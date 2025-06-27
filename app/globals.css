@@ -1,0 +1,297 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Base Colors - Light Mode */
+    --background: 0 0% 100%; /* #ffffff */
+    --foreground: 217 44% 11%; /* #0f172a */
+    --surface: 210 20% 98%; /* #f9fafb */
+    --surface-hover: 220 14% 96%; /* #f3f4f6 */
+    --border: 220 13% 91%; /* #e5e7eb */
+    --ring: 0 0% 0%; /* #000000 */
+    
+    /* Brand Colors - Light Mode */
+    --primary: 0 0% 0%; /* #000000 */
+    --primary-foreground: 0 0% 100%; /* #ffffff */
+    --accent: 263 70% 40%; /* #5b21b6 */
+    --accent-foreground: 0 0% 100%; /* #ffffff */
+    
+    /* Semantic Colors - Light Mode */
+    --success: 145 60% 36%; /* #16a34a */
+    --warning: 36 95% 50%; /* #f59e0b */
+    --error: 0 82% 51%; /* #dc2626 */
+    --info: 201 94% 40%; /* #0284c7 */
+    
+    /* Inventory Specific - Light Mode */
+    --inventory-increase: 145 60% 36%; /* #16a34a */
+    --inventory-decrease: 0 82% 51%; /* #dc2626 */
+    --inventory-neutral: 218 11% 48%; /* #6b7280 */
+    
+    /* Typography */
+    --font-sans: 'Inter Variable', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    
+    /* Spacing Unit */
+    --spacing-unit: 0.25rem; /* 4px */
+    
+    /* Component Spacing */
+    --card-padding: 1.5rem; /* 24px */
+    --section-gap: 2rem; /* 32px */
+    --inline-gap: 1rem; /* 16px */
+    --compact-gap: 0.5rem; /* 8px */
+    
+    /* Border Radius */
+    --radius-none: 0;
+    --radius-sm: 0.25rem; /* 4px */
+    --radius-md: 0.5rem; /* 8px */
+    --radius-lg: 0.75rem; /* 12px */
+    --radius-xl: 1rem; /* 16px */
+    --radius-2xl: 1.5rem; /* 24px */
+    --radius-full: 9999px;
+    
+    /* Component Radius */
+    --card-radius: var(--radius-xl);
+    --button-radius: var(--radius-lg);
+    --input-radius: var(--radius-lg);
+    --badge-radius: var(--radius-md);
+    --avatar-radius: var(--radius-full);
+    
+    /* Border Width */
+    --border-width: 1px;
+    --border-width-2: 2px;
+    --focus-ring-width: 2px;
+    
+    /* Shadows - Light Mode */
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --shadow-md: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    --shadow-lg: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+    --shadow-xl: 0 25px 50px -12px rgb(0 0 0 / 0.25);
+    
+    /* Component Shadows */
+    --card-shadow: var(--shadow-md);
+    --card-hover-shadow: var(--shadow-lg);
+    --dropdown-shadow: var(--shadow-lg);
+    --modal-shadow: var(--shadow-xl);
+    
+    /* Animation Timing */
+    --ease-in: cubic-bezier(0.4, 0, 1, 1);
+    --ease-out: cubic-bezier(0, 0, 0.2, 1);
+    --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-bounce: cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    
+    /* Animation Durations */
+    --duration-fast: 150ms;
+    --duration-normal: 300ms;
+    --duration-slow: 500ms;
+    
+    /* Additional variables for shadcn/ui components */
+    --radius: 0.5rem;
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 217 44% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 217 44% 11%;
+    --destructive: 0 82% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 217 44% 11%;
+  }
+  
+  .dark {
+    /* Base Colors - Dark Mode */
+    --background: 217 44% 11%; /* #0f172a */
+    --foreground: 210 40% 98%; /* #f8fafc */
+    --surface: 217 33% 17%; /* #1e293b */
+    --surface-hover: 215 25% 27%; /* #334155 */
+    --border: 215 25% 27%; /* #334155 */
+    --ring: 199 89% 61%; /* #38bdf8 */
+    
+    /* Brand Colors - Dark Mode */
+    --primary: 199 89% 61%; /* #38bdf8 */
+    --primary-foreground: 217 44% 11%; /* #0f172a */
+    --accent: 256 87% 73%; /* #a78bfa */
+    --accent-foreground: 217 44% 11%; /* #0f172a */
+    
+    /* Semantic Colors - Dark Mode */
+    --success: 142 71% 52%; /* #22c55e */
+    --warning: 38 92% 57%; /* #fbbf24 */
+    --error: 0 84% 63%; /* #ef4444 */
+    --info: 199 89% 61%; /* #38bdf8 */
+    
+    /* Inventory Specific - Dark Mode */
+    --inventory-increase: 142 71% 52%; /* #22c55e */
+    --inventory-decrease: 0 84% 63%; /* #ef4444 */
+    --inventory-neutral: 213 14% 64%; /* #9ca3af */
+    
+    /* Shadows - Dark Mode */
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+    --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.3);
+    --shadow-md: 0 10px 15px -3px rgb(0 0 0 / 0.5), 0 4px 6px -4px rgb(0 0 0 / 0.4);
+    --shadow-lg: 0 20px 25px -5px rgb(0 0 0 / 0.6), 0 8px 10px -6px rgb(0 0 0 / 0.5);
+    --shadow-xl: 0 25px 50px -12px rgb(0 0 0 / 0.8);
+    
+    /* Additional variables for shadcn/ui components - Dark Mode */
+    --muted: 217 33% 17%;
+    --muted-foreground: 213 14% 64%;
+    --popover: 217 44% 11%;
+    --popover-foreground: 210 40% 98%;
+    --card: 217 44% 11%;
+    --card-foreground: 210 40% 98%;
+    --destructive: 0 84% 63%;
+    --destructive-foreground: 0 0% 100%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 98%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    transition: background-color var(--duration-normal) var(--ease-in-out), 
+                color var(--duration-normal) var(--ease-in-out);
+  }
+  
+  /* Font application for metric/number classes */
+  .font-metric-lg,
+  .font-metric,
+  .font-number {
+    font-family: var(--font-mono);
+  }
+}
+
+@layer components {
+  /* Card Component */
+  .card {
+    @apply bg-surface border border-border rounded-card p-6 shadow-card;
+  }
+  
+  .card:hover {
+    @apply shadow-card-hover;
+  }
+  
+  /* Button Component */
+  .button-primary {
+    @apply bg-primary text-primary-foreground rounded-button font-medium transition-all duration-fast ease-out;
+  }
+  
+  .button-primary:hover {
+    @apply opacity-90;
+  }
+  
+  /* Input Component */
+  .input {
+    @apply bg-background border border-border rounded-input transition-colors duration-fast ease-out;
+  }
+  
+  .input:focus {
+    @apply border-primary outline-none ring-2 ring-primary/20;
+  }
+  
+  .dark .input:focus {
+    @apply ring-primary/30;
+  }
+  
+  /* Toast Notifications */
+  .toast {
+    @apply relative overflow-hidden rounded-lg border bg-background p-4 shadow-md border-l-4;
+  }
+  
+  .toast-success {
+    @apply border-l-success;
+  }
+  
+  .toast-error {
+    @apply border-l-error;
+  }
+  
+  .toast-warning {
+    @apply border-l-warning;
+  }
+  
+  .toast-info {
+    @apply border-l-info;
+  }
+  
+  .toast-timer {
+    @apply absolute bottom-0 left-0 h-1 bg-border/20;
+  }
+  
+  /* Skeleton Loading */
+  .skeleton {
+    @apply bg-surface animate-skeleton-pulse;
+  }
+  
+  /* Chart Animations */
+  .chart-line {
+    stroke-dasharray: 1000;
+    stroke-dashoffset: 1000;
+    @apply animate-draw-in;
+  }
+  
+  .chart-bar {
+    @apply opacity-0 animate-fade-in;
+    animation-delay: calc(var(--index) * 150ms);
+  }
+}
+
+@layer utilities {
+  /* Text Balance */
+  .text-balance {
+    text-wrap: balance;
+  }
+  
+  /* Background Patterns */
+  .bg-dot-pattern {
+    background-image: radial-gradient(circle at 1px 1px, rgb(0 0 0 / 0.05) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+  
+  .dark .bg-dot-pattern {
+    background-image: radial-gradient(circle at 1px 1px, rgb(255 255 255 / 0.05) 1px, transparent 1px);
+  }
+  
+  .bg-grid-pattern {
+    background-image: 
+      linear-gradient(rgb(0 0 0 / 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(0 0 0 / 0.03) 1px, transparent 1px);
+    background-size: 64px 64px;
+  }
+  
+  .dark .bg-grid-pattern {
+    background-image: 
+      linear-gradient(rgb(255 255 255 / 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(255 255 255 / 0.03) 1px, transparent 1px);
+  }
+  
+  /* Micro-interactions */
+  .hover-scale {
+    @apply transition-transform duration-fast ease-out;
+  }
+  
+  .hover-scale:hover {
+    transform: scale(1.02);
+  }
+  
+  .focus-glow:focus {
+    box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--ring);
+    @apply transition-shadow duration-fast ease-out;
+  }
+  
+  .card-lift {
+    @apply transition-all duration-normal ease-out;
+  }
+  
+  .card-lift:hover {
+    transform: translateY(-2px);
+    @apply shadow-card-hover;
+  }
+}

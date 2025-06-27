@@ -1,0 +1,101 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                   Int                   @id @default(autoincrement())
+  username             String                @db.VarChar(255)
+  passwordHash         String                @db.VarChar(255)
+  isAdmin              Boolean               @default(false)
+  email                String                @unique(map: "email") @db.VarChar(255)
+  isApproved           Boolean               @default(false)
+  defaultLocationId    Int                   @default(1)
+  emailAlerts          Boolean               @default(false)
+  inventory_logs       inventory_logs[]
+  locations            Location              @relation(fields: [defaultLocationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_default_location")
+  notificationHistory  NotificationHistory[]
+
+  @@index([defaultLocationId], map: "fk_user_default_location")
+  @@map("users")
+}
+
+model Product {
+  id                   Int                   @id @default(autoincrement())
+  name                 String                @db.VarChar(255)
+  baseName             String?               @db.VarChar(150)
+  variant              String?               @db.VarChar(100)
+  unit                 String?               @db.VarChar(20)
+  numericValue         Decimal?              @db.Decimal(10, 2)
+  quantity             Int                   @default(0)
+  location             Int                   @default(1)
+  lowStockThreshold    Int                   @default(1)
+  inventory_logs       inventory_logs[]
+  product_locations    product_locations[]
+  notificationHistory  NotificationHistory[]
+
+  @@index([baseName, numericValue, variant], map: "idx_product_sorting")
+  @@map("products")
+}
+
+model Location {
+  id                Int                 @id
+  name              String              @db.VarChar(100)
+  inventory_logs    inventory_logs[]
+  product_locations product_locations[]
+  users             User[]
+
+  @@map("locations")
+}
+
+model inventory_logs {
+  id         Int                    @id @default(autoincrement())
+  userId     Int
+  productId  Int
+  delta      Int
+  changeTime DateTime               @db.DateTime(0)
+  locationId Int?
+  logType    inventory_logs_logType @default(ADJUSTMENT)
+  locations  Location?              @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_log_location")
+  users      User                   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_1")
+  products   Product                @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_2")
+
+  @@index([locationId], map: "fk_log_location")
+  @@index([productId], map: "productId")
+  @@index([userId], map: "userId")
+}
+
+model product_locations {
+  id         Int      @id @default(autoincrement())
+  productId  Int
+  locationId Int
+  quantity   Int      @default(0)
+  locations  Location @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_pl_location")
+  products   Product  @relation(fields: [productId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_pl_product")
+
+  @@unique([productId, locationId], map: "unique_product_location")
+  @@index([locationId], map: "fk_pl_location")
+}
+
+model NotificationHistory {
+  id               Int      @id @default(autoincrement())
+  userId           Int
+  productId        Int
+  notificationType String   @db.VarChar(50)
+  sentAt           DateTime @default(now()) @db.DateTime(0)
+  users            User     @relation(fields: [userId], references: [id], onDelete: Cascade, map: "fk_notif_user")
+  products         Product  @relation(fields: [productId], references: [id], onDelete: Cascade, map: "fk_notif_product")
+
+  @@index([userId, productId, notificationType], map: "idx_user_product_type")
+  @@index([productId], map: "idx_notif_product")
+  @@map("notification_history")
+}
+
+enum inventory_logs_logType {
+  ADJUSTMENT
+  TRANSFER
+}
