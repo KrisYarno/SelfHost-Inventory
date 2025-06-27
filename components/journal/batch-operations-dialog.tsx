@@ -121,7 +121,7 @@ PROD003,Widget C,75`}
             <Alert>
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>
-                This feature is coming soon. You'll be able to select multiple products
+                This feature is coming soon. You&apos;ll be able to select multiple products
                 and apply the same adjustment to all of them.
               </AlertDescription>
             </Alert>

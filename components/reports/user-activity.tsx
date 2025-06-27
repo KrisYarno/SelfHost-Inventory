@@ -6,8 +6,8 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
-import { Users, Activity, Package, Settings } from "lucide-react";
-import { format, formatDistanceToNow } from "date-fns";
+import { Users, Package, Settings } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
 import { UserActivitySummary } from "@/types/reports";
 
 export function UserActivity() {

@@ -5,13 +5,10 @@ import { ProductWithQuantity } from "@/types/product";
 import { ProductCard } from "./product-card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useProducts } from "@/hooks/use-products";
-import { useVirtualizer } from '@tanstack/react-virtual';
-import { useRef } from 'react';
 
 interface ProductListProps {
   onEdit?: (product: ProductWithQuantity) => void;
@@ -55,14 +52,15 @@ export function ProductListOptimized({
   // Memoize filtered categories
   const categories = useMemo(() => {
     const categoryMap = new Map<string, number>();
-    products.forEach((product) => {
+    const productList = data?.products || [];
+    productList.forEach((product) => {
       const category = product.baseName || "Uncategorized";
       categoryMap.set(category, (categoryMap.get(category) || 0) + 1);
     });
     return Array.from(categoryMap.entries()).sort((a, b) =>
       a[0].localeCompare(b[0])
     );
-  }, [products]);
+  }, [data?.products]);
 
   if (error) {
     return (

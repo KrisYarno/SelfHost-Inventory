@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { MoreHorizontal, Edit, Trash2, TrendingUp, TrendingDown, Package } from "lucide-react";
+import { MoreHorizontal, Edit, Trash2, TrendingUp, Package } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,

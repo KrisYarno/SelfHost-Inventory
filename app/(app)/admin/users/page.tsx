@@ -7,9 +7,8 @@ import { UserTable } from '@/components/admin/user-table';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { CheckCircle2, XCircle, UserCog } from 'lucide-react';
+import { CheckCircle2, XCircle } from 'lucide-react';
 
 interface User {
   id: number;

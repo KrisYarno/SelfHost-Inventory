@@ -8,6 +8,7 @@
     "dev:prod-readonly": "dotenv -e .env.production-readonly -- next dev",
     "build": "next build",
     "build:prod": "NODE_ENV=production next build",
+    "build:deploy": "SKIP_ENV_VALIDATION=true next build",
     "start": "next start",
     "start:prod": "NODE_ENV=production next start",
     "lint": "next lint",

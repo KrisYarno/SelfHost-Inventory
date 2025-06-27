@@ -22,7 +22,7 @@ export default function PendingApprovalPage() {
       } else {
         setResendMessage('Failed to send notification. Please try again later.');
       }
-    } catch (error) {
+    } catch {
       setResendMessage('An error occurred. Please try again later.');
     } finally {
       setIsResending(false);

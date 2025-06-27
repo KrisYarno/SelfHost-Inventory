@@ -1,4 +1,4 @@
-import { Product, inventory_logs, Prisma } from "@prisma/client";
+import { Product, Prisma } from "@prisma/client";
 import { ProductWithQuantity, ProductFilters } from "@/types/product";
 import prisma from "@/lib/prisma";
 

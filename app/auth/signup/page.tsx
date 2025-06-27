@@ -62,7 +62,7 @@ export default function SignUpPage() {
 
       // Redirect to pending approval page
       router.push('/auth/pending-approval');
-    } catch (err) {
+    } catch {
       setError('An unexpected error occurred');
     } finally {
       setIsLoading(false);

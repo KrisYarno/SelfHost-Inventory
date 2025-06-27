@@ -17,7 +17,7 @@ interface DataTableProps<T> {
   className?: string;
 }
 
-export function DataTable<T extends Record<string, any>>({
+export function DataTable<T extends Record<string, unknown>>({
   data,
   columns,
   loading = false,
@@ -69,7 +69,7 @@ export function DataTable<T extends Record<string, any>>({
                   key={column.key}
                   className={`py-4 px-4 text-sm ${column.className || ''}`}
                 >
-                  {column.cell ? column.cell(item) : item[column.key]}
+                  {column.cell ? column.cell(item) : (item[column.key] as React.ReactNode)}
                 </td>
               ))}
             </tr>

@@ -41,7 +41,6 @@ export default function AdminInventoryPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [data, setData] = useState<InventoryOverviewData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [isAdjusting, setIsAdjusting] = useState(false);
   const debouncedSearch = useDebounce(searchTerm, 300);
 
   const fetchInventoryData = useCallback(async () => {
@@ -101,30 +100,28 @@ export default function AdminInventoryPage() {
     setExpandedProducts(newExpanded);
   };
 
-  const handleQuickAdjust = async (productId: number, locationId: number, delta: number) => {
-    try {
-      setIsAdjusting(true);
-      const response = await fetch("/api/inventory/adjust", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          productId,
-          locationId,
-          quantity: delta,
-          notes: `Admin overview adjustment`
-        }),
-      });
-      if (!response.ok) throw new Error("Failed to adjust inventory");
-      
-      toast.success("Inventory adjusted successfully");
-      await fetchInventoryData();
-    } catch (error) {
-      toast.error("Failed to adjust inventory");
-      console.error(error);
-    } finally {
-      setIsAdjusting(false);
-    }
-  };
+  // Commented out - functionality moved to read-only view
+  // const handleQuickAdjust = async (productId: number, locationId: number, delta: number) => {
+  //   try {
+  //     const response = await fetch("/api/inventory/adjust", {
+  //       method: "POST",
+  //       headers: { "Content-Type": "application/json" },
+  //       body: JSON.stringify({
+  //         productId,
+  //         locationId,
+  //         quantity: delta,
+  //         notes: `Admin overview adjustment`
+  //       }),
+  //     });
+  //     if (!response.ok) throw new Error("Failed to adjust inventory");
+  //     
+  //     toast.success("Inventory adjusted successfully");
+  //     await fetchInventoryData();
+  //   } catch (error) {
+  //     toast.error("Failed to adjust inventory");
+  //     console.error(error);
+  //   }
+  // };
 
 
   if (isLoading) {

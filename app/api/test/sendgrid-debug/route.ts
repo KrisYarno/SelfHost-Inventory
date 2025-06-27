@@ -9,17 +9,23 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    // Check email exists
+    if (!session.user.email) {
+      return NextResponse.json({ error: 'No email address found for user' }, { status: 400 });
+    }
+
     // Initialize SendGrid
     if (process.env.SENDGRID_API_KEY) {
       sgMail.setApiKey(process.env.SENDGRID_API_KEY);
     }
 
     const tests = [];
+    const userEmail = session.user.email;
     
     // Test 1: Simple text email
     try {
       const simpleMsg = {
-        to: session.user.email,
+        to: userEmail,
         from: process.env.SENDGRID_FROM_EMAIL || 'alerts@advancedresearchpep.com',
         subject: 'Test 1: Simple Text Email',
         text: 'This is a simple text email test from your inventory system.',
@@ -45,7 +51,7 @@ export async function POST(request: NextRequest) {
     // Test 2: HTML email without template
     try {
       const htmlMsg = {
-        to: session.user.email,
+        to: userEmail,
         from: process.env.SENDGRID_FROM_EMAIL || 'alerts@advancedresearchpep.com',
         subject: 'Test 2: HTML Email',
         text: 'This is the plain text version.',

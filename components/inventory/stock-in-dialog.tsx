@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useSession } from "next-auth/react";
 import { toast } from "sonner";
 import { Package, Calendar, FileText } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
@@ -33,7 +32,6 @@ export function StockInDialog({
   product,
   onSuccess,
 }: StockInDialogProps) {
-  const { data: session } = useSession();
   const { selectedLocationId } = useLocation();
   const [quantity, setQuantity] = useState("");
   const [orderNumber, setOrderNumber] = useState("");
@@ -203,7 +201,7 @@ export function StockInDialog({
             <div className="flex items-start gap-2">
               <Calendar className="h-4 w-4 text-muted-foreground mt-0.5" />
               <div className="text-sm text-muted-foreground">
-                This stock-in will be recorded with today's date and time for tracking purposes.
+                This stock-in will be recorded with today&apos;s date and time for tracking purposes.
               </div>
             </div>
           </div>

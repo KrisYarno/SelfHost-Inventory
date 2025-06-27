@@ -63,11 +63,8 @@ export class EmailService {
     try {
       // Use dynamic template if available
       if (this.templateId) {
-        // Generate plain text version
-        const plainText = this.generateLowStockText(data);
-        
         // SendGrid dynamic templates don't use subject/text when templateId is provided
-        const msg: any = {
+        const msg = {
           to,
           from: this.from, // Try simple string format
           templateId: this.templateId,
@@ -91,7 +88,7 @@ export class EmailService {
         
         console.log('Sending email with template:', this.templateId);
         console.log('To:', to);
-        console.log('Subject:', msg.subject);
+        console.log('Subject:', 'Low Stock Alert');
         
         const response = await sgMail.send(msg);
         console.log('SendGrid response:', response[0].statusCode);
@@ -108,15 +105,16 @@ export class EmailService {
           html,
         });
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error sending low stock digest:', error);
       
       // Log more detailed SendGrid error info
-      if (error.response) {
-        console.error('SendGrid error response:', error.response.body);
+      if (error instanceof Error && 'response' in error && error.response) {
+        const sgError = error as { response: { body: unknown } };
+        console.error('SendGrid error response:', sgError.response.body);
       }
       
-      throw new Error(`Failed to send email: ${error.message || 'Unknown error'}`);
+      throw new Error(`Failed to send email: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 

@@ -12,20 +12,18 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { FileText, Plus, TrendingUp, BookOpen } from 'lucide-react';
+import { Plus, TrendingUp, BookOpen } from 'lucide-react';
 import { toast } from 'sonner';
 import type { 
   InventoryLogWithRelations, 
-  InventoryTransactionWithLogs,
   CurrentInventoryLevel 
 } from '@/types/inventory';
 import type { ProductWithQuantity } from '@/types/product';
 
 export default function InventoryPage() {
   const [logs, setLogs] = useState<InventoryLogWithRelations[]>([]);
-  const [transactions, setTransactions] = useState<InventoryTransactionWithLogs[]>([]);
+  // const [transactions, setTransactions] = useState<InventoryTransactionWithLogs[]>([]);
   const [currentInventory, setCurrentInventory] = useState<CurrentInventoryLevel[]>([]);
-  const [loading, setLoading] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
   const [showQuickAdjust, setShowQuickAdjust] = useState(false);
   const [showStockIn, setShowStockIn] = useState(false);
@@ -37,45 +35,43 @@ export default function InventoryPage() {
       if (!response.ok) throw new Error('Failed to fetch inventory');
       const data = await response.json();
       setCurrentInventory(data.inventory);
-    } catch (error) {
+    } catch {
       toast.error('Failed to load current inventory levels');
     }
   };
 
   // Fetch inventory logs
   const fetchLogs = async () => {
-    setLoading(true);
     try {
       const response = await fetch('/api/inventory/logs?pageSize=20');
       if (!response.ok) throw new Error('Failed to fetch logs');
       const data = await response.json();
       setLogs(data.logs);
-    } catch (error) {
+    } catch {
       toast.error('Failed to load inventory logs');
-    } finally {
-      setLoading(false);
     }
   };
 
-  // Fetch transactions
-  const fetchTransactions = async () => {
-    setLoading(true);
-    try {
-      const response = await fetch('/api/inventory/transactions?pageSize=10');
-      if (!response.ok) throw new Error('Failed to fetch transactions');
-      const data = await response.json();
-      setTransactions(data.transactions);
-    } catch (error) {
-      toast.error('Failed to load transactions');
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Commented out - no transaction table in schema
+  // const fetchTransactions = async () => {
+  //   setLoading(true);
+  //   try {
+  //     const response = await fetch('/api/inventory/transactions?pageSize=10');
+  //     if (!response.ok) throw new Error('Failed to fetch transactions');
+  //     const data = await response.json();
+  //     setTransactions(data.transactions);
+  //   } catch {
+  //     toast.error('Failed to load transactions');
+  //   } finally {
+  //     setLoading(false);
+  //   }
+  // };
 
   useEffect(() => {
     fetchCurrentInventory();
     fetchLogs();
     // fetchTransactions(); // Commented out - no transaction table in schema
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleProductAction = (product: CurrentInventoryLevel, action: 'adjust' | 'stockIn') => {

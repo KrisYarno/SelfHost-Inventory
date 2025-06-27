@@ -66,7 +66,7 @@ export const authOptions: NextAuthOptions = {
     maxAge: 7 * 24 * 60 * 60, // 7 days
   },
   callbacks: {
-    async signIn({ user, account, profile }) {
+    async signIn({ account, profile }) {
       // For OAuth providers, create/update user with proper fields
       if (account?.provider === 'google' && profile?.email) {
         try {
@@ -81,7 +81,7 @@ export const authOptions: NextAuthOptions = {
             }
           } else {
             // Create new user with username from email
-            const newUser = await prisma.user.create({
+            await prisma.user.create({
               data: {
                 email: profile.email,
                 username: profile.email.split('@')[0],

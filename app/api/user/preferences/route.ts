@@ -3,7 +3,7 @@ import { getSession } from '@/lib/auth';
 import prisma from '@/lib/prisma';
 
 // GET /api/user/preferences - Get user preferences
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
     const session = await getSession();
     if (!session) {
@@ -41,7 +41,7 @@ export async function PATCH(request: NextRequest) {
     }
 
     const body = await request.json();
-    const updateData: any = {};
+    const updateData: Record<string, unknown> = {};
 
     // Update emailAlerts if provided
     if (typeof body.emailAlerts === 'boolean') {

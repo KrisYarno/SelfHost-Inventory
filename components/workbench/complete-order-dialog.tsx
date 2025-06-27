@@ -2,7 +2,6 @@
 
 import { useRouter } from "next/navigation";
 import { useWorkbench } from "@/hooks/use-workbench";
-import { DeductInventoryRequest } from "@/types/workbench";
 import {
   AlertDialog,
   AlertDialogAction,

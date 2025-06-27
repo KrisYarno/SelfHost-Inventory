@@ -6,7 +6,6 @@ import { SidebarNav } from "./sidebar-nav";
 import { MobileNav } from "./mobile-nav";
 import { UserMenu } from "./user-menu";
 import { LocationSwitcher } from "./location-switcher";
-import { cn } from "@/lib/utils";
 import { ThemeToggleSidebar } from "@/components/theme-toggle-sidebar";
 
 interface AppShellProps {
@@ -14,7 +13,7 @@ interface AppShellProps {
 }
 
 export function AppShell({ children }: AppShellProps) {
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [, setIsMobileMenuOpen] = useState(false);
   const pathname = usePathname();
 
   // Close mobile menu on route change

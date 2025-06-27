@@ -30,7 +30,7 @@ export default function SignInPage() {
       } else if (result?.url) {
         window.location.href = result.url;
       }
-    } catch (err) {
+    } catch {
       setError('An unexpected error occurred');
     } finally {
       setIsLoading(false);

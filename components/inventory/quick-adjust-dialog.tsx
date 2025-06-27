@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useSession } from "next-auth/react";
 import { toast } from "sonner";
 import { Plus, Minus, Package } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
@@ -34,7 +33,6 @@ export function QuickAdjustDialog({
   product,
   onSuccess,
 }: QuickAdjustDialogProps) {
-  const { data: session } = useSession();
   const { selectedLocationId } = useLocation();
   const [adjustmentType, setAdjustmentType] = useState<"add" | "remove">("add");
   const [quantity, setQuantity] = useState("");

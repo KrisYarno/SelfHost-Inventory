@@ -19,6 +19,20 @@ interface ProductPerformanceData {
   trend: 'up' | 'down' | 'stable';
 }
 
+interface InventoryItem {
+  productId: number;
+  quantity: number;
+  product: {
+    name: string;
+  };
+}
+
+interface ActivityLog {
+  productId: number;
+  changeType: string;
+  quantityChange: number;
+}
+
 export function ProductPerformance() {
   const [products, setProducts] = useState<ProductPerformanceData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -46,7 +60,7 @@ export function ProductPerformance() {
       const performanceMap = new Map<number, ProductPerformanceData>();
 
       // Initialize with current inventory
-      inventoryData.inventory.forEach((item: any) => {
+      inventoryData.inventory.forEach((item: InventoryItem) => {
         performanceMap.set(item.productId, {
           productId: item.productId,
           productName: item.product.name,
@@ -59,7 +73,7 @@ export function ProductPerformance() {
       });
 
       // Calculate stock movements from logs
-      activityData.logs.forEach((log: any) => {
+      activityData.logs.forEach((log: ActivityLog) => {
         const perf = performanceMap.get(log.productId);
         if (perf) {
           if (log.changeType === 'STOCK_IN') {

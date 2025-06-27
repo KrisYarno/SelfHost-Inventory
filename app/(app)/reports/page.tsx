@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { getSession } from "@/lib/auth";
 import { MetricsCard } from "@/components/reports/metrics-card";
 import { ActivityTimeline } from "@/components/reports/activity-timeline";
 import { ProductPerformance } from "@/components/reports/product-performance";
@@ -14,10 +13,7 @@ import {
   Download, 
   RefreshCw, 
   Package, 
-  TrendingUp, 
-  Users, 
   AlertTriangle,
-  Activity,
   DollarSign
 } from "lucide-react";
 import { DashboardMetrics } from "@/types/reports";

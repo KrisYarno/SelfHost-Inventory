@@ -5,7 +5,6 @@ import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
 import { ProductFormData, Product } from "@/types/product";
 import { cn } from "@/lib/utils";
 
@@ -30,8 +29,6 @@ export function ProductForm({
     register,
     handleSubmit,
     formState: { errors },
-    watch,
-    setValue,
   } = useForm<ProductFormData>({
     defaultValues: {
       name: product?.name || "",

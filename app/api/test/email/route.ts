@@ -35,6 +35,13 @@ export async function POST(request: NextRequest) {
     };
 
     // Send test email to the admin's email
+    if (!session.user.email) {
+      return NextResponse.json(
+        { error: 'No email address found for user' },
+        { status: 400 }
+      );
+    }
+    
     await emailService.sendLowStockDigest(
       session.user.email,
       testData

@@ -8,7 +8,7 @@ import { Mail, CheckCircle2, AlertCircle } from 'lucide-react';
 
 export default function TestEmailPage() {
   const [isSending, setIsSending] = useState(false);
-  const [result, setResult] = useState<{ success?: boolean; message?: string; details?: any } | null>(null);
+  const [result, setResult] = useState<{ success?: boolean; message?: string; details?: unknown } | null>(null);
 
   const sendTestEmail = async () => {
     setIsSending(true);
@@ -153,11 +153,11 @@ export default function TestEmailPage() {
             <AlertDescription>
               <div className="space-y-2">
                 <p className="font-medium">{result.message}</p>
-                {result.details && (
+                {result.details ? (
                   <pre className="text-xs bg-muted p-2 rounded overflow-auto">
                     {JSON.stringify(result.details, null, 2)}
                   </pre>
-                )}
+                ) : null}
               </div>
             </AlertDescription>
           </Alert>

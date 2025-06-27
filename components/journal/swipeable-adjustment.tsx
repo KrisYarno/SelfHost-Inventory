@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface SwipeableAdjustmentProps {

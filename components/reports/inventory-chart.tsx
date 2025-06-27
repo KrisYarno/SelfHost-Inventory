@@ -17,8 +17,12 @@ import {
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
+interface ChartData {
+  [key: string]: string | number;
+}
+
 interface ChartProps {
-  data: any[];
+  data: ChartData[];
   title: string;
   description?: string;
 }

@@ -55,6 +55,7 @@ export default function JournalPage() {
     if (selectedLocationId) {
       fetchProducts();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, status, router, selectedLocationId]);
 
   // Load draft from localStorage on mount
@@ -97,11 +98,11 @@ export default function JournalPage() {
       
       // Map inventory quantities to products
       const inventoryMap = new Map(
-        inventoryData.inventory.map((item: any) => [item.productId, item.quantity])
+        inventoryData.inventory.map((item: { productId: number; quantity: number }) => [item.productId, item.quantity])
       );
       
       // Update products with current quantities
-      const productsWithQuantity = productsData.products.map((product: any) => ({
+      const productsWithQuantity = productsData.products.map((product: { id: number; [key: string]: unknown }) => ({
         ...product,
         currentQuantity: inventoryMap.get(product.id) || 0,
       }));

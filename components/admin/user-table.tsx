@@ -48,28 +48,34 @@ export function UserTable({
       key: 'select',
       header: '',
       width: '40px',
-      cell: (user: User) => (
+      cell: (item: Record<string, unknown>) => {
+        const user = item as unknown as User;
+        return (
         <Checkbox
           checked={selectedUsers.has(user.id)}
           onCheckedChange={() => onToggleSelect(user.id)}
           disabled={user.isApproved}
         />
-      ),
+      )},
     }] : []),
     {
       key: 'username',
       header: 'Username',
-      cell: (user: User) => (
+      cell: (item: Record<string, unknown>) => {
+        const user = item as unknown as User;
+        return (
         <div>
           <p className="font-medium">{user.username}</p>
           <p className="text-sm text-muted-foreground">{user.email}</p>
         </div>
-      ),
+      )},
     },
     {
       key: 'role',
       header: 'Role',
-      cell: (user: User) => (
+      cell: (item: Record<string, unknown>) => {
+        const user = item as unknown as User;
+        return (
         <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
           user.isAdmin 
             ? 'bg-primary/10 text-primary' 
@@ -77,12 +83,14 @@ export function UserTable({
         }`}>
           {user.isAdmin ? 'Admin' : 'User'}
         </span>
-      ),
+      )},
     },
     {
       key: 'status',
       header: 'Status',
-      cell: (user: User) => (
+      cell: (item: Record<string, unknown>) => {
+        const user = item as unknown as User;
+        return (
         <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-full ${
           user.isApproved 
             ? 'bg-success/10 text-success' 
@@ -90,12 +98,13 @@ export function UserTable({
         }`}>
           {user.isApproved ? 'Approved' : 'Pending'}
         </span>
-      ),
+      )},
     },
     {
       key: 'actions',
       header: 'Actions',
-      cell: (user: User) => {
+      cell: (item: Record<string, unknown>) => {
+        const user = item as unknown as User;
         return (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
@@ -149,7 +158,7 @@ export function UserTable({
 
   return (
     <DataTable
-      data={users}
+      data={users as unknown as Record<string, unknown>[]}
       columns={columns}
       loading={loading}
       emptyMessage="No users found"

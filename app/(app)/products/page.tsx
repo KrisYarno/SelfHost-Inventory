@@ -20,7 +20,6 @@ export default function ProductsPage() {
   const [quickAdjustOpen, setQuickAdjustOpen] = useState(false);
   const [stockInOpen, setStockInOpen] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
   
   const isAdmin = session?.user?.isAdmin;
 
@@ -45,7 +44,7 @@ export default function ProductsPage() {
   };
 
   const refreshProducts = () => {
-    setRefreshKey(prev => prev + 1);
+    // Refresh handled by React Query in ProductListOptimized
   };
 
   return (

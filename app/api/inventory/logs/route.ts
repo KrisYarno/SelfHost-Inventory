@@ -79,8 +79,8 @@ export async function GET(request: NextRequest) {
       }),
     ]);
 
-    const response: InventoryLogResponse = {
-      logs,
+    const response = {
+      logs: logs as any[], // Type mismatch due to partial selects
       pagination: {
         page,
         pageSize,

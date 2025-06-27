@@ -7,11 +7,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { 
   Package, 
   Users, 
-  TrendingUp, 
   AlertTriangle,
   ArrowRight,
   FileText,
-  Activity
+  Activity,
+  TrendingUp
 } from "lucide-react";
 import Link from "next/link";
 import { formatNumber } from "@/lib/utils";

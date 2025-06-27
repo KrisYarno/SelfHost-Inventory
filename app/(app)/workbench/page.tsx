@@ -9,7 +9,6 @@ import { CompleteOrderDialog } from "@/components/workbench/complete-order-dialo
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SearchInput } from "@/components/ui/search-input";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -45,6 +44,7 @@ export default function WorkbenchPage() {
     if (selectedLocationId) {
       fetchProducts();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedLocationId]);
 
   const fetchProducts = async () => {
@@ -66,11 +66,11 @@ export default function WorkbenchPage() {
       
       // Map inventory quantities to products
       const inventoryMap = new Map(
-        inventoryData.inventory.map((item: any) => [item.productId, item.quantity])
+        inventoryData.inventory.map((item: { productId: number; quantity: number }) => [item.productId, item.quantity])
       );
       
       // Update products with current quantities
-      const productsWithQuantity = productsData.products.map((product: any) => ({
+      const productsWithQuantity = productsData.products.map((product: { id: number; [key: string]: unknown }) => ({
         ...product,
         currentQuantity: inventoryMap.get(product.id) || 0,
       }));

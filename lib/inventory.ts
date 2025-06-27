@@ -4,7 +4,6 @@ import {
   Prisma
 } from '@prisma/client';
 import type { 
-  InventoryLogWithRelations,
   StockValidation,
   CurrentInventoryLevel,
   InventorySnapshot
@@ -293,7 +292,7 @@ export async function createInventoryTransaction(
     quantityChange: number;
     notes?: string;
   }>,
-  metadata?: any
+  metadata?: Record<string, unknown>
 ) {
   return await prisma.$transaction(async (tx) => {
     const logs = [];

@@ -6,9 +6,31 @@ import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, CheckCircle2, Mail } from 'lucide-react';
 
+interface TestResult {
+  test: string;
+  success: boolean;
+  statusCode?: number;
+  error?: string;
+  code?: string;
+  response?: unknown;
+}
+
+interface DebugResults {
+  config?: {
+    apiKeyLength?: number;
+    apiKeyPrefix?: string;
+    fromEmail: string;
+    templateId?: string;
+    toEmail: string;
+  };
+  tests?: TestResult[];
+  error?: string;
+  details?: string;
+}
+
 export default function SendGridDebugPage() {
   const [isRunning, setIsRunning] = useState(false);
-  const [results, setResults] = useState<any>(null);
+  const [results, setResults] = useState<DebugResults | null>(null);
 
   const runDebugTests = async () => {
     setIsRunning(true);
@@ -97,7 +119,7 @@ export default function SendGridDebugPage() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
-                  {results.tests.map((test: any, index: number) => (
+                  {results.tests.map((test, index) => (
                     <div key={index} className="border rounded-lg p-4">
                       <div className="flex items-start justify-between mb-2">
                         <h4 className="font-medium">{test.test}</h4>
@@ -122,11 +144,11 @@ export default function SendGridDebugPage() {
                               Code: {test.code}
                             </p>
                           )}
-                          {test.response && (
+                          {test.response ? (
                             <pre className="text-xs bg-muted p-2 rounded overflow-auto">
                               {JSON.stringify(test.response, null, 2)}
                             </pre>
-                          )}
+                          ) : null}
                         </div>
                       )}
                     </div>
@@ -161,13 +183,13 @@ export default function SendGridDebugPage() {
             <div>
               <h4 className="font-medium mb-1">1. Sender Authentication</h4>
               <p className="text-muted-foreground">
-                Make sure alerts@advancedresearchpep.com is verified in SendGrid under Settings → Sender Authentication
+                Make sure alerts@advancedresearchpep.com is verified in SendGrid under Settings &rarr; Sender Authentication
               </p>
             </div>
             <div>
               <h4 className="font-medium mb-1">2. API Key Permissions</h4>
               <p className="text-muted-foreground">
-                Your API key needs "Mail Send" permission. Check in SendGrid under Settings → API Keys
+                Your API key needs &quot;Mail Send&quot; permission. Check in SendGrid under Settings &rarr; API Keys
               </p>
             </div>
             <div>

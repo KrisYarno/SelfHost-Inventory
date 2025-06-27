@@ -77,7 +77,7 @@ export default function AccountPage() {
       }
 
       toast.success('Default location updated successfully');
-    } catch (error) {
+    } catch {
       toast.error('Failed to update default location');
     } finally {
       setIsLoadingLocation(false);
@@ -269,7 +269,7 @@ export default function AccountPage() {
                   <Alert>
                     <AlertCircle className="h-4 w-4" />
                     <AlertDescription>
-                      You'll receive a daily digest email at 7:00 AM MT if any products are below their thresholds
+                      You&apos;ll receive a daily digest email at 7:00 AM MT if any products are below their thresholds
                     </AlertDescription>
                   </Alert>
                 )}

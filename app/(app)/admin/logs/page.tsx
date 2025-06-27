@@ -9,7 +9,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { 
-  CalendarIcon,
   Download,
   Search,
   Filter,
@@ -50,7 +49,10 @@ export default function AdminLogsPage() {
   const [dateFrom, setDateFrom] = useState<Date | undefined>(undefined);
   const [dateTo, setDateTo] = useState<Date | undefined>(undefined);
   const [data, setData] = useState<LogsResponse | null>(null);
-  const [filters, setFilters] = useState<any>(null);
+  const [filters, setFilters] = useState<{ 
+    users: Array<{ id: number; email: string }>;
+    locations?: Array<string>;
+  } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   
   const debouncedSearch = useDebounce(searchTerm, 300);
@@ -202,9 +204,9 @@ export default function AdminLogsPage() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Users</SelectItem>
-                  {filters?.users?.map((user: string) => (
-                    <SelectItem key={user} value={user}>
-                      {user}
+                  {filters?.users?.map((user) => (
+                    <SelectItem key={user.id} value={user.id.toString()}>
+                      {user.email}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -219,7 +221,7 @@ export default function AdminLogsPage() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Locations</SelectItem>
-                  {filters?.locations?.map((location: string) => (
+                  {filters?.locations?.map((location) => (
                     <SelectItem key={location} value={location}>
                       {location}
                     </SelectItem>

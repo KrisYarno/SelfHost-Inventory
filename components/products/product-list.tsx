@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { ProductWithQuantity, ProductFilters } from "@/types/product";
+import { ProductWithQuantity } from "@/types/product";
 import { ProductCard } from "./product-card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
