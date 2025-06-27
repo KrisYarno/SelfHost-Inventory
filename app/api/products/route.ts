@@ -5,6 +5,8 @@ import prisma from "@/lib/prisma";
 import { ProductFilters, CreateProductRequest } from "@/types/product";
 import { getProductsWithQuantities, isProductUnique, getNextNumericValue, formatProductName } from "@/lib/products";
 
+export const dynamic = 'force-dynamic';
+
 // GET /api/products - List all products with filters
 export async function GET(request: NextRequest) {
   try {
@@ -79,6 +81,21 @@ export async function POST(request: NextRequest) {
     // Get default numeric value if not provided
     const numericValue = body.numericValue ?? await getNextNumericValue();
 
+    // Use provided locationId or default to 1
+    const locationId = body.locationId || 1;
+
+    // Verify location exists
+    const location = await prisma.location.findUnique({
+      where: { id: locationId },
+    });
+
+    if (!location) {
+      return NextResponse.json(
+        { error: "Invalid location ID" },
+        { status: 400 }
+      );
+    }
+
     // Create the product
     const product = await prisma.product.create({
       data: {
@@ -88,8 +105,8 @@ export async function POST(request: NextRequest) {
         unit: body.unit?.trim() || null,
         numericValue,
         quantity: 0,
-        location: 1,
-        lowStockThreshold: body.lowStockThreshold ?? 1,
+        location: locationId,
+        lowStockThreshold: body.lowStockThreshold ?? 10,
       },
     });
 

@@ -4,6 +4,8 @@ import { authOptions } from '@/lib/auth';
 import { getCurrentInventoryLevelsFast, getCurrentInventoryLevelsPaginated } from '@/lib/inventory-fast';
 import type { CurrentInventoryResponse } from '@/types/inventory';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);

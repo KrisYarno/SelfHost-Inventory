@@ -3,6 +3,8 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
   try {
     const session = await getServerSession(authOptions);
@@ -14,7 +16,11 @@ export async function GET() {
     // Get unique users and locations
     const [users, locations] = await Promise.all([
       prisma.user.findMany({
-        select: { username: true },
+        select: { 
+          id: true,
+          email: true,
+          username: true 
+        },
         orderBy: { username: 'asc' },
       }),
       prisma.location.findMany({
@@ -24,7 +30,10 @@ export async function GET() {
     ]);
 
     return NextResponse.json({
-      users: users.map(u => u.username),
+      users: users.map(u => ({
+        id: u.id,
+        email: u.email || u.username
+      })),
       locations: locations.map(l => l.name),
     });
   } catch (error) {

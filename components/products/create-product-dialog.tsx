@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
   Dialog,
@@ -10,7 +10,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ProductForm } from "./product-form";
-import { ProductFormData } from "@/types/product";
 import { toast } from "sonner";
 
 interface CreateProductDialogProps {
@@ -23,12 +22,28 @@ export function CreateProductDialog({
   onOpenChange,
 }: CreateProductDialogProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [locations, setLocations] = useState<Array<{ id: number; name: string }>>([]);
   const router = useRouter();
 
-  const handleSubmit = async (data: ProductFormData) => {
+  useEffect(() => {
+    if (open) {
+      // Fetch locations when dialog opens
+      fetch("/api/locations")
+        .then(res => res.json())
+        .then(data => {
+          if (data.locations) {
+            setLocations(data.locations);
+          }
+        })
+        .catch(err => console.error("Failed to fetch locations:", err));
+    }
+  }, [open]);
+
+  const handleSubmit = async (data: any) => {
     try {
       setIsSubmitting(true);
       
+      // Data already contains properly formatted name, variant, unit, numericValue from ProductForm
       const response = await fetch("/api/products", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -39,6 +54,7 @@ export function CreateProductDialog({
           unit: data.unit,
           numericValue: data.numericValue,
           lowStockThreshold: data.lowStockThreshold,
+          locationId: data.locationId || 1, // Default to location 1 if not specified
         }),
       });
 
@@ -74,6 +90,7 @@ export function CreateProductDialog({
           onSubmit={handleSubmit}
           onCancel={() => onOpenChange(false)}
           isSubmitting={isSubmitting}
+          locations={locations}
         />
       </DialogContent>
     </Dialog>

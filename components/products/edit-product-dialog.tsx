@@ -27,21 +27,18 @@ export function EditProductDialog({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
 
-  const handleSubmit = async (data: ProductFormData) => {
+  const handleSubmit = async (data: any) => {
     if (!product) return;
     
     try {
       setIsSubmitting(true);
       
+      // For edit, we only update the lowStockThreshold
+      // The product name, variant, unit, etc. are immutable
       const response = await fetch(`/api/products/${product.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: data.name,
-          baseName: data.baseName,
-          variant: data.variant,
-          unit: data.unit,
-          numericValue: data.numericValue,
           lowStockThreshold: data.lowStockThreshold,
         }),
       });

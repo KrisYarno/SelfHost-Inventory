@@ -8,6 +8,8 @@ import {
 import { inventory_logs_logType } from '@prisma/client';
 import type { InventoryAdjustmentRequest } from '@/types/inventory';
 
+export const dynamic = 'force-dynamic';
+
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);

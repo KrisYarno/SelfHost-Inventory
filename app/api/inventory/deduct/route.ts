@@ -6,6 +6,8 @@ import { DeductInventoryRequest, DeductInventoryResponse } from "@/types/workben
 import { inventory_logs_logType } from "@prisma/client";
 import { createInventoryTransaction } from "@/lib/inventory";
 
+export const dynamic = 'force-dynamic';
+
 // POST /api/inventory/deduct - Process order deduction
 export async function POST(request: NextRequest) {
   try {

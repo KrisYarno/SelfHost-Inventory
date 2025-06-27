@@ -5,16 +5,28 @@ import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ProductFormData, Product } from "@/types/product";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Product } from "@/types/product";
 import { cn } from "@/lib/utils";
+
+interface ProductFormInputs {
+  baseName: string;
+  size: string;
+  lowStockThreshold: number;
+  locationId?: number;
+}
 
 interface ProductFormProps {
   product?: Product;
-  onSubmit: (data: ProductFormData) => Promise<void>;
+  onSubmit: (data: any) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
   className?: string;
+  locations?: Array<{ id: number; name: string }>;
 }
+
+// Regex to parse size like "1mg", "5 mg", "10 mL"
+const SIZE_REGEX = /^(\d+(?:\.\d+)?)\s*(mg|mL|mcg)$/i;
 
 export function ProductForm({
   product,
@@ -22,6 +34,7 @@ export function ProductForm({
   onCancel,
   isSubmitting = false,
   className,
+  locations = [],
 }: ProductFormProps) {
   const [error, setError] = useState<string | null>(null);
   
@@ -29,26 +42,60 @@ export function ProductForm({
     register,
     handleSubmit,
     formState: { errors },
-  } = useForm<ProductFormData>({
+    watch,
+    setValue,
+  } = useForm<ProductFormInputs>({
     defaultValues: {
-      name: product?.name || "",
       baseName: product?.baseName || "",
-      variant: product?.variant || "",
-      unit: product?.unit || "",
-      numericValue: product?.numericValue ? Number(product.numericValue) : undefined,
-      lowStockThreshold: product?.lowStockThreshold || 1,
+      size: product ? `${product.numericValue || ''} ${product.unit || ''}`.trim() : "",
+      lowStockThreshold: product?.lowStockThreshold || 10,
+      locationId: locations[0]?.id,
     },
   });
 
-  const handleFormSubmit = async (data: ProductFormData) => {
+  const validateSize = (value: string) => {
+    if (!value) return "Size is required";
+    if (!SIZE_REGEX.test(value)) {
+      return "Size must be in format like '1mg', '5 mg', or '10 mL'";
+    }
+    return true;
+  };
+
+  const handleFormSubmit = async (data: ProductFormInputs) => {
     try {
       setError(null);
-      await onSubmit(data);
+      
+      // Parse the size field
+      const sizeMatch = data.size.match(SIZE_REGEX);
+      if (!sizeMatch) {
+        setError("Invalid size format");
+        return;
+      }
+
+      const numericValue = parseFloat(sizeMatch[1]);
+      const unit = sizeMatch[2].toLowerCase();
+      
+      // Format variant: use integer format if it's a whole number
+      const variant = `${numericValue % 1 === 0 ? numericValue.toFixed(0) : numericValue} ${unit}`;
+      
+      // Construct name with single space
+      const name = `${data.baseName} ${variant}`;
+
+      const productData = {
+        name,
+        baseName: data.baseName,
+        variant,
+        unit,
+        numericValue,
+        lowStockThreshold: data.lowStockThreshold,
+        locationId: data.locationId,
+      };
+
+      await onSubmit(productData);
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     }
   };
-
 
   return (
     <form
@@ -63,19 +110,19 @@ export function ProductForm({
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
-          <Label htmlFor="baseName">Base Name</Label>
+          <Label htmlFor="baseName">Product Name</Label>
           <Input
             id="baseName"
-            placeholder="e.g., Coffee"
+            placeholder="e.g., AOD, BPC-157"
             {...register("baseName", {
-              required: "Base name is required",
+              required: "Product name is required",
               minLength: {
                 value: 1,
-                message: "Base name must be at least 1 character",
+                message: "Product name must be at least 1 character",
               },
               maxLength: {
                 value: 255,
-                message: "Base name must be less than 255 characters",
+                message: "Product name must be less than 255 characters",
               },
             })}
             disabled={isSubmitting}
@@ -86,28 +133,49 @@ export function ProductForm({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="variant">Variant</Label>
+          <Label htmlFor="size">Size</Label>
           <Input
-            id="variant"
-            placeholder="e.g., 12oz Bag"
-            {...register("variant", {
-              required: "Variant is required",
-              minLength: {
-                value: 1,
-                message: "Variant must be at least 1 character",
-              },
-              maxLength: {
-                value: 255,
-                message: "Variant must be less than 255 characters",
-              },
+            id="size"
+            placeholder="e.g., 5mg, 10 mL, 250mcg"
+            {...register("size", {
+              required: "Size is required",
+              validate: validateSize,
             })}
-            disabled={isSubmitting}
+            disabled={isSubmitting || !!product}
           />
-          {errors.variant && (
-            <p className="text-sm text-destructive">{errors.variant.message}</p>
+          <p className="text-xs text-muted-foreground">
+            Enter size with unit (mg, mL, or mcg)
+          </p>
+          {errors.size && (
+            <p className="text-sm text-destructive">{errors.size.message}</p>
           )}
         </div>
       </div>
+
+      {locations.length > 0 && !product && (
+        <div className="space-y-2">
+          <Label htmlFor="locationId">Location</Label>
+          <Select
+            value={watch("locationId")?.toString()}
+            onValueChange={(value) => setValue("locationId", parseInt(value))}
+            disabled={isSubmitting}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Select a location" />
+            </SelectTrigger>
+            <SelectContent>
+              {locations.map((location) => (
+                <SelectItem key={location.id} value={location.id.toString()}>
+                  {location.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-sm text-muted-foreground">
+            Select the location for this product
+          </p>
+        </div>
+      )}
 
       <div className="space-y-2">
         <Label htmlFor="lowStockThreshold">Low Stock Threshold</Label>
@@ -115,7 +183,7 @@ export function ProductForm({
           id="lowStockThreshold"
           type="number"
           min="0"
-          placeholder="1"
+          placeholder="10"
           {...register("lowStockThreshold", {
             valueAsNumber: true,
             min: {
@@ -126,7 +194,7 @@ export function ProductForm({
           disabled={isSubmitting}
         />
         <p className="text-sm text-muted-foreground">
-          Email alerts will be sent when stock drops below this level
+          Email alerts will be sent when total stock across all locations drops below this level
         </p>
         {errors.lowStockThreshold && (
           <p className="text-sm text-destructive">{errors.lowStockThreshold.message}</p>

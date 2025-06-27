@@ -5,6 +5,8 @@ import prisma from "@/lib/prisma";
 import { UpdateProductRequest } from "@/types/product";
 import { getCurrentQuantity, isProductUnique, formatProductName } from "@/lib/products";
 
+export const dynamic = 'force-dynamic';
+
 interface RouteParams {
   params: {
     id: string;

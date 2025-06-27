@@ -3,6 +3,8 @@ import { getSession } from '@/lib/auth';
 import { verifyPassword, hashPassword } from '@/lib/auth-helpers';
 import prisma from '@/lib/prisma';
 
+export const dynamic = 'force-dynamic';
+
 export async function PATCH(request: NextRequest) {
   try {
     const session = await getSession();

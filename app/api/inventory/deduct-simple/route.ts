@@ -4,6 +4,8 @@ import { authOptions } from "@/lib/auth";
 import { createInventoryTransaction } from "@/lib/inventory";
 import { inventory_logs_logType } from "@prisma/client";
 
+export const dynamic = 'force-dynamic';
+
 interface DeductItem {
   productId: number;
   quantity: number;

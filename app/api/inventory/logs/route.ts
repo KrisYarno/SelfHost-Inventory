@@ -5,6 +5,8 @@ import prisma from '@/lib/prisma';
 import type { InventoryLogFilters, InventoryLogResponse } from '@/types/inventory';
 import { Prisma } from '@prisma/client';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { stockChecker } from '@/lib/stock-checker';
 
+export const dynamic = 'force-dynamic';
+
 // This endpoint will be called by Vercel Cron
 export async function GET(request: NextRequest) {
   try {
