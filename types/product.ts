@@ -46,6 +46,7 @@ export interface CreateProductRequest {
   unit?: string;
   numericValue?: number;
   lowStockThreshold?: number;
+  locationId?: number;
 }
 
 // Update product request
