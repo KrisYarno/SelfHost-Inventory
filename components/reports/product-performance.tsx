@@ -33,7 +33,7 @@ export function ProductPerformance() {
       setLoading(true);
       
       // Fetch current inventory levels
-      const inventoryResponse = await fetch("/api/inventory/current");
+      const inventoryResponse = await fetch("/api/inventory/current-fast");
       if (!inventoryResponse.ok) throw new Error("Failed to fetch inventory");
       const inventoryData = await inventoryResponse.json();
 

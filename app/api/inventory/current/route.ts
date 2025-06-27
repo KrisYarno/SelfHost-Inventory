@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
 import { authOptions } from '@/lib/auth';
-import { getCurrentInventoryLevels } from '@/lib/inventory';
+import { getCurrentInventoryLevelsOptimized } from '@/lib/inventory-optimized';
 import type { CurrentInventoryResponse } from '@/types/inventory';
 
 export async function GET(request: NextRequest) {
@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const locationId = searchParams.get('locationId');
 
-    const inventory = await getCurrentInventoryLevels(
+    const inventory = await getCurrentInventoryLevelsOptimized(
       locationId ? parseInt(locationId) : undefined
     );
 

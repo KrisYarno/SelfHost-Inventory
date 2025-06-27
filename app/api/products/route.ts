@@ -21,7 +21,7 @@ export async function GET(request: NextRequest) {
       sortBy: searchParams.get("sortBy") as ProductFilters["sortBy"] || "name",
       sortOrder: searchParams.get("sortOrder") as ProductFilters["sortOrder"] || "asc",
       page: parseInt(searchParams.get("page") || "1"),
-      pageSize: parseInt(searchParams.get("pageSize") || "50"),
+      pageSize: parseInt(searchParams.get("pageSize") || "25"),
     };
 
     // Get location ID from query params (optional - if not provided, get totals)

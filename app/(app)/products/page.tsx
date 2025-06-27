@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useSession } from "next-auth/react";
 import { Button } from "@/components/ui/button";
-import { ProductList } from "@/components/products/product-list";
+import { ProductListOptimized } from "@/components/products/product-list-optimized";
 import { CreateProductDialog } from "@/components/products/create-product-dialog";
 import { EditProductDialog } from "@/components/products/edit-product-dialog";
 import { DeleteProductDialog } from "@/components/products/delete-product-dialog";
@@ -73,8 +73,7 @@ export default function ProductsPage() {
       {/* Main Content */}
       <main className="flex-1 overflow-auto p-6">
         <div className="mx-auto max-w-7xl">
-          <ProductList
-            key={refreshKey}
+          <ProductListOptimized
             onEdit={isAdmin ? handleEdit : undefined}
             onDelete={isAdmin ? handleDelete : undefined}
             onQuickAdjust={handleQuickAdjust}

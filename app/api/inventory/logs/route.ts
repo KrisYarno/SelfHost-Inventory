@@ -43,23 +43,41 @@ export async function GET(request: NextRequest) {
       if (filters.endDate) where.changeTime.lte = filters.endDate;
     }
 
-    // Get total count
-    const total = await prisma.inventory_logs.count({ where });
-
-    // Get logs with relations
-    const logs = await prisma.inventory_logs.findMany({
-      where,
-      include: {
-        users: true,
-        products: true,
-        locations: true,
-      },
-      orderBy: {
-        changeTime: 'desc',
-      },
-      skip,
-      take: pageSize,
-    });
+    // Run count and data queries in parallel
+    const [total, logs] = await Promise.all([
+      prisma.inventory_logs.count({ where }),
+      prisma.inventory_logs.findMany({
+        where,
+        include: {
+          users: {
+            select: {
+              id: true,
+              username: true,
+              email: true,
+            },
+          },
+          products: {
+            select: {
+              id: true,
+              name: true,
+              baseName: true,
+              variant: true,
+            },
+          },
+          locations: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+        orderBy: {
+          changeTime: 'desc',
+        },
+        skip,
+        take: pageSize,
+      }),
+    ]);
 
     const response: InventoryLogResponse = {
       logs,

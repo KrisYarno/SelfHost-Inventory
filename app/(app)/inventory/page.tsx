@@ -33,7 +33,7 @@ export default function InventoryPage() {
   // Fetch current inventory levels
   const fetchCurrentInventory = async () => {
     try {
-      const response = await fetch('/api/inventory/current');
+      const response = await fetch('/api/inventory/current-fast');
       if (!response.ok) throw new Error('Failed to fetch inventory');
       const data = await response.json();
       setCurrentInventory(data.inventory);

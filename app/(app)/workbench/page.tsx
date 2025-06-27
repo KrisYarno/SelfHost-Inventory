@@ -59,7 +59,7 @@ export default function WorkbenchPage() {
       const productsData = await productsResponse.json();
       
       // Then get inventory levels for the selected location
-      const inventoryResponse = await fetch(`/api/inventory/current?locationId=${selectedLocationId}`);
+      const inventoryResponse = await fetch(`/api/inventory/current-fast?locationId=${selectedLocationId}`);
       if (!inventoryResponse.ok) throw new Error("Failed to fetch inventory");
       
       const inventoryData = await inventoryResponse.json();
