@@ -6,7 +6,7 @@ declare module 'next-auth' {
       id: string;
       isAdmin: boolean;
       isApproved: boolean;
-      defaultLocationId: number;
+      defaultLocationId: number | null;
     } & DefaultSession['user'];
   }
 
@@ -16,15 +16,17 @@ declare module 'next-auth' {
     email: string;
     isAdmin: boolean;
     isApproved: boolean;
-    defaultLocationId: number;
+    defaultLocationId: number | null;
   }
 }
 
 declare module 'next-auth/jwt' {
   interface JWT {
     id: string;
+    email: string;
+    name: string;
     isAdmin: boolean;
     isApproved: boolean;
-    defaultLocationId: number;
+    defaultLocationId: number | null;
   }
 }

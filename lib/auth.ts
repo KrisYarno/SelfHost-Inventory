@@ -1,13 +1,11 @@
 import { NextAuthOptions, getServerSession } from 'next-auth';
 import GoogleProvider from 'next-auth/providers/google';
 import CredentialsProvider from 'next-auth/providers/credentials';
-import { PrismaAdapter } from '@auth/prisma-adapter';
 import prisma from '@/lib/prisma';
 import { verifyPassword } from '@/lib/auth-helpers';
-import type { Adapter } from 'next-auth/adapters';
 
 export const authOptions: NextAuthOptions = {
-  adapter: PrismaAdapter(prisma) as Adapter,
+  // Remove PrismaAdapter since we don't have the required tables
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID!,
@@ -66,22 +64,25 @@ export const authOptions: NextAuthOptions = {
     maxAge: 7 * 24 * 60 * 60, // 7 days
   },
   callbacks: {
-    async signIn({ account, profile }) {
+    async signIn({ user, account, profile }) {
       // For OAuth providers, create/update user with proper fields
       if (account?.provider === 'google' && profile?.email) {
         try {
-          const existingUser = await prisma.user.findUnique({
+          let existingUser = await prisma.user.findUnique({
             where: { email: profile.email },
           });
 
           if (existingUser) {
             // Check if approved
             if (!existingUser.isApproved) {
+              // Redirect to pending approval page
               return '/auth/pending-approval';
             }
+            // User exists and is approved, allow sign in
+            return true;
           } else {
             // Create new user with username from email
-            await prisma.user.create({
+            const newUser = await prisma.user.create({
               data: {
                 email: profile.email,
                 username: profile.email.split('@')[0],
@@ -91,8 +92,7 @@ export const authOptions: NextAuthOptions = {
               },
             });
             
-            // In a real app, you might send an email notification here
-            
+            // Redirect new users to pending approval
             return '/auth/pending-approval';
           }
         } catch (error) {
@@ -103,20 +103,30 @@ export const authOptions: NextAuthOptions = {
 
       return true;
     },
-    async jwt({ token, user, trigger, session }) {
+    async jwt({ token, user, account, profile, trigger, session }) {
       // Initial sign in
-      if (user) {
-        // For OAuth users, fetch the full user data
+      if (account?.provider === 'google' && profile?.email) {
+        // For Google sign-in, fetch the user from our database
         const dbUser = await prisma.user.findUnique({
-          where: { email: user.email! },
+          where: { email: profile.email },
         });
 
         if (dbUser) {
           token.id = dbUser.id.toString();
+          token.email = dbUser.email;
+          token.name = dbUser.username;
           token.isAdmin = dbUser.isAdmin;
           token.isApproved = dbUser.isApproved;
           token.defaultLocationId = dbUser.defaultLocationId;
         }
+      } else if (user) {
+        // For credentials sign-in
+        token.id = user.id;
+        token.email = user.email || '';
+        token.name = user.name || user.username || '';
+        token.isAdmin = user.isAdmin;
+        token.isApproved = user.isApproved;
+        token.defaultLocationId = user.defaultLocationId;
       }
 
       // Handle session updates (e.g., when user is approved)
@@ -129,10 +139,12 @@ export const authOptions: NextAuthOptions = {
     },
     async session({ session, token }) {
       if (session.user) {
-        session.user.id = token.id;
-        session.user.isAdmin = token.isAdmin;
-        session.user.isApproved = token.isApproved;
-        session.user.defaultLocationId = token.defaultLocationId;
+        session.user.id = token.id as string;
+        session.user.email = token.email as string;
+        session.user.name = token.name as string;
+        session.user.isAdmin = token.isAdmin as boolean;
+        session.user.isApproved = token.isApproved as boolean;
+        session.user.defaultLocationId = token.defaultLocationId as number | null;
       }
 
       return session;
