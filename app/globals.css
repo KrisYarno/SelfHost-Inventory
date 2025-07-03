@@ -21,6 +21,7 @@
     /* Semantic Colors - Light Mode */
     --success: 145 60% 36%; /* #16a34a */
     --warning: 36 95% 50%; /* #f59e0b */
+    --warning-foreground: 36 95% 30%; /* darker warning for text */
     --error: 0 82% 51%; /* #dc2626 */
     --info: 201 94% 40%; /* #0284c7 */
     
@@ -119,6 +120,7 @@
     /* Semantic Colors - Dark Mode */
     --success: 142 71% 52%; /* #22c55e */
     --warning: 38 92% 57%; /* #fbbf24 */
+    --warning-foreground: 38 92% 20%; /* darker warning for text in dark mode */
     --error: 0 84% 63%; /* #ef4444 */
     --info: 199 89% 61%; /* #38bdf8 */
     
@@ -293,5 +295,91 @@
   .card-lift:hover {
     transform: translateY(-2px);
     @apply shadow-card-hover;
+  }
+  
+  /* Mobile Touch Optimizations */
+  .touch-manipulation {
+    touch-action: manipulation;
+  }
+  
+  /* Smooth Scrolling for Mobile */
+  @media (prefers-reduced-motion: no-preference) {
+    .smooth-scroll {
+      scroll-behavior: smooth;
+    }
+  }
+  
+  /* Mobile Performance Optimizations */
+  @media (max-width: 640px) {
+    /* Reduce animations on mobile for performance */
+    *, *::before, *::after {
+      animation-duration: 200ms !important;
+      transition-duration: 200ms !important;
+    }
+    
+    /* Optimize hover states for touch */
+    @media (hover: none) {
+      .hover-scale:hover {
+        transform: none;
+      }
+      
+      .card-lift:hover {
+        transform: none;
+        box-shadow: var(--card-shadow);
+      }
+    }
+    
+    /* Optimize scrolling performance */
+    .overflow-x-auto {
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    
+    .overflow-x-auto::-webkit-scrollbar {
+      display: none;
+    }
+  }
+  
+  /* Pull to Refresh Indicator */
+  .pull-to-refresh {
+    position: fixed;
+    top: -60px;
+    left: 50%;
+    transform: translateX(-50%);
+    transition: top 0.3s ease-out;
+    z-index: 100;
+  }
+  
+  .pull-to-refresh.active {
+    top: 20px;
+  }
+  
+  /* Mobile Touch Targets */
+  @media (max-width: 768px) {
+    .touch-target {
+      min-width: 44px;
+      min-height: 44px;
+    }
+  }
+  
+  /* Mobile-optimized scrolling */
+  .mobile-scroll {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+  
+  /* Prevent iOS zoom on input focus */
+  @media (max-width: 768px) {
+    input[type="text"],
+    input[type="number"],
+    input[type="email"],
+    input[type="password"],
+    input[type="search"],
+    input[type="tel"],
+    input[type="url"],
+    textarea,
+    select {
+      font-size: 16px !important;
+    }
   }
 }

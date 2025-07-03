@@ -52,20 +52,35 @@ export async function GET(request: NextRequest) {
       let type: ActivityItem['type'] = 'adjustment';
       let description = '';
 
-      // Determine activity type and description based on delta and logType
-      if (log.delta > 0) {
-        type = 'stock_in';
-        description = `Added ${log.delta} units of ${log.products.name}`;
-      } else if (log.delta < 0) {
-        type = 'stock_out';
-        description = `Removed ${Math.abs(log.delta)} units of ${log.products.name}`;
-      } else {
-        type = 'adjustment';
-        description = `No change for ${log.products.name}`;
-      }
-
+      // Determine activity type based on logType and delta
       if (log.logType === 'TRANSFER') {
-        description += ` (Transfer)`;
+        // Transfer activities
+        if (log.delta > 0) {
+          type = 'stock_in';
+          description = `Received ${log.delta} units of ${log.products.name} via transfer`;
+        } else if (log.delta < 0) {
+          type = 'stock_out';
+          description = `Transferred out ${Math.abs(log.delta)} units of ${log.products.name}`;
+        } else {
+          type = 'adjustment';
+          description = `Transfer with no quantity change for ${log.products.name}`;
+        }
+      } else if (log.logType === 'ADJUSTMENT') {
+        // Adjustment activities - determine type based on delta
+        if (log.delta > 0) {
+          type = 'stock_in';
+          description = `Stocked in ${log.delta} units of ${log.products.name}`;
+        } else if (log.delta < 0) {
+          type = 'stock_out';
+          description = `Removed ${Math.abs(log.delta)} units of ${log.products.name}`;
+        } else {
+          type = 'adjustment';
+          description = `No quantity change for ${log.products.name}`;
+        }
+      } else {
+        // Fallback for any unexpected logType values
+        type = log.delta > 0 ? 'stock_in' : log.delta < 0 ? 'stock_out' : 'adjustment';
+        description = `${log.delta > 0 ? 'Added' : 'Removed'} ${Math.abs(log.delta)} units of ${log.products.name}`;
       }
 
       return {

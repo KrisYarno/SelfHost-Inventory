@@ -92,12 +92,6 @@ export default function AdminDashboardPage() {
         <h1 className="text-3xl font-bold">Admin Dashboard</h1>
         <div className="flex gap-2">
           <Button asChild variant="outline">
-            <Link href="/admin/inventory">
-              <FileText className="mr-2 h-4 w-4" />
-              Inventory Overview
-            </Link>
-          </Button>
-          <Button asChild variant="outline">
             <Link href="/admin/logs">
               <Activity className="mr-2 h-4 w-4" />
               Change Logs
@@ -244,7 +238,7 @@ export default function AdminDashboardPage() {
               <Link href="/admin/users">Manage Users</Link>
             </Button>
             <Button asChild variant="outline" className="w-full">
-              <Link href="/admin/inventory">View Inventory</Link>
+              <Link href="/inventory">View Inventory</Link>
             </Button>
             <Button asChild variant="outline" className="w-full">
               <Link href="/admin/settings">System Settings</Link>

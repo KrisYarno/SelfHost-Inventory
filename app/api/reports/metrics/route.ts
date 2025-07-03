@@ -1,15 +1,32 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { MetricsResponse } from "@/types/reports";
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
     const session = await getSession();
     if (!session) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const searchParams = request.nextUrl.searchParams;
+    const startDate = searchParams.get("startDate");
+    const endDate = searchParams.get("endDate");
+    const locationId = searchParams.get("locationId");
+
+    // Build where clause for date filtering
+    const dateFilter: any = {};
+    if (startDate) {
+      dateFilter.changeTime = { ...dateFilter.changeTime, gte: new Date(startDate) };
+    }
+    if (endDate) {
+      dateFilter.changeTime = { ...dateFilter.changeTime, lte: new Date(endDate) };
+    }
+    if (locationId) {
+      dateFilter.locationId = parseInt(locationId);
     }
 
     // Get total products count
@@ -21,7 +38,8 @@ export async function GET() {
       by: ['productId', 'locationId'],
       _sum: {
         delta: true
-      }
+      },
+      where: dateFilter
     });
 
     // Calculate total stock quantity
@@ -45,16 +63,9 @@ export async function GET() {
       }
     });
 
-    // Get recent activity count (last 7 days)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
+    // Get activity count within date range
     const recentActivityCount = await prisma.inventory_logs.count({
-      where: {
-        changeTime: {
-          gte: sevenDaysAgo
-        }
-      }
+      where: dateFilter
     });
 
     // Calculate total inventory value (placeholder - would need cost data)

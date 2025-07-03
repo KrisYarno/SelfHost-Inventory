@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { SimpleInventoryLogTable } from '@/components/inventory/simple-inventory-log-table';
-import { StockLevelBadge, StockLevelIndicator } from '@/components/inventory/stock-level-badge';
+import { VariantProductCard } from '@/components/inventory/variant-product-card';
 import { QuickAdjustDialog } from '@/components/inventory/quick-adjust-dialog';
 import { StockInDialog } from '@/components/inventory/stock-in-dialog';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -12,33 +12,161 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Plus, TrendingUp, BookOpen } from 'lucide-react';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Badge } from '@/components/ui/badge';
+import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion';
+import { BookOpen, Loader2, RefreshCw, Download, Package } from 'lucide-react';
 import { toast } from 'sonner';
+import { useInfiniteScroll } from '@/hooks/use-infinite-scroll';
+import { useDebounce } from '@/hooks/use-debounce';
+import { useLocation } from '@/contexts/location-context';
 import type { 
-  InventoryLogWithRelations, 
-  CurrentInventoryLevel 
+  InventoryLogWithRelations
 } from '@/types/inventory';
 import type { ProductWithQuantity } from '@/types/product';
 
+
+interface ProductWithLocations {
+  id: number;
+  name: string;
+  baseName: string;
+  variant: string | null;
+  locations: {
+    locationId: number;
+    locationName: string;
+    quantity: number;
+  }[];
+  totalQuantity: number;
+}
+
+interface PaginationInfo {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasMore: boolean;
+}
+
 export default function InventoryPage() {
+  const { selectedLocationId } = useLocation();
   const [logs, setLogs] = useState<InventoryLogWithRelations[]>([]);
-  // const [transactions, setTransactions] = useState<InventoryTransactionWithLogs[]>([]);
-  const [currentInventory, setCurrentInventory] = useState<CurrentInventoryLevel[]>([]);
+  const [products, setProducts] = useState<ProductWithLocations[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
   const [showQuickAdjust, setShowQuickAdjust] = useState(false);
   const [showStockIn, setShowStockIn] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [pagination, setPagination] = useState<PaginationInfo>({
+    page: 1,
+    pageSize: 12,
+    total: 0,
+    totalPages: 0,
+    hasMore: false,
+  });
+  const [expandedCategories, setExpandedCategories] = useState<string[]>([]);
 
-  // Fetch current inventory levels
-  const fetchCurrentInventory = async () => {
-    try {
-      const response = await fetch('/api/inventory/current-fast');
-      if (!response.ok) throw new Error('Failed to fetch inventory');
-      const data = await response.json();
-      setCurrentInventory(data.inventory);
-    } catch {
-      toast.error('Failed to load current inventory levels');
+  const debouncedSearch = useDebounce(searchQuery, 300);
+
+  // Group products by baseName (category)
+  const groupedProducts = useMemo(() => {
+    const groups: Record<string, ProductWithLocations[]> = {};
+    
+    products.forEach(product => {
+      const category = product.baseName || 'Uncategorized';
+      if (!groups[category]) {
+        groups[category] = [];
+      }
+      groups[category].push(product);
+    });
+
+    // Sort categories alphabetically and sort products within each category
+    const sortedGroups: Record<string, ProductWithLocations[]> = {};
+    Object.keys(groups)
+      .sort((a, b) => a.localeCompare(b))
+      .forEach(key => {
+        sortedGroups[key] = groups[key].sort((a, b) => {
+          // Sort by variant name if they exist
+          if (a.variant && b.variant) {
+            return a.variant.localeCompare(b.variant);
+          }
+          return 0;
+        });
+      });
+
+    return sortedGroups;
+  }, [products]);
+
+  // Get all category keys for accordion default value
+  const allCategories = useMemo(() => Object.keys(groupedProducts), [groupedProducts]);
+
+  // Load expanded categories from localStorage on mount
+  useEffect(() => {
+    if (allCategories.length === 0) return;
+    
+    const saved = localStorage.getItem('inventory-expanded-categories');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        // Only keep categories that still exist
+        const validCategories = parsed.filter((cat: string) => allCategories.includes(cat));
+        // Add any new categories as expanded
+        const newCategories = allCategories.filter(cat => !parsed.includes(cat));
+        setExpandedCategories([...validCategories, ...newCategories]);
+      } catch {
+        // If parsing fails, default to all expanded
+        setExpandedCategories(allCategories);
+      }
+    } else {
+      // Default to all expanded
+      setExpandedCategories(allCategories);
     }
+  }, [allCategories]);
+
+  // Save expanded categories to localStorage when they change
+  const handleAccordionChange = (value: string | string[]) => {
+    const newValue = Array.isArray(value) ? value : [value];
+    setExpandedCategories(newValue);
+    localStorage.setItem('inventory-expanded-categories', JSON.stringify(newValue));
   };
+
+  // Fetch products with variants and pagination
+  const fetchProducts = useCallback(async (page: number = 1, append: boolean = false) => {
+    if (append) {
+      setIsLoadingMore(true);
+    } else {
+      setIsLoading(true);
+    }
+
+    try {
+      const params = new URLSearchParams({
+        page: page.toString(),
+        pageSize: '12',
+        ...(debouncedSearch && { search: debouncedSearch }),
+        // Don't filter by location - show all locations for each product
+      });
+
+      const response = await fetch(`/api/inventory/variants?${params}`);
+      if (!response.ok) throw new Error('Failed to fetch inventory');
+      
+      const data = await response.json();
+      
+      if (append) {
+        setProducts(prev => [...prev, ...data.products]);
+      } else {
+        setProducts(data.products);
+      }
+      
+      setPagination(data.pagination);
+    } catch (error) {
+      console.error('Error fetching inventory:', error);
+      toast.error('Failed to load inventory');
+    } finally {
+      setIsLoading(false);
+      setIsLoadingMore(false);
+    }
+  }, [debouncedSearch, selectedLocationId]);
 
   // Fetch inventory logs
   const fetchLogs = async () => {
@@ -52,34 +180,124 @@ export default function InventoryPage() {
     }
   };
 
-  // Commented out - no transaction table in schema
-  // const fetchTransactions = async () => {
-  //   setLoading(true);
-  //   try {
-  //     const response = await fetch('/api/inventory/transactions?pageSize=10');
-  //     if (!response.ok) throw new Error('Failed to fetch transactions');
-  //     const data = await response.json();
-  //     setTransactions(data.transactions);
-  //   } catch {
-  //     toast.error('Failed to load transactions');
-  //   } finally {
-  //     setLoading(false);
-  //   }
-  // };
+  // Load more items
+  const loadMore = useCallback(() => {
+    if (!isLoadingMore && pagination.hasMore) {
+      fetchProducts(pagination.page + 1, true);
+    }
+  }, [fetchProducts, isLoadingMore, pagination]);
 
+  // Pull to refresh handler
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await Promise.all([
+        fetchProducts(1, false),
+        fetchLogs()
+      ]);
+      toast.success('Inventory refreshed');
+    } catch {
+      toast.error('Failed to refresh inventory');
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  // Setup infinite scroll
+  const { loadMoreRef } = useInfiniteScroll({
+    loading: isLoadingMore,
+    hasMore: pagination.hasMore,
+    onLoadMore: loadMore,
+  });
+
+  // Initial load
   useEffect(() => {
-    fetchCurrentInventory();
+    fetchProducts();
     fetchLogs();
-    // fetchTransactions(); // Commented out - no transaction table in schema
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, []); // Removed selectedLocationId dependency
 
-  const handleProductAction = (product: CurrentInventoryLevel, action: 'adjust' | 'stockIn') => {
-    // Convert CurrentInventoryLevel to ProductWithQuantity format
+  // Search effect
+  useEffect(() => {
+    if (debouncedSearch !== undefined) {
+      fetchProducts(1, false);
+    }
+  }, [debouncedSearch, fetchProducts]);
+
+  // Touch/Pull to refresh setup for mobile
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    let startY = 0;
+    let currentY = 0;
+    let pulling = false;
+    const pullIndicator = document.createElement('div');
+    pullIndicator.className = 'fixed top-0 left-0 right-0 h-16 bg-background/80 backdrop-blur-sm flex items-center justify-center transition-transform duration-300 z-40';
+    pullIndicator.style.transform = 'translateY(-100%)';
+    pullIndicator.innerHTML = '<div class="flex items-center gap-2"><svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span class="text-sm">Pull to refresh</span></div>';
+    document.body.appendChild(pullIndicator);
+
+    const handleTouchStart = (e: TouchEvent) => {
+      if (window.scrollY === 0) {
+        startY = e.touches[0].clientY;
+        pulling = true;
+      }
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (!pulling) return;
+      currentY = e.touches[0].clientY;
+      const pullDistance = currentY - startY;
+
+      if (pullDistance > 0 && window.scrollY === 0) {
+        e.preventDefault();
+        const progress = Math.min(pullDistance / 120, 1);
+        pullIndicator.style.transform = `translateY(${-100 + progress * 100}%)`;
+      }
+    };
+
+    const handleTouchEnd = () => {
+      if (!pulling) return;
+      pulling = false;
+      const pullDistance = currentY - startY;
+
+      if (pullDistance > 80 && !isRefreshing) {
+        handleRefresh();
+      }
+      
+      pullIndicator.style.transform = 'translateY(-100%)';
+    };
+
+    document.addEventListener('touchstart', handleTouchStart, { passive: true });
+    document.addEventListener('touchmove', handleTouchMove, { passive: false });
+    document.addEventListener('touchend', handleTouchEnd);
+
+    return () => {
+      document.removeEventListener('touchstart', handleTouchStart);
+      document.removeEventListener('touchmove', handleTouchMove);
+      document.removeEventListener('touchend', handleTouchEnd);
+      if (pullIndicator.parentNode) {
+        pullIndicator.parentNode.removeChild(pullIndicator);
+      }
+    };
+  }, [isRefreshing]);
+
+  const handleProductAction = (productId: number, action: 'adjust' | 'stockIn') => {
+    // Find the product and convert to ProductWithQuantity format
+    const product = products.find(p => p.id === productId);
+    if (!product) return;
+    
     const productWithQuantity: ProductWithQuantity = {
-      ...product.product,
-      currentQuantity: product.quantity,
-      lastUpdated: product.lastUpdated
+      id: product.id,
+      name: product.name,
+      baseName: product.baseName || '',
+      variant: product.variant,
+      unit: null,
+      numericValue: null,
+      quantity: product.totalQuantity,
+      location: 1,
+      lowStockThreshold: 1,
+      currentQuantity: product.totalQuantity,
+      lastUpdated: new Date()
     };
     
     setSelectedProduct(productWithQuantity);
@@ -91,26 +309,80 @@ export default function InventoryPage() {
   };
 
   const refreshData = () => {
-    fetchCurrentInventory();
+    fetchProducts();
     fetchLogs();
-    // fetchTransactions(); // Commented out - no transaction table in schema
+  };
+
+  const handleExportCSV = async () => {
+    try {
+      const response = await fetch("/api/inventory/export", {
+        method: "GET",
+      });
+      
+      if (!response.ok) throw new Error("Failed to export data");
+      
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `inventory-${new Date().toISOString().split('T')[0]}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      
+      toast.success("Export completed successfully");
+    } catch (error) {
+      toast.error("Failed to export data");
+      console.error(error);
+    }
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-start">
+      {/* Pull to refresh indicator */}
+      {isRefreshing && (
+        <div className="fixed top-0 left-0 right-0 z-50 flex justify-center p-4 bg-background/80 backdrop-blur-sm">
+          <div className="flex items-center gap-2">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span className="text-sm">Refreshing...</span>
+          </div>
+        </div>
+      )}
+
+      <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Inventory Management</h1>
-          <p className="text-muted-foreground">
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Inventory Management</h1>
+          <p className="text-sm sm:text-base text-muted-foreground">
             Track inventory levels, view transaction history, and manage stock adjustments.
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button asChild variant="outline">
+        <div className="flex gap-2 w-full sm:w-auto">
+          <Button asChild variant="outline" size="sm" className="flex-1 sm:flex-initial">
             <Link href="/journal" className="gap-2">
               <BookOpen className="h-4 w-4" />
-              Journal Mode
+              <span className="hidden sm:inline">Journal Mode</span>
+              <span className="sm:hidden">Journal</span>
             </Link>
+          </Button>
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={handleExportCSV}
+            className="flex-1 sm:flex-initial"
+          >
+            <Download className="h-4 w-4" />
+            <span className="hidden sm:inline">Export CSV</span>
+            <span className="sm:hidden">Export</span>
+          </Button>
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            className="sm:hidden"
+          >
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
           </Button>
         </div>
       </div>
@@ -119,56 +391,142 @@ export default function InventoryPage() {
       <Card>
         <CardHeader>
           <CardTitle>Current Stock Levels</CardTitle>
-          <CardDescription>Real-time inventory quantities across all products</CardDescription>
+          <CardDescription>Real-time inventory quantities across all products and locations</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {currentInventory.map((item) => (
-              <Card key={`${item.productId}-${item.locationId}`} className="group">
-                <CardContent className="pt-6">
-                  <div className="space-y-3">
-                    <div>
-                      <p className="text-sm font-medium">{item.product.name}</p>
-                      <p className="text-xs text-muted-foreground">{item.location.name}</p>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <StockLevelBadge quantity={item.quantity} />
-                      <span className="text-2xl font-bold">{item.quantity}</span>
-                    </div>
-                    <StockLevelIndicator quantity={item.quantity} />
-                    
-                    {/* Quick Actions */}
-                    <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleProductAction(item, 'stockIn')}
-                        className="flex-1 gap-1"
-                      >
-                        <Plus className="h-3 w-3" />
-                        Stock In
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleProductAction(item, 'adjust')}
-                        className="flex-1 gap-1"
-                      >
-                        <TrendingUp className="h-3 w-3" />
-                        Adjust
-                      </Button>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+          {/* Search Bar and Controls */}
+          <div className="mb-6 space-y-4">
+            <div className="flex flex-col sm:flex-row gap-4">
+              <Input
+                type="search"
+                placeholder="Search products..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="max-w-sm"
+              />
+              {products.length > 0 && (
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setExpandedCategories(allCategories);
+                      localStorage.setItem('inventory-expanded-categories', JSON.stringify(allCategories));
+                    }}
+                    className="whitespace-nowrap"
+                  >
+                    Expand All
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setExpandedCategories([]);
+                      localStorage.setItem('inventory-expanded-categories', JSON.stringify([]));
+                    }}
+                    className="whitespace-nowrap"
+                  >
+                    Collapse All
+                  </Button>
+                </div>
+              )}
+            </div>
           </div>
+
+          {/* Loading State */}
+          {isLoading && products.length === 0 ? (
+            <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
+              {[...Array(6)].map((_, i) => (
+                <Card key={i}>
+                  <CardContent className="p-6">
+                    <div className="space-y-3">
+                      <Skeleton className="h-6 w-3/4" />
+                      <Skeleton className="h-4 w-1/2" />
+                      <Skeleton className="h-20 w-full" />
+                      <div className="flex gap-2">
+                        <Skeleton className="h-9 flex-1" />
+                        <Skeleton className="h-9 flex-1" />
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          ) : products.length === 0 ? (
+            <div className="text-center py-12">
+              <p className="text-muted-foreground">
+                {searchQuery ? 'No products found matching your search.' : 'No products found in inventory.'}
+              </p>
+              {!searchQuery && (
+                <Button asChild className="mt-4">
+                  <Link href="/products">Add Products</Link>
+                </Button>
+              )}
+            </div>
+          ) : (
+            <>
+              <Accordion 
+                type="multiple" 
+                value={expandedCategories}
+                onValueChange={handleAccordionChange}
+                className="space-y-4"
+              >
+                {Object.entries(groupedProducts).map(([category, categoryProducts]) => (
+                  <AccordionItem key={category} value={category} className="border-border">
+                    <AccordionTrigger className="hover:no-underline">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between w-full pr-4 gap-2">
+                        <div className="flex items-center gap-2 sm:gap-3">
+                          <Package className="h-4 w-4 sm:h-5 sm:w-5 text-muted-foreground shrink-0" />
+                          <span className="text-sm sm:text-base font-semibold truncate">{category}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-xs sm:text-sm">
+                          <Badge variant="secondary" className="font-normal px-2 py-0.5">
+                            {categoryProducts.length} {categoryProducts.length === 1 ? 'variant' : 'variants'}
+                          </Badge>
+                          <Badge variant="outline" className="font-normal px-2 py-0.5">
+                            {categoryProducts.reduce((sum, p) => sum + p.totalQuantity, 0)} units
+                          </Badge>
+                        </div>
+                      </div>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 pt-4">
+                        {categoryProducts.map((product) => (
+                          <VariantProductCard
+                            key={product.id}
+                            product={product}
+                            onStockIn={(id, locationId) => handleProductAction(id, 'stockIn')}
+                            onAdjust={(id, locationId) => handleProductAction(id, 'adjust')}
+                          />
+                        ))}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                ))}
+              </Accordion>
+
+              {/* Load More Trigger */}
+              <div ref={loadMoreRef} className="h-20 flex items-center justify-center">
+                {isLoadingMore && (
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span className="text-sm text-muted-foreground">Loading more...</span>
+                  </div>
+                )}
+                {!pagination.hasMore && products.length > 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    Showing all {pagination.total} products in {Object.keys(groupedProducts).length} categories
+                  </p>
+                )}
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
 
       {/* Tabs for different views */}
       <Tabs defaultValue="logs" className="space-y-4">
-        <TabsList>
+        <TabsList className="w-full sm:w-auto overflow-x-auto">
           <TabsTrigger value="logs">Recent Activity</TabsTrigger>
           <TabsTrigger value="transactions">Transactions</TabsTrigger>
           <TabsTrigger value="adjustments">Adjustments</TabsTrigger>
@@ -202,12 +560,12 @@ export default function InventoryPage() {
                         <SelectValue placeholder="Select product" />
                       </SelectTrigger>
                       <SelectContent>
-                        {currentInventory.map((item) => (
+                        {products.map((product) => (
                           <SelectItem 
-                            key={item.productId} 
-                            value={item.productId.toString()}
+                            key={product.id} 
+                            value={product.id.toString()}
                           >
-                            {item.product.name}
+                            {product.name}
                           </SelectItem>
                         ))}
                       </SelectContent>

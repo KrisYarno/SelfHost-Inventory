@@ -20,6 +20,20 @@ const config: Config = {
         border: "hsl(var(--border))",
         ring: "hsl(var(--ring))",
         
+        // UI colors
+        muted: {
+          DEFAULT: "hsl(var(--muted))",
+          foreground: "hsl(var(--muted-foreground))",
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--secondary))",
+          foreground: "hsl(var(--secondary-foreground))",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--destructive))",
+          foreground: "hsl(var(--destructive-foreground))",
+        },
+        
         // Brand colors
         primary: {
           DEFAULT: "hsl(var(--primary))",
@@ -32,7 +46,10 @@ const config: Config = {
         
         // Semantic colors
         success: "hsl(var(--success))",
-        warning: "hsl(var(--warning))",
+        warning: {
+          DEFAULT: "hsl(var(--warning))",
+          foreground: "hsl(var(--warning-foreground))",
+        },
         error: "hsl(var(--error))",
         info: "hsl(var(--info))",
         

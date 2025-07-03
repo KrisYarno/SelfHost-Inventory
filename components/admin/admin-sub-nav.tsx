@@ -6,7 +6,6 @@ import { cn } from "@/lib/utils";
 import { 
   LayoutDashboard, 
   Users, 
-  Package, 
   FileText,
   Settings 
 } from "lucide-react";
@@ -16,11 +15,6 @@ const adminNavItems = [
     title: "Overview",
     href: "/admin",
     icon: LayoutDashboard,
-  },
-  {
-    title: "Inventory Overview",
-    href: "/admin/inventory",
-    icon: Package,
   },
   {
     title: "Change Logs",

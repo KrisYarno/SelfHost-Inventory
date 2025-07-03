@@ -1,7 +1,19 @@
 import { PrismaClient } from '@prisma/client'
+import { createPrismaMiddleware } from './db-monitoring'
 
 const prismaClientSingleton = () => {
-  return new PrismaClient()
+  const client = new PrismaClient({
+    log: process.env.NODE_ENV === 'development' 
+      ? ['query', 'info', 'warn', 'error']
+      : ['error'],
+  })
+
+  // Add query monitoring middleware in development
+  if (process.env.NODE_ENV === 'development') {
+    client.$use(createPrismaMiddleware())
+  }
+
+  return client
 }
 
 declare const globalThis: {

@@ -71,8 +71,8 @@ export function AppShell({ children }: AppShellProps) {
         </header>
 
         {/* Main Content with padding for header and bottom nav */}
-        <main className="pt-16 pb-16">
-          <div className="min-h-[calc(100vh-8rem)]">{children}</div>
+        <main className="pt-16 pb-14">
+          <div className="min-h-[calc(100vh-7.5rem)]">{children}</div>
         </main>
 
         {/* Mobile Bottom Navigation */}
