@@ -36,9 +36,9 @@ export async function GET(request: NextRequest) {
     const whereClause: any = {};
     if (search) {
       whereClause.OR = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { baseName: { contains: search, mode: 'insensitive' } },
-        { variant: { contains: search, mode: 'insensitive' } },
+        { name: { contains: search } },
+        { baseName: { contains: search } },
+        { variant: { contains: search } },
       ];
     }
 

@@ -7,7 +7,8 @@ import {
   LayoutDashboard, 
   Users, 
   FileText,
-  Settings 
+  Settings,
+  Package
 } from "lucide-react";
 
 const adminNavItems = [
@@ -15,6 +16,11 @@ const adminNavItems = [
     title: "Overview",
     href: "/admin",
     icon: LayoutDashboard,
+  },
+  {
+    title: "Mass Update",
+    href: "/admin/inventory/mass-update",
+    icon: Package,
   },
   {
     title: "Change Logs",

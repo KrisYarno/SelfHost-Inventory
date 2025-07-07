@@ -238,7 +238,7 @@ export default function AdminDashboardPage() {
               <Link href="/admin/users">Manage Users</Link>
             </Button>
             <Button asChild variant="outline" className="w-full">
-              <Link href="/inventory">View Inventory</Link>
+              <Link href="/admin/inventory/mass-update">Mass Inventory Update</Link>
             </Button>
             <Button asChild variant="outline" className="w-full">
               <Link href="/admin/settings">System Settings</Link>
