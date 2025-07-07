@@ -19,6 +19,7 @@ model User {
   inventory_logs       inventory_logs[]
   locations            Location              @relation(fields: [defaultLocationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_default_location")
   notificationHistory  NotificationHistory[]
+  deletedProducts      Product[]             @relation("DeletedProducts")
 
   @@index([defaultLocationId], map: "fk_user_default_location")
   @@map("users")
@@ -34,11 +35,15 @@ model Product {
   quantity             Int                   @default(0)
   location             Int                   @default(1)
   lowStockThreshold    Int                   @default(1)
+  deletedAt            DateTime?             @db.DateTime(0)
+  deletedBy            Int?
+  deletedByUser        User?                 @relation("DeletedProducts", fields: [deletedBy], references: [id], onDelete: SetNull)
   inventory_logs       inventory_logs[]
   product_locations    product_locations[]
   notificationHistory  NotificationHistory[]
 
   @@index([baseName, numericValue, variant], map: "idx_product_sorting")
+  @@index([deletedAt], map: "idx_deleted")
   @@map("products")
 }
 

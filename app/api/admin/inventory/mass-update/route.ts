@@ -18,8 +18,10 @@ export async function GET(request: NextRequest) {
     const search = searchParams.get("search") || "";
     const category = searchParams.get("category") || "all";
 
-    // Build where clause
-    const whereClause: any = {};
+    // Build where clause - exclude soft deleted products
+    const whereClause: any = {
+      deletedAt: null,
+    };
     if (search) {
       whereClause.OR = [
         { name: { contains: search } },

@@ -118,8 +118,10 @@ export async function getProductsWithQuantities(
     pageSize = 50,
   } = filters;
 
-  // Build where clause
-  const where: Prisma.ProductWhereInput = {};
+  // Build where clause - exclude soft deleted products
+  const where: Prisma.ProductWhereInput = {
+    deletedAt: null, // Only get non-deleted products
+  };
   
   if (search) {
     where.OR = [

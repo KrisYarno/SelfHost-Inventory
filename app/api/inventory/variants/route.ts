@@ -32,8 +32,10 @@ export async function GET(request: NextRequest) {
     const pageSize = parseInt(searchParams.get('pageSize') || '12');
     const search = searchParams.get('search') || '';
 
-    // Build where clause for search
-    const whereClause: any = {};
+    // Build where clause for search - exclude soft deleted products
+    const whereClause: any = {
+      deletedAt: null,
+    };
     if (search) {
       whereClause.OR = [
         { name: { contains: search } },

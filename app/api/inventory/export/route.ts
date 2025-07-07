@@ -13,8 +13,11 @@ export async function GET() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Get all products with their location quantities
+    // Get all products with their location quantities (excluding soft deleted)
     const products = await prisma.product.findMany({
+      where: {
+        deletedAt: null,
+      },
       include: {
         product_locations: {
           include: {

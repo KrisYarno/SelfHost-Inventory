@@ -1,7 +1,5 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
 import {
   Dialog,
   DialogContent,
@@ -14,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Product } from "@/types/product";
 import { toast } from "sonner";
 import { AlertTriangle } from "lucide-react";
+import { useDeleteProduct } from "@/hooks/use-products";
 
 interface DeleteProductDialogProps {
   product: Product | null;
@@ -26,32 +25,18 @@ export function DeleteProductDialog({
   open,
   onOpenChange,
 }: DeleteProductDialogProps) {
-  const [isDeleting, setIsDeleting] = useState(false);
-  const router = useRouter();
+  const deleteProduct = useDeleteProduct();
 
   const handleDelete = async () => {
     if (!product) return;
     
     try {
-      setIsDeleting(true);
-      
-      const response = await fetch(`/api/products/${product.id}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to delete product");
-      }
-
+      await deleteProduct.mutateAsync(product.id);
       toast.success(`Product "${product.name}" has been deleted`);
       onOpenChange(false);
-      router.refresh(); // Refresh the page to update the product list
     } catch (error) {
       console.error("Error deleting product:", error);
       toast.error(error instanceof Error ? error.message : "Failed to delete product");
-    } finally {
-      setIsDeleting(false);
     }
   };
 
@@ -90,16 +75,16 @@ export function DeleteProductDialog({
           <Button
             variant="outline"
             onClick={() => onOpenChange(false)}
-            disabled={isDeleting}
+            disabled={deleteProduct.isPending}
           >
             Cancel
           </Button>
           <Button
             variant="destructive"
             onClick={handleDelete}
-            disabled={isDeleting}
+            disabled={deleteProduct.isPending}
           >
-            {isDeleting ? (
+            {deleteProduct.isPending ? (
               <>
                 <span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
                 Deleting...

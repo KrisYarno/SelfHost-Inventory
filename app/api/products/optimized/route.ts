@@ -21,16 +21,19 @@ export async function GET(request: NextRequest) {
     const sortOrder = searchParams.get("sortOrder") || "asc";
     const locationId = searchParams.get("locationId");
 
-    // Build where clause
-    const where: Prisma.ProductWhereInput = search
-      ? {
-          OR: [
-            { name: { contains: search } },
-            { baseName: { contains: search } },
-            { variant: { contains: search } },
-          ],
-        }
-      : {};
+    // Build where clause - exclude soft deleted products
+    const where: Prisma.ProductWhereInput = {
+      deletedAt: null,
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search } },
+              { baseName: { contains: search } },
+              { variant: { contains: search } },
+            ],
+          }
+        : {}),
+    };
 
     // Execute queries in parallel
     const [products, total] = await Promise.all([

@@ -15,8 +15,12 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const threshold = parseInt(searchParams.get("threshold") || "10");
 
-    // Get all products
-    const products = await prisma.product.findMany();
+    // Get all products (excluding soft deleted)
+    const products = await prisma.product.findMany({
+      where: {
+        deletedAt: null,
+      },
+    });
 
     // Get current inventory levels
     const inventoryLevels = await prisma.inventory_logs.groupBy({

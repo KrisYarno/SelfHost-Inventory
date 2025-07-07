@@ -26,8 +26,11 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: "Invalid product ID" }, { status: 400 });
     }
 
-    const product = await prisma.product.findUnique({
-      where: { id: productId },
+    const product = await prisma.product.findFirst({
+      where: { 
+        id: productId,
+        deletedAt: null,
+      },
       include: {
         inventory_logs: {
           include: {
@@ -171,7 +174,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: "Invalid product ID" }, { status: 400 });
     }
 
-    // Check if product exists
+    // Check if product exists and is not already deleted
     const existingProduct = await prisma.product.findUnique({
       where: { id: productId },
     });
@@ -180,12 +183,26 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: "Product not found" }, { status: 404 });
     }
 
-    // Delete the product
-    const product = await prisma.product.delete({
+    if (existingProduct.deletedAt) {
+      return NextResponse.json({ error: "Product is already deleted" }, { status: 400 });
+    }
+
+    // Soft delete the product
+    const product = await prisma.product.update({
       where: { id: productId },
+      data: {
+        deletedAt: new Date(),
+        deletedBy: parseInt(session.user.id),
+      },
     });
 
-    return NextResponse.json(product);
+    // Note: We don't create an inventory log for deletion as it's not an inventory change
+    // The soft delete fields (deletedAt, deletedBy) serve as the audit trail
+
+    return NextResponse.json({
+      message: "Product deleted successfully",
+      product,
+    });
   } catch (error) {
     console.error("Error deleting product:", error);
     return NextResponse.json(

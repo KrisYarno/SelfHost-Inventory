@@ -230,6 +230,8 @@ export function ProductListOptimized({
                 onStockIn={
                   showInventoryActions ? () => onStockIn?.(product) : undefined
                 }
+                isAdmin={isAdmin}
+                showInventoryActions={showInventoryActions}
               />
             )
           ))}

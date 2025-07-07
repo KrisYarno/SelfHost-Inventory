@@ -26,9 +26,12 @@ export async function GET(
     const locationId = searchParams.get('locationId');
     const limit = Math.min(1000, parseInt(searchParams.get('limit') || '100'));
 
-    // Get product
-    const product = await prisma.product.findUnique({
-      where: { id: productId },
+    // Get product (excluding soft deleted)
+    const product = await prisma.product.findFirst({
+      where: { 
+        id: productId,
+        deletedAt: null,
+      },
     });
 
     if (!product) {
