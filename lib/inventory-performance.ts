@@ -59,6 +59,8 @@ export async function getCurrentInventoryLevelsPerformance(
       quantity: 0, // Legacy field
       location: 1, // Legacy field
       lowStockThreshold: row.product_lowStockThreshold,
+      deletedAt: null,
+      deletedBy: null,
     },
     locationId: row.locationId,
     location: {

@@ -297,7 +297,9 @@ export default function InventoryPage() {
       location: 1,
       lowStockThreshold: 1,
       currentQuantity: product.totalQuantity,
-      lastUpdated: new Date()
+      lastUpdated: new Date(),
+      deletedAt: null,
+      deletedBy: null
     };
     
     setSelectedProduct(productWithQuantity);
