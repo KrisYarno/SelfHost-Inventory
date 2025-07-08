@@ -51,28 +51,53 @@ export default function AdminMassInventoryUpdatePage() {
   const [categoryFilter, setCategory] = useState<string>("all");
   const [showChangedOnly, setShowChangedOnly] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [fetchController, setFetchController] = useState<AbortController | null>(null);
 
-  // Fetch all data once on mount
+  // Fetch all data once on mount with request deduplication
   const fetchInventoryData = useCallback(async () => {
+    // Cancel any in-flight requests
+    if (fetchController) {
+      fetchController.abort();
+    }
+
+    const controller = new AbortController();
+    setFetchController(controller);
+
     try {
       setIsLoading(true);
       // Fetch all products without any filters
-      const response = await fetch(`/api/admin/inventory/mass-update`);
+      const response = await fetch(`/api/admin/inventory/mass-update`, {
+        signal: controller.signal
+      });
       if (!response.ok) throw new Error("Failed to fetch inventory data");
       
       const result = await response.json();
       setData(result);
-    } catch (error) {
-      console.error('Error fetching inventory:', error);
-      toast.error('Failed to load inventory data');
+    } catch (error: any) {
+      if (error.name !== 'AbortError') {
+        console.error('Error fetching inventory:', error);
+        toast.error('Failed to load inventory data');
+      }
     } finally {
       setIsLoading(false);
+      setFetchController(null);
     }
-  }, []);
+  }, [fetchController]);
 
   // Only fetch once on mount
   useEffect(() => {
-    fetchInventoryData();
+    let mounted = true;
+    
+    if (mounted) {
+      fetchInventoryData();
+    }
+
+    return () => {
+      mounted = false;
+      if (fetchController) {
+        fetchController.abort();
+      }
+    };
   }, []);
 
   // Handle quantity change
@@ -161,8 +186,25 @@ export default function AdminMassInventoryUpdatePage() {
       toast.success(`Successfully updated ${data.totalChanges} inventory quantities`);
       setHasUnsavedChanges(false);
       
-      // Refresh data
-      await fetchInventoryData();
+      // Update local data to reflect saved changes instead of refetching
+      setData(prevData => {
+        if (!prevData) return null;
+        
+        return {
+          ...prevData,
+          products: prevData.products.map(product => ({
+            ...product,
+            locations: product.locations.map(location => ({
+              ...location,
+              currentQuantity: location.newQuantity !== null ? location.newQuantity : location.currentQuantity,
+              newQuantity: null,
+              delta: 0,
+              hasChanged: false
+            }))
+          })),
+          totalChanges: 0
+        };
+      });
     } catch (error) {
       console.error('Error saving changes:', error);
       toast.error(error instanceof Error ? error.message : 'Failed to save changes');
@@ -176,7 +218,24 @@ export default function AdminMassInventoryUpdatePage() {
     if (!hasUnsavedChanges) return;
     
     if (confirm('Reset all changes? This will discard any unsaved modifications.')) {
-      fetchInventoryData();
+      // Reset local data instead of refetching
+      setData(prevData => {
+        if (!prevData) return null;
+        
+        return {
+          ...prevData,
+          products: prevData.products.map(product => ({
+            ...product,
+            locations: product.locations.map(location => ({
+              ...location,
+              newQuantity: null,
+              delta: 0,
+              hasChanged: false
+            }))
+          })),
+          totalChanges: 0
+        };
+      });
       setHasUnsavedChanges(false);
     }
   };
@@ -362,7 +421,15 @@ export default function AdminMassInventoryUpdatePage() {
             </Button>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="relative">
+          {isSaving && (
+            <div className="absolute inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center">
+              <div className="flex flex-col items-center gap-2">
+                <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
+                <p className="text-sm font-medium">Saving changes...</p>
+              </div>
+            </div>
+          )}
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
@@ -409,6 +476,7 @@ export default function AdminMassInventoryUpdatePage() {
                               location.delta < 0 && "text-red-600"
                             )}
                             placeholder="--"
+                            disabled={isSaving}
                           />
                           {location.hasChanged && (
                             <Badge 
