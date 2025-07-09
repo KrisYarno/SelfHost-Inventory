@@ -286,10 +286,25 @@ export async function POST(request: NextRequest) {
     // Use transaction with isolation level to prevent conflicts
     const transactionId = `mass_update_${Date.now()}_${session.user.id}`;
     
-    try {
-      await prisma.$transaction(async (tx) => {
-        // Process each change individually within the transaction
-        for (const change of validChanges) {
+    // Process changes in batches to avoid transaction timeout
+    // Supports 75-100 products easily: 100 products = 2 batches of 50 each
+    const BATCH_SIZE = 50; // Process 50 changes at a time
+    const batches = [];
+    for (let i = 0; i < validChanges.length; i += BATCH_SIZE) {
+      batches.push(validChanges.slice(i, i + BATCH_SIZE));
+    }
+    
+    console.log(`Processing ${validChanges.length} changes in ${batches.length} batches`);
+    
+    // Process each batch
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      console.log(`Processing batch ${batchIndex + 1}/${batches.length} with ${batch.length} changes`);
+      
+      try {
+        await prisma.$transaction(async (tx) => {
+          // Process each change individually within the transaction
+          for (const change of batch) {
           try {
             const { productId, locationId, newQuantity, delta } = change;
 
@@ -396,52 +411,46 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // If no successes and not allowing partial, rollback
-        if (successCount === 0 && !body.allowPartial) {
-          throw new Error('All updates failed');
+        }, {
+            isolationLevel: 'Serializable',
+            timeout: 10000 // 10 second timeout per batch
+          });
+
+        } catch (transactionError: any) {
+          console.error(`=== BATCH ${batchIndex + 1} TRANSACTION ERROR ===`);
+          console.error('Transaction error:', transactionError);
+          
+          // If not allowing partial, convert all remaining changes to failures and stop
+          if (!body.allowPartial) {
+            // Add failures for this batch and all remaining batches
+            for (let i = batchIndex; i < batches.length; i++) {
+              const failBatch = batches[i];
+              for (const change of failBatch) {
+                if (!failures.find(f => f.productId === change.productId && f.locationId === change.locationId)) {
+                  failures.push(createFailure(
+                    change,
+                    'DATABASE_ERROR',
+                    `Batch transaction failed: ${transactionError.message || 'Transaction rolled back'}`,
+                    true
+                  ));
+                }
+              }
+            }
+            break; // Stop processing batches
+          }
         }
-
-      }, {
-        isolationLevel: 'Serializable',
-        timeout: 30000 // 30 second timeout
-      });
-
-    } catch (transactionError: any) {
-      console.error('=== TRANSACTION ERROR ===');
-      console.error('Transaction error type:', transactionError.constructor.name);
-      console.error('Transaction error message:', transactionError.message);
-      console.error('Transaction error code:', transactionError.code);
-      console.error('Transaction error details:', transactionError);
-      
-      // If transaction failed and we're not allowing partial updates
-      if (!body.allowPartial) {
-        // Convert all changes to failures
-        const allFailures = changes.map(change => {
-          const existingFailure = failures.find(f => 
-            f.productId === change.productId && 
-            f.locationId === change.locationId
-          );
-          
-          if (existingFailure) return existingFailure;
-          
-          return createFailure(
-            change,
-            'DATABASE_ERROR',
-            `Transaction failed: ${transactionError.message || 'all changes rolled back'}`,
-            true
-          );
-        });
-
-        const result: BatchUpdateResult = {
-          successful: 0,
-          failed: allFailures.length,
-          partial: false,
-          failures: allFailures,
-          transactionId
-        };
-
-        return NextResponse.json(result, { status: 500 });
       }
+    
+    // If no successes and not allowing partial, return error
+    if (successCount === 0 && !body.allowPartial && failures.length > 0) {
+      const result: BatchUpdateResult = {
+        successful: 0,
+        failed: failures.length,
+        partial: false,
+        failures,
+        transactionId
+      };
+      return NextResponse.json(result, { status: 500 });
     }
 
     // Build result

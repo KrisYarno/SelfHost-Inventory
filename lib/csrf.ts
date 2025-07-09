@@ -26,19 +26,20 @@ export async function getCSRFToken(): Promise<string> {
     return existingToken.value;
   }
   
-  // Generate new token
+  // Generate new token but don't set it here
+  // Token will be set via the /api/csrf endpoint
   const newToken = generateCSRFToken();
-  
-  // Set cookie with secure options
-  cookieStore.set(CSRF_TOKEN_COOKIE, newToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    maxAge: COOKIE_MAX_AGE,
-    path: '/'
-  });
-  
   return newToken;
+}
+
+/**
+ * Get existing CSRF token without creating a new one
+ * Safe to use in Server Components
+ */
+export async function getExistingCSRFToken(): Promise<string | null> {
+  const cookieStore = await cookies();
+  const existingToken = cookieStore.get(CSRF_TOKEN_COOKIE);
+  return existingToken?.value || null;
 }
 
 /**

@@ -6,7 +6,7 @@ import { AuthProvider } from "@/components/auth/auth-provider";
 import { ThemeProvider } from "@/components/theme-provider";
 import { QueryProvider } from "@/components/providers/query-provider";
 import { Toaster } from "@/components/ui/sonner";
-import { getCSRFToken } from "@/lib/csrf";
+import { getExistingCSRFToken } from "@/lib/csrf";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -46,13 +46,13 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  // Generate or get existing CSRF token server-side
-  const csrfToken = await getCSRFToken();
+  // Get existing CSRF token if available (don't create new one)
+  const csrfToken = await getExistingCSRFToken();
   
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <meta name="csrf-token" content={csrfToken} />
+        {csrfToken && <meta name="csrf-token" content={csrfToken} />}
       </head>
       <body
         className={`${inter.variable} ${jetbrainsMono.variable} font-sans antialiased`}

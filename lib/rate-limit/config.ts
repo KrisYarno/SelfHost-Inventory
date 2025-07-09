@@ -1,4 +1,6 @@
 // Rate limiting configuration for different endpoint types
+// Limits are configured to support up to 5 concurrent users
+// Each limit is approximately 5x the single-user requirement
 
 export interface RateLimitConfig {
   windowMs: number;  // Time window in milliseconds
@@ -13,12 +15,12 @@ export const rateLimitConfigs = {
   auth: {
     signin: {
       windowMs: 15 * 60 * 1000, // 15 minutes
-      max: 5,
+      max: 25, // Increased from 5 to 25 for 5 concurrent users
       message: 'Too many login attempts, please try again later'
     },
     signup: {
       windowMs: 60 * 60 * 1000, // 1 hour
-      max: 3,
+      max: 15, // Increased from 3 to 15 for 5 concurrent users
       message: 'Too many account creation attempts, please try again later'
     },
     passwordReset: {
@@ -32,27 +34,27 @@ export const rateLimitConfigs = {
   api: {
     default: {
       windowMs: 60 * 1000, // 1 minute
-      max: 60,
+      max: 300, // Increased from 60 to 300 for 5 concurrent users
       message: 'Too many requests, please slow down'
     },
     inventory: {
       windowMs: 60 * 1000, // 1 minute
-      max: 60, // Increased from 30 to 60 for better UX with multiple components
+      max: 300, // Increased from 60 to 300 for 5 concurrent users
       message: 'Too many inventory requests, please slow down'
     },
     inventoryRead: {
       windowMs: 60 * 1000, // 1 minute
-      max: 100, // More lenient for read operations
+      max: 500, // Increased from 100 to 500 for 5 concurrent users doing reads
       message: 'Too many inventory requests, please slow down'
     },
     reports: {
       windowMs: 60 * 1000, // 1 minute
-      max: 20,
+      max: 100, // Increased from 20 to 100 for 5 concurrent users
       message: 'Too many report requests, please slow down'
     },
     heavy: {
       windowMs: 5 * 60 * 1000, // 5 minutes
-      max: 10,
+      max: 25, // Increased from 10 to 25 for 5 concurrent users
       message: 'Too many heavy operation requests, please wait before trying again'
     }
   },
@@ -61,17 +63,17 @@ export const rateLimitConfigs = {
   admin: {
     default: {
       windowMs: 60 * 1000, // 1 minute
-      max: 100,
+      max: 500, // Increased from 100 to 500 for 5 concurrent admin users
       message: 'Too many admin requests, please slow down'
     },
     userManagement: {
       windowMs: 60 * 1000, // 1 minute
-      max: 20,
+      max: 100, // Increased from 20 to 100 for 5 concurrent admin users
       message: 'Too many user management requests, please slow down'
     },
     bulkOperations: {
       windowMs: 5 * 60 * 1000, // 5 minutes
-      max: 5,
+      max: 25, // Increased from 5 to 25 for 5 concurrent users
       message: 'Too many bulk operations, please wait before trying again'
     }
   },
@@ -80,7 +82,7 @@ export const rateLimitConfigs = {
   public: {
     default: {
       windowMs: 60 * 1000, // 1 minute
-      max: 100,
+      max: 500, // Increased from 100 to 500 for 5 concurrent users
       message: 'Too many requests, please slow down'
     }
   }

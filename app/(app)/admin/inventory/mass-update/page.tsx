@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -396,33 +396,40 @@ export default function AdminMassInventoryUpdatePage() {
     }
   };
 
-  // Client-side filtering
-  const filteredProducts = data?.products.filter(product => {
-    // Filter by search term
-    if (searchTerm) {
-      const searchLower = searchTerm.toLowerCase();
-      const matchesSearch = 
-        product.productName.toLowerCase().includes(searchLower) ||
-        product.baseName.toLowerCase().includes(searchLower) ||
-        (product.variant && product.variant.toLowerCase().includes(searchLower));
+  // Client-side filtering with memoization for better performance with 100+ products
+  const filteredProducts = useMemo(() => {
+    if (!data?.products) return [];
+    
+    return data.products.filter(product => {
+      // Filter by search term
+      if (searchTerm) {
+        const searchLower = searchTerm.toLowerCase();
+        const matchesSearch = 
+          product.productName.toLowerCase().includes(searchLower) ||
+          product.baseName.toLowerCase().includes(searchLower) ||
+          (product.variant && product.variant.toLowerCase().includes(searchLower));
+        
+        if (!matchesSearch) return false;
+      }
       
-      if (!matchesSearch) return false;
-    }
+      // Filter by category
+      if (categoryFilter !== "all") {
+        const productCategory = product.baseName || 'Uncategorized';
+        if (productCategory !== categoryFilter) return false;
+      }
+      
+      // Filter by changed only
+      if (showChangedOnly && !product.locations.some(loc => loc.hasChanged)) return false;
     
-    // Filter by category
-    if (categoryFilter !== "all") {
-      const productCategory = product.baseName || 'Uncategorized';
-      if (productCategory !== categoryFilter) return false;
-    }
-    
-    // Filter by changed only
-    if (showChangedOnly && !product.locations.some(loc => loc.hasChanged)) return false;
-    
-    return true;
-  }) || [];
+      return true;
+    });
+  }, [data?.products, searchTerm, categoryFilter, showChangedOnly]);
 
-  // Get unique categories
-  const categories = data ? Array.from(new Set(data.products.map(p => p.baseName || 'Uncategorized'))).sort() : [];
+  // Get unique categories with memoization
+  const categories = useMemo(() => {
+    if (!data?.products) return [];
+    return Array.from(new Set(data.products.map(p => p.baseName || 'Uncategorized'))).sort();
+  }, [data?.products]);
 
   if (isLoading) {
     return (
@@ -473,7 +480,7 @@ export default function AdminMassInventoryUpdatePage() {
         <div>
           <h1 className="text-3xl font-bold">Mass Inventory Update</h1>
           <p className="text-muted-foreground mt-1">
-            Enter physical count numbers to update inventory across all locations
+            Enter physical count numbers to update inventory across all locations. Supports updating 100+ products efficiently.
           </p>
         </div>
         <div className="flex gap-2">
@@ -690,6 +697,13 @@ export default function AdminMassInventoryUpdatePage() {
           {filteredProducts.length === 0 && (
             <div className="text-center py-8 text-muted-foreground">
               {showChangedOnly ? "No products with changes" : "No products found"}
+            </div>
+          )}
+          
+          {filteredProducts.length > 0 && (
+            <div className="mt-4 p-2 text-sm text-muted-foreground border-t">
+              Showing {filteredProducts.length} of {data?.totalProducts || 0} products
+              {(data?.totalChanges ?? 0) > 0 && ` • ${data?.totalChanges} pending changes`}
             </div>
           )}
         </CardContent>
