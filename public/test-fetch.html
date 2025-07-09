@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fetch API Test Page</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 800px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .container {
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    h1 {
+      color: #333;
+      margin-bottom: 30px;
+    }
+    .test-section {
+      margin-bottom: 30px;
+      padding: 20px;
+      background: #f9f9f9;
+      border-radius: 4px;
+      border: 1px solid #e0e0e0;
+    }
+    .test-section h2 {
+      margin-top: 0;
+      color: #555;
+      font-size: 18px;
+    }
+    button {
+      background: #0070f3;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-right: 10px;
+      margin-bottom: 10px;
+    }
+    button:hover {
+      background: #0051cc;
+    }
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    .result {
+      margin-top: 15px;
+      padding: 15px;
+      background: #f0f0f0;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .success {
+      background: #d4edda;
+      border: 1px solid #c3e6cb;
+      color: #155724;
+    }
+    .error {
+      background: #f8d7da;
+      border: 1px solid #f5c6cb;
+      color: #721c24;
+    }
+    .warning {
+      background: #fff3cd;
+      border: 1px solid #ffeeba;
+      color: #856404;
+    }
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid #f3f3f3;
+      border-top: 2px solid #0070f3;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-left: 10px;
+      vertical-align: middle;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔍 Fetch API Test Page</h1>
+    <p>This page tests various fetch scenarios to diagnose API communication issues.</p>
+    
+    <!-- Test 1: Basic Fetch -->
+    <div class="test-section">
+      <h2>Test 1: Basic Fetch (GET /api/products)</h2>
+      <button onclick="testBasicFetch()">Run Test</button>
+      <div id="basicFetchResult" class="result" style="display:none;"></div>
+    </div>
+
+    <!-- Test 2: POST Request -->
+    <div class="test-section">
+      <h2>Test 2: POST Request (Mock Mass Update)</h2>
+      <button onclick="testPostRequest()">Run Test</button>
+      <div id="postResult" class="result" style="display:none;"></div>
+    </div>
+
+    <!-- Test 3: Authentication Check -->
+    <div class="test-section">
+      <h2>Test 3: Authentication Status</h2>
+      <button onclick="testAuth()">Check Auth</button>
+      <div id="authResult" class="result" style="display:none;"></div>
+    </div>
+
+    <!-- Test 4: CORS Test -->
+    <div class="test-section">
+      <h2>Test 4: CORS Headers Check</h2>
+      <button onclick="testCORS()">Run Test</button>
+      <div id="corsResult" class="result" style="display:none;"></div>
+    </div>
+
+    <!-- Test 5: Network Error Simulation -->
+    <div class="test-section">
+      <h2>Test 5: Error Handling</h2>
+      <button onclick="testErrorHandling()">Test 404</button>
+      <button onclick="testNetworkError()">Test Network Error</button>
+      <div id="errorResult" class="result" style="display:none;"></div>
+    </div>
+
+    <!-- Test 6: Mass Update Endpoint -->
+    <div class="test-section">
+      <h2>Test 6: Mass Update Endpoint (/api/inventory/deduct)</h2>
+      <button onclick="testMassUpdateEndpoint()">Test Endpoint</button>
+      <div id="massUpdateResult" class="result" style="display:none;"></div>
+    </div>
+
+    <!-- Console Output -->
+    <div class="test-section">
+      <h2>Console Output</h2>
+      <button onclick="clearConsole()">Clear</button>
+      <div id="consoleOutput" class="result" style="display:block; min-height: 100px;">
+Ready to run tests...
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Utility function to log to both console and page
+    function log(message, type = 'info') {
+      console.log(message);
+      const output = document.getElementById('consoleOutput');
+      const timestamp = new Date().toLocaleTimeString();
+      const prefix = type === 'error' ? '❌' : type === 'success' ? '✅' : '📝';
+      output.textContent += `\n[${timestamp}] ${prefix} ${message}`;
+      output.scrollTop = output.scrollHeight;
+    }
+
+    function clearConsole() {
+      document.getElementById('consoleOutput').textContent = 'Console cleared.\n';
+    }
+
+    function showResult(elementId, content, type = 'info') {
+      const element = document.getElementById(elementId);
+      element.style.display = 'block';
+      element.textContent = typeof content === 'object' ? JSON.stringify(content, null, 2) : content;
+      element.className = `result ${type}`;
+    }
+
+    function showSpinner(button) {
+      button.disabled = true;
+      button.innerHTML = button.textContent + '<span class="spinner"></span>';
+    }
+
+    function hideSpinner(button, originalText) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+
+    // Test 1: Basic Fetch
+    async function testBasicFetch() {
+      const button = event.target;
+      const originalText = button.textContent;
+      showSpinner(button);
+      log('Starting basic fetch test...');
+      
+      try {
+        const response = await fetch('/api/products', {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          credentials: 'same-origin'
+        });
+        
+        const data = await response.json();
+        log(`Fetch successful! Status: ${response.status}`, 'success');
+        showResult('basicFetchResult', {
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers.entries()),
+          dataCount: Array.isArray(data) ? data.length : 'Not an array',
+          sampleData: data[0] || data
+        }, 'success');
+      } catch (error) {
+        log(`Fetch failed: ${error.message}`, 'error');
+        showResult('basicFetchResult', {
+          error: error.message,
+          stack: error.stack
+        }, 'error');
+      } finally {
+        hideSpinner(button, originalText);
+      }
+    }
+
+    // Test 2: POST Request
+    async function testPostRequest() {
+      const button = event.target;
+      const originalText = button.textContent;
+      showSpinner(button);
+      log('Testing POST request...');
+      
+      const testData = {
+        updates: [
+          { productId: 'test-123', quantity: 5 }
+        ]
+      };
+      
+      try {
+        const response = await fetch('/api/inventory/deduct', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          credentials: 'same-origin',
+          body: JSON.stringify(testData)
+        });
+        
+        const contentType = response.headers.get('content-type');
+        let data;
+        
+        if (contentType && contentType.includes('application/json')) {
+          data = await response.json();
+        } else {
+          data = await response.text();
+        }
+        
+        log(`POST request completed! Status: ${response.status}`, response.ok ? 'success' : 'error');
+        showResult('postResult', {
+          status: response.status,
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers.entries()),
+          sentData: testData,
+          response: data
+        }, response.ok ? 'success' : 'warning');
+      } catch (error) {
+        log(`POST request failed: ${error.message}`, 'error');
+        showResult('postResult', {
+          error: error.message,
+          stack: error.stack,
+          sentData: testData
+        }, 'error');
+      } finally {
+        hideSpinner(button, originalText);
+      }
+    }
+
+    // Test 3: Authentication
+    async function testAuth() {
+      const button = event.target;
+      const originalText = button.textContent;
+      showSpinner(button);
+      log('Checking authentication status...');
+      
+      try {
+        const response = await fetch('/api/auth/session', {
+          credentials: 'same-origin'
+        });
+        const session = await response.json();
+        
+        const isAuthenticated = !!session?.user;
+        log(`Authentication check: ${isAuthenticated ? 'Logged in' : 'Not logged in'}`, isAuthenticated ? 'success' : 'warning');
+        showResult('authResult', {
+          authenticated: isAuthenticated,
+          user: session?.user || null,
+          expires: session?.expires || null
+        }, isAuthenticated ? 'success' : 'warning');
+      } catch (error) {
+        log(`Auth check failed: ${error.message}`, 'error');
+        showResult('authResult', {
+          error: error.message
+        }, 'error');
+      } finally {
+        hideSpinner(button, originalText);
+      }
+    }
+
+    // Test 4: CORS
+    async function testCORS() {
+      const button = event.target;
+      const originalText = button.textContent;
+      showSpinner(button);
+      log('Testing CORS headers...');
+      
+      try {
+        const response = await fetch('/api/products', {
+          method: 'OPTIONS'
+        });
+        
+        const headers = {};
+        response.headers.forEach((value, key) => {
+          if (key.toLowerCase().includes('cors') || key.toLowerCase().includes('access-control')) {
+            headers[key] = value;
+          }
+        });
+        
+        log('CORS headers check completed', 'success');
+        showResult('corsResult', {
+          status: response.status,
+          corsHeaders: headers,
+          hasCORSHeaders: Object.keys(headers).length > 0
+        }, 'success');
+      } catch (error) {
+        log(`CORS check failed: ${error.message}`, 'error');
+        showResult('corsResult', {
+          error: error.message
+        }, 'error');
+      } finally {
+        hideSpinner(button, originalText);
+      }
+    }
+
+    // Test 5: Error Handling
+    async function testErrorHandling() {
+      const button = event.target;
+      const originalText = button.textContent;
+      showSpinner(button);
+      log('Testing 404 error handling...');
+      
+      try {
+        const response = await fetch('/api/nonexistent-endpoint');
+        log(`404 test: Status ${response.status}`, 'warning');
+        showResult('errorResult', {
+          status: response.status,
+          statusText: response.statusText,
+          ok: response.ok
+        }, 'warning');
+      } catch (error) {
+        log(`404 test error: ${error.message}`, 'error');
+        showResult('errorResult', {
+          error: error.message
+        }, 'error');
+      } finally {
+        hideSpinner(button, originalText);
+      }
+    }
+
+    async function testNetworkError() {
+      const button = event.target;
+      const originalText = button.textContent;
+      showSpinner(button);
+      log('Testing network error handling...');
+      
+      try {
+        // Force a network error by using an invalid URL
+        const response = await fetch('http://invalid-domain-that-does-not-exist.com/api/test');
+        showResult('errorResult', 'Unexpected: fetch succeeded', 'error');
+      } catch (error) {
+        log('Network error handled correctly', 'success');
+        showResult('errorResult', {
+          errorType: error.name,
+          message: error.message,
+          expectedBehavior: 'This error is expected when network is unreachable'
+        }, 'success');
+      } finally {
+        hideSpinner(button, originalText);
+      }
+    }
+
+    // Test 6: Mass Update Endpoint
+    async function testMassUpdateEndpoint() {
+      const button = event.target;
+      const originalText = button.textContent;
+      showSpinner(button);
+      log('Testing mass update endpoint...');
+      
+      const results = {
+        OPTIONS: null,
+        HEAD: null,
+        GET: null,
+        POST: null
+      };
+      
+      // Test different HTTP methods
+      for (const method of ['OPTIONS', 'HEAD', 'GET']) {
+        try {
+          const response = await fetch('/api/inventory/deduct', { method });
+          results[method] = {
+            status: response.status,
+            statusText: response.statusText,
+            ok: response.ok
+          };
+          log(`${method} request: ${response.status}`, response.ok ? 'success' : 'warning');
+        } catch (error) {
+          results[method] = {
+            error: error.message
+          };
+          log(`${method} request failed: ${error.message}`, 'error');
+        }
+      }
+      
+      // Test POST with empty body
+      try {
+        const response = await fetch('/api/inventory/deduct', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ updates: [] })
+        });
+        
+        let responseData;
+        try {
+          responseData = await response.json();
+        } catch {
+          responseData = await response.text();
+        }
+        
+        results.POST = {
+          status: response.status,
+          statusText: response.statusText,
+          ok: response.ok,
+          response: responseData
+        };
+        log(`POST request: ${response.status}`, response.ok ? 'success' : 'warning');
+      } catch (error) {
+        results.POST = {
+          error: error.message
+        };
+        log(`POST request failed: ${error.message}`, 'error');
+      }
+      
+      showResult('massUpdateResult', results, results.POST?.ok ? 'success' : 'warning');
+      hideSpinner(button, originalText);
+    }
+
+    // Add global error handler
+    window.addEventListener('unhandledrejection', event => {
+      log(`Unhandled promise rejection: ${event.reason}`, 'error');
+    });
+
+    // Check if we're running in development
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      log('Running in development mode', 'success');
+    } else {
+      log('Running in production mode', 'warning');
+    }
+  </script>
+</body>
+</html>

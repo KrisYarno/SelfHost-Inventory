@@ -8,6 +8,9 @@ interface SwipeableAdjustmentProps {
   onSwipeRight?: () => void;
   children: React.ReactNode;
   className?: string;
+  role?: string;
+  'aria-label'?: string;
+  tabIndex?: number;
 }
 
 export function SwipeableAdjustment({
@@ -15,6 +18,9 @@ export function SwipeableAdjustment({
   onSwipeRight,
   children,
   className,
+  role,
+  'aria-label': ariaLabel,
+  tabIndex,
 }: SwipeableAdjustmentProps) {
   const [touchStart, setTouchStart] = useState<number | null>(null);
   const [touchEnd, setTouchEnd] = useState<number | null>(null);
@@ -58,15 +64,30 @@ export function SwipeableAdjustment({
     setSwipeDistance(0);
   };
 
+  // Keyboard navigation support
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowLeft' && onSwipeLeft) {
+      e.preventDefault();
+      onSwipeLeft();
+    } else if (e.key === 'ArrowRight' && onSwipeRight) {
+      e.preventDefault();
+      onSwipeRight();
+    }
+  };
+
   return (
     <div
       className={cn(
-        "relative overflow-hidden touch-pan-y",
+        "relative overflow-hidden touch-pan-y focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-primary",
         className
       )}
       onTouchStart={onTouchStart}
       onTouchMove={onTouchMove}
       onTouchEnd={onTouchEnd}
+      onKeyDown={handleKeyDown}
+      role={role}
+      aria-label={ariaLabel}
+      tabIndex={tabIndex}
     >
       {/* Swipe indicators */}
       {swiping && (
@@ -75,6 +96,7 @@ export function SwipeableAdjustment({
             <div 
               className="absolute inset-y-0 left-0 bg-green-500/20 flex items-center px-4"
               style={{ width: Math.min(swipeDistance, 100) }}
+              aria-hidden="true"
             >
               <span className="text-green-600 font-medium">+1</span>
             </div>
@@ -83,6 +105,7 @@ export function SwipeableAdjustment({
             <div 
               className="absolute inset-y-0 right-0 bg-red-500/20 flex items-center justify-end px-4"
               style={{ width: Math.min(Math.abs(swipeDistance), 100) }}
+              aria-hidden="true"
             >
               <span className="text-red-600 font-medium">-1</span>
             </div>

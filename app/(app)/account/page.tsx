@@ -11,6 +11,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
 import { AlertCircle, CheckCircle2, Mail } from 'lucide-react';
 import { toast } from 'sonner';
+import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
 
 interface Location {
   id: number;
@@ -19,6 +20,7 @@ interface Location {
 
 export default function AccountPage() {
   const { data: session } = useSession();
+  const { token: csrfToken } = useCSRF();
   const [locations, setLocations] = useState<Location[]>([]);
   const [defaultLocation, setDefaultLocation] = useState<string>('');
   const [oldPassword, setOldPassword] = useState('');
@@ -68,7 +70,7 @@ export default function AccountPage() {
     try {
       const response = await fetch('/api/account/default-location', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
         body: JSON.stringify({ locationId: parseInt(defaultLocation) }),
       });
 
@@ -109,7 +111,7 @@ export default function AccountPage() {
     try {
       const response = await fetch('/api/account/password', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
         body: JSON.stringify({ oldPassword, newPassword }),
       });
 
@@ -138,7 +140,7 @@ export default function AccountPage() {
     try {
       const response = await fetch('/api/user/preferences', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
         body: JSON.stringify({ emailAlerts: !emailAlerts }),
       });
 

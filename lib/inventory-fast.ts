@@ -25,6 +25,7 @@ export async function getCurrentInventoryLevelsFast(
     location: pl.locations,
     quantity: pl.quantity,
     lastUpdated: new Date(0), // Default date, not fetched
+    version: pl.version,
   }));
   
   // If specific location requested, include products with 0 quantity
@@ -50,6 +51,7 @@ export async function getCurrentInventoryLevelsFast(
           location,
           quantity: 0,
           lastUpdated: new Date(0),
+          version: 0,
         });
       }
     }
@@ -124,6 +126,7 @@ export async function getCurrentInventoryLevelsPaginated(
           location,
           quantity: pl?.quantity || 0,
           lastUpdated: new Date(0),
+          version: pl?.version || 0,
         });
       }
     } else {
@@ -136,6 +139,7 @@ export async function getCurrentInventoryLevelsPaginated(
         location: { id: 0, name: 'All Locations' },
         quantity: totalQuantity,
         lastUpdated: new Date(0),
+        version: 0, // Aggregated view doesn't have a single version
       });
     }
   }

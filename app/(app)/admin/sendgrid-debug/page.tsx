@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, CheckCircle2, Mail } from 'lucide-react';
+import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
 
 interface TestResult {
   test: string;
@@ -31,6 +32,7 @@ interface DebugResults {
 export default function SendGridDebugPage() {
   const [isRunning, setIsRunning] = useState(false);
   const [results, setResults] = useState<DebugResults | null>(null);
+  const { token: csrfToken } = useCSRF();
 
   const runDebugTests = async () => {
     setIsRunning(true);
@@ -39,6 +41,9 @@ export default function SendGridDebugPage() {
     try {
       const response = await fetch('/api/test/sendgrid-debug', {
         method: 'POST',
+        headers: withCSRFHeaders({
+          'Content-Type': 'application/json',
+        }, csrfToken),
       });
       
       const data = await response.json();

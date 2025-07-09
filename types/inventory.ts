@@ -30,6 +30,7 @@ export type CurrentInventoryLevel = {
   location: Location;
   quantity: number;
   lastUpdated: Date;
+  version?: number;
 };
 
 // API Request types
@@ -38,6 +39,7 @@ export type InventoryAdjustmentRequest = {
   locationId: number;
   delta: number;
   logType?: inventory_logs_logType;
+  expectedVersion?: number;
 };
 
 export type StockInRequest = {

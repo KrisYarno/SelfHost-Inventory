@@ -12,6 +12,7 @@ interface AdjustmentInputProps {
   currentQuantity: number;
   min?: number;
   max?: number;
+  productName?: string;
 }
 
 export function AdjustmentInput({
@@ -20,6 +21,7 @@ export function AdjustmentInput({
   currentQuantity,
   min = -currentQuantity,
   max = 9999,
+  productName = "product",
 }: AdjustmentInputProps) {
   const [inputValue, setInputValue] = useState(value.toString());
   const [isEditing, setIsEditing] = useState(false);
@@ -74,19 +76,27 @@ export function AdjustmentInput({
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") {
       handleInputBlur();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      handleIncrement();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      handleDecrement();
     }
   };
 
   return (
-    <div className="flex items-center gap-1">
+    <div className="flex items-center gap-1" role="group" aria-label={`Adjust quantity for ${productName}`}>
       <Button
         variant="outline"
         size="icon"
         onClick={handleDecrement}
         disabled={value <= min}
         className="h-8 w-8"
+        aria-label={`Decrease quantity (current adjustment: ${value})`}
+        title="Decrease quantity"
       >
-        <Minus className="h-3 w-3" />
+        <Minus className="h-3 w-3" aria-hidden="true" />
       </Button>
 
       <Input
@@ -101,6 +111,12 @@ export function AdjustmentInput({
           value > 0 && "text-green-600 border-green-500/50",
           value < 0 && "text-red-600 border-red-500/50"
         )}
+        aria-label={`Quantity adjustment value`}
+        aria-valuemin={min}
+        aria-valuemax={max}
+        aria-valuenow={value}
+        aria-valuetext={`${value > 0 ? "+" : ""}${value} units`}
+        role="spinbutton"
       />
 
       <Button
@@ -109,8 +125,10 @@ export function AdjustmentInput({
         onClick={handleIncrement}
         disabled={value >= max}
         className="h-8 w-8"
+        aria-label={`Increase quantity (current adjustment: ${value})`}
+        title="Increase quantity"
       >
-        <Plus className="h-3 w-3" />
+        <Plus className="h-3 w-3" aria-hidden="true" />
       </Button>
     </div>
   );

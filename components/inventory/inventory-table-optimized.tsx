@@ -103,7 +103,7 @@ export function InventoryTableOptimized({
                 <TableCell>
                   <StockStatusBadge 
                     quantity={item.quantity} 
-                    threshold={item.product.lowStockThreshold}
+                    threshold={item.product.lowStockThreshold || 10}
                   />
                 </TableCell>
                 <TableCell className="text-muted-foreground">

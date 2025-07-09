@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import prisma from '@/lib/prisma';
+import { auditService } from '@/lib/audit';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,10 +26,30 @@ export async function DELETE(
       );
     }
 
+    // Get user info before deletion for audit log
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true }
+    });
+
+    if (!user) {
+      return NextResponse.json(
+        { error: 'User not found' },
+        { status: 404 }
+      );
+    }
+
     // Delete the user
     await prisma.user.delete({
       where: { id: userId },
     });
+
+    // Log the rejection action
+    await auditService.logUserRejection(
+      parseInt(session.user.id),
+      user.id,
+      user.email
+    );
 
     return NextResponse.json({ 
       message: 'User rejected and removed successfully'

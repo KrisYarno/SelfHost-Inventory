@@ -6,6 +6,7 @@ import { AuthProvider } from "@/components/auth/auth-provider";
 import { ThemeProvider } from "@/components/theme-provider";
 import { QueryProvider } from "@/components/providers/query-provider";
 import { Toaster } from "@/components/ui/sonner";
+import { getCSRFToken } from "@/lib/csrf";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -40,13 +41,19 @@ export const metadata: Metadata = {
   description: "Modern inventory management system",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Generate or get existing CSRF token server-side
+  const csrfToken = await getCSRFToken();
+  
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        <meta name="csrf-token" content={csrfToken} />
+      </head>
       <body
         className={`${inter.variable} ${jetbrainsMono.variable} font-sans antialiased`}
       >

@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { ProductForm } from "./product-form";
 import { toast } from "sonner";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 interface CreateProductDialogProps {
   open: boolean;
@@ -24,11 +25,14 @@ export function CreateProductDialog({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [locations, setLocations] = useState<Array<{ id: number; name: string }>>([]);
   const router = useRouter();
+  const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
 
   useEffect(() => {
     if (open) {
       // Fetch locations when dialog opens
-      fetch("/api/locations")
+      fetch("/api/locations", {
+        headers: withCSRFHeaders({}, csrfToken),
+      })
         .then(res => res.json())
         .then(data => {
           if (data.locations) {
@@ -37,7 +41,7 @@ export function CreateProductDialog({
         })
         .catch(err => console.error("Failed to fetch locations:", err));
     }
-  }, [open]);
+  }, [open, csrfToken]);
 
   const handleSubmit = async (data: any) => {
     try {
@@ -46,7 +50,7 @@ export function CreateProductDialog({
       // Data already contains properly formatted name, variant, unit, numericValue from ProductForm
       const response = await fetch("/api/products", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({
           name: data.name,
           baseName: data.baseName,
@@ -89,7 +93,7 @@ export function CreateProductDialog({
         <ProductForm
           onSubmit={handleSubmit}
           onCancel={() => onOpenChange(false)}
-          isSubmitting={isSubmitting}
+          isSubmitting={isSubmitting || csrfLoading}
           locations={locations}
         />
       </DialogContent>

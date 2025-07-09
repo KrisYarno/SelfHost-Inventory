@@ -9,6 +9,7 @@ export interface ProductWithQuantity extends Product {
   lastUpdated?: Date;
   locationQuantities?: Map<number, number>; // Optional: quantities per location
   totalQuantity?: number; // Optional: total across all locations
+  version?: number; // Optional: version for optimistic locking
 }
 
 // Product form input types

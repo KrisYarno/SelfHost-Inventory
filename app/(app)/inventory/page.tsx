@@ -20,6 +20,7 @@ import { toast } from 'sonner';
 import { useInfiniteScroll } from '@/hooks/use-infinite-scroll';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useLocation } from '@/contexts/location-context';
+import { fetchWithErrorHandling } from '@/lib/rate-limited-fetch';
 import type { 
   InventoryLogWithRelations
 } from '@/types/inventory';
@@ -147,10 +148,7 @@ export default function InventoryPage() {
         // Don't filter by location - show all locations for each product
       });
 
-      const response = await fetch(`/api/inventory/variants?${params}`);
-      if (!response.ok) throw new Error('Failed to fetch inventory');
-      
-      const data = await response.json();
+      const data = await fetchWithErrorHandling(`/api/inventory/variants?${params}`);
       
       if (append) {
         setProducts(prev => [...prev, ...data.products]);
@@ -161,7 +159,8 @@ export default function InventoryPage() {
       setPagination(data.pagination);
     } catch (error) {
       console.error('Error fetching inventory:', error);
-      toast.error('Failed to load inventory');
+      const errorMessage = error instanceof Error ? error.message : 'Failed to load inventory';
+      toast.error(errorMessage);
     } finally {
       setIsLoading(false);
       setIsLoadingMore(false);
@@ -171,9 +170,7 @@ export default function InventoryPage() {
   // Fetch inventory logs
   const fetchLogs = async () => {
     try {
-      const response = await fetch('/api/inventory/logs?pageSize=20');
-      if (!response.ok) throw new Error('Failed to fetch logs');
-      const data = await response.json();
+      const data = await fetchWithErrorHandling('/api/inventory/logs?pageSize=20');
       setLogs(data.logs);
     } catch {
       toast.error('Failed to load inventory logs');

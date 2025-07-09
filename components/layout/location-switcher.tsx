@@ -29,7 +29,7 @@ export function LocationSwitcher() {
 
   return (
     <Select 
-      value={selectedLocationId?.toString() || ""} 
+      value={selectedLocationId ? selectedLocationId.toString() : undefined} 
       onValueChange={handleLocationChange}
     >
       <SelectTrigger 

@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { Plus, Minus, Package } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import {
   Dialog,
   DialogContent,
@@ -34,6 +35,7 @@ export function QuickAdjustDialog({
   onSuccess,
 }: QuickAdjustDialogProps) {
   const { selectedLocationId } = useLocation();
+  const { token: csrfToken } = useCSRF();
   const [adjustmentType, setAdjustmentType] = useState<"add" | "remove">("add");
   const [quantity, setQuantity] = useState("");
   const [reason, setReason] = useState("");
@@ -89,7 +91,7 @@ export function QuickAdjustDialog({
     try {
       const response = await fetch("/api/inventory/adjust", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({
           productId: product.id,
           locationId: selectedLocationId,

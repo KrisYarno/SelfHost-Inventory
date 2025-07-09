@@ -12,6 +12,7 @@ import {
 import { ProductForm } from "./product-form";
 import { ProductFormData, Product } from "@/types/product";
 import { toast } from "sonner";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 interface EditProductDialogProps {
   product: Product | null;
@@ -26,6 +27,7 @@ export function EditProductDialog({
 }: EditProductDialogProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
+  const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
 
   const handleSubmit = async (data: any) => {
     if (!product) return;
@@ -37,7 +39,7 @@ export function EditProductDialog({
       // The product name, variant, unit, etc. are immutable
       const response = await fetch(`/api/products/${product.id}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({
           lowStockThreshold: data.lowStockThreshold,
         }),
@@ -76,7 +78,7 @@ export function EditProductDialog({
             product={product}
             onSubmit={handleSubmit}
             onCancel={() => onOpenChange(false)}
-            isSubmitting={isSubmitting}
+            isSubmitting={isSubmitting || csrfLoading}
           />
         )}
       </DialogContent>

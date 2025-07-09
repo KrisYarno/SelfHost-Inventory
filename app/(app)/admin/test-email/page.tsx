@@ -5,10 +5,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Mail, CheckCircle2, AlertCircle } from 'lucide-react';
+import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
 
 export default function TestEmailPage() {
   const [isSending, setIsSending] = useState(false);
   const [result, setResult] = useState<{ success?: boolean; message?: string; details?: unknown } | null>(null);
+  const { token: csrfToken } = useCSRF();
 
   const sendTestEmail = async () => {
     setIsSending(true);
@@ -17,6 +19,9 @@ export default function TestEmailPage() {
     try {
       const response = await fetch('/api/test/email', {
         method: 'POST',
+        headers: withCSRFHeaders({
+          'Content-Type': 'application/json',
+        }, csrfToken),
       });
       
       const data = await response.json();
@@ -50,7 +55,7 @@ export default function TestEmailPage() {
     setResult(null);
     
     try {
-      const response = await fetch('/api/cron/stock-check');
+      const response = await fetch('/api/cron/stock-check'); // GET request, no CSRF needed
       const data = await response.json();
       
       if (response.ok) {

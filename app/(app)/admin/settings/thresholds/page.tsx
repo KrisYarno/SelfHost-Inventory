@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
 import { Save, Package, AlertTriangle } from 'lucide-react';
+import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
 
 interface ProductThreshold {
   id: number;
@@ -23,6 +24,7 @@ export default function ThresholdSettingsPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [modifiedProducts, setModifiedProducts] = useState<Set<number>>(new Set());
   const [thresholds, setThresholds] = useState<Record<number, number>>({});
+  const { token: csrfToken } = useCSRF();
 
   useEffect(() => {
     fetchProducts();
@@ -86,7 +88,9 @@ export default function ThresholdSettingsPage() {
 
       const response = await fetch('/api/admin/products/thresholds', {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: withCSRFHeaders({
+          'Content-Type': 'application/json',
+        }, csrfToken),
         body: JSON.stringify({ updates }),
       });
 

@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { queryKeys, CACHE_TIMES, cacheInvalidators } from '@/lib/cache-config';
-import { searchProductsPerformance } from '@/lib/inventory-performance';
 import type { Product, ProductFilters, ProductWithQuantity } from '@/types/product';
+import { useCSRF, withCSRFHeaders } from './use-csrf';
 
 // Fetch products with caching
 export function useProducts(filters: ProductFilters, locationId?: number) {
@@ -33,9 +33,19 @@ export function useProductSearch(query: string, enabled = true) {
   return useQuery({
     queryKey: queryKeys.products.search(query),
     queryFn: async () => {
-      // Use the performance-optimized search directly
+      // Use the API endpoint for search
       if (query.length < 2) return [];
-      return searchProductsPerformance(query, 10);
+      
+      const params = new URLSearchParams({
+        search: query,
+        pageSize: '10'
+      });
+      
+      const response = await fetch(`/api/products?${params}`);
+      if (!response.ok) throw new Error('Failed to search products');
+      
+      const data = await response.json();
+      return data.products || [];
     },
     enabled: enabled && query.length >= 2,
     staleTime: CACHE_TIMES.PRODUCTS,
@@ -61,12 +71,13 @@ export function useProduct(id: number) {
 // Create product with cache invalidation
 export function useCreateProduct() {
   const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
   
   return useMutation({
     mutationFn: async (data: Partial<Product>) => {
       const response = await fetch('/api/products', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
         body: JSON.stringify(data),
       });
       
@@ -87,12 +98,13 @@ export function useCreateProduct() {
 // Update product with optimistic updates
 export function useUpdateProduct() {
   const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
   
   return useMutation({
     mutationFn: async ({ id, data }: { id: number; data: Partial<Product> }) => {
       const response = await fetch(`/api/products/${id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
         body: JSON.stringify(data),
       });
       
@@ -134,11 +146,13 @@ export function useUpdateProduct() {
 // Delete product with cache cleanup
 export function useDeleteProduct() {
   const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
   
   return useMutation({
     mutationFn: async (id: number) => {
       const response = await fetch(`/api/products/${id}`, {
         method: 'DELETE',
+        headers: withCSRFHeaders({}, csrfToken),
       });
       
       if (!response.ok) {

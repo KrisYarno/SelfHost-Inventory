@@ -33,9 +33,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (userFilter && userFilter !== "all") {
-      whereClause.users = {
-        username: userFilter
-      };
+      whereClause.userId = parseInt(userFilter);
     }
 
     if (locationFilter && locationFilter !== "all") {

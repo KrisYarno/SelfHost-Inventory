@@ -8,6 +8,10 @@ import type {
   CurrentInventoryLevel,
   InventorySnapshot
 } from '@/types/inventory';
+import { 
+  InsufficientStockError, 
+  ProductNotFoundError
+} from '@/lib/error-handling';
 
 /**
  * Creates an inventory log entry
@@ -214,73 +218,147 @@ export async function getInventorySnapshot(
 }
 
 /**
- * Creates an inventory adjustment and updates product_locations
+ * Creates an inventory adjustment and updates product_locations with optimistic locking
  */
 export async function createInventoryAdjustment(
   userId: string,
   productId: number,
   locationId: number,
   delta: number,
-  logType?: inventory_logs_logType
+  logType?: inventory_logs_logType,
+  expectedVersion?: number
 ) {
-  return await prisma.$transaction(async (tx) => {
-    // If removing stock, validate availability
-    if (delta < 0) {
-      const validation = await validateStockAvailability(
-        productId,
-        locationId,
-        Math.abs(delta),
-        tx
-      );
+  const maxRetries = 3;
+  let retryCount = 0;
+  
+  while (retryCount < maxRetries) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        // Get current product location with version
+        const currentProductLocation = await tx.product_locations.findUnique({
+          where: {
+            productId_locationId: {
+              productId,
+              locationId,
+            },
+          },
+        });
 
-      if (!validation.isValid) {
-        throw new Error(validation.error);
-      }
-    }
+        // Check version if provided (for optimistic locking)
+        if (expectedVersion !== undefined && currentProductLocation) {
+          if (currentProductLocation.version !== expectedVersion) {
+            throw new OptimisticLockError(
+              'Product inventory has been modified by another user. Please refresh and try again.',
+              currentProductLocation.version,
+              expectedVersion
+            );
+          }
+        }
 
-    // Create the log entry
-    const log = await createInventoryLog({
-      userId: parseInt(userId),
-      productId,
-      locationId,
-      delta,
-      logType,
-    }, tx);
+        // If removing stock, validate availability
+        if (delta < 0) {
+          const validation = await validateStockAvailability(
+            productId,
+            locationId,
+            Math.abs(delta),
+            tx
+          );
 
-    // Update or create product_locations entry
-    await tx.product_locations.upsert({
-      where: {
-        productId_locationId: {
+          if (!validation.isValid) {
+            // Get product name for better error message
+            const product = await tx.product.findUnique({
+              where: { id: productId },
+              select: { name: true }
+            });
+            
+            if (!product) {
+              throw new ProductNotFoundError(productId);
+            }
+            
+            throw new InsufficientStockError(
+              product.name,
+              validation.currentQuantity,
+              Math.abs(delta)
+            );
+          }
+        }
+
+        // Create the log entry
+        const log = await createInventoryLog({
+          userId: parseInt(userId),
           productId,
           locationId,
-        },
-      },
-      update: {
-        quantity: {
-          increment: delta,
-        },
-      },
-      create: {
-        productId,
-        locationId,
-        quantity: delta,
-      },
-    });
+          delta,
+          logType,
+        }, tx);
 
-    // Update the product's quantity field for location 1 (for compatibility)
-    if (locationId === 1) {
-      await tx.product.update({
-        where: { id: productId },
-        data: { quantity: { increment: delta } },
+        // Update or create product_locations entry with version increment
+        const updatedProductLocation = await tx.product_locations.upsert({
+          where: {
+            productId_locationId: {
+              productId,
+              locationId,
+            },
+          },
+          update: {
+            quantity: {
+              increment: delta,
+            },
+            version: {
+              increment: 1,
+            },
+          },
+          create: {
+            productId,
+            locationId,
+            quantity: delta,
+            version: 1,
+          },
+        });
+
+        // Update the product's quantity field for location 1 (for compatibility)
+        if (locationId === 1) {
+          await tx.product.update({
+            where: { id: productId },
+            data: { quantity: { increment: delta } },
+          });
+        }
+
+        return {
+          log,
+          newVersion: updatedProductLocation.version,
+        };
       });
+    } catch (error) {
+      if (error instanceof OptimisticLockError && retryCount < maxRetries - 1) {
+        retryCount++;
+        // Small delay before retry
+        await new Promise(resolve => setTimeout(resolve, 100 * retryCount));
+        continue;
+      }
+      throw error;
     }
-
-    return log;
-  });
+  }
+  
+  throw new Error('Max retries exceeded');
 }
 
 /**
- * Simplified transaction creation for compatibility
+ * Custom error class for optimistic lock violations
+ */
+export class OptimisticLockError extends Error {
+  constructor(
+    message: string,
+    public currentVersion: number,
+    public expectedVersion: number
+  ) {
+    super(message);
+    this.name = 'OptimisticLockError';
+  }
+}
+
+/**
+ * Simplified transaction creation for compatibility with optimistic locking support
  */
 export async function createInventoryTransaction(
   type: string,
@@ -291,14 +369,37 @@ export async function createInventoryTransaction(
     changeType?: string;
     quantityChange: number;
     notes?: string;
+    expectedVersion?: number;
   }>,
   metadata?: Record<string, unknown>
 ) {
   return await prisma.$transaction(async (tx) => {
     const logs = [];
+    const versions: Record<string, number> = {};
 
     // Process each item
     for (const item of items) {
+      // Get current product location with version
+      const currentProductLocation = await tx.product_locations.findUnique({
+        where: {
+          productId_locationId: {
+            productId: item.productId,
+            locationId: item.locationId,
+          },
+        },
+      });
+
+      // Check version if provided (for optimistic locking)
+      if (item.expectedVersion !== undefined && currentProductLocation) {
+        if (currentProductLocation.version !== item.expectedVersion) {
+          throw new OptimisticLockError(
+            `Product ${item.productId} inventory has been modified by another user. Please refresh and try again.`,
+            currentProductLocation.version,
+            item.expectedVersion
+          );
+        }
+      }
+
       // Validate stock if removing
       if (item.quantityChange < 0) {
         const validation = await validateStockAvailability(
@@ -309,7 +410,21 @@ export async function createInventoryTransaction(
         );
 
         if (!validation.isValid) {
-          throw new Error(validation.error);
+          // Get product name for better error message
+          const product = await tx.product.findUnique({
+            where: { id: item.productId },
+            select: { name: true }
+          });
+          
+          if (!product) {
+            throw new ProductNotFoundError(item.productId);
+          }
+          
+          throw new InsufficientStockError(
+            product.name,
+            validation.currentQuantity,
+            Math.abs(item.quantityChange)
+          );
         }
       }
 
@@ -322,8 +437,8 @@ export async function createInventoryTransaction(
         logType: inventory_logs_logType.ADJUSTMENT,
       }, tx);
 
-      // Update product_locations
-      await tx.product_locations.upsert({
+      // Update product_locations with version increment
+      const updatedProductLocation = await tx.product_locations.upsert({
         where: {
           productId_locationId: {
             productId: item.productId,
@@ -334,13 +449,19 @@ export async function createInventoryTransaction(
           quantity: {
             increment: item.quantityChange,
           },
+          version: {
+            increment: 1,
+          },
         },
         create: {
           productId: item.productId,
           locationId: item.locationId,
           quantity: item.quantityChange,
+          version: 1,
         },
       });
+
+      versions[`${item.productId}-${item.locationId}`] = updatedProductLocation.version;
 
       // Update product quantity for location 1 (compatibility)
       if (item.locationId === 1) {
@@ -362,6 +483,7 @@ export async function createInventoryTransaction(
         metadata,
       },
       logs,
+      versions,
     };
   });
 }

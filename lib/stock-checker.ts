@@ -36,7 +36,8 @@ export class StockChecker {
       );
 
       // Check if below threshold
-      if (totalQuantity <= product.lowStockThreshold) {
+      const threshold = product.lowStockThreshold || 10; // Default to 10 if null
+      if (totalQuantity <= threshold) {
         // Calculate days until empty based on recent usage
         const daysUntilEmpty = await this.calculateDaysUntilEmpty(product.id, totalQuantity);
         
@@ -44,7 +45,7 @@ export class StockChecker {
           id: product.id,
           name: product.name,
           currentStock: totalQuantity,
-          threshold: product.lowStockThreshold,
+          threshold: threshold,
           daysUntilEmpty,
         });
       }

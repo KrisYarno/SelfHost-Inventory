@@ -1,8 +1,12 @@
 import { NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import prisma from '@/lib/prisma';
 import { hashPassword } from '@/lib/auth-helpers';
+import { withRateLimitHandler } from '@/lib/rate-limit/route-handler';
+import { rateLimitConfigs } from '@/lib/rate-limit/config';
 
-export async function POST(request: Request) {
+export const POST = withRateLimitHandler(
+  async (request: NextRequest) => {
   try {
     const { email, password, username } = await request.json();
 
@@ -69,4 +73,9 @@ export async function POST(request: Request) {
       { status: 500 }
     );
   }
-}
+  },
+  { 
+    type: 'ip', // Use IP-based rate limiting for signup
+    config: rateLimitConfigs.auth.signup 
+  }
+);

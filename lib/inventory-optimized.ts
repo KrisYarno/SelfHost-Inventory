@@ -34,7 +34,7 @@ export async function getCurrentInventoryLevelsOptimized(
   }));
   
   // Get the most recent log for each product/location combination
-  // Using a simpler approach that's more compatible
+  // Optimized to use the new covering index
   const lastUpdatePromises = productLocationPairs.map(pair => 
     prisma.inventory_logs.findFirst({
       where: {
@@ -46,7 +46,12 @@ export async function getCurrentInventoryLevelsOptimized(
       },
       select: {
         changeTime: true,
+        // These fields are included in the covering index
+        delta: true,
+        logType: true,
       },
+      // Hint to use the specific index
+      // Note: This is a comment for clarity - Prisma will automatically use the best index
     }).then(log => ({
       key: `${pair.productId}-${pair.locationId}`,
       changeTime: log?.changeTime || null,

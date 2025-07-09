@@ -2,8 +2,10 @@
 
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
-import { Package, Calendar, FileText } from "lucide-react";
+import { Package, Calendar, FileText, AlertCircle } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
+import { getUserFriendlyMessage } from "@/lib/error-handling";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import {
   Dialog,
   DialogContent,
@@ -33,6 +35,7 @@ export function StockInDialog({
   onSuccess,
 }: StockInDialogProps) {
   const { selectedLocationId } = useLocation();
+  const { token: csrfToken } = useCSRF();
   const [quantity, setQuantity] = useState("");
   const [orderNumber, setOrderNumber] = useState("");
   const [notes, setNotes] = useState("");
@@ -85,7 +88,7 @@ export function StockInDialog({
     try {
       const response = await fetch("/api/inventory/stock-in", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({
           productId: product.id,
           locationId: selectedLocationId,
@@ -96,8 +99,21 @@ export function StockInDialog({
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to add stock");
+        const errorData = await response.json();
+        
+        // Handle structured error response
+        if (errorData.error && typeof errorData.error === 'object') {
+          const { message, code, context } = errorData.error;
+          
+          // Create a proper error object
+          const error = new Error(message);
+          (error as any).code = code;
+          (error as any).context = context;
+          
+          throw error;
+        } else {
+          throw new Error(errorData.error || "Failed to add stock");
+        }
       }
 
       toast.success(`Added ${quantityNum} units to ${product.name}`);
@@ -111,7 +127,27 @@ export function StockInDialog({
       setLocationQuantity(null);
     } catch (error) {
       console.error("Error adding stock:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to add stock");
+      
+      // Generate user-friendly error message
+      const friendlyError = getUserFriendlyMessage(error as Error);
+      
+      toast.error(
+        <div className="space-y-2">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div className="space-y-1">
+              <p className="font-medium">{friendlyError.title}</p>
+              <p className="text-sm">{friendlyError.description}</p>
+              {friendlyError.action && (
+                <p className="text-sm text-muted-foreground">{friendlyError.action}</p>
+              )}
+            </div>
+          </div>
+        </div>,
+        {
+          duration: 5000,
+        }
+      );
     } finally {
       setIsSubmitting(false);
     }

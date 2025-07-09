@@ -5,6 +5,13 @@ import prisma from "@/lib/prisma";
 import { DeductInventoryRequest, DeductInventoryResponse } from "@/types/workbench";
 import { inventory_logs_logType } from "@prisma/client";
 import { createInventoryTransaction } from "@/lib/inventory";
+import { 
+  AppError, 
+  UnauthorizedError, 
+  InvalidQuantityError,
+  errorLogger
+} from "@/lib/error-handling";
+import { validateCSRFToken } from "@/lib/csrf";
 
 export const dynamic = 'force-dynamic';
 
@@ -13,24 +20,45 @@ export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
     if (!session?.user?.isApproved) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      throw new UnauthorizedError("process inventory deductions");
+    }
+
+    // Validate CSRF token
+    const isValidCSRF = await validateCSRFToken(request);
+    if (!isValidCSRF) {
+      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
     }
 
     const body: DeductInventoryRequest = await request.json();
 
     // Validate request
     if (!body.orderReference?.trim()) {
-      return NextResponse.json(
-        { error: "Order reference is required" },
-        { status: 400 }
+      throw new AppError(
+        "Order reference is required",
+        "MISSING_ORDER_REFERENCE",
+        400
       );
     }
 
     if (!body.items || body.items.length === 0) {
-      return NextResponse.json(
-        { error: "No items to process" },
-        { status: 400 }
+      throw new AppError(
+        "No items to process in the order",
+        "EMPTY_ORDER",
+        400
       );
+    }
+
+    // Validate item quantities
+    for (const item of body.items) {
+      if (item.quantity <= 0 || !Number.isInteger(item.quantity)) {
+        const product = await prisma.product.findUnique({
+          where: { id: item.productId },
+          select: { name: true }
+        });
+        throw new InvalidQuantityError(
+          `Invalid quantity for ${product?.name || `Product ${item.productId}`}: ${item.quantity}`
+        );
+      }
     }
 
     // Get default location (MVP: single location)
@@ -39,9 +67,10 @@ export async function POST(request: NextRequest) {
     });
 
     if (!location) {
-      return NextResponse.json(
-        { error: "No location found" },
-        { status: 400 }
+      throw new AppError(
+        "No location configured in the system",
+        "NO_LOCATION",
+        500
       );
     }
 
@@ -73,17 +102,43 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(response);
   } catch (error) {
-    console.error("Error processing inventory deduction:", error);
+    errorLogger.log(error as Error);
     
-    if (error instanceof Error) {
+    if (error instanceof AppError) {
       return NextResponse.json(
-        { error: error.message },
+        { 
+          error: {
+            message: error.message,
+            code: error.code
+          }
+        },
+        { status: error.statusCode }
+      );
+    }
+    
+    // Handle Prisma errors
+    if (error instanceof Error && error.message.includes("Insufficient stock")) {
+      const match = error.message.match(/Product (.+) has insufficient stock/);
+      const productName = match ? match[1] : "Unknown product";
+      return NextResponse.json(
+        { 
+          error: {
+            message: `Not enough stock for ${productName}. Please check available inventory.`,
+            code: "INVENTORY_INSUFFICIENT_STOCK",
+            context: { productName }
+          }
+        },
         { status: 400 }
       );
     }
     
     return NextResponse.json(
-      { error: "Failed to process inventory deduction" },
+      { 
+        error: {
+          message: "Failed to process inventory deduction. Please try again.",
+          code: "DEDUCTION_FAILED"
+        }
+      },
       { status: 500 }
     );
   }

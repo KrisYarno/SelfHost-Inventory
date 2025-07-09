@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { toast } from 'sonner';
 import { CheckCircle2, XCircle } from 'lucide-react';
+import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
 
 interface User {
   id: number;
@@ -30,6 +31,7 @@ interface UsersResponse {
 
 export default function AdminUsersPage() {
   const router = useRouter();
+  const { token: csrfToken } = useCSRF();
   const [pendingUsers, setPendingUsers] = useState<User[]>([]);
   const [allUsers, setAllUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
@@ -86,6 +88,7 @@ export default function AdminUsersPage() {
     try {
       const response = await fetch(`/api/admin/users/${userId}/approve`, {
         method: 'POST',
+        headers: withCSRFHeaders({}, csrfToken),
       });
 
       if (!response.ok) {
@@ -105,9 +108,9 @@ export default function AdminUsersPage() {
     try {
       const response = await fetch(`/api/admin/users/${userId}/reject`, {
         method: 'DELETE',
-        headers: {
+        headers: withCSRFHeaders({
           'Content-Type': 'application/json',
-        },
+        }, csrfToken),
         body: JSON.stringify({ reason }),
       });
 
@@ -132,6 +135,7 @@ export default function AdminUsersPage() {
     try {
       const response = await fetch(`/api/admin/users/${userId}`, {
         method: 'DELETE',
+        headers: withCSRFHeaders({}, csrfToken),
       });
 
       if (!response.ok) {
@@ -150,9 +154,9 @@ export default function AdminUsersPage() {
     try {
       const response = await fetch(`/api/admin/users/${userId}/toggle-admin`, {
         method: 'POST',
-        headers: {
+        headers: withCSRFHeaders({
           'Content-Type': 'application/json',
-        },
+        }, csrfToken),
         body: JSON.stringify({ isAdmin: !currentIsAdmin }),
       });
 
@@ -178,9 +182,9 @@ export default function AdminUsersPage() {
     try {
       const response = await fetch('/api/admin/users/bulk-approve', {
         method: 'POST',
-        headers: {
+        headers: withCSRFHeaders({
           'Content-Type': 'application/json',
-        },
+        }, csrfToken),
         body: JSON.stringify({ userIds: Array.from(selectedUsers) }),
       });
 
@@ -214,9 +218,9 @@ export default function AdminUsersPage() {
     try {
       const response = await fetch('/api/admin/users/bulk-reject', {
         method: 'POST',
-        headers: {
+        headers: withCSRFHeaders({
           'Content-Type': 'application/json',
-        },
+        }, csrfToken),
         body: JSON.stringify({ userIds: Array.from(selectedUsers) }),
       });
 

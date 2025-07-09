@@ -8,7 +8,8 @@ import {
   Users, 
   FileText,
   Settings,
-  Package
+  Package,
+  Shield
 } from "lucide-react";
 
 const adminNavItems = [
@@ -31,6 +32,11 @@ const adminNavItems = [
     title: "Users",
     href: "/admin/users",
     icon: Users,
+  },
+  {
+    title: "Audit Logs",
+    href: "/admin/audit-logs",
+    icon: Shield,
   },
   {
     title: "Settings",

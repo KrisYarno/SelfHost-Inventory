@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import prisma from '@/lib/prisma';
+import { auditService } from '@/lib/audit';
+import { validateCSRFToken } from '@/lib/csrf';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,6 +19,12 @@ export async function POST(
       );
     }
 
+    // Validate CSRF token
+    const isValidCSRF = await validateCSRFToken(request);
+    if (!isValidCSRF) {
+      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
+    }
+
     const userId = parseInt(params.userId);
     if (isNaN(userId)) {
       return NextResponse.json(
@@ -30,6 +38,13 @@ export async function POST(
       where: { id: userId },
       data: { isApproved: true },
     });
+
+    // Log the approval action
+    await auditService.logUserApproval(
+      parseInt(session.user.id),
+      user.id,
+      user.email
+    );
 
     return NextResponse.json({ 
       message: 'User approved successfully',

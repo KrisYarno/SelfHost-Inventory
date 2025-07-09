@@ -4,6 +4,8 @@ import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { ProductFilters, CreateProductRequest } from "@/types/product";
 import { getProductsWithQuantities, isProductUnique, getNextNumericValue, formatProductName } from "@/lib/products";
+import { auditService } from "@/lib/audit";
+import { validateCSRFToken } from "@/lib/csrf";
 
 export const dynamic = 'force-dynamic';
 
@@ -55,6 +57,12 @@ export async function POST(request: NextRequest) {
     // Check if user is authenticated and is an admin
     if (!session?.user?.isApproved || !session.user.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // Validate CSRF token
+    const isValidCSRF = await validateCSRFToken(request);
+    if (!isValidCSRF) {
+      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
     }
 
     const body: CreateProductRequest = await request.json();
@@ -109,6 +117,13 @@ export async function POST(request: NextRequest) {
         lowStockThreshold: body.lowStockThreshold ?? 10,
       },
     });
+
+    // Log the product creation
+    await auditService.logProductCreate(
+      parseInt(session.user.id),
+      product.id,
+      product.name
+    );
 
     return NextResponse.json(product, { status: 201 });
   } catch (error) {

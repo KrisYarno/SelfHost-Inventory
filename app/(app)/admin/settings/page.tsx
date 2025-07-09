@@ -15,6 +15,7 @@ import {
   AlertTriangle
 } from "lucide-react";
 import Link from "next/link";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 interface Location {
   id: number;
@@ -35,6 +36,7 @@ export default function AdminSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isAddingLocation, setIsAddingLocation] = useState(false);
   const [isDeletingLocation, setIsDeletingLocation] = useState(false);
+  const { token: csrfToken } = useCSRF();
 
   const fetchSettings = async () => {
     try {
@@ -64,7 +66,7 @@ export default function AdminSettingsPage() {
       setIsAddingLocation(true);
       const response = await fetch("/api/admin/locations", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({ name: newLocationName.trim() }),
       });
       
@@ -98,6 +100,7 @@ export default function AdminSettingsPage() {
       setIsDeletingLocation(true);
       const response = await fetch(`/api/admin/locations/${location.id}`, {
         method: "DELETE",
+        headers: withCSRFHeaders({}, csrfToken),
       });
       
       if (!response.ok) {

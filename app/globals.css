@@ -246,6 +246,72 @@
 }
 
 @layer utilities {
+  /* Accessibility - Screen Reader Only */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+
+  /* WCAG Compliant Focus Indicators */
+  .focus-visible:focus-visible {
+    outline: 2px solid hsl(var(--primary));
+    outline-offset: 2px;
+    @apply ring-2 ring-offset-2 ring-primary/50;
+  }
+
+  /* High Contrast Mode Support */
+  @media (prefers-contrast: high) {
+    .focus-visible:focus-visible {
+      outline: 3px solid;
+      outline-offset: 3px;
+    }
+  }
+
+  /* Keyboard Navigation Indicators */
+  .keyboard-navigable:focus {
+    @apply ring-2 ring-offset-2 ring-primary;
+    outline: none;
+  }
+
+  /* Skip to Main Content Link */
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    z-index: 999;
+    padding: 1em;
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    text-decoration: none;
+    border-radius: var(--radius-md);
+  }
+
+  .skip-link:focus {
+    left: 50%;
+    transform: translateX(-50%);
+    top: 1rem;
+    outline: 2px solid hsl(var(--primary));
+    outline-offset: 2px;
+  }
+
+  /* Reduced Motion Support */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
   /* Text Balance */
   .text-balance {
     text-wrap: balance;

@@ -3,10 +3,14 @@ import { getServerSession } from 'next-auth/next';
 import { authOptions } from '@/lib/auth';
 import { 
   createInventoryAdjustment,
-  validateStockAvailability 
+  validateStockAvailability,
+  OptimisticLockError 
 } from '@/lib/inventory';
 import { inventory_logs_logType } from '@prisma/client';
 import type { InventoryAdjustmentRequest } from '@/types/inventory';
+import { auditService } from '@/lib/audit';
+import prisma from '@/lib/prisma';
+import { validateCSRFToken } from '@/lib/csrf';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,6 +19,12 @@ export async function POST(request: NextRequest) {
     const session = await getServerSession(authOptions);
     if (!session?.user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Validate CSRF token
+    const isValidCSRF = await validateCSRFToken(request);
+    if (!isValidCSRF) {
+      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
     }
 
     const body: InventoryAdjustmentRequest = await request.json();
@@ -50,21 +60,54 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Create the adjustment
-    const log = await createInventoryAdjustment(
+    // Get product info for audit log
+    const product = await prisma.product.findUnique({
+      where: { id: body.productId },
+      select: { name: true }
+    });
+
+    // Create the adjustment with version checking
+    const result = await createInventoryAdjustment(
       session.user.id,
       body.productId,
       body.locationId,
       body.delta,
-      body.logType || inventory_logs_logType.ADJUSTMENT
+      body.logType || inventory_logs_logType.ADJUSTMENT,
+      body.expectedVersion
     );
+
+    // Log the inventory adjustment
+    if (product) {
+      await auditService.logInventoryAdjustment(
+        parseInt(session.user.id),
+        body.productId,
+        product.name,
+        body.delta,
+        body.locationId
+      );
+    }
 
     return NextResponse.json({
       success: true,
-      log,
+      log: result.log,
+      newVersion: result.newVersion,
     });
   } catch (error) {
     console.error('Error creating inventory adjustment:', error);
+    
+    // Handle optimistic lock errors specifically
+    if (error instanceof OptimisticLockError) {
+      return NextResponse.json(
+        { 
+          error: error.message,
+          type: 'OPTIMISTIC_LOCK_ERROR',
+          currentVersion: error.currentVersion,
+          expectedVersion: error.expectedVersion
+        },
+        { status: 409 } // Conflict status code
+      );
+    }
+    
     return NextResponse.json(
       { error: 'Failed to create inventory adjustment' },
       { status: 500 }

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
+import { auditService } from "@/lib/audit";
 
 export const dynamic = 'force-dynamic';
 
@@ -33,6 +34,13 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    if (usersToReject.length === 0) {
+      return NextResponse.json({
+        rejected: 0,
+        message: "No users to reject",
+      });
+    }
+
     // Delete users
     const deleteResult = await prisma.user.deleteMany({
       where: {
@@ -40,6 +48,12 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    // Log the bulk rejection action
+    await auditService.logBulkUserRejection(
+      parseInt(session.user.id),
+      usersToReject.map(u => u.id),
+      usersToReject.map(u => u.email)
+    );
 
     return NextResponse.json({
       rejected: deleteResult.count,

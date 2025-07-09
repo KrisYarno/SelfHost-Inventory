@@ -4,6 +4,8 @@ import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { UpdateProductRequest } from "@/types/product";
 import { getCurrentQuantity, isProductUnique, formatProductName } from "@/lib/products";
+import { auditService } from "@/lib/audit";
+import { validateCSRFToken } from "@/lib/csrf";
 
 export const dynamic = 'force-dynamic';
 
@@ -89,6 +91,12 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    // Validate CSRF token
+    const isValidCSRF = await validateCSRFToken(request);
+    if (!isValidCSRF) {
+      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
+    }
+
     const productId = parseInt(params.id);
     if (isNaN(productId)) {
       return NextResponse.json({ error: "Invalid product ID" }, { status: 400 });
@@ -149,6 +157,25 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       data: updateData,
     });
 
+    // Log the product update with changes
+    const changes: Record<string, any> = {};
+    if (body.baseName !== undefined && body.baseName !== existingProduct.baseName) {
+      changes.baseName = { from: existingProduct.baseName, to: body.baseName };
+    }
+    if (body.variant !== undefined && body.variant !== existingProduct.variant) {
+      changes.variant = { from: existingProduct.variant, to: body.variant };
+    }
+    if (body.lowStockThreshold !== undefined && body.lowStockThreshold !== existingProduct.lowStockThreshold) {
+      changes.lowStockThreshold = { from: existingProduct.lowStockThreshold, to: body.lowStockThreshold };
+    }
+
+    await auditService.logProductUpdate(
+      parseInt(session.user.id),
+      product.id,
+      product.name,
+      changes
+    );
+
     return NextResponse.json(product);
   } catch (error) {
     console.error("Error updating product:", error);
@@ -167,6 +194,12 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     // Check if user is authenticated and is an admin
     if (!session?.user?.isApproved || !session.user.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // Validate CSRF token
+    const isValidCSRF = await validateCSRFToken(request);
+    if (!isValidCSRF) {
+      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
     }
 
     const productId = parseInt(params.id);
@@ -195,6 +228,13 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
         deletedBy: parseInt(session.user.id),
       },
     });
+
+    // Log the product deletion
+    await auditService.logProductDelete(
+      parseInt(session.user.id),
+      product.id,
+      product.name
+    );
 
     // Note: We don't create an inventory log for deletion as it's not an inventory change
     // The soft delete fields (deletedAt, deletedBy) serve as the audit trail

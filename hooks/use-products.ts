@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ProductWithQuantity, ProductFilters } from '@/types/product';
 import { useDebounce } from './use-debounce';
+import { useCSRF, withCSRFHeaders } from './use-csrf';
 
 interface ProductsResponse {
   products: ProductWithQuantity[];
@@ -50,12 +51,13 @@ export function useProduct(productId: number) {
 
 export function useCreateProduct() {
   const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
   
   return useMutation({
     mutationFn: async (data: any) => {
       const response = await fetch('/api/products', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
         body: JSON.stringify(data),
       });
       if (!response.ok) throw new Error('Failed to create product');
@@ -70,12 +72,13 @@ export function useCreateProduct() {
 
 export function useUpdateProduct() {
   const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
   
   return useMutation({
     mutationFn: async ({ id, data }: { id: number; data: any }) => {
       const response = await fetch(`/api/products/${id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
         body: JSON.stringify(data),
       });
       if (!response.ok) throw new Error('Failed to update product');
@@ -92,11 +95,13 @@ export function useUpdateProduct() {
 
 export function useDeleteProduct() {
   const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
   
   return useMutation({
     mutationFn: async (id: number) => {
       const response = await fetch(`/api/products/${id}`, {
         method: 'DELETE',
+        headers: withCSRFHeaders({}, csrfToken),
       });
       if (!response.ok) throw new Error('Failed to delete product');
       return response.json();

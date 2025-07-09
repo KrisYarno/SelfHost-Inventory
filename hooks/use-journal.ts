@@ -4,7 +4,7 @@ import { persist } from 'zustand/middleware';
 export interface JournalAdjustment {
   productId: number;
   quantityChange: number;
-  notes?: string;
+  version?: number;
 }
 
 interface JournalStore {
@@ -35,12 +35,15 @@ export const useJournalStore = create<JournalStore>()(
       adjustments: {},
 
       addAdjustment: (adjustment) => {
-        set((state) => ({
-          adjustments: {
+        console.log('useJournalStore: addAdjustment called with:', adjustment);
+        set((state) => {
+          const newAdjustments = {
             ...state.adjustments,
             [adjustment.productId]: adjustment,
-          },
-        }));
+          };
+          console.log('useJournalStore: new adjustments state:', newAdjustments);
+          return { adjustments: newAdjustments };
+        });
       },
 
       removeAdjustment: (productId) => {
@@ -74,7 +77,7 @@ export const useJournalStore = create<JournalStore>()(
         return {
           additions,
           removals: Math.abs(removals),
-          total: additions + removals,
+          total: additions + removals, // This is the net change (removals is negative)
         };
       },
 
@@ -89,6 +92,7 @@ export const useJournalStore = create<JournalStore>()(
     {
       name: 'journal-adjustments',
       skipHydration: false,
+      partialize: (state) => ({ adjustments: state.adjustments }), // Only persist adjustments
     }
   )
 );

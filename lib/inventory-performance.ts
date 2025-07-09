@@ -1,259 +1,259 @@
+/**
+ * Performance-optimized inventory queries
+ * These functions are specifically designed to leverage the new indexes
+ * for the mass update feature
+ */
+
 import prisma from '@/lib/prisma';
-import { 
-  inventory_logs_logType,
-  Prisma
-} from '@prisma/client';
-import type { 
-  CurrentInventoryLevel
-} from '@/types/inventory';
+import { Prisma } from '@prisma/client';
 
 /**
- * High-performance version of getCurrentInventoryLevels
- * Uses a single query with subqueries to avoid N+1 problem
+ * Get products with quantities using optimized queries
+ * Designed for the journal page load
  */
-export async function getCurrentInventoryLevelsPerformance(
-  locationId?: number
-): Promise<CurrentInventoryLevel[]> {
-  // Use raw SQL for optimal performance
-  const locationFilter = locationId ? `WHERE pl.locationId = ${locationId}` : '';
-  
-  const query = `
-    SELECT 
-      pl.productId,
-      pl.locationId,
-      pl.quantity,
-      p.id as product_id,
-      p.name as product_name,
-      p.baseName as product_baseName,
-      p.variant as product_variant,
-      p.unit as product_unit,
-      p.numericValue as product_numericValue,
-      p.lowStockThreshold as product_lowStockThreshold,
-      l.id as location_id,
-      l.name as location_name,
-      (
-        SELECT MAX(il.changeTime)
-        FROM inventory_logs il
-        WHERE il.productId = pl.productId
-          AND il.locationId = pl.locationId
-      ) as lastUpdated
-    FROM product_locations pl
-    INNER JOIN products p ON p.id = pl.productId
-    INNER JOIN locations l ON l.id = pl.locationId
-    ${locationFilter}
-    ORDER BY p.name ASC
-  `;
+export async function getProductsWithQuantitiesOptimized(
+  locationId: number,
+  search?: string,
+  page: number = 1,
+  pageSize: number = 50
+) {
+  // Build where clause with soft delete filter
+  const where: Prisma.ProductWhereInput = {
+    deletedAt: null,
+  };
 
-  const results = await prisma.$queryRawUnsafe<any[]>(query);
-  
-  // Transform raw results to match expected type
-  const inventoryLevels: CurrentInventoryLevel[] = results.map(row => ({
-    productId: row.productId,
-    product: {
-      id: row.product_id,
-      name: row.product_name,
-      baseName: row.product_baseName,
-      variant: row.product_variant,
-      unit: row.product_unit,
-      numericValue: row.product_numericValue,
-      quantity: 0, // Legacy field
-      location: 1, // Legacy field
-      lowStockThreshold: row.product_lowStockThreshold,
-      deletedAt: null,
-      deletedBy: null,
-    },
-    locationId: row.locationId,
-    location: {
-      id: row.location_id,
-      name: row.location_name,
-    },
-    quantity: row.quantity,
-    lastUpdated: row.lastUpdated || new Date(0),
-  }));
+  if (search) {
+    // Use contains for search (MySQL is case-insensitive by default)
+    where.OR = [
+      { name: { contains: search } },
+      { baseName: { contains: search } },
+      { variant: { contains: search } },
+    ];
+  }
 
-  // If specific location requested, also include products with 0 quantity
-  if (locationId) {
-    const productsWithInventory = new Set(inventoryLevels.map(il => il.productId));
-    const missingProducts = await prisma.product.findMany({
+  // Execute queries in parallel for better performance
+  const [products, totalCount, productLocations] = await Promise.all([
+    // Get products - uses idx_products_bulk_lookup for soft delete filter
+    prisma.product.findMany({
+      where,
+      orderBy: { name: 'asc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+    
+    // Get total count
+    prisma.product.count({ where }),
+    
+    // Pre-fetch all product locations for the page
+    // This prevents N+1 queries
+    prisma.product_locations.findMany({
       where: {
-        id: {
-          notIn: Array.from(productsWithInventory),
-        },
+        locationId,
+        products: where,
       },
-    });
-    
-    const location = await prisma.location.findUnique({ 
-      where: { id: locationId } 
-    });
-    
-    if (location) {
-      for (const product of missingProducts) {
-        inventoryLevels.push({
-          productId: product.id,
-          product,
-          locationId,
-          location,
-          quantity: 0,
-          lastUpdated: new Date(0),
-        });
-      }
-    }
-  }
-  
-  return inventoryLevels;
-}
+      select: {
+        productId: true,
+        quantity: true,
+        version: true,
+      },
+    }),
+  ]);
 
-/**
- * Optimized batch quantity calculation using raw SQL
- */
-export async function getBulkCurrentQuantitiesPerformance(
-  productIds: number[],
-  locationId: number
-): Promise<Map<number, number>> {
-  if (productIds.length === 0) {
-    return new Map();
-  }
+  // Create a map for O(1) lookups
+  const locationMap = new Map(
+    productLocations.map(pl => [pl.productId, pl])
+  );
 
-  const results = await prisma.$queryRaw<Array<{productId: number, quantity: number}>>`
-    SELECT productId, quantity
-    FROM product_locations
-    WHERE productId IN (${Prisma.join(productIds)})
-      AND locationId = ${locationId}
-  `;
-
-  const quantities = new Map<number, number>();
-  
-  // Initialize all products with 0
-  productIds.forEach(id => quantities.set(id, 0));
-  
-  // Set actual quantities
-  results.forEach(row => {
-    quantities.set(row.productId, row.quantity);
+  // Combine the data
+  const productsWithQuantities = products.map(product => {
+    const location = locationMap.get(product.id);
+    return {
+      ...product,
+      currentQuantity: location?.quantity || 0,
+      version: location?.version || 0,
+    };
   });
 
-  return quantities;
-}
-
-/**
- * Optimized low stock detection using window functions
- */
-export async function getLowStockProductsPerformance(
-  threshold: number = 10,
-  locationId?: number
-): Promise<Array<{
-  productId: number;
-  productName: string;
-  currentStock: number;
-  threshold: number;
-  location?: string;
-}>> {
-  const locationFilter = locationId 
-    ? Prisma.sql`AND pl.locationId = ${locationId}` 
-    : Prisma.sql``;
-
-  const results = await prisma.$queryRaw<any[]>`
-    SELECT 
-      p.id as productId,
-      p.name as productName,
-      COALESCE(SUM(pl.quantity), 0) as currentStock,
-      p.lowStockThreshold as threshold,
-      ${locationId ? Prisma.sql`l.name as location` : Prisma.sql`NULL as location`}
-    FROM products p
-    LEFT JOIN product_locations pl ON pl.productId = p.id
-    ${locationId ? Prisma.sql`LEFT JOIN locations l ON l.id = pl.locationId` : Prisma.sql``}
-    WHERE 1=1 ${locationFilter}
-    GROUP BY p.id, p.name, p.lowStockThreshold${locationId ? Prisma.sql`, l.name` : Prisma.sql``}
-    HAVING currentStock < ${threshold}
-    ORDER BY currentStock ASC
-  `;
-
-  return results;
-}
-
-/**
- * Get inventory metrics with a single optimized query
- */
-export async function getInventoryMetricsPerformance(
-  startDate?: Date,
-  endDate?: Date,
-  locationId?: number
-): Promise<{
-  totalProducts: number;
-  totalQuantity: number;
-  lowStockCount: number;
-  recentActivityCount: number;
-  avgDailyMovement: number;
-}> {
-  const dateFilter = [];
-  if (startDate) dateFilter.push(Prisma.sql`il.changeTime >= ${startDate}`);
-  if (endDate) dateFilter.push(Prisma.sql`il.changeTime <= ${endDate}`);
-  if (locationId) dateFilter.push(Prisma.sql`il.locationId = ${locationId}`);
-  
-  const whereClause = dateFilter.length > 0 
-    ? Prisma.sql`WHERE ${Prisma.join(dateFilter, ' AND ')}` 
-    : Prisma.sql``;
-
-  const [metrics] = await prisma.$queryRaw<any[]>`
-    WITH inventory_summary AS (
-      SELECT 
-        COUNT(DISTINCT p.id) as totalProducts,
-        COALESCE(SUM(pl.quantity), 0) as totalQuantity,
-        COUNT(DISTINCT CASE WHEN pl.quantity < p.lowStockThreshold THEN p.id END) as lowStockCount
-      FROM products p
-      LEFT JOIN product_locations pl ON pl.productId = p.id
-      ${locationId ? Prisma.sql`WHERE pl.locationId = ${locationId}` : Prisma.sql``}
-    ),
-    activity_summary AS (
-      SELECT 
-        COUNT(*) as recentActivityCount,
-        COALESCE(SUM(ABS(il.delta)), 0) / NULLIF(DATEDIFF(COALESCE(${endDate}, NOW()), COALESCE(${startDate}, DATE_SUB(NOW(), INTERVAL 30 DAY))), 0) as avgDailyMovement
-      FROM inventory_logs il
-      ${whereClause}
-    )
-    SELECT 
-      is_.totalProducts,
-      is_.totalQuantity,
-      is_.lowStockCount,
-      as_.recentActivityCount,
-      COALESCE(as_.avgDailyMovement, 0) as avgDailyMovement
-    FROM inventory_summary is_
-    CROSS JOIN activity_summary as_
-  `;
-
-  return metrics || {
-    totalProducts: 0,
-    totalQuantity: 0,
-    lowStockCount: 0,
-    recentActivityCount: 0,
-    avgDailyMovement: 0,
+  return {
+    products: productsWithQuantities,
+    total: totalCount,
+    page,
+    pageSize,
   };
 }
 
 /**
- * Cached product search with optimized query
+ * Batch validate product versions for optimistic locking
+ * Uses the covering index for efficient lookups
  */
-export async function searchProductsPerformance(
-  search: string,
-  limit: number = 20
-): Promise<Array<{id: number; name: string; baseName: string | null; variant: string | null}>> {
-  // Use full-text search if available, otherwise fall back to LIKE
-  const results = await prisma.$queryRaw<any[]>`
-    SELECT id, name, baseName, variant
-    FROM products
-    WHERE 
-      name LIKE ${`%${search}%`}
-      OR baseName LIKE ${`%${search}%`}
-      OR variant LIKE ${`%${search}%`}
-    ORDER BY 
-      CASE 
-        WHEN name LIKE ${`${search}%`} THEN 1
-        WHEN baseName LIKE ${`${search}%`} THEN 2
-        WHEN variant LIKE ${`${search}%`} THEN 3
-        ELSE 4
-      END,
-      name ASC
-    LIMIT ${limit}
-  `;
+export async function batchValidateVersions(
+  items: Array<{
+    productId: number;
+    locationId: number;
+    expectedVersion: number;
+  }>
+): Promise<Map<string, { isValid: boolean; currentVersion: number }>> {
+  // Build a list of unique product/location pairs
+  const pairs = items.map(item => ({
+    productId: item.productId,
+    locationId: item.locationId,
+  }));
+
+  // Fetch all versions in one query - uses idx_product_locations_lookup_covering
+  const productLocations = await prisma.product_locations.findMany({
+    where: {
+      OR: pairs.map(pair => ({
+        productId: pair.productId,
+        locationId: pair.locationId,
+      })),
+    },
+    select: {
+      productId: true,
+      locationId: true,
+      version: true,
+    },
+  });
+
+  // Create lookup map
+  const versionMap = new Map(
+    productLocations.map(pl => [
+      `${pl.productId}-${pl.locationId}`,
+      pl.version,
+    ])
+  );
+
+  // Validate versions
+  const results = new Map<string, { isValid: boolean; currentVersion: number }>();
+  
+  for (const item of items) {
+    const key = `${item.productId}-${item.locationId}`;
+    const currentVersion = versionMap.get(key) || 0;
+    
+    results.set(key, {
+      isValid: currentVersion === item.expectedVersion,
+      currentVersion,
+    });
+  }
 
   return results;
+}
+
+/**
+ * Get recent inventory changes with user information
+ * Optimized for activity feeds and reports
+ */
+export async function getRecentInventoryChanges(
+  locationId?: number,
+  limit: number = 50
+) {
+  const where: Prisma.inventory_logsWhereInput = {
+    // Uses idx_inventory_logs_recent_changes for date filtering
+    changeTime: {
+      gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // Last 7 days
+    },
+  };
+
+  if (locationId) {
+    where.locationId = locationId;
+  }
+
+  // Single query with all needed joins
+  const logs = await prisma.inventory_logs.findMany({
+    where,
+    orderBy: { changeTime: 'desc' },
+    take: limit,
+    include: {
+      users: {
+        select: {
+          id: true,
+          username: true,
+          email: true,
+        },
+      },
+      products: {
+        select: {
+          id: true,
+          name: true,
+          baseName: true,
+          variant: true,
+        },
+      },
+      locations: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+  });
+
+  return logs;
+}
+
+/**
+ * Find products with low stock efficiently
+ * Uses the idx_product_locations_low_stock index
+ */
+export async function findLowStockProducts(
+  locationId?: number,
+  threshold?: number
+) {
+  const query = prisma.$queryRaw`
+    SELECT 
+      p.id,
+      p.name,
+      p.baseName,
+      p.variant,
+      p.lowStockThreshold,
+      pl.quantity,
+      pl.locationId,
+      l.name as locationName
+    FROM products p
+    INNER JOIN product_locations pl ON p.id = pl.productId
+    INNER JOIN locations l ON pl.locationId = l.id
+    WHERE p.deletedAt IS NULL
+      AND pl.quantity <= p.lowStockThreshold
+      ${locationId ? Prisma.sql`AND pl.locationId = ${locationId}` : Prisma.empty}
+      ${threshold ? Prisma.sql`AND pl.quantity <= ${threshold}` : Prisma.empty}
+    ORDER BY pl.quantity ASC, p.name ASC
+    LIMIT 100
+  `;
+
+  return query;
+}
+
+/**
+ * Analyze index usage for performance monitoring
+ */
+export async function analyzeIndexUsage() {
+  // Get index statistics
+  const indexStats = await prisma.$queryRaw`
+    SELECT 
+      table_name,
+      index_name,
+      cardinality,
+      avg_frequency
+    FROM information_schema.statistics
+    WHERE table_schema = DATABASE()
+      AND table_name IN ('products', 'inventory_logs', 'product_locations')
+      AND index_name LIKE 'idx_%'
+    ORDER BY table_name, index_name
+  `;
+
+  // Get table sizes
+  const tableSizes = await prisma.$queryRaw`
+    SELECT 
+      table_name,
+      table_rows,
+      data_length / 1024 / 1024 as data_size_mb,
+      index_length / 1024 / 1024 as index_size_mb
+    FROM information_schema.tables
+    WHERE table_schema = DATABASE()
+      AND table_name IN ('products', 'inventory_logs', 'product_locations')
+  `;
+
+  return {
+    indexStats,
+    tableSizes,
+  };
 }

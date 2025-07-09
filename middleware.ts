@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { getToken } from 'next-auth/jwt';
+import { createRateLimiter } from './lib/rate-limit';
 
 // Routes that require authentication
 const protectedRoutes = [
@@ -28,8 +29,26 @@ const authRoutes = [
   '/auth/signup',
 ];
 
+// Routes that should have rate limiting
+const rateLimitedRoutes = [
+  '/api/',
+  '/auth/',
+];
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  
+  // Apply rate limiting to API and auth routes
+  const shouldRateLimit = rateLimitedRoutes.some(route => pathname.includes(route));
+  
+  if (shouldRateLimit) {
+    const limiter = createRateLimiter(pathname);
+    const rateLimitResponse = await limiter.limit(request);
+    
+    if (rateLimitResponse) {
+      return rateLimitResponse;
+    }
+  }
   
   // Check if the route is protected
   const isProtectedRoute = protectedRoutes.some(route => 

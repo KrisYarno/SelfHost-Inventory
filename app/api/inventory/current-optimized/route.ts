@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
 import { authOptions } from '@/lib/auth';
-import { getCurrentInventoryLevelsPerformance } from '@/lib/inventory-performance';
+import { getCurrentInventoryLevelsOptimized } from '@/lib/inventory-optimized';
 import type { CurrentInventoryResponse } from '@/types/inventory';
 
 export const dynamic = 'force-dynamic';
@@ -19,8 +19,8 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const locationId = searchParams.get('locationId');
 
-    // Use the optimized performance function
-    const inventory = await getCurrentInventoryLevelsPerformance(
+    // Use the optimized function
+    const inventory = await getCurrentInventoryLevelsOptimized(
       locationId ? parseInt(locationId) : undefined
     );
 

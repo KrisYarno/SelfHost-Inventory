@@ -16,6 +16,7 @@ import {
 import Link from "next/link";
 import { formatNumber } from "@/lib/utils";
 import { toast } from "sonner";
+import { RateLimitMonitor } from "@/components/admin/rate-limit-monitor";
 
 interface DashboardMetrics {
   totalProducts: number;
@@ -226,6 +227,9 @@ export default function AdminDashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Rate Limit Monitor */}
+      <RateLimitMonitor />
 
       {/* Quick Links */}
       <Card>

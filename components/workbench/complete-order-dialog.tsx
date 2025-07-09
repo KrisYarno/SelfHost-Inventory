@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useWorkbench } from "@/hooks/use-workbench";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -13,8 +14,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
-import { CheckCircle } from "lucide-react";
+import { CheckCircle, AlertCircle } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
+import { getUserFriendlyMessage } from "@/lib/error-handling";
 
 interface CompleteOrderDialogProps {
   open: boolean;
@@ -30,6 +32,7 @@ export function CompleteOrderDialog({
   const router = useRouter();
   const { orderItems, orderReference, clearOrder, getTotalQuantity, isProcessing, setIsProcessing } = useWorkbench();
   const { selectedLocationId } = useLocation();
+  const { token: csrfToken } = useCSRF();
 
   const handleComplete = async () => {
     if (!orderReference.trim()) {
@@ -56,13 +59,26 @@ export function CompleteOrderDialog({
 
       const response = await fetch("/api/inventory/deduct-simple", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify(request),
       });
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to process order");
+        const errorData = await response.json();
+        
+        // Handle structured error response
+        if (errorData.error && typeof errorData.error === 'object') {
+          const { message, code, context } = errorData.error;
+          
+          // Create a proper error object
+          const error = new Error(message);
+          (error as any).code = code;
+          (error as any).context = context;
+          
+          throw error;
+        } else {
+          throw new Error(errorData.error || "Failed to process order");
+        }
       }
 
       const result = await response.json();
@@ -91,7 +107,34 @@ export function CompleteOrderDialog({
       }
     } catch (error) {
       console.error("Error processing order:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to process order");
+      
+      // Generate user-friendly error message
+      const friendlyError = getUserFriendlyMessage(error as Error);
+      
+      // Show detailed error with action
+      toast.error(
+        <div className="space-y-2">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <div className="space-y-1">
+              <p className="font-medium">{friendlyError.title}</p>
+              <p className="text-sm">{friendlyError.description}</p>
+              {friendlyError.action && (
+                <p className="text-sm text-muted-foreground">{friendlyError.action}</p>
+              )}
+            </div>
+          </div>
+        </div>,
+        {
+          duration: 5000,
+        }
+      );
+      
+      // If it's an insufficient stock error, we might want to highlight the problematic items
+      if ((error as any).code === 'INVENTORY_INSUFFICIENT_STOCK' && (error as any).context?.productName) {
+        // Optionally highlight the item in the UI
+        console.log('Insufficient stock for:', (error as any).context.productName);
+      }
     } finally {
       setIsProcessing(false);
     }
