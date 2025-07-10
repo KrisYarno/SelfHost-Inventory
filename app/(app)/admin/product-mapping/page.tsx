@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Search, Filter, MapPin, AlertCircle, Undo2, Check, X } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { SearchInput } from '@/components/ui/search-input'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -116,7 +117,8 @@ export default function ProductMappingPage() {
     onSuccess: (data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['unmapped-products'] })
       const wooProduct = unmappedProducts?.find(p => p.id === variables.wooProductId)
-      const internalProduct = internalProducts?.find(p => p.id === variables.internalProductId)
+      const internalProductId = parseInt(variables.internalProductId)
+      const internalProduct = !isNaN(internalProductId) ? internalProducts?.find(p => p.id === internalProductId) : undefined
       
       if (wooProduct && internalProduct) {
         setRecentMappings(prev => [{
@@ -256,12 +258,11 @@ export default function ProductMappingPage() {
         <CardContent className="p-4">
           <div className="flex flex-col md:flex-row gap-4">
             <div className="flex-1">
-              <Input
+              <SearchInput
                 placeholder="Search products..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full"
-                icon={<Search className="h-4 w-4" />}
               />
             </div>
             <div className="flex gap-2">

@@ -20,3 +20,25 @@ export interface Order {
   createdAt: Date
   updatedAt: Date
 }
+
+// API Response Types
+export interface OrdersResponse {
+  orders: Order[]
+  hasMore: boolean
+  nextCursor?: string
+}
+
+export interface OrderLockRequest {
+  orderId: string
+  userId: string
+}
+
+export interface OrderLockResponse {
+  success: boolean
+  lockedBy?: {
+    userId: string
+    userName: string
+    lockedAt: Date
+  }
+  error?: string
+}

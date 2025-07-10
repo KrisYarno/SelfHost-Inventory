@@ -1,5 +1,3 @@
-import { User, Product, Location } from '@prisma/client';
-
 // External order status
 export enum ExternalOrderStatus {
   PENDING = 'PENDING',

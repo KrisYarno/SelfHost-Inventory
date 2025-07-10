@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { syncWooCommerceOrders } from '@/lib/woocommerce-sync';
+import { syncProcessingOrders } from '@/lib/woocommerce/sync';
+import prisma from '@/lib/prisma';
 import { headers } from 'next/headers';
 
 export const runtime = 'nodejs';
@@ -42,7 +43,7 @@ export async function GET(request: NextRequest) {
     console.log('Starting WooCommerce order sync...');
     
     // Call the sync service
-    const syncResult = await syncWooCommerceOrders();
+    const syncResult = await syncProcessingOrders(prisma);
     
     console.log('Sync completed:', syncResult);
 
