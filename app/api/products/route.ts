@@ -28,6 +28,11 @@ export async function GET(request: NextRequest) {
       pageSize: parseInt(searchParams.get("pageSize") || "25"),
     };
 
+    // Handle isActive parameter (for backward compatibility)
+    const isActive = searchParams.get("isActive");
+    // Note: We treat all non-deleted products as active
+    // If isActive is false, we would need to define what makes a product inactive
+
     // Get location ID from query params (optional - if not provided, get totals)
     const locationId = searchParams.get("locationId");
     const getTotal = searchParams.get("getTotal") === "true" || !locationId;
@@ -42,6 +47,22 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("Error fetching products:", error);
+    
+    // Check for database connection errors
+    if (error instanceof Error) {
+      if (error.message.includes('P2002') || error.message.includes('P2003')) {
+        return NextResponse.json(
+          { error: "Database connection error. Please check your DATABASE_URL configuration." },
+          { status: 503 }
+        );
+      }
+      
+      return NextResponse.json(
+        { error: `Failed to fetch products: ${error.message}` },
+        { status: 500 }
+      );
+    }
+    
     return NextResponse.json(
       { error: "Failed to fetch products" },
       { status: 500 }

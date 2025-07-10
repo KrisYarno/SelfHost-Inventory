@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, BarChart3, Settings, Warehouse } from "lucide-react";
+import { Home, Package, BarChart3, Settings, Warehouse, PackageCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -12,6 +12,12 @@ const navigation = [
     href: "/workbench",
     icon: Home,
     label: "Workbench",
+  },
+  {
+    name: "Orders",
+    href: "/orders",
+    icon: PackageCheck,
+    label: "Orders",
   },
   {
     name: "Products",
@@ -51,7 +57,7 @@ export function MobileNav() {
 
   return (
     <nav className="fixed bottom-0 z-40 w-full border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 md:hidden">
-      <div className="flex h-14 items-center justify-around px-2">
+      <div className="flex h-14 items-center justify-around px-1">
         {allNavigation.map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
           
@@ -60,7 +66,7 @@ export function MobileNav() {
               key={item.name}
               href={item.href}
               className={cn(
-                "relative flex items-center justify-center p-3 transition-colors rounded-lg",
+                "relative flex items-center justify-center p-2 transition-colors rounded-lg",
                 "hover:bg-muted/50",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                 "min-w-[44px] min-h-[44px]",
@@ -74,7 +80,7 @@ export function MobileNav() {
             >
               <item.icon
                 className={cn(
-                  "h-6 w-6",
+                  "h-5 w-5",
                   isActive && "scale-110"
                 )}
                 aria-hidden="true"

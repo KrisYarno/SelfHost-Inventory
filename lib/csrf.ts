@@ -19,7 +19,7 @@ export function generateCSRFToken(): string {
  * This should be called from server components or API routes
  */
 export async function getCSRFToken(): Promise<string> {
-  const cookieStore = await cookies();
+  const cookieStore = cookies();
   const existingToken = cookieStore.get(CSRF_TOKEN_COOKIE);
   
   if (existingToken?.value) {
@@ -37,7 +37,7 @@ export async function getCSRFToken(): Promise<string> {
  * Safe to use in Server Components
  */
 export async function getExistingCSRFToken(): Promise<string | null> {
-  const cookieStore = await cookies();
+  const cookieStore = cookies();
   const existingToken = cookieStore.get(CSRF_TOKEN_COOKIE);
   return existingToken?.value || null;
 }
@@ -48,7 +48,7 @@ export async function getExistingCSRFToken(): Promise<string | null> {
  */
 export async function validateCSRFToken(request: NextRequest): Promise<boolean> {
   // Get token from cookie
-  const cookieStore = await cookies();
+  const cookieStore = cookies();
   const cookieToken = cookieStore.get(CSRF_TOKEN_COOKIE)?.value;
   
   if (!cookieToken) {

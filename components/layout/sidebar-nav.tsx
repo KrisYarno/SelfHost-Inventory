@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, BarChart3, Settings, Warehouse, BookOpen } from "lucide-react";
+import { Home, Package, BarChart3, Settings, Warehouse, BookOpen, PackageCheck, TruckIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -12,6 +12,18 @@ const navigation = [
     href: "/workbench",
     icon: Home,
     description: "Main inventory management",
+  },
+  {
+    name: "Orders",
+    href: "/orders",
+    icon: PackageCheck,
+    description: "Order packing system",
+  },
+  {
+    name: "External Orders",
+    href: "/external-orders",
+    icon: TruckIcon,
+    description: "External order fulfillment",
   },
   {
     name: "Products",

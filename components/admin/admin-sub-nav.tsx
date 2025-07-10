@@ -9,7 +9,8 @@ import {
   FileText,
   Settings,
   Package,
-  Shield
+  Shield,
+  Link2
 } from "lucide-react";
 
 const adminNavItems = [
@@ -22,6 +23,11 @@ const adminNavItems = [
     title: "Mass Update",
     href: "/admin/inventory/mass-update",
     icon: Package,
+  },
+  {
+    title: "Product Mapping",
+    href: "/admin/product-mapping",
+    icon: Link2,
   },
   {
     title: "Change Logs",

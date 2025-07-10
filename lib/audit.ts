@@ -24,8 +24,9 @@ export type AuditActionType =
   | 'EMAIL_SENT'
   | 'DATA_EXPORT'
   | 'SYSTEM_MAINTENANCE'
+  | 'PACK_ORDER'
 
-export type EntityType = 'USER' | 'PRODUCT' | 'INVENTORY' | 'LOCATION' | 'SETTINGS' | 'SYSTEM'
+export type EntityType = 'USER' | 'PRODUCT' | 'INVENTORY' | 'LOCATION' | 'SETTINGS' | 'SYSTEM' | 'EXTERNAL_ORDER'
 
 interface AuditLogEntry {
   userId: number
@@ -212,14 +213,14 @@ class AuditService {
   /**
    * Log inventory adjustment
    */
-  async logInventoryAdjustment(userId: number, productId: number, productName: string, delta: number, locationId: number): Promise<void> {
+  async logInventoryAdjustment(userId: number, productId: number, productName: string, delta: number, locationId: number, additionalDetails?: Record<string, any>): Promise<void> {
     await this.log({
       userId,
       actionType: 'INVENTORY_ADJUSTMENT',
       entityType: 'INVENTORY',
       entityId: productId,
       action: `Adjusted inventory for "${productName}" by ${delta > 0 ? '+' : ''}${delta}`,
-      details: { productName, delta, locationId }
+      details: { productName, delta, locationId, ...additionalDetails }
     })
   }
 
@@ -319,6 +320,27 @@ class AuditService {
         }
       },
       orderBy: { createdAt: 'asc' }
+    })
+  }
+
+  /**
+   * Generic log action method
+   */
+  async logAction(
+    userId: number, 
+    actionType: AuditActionType, 
+    entityType: EntityType, 
+    entityId: number | undefined, 
+    action: string, 
+    details?: Record<string, any>
+  ): Promise<void> {
+    await this.log({
+      userId,
+      actionType,
+      entityType,
+      entityId,
+      action,
+      details
     })
   }
 }

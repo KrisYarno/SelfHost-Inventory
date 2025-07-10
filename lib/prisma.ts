@@ -13,6 +13,11 @@ const prismaClientSingleton = () => {
     client.$use(createPrismaMiddleware())
   }
 
+  // Handle connection errors
+  client.$connect().catch((error) => {
+    console.error('Failed to connect to database:', error)
+  })
+
   return client
 }
 

@@ -1,0 +1,13 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/sync-orders",
+      "schedule": "0 */6 * * *"
+    }
+  ],
+  "functions": {
+    "app/api/cron/sync-orders/route.ts": {
+      "maxDuration": 300
+    }
+  }
+}
