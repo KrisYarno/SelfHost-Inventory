@@ -13,7 +13,7 @@ export const usePackingStore = create<PackingStore>((set, get) => ({
   
   addPackedItem: (itemId: string) => {
     set((state) => ({
-      packedItems: [...new Set([...state.packedItems, itemId])]
+      packedItems: Array.from(new Set([...state.packedItems, itemId]))
     }))
   },
   

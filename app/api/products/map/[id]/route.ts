@@ -9,7 +9,7 @@ export async function DELETE(
 ) {
   try {
     const session = await getServerSession(authOptions)
-    if (!session || session.user.role !== 'ADMIN') {
+    if (!session || !session.user.isAdmin) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
@@ -44,8 +44,9 @@ export async function DELETE(
     // Log the unmapping action
     await prisma.auditLog.create({
       data: {
-        userId: session.user.id,
+        userId: parseInt(session.user.id),
         action: 'PRODUCT_UNMAPPED',
+        actionType: 'DELETE',
         entityType: 'PRODUCT',
         entityId: id,
         metadata: {

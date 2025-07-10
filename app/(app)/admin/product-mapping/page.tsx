@@ -373,7 +373,6 @@ export default function ProductMappingPage() {
                                 </div>
                               ) : (
                                 <Select
-                                  id={`select-${product.id}`}
                                   defaultValue={suggestion?.suggestedProductId}
                                 >
                                   <SelectTrigger className="w-[250px]">
@@ -482,7 +481,6 @@ export default function ProductMappingPage() {
                         ) : (
                           <div className="space-y-3">
                             <Select
-                              id={`select-mobile-${product.id}`}
                               defaultValue={suggestion?.suggestedProductId}
                             >
                               <SelectTrigger className="w-full">

@@ -58,6 +58,7 @@ export function PackingSheetExample() {
         orderId="order-123"
         orderNumber="ORD-2024-001"
         items={orderItems}
+        locationId={1}
         isOpen={isOpen}
         onClose={() => setIsOpen(false)}
         onComplete={handleCompleteOrder}

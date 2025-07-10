@@ -9,7 +9,7 @@ const COOKIE_MAX_AGE = 60 * 60 * 24; // 24 hours
 
 export async function GET() {
   try {
-    const cookieStore = cookies();
+    const cookieStore = await cookies();
     
     // Check if token already exists
     const existingToken = cookieStore.get(CSRF_TOKEN_COOKIE);

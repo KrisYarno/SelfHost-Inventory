@@ -57,7 +57,7 @@ export function OrderCard({ order, onSelect, onSwipe, className }: OrderCardProp
   // Status colors
   const statusColors = {
     pending: 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400',
-    in_progress: 'bg-blue-500/10 text-blue-700 dark:text-blue-400',
+    packing: 'bg-blue-500/10 text-blue-700 dark:text-blue-400',
     completed: 'bg-green-500/10 text-green-700 dark:text-green-400',
     cancelled: 'bg-red-500/10 text-red-700 dark:text-red-400',
   };
@@ -108,7 +108,7 @@ export function OrderCard({ order, onSelect, onSwipe, className }: OrderCardProp
                 {isLocked && (
                   <Badge variant="outline" className="text-xs">
                     <Lock className="w-3 h-3 mr-1" />
-                    {isOwnLock ? 'You' : order.lockedBy.userName}
+                    {isOwnLock ? 'You' : order.lockedBy?.userName}
                   </Badge>
                 )}
               </div>
@@ -121,7 +121,7 @@ export function OrderCard({ order, onSelect, onSwipe, className }: OrderCardProp
                 </div>
                 
                 <div className="font-medium">
-                  ${order.total.toFixed(2)}
+                  ${order.total?.toFixed(2) || '0.00'}
                 </div>
               </div>
             </div>

@@ -90,8 +90,8 @@ export async function POST(
     }
     
     // Validate each packed item
-    const mappedItems = [];
-    const unmappedItems = [];
+    const mappedItems: Array<{ orderItemId: string; productId: number; quantity: number; orderItem: any }> = [];
+    const unmappedItems: Array<{ orderItemId: string; productId: number; quantity: number; orderItem: any }> = [];
     
     for (const packItem of body.items) {
       const orderItem = itemMap.get(packItem.orderItemId);

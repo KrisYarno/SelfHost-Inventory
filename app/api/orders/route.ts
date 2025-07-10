@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/prisma";
 import { OrdersResponse } from "@/types/orders";
 
 // Mock data for now - replace with actual database queries
@@ -14,40 +14,38 @@ const mockOrders = [
     items: [
       {
         id: "1-1",
-        productId: 1,
-        productName: "Widget A",
+        name: "Widget A",
         quantity: 5,
-        price: 10.99,
-        subtotal: 54.95,
+        currentStock: 100,
+        productId: 1,
+        isMapped: true,
       },
       {
         id: "1-2",
-        productId: 2,
-        productName: "Gadget B",
+        name: "Gadget B",
         quantity: 3,
-        price: 24.99,
-        subtotal: 74.97,
+        currentStock: 50,
+        productId: 2,
+        isMapped: true,
       },
     ],
-    total: 129.92,
   },
   {
     id: "2",
     orderNumber: "ORD-2024-002",
     createdAt: new Date(Date.now() - 1000 * 60 * 15), // 15 minutes ago
     updatedAt: new Date(Date.now() - 1000 * 60 * 15),
-    status: 'in_progress' as const,
+    status: 'packing' as const,
     items: [
       {
         id: "2-1",
-        productId: 3,
-        productName: "Tool C",
+        name: "Tool C",
         quantity: 10,
-        price: 5.99,
-        subtotal: 59.90,
+        currentStock: 75,
+        productId: 3,
+        isMapped: true,
       },
     ],
-    total: 59.90,
     lockedBy: {
       userId: "user-123",
       userName: "John Doe",
@@ -63,30 +61,29 @@ const mockOrders = [
     items: [
       {
         id: "3-1",
-        productId: 4,
-        productName: "Component D",
+        name: "Component D",
         quantity: 20,
-        price: 2.50,
-        subtotal: 50.00,
+        currentStock: 200,
+        productId: 4,
+        isMapped: true,
       },
       {
         id: "3-2",
-        productId: 5,
-        productName: "Part E",
+        name: "Part E",
         quantity: 15,
-        price: 3.75,
-        subtotal: 56.25,
+        currentStock: 150,
+        productId: 5,
+        isMapped: true,
       },
       {
         id: "3-3",
-        productId: 6,
-        productName: "Item F",
+        name: "Item F",
         quantity: 8,
-        price: 8.99,
-        subtotal: 71.92,
+        currentStock: 80,
+        productId: 6,
+        isMapped: true,
       },
     ],
-    total: 178.17,
   },
 ];
 

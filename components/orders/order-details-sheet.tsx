@@ -94,7 +94,7 @@ export function OrderDetailsSheet({ order, open, onOpenChange }: OrderDetailsShe
               className={cn(
                 "text-sm",
                 order.status === 'pending' && "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
-                order.status === 'in_progress' && "bg-blue-500/10 text-blue-700 dark:text-blue-400",
+                order.status === 'packing' && "bg-blue-500/10 text-blue-700 dark:text-blue-400",
                 order.status === 'completed' && "bg-green-500/10 text-green-700 dark:text-green-400",
               )}
             >
@@ -106,7 +106,7 @@ export function OrderDetailsSheet({ order, open, onOpenChange }: OrderDetailsShe
             <div className="flex items-center gap-2 mt-3 p-3 bg-orange-500/10 rounded-lg">
               <Lock className="w-4 h-4 text-orange-600 dark:text-orange-400" />
               <span className="text-sm text-orange-600 dark:text-orange-400">
-                Locked by {isOwnLock ? 'you' : order.lockedBy.userName}
+                Locked by {isOwnLock ? 'you' : order.lockedBy?.userName}
               </span>
             </div>
           )}
@@ -128,15 +128,15 @@ export function OrderDetailsSheet({ order, open, onOpenChange }: OrderDetailsShe
                       <Package className="w-6 h-6 text-muted-foreground" />
                     </div>
                     <div className="flex-1">
-                      <p className="font-medium">{item.productName}</p>
+                      <p className="font-medium">{item.name}</p>
                       <p className="text-sm text-muted-foreground">
-                        ${item.price.toFixed(2)} each
+                        Qty: {item.quantity}
                       </p>
                     </div>
                     <div className="text-right">
                       <p className="font-semibold text-lg">{item.quantity}</p>
                       <p className="text-sm text-muted-foreground">
-                        ${item.subtotal.toFixed(2)}
+                        Stock: {item.currentStock}
                       </p>
                     </div>
                   </div>
@@ -148,7 +148,7 @@ export function OrderDetailsSheet({ order, open, onOpenChange }: OrderDetailsShe
 
             <div className="flex items-center justify-between py-2">
               <span className="font-semibold text-lg">Total</span>
-              <span className="font-bold text-2xl">${order.total.toFixed(2)}</span>
+              <span className="font-bold text-2xl">${order.total?.toFixed(2) || '0.00'}</span>
             </div>
 
             {order.notes && (

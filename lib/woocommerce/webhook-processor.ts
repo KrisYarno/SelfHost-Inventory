@@ -83,7 +83,7 @@ export class WebhookProcessor {
     });
 
     try {
-      const payload = event.payload as WebhookPayload;
+      const payload = event.payload as unknown as WebhookPayload;
 
       switch (event.eventType) {
         case 'order.created':
@@ -156,7 +156,7 @@ export class WebhookProcessor {
           status: this.mapOrderStatus(payload.status),
           orderTotal: parseFloat(payload.total),
           currency: payload.currency,
-          jsonData: payload,
+          jsonData: payload as any,
           syncedAt: new Date(),
         },
       });
@@ -193,7 +193,7 @@ export class WebhookProcessor {
               productName: item.name,
               quantity: item.quantity,
               price: parseFloat(item.price),
-              metaData: item.meta_data || null,
+              metaData: item.meta_data || undefined,
             },
           });
 
@@ -232,7 +232,7 @@ export class WebhookProcessor {
           status: this.mapOrderStatus(payload.status),
           orderTotal: parseFloat(payload.total),
           currency: payload.currency,
-          jsonData: payload,
+          jsonData: payload as any,
           syncedAt: new Date(),
         },
       });
@@ -269,7 +269,7 @@ export class WebhookProcessor {
               productName: item.name,
               quantity: item.quantity,
               price: parseFloat(item.price),
-              metaData: item.meta_data || null,
+              metaData: item.meta_data || undefined,
             },
           });
 

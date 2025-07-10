@@ -19,6 +19,13 @@ export interface Order {
   status: 'pending' | 'packing' | 'completed' | 'cancelled'
   createdAt: Date
   updatedAt: Date
+  total?: number
+  notes?: string
+  lockedBy?: {
+    userId: string
+    userName: string
+    lockedAt: Date
+  }
 }
 
 // API Response Types

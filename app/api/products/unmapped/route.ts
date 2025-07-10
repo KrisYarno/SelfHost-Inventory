@@ -6,7 +6,7 @@ import prisma from '@/lib/prisma'
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions)
-    if (!session || session.user.role !== 'ADMIN') {
+    if (!session || !session.user.isAdmin) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
@@ -20,8 +20,8 @@ export async function GET(request: NextRequest) {
       where: {
         ...(search && {
           OR: [
-            { name: { contains: search, mode: 'insensitive' } },
-            { sku: { contains: search, mode: 'insensitive' } }
+            { name: { contains: search } },
+            { sku: { contains: search } }
           ]
         }),
         ...(tab === 'unmapped' && { productId: null })
@@ -45,7 +45,7 @@ export async function GET(request: NextRequest) {
 
       const conflictWooProducts = await prisma.wooCommerceProduct.findMany({
         where: {
-          productId: { in: conflictProductIds as string[] }
+          productId: { in: conflictProductIds as number[] }
         },
         include: {
           product: true

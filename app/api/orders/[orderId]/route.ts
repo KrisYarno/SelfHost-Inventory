@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/prisma";
 import { Order } from "@/types/orders";
 
 // Mock order details - replace with actual database query
@@ -15,23 +15,21 @@ const getOrderById = (orderId: string): Order | null => {
       items: [
         {
           id: "1-1",
-          productId: 1,
-          productName: "Widget A",
+          name: "Widget A",
           quantity: 5,
-          price: 10.99,
-          subtotal: 54.95,
+          currentStock: 100,
+          productId: 1,
+          isMapped: true,
         },
         {
           id: "1-2",
-          productId: 2,
-          productName: "Gadget B",
+          name: "Gadget B",
           quantity: 3,
-          price: 24.99,
-          subtotal: 74.97,
+          currentStock: 50,
+          productId: 2,
+          isMapped: true,
         },
       ],
-      total: 129.92,
-      notes: "Customer requested gift wrapping",
     },
   ];
   

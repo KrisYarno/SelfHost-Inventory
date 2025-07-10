@@ -20,7 +20,6 @@ model User {
   notificationHistory NotificationHistory[]
   deletedProducts     Product[]             @relation("DeletedProducts")
   auditLogs           AuditLog[]
-  packedOrders        ExternalOrder[]       @relation("PackedOrders")
   locations           Location              @relation(fields: [defaultLocationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_default_location")
 
   @@index([defaultLocationId], map: "fk_user_default_location")
@@ -39,20 +38,11 @@ model Product {
   lowStockThreshold   Int?                  @default(1)
   deletedAt           DateTime?             @db.DateTime(0)
   deletedBy           Int?
-  wooProductId        Int?                  @unique
-  wooVariationId      Int                   @default(0)
-  wooSku              String?               @unique @db.VarChar(255)
-  lastWooSync         DateTime?             @db.DateTime(0)
-  sku                 String?               @db.VarChar(255)
-  isActive            Boolean               @default(true)
   inventory_logs      inventory_logs[]
   notificationHistory NotificationHistory[]
   product_locations   product_locations[]
-  externalOrderItems  ExternalOrderItem[]
   deletedByUser       User?                 @relation("DeletedProducts", fields: [deletedBy], references: [id])
-  wooCommerceProducts WooCommerceProduct[]
 
-  @@unique([wooProductId, wooVariationId], map: "unique_woo_product_variation")
   @@index([baseName, numericValue, variant], map: "idx_product_sorting")
   @@index([deletedAt], map: "idx_deleted")
   @@index([name], map: "idx_products_name_fulltext")
@@ -74,24 +64,21 @@ model Location {
 }
 
 model inventory_logs {
-  id              Int                    @id @default(autoincrement())
-  userId          Int
-  productId       Int
-  delta           Int
-  changeTime      DateTime               @db.DateTime(0)
-  locationId      Int?
-  logType         inventory_logs_logType @default(ADJUSTMENT)
-  externalOrderId Int?
-  locations       Location?              @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_log_location")
-  users           User                   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_1")
-  products        Product                @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_2")
-  externalOrder   ExternalOrder?         @relation(fields: [externalOrderId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_log_external_order")
+  id         Int                    @id @default(autoincrement())
+  userId     Int
+  productId  Int
+  delta      Int
+  changeTime DateTime               @db.DateTime(0)
+  locationId Int?
+  logType    inventory_logs_logType @default(ADJUSTMENT)
+  locations  Location?              @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_log_location")
+  users      User                   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_1")
+  products   Product                @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_2")
 
   @@index([locationId], map: "fk_log_location")
   @@index([productId, locationId, changeTime], map: "idx_inventory_logs_product_location_time_desc")
   @@index([logType, changeTime], map: "idx_inventory_logs_type_time")
   @@index([userId, changeTime, productId, locationId, delta], map: "idx_inventory_logs_user_covering")
-  @@index([externalOrderId], map: "idx_inventory_logs_external_order")
 }
 
 model product_locations {
@@ -129,11 +116,10 @@ model AuditLog {
   userId        Int
   actionType    String   @db.VarChar(50)
   entityType    String   @db.VarChar(50)
-  entityId      String?  @db.VarChar(255)
+  entityId      Int?
   batchId       String?  @db.VarChar(36)
   action        String   @db.Text
   details       Json?
-  metadata      Json?
   ipAddress     String?  @db.VarChar(45)
   userAgent     String?  @db.VarChar(255)
   affectedCount Int      @default(1)
@@ -151,150 +137,4 @@ model AuditLog {
 enum inventory_logs_logType {
   ADJUSTMENT
   TRANSFER
-  EXTERNAL_ORDER
 }
-
-model ExternalOrder {
-  id             Int                 @id @default(autoincrement())
-  wooOrderId     Int                 @unique
-  orderNumber    String              @unique @db.VarChar(100)
-  status         String              @db.VarChar(50) // 'processing', 'packed', 'cancelled'
-  orderTotal     Decimal             @db.Decimal(10, 2)
-  currency       String              @db.VarChar(10)
-  jsonData       Json                // Sanitized order data without personal info
-  packedAt       DateTime?           @db.DateTime(0)
-  packedBy       Int?
-  syncedAt       DateTime            @db.DateTime(0)
-  createdAt      DateTime            @default(now()) @db.DateTime(0)
-  updatedAt      DateTime            @updatedAt @db.DateTime(0)
-  orderItems     ExternalOrderItem[]
-  inventoryLogs  inventory_logs[]
-  packedByUser   User?               @relation("PackedOrders", fields: [packedBy], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_order_packed_by")
-
-  @@index([status], map: "idx_external_order_status")
-  @@index([packedBy], map: "idx_external_order_packed_by")
-  @@index([createdAt], map: "idx_external_order_created")
-  @@map("external_orders")
-}
-
-model ExternalOrderItem {
-  id             Int           @id @default(autoincrement())
-  orderId        Int
-  productId      Int?
-  wooProductId   Int
-  wooVariationId Int           @default(0)
-  productName    String        @db.VarChar(255)
-  quantity       Int
-  price          Decimal       @db.Decimal(10, 2)
-  metaData       Json?         // For bundle info
-  order          ExternalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_order_item_order")
-  product        Product?      @relation(fields: [productId], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_order_item_product")
-
-  @@index([orderId], map: "idx_order_item_order")
-  @@index([productId], map: "idx_order_item_product")
-  @@index([wooProductId, wooVariationId], map: "idx_order_item_woo_product")
-  @@map("external_order_items")
-}
-
-model OrderLock {
-  id         Int      @id @default(autoincrement())
-  orderId    Int      @unique
-  lockedBy   Int
-  lockedAt   DateTime @default(now()) @db.DateTime(0)
-  expiresAt  DateTime @db.DateTime(0)
-
-  @@index([expiresAt], map: "idx_order_lock_expires")
-  @@map("order_locks")
-}
-
-model Order {
-  id           Int         @id @default(autoincrement())
-  orderNumber  String      @unique @db.VarChar(50)
-  total        Decimal     @db.Decimal(10, 2)
-  currency     String      @db.VarChar(3)
-  status       String      @db.VarChar(50)
-  dateCreated  DateTime    @db.DateTime(0)
-  dateModified DateTime    @db.DateTime(0)
-  orderItems   OrderItem[]
-
-  @@index([status], map: "idx_order_status")
-  @@index([dateCreated], map: "idx_order_created")
-  @@index([dateModified], map: "idx_order_modified")
-  @@map("orders")
-}
-
-model OrderItem {
-  id             Int     @id @default(autoincrement())
-  orderId        Int
-  productId      Int
-  variationId    Int
-  name           String  @db.VarChar(255)
-  sku            String  @db.VarChar(100)
-  quantity       Int
-  price          Decimal @db.Decimal(10, 2)
-  bundleParentId Int?
-  isBundleParent Boolean @default(false)
-  bundleChildren Json?
-  order          Order   @relation(fields: [orderId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_orderitem_order")
-
-  @@index([orderId], map: "idx_orderitem_order")
-  @@index([productId], map: "idx_orderitem_product")
-  @@index([sku], map: "idx_orderitem_sku")
-  @@map("order_items")
-}
-
-model SyncLog {
-  id               Int      @id @default(autoincrement())
-  syncType         String   @db.VarChar(50)
-  syncedAt         DateTime @db.DateTime(0)
-  recordsProcessed Int      @default(0)
-  errors           Json?
-  success          Boolean  @default(true)
-
-  @@index([syncType, syncedAt], map: "idx_sync_type_time")
-  @@map("sync_logs")
-}
-
-model WebhookEvent {
-  id             Int                   @id @default(autoincrement())
-  eventType      String                @db.VarChar(50) // 'order.created', 'order.updated', 'order.deleted'
-  webhookId      String                @unique @db.VarChar(255) // WooCommerce webhook delivery ID for idempotency
-  resourceId     Int                   // WooCommerce order ID
-  payload        Json                  // Sanitized webhook payload
-  status         WebhookEventStatus    @default(PENDING)
-  attempts       Int                   @default(0)
-  lastAttemptAt  DateTime?             @db.DateTime(0)
-  processedAt    DateTime?             @db.DateTime(0)
-  error          String?               @db.Text
-  createdAt      DateTime              @default(now()) @db.DateTime(0)
-
-  @@index([status, createdAt], map: "idx_webhook_status_created")
-  @@index([eventType], map: "idx_webhook_event_type")
-  @@index([resourceId], map: "idx_webhook_resource_id")
-  @@map("webhook_events")
-}
-
-enum WebhookEventStatus {
-  PENDING
-  PROCESSING
-  COMPLETED
-  FAILED
-  SKIPPED
-}
-
-model WooCommerceProduct {
-  id             String   @id @default(cuid())
-  wooCommerceId  Int      @unique
-  name           String   @db.VarChar(255)
-  sku            String?  @db.VarChar(255)
-  productId      Int?     // Internal product mapping
-  createdAt      DateTime @default(now()) @db.DateTime(0)
-  updatedAt      DateTime @updatedAt @db.DateTime(0)
-  product        Product? @relation(fields: [productId], references: [id], onDelete: SetNull, onUpdate: NoAction)
-
-  @@index([productId], map: "idx_woo_product_mapping")
-  @@index([name], map: "idx_woo_product_name")
-  @@index([sku], map: "idx_woo_product_sku")
-  @@map("woocommerce_products")
-}
-
