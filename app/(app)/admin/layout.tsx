@@ -15,7 +15,7 @@ export default async function AdminLayout({
   }
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-6 overflow-x-hidden">
       <AdminSubNav />
       {children}
     </div>

@@ -1,0 +1,25 @@
+name: inventory-dev
+
+services:
+  app:
+    environment:
+      NODE_ENV: development
+      NEXTAUTH_URL: http://localhost:3000
+    networks:
+      - internal
+    labels: {}
+
+  db:
+    volumes:
+      - db_data_dev:/var/lib/mysql
+
+  backup:
+    # optional: disable cron'ed backup in dev
+    profiles: ["never"]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  db_data_dev:

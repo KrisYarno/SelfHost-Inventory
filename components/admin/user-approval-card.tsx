@@ -92,7 +92,7 @@ export function UserApprovalCard({ user, onApprove, onReject, isSelected, onTogg
 
       {/* Reject Dialog */}
       {showRejectDialog && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-background/80 dark:bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-card rounded-lg p-6 max-w-md w-full border border-border">
             <h3 className="text-lg font-semibold mb-4">Reject User Application</h3>
             <p className="text-sm text-muted-foreground mb-4">

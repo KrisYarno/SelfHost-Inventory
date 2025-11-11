@@ -63,7 +63,10 @@ export default function OrderPackerPage() {
   });
 
   // Count orders by status
-  const orderCounts = data?.orders.reduce((acc, order) => {
+  const orderCounts = data?.orders.reduce((
+    acc: Record<string, number>,
+    order: Order
+  ) => {
     acc[order.status] = (acc[order.status] || 0) + 1;
     return acc;
   }, {} as Record<string, number>) || {};

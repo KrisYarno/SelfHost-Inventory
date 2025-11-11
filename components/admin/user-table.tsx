@@ -64,9 +64,9 @@ export function UserTable({
       cell: (item: Record<string, unknown>) => {
         const user = item as unknown as User;
         return (
-        <div>
-          <p className="font-medium">{user.username}</p>
-          <p className="text-sm text-muted-foreground">{user.email}</p>
+        <div className="min-w-0">
+          <p className="font-medium truncate max-w-[60vw] sm:max-w-none">{user.username}</p>
+          <p className="text-xs sm:text-sm text-muted-foreground break-all sm:break-normal truncate max-w-[70vw] sm:max-w-none">{user.email}</p>
         </div>
       )},
     },
@@ -113,7 +113,7 @@ export function UserTable({
                 <MoreHorizontal className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent align="end" className="min-w-[12rem] sm:min-w-[14rem] max-w-[90vw]">
               {!user.isApproved && (
                 <>
                   {onApprove && (

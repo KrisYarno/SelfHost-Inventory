@@ -119,7 +119,7 @@ export default function AdminSettingsPage() {
 
   if (isLoading) {
     return (
-      <div className="container mx-auto p-6 space-y-6">
+      <div className="container mx-auto p-4 sm:p-6 space-y-6 overflow-x-hidden">
         <h1 className="text-3xl font-bold">System Settings</h1>
         <div className="grid gap-6 md:grid-cols-2">
           <Skeleton className="h-[300px]" />
@@ -130,7 +130,7 @@ export default function AdminSettingsPage() {
   }
 
   return (
-    <div className="container mx-auto p-6 space-y-6">
+    <div className="container mx-auto p-4 sm:p-6 space-y-6 overflow-x-hidden">
       <div className="flex items-center gap-2">
         <SettingsIcon className="h-8 w-8" />
         <h1 className="text-3xl font-bold">System Settings</h1>

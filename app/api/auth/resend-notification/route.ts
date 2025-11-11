@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession } from '@/lib/auth';
 import prisma from '@/lib/prisma';
+import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from '@/lib/rateLimit';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,14 +35,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const rateLimitHeaders = enforceRateLimit(request, 'auth:resend-notification', {
+      identifier: session.user.id ?? session.user.email ?? undefined,
+    });
+
     // In a real app, you might send an email notification here
     // For now, we'll just simulate success
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       message: 'Notification sent to administrators',
     });
+    return applyRateLimitHeaders(response, rateLimitHeaders);
   } catch (error) {
     console.error('Error sending notification:', error);
+
+    if (error instanceof RateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status, headers: error.headers }
+      );
+    }
     return NextResponse.json(
       { error: 'Failed to send notification' },
       { status: 500 }

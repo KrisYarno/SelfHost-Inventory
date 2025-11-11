@@ -107,7 +107,7 @@ export function AdjustmentInput({
         onFocus={handleInputFocus}
         onKeyDown={handleKeyDown}
         className={cn(
-          "w-20 text-center h-8",
+          "h-8 text-center w-16 sm:w-20",
           value > 0 && "text-green-600 border-green-500/50",
           value < 0 && "text-red-600 border-red-500/50"
         )}

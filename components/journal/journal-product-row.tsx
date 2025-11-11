@@ -42,15 +42,15 @@ export function JournalProductRow({
       onSwipeRight={handleSwipeRight}
       onSwipeLeft={handleSwipeLeft}
       className={cn(
-        "rounded-lg border transition-colors",
+        "rounded-lg border transition-colors overflow-visible",
         hasChange && "border-primary/50 bg-primary/5"
       )}
       role="article"
       aria-label={`Product ${product.name}, current quantity ${currentQuantity}`}
       tabIndex={0}
     >
-      <div className="p-4">
-        <div className="flex items-center gap-4">
+      <div className="p-4 pr-2">
+        <div className="flex items-center gap-3 sm:gap-4">
         {/* Product Info */}
         <div className="flex-1 min-w-0">
           <h4 className="font-medium truncate" id={`product-name-${product.id}`}>{product.name}</h4>
@@ -75,7 +75,7 @@ export function JournalProductRow({
         </div>
 
         {/* Adjustment Controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-shrink-0">
           <AdjustmentInput
             value={adjustment?.quantityChange || 0}
             onChange={handleQuantityChange}

@@ -116,9 +116,9 @@ export function DateRangePicker({
   };
 
   return (
-    <div className={cn("flex items-center gap-2", className)}>
+    <div className={cn("flex items-center gap-2 flex-wrap min-w-0", className)}>
       <Select value={selectedPreset} onValueChange={handlePresetChange}>
-        <SelectTrigger className="w-[160px]">
+        <SelectTrigger className="w-[140px] sm:w-[160px]">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -136,7 +136,8 @@ export function DateRangePicker({
           <Button
             variant="outline"
             className={cn(
-              "justify-start text-left font-normal",
+              "justify-start text-left font-normal whitespace-nowrap overflow-hidden text-ellipsis",
+              "max-w-[60vw] sm:max-w-none",
               !date && "text-muted-foreground"
             )}
           >
@@ -155,7 +156,7 @@ export function DateRangePicker({
             )}
           </Button>
         </PopoverTrigger>
-        <PopoverContent className="w-auto p-0" align="start">
+        <PopoverContent className="w-auto p-0 bg-background border shadow-xl" align="start">
           <Calendar
             initialFocus
             mode="range"

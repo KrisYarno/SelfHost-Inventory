@@ -253,16 +253,16 @@ export default function AuditLogsPage() {
         </CardHeader>
         <CardContent>
           <ScrollArea className="h-[600px]">
-            <Table>
+            <Table className="min-w-[720px] sm:min-w-0">
               <TableHeader>
                 <TableRow>
-                  <TableHead>Timestamp</TableHead>
-                  <TableHead>User</TableHead>
-                  <TableHead>Action Type</TableHead>
-                  <TableHead>Action</TableHead>
-                  <TableHead>Entity</TableHead>
-                  <TableHead>Count</TableHead>
-                  <TableHead>Details</TableHead>
+                  <TableHead className="whitespace-nowrap">Timestamp</TableHead>
+                  <TableHead className="whitespace-nowrap">User</TableHead>
+                  <TableHead className="whitespace-nowrap">Action Type</TableHead>
+                  <TableHead className="whitespace-nowrap">Action</TableHead>
+                  <TableHead className="whitespace-nowrap">Entity</TableHead>
+                  <TableHead className="whitespace-nowrap text-right">Count</TableHead>
+                  <TableHead className="whitespace-nowrap">Details</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -283,13 +283,13 @@ export default function AuditLogsPage() {
                 ) : (
                   logs.map((log) => (
                     <TableRow key={log.id}>
-                      <TableCell className="font-mono text-sm">
+                      <TableCell className="font-mono text-sm whitespace-nowrap">
                         {format(new Date(log.createdAt), "yyyy-MM-dd HH:mm:ss")}
                       </TableCell>
-                      <TableCell>
-                        <div>
-                          <div className="font-medium">{log.user.username}</div>
-                          <div className="text-sm text-muted-foreground">
+                      <TableCell className="min-w-[160px]">
+                        <div className="min-w-0">
+                          <div className="font-medium truncate max-w-[50vw] sm:max-w-none">{log.user.username}</div>
+                          <div className="text-sm text-muted-foreground truncate max-w-[60vw] sm:max-w-none">
                             {log.user.email}
                           </div>
                         </div>
@@ -301,7 +301,7 @@ export default function AuditLogsPage() {
                           {log.actionType.replace(/_/g, " ")}
                         </Badge>
                       </TableCell>
-                      <TableCell className="max-w-xs truncate">
+                      <TableCell className="max-w-[220px] truncate">
                         {log.action}
                       </TableCell>
                       <TableCell>
@@ -314,7 +314,7 @@ export default function AuditLogsPage() {
                           )}
                         </div>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="text-right">
                         {log.affectedCount > 1 && (
                           <Badge variant="secondary">{log.affectedCount}</Badge>
                         )}
@@ -326,7 +326,7 @@ export default function AuditLogsPage() {
                           </Badge>
                         )}
                         {log.ipAddress && (
-                          <div className="text-xs text-muted-foreground">
+                          <div className="text-xs text-muted-foreground truncate max-w-[40vw] sm:max-w-none">
                             {log.ipAddress}
                           </div>
                         )}

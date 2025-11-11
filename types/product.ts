@@ -20,6 +20,8 @@ export interface ProductFormData {
   unit?: string;
   numericValue?: number;
   lowStockThreshold?: number;
+  costPrice?: number;
+  retailPrice?: number;
 }
 
 // API response types
@@ -48,6 +50,8 @@ export interface CreateProductRequest {
   numericValue?: number;
   lowStockThreshold?: number;
   locationId?: number;
+  costPrice?: number;
+  retailPrice?: number;
 }
 
 // Update product request
@@ -58,6 +62,8 @@ export interface UpdateProductRequest {
   unit?: string;
   numericValue?: number;
   lowStockThreshold?: number;
+  costPrice?: number;
+  retailPrice?: number;
 }
 
 // Product with inventory logs for detailed view

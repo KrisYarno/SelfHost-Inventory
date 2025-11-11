@@ -1,13 +1,12 @@
-import { NextResponse } from 'next/server';
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { hashPassword } from '@/lib/auth-helpers';
-import { withRateLimitHandler } from '@/lib/rate-limit/route-handler';
-import { rateLimitConfigs } from '@/lib/rate-limit/config';
+import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from '@/lib/rateLimit';
 
-export const POST = withRateLimitHandler(
-  async (request: NextRequest) => {
+export async function POST(request: NextRequest) {
   try {
+    const rateLimitHeaders = enforceRateLimit(request, 'auth:signup');
+
     const { email, password, username } = await request.json();
 
     // Validate input
@@ -58,7 +57,7 @@ export const POST = withRateLimitHandler(
 
     // In a real app, you might send an email notification here
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       message: 'Account created successfully. Please wait for administrator approval.',
       user: {
         id: user.id,
@@ -66,16 +65,18 @@ export const POST = withRateLimitHandler(
         username: user.username,
       },
     });
+    return applyRateLimitHeaders(response, rateLimitHeaders);
   } catch (error) {
+    if (error instanceof RateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status, headers: error.headers }
+      );
+    }
     console.error('Signup error:', error);
     return NextResponse.json(
       { error: 'Failed to create account' },
       { status: 500 }
     );
   }
-  },
-  { 
-    type: 'ip', // Use IP-based rate limiting for signup
-    config: rateLimitConfigs.auth.signup 
-  }
-);
+}

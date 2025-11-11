@@ -148,7 +148,7 @@ export default function AdminLogsPage() {
 
   if (isLoading) {
     return (
-      <div className="container mx-auto p-6 space-y-6">
+      <div className="container mx-auto p-4 sm:p-6 space-y-6 overflow-x-hidden">
         <h1 className="text-3xl font-bold">Inventory Change Log</h1>
         <Card>
           <CardContent className="p-6">
@@ -164,8 +164,8 @@ export default function AdminLogsPage() {
   }
 
   return (
-    <div className="container mx-auto p-6 space-y-6">
-      <div className="flex justify-between items-center">
+    <div className="container mx-auto p-4 sm:p-6 space-y-6 overflow-x-hidden">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
         <h1 className="text-3xl font-bold">Inventory Change Log</h1>
         <Button onClick={handleExportCSV} variant="outline">
           <Download className="mr-2 h-4 w-4" />

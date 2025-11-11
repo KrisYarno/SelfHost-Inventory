@@ -94,6 +94,7 @@
     --muted-foreground: 220 9% 46%;
     --popover: 0 0% 100%;
     --popover-foreground: 217 44% 11%;
+    --input: 220 13% 91%;
     --card: 0 0% 100%;
     --card-foreground: 217 44% 11%;
     --destructive: 0 82% 51%;
@@ -141,6 +142,7 @@
     --muted-foreground: 213 14% 64%;
     --popover: 217 44% 11%;
     --popover-foreground: 210 40% 98%;
+    --input: 215 25% 27%;
     --card: 217 44% 11%;
     --card-foreground: 210 40% 98%;
     --destructive: 0 84% 63%;
@@ -156,7 +158,7 @@
   }
   
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground overflow-x-hidden;
     font-feature-settings: "rlig" 1, "calt" 1;
     transition: background-color var(--duration-normal) var(--ease-in-out), 
                 color var(--duration-normal) var(--ease-in-out);

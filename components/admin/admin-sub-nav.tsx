@@ -9,7 +9,8 @@ import {
   FileText,
   Settings,
   Package,
-  Shield
+  Shield,
+  BarChart3
 } from "lucide-react";
 
 const adminNavItems = [
@@ -22,6 +23,11 @@ const adminNavItems = [
     title: "Mass Update",
     href: "/admin/inventory/mass-update",
     icon: Package,
+  },
+  {
+    title: "Reports",
+    href: "/admin/reports",
+    icon: BarChart3,
   },
   {
     title: "Change Logs",
@@ -43,6 +49,11 @@ const adminNavItems = [
     href: "/admin/settings",
     icon: Settings,
   },
+  {
+    title: "Backup",
+    href: "/admin/backup",
+    icon: FileText,
+  },
 ];
 
 export function AdminSubNav() {
@@ -50,8 +61,8 @@ export function AdminSubNav() {
 
   return (
     <div className="border-b">
-      <div className="flex h-16 items-center px-6">
-        <nav className="flex items-center space-x-6">
+      <div className="flex h-16 items-center px-4 sm:px-6">
+        <nav className="flex items-center gap-4 sm:gap-6 overflow-x-auto max-w-full">
           {adminNavItems.map((item) => {
             const isActive = pathname === item.href;
             const Icon = item.icon;

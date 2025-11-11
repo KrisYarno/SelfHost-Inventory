@@ -1,0 +1,96 @@
+services:
+  db:
+    image: mysql:8.4
+    command: >-
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: inventory
+      MYSQL_USER: inventory
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  migrate:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: mysql://inventory:${MYSQL_PASSWORD}@db:3306/inventory?connection_limit=20
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-advancedresearchpep.com}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >-
+      sh -lc "npm ci --ignore-scripts && npx prisma generate && (npx prisma migrate deploy || npx prisma db push) && node scripts/seed-default-location.js"
+    networks:
+      - internal
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      HOST: 0.0.0.0
+      DATABASE_URL: mysql://inventory:${MYSQL_PASSWORD}@db:3306/inventory?connection_limit=20
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-advancedresearchpep.com}
+    expose:
+      - "3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - internal
+    labels: {}
+    volumes:
+      - db_backups:/backup
+
+  backup:
+    image: fradelg/mysql-cron-backup
+    environment:
+      MYSQL_HOST: db
+      MYSQL_USER: inventory
+      MYSQL_PASS: ${MYSQL_PASSWORD}
+      MYSQL_DB: inventory
+      CRON_TIME: "0 3 * * *"
+      MYSQLDUMP_OPTS: "--single-transaction --quick --routines --events --no-tablespaces"
+      TZ: UTC
+    volumes:
+      - db_backups:/backup
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  db_data:
+  db_backups:

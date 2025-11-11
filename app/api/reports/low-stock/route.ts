@@ -64,7 +64,10 @@ export async function GET(request: NextRequest) {
     });
 
     productUsage.forEach((usages, productId) => {
-      const totalUsage = usages.reduce((sum, usage) => sum + usage, 0);
+      const totalUsage = usages.reduce(
+        (sum: number, usage: number) => sum + usage,
+        0
+      );
       const avgDailyUsage = totalUsage / 30;
       usageMap.set(productId, avgDailyUsage);
     });

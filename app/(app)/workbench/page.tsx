@@ -196,7 +196,10 @@ export default function WorkbenchPage() {
   }, [products, searchTerm, showInStockOnly, showLowStockOnly, showOutOfStockOnly]);
 
   // Group filtered products by baseName
-  const groupedProducts = filteredProducts.reduce((acc, product) => {
+  const groupedProducts = filteredProducts.reduce((
+    acc: Record<string, ProductWithQuantity[]>,
+    product: ProductWithQuantity
+  ) => {
     const baseName = product.baseName || 'Other';
     if (!acc[baseName]) {
       acc[baseName] = [];

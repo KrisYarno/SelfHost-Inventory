@@ -7,6 +7,13 @@ export async function GET(request: NextRequest) {
   try {
     // Get session
     const session = await getServerSession(authOptions);
+
+    if (!session?.user?.isAdmin) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
     
     // Get request headers
     const headersList = headers();
@@ -86,6 +93,14 @@ export async function GET(request: NextRequest) {
 // Also support POST for testing
 export async function POST(request: NextRequest) {
   try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user?.isAdmin) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
+
     const body = await request.json();
     
     return NextResponse.json({

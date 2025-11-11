@@ -258,10 +258,10 @@ export default function AdminUsersPage() {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full overflow-x-hidden">
       {/* Header */}
-      <div className="container mx-auto p-6 space-y-6">
-        <div className="flex items-center justify-between">
+      <div className="container mx-auto p-4 sm:p-6 space-y-6 min-w-0">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0">
           <div>
             <h1 className="text-3xl font-bold">User Management</h1>
             <p className="text-sm text-muted-foreground">
@@ -308,7 +308,7 @@ export default function AdminUsersPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {pendingUsers.map((user) => (
                   <UserApprovalCard
                     key={user.id}
@@ -328,8 +328,8 @@ export default function AdminUsersPage() {
         <Card>
           <CardHeader>
             <CardTitle>All Users</CardTitle>
-            <div className="flex flex-col sm:flex-row gap-4 mt-4">
-              <div className="flex gap-2">
+            <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 mt-4 min-w-0">
+              <div className="flex gap-2 flex-wrap">
                 <Button
                   onClick={() => {
                     setFilter('all');
@@ -362,7 +362,7 @@ export default function AdminUsersPage() {
                 </Button>
               </div>
               
-              <div className="flex-1 max-w-md">
+              <div className="flex-1 max-w-md min-w-0">
                 <Input
                   type="text"
                   placeholder="Search by email or username..."

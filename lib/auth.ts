@@ -1,58 +1,26 @@
 import { NextAuthOptions, getServerSession } from 'next-auth';
 import GoogleProvider from 'next-auth/providers/google';
-import CredentialsProvider from 'next-auth/providers/credentials';
 import prisma from '@/lib/prisma';
-import { verifyPassword } from '@/lib/auth-helpers';
+
+// Allowed email domains for Google OAuth, comma-separated
+// e.g. "advancedresearchpep.com,artech.tools"
+const allowedDomains = (process.env.ALLOWED_EMAIL_DOMAINS || 'advancedresearchpep.com')
+  .split(',')
+  .map((d) => d.trim().toLowerCase())
+  .filter(Boolean);
+const allowAllDomains = allowedDomains.includes('*');
 
 export const authOptions: NextAuthOptions = {
-  // Remove PrismaAdapter since we don't have the required tables
+  secret: process.env.NEXTAUTH_SECRET,
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID!,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-    }),
-    CredentialsProvider({
-      name: 'credentials',
-      credentials: {
-        email: { label: 'Email', type: 'email' },
-        password: { label: 'Password', type: 'password' },
-      },
-      async authorize(credentials) {
-        if (!credentials?.email || !credentials?.password) {
-          throw new Error('Invalid credentials');
-        }
-
-        const user = await prisma.user.findUnique({
-          where: { email: credentials.email },
-        });
-
-        if (!user || !user.passwordHash) {
-          throw new Error('Invalid credentials');
-        }
-
-        const isPasswordValid = await verifyPassword(
-          credentials.password,
-          user.passwordHash
-        );
-
-        if (!isPasswordValid) {
-          throw new Error('Invalid credentials');
-        }
-
-        // Check if user is approved
-        if (!user.isApproved) {
-          throw new Error('Your account is pending approval. Please wait for an administrator to approve your account.');
-        }
-
-        return {
-          id: user.id.toString(),
-          email: user.email,
-          name: user.username,
-          username: user.username,
-          isAdmin: user.isAdmin,
-          isApproved: user.isApproved,
-          defaultLocationId: user.defaultLocationId,
-        };
+      // Only hint hosted domain when a single domain is configured
+      authorization: allowedDomains.length === 1 ? {
+        params: { hd: allowedDomains[0], prompt: 'select_account' },
+      } : {
+        params: { prompt: 'select_account' },
       },
     }),
   ],
@@ -65,50 +33,60 @@ export const authOptions: NextAuthOptions = {
   },
   callbacks: {
     async signIn({ user, account, profile }) {
-      // For OAuth providers, create/update user with proper fields
-      if (account?.provider === 'google' && profile?.email) {
-        try {
-          let existingUser = await prisma.user.findUnique({
-            where: { email: profile.email },
-          });
-
-          if (existingUser) {
-            // Check if approved
-            if (!existingUser.isApproved) {
-              // Redirect to pending approval page
-              return '/auth/pending-approval';
-            }
-            // User exists and is approved, allow sign in
-            return true;
-          } else {
-            // Create new user with username from email
-            const newUser = await prisma.user.create({
-              data: {
-                email: profile.email,
-                username: profile.email.split('@')[0],
-                passwordHash: '', // OAuth users don't have passwords
-                isAdmin: false,
-                isApproved: false,
-              },
-            });
-            
-            // Redirect new users to pending approval
-            return '/auth/pending-approval';
-          }
-        } catch (error) {
-          console.error('Error in signIn callback:', error);
-          return false;
-        }
+      if (account?.provider !== 'google' || !profile?.email) {
+        return false;
       }
 
-      return true;
+      const email = profile.email.toLowerCase();
+      const emailDomain = email.split('@')[1];
+      if (!emailDomain || (!allowAllDomains && !allowedDomains.includes(emailDomain))) {
+        console.warn('[auth] Sign-in blocked by domain policy', {
+          email,
+          emailDomain,
+          allowedDomains,
+        });
+        return false;
+      }
+
+      // For OAuth providers, create/update user with proper fields
+      try {
+        const existingUser = await prisma.user.findUnique({
+          where: { email },
+        });
+
+        if (existingUser) {
+          if (!existingUser.isApproved) {
+            return '/auth/pending-approval';
+          }
+          return true;
+        }
+
+        await prisma.user.create({
+          data: {
+            email,
+            username: email.split('@')[0],
+            passwordHash: '',
+            isAdmin: false,
+            isApproved: false,
+          },
+        });
+
+        return '/auth/pending-approval';
+      } catch (error) {
+        console.error('Error in signIn callback:', error);
+        return false;
+      }
     },
     async jwt({ token, user, account, profile, trigger, session }) {
-      // Initial sign in
       if (account?.provider === 'google' && profile?.email) {
+        const domain = profile.email.toLowerCase().split('@')[1];
+        if (!domain || (!allowAllDomains && !allowedDomains.includes(domain))) {
+          return token;
+        }
+
         // For Google sign-in, fetch the user from our database
         const dbUser = await prisma.user.findUnique({
-          where: { email: profile.email },
+          where: { email: profile.email.toLowerCase() },
         });
 
         if (dbUser) {
@@ -119,14 +97,6 @@ export const authOptions: NextAuthOptions = {
           token.isApproved = dbUser.isApproved;
           token.defaultLocationId = dbUser.defaultLocationId;
         }
-      } else if (user) {
-        // For credentials sign-in
-        token.id = user.id;
-        token.email = user.email || '';
-        token.name = user.name || user.username || '';
-        token.isAdmin = user.isAdmin;
-        token.isApproved = user.isApproved;
-        token.defaultLocationId = user.defaultLocationId;
       }
 
       // Handle session updates (e.g., when user is approved)

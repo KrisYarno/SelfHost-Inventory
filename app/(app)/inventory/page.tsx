@@ -102,26 +102,22 @@ export default function InventoryPage() {
   // Get all category keys for accordion default value
   const allCategories = useMemo(() => Object.keys(groupedProducts), [groupedProducts]);
 
-  // Load expanded categories from localStorage on mount
+  // Load/maintain expanded categories (stable, no auto-expand on new data)
   useEffect(() => {
-    if (allCategories.length === 0) return;
-    
-    const saved = localStorage.getItem('inventory-expanded-categories');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        // Only keep categories that still exist
-        const validCategories = parsed.filter((cat: string) => allCategories.includes(cat));
-        // Add any new categories as expanded
-        const newCategories = allCategories.filter(cat => !parsed.includes(cat));
-        setExpandedCategories([...validCategories, ...newCategories]);
-      } catch {
-        // If parsing fails, default to all expanded
-        setExpandedCategories(allCategories);
-      }
-    } else {
-      // Default to all expanded
-      setExpandedCategories(allCategories);
+    if (allCategories.length === 0) {
+      setExpandedCategories([]);
+      return;
+    }
+
+    try {
+      const saved = localStorage.getItem('inventory-expanded-categories');
+      const parsed: string[] = saved ? JSON.parse(saved) : [];
+      // Keep only categories that still exist; do NOT auto-expand new ones
+      const next = parsed.filter((cat) => allCategories.includes(cat));
+      setExpandedCategories(next);
+    } catch {
+      // On parse error, default to collapsed
+      setExpandedCategories([]);
     }
   }, [allCategories]);
 
@@ -293,6 +289,9 @@ export default function InventoryPage() {
       quantity: product.totalQuantity,
       location: 1,
       lowStockThreshold: 1,
+      // default prices for client-side constructed object
+      costPrice: 0 as any,
+      retailPrice: 0 as any,
       currentQuantity: product.totalQuantity,
       lastUpdated: new Date(),
       deletedAt: null,

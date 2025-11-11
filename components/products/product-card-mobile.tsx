@@ -25,7 +25,8 @@ export function ProductCardMobile({
       className={cn(
         "relative overflow-hidden transition-all duration-200",
         "hover:shadow-md active:scale-[0.98]",
-        "cursor-pointer aspect-square",
+        // Better fit on very small screens; square from sm+
+        "cursor-pointer aspect-[3/4] sm:aspect-square",
         isOutOfStock && "opacity-75",
         className
       )}
@@ -60,7 +61,7 @@ export function ProductCardMobile({
 
       {/* Content */}
       <div className="flex flex-col items-center justify-center h-full p-3 text-center">
-        <Package className="h-8 w-8 text-muted-foreground/30 mb-2" />
+        <Package className="h-7 w-7 sm:h-8 sm:w-8 text-muted-foreground/30 mb-2" />
         <h3 className="font-medium text-sm leading-tight line-clamp-2">
           {product.baseName}
         </h3>

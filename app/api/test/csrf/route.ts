@@ -1,11 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth/next";
 import { validateCSRFToken } from "@/lib/csrf";
+import { authOptions } from "@/lib/auth";
 
 export const dynamic = 'force-dynamic';
 
 // Test endpoint to verify CSRF protection
 export async function POST(request: NextRequest) {
   try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user?.isApproved) {
+      return NextResponse.json(
+        { error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
+
     // Validate CSRF token
     const isValidCSRF = await validateCSRFToken(request);
     

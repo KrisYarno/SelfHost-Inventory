@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth/next';
 import { withRateLimitHandler } from '@/lib/rate-limit/route-handler';
+import { authOptions } from '@/lib/auth';
 
 // Test endpoint with very low rate limit for demonstration
 const testRateLimit = {
@@ -10,6 +12,14 @@ const testRateLimit = {
 
 export const GET = withRateLimitHandler(
   async (request: NextRequest) => {
+    const session = await getServerSession(authOptions);
+    if (!session?.user?.isAdmin) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
+
     // Simulate some processing time
     await new Promise(resolve => setTimeout(resolve, 100));
     
@@ -28,6 +38,14 @@ export const GET = withRateLimitHandler(
 // Different limits for POST requests
 export const POST = withRateLimitHandler(
   async (request: NextRequest) => {
+    const session = await getServerSession(authOptions);
+    if (!session?.user?.isAdmin) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+    }
+
     const body = await request.json();
     
     return NextResponse.json({

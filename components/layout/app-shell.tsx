@@ -70,8 +70,8 @@ export function AppShell({ children }: AppShellProps) {
           </div>
         </header>
 
-        {/* Main Content with padding for header and bottom nav */}
-        <main className="pt-16 pb-14">
+        {/* Main Content with padding for header and bottom nav (safe-area aware) */}
+        <main className="pt-16 pb-[calc(theme(spacing.14)+env(safe-area-inset-bottom))]">
           <div className="min-h-[calc(100vh-7.5rem)]">{children}</div>
         </main>
 
