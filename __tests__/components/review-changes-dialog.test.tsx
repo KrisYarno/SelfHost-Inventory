@@ -5,34 +5,32 @@ import { ReviewChangesDialog } from '@/components/journal/review-changes-dialog'
 import type { ProductWithQuantity } from '@/types/product'
 import type { JournalAdjustment } from '@/hooks/use-journal'
 
+const createMockProduct = (
+  id: number,
+  name: string,
+  currentQuantity: number,
+  unit: string
+): ProductWithQuantity => ({
+  id,
+  name,
+  baseName: null,
+  variant: null,
+  unit,
+  numericValue: null,
+  quantity: currentQuantity,
+  location: 1,
+  lowStockThreshold: 10,
+  deletedAt: null,
+  deletedBy: null,
+  costPrice: 0 as any,
+  retailPrice: 0 as any,
+  currentQuantity,
+});
+
 const mockProducts: ProductWithQuantity[] = [
-  {
-    id: 1,
-    name: 'Product 1',
-    sku: 'SKU001',
-    unit: 'EA',
-    description: 'Test product 1',
-    isActive: true,
-    currentQuantity: 100,
-  },
-  {
-    id: 2,
-    name: 'Product 2',
-    sku: 'SKU002',
-    unit: 'BOX',
-    description: 'Test product 2',
-    isActive: true,
-    currentQuantity: 50,
-  },
-  {
-    id: 3,
-    name: 'Product 3',
-    sku: 'SKU003',
-    unit: 'KG',
-    description: 'Test product 3',
-    isActive: true,
-    currentQuantity: 10,
-  },
+  createMockProduct(1, 'Product 1', 100, 'EA'),
+  createMockProduct(2, 'Product 2', 50, 'BOX'),
+  createMockProduct(3, 'Product 3', 10, 'KG'),
 ]
 
 const mockAdjustments: Record<number, JournalAdjustment> = {

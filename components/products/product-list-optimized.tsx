@@ -188,7 +188,7 @@ export function ProductListOptimized({
           isMobile ? "grid-cols-2" : "sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
         )}>
           {[...Array(8)].map((_, i) => (
-            <Skeleton key={i} className={isMobile ? "aspect-square" : "h-[180px]"} />
+            <Skeleton key={i} className={isMobile ? "aspect-[3/4] sm:aspect-square" : "h-[180px]"} />
           ))}
         </div>
       ) : filteredProducts.length === 0 ? (

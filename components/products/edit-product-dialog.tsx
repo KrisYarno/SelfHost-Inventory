@@ -35,13 +35,13 @@ export function EditProductDialog({
     try {
       setIsSubmitting(true);
       
-      // For edit, we only update the lowStockThreshold
-      // The product name, variant, unit, etc. are immutable
       const response = await fetch(`/api/products/${product.id}`, {
         method: "PUT",
         headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({
           lowStockThreshold: data.lowStockThreshold,
+          costPrice: data.costPrice,
+          retailPrice: data.retailPrice,
         }),
       });
 

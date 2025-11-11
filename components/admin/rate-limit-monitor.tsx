@@ -85,16 +85,16 @@ export function RateLimitMonitor() {
 
             return (
               <div key={limit.endpoint} className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{limit.endpoint}</span>
-                    {limit.blocked > 0 && (
-                      <Badge variant="destructive" className="text-xs">
-                        {limit.blocked} blocked
-                      </Badge>
-                    )}
+                <div className="flex items-center justify-between min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="font-medium truncate max-w-[60vw] sm:max-w-none">{limit.endpoint}</span>
+                  {limit.blocked > 0 && (
+                    <Badge variant="destructive" className="text-xs">
+                      {limit.blocked} blocked
+                    </Badge>
+                  )}
                   </div>
-                  <div className="flex items-center gap-2 text-sm">
+                  <div className="flex items-center gap-2 text-sm flex-shrink-0">
                     <Clock className="h-3 w-3 text-muted-foreground" />
                     <span className="text-muted-foreground">
                       Reset in {resetMinutes}m {resetSeconds}s

@@ -125,13 +125,19 @@ export function MassUpdateRecoveryDialog({
     onRetry(failuresToRetry);
   };
 
-  const groupedFailures = failures.reduce((acc, failure) => {
-    if (!acc[failure.reason]) {
-      acc[failure.reason] = [];
-    }
-    acc[failure.reason].push(failure);
-    return acc;
-  }, {} as Record<UpdateFailureReason, FailedUpdate[]>);
+  const groupedFailures = failures.reduce(
+    (
+      acc: Record<UpdateFailureReason, FailedUpdate[]>,
+      failure: FailedUpdate
+    ) => {
+      if (!acc[failure.reason]) {
+        acc[failure.reason] = [];
+      }
+      acc[failure.reason].push(failure);
+      return acc;
+    },
+    {} as Record<UpdateFailureReason, FailedUpdate[]>
+  );
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

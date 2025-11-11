@@ -5,6 +5,8 @@ export interface DashboardMetrics {
   totalProducts: number;
   activeProducts: number;
   totalInventoryValue: number;
+  totalInventoryCostValue: number;
+  totalInventoryRetailValue: number;
   totalStockQuantity: number;
   lowStockProducts: number;
   recentActivityCount: number;

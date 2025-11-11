@@ -36,6 +36,8 @@ model Product {
   quantity            Int                   @default(0)
   location            Int                   @default(1)
   lowStockThreshold   Int?                  @default(1)
+  costPrice           Decimal               @default(0.00) @db.Decimal(10, 2)
+  retailPrice         Decimal               @default(0.00) @db.Decimal(10, 2)
   deletedAt           DateTime?             @db.DateTime(0)
   deletedBy           Int?
   inventory_logs      inventory_logs[]

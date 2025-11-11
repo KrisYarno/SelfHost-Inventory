@@ -1,16 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
+import { ZodError } from 'zod';
 import { authOptions } from '@/lib/auth';
-import { 
+import {
   createInventoryAdjustment,
   validateStockAvailability,
-  OptimisticLockError 
+  OptimisticLockError,
 } from '@/lib/inventory';
 import { inventory_logs_logType } from '@prisma/client';
-import type { InventoryAdjustmentRequest } from '@/types/inventory';
 import { auditService } from '@/lib/audit';
 import prisma from '@/lib/prisma';
 import { validateCSRFToken } from '@/lib/csrf';
+import { InventoryAdjustmentSchema } from '@/lib/validation/inventory';
+import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from '@/lib/rateLimit';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,28 +23,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    const rateLimitHeaders = enforceRateLimit(request, 'inventory:adjust', {
+      identifier: session.user.id,
+    });
+
     // Validate CSRF token
     const isValidCSRF = await validateCSRFToken(request);
     if (!isValidCSRF) {
       return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
     }
 
-    const body: InventoryAdjustmentRequest = await request.json();
-    
-    // Validate request
-    if (!body.productId || !body.locationId || body.delta === undefined) {
-      return NextResponse.json(
-        { error: 'Missing required fields: productId, locationId, delta' },
-        { status: 400 }
-      );
-    }
-
-    if (body.delta === 0) {
-      return NextResponse.json(
-        { error: 'Delta cannot be zero' },
-        { status: 400 }
-      );
-    }
+    const body = InventoryAdjustmentSchema.parse(await request.json());
 
     // If removing stock, validate availability
     if (body.delta < 0) {
@@ -87,12 +78,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
       log: result.log,
       newVersion: result.newVersion,
     });
+    return applyRateLimitHeaders(response, rateLimitHeaders);
   } catch (error) {
+    if (error instanceof RateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status, headers: error.headers }
+      );
+    }
+
+    if (error instanceof ZodError) {
+      return NextResponse.json(
+        {
+          error: 'Invalid request payload',
+          details: error.flatten().fieldErrors,
+        },
+        { status: 400 }
+      );
+    }
+
     console.error('Error creating inventory adjustment:', error);
     
     // Handle optimistic lock errors specifically

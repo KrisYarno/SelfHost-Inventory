@@ -91,12 +91,15 @@ export async function GET() {
     ]);
 
     // Process user stats
-    const activeUsers = userStats.find(stat => stat.isApproved === true)?._count || 0;
-    const pendingUsers = userStats.find(stat => stat.isApproved === false)?._count || 0;
+    const activeUsers = userStats.find((stat: { isApproved: boolean; _count: number }) => stat.isApproved === true)?._count || 0;
+    const pendingUsers = userStats.find((stat: { isApproved: boolean; _count: number }) => stat.isApproved === false)?._count || 0;
     const totalUsers = activeUsers + pendingUsers;
 
     // Process stock stats
-    const stockStatsMap = stockStats.reduce((acc, stat) => {
+    const stockStatsMap = stockStats.reduce((
+      acc: Record<string, number>,
+      stat: { status: string; count: bigint }
+    ) => {
       acc[stat.status] = Number(stat.count);
       return acc;
     }, {} as Record<string, number>);

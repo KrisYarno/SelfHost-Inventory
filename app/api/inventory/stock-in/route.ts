@@ -1,27 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
+import { ZodError } from 'zod';
 import { authOptions } from '@/lib/auth';
 import { createInventoryAdjustment } from '@/lib/inventory';
 import { inventory_logs_logType } from '@prisma/client';
-import type { StockInRequest } from '@/types/inventory';
 import { 
   AppError, 
   UnauthorizedError, 
-  InvalidQuantityError,
   errorLogger
 } from "@/lib/error-handling";
 import { validateCSRFToken } from '@/lib/csrf';
-import { withRateLimitHandler } from '@/lib/rate-limit/route-handler';
+import { StockInSchema } from '@/lib/validation/inventory';
+import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from '@/lib/rateLimit';
 
 export const dynamic = 'force-dynamic';
 
-export const POST = withRateLimitHandler(
-  async (request: NextRequest) => {
+export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
     if (!session?.user?.isApproved) {
       throw new UnauthorizedError("add stock to inventory");
     }
+
+    const rateLimitHeaders = enforceRateLimit(request, 'inventory:stock-in', {
+      identifier: session.user.id,
+    });
 
     // Validate CSRF token
     const isValidCSRF = await validateCSRFToken(request);
@@ -29,22 +32,7 @@ export const POST = withRateLimitHandler(
       return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
     }
 
-    const body: StockInRequest = await request.json();
-    
-    // Validate request
-    if (!body.productId || !body.locationId || !body.quantity) {
-      throw new AppError(
-        "Missing required fields: productId, locationId, and quantity",
-        "MISSING_REQUIRED_FIELDS",
-        400
-      );
-    }
-
-    if (body.quantity <= 0 || !Number.isInteger(body.quantity)) {
-      throw new InvalidQuantityError(
-        `Invalid quantity for Product ID ${body.productId}: ${body.quantity}`
-      );
-    }
+    const body = StockInSchema.parse(await request.json());
 
     // Create the stock-in adjustment
     const result = await createInventoryAdjustment(
@@ -55,12 +43,30 @@ export const POST = withRateLimitHandler(
       inventory_logs_logType.ADJUSTMENT
     );
 
-    return NextResponse.json({
+    const response = NextResponse.json({
       success: true,
       log: result,
     });
+    return applyRateLimitHeaders(response, rateLimitHeaders);
   } catch (error) {
     errorLogger.log(error as Error);
+    
+    if (error instanceof RateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status, headers: error.headers }
+      );
+    }
+
+    if (error instanceof ZodError) {
+      return NextResponse.json(
+        {
+          error: 'Invalid request payload',
+          details: error.flatten().fieldErrors,
+        },
+        { status: 400 }
+      );
+    }
     
     if (error instanceof AppError) {
       return NextResponse.json(
@@ -84,9 +90,4 @@ export const POST = withRateLimitHandler(
       { status: 500 }
     );
   }
-  },
-  { 
-    type: 'user', // Use user-based rate limiting for authenticated operations
-    configPath: '/api/inventory' // Use inventory rate limit config
-  }
-);
+}

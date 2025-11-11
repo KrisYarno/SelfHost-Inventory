@@ -18,65 +18,81 @@ export async function GET(request: NextRequest) {
     const locationId = searchParams.get("locationId");
 
     // Build where clause for date filtering
-    const dateFilter: any = {};
+    const activityFilter: any = {};
     if (startDate) {
-      dateFilter.changeTime = { ...dateFilter.changeTime, gte: new Date(startDate) };
+      activityFilter.changeTime = { ...activityFilter.changeTime, gte: new Date(startDate) };
     }
     if (endDate) {
-      dateFilter.changeTime = { ...dateFilter.changeTime, lte: new Date(endDate) };
+      activityFilter.changeTime = { ...activityFilter.changeTime, lte: new Date(endDate) };
     }
     if (locationId) {
-      dateFilter.locationId = parseInt(locationId);
+      activityFilter.locationId = parseInt(locationId);
     }
+
+    const locationFilter = locationId ? { locationId: parseInt(locationId) } : undefined;
 
     // Get total products count
     const totalProducts = await prisma.product.count();
     const activeProducts = totalProducts; // All products are considered active
 
     // Get current inventory levels and calculate total stock
-    const inventoryLevels = await prisma.inventory_logs.groupBy({
-      by: ['productId', 'locationId'],
-      _sum: {
-        delta: true
+    const productLocations = await prisma.product_locations.findMany({
+      where: locationFilter,
+      select: {
+        productId: true,
+        quantity: true,
       },
-      where: dateFilter
     });
 
-    // Calculate total stock quantity
     let totalStockQuantity = 0;
     const productStockMap = new Map<number, number>();
 
-    inventoryLevels.forEach(level => {
-      const quantity = level._sum.delta || 0;
-      totalStockQuantity += quantity;
-      
-      const currentStock = productStockMap.get(level.productId) || 0;
-      productStockMap.set(level.productId, currentStock + quantity);
+    productLocations.forEach((pl) => {
+      totalStockQuantity += pl.quantity;
+      productStockMap.set(pl.productId, (productStockMap.get(pl.productId) || 0) + pl.quantity);
     });
 
-    // Count products with low stock (less than 10 units)
     const lowStockThreshold = 10;
+    const products = await prisma.product.findMany({
+      select: {
+        id: true,
+        costPrice: true,
+        retailPrice: true,
+        lowStockThreshold: true,
+      },
+    });
+
     let lowStockProducts = 0;
-    productStockMap.forEach(quantity => {
-      if (quantity < lowStockThreshold && quantity > 0) {
+    let totalInventoryCostValue = 0;
+    let totalInventoryRetailValue = 0;
+
+    products.forEach((product) => {
+      const quantity = productStockMap.get(product.id) || 0;
+      const threshold = product.lowStockThreshold ?? lowStockThreshold;
+      if (quantity > 0 && quantity < threshold) {
         lowStockProducts++;
       }
+
+      const cost = Number(product.costPrice ?? 0);
+      const retail = Number(product.retailPrice ?? 0);
+      totalInventoryCostValue += quantity * cost;
+      totalInventoryRetailValue += quantity * retail;
     });
 
     // Get activity count within date range
     const recentActivityCount = await prisma.inventory_logs.count({
-      where: dateFilter
+      where: activityFilter
     });
 
-    // Calculate total inventory value (placeholder - would need cost data)
-    // For now, we'll use a placeholder calculation
-    const totalInventoryValue = totalStockQuantity * 10; // $10 average value per unit
+    const totalInventoryValue = totalInventoryRetailValue;
 
     const metrics: MetricsResponse = {
       metrics: {
         totalProducts,
         activeProducts,
         totalInventoryValue,
+        totalInventoryCostValue,
+        totalInventoryRetailValue,
         totalStockQuantity,
         lowStockProducts,
         recentActivityCount,

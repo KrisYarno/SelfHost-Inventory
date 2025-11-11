@@ -1,4 +1,3 @@
-import { Prisma } from '@prisma/client';
 
 interface QueryLog {
   query: string;
@@ -87,8 +86,9 @@ class DatabaseMonitor {
 export const dbMonitor = new DatabaseMonitor();
 
 // Prisma middleware for query logging
-export function createPrismaMiddleware(): Prisma.Middleware {
-  return async (params, next) => {
+// Legacy middleware factory (no longer used with Prisma v6). Kept for reference.
+export function createPrismaMiddleware(): any {
+  return async (params: any, next: (params: any) => Promise<any>) => {
     const start = Date.now();
     
     try {

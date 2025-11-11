@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
+import { ZodError } from "zod";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
+import { validateCSRFToken } from "@/lib/csrf";
+import { BatchInventoryAdjustmentSchema } from "@/lib/validation/inventory";
+import { enforceRateLimit, RateLimitError, applyRateLimitHeaders } from "@/lib/rateLimit";
 
 export async function POST(request: NextRequest) {
   try {
@@ -11,28 +15,21 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const body = await request.json();
-    const { adjustments, type } = body;
+    const rateLimitHeaders = enforceRateLimit(request, "inventory:batch-adjust", {
+      identifier: session.user.id,
+    });
 
-    // Manual validation
-    if (!adjustments || !Array.isArray(adjustments)) {
-      return NextResponse.json(
-        { error: "Invalid request data: adjustments must be an array" },
-        { status: 400 }
-      );
+    const isValidCSRF = await validateCSRFToken(request);
+    if (!isValidCSRF) {
+      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
     }
 
-    for (const adj of adjustments) {
-      if (typeof adj.productId !== 'number' || typeof adj.locationId !== 'number' || typeof adj.delta !== 'number') {
-        return NextResponse.json(
-          { error: "Invalid adjustment data: productId, locationId, and delta must be numbers" },
-          { status: 400 }
-        );
-      }
-    }
+    const { adjustments } = BatchInventoryAdjustmentSchema.parse(
+      await request.json()
+    );
 
     // Get product names for audit logging
-    const productIds = adjustments.map((adj: any) => adj.productId);
+    const productIds = adjustments.map((adj) => adj.productId);
     const products = await prisma.product.findMany({
       where: { id: { in: productIds } },
       select: { id: true, name: true }
@@ -41,8 +38,8 @@ export async function POST(request: NextRequest) {
 
     // Execute all adjustments in a transaction
     const results = await prisma.$transaction(async (tx: any) => {
-      const logs = [];
-      const auditUpdates = [];
+      const logs: any[] = [];
+      const auditUpdates: Array<{ productId: number; productName: string; delta: number }> = [];
 
       for (const adjustment of adjustments) {
         try {
@@ -79,7 +76,7 @@ export async function POST(request: NextRequest) {
               data: {
                 productId: adjustment.productId,
                 locationId: adjustment.locationId,
-                userId: session.user.id,
+                userId: parseInt(session.user.id),
                 delta: adjustment.delta,
                 changeTime: new Date(),
                 logType: "ADJUSTMENT",
@@ -155,13 +152,31 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return NextResponse.json({ 
+    const response = NextResponse.json({ 
       success: true, 
       logs: results.logs,
       count: results.logs.length 
     });
+    return applyRateLimitHeaders(response, rateLimitHeaders);
 
   } catch (error: any) {
+    if (error instanceof RateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status, headers: error.headers }
+      );
+    }
+
+    if (error instanceof ZodError) {
+      return NextResponse.json(
+        {
+          error: "Invalid request payload",
+          details: error.flatten().fieldErrors,
+        },
+        { status: 400 }
+      );
+    }
+
     console.error("Batch adjustment error:", error);
 
     // Check if it's an optimistic lock error

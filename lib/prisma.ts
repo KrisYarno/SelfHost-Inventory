@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client'
-import { createPrismaMiddleware } from './db-monitoring'
+import { dbMonitor } from './db-monitoring'
 
 const prismaClientSingleton = () => {
   const client = new PrismaClient({
@@ -8,9 +8,13 @@ const prismaClientSingleton = () => {
       : ['error'],
   })
 
-  // Add query monitoring middleware in development
+  // Add lightweight query monitoring in development via $on('query')
   if (process.env.NODE_ENV === 'development') {
-    client.$use(createPrismaMiddleware())
+    client.$on('query', (e: any) => {
+      try {
+        dbMonitor.logQuery(e.query, e.params, e.duration)
+      } catch {}
+    })
   }
 
   return client

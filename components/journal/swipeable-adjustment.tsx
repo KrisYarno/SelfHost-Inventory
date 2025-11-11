@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface SwipeableAdjustmentProps {
@@ -22,32 +22,63 @@ export function SwipeableAdjustment({
   'aria-label': ariaLabel,
   tabIndex,
 }: SwipeableAdjustmentProps) {
-  const [touchStart, setTouchStart] = useState<number | null>(null);
-  const [touchEnd, setTouchEnd] = useState<number | null>(null);
+  const startXRef = useRef<number | null>(null);
+  const startYRef = useRef<number | null>(null);
+  const [lastX, setLastX] = useState<number | null>(null);
   const [swiping, setSwiping] = useState(false);
   const [swipeDistance, setSwipeDistance] = useState(0);
 
-  // Minimum swipe distance (in px) to trigger action
-  const minSwipeDistance = 50;
+  // Swipe sensitivity tuning
+  // - Require more horizontal distance
+  // - Only act if horizontal dominates vertical
+  const minSwipeDistance = 80; // px
+  const minStartThreshold = 12; // px before we consider entering swipe state
 
   const onTouchStart = (e: React.TouchEvent) => {
-    setTouchEnd(null);
-    setTouchStart(e.targetTouches[0].clientX);
-    setSwiping(true);
+    const t = e.targetTouches[0];
+    startXRef.current = t.clientX;
+    startYRef.current = t.clientY;
+    setLastX(t.clientX);
+    setSwiping(false); // don't enter swiping until we confirm horizontal intent
+    setSwipeDistance(0);
   };
 
   const onTouchMove = (e: React.TouchEvent) => {
-    if (!touchStart) return;
-    
-    const currentTouch = e.targetTouches[0].clientX;
-    setTouchEnd(currentTouch);
-    setSwipeDistance(currentTouch - touchStart);
+    const startX = startXRef.current;
+    const startY = startYRef.current;
+    if (startX == null || startY == null) return;
+
+    const t = e.targetTouches[0];
+    const dx = t.clientX - startX;
+    const dy = t.clientY - startY;
+
+    // If vertical movement dominates, treat as scroll and never enter swiping
+    if (!swiping) {
+      if (Math.abs(dy) > Math.abs(dx)) {
+        return; // let page scroll
+      }
+      // Require a small horizontal threshold before engaging swiping visuals
+      if (Math.abs(dx) < minStartThreshold) {
+        return;
+      }
+      setSwiping(true);
+    }
+
+    setLastX(t.clientX);
+    setSwipeDistance(dx);
   };
 
   const onTouchEnd = () => {
-    if (!touchStart || !touchEnd) return;
-    
-    const distance = touchEnd - touchStart;
+    const startX = startXRef.current;
+    if (startX == null || lastX == null) {
+      startXRef.current = null;
+      startYRef.current = null;
+      setSwiping(false);
+      setSwipeDistance(0);
+      return;
+    }
+
+    const distance = lastX - startX;
     const isLeftSwipe = distance < -minSwipeDistance;
     const isRightSwipe = distance > minSwipeDistance;
 
@@ -60,6 +91,8 @@ export function SwipeableAdjustment({
     }
 
     // Reset
+    startXRef.current = null;
+    startYRef.current = null;
     setSwiping(false);
     setSwipeDistance(0);
   };
@@ -78,7 +111,7 @@ export function SwipeableAdjustment({
   return (
     <div
       className={cn(
-        "relative overflow-hidden touch-pan-y focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-primary",
+        "relative overflow-x-visible overflow-y-hidden touch-pan-y focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-primary",
         className
       )}
       onTouchStart={onTouchStart}

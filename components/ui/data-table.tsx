@@ -45,13 +45,13 @@ export function DataTable<T extends Record<string, unknown>>({
 
   return (
     <div className={`overflow-x-auto ${className}`}>
-      <table className="w-full">
+      <table className="w-full table-fixed sm:table-auto">
         <thead>
           <tr className="border-b border-border">
             {columns.map((column) => (
               <th
                 key={column.key}
-                className={`text-left py-3 px-4 font-medium text-sm text-gray-700 ${column.className || ''}`}
+                className={`text-left py-3 px-4 font-medium text-sm text-gray-700 whitespace-nowrap ${column.className || ''}`}
               >
                 {column.header}
               </th>
@@ -67,7 +67,7 @@ export function DataTable<T extends Record<string, unknown>>({
               {columns.map((column) => (
                 <td
                   key={column.key}
-                  className={`py-4 px-4 text-sm ${column.className || ''}`}
+                  className={`py-4 px-4 text-sm align-top break-words ${column.className || ''}`}
                 >
                   {column.cell ? column.cell(item) : (item[column.key] as React.ReactNode)}
                 </td>

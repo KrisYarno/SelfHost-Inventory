@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, BarChart3, Settings, Warehouse, BookOpen } from "lucide-react";
+import { Home, Package, Settings, Warehouse, BookOpen, BarChart3 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -31,12 +31,7 @@ const navigation = [
     icon: BookOpen,
     description: "Bulk inventory adjustments",
   },
-  {
-    name: "Reports",
-    href: "/reports",
-    icon: BarChart3,
-    description: "Analytics and reports",
-  },
+  // Reports moved under Admin menu (see below)
 ];
 
 const adminNavigation = [
@@ -45,6 +40,12 @@ const adminNavigation = [
     href: "/admin",
     icon: Settings,
     description: "Administration panel",
+  },
+  {
+    name: "Reports",
+    href: "/admin/reports",
+    icon: BarChart3,
+    description: "Analytics and reports",
   },
 ];
 

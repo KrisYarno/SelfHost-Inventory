@@ -411,8 +411,8 @@ export default function JournalPage() {
           <CardTitle id="products-heading">Products</CardTitle>
         </CardHeader>
         <CardContent role="main" aria-labelledby="products-heading">
-          <ScrollArea className="h-[600px]" aria-label="Products list">
-            <div className="space-y-2" role="list" aria-live="polite" aria-relevant="additions removals">
+          <ScrollArea className="h-[70vh] sm:h-[600px]" aria-label="Products list">
+            <div className="space-y-2 pr-3 sm:pr-0" role="list" aria-live="polite" aria-relevant="additions removals">
               {isLoading ? (
                 <div className="text-center py-8 text-muted-foreground" role="status" aria-live="polite">
                   <span aria-label="Loading products">Loading products...</span>

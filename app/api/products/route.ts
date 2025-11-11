@@ -1,11 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
+import { ZodError } from "zod";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
-import { ProductFilters, CreateProductRequest } from "@/types/product";
-import { getProductsWithQuantities, isProductUnique, getNextNumericValue, formatProductName } from "@/lib/products";
+import { ProductFilters } from "@/types/product";
+import {
+  getProductsWithQuantities,
+  isProductUnique,
+  getNextNumericValue,
+  formatProductName,
+} from "@/lib/products";
 import { auditService } from "@/lib/audit";
 import { validateCSRFToken } from "@/lib/csrf";
+import { ProductCreateSchema } from "@/lib/validation/product";
+import {
+  applyRateLimitHeaders,
+  enforceRateLimit,
+  RateLimitError,
+} from "@/lib/rateLimit";
 
 export const dynamic = 'force-dynamic';
 
@@ -59,22 +71,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const rateLimitHeaders = enforceRateLimit(request, "products:POST", {
+      identifier: session.user.id,
+    });
+
     // Validate CSRF token
     const isValidCSRF = await validateCSRFToken(request);
     if (!isValidCSRF) {
       return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
     }
 
-    const body: CreateProductRequest = await request.json();
+    const body = ProductCreateSchema.parse(await request.json());
     
-    // Validate required fields
-    if (!body.name) {
-      return NextResponse.json(
-        { error: "Product name is required" },
-        { status: 400 }
-      );
-    }
-
     // Check uniqueness if baseName and variant are provided
     if (body.baseName && body.variant) {
       const isUnique = await isProductUnique(body.baseName, body.variant);
@@ -104,6 +112,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const costPrice = Number(body.costPrice ?? 0);
+    const retailPrice = Number(body.retailPrice ?? 0);
+
     // Create the product
     const product = await prisma.product.create({
       data: {
@@ -115,6 +126,8 @@ export async function POST(request: NextRequest) {
         quantity: 0,
         location: locationId,
         lowStockThreshold: body.lowStockThreshold ?? 10,
+        costPrice: costPrice >= 0 ? costPrice : 0,
+        retailPrice: retailPrice >= 0 ? retailPrice : 0,
       },
     });
 
@@ -125,8 +138,26 @@ export async function POST(request: NextRequest) {
       product.name
     );
 
-    return NextResponse.json(product, { status: 201 });
+    const response = NextResponse.json(product, { status: 201 });
+    return applyRateLimitHeaders(response, rateLimitHeaders);
   } catch (error) {
+    if (error instanceof RateLimitError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status, headers: error.headers }
+      );
+    }
+
+    if (error instanceof ZodError) {
+      return NextResponse.json(
+        {
+          error: "Invalid request payload",
+          details: error.flatten().fieldErrors,
+        },
+        { status: 400 }
+      );
+    }
+
     console.error("Error creating product:", error);
     return NextResponse.json(
       { error: "Failed to create product" },

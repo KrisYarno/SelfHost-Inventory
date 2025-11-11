@@ -14,6 +14,8 @@ interface ProductFormInputs {
   size: string;
   lowStockThreshold: number;
   locationId?: number;
+  costPrice: number;
+  retailPrice: number;
 }
 
 interface ProductFormProps {
@@ -50,6 +52,8 @@ export function ProductForm({
       size: product ? `${product.numericValue || ''} ${product.unit || ''}`.trim() : "",
       lowStockThreshold: product?.lowStockThreshold || 10,
       locationId: locations[0]?.id,
+      costPrice: product ? Number(product.costPrice ?? 0) : 0,
+      retailPrice: product ? Number(product.retailPrice ?? 0) : 0,
     },
   });
 
@@ -81,6 +85,9 @@ export function ProductForm({
       // Construct name with single space
       const name = `${data.baseName} ${variant}`;
 
+      const sanitizedCostPrice = Number.isFinite(data.costPrice) ? data.costPrice : 0;
+      const sanitizedRetailPrice = Number.isFinite(data.retailPrice) ? data.retailPrice : 0;
+
       const productData = {
         name,
         baseName: data.baseName,
@@ -89,6 +96,8 @@ export function ProductForm({
         numericValue,
         lowStockThreshold: data.lowStockThreshold,
         locationId: data.locationId,
+        costPrice: sanitizedCostPrice,
+        retailPrice: sanitizedRetailPrice,
       };
 
       await onSubmit(productData);
@@ -199,6 +208,52 @@ export function ProductForm({
         {errors.lowStockThreshold && (
           <p className="text-sm text-destructive">{errors.lowStockThreshold.message}</p>
         )}
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor="costPrice">Cost Price</Label>
+          <Input
+            id="costPrice"
+            type="number"
+            step="0.01"
+            min="0"
+            placeholder="0.00"
+            {...register("costPrice", {
+              valueAsNumber: true,
+              min: {
+                value: 0,
+                message: "Cost must be 0 or greater",
+              },
+            })}
+            disabled={isSubmitting}
+          />
+          {errors.costPrice && (
+            <p className="text-sm text-destructive">{errors.costPrice.message}</p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="retailPrice">Retail Price</Label>
+          <Input
+            id="retailPrice"
+            type="number"
+            step="0.01"
+            min="0"
+            placeholder="0.00"
+            {...register("retailPrice", {
+              valueAsNumber: true,
+              min: {
+                value: 0,
+                message: "Retail price must be 0 or greater",
+              },
+            })}
+            disabled={isSubmitting}
+          />
+          {errors.retailPrice && (
+            <p className="text-sm text-destructive">{errors.retailPrice.message}</p>
+          )}
+        </div>
       </div>
 
       <div className="flex justify-end gap-3 pt-4">

@@ -39,6 +39,8 @@ export function ProductCard({
     <Card 
       className={cn(
         "relative overflow-hidden transition-all duration-300 hover:shadow-lg",
+        // Keep consistent height to reduce layout shift
+        "min-h-[180px]",
         className
       )}
     >
@@ -101,10 +103,10 @@ export function ProductCard({
         {/* Product info */}
         <div className="space-y-2">
           <div>
-            <h3 className="font-semibold text-lg leading-tight">
+            <h3 className="font-semibold text-base sm:text-lg leading-tight line-clamp-1">
               {product.baseName}
             </h3>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-xs sm:text-sm text-muted-foreground line-clamp-1">
               {product.variant}
             </p>
           </div>

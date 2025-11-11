@@ -1,31 +1,22 @@
-# Inventory Management System
+## Inventory App (Rebuild)
 
-A modern, ledger-based inventory management system built with Next.js 14, featuring real-time tracking, comprehensive audit trails, and multi-location support.
+Modern inventory management built with Next.js (App Router), TypeScript, Prisma (MySQL), and Docker. This README reflects the current Rebuild state: auth, pricing, migrations, and Docker/Caddy deployment.
 
-## 🚀 Features
-
-### Core Functionality
-- **Workbench Mode**: Digital order-packer interface for efficient order fulfillment
-- **Journal Mode**: Bulk inventory adjustments with visual feedback
-- **Multi-Location Support**: Manage inventory across multiple locations
-- **Product Management**: Complete CRUD operations with search and filtering
-- **Ledger Architecture**: Immutable audit trail for all inventory changes
-- **Real-time Analytics**: Comprehensive reports and dashboards
-
-### Technical Highlights
-- **Authentication**: NextAuth.js with Google OAuth and credentials
-- **Database**: MySQL with Prisma ORM (ledger-based design)
-- **UI Framework**: Tailwind CSS + shadcn/ui components  
-- **State Management**: Zustand for complex UI state, Context API for location management
-- **Type Safety**: TypeScript throughout with strict mode
-- **Dark Mode**: Full theme support with system preference detection
+### Highlights
+- Google OAuth (NextAuth v4), domain allowlist via `ALLOWED_EMAIL_DOMAINS`.
+- Admin + approval model; pending-approval flow for new users.
+- Product pricing (`costPrice`, `retailPrice`); reports include inventory cost and retail value.
+- Optimistic locking for inventory updates; detailed audit trail.
+- `/api/healthz` endpoint for container health.
+- Docker Compose stack with DB, migrate, app, nightly backup.
+- Caddy reverse proxy support via external Docker network.
 
 ## 📦 Getting Started
 
 ### Prerequisites
-- Node.js 18.17 or later
-- MySQL database
-- SendGrid account for email notifications (optional)
+- Node.js 20+
+- MySQL (or use Docker Compose)
+- Google OAuth Client ID/Secret
 
 ### Installation
 
@@ -39,32 +30,24 @@ cd "inventory app rebuild"
 npm install
 ```
 
-3. Set up environment variables:
-```bash
-cp .env.example .env.local
-```
-
-Edit `.env.local` with your configuration:
+3. Environment
+Copy `.env.example` → `.env` and fill values:
 ```env
-DATABASE_URL="mysql://user:password@host:port/database?connection_limit=20"
-NEXTAUTH_URL="http://localhost:3000"
-NEXTAUTH_SECRET="generate-with-openssl-rand-base64-32"
-GOOGLE_CLIENT_ID="your-google-client-id"
-GOOGLE_CLIENT_SECRET="your-google-client-secret"
-SENDGRID_API_KEY="your-sendgrid-api-key"
-FROM_EMAIL="noreply@yourdomain.com"
+NEXTAUTH_URL=http://localhost:3000
+NEXTAUTH_SECRET=<openssl rand -base64 32>
+GOOGLE_CLIENT_ID=<client-id>
+GOOGLE_CLIENT_SECRET=<client-secret>
+
+# Optional for local DB; Compose sets its own DATABASE_URL for services
+# DATABASE_URL=mysql://user:pass@localhost:3306/inventory
+
+# Domain allowlist for Google OAuth
+ALLOWED_EMAIL_DOMAINS=advancedresearchpep.com
 ```
 
-4. Set up the database:
+4. Generate Prisma Client
 ```bash
-# Pull existing schema (if using existing database)
-npm run db:pull
-
-# Generate Prisma Client
-npm run db:generate
-
-# If starting fresh, run migrations
-npx prisma migrate dev
+npx prisma generate
 ```
 
 5. Start the development server:
@@ -72,7 +55,7 @@ npx prisma migrate dev
 npm run dev
 ```
 
-Visit `http://localhost:3000` to see the application.
+Open `http://localhost:3000`.
 
 ## 🏗️ Project Structure
 
@@ -83,8 +66,10 @@ inventory-app-rebuild/
 │   │   ├── workbench/     # Order fulfillment interface
 │   │   ├── journal/       # Bulk adjustment interface
 │   │   ├── products/      # Product management
-│   │   ├── inventory/     # Inventory logs
-│   │   └── reports/       # Analytics dashboard
+│   │   ├── inventory/     # Inventory lists & logs
+│   │   └── admin/
+│   │       ├── reports/   # Analytics dashboard (moved under Admin)
+│   │       └── backup/    # GUI for listing/downloading backups
 │   ├── api/               # API routes
 │   └── auth/              # Authentication pages
 ├── components/            # React components
@@ -95,6 +80,156 @@ inventory-app-rebuild/
 ├── public/                # Static assets
 └── types/                 # TypeScript types
 ```
+
+---
+
+## Docker Compose
+
+Services:
+- `db` (MySQL 8.4)
+- `migrate` (one-shot): `migrate deploy` OR fallback to `db push`, then seed default location
+- `app` (Next standalone): binds `0.0.0.0:3000`, healthcheck via `/api/healthz`
+- `backup`: nightly mysqldump to volume
+
+Bring up:
+```
+docker compose up -d db
+docker compose up migrate
+docker compose up -d --build app backup
+```
+
+Health:
+```
+curl -I https://inventorylocal.artech.tools/api/healthz  # expect 200
+```
+
+### Caddy
+App joins external `caddy` network with alias `inventory`. Example Caddyfile (include defense-in-depth header):
+```
+inventorylocal.artech.tools {
+  encode gzip zstd
+  reverse_proxy inventory:3000 {
+    header_up -x-middleware-subrequest
+  }
+}
+
+# Production domain
+inventory.artech.tools {
+  encode gzip zstd
+  reverse_proxy inventory:3000 {
+    header_up -x-middleware-subrequest
+  }
+}
+```
+Reload: `docker exec caddy_proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`
+
+---
+
+### Backups
+
+The `backup` service runs nightly mysqldump to the `db_backups` volume. You can also trigger a manual dump and download it.
+
+- Manual one‑off backup (service, immediate):
+  ```bash
+  docker compose run --rm backup sh -lc 'mysqldump -h "$MYSQL_HOST" -u "$MYSQL_USER" -p"$MYSQL_PASS" "$MYSQL_DB" \
+    --single-transaction --quick --routines --events --no-tablespaces \
+    > /backup/manual-$(date +%F-%H%M%S).sql && ls -lh /backup'
+  ```
+  - Uses the `inventory` DB user; `--no-tablespaces` avoids PROCESS privilege errors.
+  - Note: `docker compose run --rm backup` (without a command) starts cron and waits; it will not exit.
+
+- GUI (Admin → Backup):
+  - “Create Backup” attempts a dump and prompts download; list shows files from `/backup`.
+  - If a 500 occurs due to client/server auth mismatch, use the manual one‑off command above, then use the GUI to download the newest file.
+
+- List backups:
+  ```bash
+  docker compose run --rm backup sh -lc 'ls -lh /backup'
+  ```
+
+- Test schedule quickly:
+  ```bash
+  docker compose run --rm -e CRON_TIME='*/1 * * * *' backup
+  # wait ~60–90s, then list backups
+  docker compose run --rm backup sh -lc 'ls -lh /backup'
+  ```
+
+- Restore example (from inside DB container):
+  ```bash
+  docker compose exec -T db sh -lc 'mysql -uinventory -p"$MYSQL_PASSWORD" inventory' < path/to/backup.sql
+  ```
+
+---
+
+## Clone Production (Railway) → Local
+
+1) Export (no CREATE DATABASE):
+```
+set -a; source .env.railway; set +a
+
+mysqldump \
+  -h "$RAILWAY_TCP_PROXY_DOMAIN" \
+  -P "$RAILWAY_TCP_PROXY_PORT" \
+  -u "$MYSQLUSER" \
+  -p"$MYSQLPASSWORD" \
+  --single-transaction --quick --routines --events \
+  "$MYSQLDATABASE" \
+  > railway-backup.sql
+```
+
+2) Stop app: `docker compose stop app`
+
+3) Import into compose DB (`inventory`):
+```
+docker compose exec -T db sh -lc 'mysql -uinventory -p"$MYSQL_PASSWORD" inventory' < railway-backup.sql
+```
+
+4) Apply schema + seed:
+```
+docker compose up migrate
+```
+
+5) Start app: `docker compose up -d app`
+
+If NULL prices block schema push, normalize:
+```
+UPDATE products SET retailPrice=0 WHERE retailPrice IS NULL;
+UPDATE products SET costPrice=0 WHERE costPrice IS NULL;
+```
+
+Promote admin if needed:
+```
+docker compose run --rm migrate node scripts/promote-admin.js you@advancedresearchpep.com
+```
+
+---
+
+## Auth & Security
+- NextAuth v4 (Google provider only; credentials removed)
+- Env: `NEXTAUTH_URL`, `NEXTAUTH_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ALLOWED_EMAIL_DOMAINS`
+- New accounts: not approved → pending page; approve via UI or promote script.
+- CSP tuned per env; production allows Google OAuth and Next bootstrap scripts.
+- `/api/healthz` used by Docker healthcheck.
+
+## Reports & Pricing
+- Products carry `costPrice`/`retailPrice`.
+- Reports aggregate inventory by product/location and compute cost/retail totals.
+- Reports UI lives at `/admin/reports` (moved under Admin). Use the Admin sub‑nav.
+
+## Mobile Navigation
+- Bottom nav includes Journal. Reports are accessible via Admin → Reports to conserve space on small screens.
+
+## Troubleshooting
+- 502 via Caddy: ensure app binds `0.0.0.0` and Caddy proxies `inventory:3000` on the `caddy` network.
+- AccessDenied on sign-in: verify `ALLOWED_EMAIL_DOMAINS` and Google OAuth URIs (redirect + origin).
+- FK error on first login: seed default Location id=1 (handled by migrate job).
+
+## Scripts
+- `npm run type-check`
+- `npx prisma generate`
+- `npm run migrate:baseline`
+- `node scripts/seed-default-location.js`
+- `node scripts/promote-admin.js you@advancedresearchpep.com`
 
 ## 🔐 Authentication & Authorization
 
