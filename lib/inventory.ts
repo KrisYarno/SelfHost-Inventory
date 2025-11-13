@@ -344,6 +344,173 @@ export async function createInventoryAdjustment(
 }
 
 /**
+ * Atomically transfer quantity between two locations with optimistic locking
+ */
+export async function createInventoryTransfer(options: {
+  userId: string;
+  productId: number;
+  fromLocationId: number;
+  toLocationId: number;
+  quantity: number;
+  expectedFromVersion?: number;
+  expectedToVersion?: number;
+}) {
+  const {
+    userId,
+    productId,
+    fromLocationId,
+    toLocationId,
+    quantity,
+    expectedFromVersion,
+    expectedToVersion,
+  } = options;
+
+  if (fromLocationId === toLocationId) {
+    throw new Error('Source and destination locations must be different.');
+  }
+  if (quantity <= 0) {
+    throw new Error('Transfer quantity must be greater than zero.');
+  }
+
+  const maxRetries = 3;
+  let retryCount = 0;
+
+  while (retryCount < maxRetries) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        // Load current rows for optimistic checks
+        const [fromRow, toRow] = await Promise.all([
+          tx.product_locations.findUnique({
+            where: { productId_locationId: { productId, locationId: fromLocationId } },
+          }),
+          tx.product_locations.findUnique({
+            where: { productId_locationId: { productId, locationId: toLocationId } },
+          }),
+        ]);
+
+        // Version checks if provided
+        if (expectedFromVersion !== undefined && fromRow) {
+          if (fromRow.version !== expectedFromVersion) {
+            throw new OptimisticLockError(
+              'Source location inventory was modified by another user.',
+              fromRow.version,
+              expectedFromVersion
+            );
+          }
+        }
+        if (expectedToVersion !== undefined && toRow) {
+          if (toRow.version !== expectedToVersion) {
+            throw new OptimisticLockError(
+              'Destination location inventory was modified by another user.',
+              toRow.version,
+              expectedToVersion
+            );
+          }
+        }
+
+        // Validate availability at source within transaction
+        const availability = await validateStockAvailability(
+          productId,
+          fromLocationId,
+          quantity,
+          tx
+        );
+        if (!availability.isValid) {
+          const product = await tx.product.findUnique({ where: { id: productId }, select: { name: true } });
+          if (!product) {
+            throw new ProductNotFoundError(productId);
+          }
+          throw new InsufficientStockError(
+            product.name,
+            availability.currentQuantity,
+            availability.requestedQuantity
+          );
+        }
+
+        const numericUserId = parseInt(userId);
+
+        // Create two TRANSFER logs
+        const [fromLog, toLog] = await Promise.all([
+          createInventoryLog(
+            {
+              userId: numericUserId,
+              productId,
+              locationId: fromLocationId,
+              delta: -quantity,
+              logType: inventory_logs_logType.TRANSFER,
+            },
+            tx
+          ),
+          createInventoryLog(
+            {
+              userId: numericUserId,
+              productId,
+              locationId: toLocationId,
+              delta: quantity,
+              logType: inventory_logs_logType.TRANSFER,
+            },
+            tx
+          ),
+        ]);
+
+        // Decrement source (must exist after validation)
+        const updatedFrom = await tx.product_locations.upsert({
+          where: { productId_locationId: { productId, locationId: fromLocationId } },
+          update: {
+            quantity: { decrement: quantity },
+            version: { increment: 1 },
+          },
+          create: {
+            productId,
+            locationId: fromLocationId,
+            quantity: 0,
+            version: 1,
+          },
+        });
+
+        // Increment destination (create if needed)
+        const updatedTo = await tx.product_locations.upsert({
+          where: { productId_locationId: { productId, locationId: toLocationId } },
+          update: {
+            quantity: { increment: quantity },
+            version: { increment: 1 },
+          },
+          create: {
+            productId,
+            locationId: toLocationId,
+            quantity,
+            version: 1,
+          },
+        });
+
+        // Maintain Product.quantity legacy semantics for location 1
+        if (fromLocationId === 1) {
+          await tx.product.update({ where: { id: productId }, data: { quantity: { decrement: quantity } } });
+        }
+        if (toLocationId === 1) {
+          await tx.product.update({ where: { id: productId }, data: { quantity: { increment: quantity } } });
+        }
+
+        return {
+          logs: { from: fromLog, to: toLog },
+          fromVersion: updatedFrom.version,
+          toVersion: updatedTo.version,
+        };
+      });
+    } catch (error) {
+      if (error instanceof OptimisticLockError && retryCount < maxRetries - 1) {
+        retryCount++;
+        await new Promise((resolve) => setTimeout(resolve, 100 * retryCount));
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new Error('Max retries exceeded for inventory transfer.');
+}
+
+/**
  * Custom error class for optimistic lock violations
  */
 export class OptimisticLockError extends Error {

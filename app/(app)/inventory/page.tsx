@@ -3,6 +3,8 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { SimpleInventoryLogTable } from '@/components/inventory/simple-inventory-log-table';
+import { TransferDialog } from '@/components/inventory/transfer-dialog';
+import { TransferLogTable } from '@/components/inventory/transfer-log-table';
 import { VariantProductCard } from '@/components/inventory/variant-product-card';
 import { QuickAdjustDialog } from '@/components/inventory/quick-adjust-dialog';
 import { StockInDialog } from '@/components/inventory/stock-in-dialog';
@@ -55,6 +57,7 @@ export default function InventoryPage() {
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
   const [showQuickAdjust, setShowQuickAdjust] = useState(false);
   const [showStockIn, setShowStockIn] = useState(false);
+  const [showTransfer, setShowTransfer] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -67,6 +70,7 @@ export default function InventoryPage() {
     hasMore: false,
   });
   const [expandedCategories, setExpandedCategories] = useState<string[]>([]);
+  const [transferLogs, setTransferLogs] = useState<any[]>([]);
 
   const debouncedSearch = useDebounce(searchQuery, 300);
 
@@ -173,6 +177,15 @@ export default function InventoryPage() {
     }
   };
 
+  const fetchTransfers = async () => {
+    try {
+      const data = await fetchWithErrorHandling('/api/inventory/transfers?pageSize=20');
+      setTransferLogs(data.transfers ?? []);
+    } catch {
+      toast.error('Failed to load transfer history');
+    }
+  };
+
   // Load more items
   const loadMore = useCallback(() => {
     if (!isLoadingMore && pagination.hasMore) {
@@ -186,7 +199,8 @@ export default function InventoryPage() {
     try {
       await Promise.all([
         fetchProducts(1, false),
-        fetchLogs()
+        fetchLogs(),
+        fetchTransfers(),
       ]);
       toast.success('Inventory refreshed');
     } catch {
@@ -207,6 +221,7 @@ export default function InventoryPage() {
   useEffect(() => {
     fetchProducts();
     fetchLogs();
+    fetchTransfers();
   }, []); // Removed selectedLocationId dependency
 
   // Search effect
@@ -274,7 +289,7 @@ export default function InventoryPage() {
     };
   }, [isRefreshing]);
 
-  const handleProductAction = (productId: number, action: 'adjust' | 'stockIn') => {
+  const handleProductAction = (productId: number, action: 'adjust' | 'stockIn' | 'transfer') => {
     // Find the product and convert to ProductWithQuantity format
     const product = products.find(p => p.id === productId);
     if (!product) return;
@@ -301,14 +316,17 @@ export default function InventoryPage() {
     setSelectedProduct(productWithQuantity);
     if (action === 'adjust') {
       setShowQuickAdjust(true);
-    } else {
+    } else if (action === 'stockIn') {
       setShowStockIn(true);
+    } else if (action === 'transfer') {
+      setShowTransfer(true);
     }
   };
 
   const refreshData = () => {
     fetchProducts();
     fetchLogs();
+    fetchTransfers();
   };
 
   const handleExportCSV = async () => {
@@ -495,6 +513,7 @@ export default function InventoryPage() {
                             product={product}
                             onStockIn={(id, locationId) => handleProductAction(id, 'stockIn')}
                             onAdjust={(id, locationId) => handleProductAction(id, 'adjust')}
+                            onTransfer={(id, locationId) => handleProductAction(id, 'transfer')}
                           />
                         ))}
                       </div>
@@ -526,7 +545,7 @@ export default function InventoryPage() {
       <Tabs defaultValue="logs" className="space-y-4">
         <TabsList className="w-full sm:w-auto overflow-x-auto">
           <TabsTrigger value="logs">Recent Activity</TabsTrigger>
-          <TabsTrigger value="transactions">Transactions</TabsTrigger>
+          <TabsTrigger value="transfers">Transfers</TabsTrigger>
           <TabsTrigger value="adjustments">Adjustments</TabsTrigger>
         </TabsList>
 
@@ -534,12 +553,8 @@ export default function InventoryPage() {
           <SimpleInventoryLogTable logs={logs} />
         </TabsContent>
 
-        <TabsContent value="transactions" className="space-y-4">
-          <Card>
-            <CardContent className="py-8">
-              <p className="text-center text-muted-foreground">Transactions feature is not available with the current database schema.</p>
-            </CardContent>
-          </Card>
+        <TabsContent value="transfers" className="space-y-4">
+          <TransferLogTable logs={transferLogs} />
         </TabsContent>
 
         <TabsContent value="adjustments" className="space-y-4">
@@ -610,6 +625,16 @@ export default function InventoryPage() {
         <StockInDialog
           open={showStockIn}
           onOpenChange={setShowStockIn}
+          product={selectedProduct}
+          onSuccess={refreshData}
+        />
+      )}
+
+      {/* Transfer Dialog */}
+      {selectedProduct && (
+        <TransferDialog
+          open={showTransfer}
+          onOpenChange={setShowTransfer}
           product={selectedProduct}
           onSuccess={refreshData}
         />

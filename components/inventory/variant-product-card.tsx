@@ -11,7 +11,8 @@ import {
   Edit, 
   MapPin, 
   ChevronDown, 
-  ChevronUp 
+  ChevronUp,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -32,9 +33,10 @@ interface VariantProductCardProps {
   };
   onStockIn: (productId: number, locationId?: number) => void;
   onAdjust: (productId: number, locationId?: number) => void;
+  onTransfer?: (productId: number, locationId?: number) => void;
 }
 
-export function VariantProductCard({ product, onStockIn, onAdjust }: VariantProductCardProps) {
+export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }: VariantProductCardProps) {
   const [isExpanded, setIsExpanded] = useState(false); // Default to collapsed
 
   return (
@@ -77,6 +79,17 @@ export function VariantProductCard({ product, onStockIn, onAdjust }: VariantProd
             <Edit className="h-4 w-4 mr-1" />
             Adjust
           </Button>
+          {onTransfer && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="flex-1 h-11 min-h-[44px]"
+              onClick={() => onTransfer(product.id)}
+            >
+              <ArrowLeftRight className="h-4 w-4 mr-1" />
+              Transfer
+            </Button>
+          )}
         </div>
 
         {/* Location breakdown */}
