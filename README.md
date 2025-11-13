@@ -42,7 +42,7 @@ GOOGLE_CLIENT_SECRET=<client-secret>
 # DATABASE_URL=mysql://user:pass@localhost:3306/inventory
 
 # Domain allowlist for Google OAuth
-ALLOWED_EMAIL_DOMAINS=advancedresearchpep.com
+ALLOWED_EMAIL_DOMAINS=<domain.com>
 ```
 
 4. Generate Prisma Client
@@ -100,21 +100,14 @@ docker compose up -d --build app backup
 
 Health:
 ```
-curl -I https://inventorylocal.artech.tools/api/healthz  # expect 200
+curl -I https://localhost:3000/api/healthz  # expect 200
 ```
 
 ### Caddy
 App joins external `caddy` network with alias `inventory`. Example Caddyfile (include defense-in-depth header):
 ```
-inventorylocal.artech.tools {
-  encode gzip zstd
-  reverse_proxy inventory:3000 {
-    header_up -x-middleware-subrequest
-  }
-}
 
-# Production domain
-inventory.artech.tools {
+example.domain {
   encode gzip zstd
   reverse_proxy inventory:3000 {
     header_up -x-middleware-subrequest

@@ -27,7 +27,7 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: mysql://inventory:${MYSQL_PASSWORD}@db:3306/inventory?connection_limit=20
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: https://inventory.artech.tools
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
@@ -51,7 +51,7 @@ services:
       HOSTNAME: 0.0.0.0
       HOST: 0.0.0.0
       DATABASE_URL: mysql://inventory:${MYSQL_PASSWORD}@db:3306/inventory?connection_limit=20
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: https://inventory.artech.tools
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
@@ -64,8 +64,15 @@ services:
       migrate:
         condition: service_completed_successfully
     networks:
-      - internal
-    labels: {}
+      caddy:
+        aliases:
+          - inventory
+      internal:
+    labels:
+      caddy: inventory.artech.tools
+      caddy.encode: "gzip zstd"
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+      caddy.reverse_proxy.header_up: "-x-middleware-subrequest"
     volumes:
       - db_backups:/backup
 
@@ -90,6 +97,8 @@ services:
 networks:
   internal:
     driver: bridge
+  caddy:
+    external: true
 
 volumes:
   db_data:

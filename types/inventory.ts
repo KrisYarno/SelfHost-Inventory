@@ -49,6 +49,15 @@ export type StockInRequest = {
   logType?: inventory_logs_logType;
 };
 
+export type InventoryTransferRequest = {
+  productId: number;
+  fromLocationId: number;
+  toLocationId: number;
+  quantity: number;
+  expectedFromVersion?: number;
+  expectedToVersion?: number;
+};
+
 // API Response types
 export type InventoryLogResponse = {
   logs: InventoryLogWithRelations[];

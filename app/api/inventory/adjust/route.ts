@@ -33,7 +33,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
     }
 
-    const body = InventoryAdjustmentSchema.parse(await request.json());
+    const rawBody = await request.json();
+    const body = InventoryAdjustmentSchema.parse(rawBody);
+    const autoAddForTransfer = rawBody?.autoAddForTransfer === true;
 
     // If removing stock, validate availability
     if (body.delta < 0) {
@@ -67,15 +69,26 @@ export async function POST(request: NextRequest) {
       body.expectedVersion
     );
 
-    // Log the inventory adjustment
+    // Log the inventory adjustment (special-case auto add for transfer)
     if (product) {
-      await auditService.logInventoryAdjustment(
-        parseInt(session.user.id),
-        body.productId,
-        product.name,
-        body.delta,
-        body.locationId
-      );
+      const userId = parseInt(session.user.id);
+      if (autoAddForTransfer) {
+        await auditService.logInventoryTransferAutoAdd(
+          userId,
+          body.productId,
+          product.name,
+          body.delta,
+          body.locationId
+        );
+      } else {
+        await auditService.logInventoryAdjustment(
+          userId,
+          body.productId,
+          product.name,
+          body.delta,
+          body.locationId
+        );
+      }
     }
 
     const response = NextResponse.json({
