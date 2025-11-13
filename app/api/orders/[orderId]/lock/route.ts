@@ -4,7 +4,7 @@ import { OrderLockResponse } from "@/types/orders";
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { orderId: string } }
+  _context: { params: { orderId: string } }
 ) {
   try {
     const session = await getSession();
@@ -13,7 +13,7 @@ export async function POST(
     }
 
     const body = await request.json();
-    const { userId } = body;
+    const { userId: _userId } = body;
 
     // Mock implementation - replace with actual database logic
     // In a real implementation, you would:

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import prisma from "@/lib/prisma";
 import { Order } from "@/types/orders";
 
 // Mock order details - replace with actual database query
@@ -37,7 +36,7 @@ const getOrderById = (orderId: string): Order | null => {
 };
 
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: { orderId: string } }
 ) {
   try {

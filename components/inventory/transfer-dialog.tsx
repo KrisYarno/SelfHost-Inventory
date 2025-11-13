@@ -34,6 +34,9 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import type { ProductWithQuantity } from '@/types/product';
+import { ContextTag } from '@/components/ui/context-tag';
+import { ValueChip } from '@/components/ui/value-chip';
+import { InlineHighlight } from '@/components/ui/inline-highlight';
 
 type TransferDialogProps = {
   open: boolean;
@@ -64,6 +67,8 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
   const [toLocationId, setToLocationId] = React.useState<number | null>(null);
   const [fromQuantity, setFromQuantity] = React.useState<number | null>(null);
   const [loadingFromQuantity, setLoadingFromQuantity] = React.useState(false);
+  const [toQuantity, setToQuantity] = React.useState<number | null>(null);
+  const [loadingToQuantity, setLoadingToQuantity] = React.useState(false);
   const [quantity, setQuantity] = React.useState<string>('');
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
@@ -106,12 +111,38 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
       .finally(() => setLoadingFromQuantity(false));
   }, [open, product, fromLocationId]);
 
+  React.useEffect(() => {
+    if (!open || !product || !toLocationId) {
+      setToQuantity(null);
+      return;
+    }
+    setLoadingToQuantity(true);
+    fetch(`/api/inventory/product/${product.id}?locationId=${toLocationId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (typeof data.currentQuantity === 'number') {
+          setToQuantity(data.currentQuantity);
+        } else {
+          setToQuantity(0);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to fetch destination quantity:', err);
+        toast.error('Failed to fetch destination quantity');
+        setToQuantity(null);
+      })
+      .finally(() => setLoadingToQuantity(false));
+  }, [open, product, toLocationId]);
+
   if (!product) return null;
 
   const qtyNum = Number.parseInt(quantity || '0', 10) > 0 ? Number.parseInt(quantity || '0', 10) : 0;
   const canSubmit = !!fromLocationId && !!toLocationId && fromLocationId !== toLocationId && qtyNum > 0;
   const sourceDisplayQty = fromQuantity ?? product.currentQuantity ?? 0;
+  const destinationDisplayQty = toQuantity ?? 0;
   const projectedSource = qtyNum > 0 ? sourceDisplayQty - qtyNum : sourceDisplayQty;
+  const projectedDestination = qtyNum > 0 ? destinationDisplayQty + qtyNum : destinationDisplayQty;
+  const hasSameLocation = Boolean(fromLocationId && toLocationId && fromLocationId === toLocationId);
 
   const handleIncrement = () => {
     setQuantity((prev) => {
@@ -173,10 +204,8 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
       toast.error('Please complete the transfer form');
       return;
     }
-    if (fromQuantity !== null && qtyNum > fromQuantity) {
-      toast.error('Cannot transfer more than available stock');
-      return;
-    }
+    // Do not block here; allow server to return a structured
+    // insufficient-stock response so we can offer auto-add.
 
     const payload: PendingTransferPayload = {
       productId: product.id,
@@ -247,31 +276,46 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Transfer inventory</DialogTitle>
-            <DialogDescription>Move stock between locations for this product.</DialogDescription>
-          </DialogHeader>
+        <DialogContent className="max-w-md w-[95vw] sm:w-full overflow-hidden border border-slate-800 bg-slate-950/95 p-0 shadow-2xl">
+          <div className="space-y-5 p-6">
+            <DialogHeader className="space-y-2">
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <DialogTitle className="flex items-center gap-2 text-base md:text-lg font-semibold text-slate-50">
+                    <ArrowLeftRight className="h-4 w-4 text-slate-300" />
+                    Transfer inventory
+                  </DialogTitle>
+                  <DialogDescription className="text-sm text-slate-400">
+                    Move stock between locations for this product.
+                  </DialogDescription>
+                </div>
+              </div>
 
-          <div className="space-y-4">
-            {/* Product info */}
-            <div className="p-3 rounded-lg bg-muted/50">
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <ArrowLeftRight className="h-4 w-4" />
-                <span>Product</span>
+              <div className="mt-2 rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <Package className="h-4 w-4 text-slate-300" />
+                  <p className="text-sm font-medium text-slate-100 truncate">{product.name}</p>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-300">
+                  <ContextTag icon={<MapPin className="h-3 w-3 text-slate-400" />}>
+                    {fromLoc?.name ?? 'Select a source'}
+                  </ContextTag>
+                  <ValueChip
+                    tone={sourceDisplayQty > 0 ? 'positive' : sourceDisplayQty < 0 ? 'negative' : 'neutral'}
+                    className="uppercase tracking-wide"
+                  >
+                    {loadingFromQuantity ? 'Loading...' : `${sourceDisplayQty} units`}
+                  </ValueChip>
+                </div>
               </div>
-              <div className="mt-1 flex items-center gap-2">
-                <Package className="h-4 w-4" />
-                <p className="font-medium">{product.name}</p>
-              </div>
-            </div>
+            </DialogHeader>
 
             {/* From / To location selectors */}
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label className="flex items-center gap-1">
-                  <MapPin className="h-4 w-4" />
-                  <span>From location</span>
+            <div className="space-y-4 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
+              <div className="space-y-1.5">
+                <Label className="flex items-center gap-1 text-xs font-medium text-slate-300">
+                  <MapPin className="h-3.5 w-3.5 text-slate-400" />
+                  From location
                 </Label>
                 <Select
                   value={fromLocationId ? String(fromLocationId) : undefined}
@@ -284,10 +328,10 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                     }
                   }}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger className="mt-0.5 h-10 w-full rounded-md border border-slate-700 bg-slate-900 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950">
                     <SelectValue placeholder="Select source" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent className="bg-slate-900 text-slate-100">
                     {locations.map((loc) => (
                       <SelectItem key={loc.id} value={String(loc.id)}>
                         {loc.name}
@@ -295,21 +339,30 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                     ))}
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-muted-foreground">
-                  {loadingFromQuantity ? 'Loading current quantity...' : `Current stock: ${sourceDisplayQty}`}
-                </p>
+                <div className="flex items-center justify-between text-[11px] text-slate-400">
+                  <span>Current stock:</span>
+                  <ValueChip
+                    tone={sourceDisplayQty > 0 ? 'positive' : sourceDisplayQty < 0 ? 'negative' : 'neutral'}
+                    className="text-[10px]"
+                  >
+                    {loadingFromQuantity ? '...' : `${sourceDisplayQty} units`}
+                  </ValueChip>
+                </div>
               </div>
 
-              <div className="space-y-2">
-                <Label className="flex items-center gap-1">
-                  <MapPin className="h-4 w-4" />
-                  <span>To location</span>
+              <div className="space-y-1.5">
+                <Label className="flex items-center gap-1 text-xs font-medium text-slate-300">
+                  <MapPin className="h-3.5 w-3.5 text-slate-400" />
+                  To location
                 </Label>
-                <Select value={toLocationId ? String(toLocationId) : undefined} onValueChange={(value) => setToLocationId(Number(value))}>
-                  <SelectTrigger>
+                <Select
+                  value={toLocationId ? String(toLocationId) : undefined}
+                  onValueChange={(value) => setToLocationId(Number(value))}
+                >
+                  <SelectTrigger className="mt-0.5 h-10 w-full rounded-md border border-slate-700 bg-slate-900 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950">
                     <SelectValue placeholder="Select destination" />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent className="bg-slate-900 text-slate-100">
                     {locations.map((loc) => (
                       <SelectItem key={loc.id} value={String(loc.id)}>
                         {loc.name}
@@ -317,8 +370,17 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                     ))}
                   </SelectContent>
                 </Select>
-                {fromLocationId && toLocationId && fromLocationId === toLocationId && (
-                  <p className="text-xs text-destructive flex items-center gap-1">
+                <div className="flex items-center justify-between text-[11px] text-slate-400">
+                  <span>Current stock:</span>
+                  <ValueChip
+                    tone={destinationDisplayQty > 0 ? 'positive' : destinationDisplayQty < 0 ? 'negative' : 'neutral'}
+                    className="text-[10px]"
+                  >
+                    {loadingToQuantity ? '...' : `${destinationDisplayQty} units`}
+                  </ValueChip>
+                </div>
+                {hasSameLocation && (
+                  <p className="mt-1 flex items-center gap-1 text-xs text-red-400">
                     <AlertCircle className="h-3 w-3" />
                     Source and destination must be different.
                   </p>
@@ -328,9 +390,16 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
 
             {/* Quantity + stepper */}
             <div className="space-y-2">
-              <Label>Quantity to move</Label>
+              <p className="text-xs font-medium text-slate-300">Quantity to move</p>
               <div className="flex items-center gap-2">
-                <Button type="button" variant="outline" size="icon" className="h-10 w-10" onClick={handleDecrement} disabled={isSubmitting}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-10 w-10 rounded-md border-slate-600 bg-slate-900 text-xl text-slate-100"
+                  onClick={handleDecrement}
+                  disabled={isSubmitting}
+                >
                   −
                 </Button>
                 <Input
@@ -339,30 +408,62 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                   pattern="[0-9]*"
                   value={quantity}
                   onChange={(e) => setQuantity(e.target.value)}
-                  className="h-10 text-center text-lg"
+                  className="h-10 w-24 rounded-md border-slate-600 bg-slate-900 text-center text-lg font-semibold tracking-wider text-slate-50"
                   placeholder="0"
                 />
-                <Button type="button" variant="outline" size="icon" className="h-10 w-10" onClick={handleIncrement} disabled={isSubmitting}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-10 w-10 rounded-md border-slate-600 bg-slate-900 text-xl text-slate-100"
+                  onClick={handleIncrement}
+                  disabled={isSubmitting}
+                >
                   +
                 </Button>
               </div>
               {qtyNum > 0 && (
-                <p className="text-xs text-muted-foreground">
-                  After transfer, <span className="font-medium">{fromLoc?.name ?? 'source'}</span> would have{' '}
-                  <span className={projectedSource < 0 ? 'text-destructive font-semibold' : 'font-semibold'}>{projectedSource}</span> units.
+                <p className="text-xs text-slate-400">
+                  After transfer:{' '}
+                  <InlineHighlight className="text-slate-100">
+                    {fromLoc?.name ?? 'Source'}
+                  </InlineHighlight>{' '}
+                  -&gt;{' '}
+                  <span className={projectedSource < 0 ? 'text-red-400 font-semibold' : 'text-slate-100 font-semibold'}>
+                    {projectedSource} units
+                  </span>{' '}
+                  |{' '}
+                  <InlineHighlight className="text-slate-100">
+                    {toLoc?.name ?? 'Destination'}
+                  </InlineHighlight>{' '}
+                  -&gt;{' '}
+                  <span className="text-emerald-300 font-semibold">
+                    {projectedDestination} units
+                  </span>
                 </p>
               )}
             </div>
-          </div>
 
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
-              Cancel
-            </Button>
-            <Button type="button" onClick={handleSubmit} disabled={!canSubmit || isSubmitting}>
-              {isSubmitting ? 'Transferring...' : 'Confirm transfer'}
-            </Button>
-          </DialogFooter>
+            <DialogFooter className="mt-2 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                className="h-10 w-full border-slate-600 text-slate-200 sm:w-auto"
+                onClick={() => onOpenChange(false)}
+                disabled={isSubmitting}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                className="h-10 w-full bg-sky-600 text-slate-50 hover:bg-sky-500 sm:w-auto"
+                onClick={handleSubmit}
+                disabled={!canSubmit || isSubmitting}
+              >
+                {isSubmitting ? 'Transferring...' : qtyNum > 0 ? `Transfer ${qtyNum} units` : 'Transfer'}
+              </Button>
+            </DialogFooter>
+          </div>
         </DialogContent>
       </Dialog>
 
@@ -375,14 +476,32 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
               {insufficient?.message ?? 'There is not enough stock at the selected source location to complete this transfer.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="mt-2 space-y-1 text-sm">
-            <p>
-              Available: <span className="font-semibold">{insufficient?.available ?? 0}</span>
-            </p>
-            <p>
-              Missing for this transfer: <span className="font-semibold">{insufficient?.shortfall ?? 0}</span>
-            </p>
-          </div>
+          {(() => {
+            const available = insufficient?.available ?? 0;
+            const shortfall = insufficient?.shortfall ?? 0;
+            const requested = pendingTransfer?.quantity ?? 0;
+            const afterAdd = available + shortfall;
+            const afterTransfer = afterAdd - requested;
+            return (
+              <div className="mt-2 space-y-1 text-sm">
+                <p>
+                  Available now: <span className="font-semibold">{available}</span>
+                </p>
+                <p>
+                  Shortfall to complete transfer: <span className="font-semibold">{shortfall}</span>
+                </p>
+                <p className="mt-2">
+                  This will add <span className="font-semibold">{shortfall}</span> units of
+                  {' '}<span className="font-semibold">{product.name}</span>
+                  {fromLoc ? <> at <span className="font-semibold">{fromLoc.name}</span></> : null}
+                  {' '}so you can move <span className="font-semibold">{requested}</span>.
+                </p>
+                <p className="text-muted-foreground">
+                  After add: {afterAdd}. After transfer: {afterTransfer} at the source.
+                </p>
+              </div>
+            );
+          })()}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isSubmitting}>Cancel</AlertDialogCancel>
             <AlertDialogAction disabled={isSubmitting} onClick={handleConfirmAutoAdd}>
@@ -394,4 +513,3 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
     </>
   );
 }
-

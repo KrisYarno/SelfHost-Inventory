@@ -32,7 +32,7 @@ export const authOptions: NextAuthOptions = {
     maxAge: 7 * 24 * 60 * 60, // 7 days
   },
   callbacks: {
-    async signIn({ user, account, profile }) {
+    async signIn({ user: _user, account, profile }) {
       if (account?.provider !== 'google' || !profile?.email) {
         return false;
       }
@@ -77,7 +77,7 @@ export const authOptions: NextAuthOptions = {
         return false;
       }
     },
-    async jwt({ token, user, account, profile, trigger, session }) {
+    async jwt({ token, user: _user, account, profile, trigger, session }) {
       if (account?.provider === 'google' && profile?.email) {
         const domain = profile.email.toLowerCase().split('@')[1];
         if (!domain || (!allowAllDomains && !allowedDomains.includes(domain))) {

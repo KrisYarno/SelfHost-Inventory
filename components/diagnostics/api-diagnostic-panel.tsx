@@ -132,7 +132,7 @@ export function ApiDiagnosticPanel() {
               throw new Error('LocalStorage read/write failed');
             }
             return { available: true };
-          } catch (error) {
+          } catch (_error) {
             throw new Error('LocalStorage not available');
           }
         }

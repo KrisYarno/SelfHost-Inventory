@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
-import prisma from "@/lib/prisma";
 import { OrdersResponse } from "@/types/orders";
 
 // Mock data for now - replace with actual database queries

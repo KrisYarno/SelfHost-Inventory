@@ -6,7 +6,7 @@ import { validateCSRFToken } from '@/lib/csrf';
 export const dynamic = 'force-dynamic';
 
 // GET /api/admin/products/thresholds - Get all products with thresholds
-export async function GET(request: NextRequest) {
+export async function GET(_request: NextRequest) {
   try {
     const session = await getSession();
     if (!session || !session.user.isAdmin) {

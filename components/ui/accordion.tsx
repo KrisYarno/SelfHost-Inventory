@@ -35,9 +35,12 @@ export function Accordion({
     return [];
   });
 
-  const finalValue = controlledValue !== undefined
-    ? Array.isArray(controlledValue) ? controlledValue : [controlledValue]
-    : value;
+  const finalValue = React.useMemo(() => {
+    if (controlledValue !== undefined) {
+      return Array.isArray(controlledValue) ? controlledValue : [controlledValue];
+    }
+    return value;
+  }, [controlledValue, value]);
 
   const handleValueChange = React.useCallback((itemValue: string) => {
     const newValue = type === 'single'

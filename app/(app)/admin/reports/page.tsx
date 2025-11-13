@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { MetricsCard } from "@/components/reports/metrics-card";
 import { ActivityTimeline } from "@/components/reports/activity-timeline";
 import { ProductPerformance } from "@/components/reports/product-performance";
@@ -16,7 +16,7 @@ import {
   AlertTriangle,
   DollarSign,
   FileDown,
-  Image
+  Image as ImageIcon
 } from "lucide-react";
 import { DashboardMetrics, StockLevelChartData, ActivityChartData } from "@/types/reports";
 import { useLocation } from "@/contexts/location-context";
@@ -46,13 +46,11 @@ export default function AdminReportsPage() {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [inventoryTrends, setInventoryTrends] = useState<StockLevelChartData[]>([]);
   const [dailyActivity, setDailyActivity] = useState<ActivityChartData[]>([]);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [dateRange, setDateRange] = useState<DateRange | undefined>({
     from: startOfDay(subDays(new Date(), 6)),
     to: endOfDay(new Date()),
   });
-  const [datePreset, setDatePreset] = useState<DateRangePreset>("last7days");
   const [drillDownModal, setDrillDownModal] = useState<{
     isOpen: boolean;
     type: "product" | "date" | "user" | "location";
@@ -68,26 +66,7 @@ export default function AdminReportsPage() {
   const { selectedLocationId } = useLocation();
   const chartRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
 
-  useEffect(() => {
-    fetchAllData();
-  }, [selectedLocationId, dateRange]);
-
-  const fetchAllData = async () => {
-    try {
-      setLoading(true);
-      await Promise.all([
-        fetchMetrics(),
-        fetchInventoryTrends(),
-        fetchDailyActivity()
-      ]);
-    } catch (error) {
-      console.error("Error fetching data:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchMetrics = async () => {
+  const fetchMetrics = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (dateRange?.from) {
@@ -107,9 +86,9 @@ export default function AdminReportsPage() {
     } catch (error) {
       console.error("Error fetching metrics:", error);
     }
-  };
+  }, [dateRange, selectedLocationId]);
 
-  const fetchInventoryTrends = async () => {
+  const fetchInventoryTrends = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (dateRange?.from) {
@@ -129,9 +108,9 @@ export default function AdminReportsPage() {
     } catch (error) {
       console.error("Error fetching inventory trends:", error);
     }
-  };
+  }, [dateRange, selectedLocationId]);
 
-  const fetchDailyActivity = async () => {
+  const fetchDailyActivity = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (dateRange?.from) {
@@ -151,7 +130,23 @@ export default function AdminReportsPage() {
     } catch (error) {
       console.error("Error fetching daily activity:", error);
     }
-  };
+  }, [dateRange, selectedLocationId]);
+
+  const fetchAllData = useCallback(async () => {
+    try {
+      await Promise.all([
+        fetchMetrics(),
+        fetchInventoryTrends(),
+        fetchDailyActivity()
+      ]);
+    } catch (error) {
+      console.error("Error fetching data:", error);
+    }
+  }, [fetchMetrics, fetchInventoryTrends, fetchDailyActivity]);
+
+  useEffect(() => {
+    fetchAllData();
+  }, [fetchAllData]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -159,9 +154,8 @@ export default function AdminReportsPage() {
     setRefreshing(false);
   };
 
-  const handleDateRangeChange = (newDateRange: DateRange | undefined, preset: DateRangePreset) => {
+  const handleDateRangeChange = (newDateRange: DateRange | undefined, _preset: DateRangePreset) => {
     setDateRange(newDateRange);
-    setDatePreset(preset);
   };
   
   const handleExportMetrics = () => {
@@ -255,11 +249,11 @@ export default function AdminReportsPage() {
                     Export Metrics (CSV)
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => handleExportChart("inventory-trend", "inventory-trend")}>
-                    <Image className="h-4 w-4 mr-2" />
+                    <ImageIcon className="h-4 w-4 mr-2" aria-hidden="true" />
                     Export Inventory Trend (PNG)
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => handleExportChart("daily-activity", "daily-activity")}>
-                    <Image className="h-4 w-4 mr-2" />
+                    <ImageIcon className="h-4 w-4 mr-2" aria-hidden="true" />
                     Export Daily Activity (PNG)
                   </DropdownMenuItem>
                 </DropdownMenuContent>

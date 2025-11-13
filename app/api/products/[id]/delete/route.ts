@@ -52,7 +52,7 @@ export async function POST(
     const totalInventory = product.product_locations.reduce((sum, loc) => sum + loc.quantity, 0);
 
     // Soft delete the product
-    const deletedProduct = await prisma.product.update({
+    await prisma.product.update({
       where: { id: productId },
       data: {
         deletedAt: new Date(),

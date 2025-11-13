@@ -5,7 +5,6 @@ import { NextRequest } from 'next/server';
 const CSRF_TOKEN_COOKIE = 'csrf-token';
 const CSRF_HEADER = 'x-csrf-token';
 const TOKEN_LENGTH = 32;
-const COOKIE_MAX_AGE = 60 * 60 * 24; // 24 hours
 
 /**
  * Generate a cryptographically secure CSRF token

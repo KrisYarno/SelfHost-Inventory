@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth/next';
 import { authOptions } from '@/lib/auth';
 import prisma from '@/lib/prisma';
-import type { InventoryLogFilters, InventoryLogResponse } from '@/types/inventory';
+import type { InventoryLogFilters } from '@/types/inventory';
 import { Prisma } from '@prisma/client';
 
 export const dynamic = 'force-dynamic';

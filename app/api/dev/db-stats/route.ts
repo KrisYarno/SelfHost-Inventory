@@ -5,7 +5,7 @@ import { getQueryStatsHandler } from '@/lib/db-monitoring';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(request: NextRequest) {
+export async function GET(_request: NextRequest) {
   // Only available in development
   if (process.env.NODE_ENV !== 'development') {
     return NextResponse.json(

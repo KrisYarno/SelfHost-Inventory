@@ -50,37 +50,7 @@ export function ProductPerformance() {
 
   const PAGE_SIZE = 20;
 
-  // Infinite scroll observer
-  useEffect(() => {
-    if (loading || loadingMore || !hasMore) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting) {
-          loadMoreProducts();
-        }
-      },
-      { threshold: 0.1 }
-    );
-
-    if (loadMoreRef.current) {
-      observer.observe(loadMoreRef.current);
-    }
-
-    observerRef.current = observer;
-
-    return () => {
-      if (observerRef.current) {
-        observerRef.current.disconnect();
-      }
-    };
-  }, [loading, loadingMore, hasMore, page]);
-
-  useEffect(() => {
-    fetchProductPerformance();
-  }, [selectedLocationId]);
-
-  const fetchProductPerformance = async () => {
+  const fetchProductPerformance = useCallback(async () => {
     try {
       setLoading(true);
       setPage(1);
@@ -161,7 +131,7 @@ export function ProductPerformance() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedLocationId]);
 
   const loadMoreProducts = useCallback(() => {
     if (loadingMore || !hasMore) return;
@@ -181,6 +151,36 @@ export function ProductPerformance() {
     }
     setLoadingMore(false);
   }, [page, allProducts, loadingMore, hasMore]);
+
+  // Infinite scroll observer
+  useEffect(() => {
+    if (loading || loadingMore || !hasMore) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          loadMoreProducts();
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    if (loadMoreRef.current) {
+      observer.observe(loadMoreRef.current);
+    }
+
+    observerRef.current = observer;
+
+    return () => {
+      if (observerRef.current) {
+        observerRef.current.disconnect();
+      }
+    };
+  }, [loading, loadingMore, hasMore, loadMoreProducts]);
+
+  useEffect(() => {
+    fetchProductPerformance();
+  }, [fetchProductPerformance]);
 
   if (loading) {
     return (

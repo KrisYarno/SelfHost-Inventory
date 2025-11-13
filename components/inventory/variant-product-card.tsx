@@ -3,10 +3,9 @@
 import { useState } from 'react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { StockLevelBadge } from '@/components/inventory/stock-level-badge';
+import { ValueChip } from '@/components/ui/value-chip';
+import { StatusBadge } from '@/components/ui/status-badge';
 import { 
-  Package, 
   Plus, 
   Edit, 
   MapPin, 
@@ -40,8 +39,8 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
   const [isExpanded, setIsExpanded] = useState(false); // Default to collapsed
 
   return (
-    <Card className="overflow-hidden group">
-      <div className="p-4 md:p-6">
+    <Card className="relative overflow-hidden group">
+      <div className="p-4 md:p-6 space-y-4">
         <div className="flex items-start justify-between mb-3">
           <div className="flex-1">
             <h3 className="font-semibold text-base md:text-lg">
@@ -53,11 +52,27 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
               )}
             </h3>
           </div>
-          <div className="text-right">
-            <div className="text-2xl font-bold">{product.totalQuantity}</div>
-            <StockLevelBadge quantity={product.totalQuantity} />
+          <div className="flex flex-col items-end gap-1 text-right">
+            <span className="text-2xl font-bold">{product.totalQuantity}</span>
+            <ValueChip
+              tone={
+                product.totalQuantity > 0
+                  ? 'positive'
+                  : product.totalQuantity < 0
+                  ? 'negative'
+                  : 'neutral'
+              }
+            >
+              {product.totalQuantity} units
+            </ValueChip>
           </div>
         </div>
+
+        {product.totalQuantity <= 0 && (
+          <StatusBadge tone="negative" className="absolute right-4 top-4">
+            Out
+          </StatusBadge>
+        )}
 
         {/* Quick actions - always visible on mobile, hover on desktop */}
         <div className="flex gap-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
@@ -122,7 +137,14 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
                   .map((location) => (
                   <div
                     key={location.locationId}
-                    className="flex items-center justify-between p-3 bg-muted/30 rounded-lg"
+                    className={cn(
+                      "flex items-center justify-between rounded-lg border px-3 py-2",
+                      location.quantity > 0
+                        ? "border-emerald-500/30 bg-emerald-500/5"
+                        : location.quantity < 0
+                        ? "border-red-500/40 bg-red-500/10"
+                        : "border-border bg-muted/30"
+                    )}
                   >
                     <div className="flex items-center gap-2">
                       <MapPin className="h-4 w-4 text-muted-foreground" />
@@ -130,13 +152,20 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
                         <span className="text-sm font-medium">{location.locationName}</span>
                       </div>
                     </div>
-                    <div className="flex items-center gap-3">
-                      <span className="font-semibold text-lg">{location.quantity}</span>
-                      <span className="text-sm text-muted-foreground">units</span>
+                    <div className="flex items-center gap-2">
+                      <ValueChip
+                        tone={
+                          location.quantity > 0
+                            ? 'positive'
+                            : location.quantity < 0
+                            ? 'negative'
+                            : 'neutral'
+                        }
+                      >
+                        {location.quantity} units
+                      </ValueChip>
                       {location.quantity === 0 && (
-                        <Badge variant="outline" className="text-orange-600 border-orange-600 ml-2">
-                          Out
-                        </Badge>
+                        <StatusBadge tone="negative">Out</StatusBadge>
                       )}
                     </div>
                   </div>

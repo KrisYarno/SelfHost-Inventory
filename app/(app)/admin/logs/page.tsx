@@ -83,7 +83,7 @@ export default function AdminLogsPage() {
     }
   }, [page, pageSize, debouncedSearch, userFilter, locationFilter, typeFilter, dateFrom, dateTo]);
 
-  const fetchFilters = async () => {
+  const fetchFilters = useCallback(async () => {
     try {
       const response = await fetch("/api/admin/logs/filters");
       if (!response.ok) throw new Error("Failed to fetch filters");
@@ -92,7 +92,7 @@ export default function AdminLogsPage() {
     } catch (error) {
       console.error('Error fetching filters:', error);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchLogs();
@@ -104,7 +104,7 @@ export default function AdminLogsPage() {
     // Auto-refresh every 10 seconds
     const interval = setInterval(fetchLogs, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchFilters, fetchLogs]);
 
   const handleExportCSV = async () => {
     try {

@@ -1,23 +1,21 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ValueChip } from "@/components/ui/value-chip";
+import { InlineHighlight } from "@/components/ui/inline-highlight";
 import { 
   Save, 
   RotateCcw, 
   AlertTriangle,
   Download,
-  Upload,
   Search,
-  Check,
-  X,
   Shield,
   RefreshCw
 } from "lucide-react";
@@ -62,7 +60,7 @@ export default function AdminMassInventoryUpdatePage() {
   const [categoryFilter, setCategory] = useState<string>("all");
   const [showChangedOnly, setShowChangedOnly] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  const [fetchController, setFetchController] = useState<AbortController | null>(null);
+  const fetchControllerRef = useRef<AbortController | null>(null);
   const [allowPartialUpdates, setAllowPartialUpdates] = useState(true);
   const [showRecoveryDialog, setShowRecoveryDialog] = useState(false);
   const [lastFailures, setLastFailures] = useState<FailedUpdate[]>([]);
@@ -72,12 +70,12 @@ export default function AdminMassInventoryUpdatePage() {
   // Fetch all data once on mount with request deduplication
   const fetchInventoryData = useCallback(async () => {
     // Cancel any in-flight requests
-    if (fetchController) {
-      fetchController.abort();
+    if (fetchControllerRef.current) {
+      fetchControllerRef.current.abort();
     }
 
     const controller = new AbortController();
-    setFetchController(controller);
+    fetchControllerRef.current = controller;
 
     try {
       setIsLoading(true);
@@ -96,9 +94,9 @@ export default function AdminMassInventoryUpdatePage() {
       }
     } finally {
       setIsLoading(false);
-      setFetchController(null);
+      fetchControllerRef.current = null;
     }
-  }, [fetchController]);
+  }, []);
 
   // Only fetch once on mount and check for recovery state
   useEffect(() => {
@@ -125,11 +123,9 @@ export default function AdminMassInventoryUpdatePage() {
 
     return () => {
       mounted = false;
-      if (fetchController) {
-        fetchController.abort();
-      }
+      fetchControllerRef.current?.abort();
     };
-  }, []);
+  }, [fetchInventoryData]);
 
   // Handle quantity change
   const handleQuantityChange = (productId: number, locationId: number, value: string) => {
@@ -391,7 +387,7 @@ export default function AdminMassInventoryUpdatePage() {
       document.body.removeChild(a);
       
       toast.success('Export completed');
-    } catch (error) {
+    } catch {
       toast.error('Failed to export data');
     }
   };
@@ -629,9 +625,73 @@ export default function AdminMassInventoryUpdatePage() {
               </div>
             </div>
           )}
-          <div className="overflow-x-auto">
+          {/* Mobile cards */}
+          <div className="space-y-3 md:hidden">
+            {filteredProducts.map((product) => (
+              <div
+                key={`mobile-${product.productId}`}
+                className="rounded-lg border border-border bg-muted/20 p-3"
+              >
+                <div>
+                  <p className="font-medium text-sm">{product.productName}</p>
+                  {product.variant && (
+                    <p className="text-xs text-muted-foreground">{product.variant}</p>
+                  )}
+                </div>
+                <div className="mt-3 space-y-3">
+                  {product.locations.map((location) => (
+                    <div
+                      key={`mobile-${product.productId}-${location.locationId}`}
+                      className={cn(
+                        "flex items-center justify-between gap-3 rounded-md border px-3 py-2",
+                        location.hasChanged ? "border-primary/50 bg-primary/5" : "border-border bg-background/60"
+                      )}
+                    >
+                      <div className="flex flex-col text-xs">
+                        <span className="font-semibold text-sm">{location.locationName}</span>
+                        <span className="text-muted-foreground">
+                          Current:{" "}
+                          <InlineHighlight className="text-xs">
+                            {location.currentQuantity}
+                          </InlineHighlight>
+                        </span>
+                      </div>
+                      <div className="flex flex-col items-end gap-1">
+                        <Input
+                          type="number"
+                          value={location.newQuantity ?? ""}
+                          onChange={(e) =>
+                            handleQuantityChange(
+                              product.productId,
+                              location.locationId,
+                              e.target.value
+                            )
+                          }
+                          className={cn(
+                            "h-9 w-24 text-center text-sm",
+                            location.delta > 0 && "text-green-600",
+                            location.delta < 0 && "text-red-600"
+                          )}
+                          placeholder="--"
+                          disabled={isSaving}
+                        />
+                        {location.hasChanged && (
+                          <ValueChip tone={location.delta > 0 ? "positive" : "negative"}>
+                            {location.delta > 0 ? "+" : ""}
+                            {location.delta}
+                          </ValueChip>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full">
-              <thead>
+              <thead className="sticky top-0 z-10 bg-background">
                 <tr className="border-b">
                   <th className="text-left p-2">Product</th>
                   {data?.locations.map(location => (
@@ -678,12 +738,12 @@ export default function AdminMassInventoryUpdatePage() {
                             disabled={isSaving}
                           />
                           {location.hasChanged && (
-                            <Badge 
-                              variant={location.delta > 0 ? "default" : "destructive"}
-                              className="text-xs"
+                            <ValueChip
+                              tone={location.delta > 0 ? "positive" : "negative"}
                             >
-                              {location.delta > 0 ? "+" : ""}{location.delta}
-                            </Badge>
+                              {location.delta > 0 ? "+" : ""}
+                              {location.delta}
+                            </ValueChip>
                           )}
                         </div>
                       </td>
