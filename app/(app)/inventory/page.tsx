@@ -165,26 +165,26 @@ export default function InventoryPage() {
       setIsLoading(false);
       setIsLoadingMore(false);
     }
-  }, [debouncedSearch, selectedLocationId]);
+  }, [debouncedSearch]);
 
   // Fetch inventory logs
-  const fetchLogs = async () => {
+  const fetchLogs = useCallback(async () => {
     try {
       const data = await fetchWithErrorHandling('/api/inventory/logs?pageSize=20');
       setLogs(data.logs);
     } catch {
       toast.error('Failed to load inventory logs');
     }
-  };
+  }, []);
 
-  const fetchTransfers = async () => {
+  const fetchTransfers = useCallback(async () => {
     try {
       const data = await fetchWithErrorHandling('/api/inventory/transfers?pageSize=20');
       setTransferLogs(data.transfers ?? []);
     } catch {
       toast.error('Failed to load transfer history');
     }
-  };
+  }, []);
 
   // Load more items
   const loadMore = useCallback(() => {
@@ -194,7 +194,7 @@ export default function InventoryPage() {
   }, [fetchProducts, isLoadingMore, pagination]);
 
   // Pull to refresh handler
-  const handleRefresh = async () => {
+  const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
     try {
       await Promise.all([
@@ -208,7 +208,7 @@ export default function InventoryPage() {
     } finally {
       setIsRefreshing(false);
     }
-  };
+  }, [fetchProducts, fetchLogs, fetchTransfers]);
 
   // Setup infinite scroll
   const { loadMoreRef } = useInfiniteScroll({
@@ -222,7 +222,7 @@ export default function InventoryPage() {
     fetchProducts();
     fetchLogs();
     fetchTransfers();
-  }, []); // Removed selectedLocationId dependency
+  }, [fetchProducts, fetchLogs, fetchTransfers]);
 
   // Search effect
   useEffect(() => {
@@ -287,7 +287,7 @@ export default function InventoryPage() {
         pullIndicator.parentNode.removeChild(pullIndicator);
       }
     };
-  }, [isRefreshing]);
+  }, [handleRefresh, isRefreshing]);
 
   const handleProductAction = (productId: number, action: 'adjust' | 'stockIn' | 'transfer') => {
     // Find the product and convert to ProductWithQuantity format
@@ -511,9 +511,9 @@ export default function InventoryPage() {
                           <VariantProductCard
                             key={product.id}
                             product={product}
-                            onStockIn={(id, locationId) => handleProductAction(id, 'stockIn')}
-                            onAdjust={(id, locationId) => handleProductAction(id, 'adjust')}
-                            onTransfer={(id, locationId) => handleProductAction(id, 'transfer')}
+                            onStockIn={(id) => handleProductAction(id, 'stockIn')}
+                            onAdjust={(id) => handleProductAction(id, 'adjust')}
+                            onTransfer={(id) => handleProductAction(id, 'transfer')}
                           />
                         ))}
                       </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { format } from "date-fns";
@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Search, FileText, ChevronLeft, ChevronRight, Filter, Download } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download } from "lucide-react";
 import { toast } from "sonner";
 
 interface AuditLog {
@@ -42,7 +42,7 @@ interface AuditLog {
   entityId: number | null;
   batchId: string | null;
   action: string;
-  details: any;
+  details: Record<string, unknown>;
   ipAddress: string | null;
   userAgent: string | null;
   affectedCount: number;
@@ -75,21 +75,11 @@ export default function AuditLogsPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize] = useState(50);
-  const [searchTerm, setSearchTerm] = useState("");
   const [actionTypeFilter, setActionTypeFilter] = useState<string>("all");
   const [entityTypeFilter, setEntityTypeFilter] = useState<string>("all");
   const [userIdFilter, setUserIdFilter] = useState<string>("");
 
-  useEffect(() => {
-    if (status === "loading") return;
-    if (!session?.user?.isAdmin) {
-      router.push("/unauthorized");
-      return;
-    }
-    fetchAuditLogs();
-  }, [session, status, router, page, actionTypeFilter, entityTypeFilter, userIdFilter]);
-
-  const fetchAuditLogs = async () => {
+  const fetchAuditLogs = useCallback(async () => {
     try {
       setIsLoading(true);
       const params = new URLSearchParams({
@@ -113,7 +103,16 @@ export default function AuditLogsPage() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [page, pageSize, actionTypeFilter, entityTypeFilter, userIdFilter]);
+
+  useEffect(() => {
+    if (status === "loading") return;
+    if (!session?.user?.isAdmin) {
+      router.push("/unauthorized");
+      return;
+    }
+    fetchAuditLogs();
+  }, [session, status, router, fetchAuditLogs]);
 
   const handleExport = async () => {
     try {

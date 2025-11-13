@@ -6,7 +6,7 @@ import prisma from "@/lib/prisma";
 export const dynamic = 'force-dynamic';
 
 // GET /api/admin/products/deleted - List all soft deleted products (Admin only)
-export async function GET(request: NextRequest) {
+export async function GET(_request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
     

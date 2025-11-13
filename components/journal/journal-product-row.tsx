@@ -1,6 +1,6 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
+import { ValueChip } from "@/components/ui/value-chip";
 import { cn } from "@/lib/utils";
 import { AdjustmentInput } from "./adjustment-input";
 import { SwipeableAdjustment } from "./swipeable-adjustment";
@@ -11,18 +11,17 @@ interface JournalProductRowProps {
   product: ProductWithQuantity;
   adjustment?: JournalAdjustment;
   onQuantityChange: (change: number) => void;
-  index?: number;
 }
 
 export function JournalProductRow({
   product,
   adjustment,
   onQuantityChange,
-  index = 0,
 }: JournalProductRowProps) {
   const currentQuantity = product.currentQuantity || 0;
-  const adjustedQuantity = currentQuantity + (adjustment?.quantityChange || 0);
-  const hasChange = adjustment && adjustment.quantityChange !== 0;
+  const delta = adjustment?.quantityChange || 0;
+  const adjustedQuantity = currentQuantity + delta;
+  const hasChange = delta !== 0;
 
   const handleQuantityChange = (change: number) => {
     console.log(`JournalProductRow: handleQuantityChange for product ${product.id} (${product.name}), new change: ${change}`);
@@ -43,7 +42,11 @@ export function JournalProductRow({
       onSwipeLeft={handleSwipeLeft}
       className={cn(
         "rounded-lg border transition-colors overflow-visible",
-        hasChange && "border-primary/50 bg-primary/5"
+        hasChange
+          ? delta > 0
+            ? "border-emerald-500/50 bg-emerald-500/5"
+            : "border-red-500/50 bg-red-500/5"
+          : "border-border bg-card"
       )}
       role="article"
       aria-label={`Product ${product.name}, current quantity ${currentQuantity}`}
@@ -55,20 +58,20 @@ export function JournalProductRow({
         <div className="flex-1 min-w-0">
           <h4 className="font-medium truncate" id={`product-name-${product.id}`}>{product.name}</h4>
           <div className="flex items-center gap-2 mt-1">
-            <Badge variant="outline" className="text-xs" role="status" aria-label={`Current quantity: ${currentQuantity}`}>
+            <ValueChip tone="neutral" className="text-[11px]" role="status" aria-label={`Current quantity: ${currentQuantity}`}>
               Current: {currentQuantity}
-            </Badge>
+            </ValueChip>
             {hasChange && (
               <>
-                <span className="text-muted-foreground">→</span>
-                <Badge
-                  variant={adjustment.quantityChange > 0 ? "default" : "destructive"}
-                  className="text-xs"
+                <span className="text-muted-foreground text-xs">-&gt;</span>
+                <ValueChip
+                  tone={delta > 0 ? "positive" : "negative"}
+                  className="text-[11px]"
                   role="status"
                   aria-label={`New quantity will be: ${adjustedQuantity}`}
                 >
                   New: {adjustedQuantity}
-                </Badge>
+                </ValueChip>
               </>
             )}
           </div>
@@ -88,16 +91,10 @@ export function JournalProductRow({
       {/* Change Indicator */}
       {hasChange && (
         <div className="mt-2 pl-[72px]" role="status" aria-live="polite">
-          <span
-            className={cn(
-              "text-sm font-medium",
-              adjustment.quantityChange > 0 ? "text-green-600" : "text-red-600"
-            )}
-            aria-label={`Change: ${adjustment.quantityChange > 0 ? "increase" : "decrease"} by ${Math.abs(adjustment.quantityChange)} units`}
-          >
-            {adjustment.quantityChange > 0 ? "+" : ""}
-            {adjustment.quantityChange} units
-          </span>
+          <ValueChip tone={delta > 0 ? "positive" : "negative"}>
+            {delta > 0 ? "+" : ""}
+            {delta} units
+          </ValueChip>
         </div>
       )}
       </div>

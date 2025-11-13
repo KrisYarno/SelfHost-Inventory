@@ -11,7 +11,7 @@ const testRateLimit = {
 };
 
 export const GET = withRateLimitHandler(
-  async (request: NextRequest) => {
+  async (_request: NextRequest) => {
     const session = await getServerSession(authOptions);
     if (!session?.user?.isAdmin) {
       return NextResponse.json(

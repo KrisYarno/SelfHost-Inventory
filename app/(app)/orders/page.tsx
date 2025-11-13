@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
-import { Package, Grid3X3, List, RefreshCw, Loader2 } from "lucide-react";
+import { useState, useCallback } from "react";
+import { Package, Grid3X3, List, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";

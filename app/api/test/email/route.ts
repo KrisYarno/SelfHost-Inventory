@@ -4,7 +4,7 @@ import { emailService } from '@/lib/email';
 
 export const dynamic = 'force-dynamic';
 
-export async function POST(request: NextRequest) {
+export async function POST(_request: NextRequest) {
   try {
     const session = await getSession();
     if (!session || !session.user.isAdmin) {

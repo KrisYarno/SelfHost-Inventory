@@ -217,7 +217,7 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    const { changes, note, isRetry = false } = body;
+    const { changes, note: _note, isRetry: _isRetry = false } = body;
 
     if (!changes || !Array.isArray(changes) || changes.length === 0) {
       console.log('No changes provided or invalid format');

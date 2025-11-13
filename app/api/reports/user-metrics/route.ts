@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import prisma from "@/lib/prisma";
-import { startOfDay, endOfDay, subDays, format } from "date-fns";
+import { subDays, format } from "date-fns";
 
 export const dynamic = 'force-dynamic';
 

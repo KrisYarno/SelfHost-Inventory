@@ -2,7 +2,6 @@
 
 import { ProductWithQuantity } from "@/types/product";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { MoreHorizontal, Edit, Trash2, TrendingUp, Package } from "lucide-react";
@@ -13,6 +12,8 @@ import {
   DropdownMenuTrigger,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { ValueChip } from "@/components/ui/value-chip";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 interface ProductCardProps {
   product: ProductWithQuantity;
@@ -44,6 +45,12 @@ export function ProductCard({
         className
       )}
     >
+      {product.currentQuantity <= 0 && (
+        <StatusBadge tone="negative" className="absolute right-2 top-2 z-10">
+          Out
+        </StatusBadge>
+      )}
+
       <div className="p-4">
         {/* Actions menu */}
         {(isAdmin || showInventoryActions) && (onEdit || onDelete || onQuickAdjust || onStockIn) && (
@@ -113,12 +120,17 @@ export function ProductCard({
 
           {/* Badges */}
           <div className="flex items-center gap-2">
-            <Badge 
-              variant={product.currentQuantity > 0 ? "default" : "destructive"}
-              className="text-xs font-mono"
+            <ValueChip
+              tone={
+                product.currentQuantity > 0
+                  ? "positive"
+                  : product.currentQuantity < 0
+                  ? "negative"
+                  : "neutral"
+              }
             >
-              Qty: {product.currentQuantity}
-            </Badge>
+              {product.currentQuantity} units
+            </ValueChip>
           </div>
 
         </div>

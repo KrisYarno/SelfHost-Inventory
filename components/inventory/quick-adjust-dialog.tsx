@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
-import { Plus, Minus, Package } from "lucide-react";
+import { Plus, Minus, Package, MapPin } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import {
@@ -18,7 +18,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Badge } from "@/components/ui/badge";
+import { ValueChip } from "@/components/ui/value-chip";
+import { ContextTag } from "@/components/ui/context-tag";
+import { InlineHighlight } from "@/components/ui/inline-highlight";
 import type { ProductWithQuantity } from "@/types/product";
 
 interface QuickAdjustDialogProps {
@@ -34,7 +36,7 @@ export function QuickAdjustDialog({
   product,
   onSuccess,
 }: QuickAdjustDialogProps) {
-  const { selectedLocationId } = useLocation();
+  const { selectedLocationId, locations } = useLocation();
   const { token: csrfToken } = useCSRF();
   const [adjustmentType, setAdjustmentType] = useState<"add" | "remove">("add");
   const [quantity, setQuantity] = useState("");
@@ -72,8 +74,26 @@ export function QuickAdjustDialog({
   const adjustedQuantity = adjustmentType === "add" 
     ? currentQuantity + quantityNum 
     : currentQuantity - quantityNum;
+  const selectedLocationName =
+    locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Selected location";
   
   const isValid = quantityNum > 0 && reason.trim() && adjustedQuantity >= 0;
+
+  const handleIncrement = () => {
+    setQuantity((prev) => {
+      const current = Number.parseInt(prev, 10) || 0;
+      const next = Math.max(current + 1, 1);
+      return String(next);
+    });
+  };
+
+  const handleDecrement = () => {
+    setQuantity((prev) => {
+      const current = Number.parseInt(prev, 10) || 1;
+      const next = Math.max(current - 1, 1);
+      return String(next);
+    });
+  };
 
   const handleSubmit = async () => {
     if (!selectedLocationId) {
@@ -140,15 +160,21 @@ export function QuickAdjustDialog({
         </DialogHeader>
 
         {/* Product Info */}
-        <div className="p-4 rounded-lg bg-muted/50">
-          <div>
-            <h4 className="font-medium">{product.name}</h4>
-            <div className="flex items-center gap-2 mt-1">
-              <Package className="h-4 w-4 text-muted-foreground" />
-              <span className="text-sm text-muted-foreground">
-                Current Stock: {loadingQuantity ? "Loading..." : currentQuantity}
-              </span>
-            </div>
+        <div className="rounded-lg border border-border bg-muted/30 p-4">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Package className="h-4 w-4" />
+            <span>Product</span>
+          </div>
+          <h4 className="mt-1 text-base font-semibold">{product.name}</h4>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+            <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
+              {selectedLocationName}
+            </ContextTag>
+            <ValueChip
+              tone={currentQuantity > 0 ? "positive" : currentQuantity < 0 ? "negative" : "neutral"}
+            >
+              {loadingQuantity ? "Loading..." : `${currentQuantity} units`}
+            </ValueChip>
           </div>
         </div>
 
@@ -185,24 +211,57 @@ export function QuickAdjustDialog({
 
           {/* Quantity */}
           <div className="space-y-2">
-            <Label htmlFor="quantity">Quantity</Label>
-            <Input
-              id="quantity"
-              type="number"
-              min="1"
-              value={quantity}
-              onChange={(e) => setQuantity(e.target.value)}
-              placeholder="Enter quantity"
-            />
+            <Label htmlFor="quantity" className="text-xs font-medium text-muted-foreground">
+              Quantity
+            </Label>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-10 w-10 rounded-md border-border"
+                onClick={handleDecrement}
+                disabled={quantityNum <= 1}
+              >
+                <Minus className="h-4 w-4" />
+              </Button>
+              <Input
+                id="quantity"
+                type="number"
+                min="1"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={quantity}
+                onChange={(e) => setQuantity(e.target.value)}
+                placeholder="Enter quantity"
+                className="h-10 flex-1 text-center text-lg font-semibold tabular-nums"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-10 w-10 rounded-md border-border"
+                onClick={handleIncrement}
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </div>
             {quantityNum > 0 && (
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">New quantity:</span>
-                <Badge
-                  variant={adjustedQuantity < 0 ? "destructive" : "outline"}
+              <p className="text-[11px] text-muted-foreground">
+                After adjustment,{" "}
+                <InlineHighlight>{selectedLocationName}</InlineHighlight>{" "}
+                would have{" "}
+                <span
+                  className={
+                    adjustedQuantity < 0
+                      ? "text-destructive font-semibold"
+                      : "text-emerald-500 font-semibold"
+                  }
                 >
-                  {adjustedQuantity}
-                </Badge>
-              </div>
+                  {adjustedQuantity} units
+                </span>
+                .
+              </p>
             )}
           </div>
 
@@ -241,6 +300,7 @@ export function QuickAdjustDialog({
           <Button
             onClick={handleSubmit}
             disabled={!isValid || isSubmitting}
+            className="bg-sky-600 text-slate-50 hover:bg-sky-500"
           >
             {isSubmitting ? "Adjusting..." : "Confirm Adjustment"}
           </Button>

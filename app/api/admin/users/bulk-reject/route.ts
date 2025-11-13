@@ -14,7 +14,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { userIds, reason } = await request.json();
+    const { userIds, reason: _reason } = await request.json();
     
     if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
       return NextResponse.json({ error: "Invalid user IDs" }, { status: 400 });

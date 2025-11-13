@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
 
           if (!inventory) {
             // Create new inventory record if it doesn't exist
-            const newInventory = await tx.product_locations.create({
+            await tx.product_locations.create({
               data: {
                 productId: adjustment.productId,
                 locationId: adjustment.locationId,

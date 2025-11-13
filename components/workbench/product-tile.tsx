@@ -1,7 +1,8 @@
 "use client";
 
 import { ProductWithQuantity } from "@/types/product";
-import { Badge } from "@/components/ui/badge";
+import { ValueChip } from "@/components/ui/value-chip";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { cn } from "@/lib/utils";
 
 interface ProductTileProps {
@@ -30,20 +31,10 @@ export function ProductTile({ product, onClick, className }: ProductTileProps) {
       {/* Stock badges */}
       <div className="absolute top-2 right-2">
         {isOutOfStock && (
-          <Badge
-            variant="destructive"
-            className="text-xs px-1.5 py-0.5"
-          >
-            Out
-          </Badge>
+          <StatusBadge tone="negative">Out</StatusBadge>
         )}
-        {isLowStock && (
-          <Badge
-            variant="secondary"
-            className="text-xs px-1.5 py-0.5 bg-warning/20 text-warning-foreground"
-          >
-            Low
-          </Badge>
+        {!isOutOfStock && isLowStock && (
+          <StatusBadge tone="warning">Low</StatusBadge>
         )}
       </div>
 
@@ -51,12 +42,17 @@ export function ProductTile({ product, onClick, className }: ProductTileProps) {
       <div className="text-center space-y-1 flex-1 flex flex-col justify-center pt-4">
         <h3 className="font-medium text-sm line-clamp-1">{product.baseName}</h3>
         <p className="text-xs text-muted-foreground">{product.variant}</p>
-        <p className="text-xs font-medium">
-          Stock: <span className={cn(
-            isOutOfStock && "text-destructive",
-            isLowStock && "text-warning"
-          )}>{product.currentQuantity}</span>
-        </p>
+        <ValueChip
+          tone={
+            product.currentQuantity > 0
+              ? "positive"
+              : product.currentQuantity < 0
+              ? "negative"
+              : "neutral"
+          }
+        >
+          Stock: {product.currentQuantity}
+        </ValueChip>
       </div>
 
       {/* Hover effect */}

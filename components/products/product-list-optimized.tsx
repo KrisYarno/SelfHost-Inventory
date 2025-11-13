@@ -76,11 +76,11 @@ export function ProductListOptimized({
     setPage(1);
   };
 
-  const products = data?.products || [];
   const total = data?.total || 0;
 
   // Apply client-side stock filtering
   const filteredProducts = useMemo(() => {
+    const products = data?.products ?? [];
     return products.filter((product) => {
       switch (stockFilter) {
         case "in-stock":
@@ -93,7 +93,7 @@ export function ProductListOptimized({
           return true;
       }
     });
-  }, [products, stockFilter]);
+  }, [data?.products, stockFilter]);
 
   // Memoize filtered categories
   const categories = useMemo(() => {

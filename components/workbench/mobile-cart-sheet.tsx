@@ -9,8 +9,6 @@ import {
   SheetDescription,
   SheetHeader,
   SheetTitle,
-  SheetTrigger,
-  SheetFooter,
 } from "@/components/ui/sheet";
 import { OrderList } from "./order-list";
 import { RotateCcw, ShoppingCart } from "lucide-react";
@@ -69,7 +67,7 @@ export function MobileCartSheet({
         </div>
 
         {/* Order Summary and Actions */}
-        <div className="space-y-4 pt-4 border-t">
+        <div className="mt-auto space-y-4 border-t border-border bg-background/80 -mx-6 px-6 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-4">
           <div className="space-y-2">
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">Total items:</span>

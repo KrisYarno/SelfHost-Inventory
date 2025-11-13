@@ -9,7 +9,6 @@ import {
   Users, 
   AlertTriangle,
   ArrowRight,
-  FileText,
   Activity,
   TrendingUp
 } from "lucide-react";

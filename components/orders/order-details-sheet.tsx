@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Package, X, Check, Lock, Unlock } from "lucide-react";
+import { Package, Check, Lock, Unlock } from "lucide-react";
 import {
   Sheet,
   SheetContent,

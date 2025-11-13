@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Minus, Plus, Trash2, Check, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ValueChip } from "@/components/ui/value-chip";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 interface OrderItemProps {
   item: OrderItem;
@@ -55,11 +57,15 @@ export function OrderItemComponent({
     setIsEditing(false);
   };
 
+  const availableStock = item.product.currentQuantity ?? 0;
+  const isOverPicked = item.quantity > availableStock;
+
   return (
     <div
       className={cn(
         "flex items-center gap-3 p-3 rounded-lg border bg-card",
         "hover:shadow-sm transition-shadow",
+        isOverPicked && "border-amber-500/60 bg-amber-500/10",
         className
       )}
     >
@@ -68,9 +74,27 @@ export function OrderItemComponent({
         <h4 className="font-medium text-sm truncate">
           {item.product.name}
         </h4>
-        <p className="text-xs text-muted-foreground">
-          Stock: {item.product.currentQuantity}
-        </p>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <ValueChip
+            tone={
+              availableStock > 0
+                ? "positive"
+                : availableStock < 0
+                ? "negative"
+                : "neutral"
+            }
+          >
+            Stock: {availableStock}
+          </ValueChip>
+          {isOverPicked && (
+            <StatusBadge tone="warning">Over picked</StatusBadge>
+          )}
+        </div>
+        {isOverPicked && (
+          <p className="text-[11px] text-amber-400">
+            Requested {item.quantity}, only {availableStock} in stock.
+          </p>
+        )}
       </div>
 
       {/* Quantity Controls */}

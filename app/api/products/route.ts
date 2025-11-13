@@ -8,7 +8,6 @@ import {
   getProductsWithQuantities,
   isProductUnique,
   getNextNumericValue,
-  formatProductName,
 } from "@/lib/products";
 import { auditService } from "@/lib/audit";
 import { validateCSRFToken } from "@/lib/csrf";

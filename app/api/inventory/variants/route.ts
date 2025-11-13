@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
     }
 
     const searchParams = request.nextUrl.searchParams;
-    const locationId = searchParams.get('locationId');
+    const _locationId = searchParams.get('locationId');
     const page = parseInt(searchParams.get('page') || '1');
     const pageSize = parseInt(searchParams.get('pageSize') || '12');
     const search = searchParams.get('search') || '';

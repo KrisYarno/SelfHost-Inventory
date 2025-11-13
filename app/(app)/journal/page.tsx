@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Search, Filter, RotateCcw, Save, FileSpreadsheet, AlertCircle } from "lucide-react";
+import { Search, Filter, RotateCcw, Save, FileSpreadsheet, AlertCircle, MapPin } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -22,11 +22,12 @@ import { getUserFriendlyMessage, handleBatchOperationErrors } from "@/lib/error-
 import { useInventoryChangeAnnouncer } from "@/hooks/use-accessibility-announcer";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { fetchWithErrorHandling } from "@/lib/rate-limited-fetch";
+import { ContextTag } from "@/components/ui/context-tag";
 
 export default function JournalPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
-  const { selectedLocationId } = useLocation();
+  const { selectedLocationId, locations } = useLocation();
   const { token: csrfToken } = useCSRF();
   const [products, setProducts] = useState<ProductWithQuantity[]>([]);
   const [filteredProducts, setFilteredProducts] = useState<ProductWithQuantity[]>([]);
@@ -320,6 +321,8 @@ export default function JournalPage() {
   };
 
   const totalChanges = getTotalChanges();
+  const selectedLocationName =
+    locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Select a location";
   
   // Debug: log the current state
   useEffect(() => {
@@ -338,6 +341,11 @@ export default function JournalPage() {
         <p className="text-muted-foreground" id="page-description">
           Make bulk inventory adjustments across multiple products
         </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+          <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
+            {selectedLocationName}
+          </ContextTag>
+        </div>
       </div>
 
 
@@ -422,7 +430,7 @@ export default function JournalPage() {
                   <span>No products found</span>
                 </div>
               ) : (
-                filteredProducts.map((product, index) => (
+                filteredProducts.map((product) => (
                   <div key={product.id} role="listitem">
                     <JournalProductRow
                       product={product}
@@ -430,7 +438,6 @@ export default function JournalPage() {
                       onQuantityChange={(change) => 
                         handleQuantityChange(product.id, change)
                       }
-                      index={index}
                     />
                   </div>
                 ))

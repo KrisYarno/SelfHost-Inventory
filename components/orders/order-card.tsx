@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useRef, TouchEvent } from "react";
+import { useState, TouchEvent } from "react";
 import { formatDistanceToNow } from "date-fns";
-import { Package, Clock, Lock, ChevronRight } from "lucide-react";
+import { Package, Lock, ChevronRight } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

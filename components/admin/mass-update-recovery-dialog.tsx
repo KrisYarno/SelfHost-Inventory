@@ -17,7 +17,6 @@ import { Separator } from "@/components/ui/separator";
 import {
   AlertTriangle,
   RefreshCw,
-  X,
   AlertCircle,
   Database,
   Network,
