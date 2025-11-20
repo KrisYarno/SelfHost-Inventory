@@ -19,6 +19,7 @@ interface LocationQuantity {
   locationId: number;
   locationName: string;
   quantity: number;
+  minQuantity: number;
 }
 
 interface VariantProductCardProps {
@@ -29,6 +30,7 @@ interface VariantProductCardProps {
     variant: string | null;
     locations: LocationQuantity[];
     totalQuantity: number;
+    combinedMinimum: number;
   };
   onStockIn: (productId: number, locationId?: number) => void;
   onAdjust: (productId: number, locationId?: number) => void;
@@ -38,8 +40,12 @@ interface VariantProductCardProps {
 export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }: VariantProductCardProps) {
   const [isExpanded, setIsExpanded] = useState(false); // Default to collapsed
 
+  const totalBelowMinimum =
+    product.combinedMinimum > 0 &&
+    product.totalQuantity < product.combinedMinimum;
+
   return (
-    <Card className="relative overflow-hidden group">
+    <Card className="overflow-hidden group">
       <div className="p-4 md:p-6 space-y-4">
         <div className="flex items-start justify-between mb-3">
           <div className="flex-1">
@@ -53,7 +59,14 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
             </h3>
           </div>
           <div className="flex flex-col items-end gap-1 text-right">
-            <span className="text-2xl font-bold">{product.totalQuantity}</span>
+            {(product.totalQuantity <= 0 || totalBelowMinimum) && (
+              <StatusBadge
+                tone={product.totalQuantity <= 0 ? 'negative' : 'warning'}
+                className="self-end"
+              >
+                {product.totalQuantity <= 0 ? 'Out' : 'Below min'}
+              </StatusBadge>
+            )}
             <ValueChip
               tone={
                 product.totalQuantity > 0
@@ -67,12 +80,6 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
             </ValueChip>
           </div>
         </div>
-
-        {product.totalQuantity <= 0 && (
-          <StatusBadge tone="negative" className="absolute right-4 top-4">
-            Out
-          </StatusBadge>
-        )}
 
         {/* Quick actions - always visible on mobile, hover on desktop */}
         <div className="flex gap-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
@@ -133,43 +140,58 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
             <div className="space-y-2">
               {product.locations.length > 0 ? (
                 product.locations
-                  .sort((a, b) => b.quantity - a.quantity) // Sort by quantity descending
-                  .map((location) => (
-                  <div
-                    key={location.locationId}
-                    className={cn(
-                      "flex items-center justify-between rounded-lg border px-3 py-2",
-                      location.quantity > 0
-                        ? "border-emerald-500/30 bg-emerald-500/5"
-                        : location.quantity < 0
-                        ? "border-red-500/40 bg-red-500/10"
-                        : "border-border bg-muted/30"
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      <MapPin className="h-4 w-4 text-muted-foreground" />
-                      <div>
-                        <span className="text-sm font-medium">{location.locationName}</span>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <ValueChip
-                        tone={
-                          location.quantity > 0
-                            ? 'positive'
+                  .slice()
+                  .sort((a, b) => b.quantity - a.quantity)
+                  .map((location) => {
+                    const isBelowLocation =
+                      location.minQuantity > 0 &&
+                      location.quantity < location.minQuantity;
+                    return (
+                      <div
+                        key={location.locationId}
+                        className={cn(
+                          'flex items-center justify-between rounded-lg border px-3 py-2',
+                          isBelowLocation
+                            ? 'border-amber-500/50 bg-amber-500/10'
+                            : location.quantity > 0
+                            ? 'border-emerald-500/30 bg-emerald-500/5'
                             : location.quantity < 0
-                            ? 'negative'
-                            : 'neutral'
-                        }
+                            ? 'border-red-500/40 bg-red-500/10'
+                            : 'border-border bg-muted/30'
+                        )}
                       >
-                        {location.quantity} units
-                      </ValueChip>
-                      {location.quantity === 0 && (
-                        <StatusBadge tone="negative">Out</StatusBadge>
-                      )}
-                    </div>
-                  </div>
-                ))
+                        <div className="flex items-center gap-2">
+                          <MapPin className="h-4 w-4 text-muted-foreground" />
+                          <div>
+                            <span className="text-sm font-medium">
+                              {location.locationName}
+                            </span>
+                            {location.minQuantity > 0 && (
+                              <p className="text-xs text-muted-foreground">
+                                Min {location.minQuantity} units
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <ValueChip
+                            tone={
+                              isBelowLocation
+                                ? 'negative'
+                                : location.quantity > 0
+                                ? 'positive'
+                                : 'neutral'
+                            }
+                          >
+                            {location.quantity} units
+                          </ValueChip>
+                          {isBelowLocation && (
+                            <StatusBadge tone="warning">Below min</StatusBadge>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
               ) : (
                 <div className="text-center py-4 text-sm text-muted-foreground">
                   No location data available

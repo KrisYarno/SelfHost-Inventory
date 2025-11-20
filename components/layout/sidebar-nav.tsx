@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, BookOpen, BarChart3 } from "lucide-react";
+import { Home, Package, Settings, Warehouse, BookOpen, BarChart3, Truck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -30,6 +30,12 @@ const navigation = [
     href: "/journal",
     icon: BookOpen,
     description: "Bulk inventory adjustments",
+  },
+  {
+    name: "Stocker",
+    href: "/stocker",
+    icon: Truck,
+    description: "Refill tasks for on-site stockers",
   },
   // Reports moved under Admin menu (see below)
 ];

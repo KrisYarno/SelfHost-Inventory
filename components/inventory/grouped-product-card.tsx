@@ -80,7 +80,7 @@ export function GroupedProductCard({
             <div className="flex items-center gap-2">
               <StockLevelBadge 
                 quantity={aggregatedData.totalQuantity} 
-                lowStockThreshold={aggregatedData.lowStockThreshold}
+                threshold={aggregatedData.lowStockThreshold}
                 showQuantity={false}
               />
               {productGroup.length > 1 && (
@@ -165,7 +165,7 @@ export function GroupedProductCard({
                     <div className="flex items-center gap-2 sm:gap-3">
                       <StockLevelBadge 
                         quantity={item.quantity} 
-                        lowStockThreshold={item.product.lowStockThreshold || 10}
+                        threshold={item.product.lowStockThreshold || 10}
                         showQuantity={false}
                         className="h-5 sm:h-6"
                       />

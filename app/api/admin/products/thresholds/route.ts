@@ -13,39 +13,51 @@ export async function GET(_request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // Get all products with their current stock levels
-    const products = await prisma.product.findMany({
-      select: {
-        id: true,
-        name: true,
-        lowStockThreshold: true,
-        product_locations: {
-          select: {
-            quantity: true,
-          },
-        },
-      },
-      orderBy: {
-        name: 'asc',
-      },
+    const locations = await prisma.location.findMany({
+      orderBy: { name: 'asc' },
     });
 
-    // Calculate current stock for each product
-    const productsWithStock = products.map(product => {
-      const currentStock = product.product_locations.reduce(
-        (sum, location) => sum + location.quantity,
+    const products = await prisma.product.findMany({
+      where: { deletedAt: null },
+      include: {
+        product_locations: {
+          include: { locations: true },
+        },
+      },
+      orderBy: { name: 'asc' },
+    });
+
+    const payload = products.map(product => {
+      const totalStock = product.product_locations.reduce(
+        (sum, row) => sum + row.quantity,
         0
       );
-      
+
+      const perLocation = locations.map(location => {
+        const row = product.product_locations.find(
+          pl => pl.locationId === location.id
+        );
+        return {
+          locationId: location.id,
+          locationName: location.name,
+          quantity: row?.quantity ?? 0,
+          minQuantity: row?.minQuantity ?? 0,
+        };
+      });
+
       return {
         id: product.id,
         name: product.name,
-        lowStockThreshold: product.lowStockThreshold,
-        currentStock,
+        combinedMinimum: product.lowStockThreshold ?? 0,
+        totalStock,
+        perLocation,
       };
     });
 
-    return NextResponse.json(productsWithStock);
+    return NextResponse.json({
+      locations,
+      products: payload,
+    });
   } catch (error) {
     console.error('Error fetching product thresholds:', error);
     return NextResponse.json(
@@ -70,7 +82,13 @@ export async function PATCH(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { updates } = body;
+    const { updates } = body as {
+      updates: Array<{
+        productId: number;
+        combinedMinimum?: number;
+        perLocation?: { locationId: number; minQuantity: number }[];
+      }>;
+    };
 
     if (!Array.isArray(updates) || updates.length === 0) {
       return NextResponse.json(
@@ -79,31 +97,69 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    // Validate updates
+    const ops: any[] = [];
+
     for (const update of updates) {
-      if (!update.id || typeof update.lowStockThreshold !== 'number') {
+      if (!update.productId) {
         return NextResponse.json(
           { error: 'Invalid update format' },
           { status: 400 }
         );
       }
-      if (update.lowStockThreshold < 0) {
+
+      if (
+        update.combinedMinimum !== undefined &&
+        update.combinedMinimum < 0
+      ) {
         return NextResponse.json(
-          { error: 'Threshold cannot be negative' },
+          { error: 'Combined minimum cannot be negative' },
           { status: 400 }
         );
       }
+
+      if (update.combinedMinimum !== undefined) {
+        ops.push(
+          prisma.product.update({
+            where: { id: update.productId },
+            data: { lowStockThreshold: update.combinedMinimum },
+          })
+        );
+      }
+
+      if (Array.isArray(update.perLocation)) {
+        for (const loc of update.perLocation) {
+          if (loc.minQuantity < 0) {
+            return NextResponse.json(
+              { error: 'Location minimum cannot be negative' },
+              { status: 400 }
+            );
+          }
+          ops.push(
+            prisma.product_locations.upsert({
+              where: {
+                productId_locationId: {
+                  productId: update.productId,
+                  locationId: loc.locationId,
+                },
+              },
+              update: {
+                minQuantity: loc.minQuantity,
+              },
+              create: {
+                productId: update.productId,
+                locationId: loc.locationId,
+                quantity: 0,
+                minQuantity: loc.minQuantity,
+              },
+            })
+          );
+        }
+      }
     }
 
-    // Perform bulk update using transactions
-    const updatePromises = updates.map(update =>
-      prisma.product.update({
-        where: { id: update.id },
-        data: { lowStockThreshold: update.lowStockThreshold },
-      })
-    );
-
-    await prisma.$transaction(updatePromises);
+    if (ops.length) {
+      await prisma.$transaction(ops);
+    }
 
     return NextResponse.json({
       success: true,

@@ -32,9 +32,14 @@ export function CompleteOrderDialog({
   const router = useRouter();
   const { orderItems, orderReference, clearOrder, getTotalQuantity, isProcessing, setIsProcessing } = useWorkbench();
   const { selectedLocationId } = useLocation();
-  const { token: csrfToken } = useCSRF();
+  const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
 
   const handleComplete = async () => {
+    if (!csrfToken) {
+      toast.error("Secure session is still initializing. Please wait a moment and try again.");
+      return;
+    }
+
     if (!orderReference.trim()) {
       toast.error("Order reference is required");
       return;
@@ -191,7 +196,7 @@ export function CompleteOrderDialog({
           <AlertDialogCancel disabled={isProcessing}>Cancel</AlertDialogCancel>
           <AlertDialogAction
             onClick={handleComplete}
-            disabled={isProcessing}
+            disabled={isProcessing || csrfLoading || !csrfToken}
           >
             {isProcessing ? "Processing..." : "Complete Order"}
           </AlertDialogAction>

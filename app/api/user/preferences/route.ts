@@ -17,6 +17,11 @@ export async function GET() {
       select: {
         emailAlerts: true,
         defaultLocationId: true,
+        phoneNumber: true,
+        minLocationEmailAlerts: true,
+        minLocationSmsAlerts: true,
+        minCombinedEmailAlerts: true,
+        minCombinedSmsAlerts: true,
       },
     });
 
@@ -45,9 +50,26 @@ export async function PATCH(request: NextRequest) {
     const body = await request.json();
     const updateData: Record<string, unknown> = {};
 
-    // Update emailAlerts if provided
     if (typeof body.emailAlerts === 'boolean') {
       updateData.emailAlerts = body.emailAlerts;
+    }
+
+    const booleanFields = [
+      'minLocationEmailAlerts',
+      'minLocationSmsAlerts',
+      'minCombinedEmailAlerts',
+      'minCombinedSmsAlerts',
+    ] as const;
+
+    booleanFields.forEach((field) => {
+      if (typeof body[field] === 'boolean') {
+        updateData[field] = body[field];
+      }
+    });
+
+    if (typeof body.phoneNumber === 'string') {
+      const trimmed = body.phoneNumber.trim();
+      updateData.phoneNumber = trimmed.length ? trimmed : null;
     }
 
     // Update defaultLocationId if provided
@@ -81,6 +103,11 @@ export async function PATCH(request: NextRequest) {
       select: {
         emailAlerts: true,
         defaultLocationId: true,
+        phoneNumber: true,
+        minLocationEmailAlerts: true,
+        minLocationSmsAlerts: true,
+        minCombinedEmailAlerts: true,
+        minCombinedSmsAlerts: true,
       },
     });
 

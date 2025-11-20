@@ -127,3 +127,21 @@ export type InventorySnapshot = {
     quantity: number;
   }>;
 };
+
+// Minimum breach tracking for alerting + UI
+export interface LocationMinBreach {
+  productId: number;
+  productName: string;
+  locationId: number;
+  locationName: string;
+  currentQuantity: number;
+  minQuantity: number;
+}
+
+export interface CombinedMinBreach {
+  productId: number;
+  productName: string;
+  totalQuantity: number;
+  combinedMinimum: number;
+  daysUntilEmpty: number | null;
+}
