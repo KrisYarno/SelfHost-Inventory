@@ -21,7 +21,6 @@ import { BookOpen, Loader2, RefreshCw, Download, Package } from 'lucide-react';
 import { toast } from 'sonner';
 import { useInfiniteScroll } from '@/hooks/use-infinite-scroll';
 import { useDebounce } from '@/hooks/use-debounce';
-import { useLocation } from '@/contexts/location-context';
 import { fetchWithErrorHandling } from '@/lib/rate-limited-fetch';
 import type { 
   InventoryLogWithRelations
@@ -34,10 +33,12 @@ interface ProductWithLocations {
   name: string;
   baseName: string;
   variant: string | null;
+  combinedMinimum: number;
   locations: {
     locationId: number;
     locationName: string;
     quantity: number;
+    minQuantity: number;
   }[];
   totalQuantity: number;
 }
@@ -51,7 +52,6 @@ interface PaginationInfo {
 }
 
 export default function InventoryPage() {
-  const { selectedLocationId } = useLocation();
   const [logs, setLogs] = useState<InventoryLogWithRelations[]>([]);
   const [products, setProducts] = useState<ProductWithLocations[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);

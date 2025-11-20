@@ -25,6 +25,7 @@ import { DateRange } from "react-day-picker";
 import { format, startOfDay, endOfDay, subDays } from "date-fns";
 import { exportToCSV, exportChartAsImage, generateExportFilename } from "@/lib/export-utils";
 import { DrillDownModal } from "@/components/reports/drill-down-modal";
+import { CombinedMinimumsReport } from "@/components/reports/combined-minimums";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -282,6 +283,7 @@ export default function AdminReportsPage() {
             <MetricsCard title="Inventory Retail Value" value={formatCurrency(metrics?.totalInventoryRetailValue)} subtitle="At retail" icon={<DollarSign className="h-4 w-4" />} />
             <MetricsCard title="Low Stock Items" value={metrics?.lowStockProducts || 0} subtitle="Below threshold" icon={<AlertTriangle className="h-4 w-4" />} trend={metrics?.lowStockProducts ? { value: 12, direction: 'up' } : undefined} />
           </div>
+          <CombinedMinimumsReport />
 
           <Tabs defaultValue="overview" className="space-y-4">
             <TabsList className="w-full overflow-x-auto whitespace-nowrap">

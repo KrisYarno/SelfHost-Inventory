@@ -6,49 +6,37 @@ import { cn } from '@/lib/utils';
 
 interface StockLevelBadgeProps {
   quantity: number;
-  lowStockThreshold?: number;
-  outOfStockThreshold?: number;
+  threshold?: number;
   className?: string;
   showQuantity?: boolean;
 }
 
 export function StockLevelBadge({
   quantity,
-  lowStockThreshold = 10,
-  outOfStockThreshold = 0,
+  threshold = 0,
   className,
   showQuantity = true,
 }: StockLevelBadgeProps) {
-  const getStockStatus = () => {
-    if (quantity <= outOfStockThreshold) {
-      return {
-        label: 'Out of Stock',
-        variant: 'destructive' as const,
-        className: 'bg-red-500 hover:bg-red-600',
-      };
-    } else if (quantity <= lowStockThreshold) {
-      return {
-        label: 'Low Stock',
-        variant: 'secondary' as const,
-        className: 'bg-orange-500 hover:bg-orange-600 text-white',
-      };
-    } else {
-      return {
-        label: 'In Stock',
-        variant: 'default' as const,
-        className: 'bg-green-500 hover:bg-green-600',
-      };
-    }
-  };
+  const isOut = quantity <= 0;
+  const isLow = !isOut && threshold > 0 && quantity <= threshold;
 
-  const status = getStockStatus();
+  let label = 'In Stock';
+  let variant: 'default' | 'secondary' | 'destructive' = 'default';
+  let styles = 'bg-emerald-500 hover:bg-emerald-600 text-white';
+
+  if (isOut) {
+    label = 'Out of Stock';
+    variant = 'destructive';
+    styles = 'bg-red-500 hover:bg-red-600';
+  } else if (isLow) {
+    label = 'Below Minimum';
+    variant = 'secondary';
+    styles = 'bg-amber-500 hover:bg-amber-600 text-white';
+  }
 
   return (
-    <Badge 
-      variant={status.variant}
-      className={cn(status.className, className)}
-    >
-      {showQuantity ? `${quantity} units` : status.label}
+    <Badge variant={variant} className={cn(styles, className)}>
+      {showQuantity ? `${quantity} units` : label}
     </Badge>
   );
 }

@@ -16,6 +16,12 @@ model User {
   isApproved          Boolean               @default(false)
   defaultLocationId   Int                   @default(1)
   emailAlerts         Boolean?              @default(false)
+  phoneNumber         String?               @db.VarChar(20)
+  smsVerified         Boolean               @default(false)
+  minLocationEmailAlerts Boolean            @default(false)
+  minLocationSmsAlerts   Boolean            @default(false)
+  minCombinedEmailAlerts Boolean            @default(false)
+  minCombinedSmsAlerts   Boolean            @default(false)
   inventory_logs      inventory_logs[]
   notificationHistory NotificationHistory[]
   deletedProducts     Product[]             @relation("DeletedProducts")
@@ -60,6 +66,7 @@ model Location {
   name              String              @db.VarChar(100)
   inventory_logs    inventory_logs[]
   product_locations product_locations[]
+  notificationHistory NotificationHistory[]
   users             User[]
 
   @@map("locations")
@@ -88,6 +95,8 @@ model product_locations {
   productId  Int
   locationId Int
   quantity   Int      @default(0)
+  /// Per-location minimum on hand; 0 disables the trigger
+  minQuantity Int     @default(0)
   version    Int      @default(0)
   updatedAt  DateTime @default(now()) @updatedAt @db.DateTime(0)
   locations  Location @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_pl_location")
@@ -103,11 +112,14 @@ model NotificationHistory {
   id               Int       @id @default(autoincrement())
   userId           Int
   productId        Int
+  locationId       Int?
   notificationType String    @db.VarChar(50)
   sentAt           DateTime? @default(now()) @db.DateTime(0)
+  location         Location? @relation(fields: [locationId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   products         Product   @relation(fields: [productId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_notif_product")
   users            User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_notif_user")
 
+  @@index([userId, productId, locationId, notificationType], map: "idx_user_product_loc_type")
   @@index([userId, productId, notificationType], map: "idx_user_product_type")
   @@index([productId], map: "idx_notif_product")
   @@map("notification_history")

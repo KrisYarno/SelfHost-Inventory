@@ -15,7 +15,8 @@ export async function GET(request: NextRequest) {
     console.log('Running stock check cron job...');
     const startTime = Date.now();
 
-    const result = await stockChecker.runDailyCheck();
+    const lowStockResult = await stockChecker.runDailyCheck();
+    const minimumResult = await stockChecker.runMinimumsCheck();
     
     const duration = Date.now() - startTime;
     console.log(`Stock check completed in ${duration}ms`);
@@ -24,7 +25,8 @@ export async function GET(request: NextRequest) {
       success: true,
       timestamp: new Date().toISOString(),
       duration,
-      ...result,
+      ...lowStockResult,
+      ...minimumResult,
     });
   } catch (error) {
     console.error('Stock check cron job failed:', error);

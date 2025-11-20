@@ -11,10 +11,12 @@ interface ProductWithLocations {
   name: string;
   baseName: string;
   variant: string | null;
+  combinedMinimum: number;
   locations: {
     locationId: number;
     locationName: string;
     quantity: number;
+    minQuantity: number;
   }[];
   totalQuantity: number;
 }
@@ -76,6 +78,7 @@ export async function GET(request: NextRequest) {
         locationId: pl.locationId,
         locationName: pl.locations.name,
         quantity: pl.quantity,
+        minQuantity: pl.minQuantity ?? 0,
       }));
 
       const totalQuantity = locations.reduce((sum: number, loc) => sum + loc.quantity, 0);
@@ -85,6 +88,7 @@ export async function GET(request: NextRequest) {
         name: product.name,
         baseName: product.baseName || '',
         variant: product.variant,
+        combinedMinimum: product.lowStockThreshold ?? 0,
         locations: locations.sort((a, b) => b.quantity - a.quantity), // Sort by quantity desc
         totalQuantity,
       };

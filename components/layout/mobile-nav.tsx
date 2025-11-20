@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, ClipboardList } from "lucide-react";
+import { Home, Package, Settings, Warehouse, ClipboardList, Truck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -30,6 +30,12 @@ const navigation = [
     href: "/journal",
     icon: ClipboardList,
     label: "Journal",
+  },
+  {
+    name: "Stocker",
+    href: "/stocker",
+    icon: Truck,
+    label: "Stocker",
   },
 ];
 

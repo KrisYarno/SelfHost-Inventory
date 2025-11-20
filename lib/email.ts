@@ -1,4 +1,5 @@
 import sgMail from '@sendgrid/mail';
+import type { CombinedMinBreach, LocationMinBreach } from '@/types/inventory';
 
 // Initialize SendGrid with API key
 if (process.env.SENDGRID_API_KEY) {
@@ -25,6 +26,12 @@ export interface LowStockEmailData {
   unsubscribeToken?: string;
 }
 
+export interface MinimumDigestData {
+  recipientName: string;
+  locationItems: LocationMinBreach[];
+  combinedItems: CombinedMinBreach[];
+}
+
 export class EmailService {
   private from = process.env.SENDGRID_FROM_EMAIL || 'alerts@advancedresearchpep.com';
   private templateId = process.env.TEMPLATE_ID;
@@ -49,6 +56,27 @@ export class EmailService {
       console.error('Error sending email:', error);
       throw new Error('Failed to send email');
     }
+  }
+
+  async sendMinimumsDigest(
+    to: string | string[],
+    data: MinimumDigestData
+  ): Promise<void> {
+    if (!process.env.SENDGRID_API_KEY) {
+      console.warn('SendGrid API key not configured, minimum email not sent');
+      return;
+    }
+
+    const subject = `Minimum Alert – ${data.locationItems.length + data.combinedItems.length} item(s)`;
+    const html = this.generateMinimumsHTML(data);
+    const text = this.generateMinimumsText(data);
+
+    await this.sendEmail({
+      to,
+      subject,
+      text,
+      html,
+    });
   }
 
   async sendLowStockDigest(
@@ -209,6 +237,99 @@ View inventory at: ${process.env.NEXTAUTH_URL}/inventory
 
 You're receiving this email because you've opted into low stock alerts.
 ${data.unsubscribeToken ? `Unsubscribe: ${process.env.NEXTAUTH_URL}/unsubscribe?token=${data.unsubscribeToken}` : ''}
+    `.trim();
+  }
+
+  private generateMinimumsHTML(data: MinimumDigestData): string {
+    const locationRows = data.locationItems
+      .map(
+        (item) => `
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;">${item.productName}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;">${item.locationName}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.currentQuantity}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.minQuantity}</td>
+        </tr>`
+      )
+      .join("");
+
+    const combinedRows = data.combinedItems
+      .map(
+        (item) => `
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;">${item.productName}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.totalQuantity}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.combinedMinimum}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.daysUntilEmpty ?? "N/A"}</td>
+        </tr>`
+      )
+      .join("");
+
+    return `
+      <h2 style="color:#e5e7eb;margin-bottom:16px;">Hello ${data.recipientName},</h2>
+      <p style="color:#cbd5f5;">Here are the current minimum alerts.</p>
+      ${
+        locationRows
+          ? `<h3 style="color:#fbbf24;margin-top:24px;">Location minimum breaches</h3>
+             <table style="width:100%;border-collapse:collapse;color:#f9fafb;">
+               <thead>
+                 <tr>
+                   <th align="left">Product</th>
+                   <th align="left">Location</th>
+                   <th>Current</th>
+                   <th>Minimum</th>
+                 </tr>
+               </thead>
+               <tbody>${locationRows}</tbody>
+             </table>`
+          : ""
+      }
+      ${
+        combinedRows
+          ? `<h3 style="color:#f87171;margin-top:24px;">Combined minimum breaches</h3>
+             <table style="width:100%;border-collapse:collapse;color:#f9fafb;">
+               <thead>
+                 <tr>
+                   <th align="left">Product</th>
+                   <th>Total</th>
+                   <th>Minimum</th>
+                   <th>Days until empty</th>
+                 </tr>
+               </thead>
+               <tbody>${combinedRows}</tbody>
+             </table>`
+          : ""
+      }
+      <p style="color:#9ca3af;margin-top:24px;">Manage notifications at ${process.env.NEXTAUTH_URL}/account</p>
+    `;
+  }
+
+  private generateMinimumsText(data: MinimumDigestData): string {
+    const loc = data.locationItems
+      .map(
+        (item) =>
+          ` - ${item.productName} @ ${item.locationName}: ${item.currentQuantity}/${item.minQuantity}`
+      )
+      .join("\n");
+    const combined = data.combinedItems
+      .map(
+        (item) =>
+          ` - ${item.productName}: ${item.totalQuantity}/${item.combinedMinimum} (days until empty: ${
+            item.daysUntilEmpty ?? "N/A"
+          })`
+      )
+      .join("\n");
+
+    return `
+Minimum alerts for ${data.recipientName}
+
+Location minimums:
+${loc || "None"}
+
+Combined minimums:
+${combined || "None"}
+
+Manage notifications: ${process.env.NEXTAUTH_URL}/account
     `.trim();
   }
 }

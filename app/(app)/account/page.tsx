@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
-import { AlertCircle, CheckCircle2, Mail } from 'lucide-react';
+import { AlertCircle, CheckCircle2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
 
@@ -31,7 +31,12 @@ export default function AccountPage() {
   const [passwordError, setPasswordError] = useState('');
   const [passwordSuccess, setPasswordSuccess] = useState(false);
   const [emailAlerts, setEmailAlerts] = useState(false);
-  const [isLoadingEmailAlerts, setIsLoadingEmailAlerts] = useState(false);
+  const [phoneNumber, setPhoneNumber] = useState('');
+  const [minLocationEmailAlerts, setMinLocationEmailAlerts] = useState(false);
+  const [minLocationSmsAlerts, setMinLocationSmsAlerts] = useState(false);
+  const [minCombinedEmailAlerts, setMinCombinedEmailAlerts] = useState(false);
+  const [minCombinedSmsAlerts, setMinCombinedSmsAlerts] = useState(false);
+  const [isSavingNotifications, setIsSavingNotifications] = useState(false);
 
   // Fetch locations and user preferences
   useEffect(() => {
@@ -49,6 +54,11 @@ export default function AccountPage() {
         if (userResponse.ok) {
           const userData = await userResponse.json();
           setEmailAlerts(userData.emailAlerts || false);
+          setPhoneNumber(userData.phoneNumber || '');
+          setMinLocationEmailAlerts(userData.minLocationEmailAlerts || false);
+          setMinLocationSmsAlerts(userData.minLocationSmsAlerts || false);
+          setMinCombinedEmailAlerts(userData.minCombinedEmailAlerts || false);
+          setMinCombinedSmsAlerts(userData.minCombinedSmsAlerts || false);
         }
       } catch (error) {
         console.error('Error fetching data:', error);
@@ -135,25 +145,32 @@ export default function AccountPage() {
     }
   };
 
-  const handleEmailAlertsToggle = async () => {
-    setIsLoadingEmailAlerts(true);
+  const handleNotificationSave = async () => {
+    setIsSavingNotifications(true);
     try {
       const response = await fetch('/api/user/preferences', {
         method: 'PATCH',
         headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
-        body: JSON.stringify({ emailAlerts: !emailAlerts }),
+        body: JSON.stringify({
+          phoneNumber,
+          emailAlerts,
+          minLocationEmailAlerts,
+          minLocationSmsAlerts,
+          minCombinedEmailAlerts,
+          minCombinedSmsAlerts,
+        }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to update email preferences');
+        const data = await response.json();
+        throw new Error(data.error || 'Failed to update notifications');
       }
 
-      setEmailAlerts(!emailAlerts);
-      toast.success(`Email alerts ${!emailAlerts ? 'enabled' : 'disabled'}`);
+      toast.success('Notification preferences updated');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to update preferences');
+      toast.error(error instanceof Error ? error.message : 'Failed to update notifications');
     } finally {
-      setIsLoadingEmailAlerts(false);
+      setIsSavingNotifications(false);
     }
   };
 
@@ -238,44 +255,109 @@ export default function AccountPage() {
             </CardContent>
           </Card>
 
-          {/* Email Notifications */}
+          {/* Notification Preferences */}
           <Card>
             <CardHeader>
-              <CardTitle>Email Notifications</CardTitle>
+              <CardTitle>Notification Preferences</CardTitle>
               <CardDescription>
-                Manage your email notification preferences
+                Configure alerts for low stock, location minimums, and combined minimums.
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
+            <CardContent className="space-y-4">
+              <div>
+                <Label htmlFor="phone-number">Phone number for SMS alerts</Label>
+                <Input
+                  id="phone-number"
+                  type="tel"
+                  value={phoneNumber}
+                  onChange={(event) => setPhoneNumber(event.target.value)}
+                  placeholder="+1 (555) 123-4567"
+                  className="mt-2"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  SMS notifications are sent only if a number is provided.
+                </p>
+              </div>
+
+              <div className="space-y-3">
                 <div className="flex items-center justify-between rounded-lg border p-4">
-                  <div className="space-y-0.5 pr-4">
-                    <div className="flex items-center gap-2">
-                      <Mail className="h-4 w-4 text-muted-foreground" />
-                      <Label htmlFor="email-alerts" className="text-base font-medium cursor-pointer">
-                        Low Stock Alerts
-                      </Label>
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                      Receive daily email notifications when products fall below their stock thresholds
+                  <div className="pr-4">
+                    <p className="text-sm font-medium">Low stock email alerts</p>
+                    <p className="text-xs text-muted-foreground">
+                      Receive the existing daily digest when products fall below their global thresholds.
                     </p>
                   </div>
                   <Switch
-                    id="email-alerts"
+                    id="low-stock-email"
                     checked={emailAlerts}
-                    onCheckedChange={handleEmailAlertsToggle}
-                    disabled={isLoadingEmailAlerts}
+                    onCheckedChange={setEmailAlerts}
                   />
                 </div>
-                {emailAlerts && (
-                  <Alert>
-                    <AlertCircle className="h-4 w-4" />
-                    <AlertDescription>
-                      You&apos;ll receive a daily digest email at 7:00 AM MT if any products are below their thresholds
-                    </AlertDescription>
-                  </Alert>
-                )}
+
+                <div className="flex items-center justify-between rounded-lg border p-4">
+                  <div className="pr-4">
+                    <p className="text-sm font-medium">Location minimum email alerts</p>
+                    <p className="text-xs text-muted-foreground">
+                      Notify me when my default location dips below its minimum.
+                    </p>
+                  </div>
+                  <Switch
+                    id="location-email"
+                    checked={minLocationEmailAlerts}
+                    onCheckedChange={setMinLocationEmailAlerts}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between rounded-lg border p-4">
+                  <div className="pr-4">
+                    <p className="text-sm font-medium">Location minimum SMS alerts</p>
+                    <p className="text-xs text-muted-foreground">
+                      SMS alerts for refill needs at your default location.
+                    </p>
+                  </div>
+                  <Switch
+                    id="location-sms"
+                    checked={minLocationSmsAlerts}
+                    onCheckedChange={setMinLocationSmsAlerts}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between rounded-lg border p-4">
+                  <div className="pr-4">
+                    <p className="text-sm font-medium">Combined minimum email alerts</p>
+                    <p className="text-xs text-muted-foreground">
+                      Email me when total inventory for a product falls below its combined minimum.
+                    </p>
+                  </div>
+                  <Switch
+                    id="combined-email"
+                    checked={minCombinedEmailAlerts}
+                    onCheckedChange={setMinCombinedEmailAlerts}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between rounded-lg border p-4">
+                  <div className="pr-4">
+                    <p className="text-sm font-medium">Combined minimum SMS alerts</p>
+                    <p className="text-xs text-muted-foreground">
+                      SMS summary for products below combined minimums.
+                    </p>
+                  </div>
+                  <Switch
+                    id="combined-sms"
+                    checked={minCombinedSmsAlerts}
+                    onCheckedChange={setMinCombinedSmsAlerts}
+                  />
+                </div>
               </div>
+
+              <Button
+                onClick={handleNotificationSave}
+                disabled={isSavingNotifications}
+                className="w-full sm:w-auto"
+              >
+                {isSavingNotifications ? 'Saving...' : 'Save Notification Preferences'}
+              </Button>
             </CardContent>
           </Card>
 
