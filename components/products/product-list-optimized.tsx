@@ -42,7 +42,7 @@ export function ProductListOptimized({
     search,
     page,
     pageSize,
-    sortBy: 'name',
+    sortBy: 'baseNameNumeric',
     sortOrder: 'asc',
   });
 
@@ -95,16 +95,22 @@ export function ProductListOptimized({
     });
   }, [data?.products, stockFilter]);
 
-  // Memoize filtered categories
+  // Memoize filtered categories (case-insensitive keys, preserving first label)
   const categories = useMemo(() => {
-    const categoryMap = new Map<string, number>();
+    const categoryMap = new Map<string, { label: string; count: number }>();
     filteredProducts.forEach((product) => {
-      const category = product.baseName || "Uncategorized";
-      categoryMap.set(category, (categoryMap.get(category) || 0) + 1);
+      const raw = product.baseName || "Uncategorized";
+      const key = raw.trim().toLowerCase() || "uncategorized";
+      const existing = categoryMap.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        categoryMap.set(key, { label: raw, count: 1 });
+      }
     });
-    return Array.from(categoryMap.entries()).sort((a, b) =>
-      a[0].localeCompare(b[0])
-    );
+    return Array.from(categoryMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([, value]) => [value.label, value.count] as [string, number]);
   }, [filteredProducts]);
 
   const activeFilterCount = stockFilter !== "all" ? 1 : 0;

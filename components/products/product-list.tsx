@@ -46,8 +46,7 @@ export function ProductList({
       
       const params = new URLSearchParams();
       if (debouncedSearch) params.set("search", debouncedSearch);
-      if (!showInactive) params.set("isActive", "true");
-      params.set("sortBy", "sortOrder");
+      params.set("sortBy", "baseNameNumeric");
       params.set("sortOrder", "asc");
       params.set("getTotal", "true"); // Request total quantities across all locations
       
@@ -70,17 +69,24 @@ export function ProductList({
     fetchProducts();
   }, [fetchProducts]);
 
-  // Group products by baseName
+  // Group products by baseName (case-insensitive) while preserving a display label
   const groupedProducts = useMemo(() => {
-    const groups = new Map<string, ProductWithQuantity[]>();
+    const groups = new Map<string, { label: string; items: ProductWithQuantity[] }>();
     
     products.forEach(product => {
-      const baseName = product.baseName || 'Other';
-      const existing = groups.get(baseName) || [];
-      groups.set(baseName, [...existing, product]);
+      const raw = product.baseName || 'Other';
+      const key = raw.trim().toLowerCase() || 'other';
+      const existing = groups.get(key);
+      if (existing) {
+        existing.items.push(product);
+      } else {
+        groups.set(key, { label: raw, items: [product] });
+      }
     });
     
-    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+    return Array.from(groups.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([, value]) => value);
   }, [products]);
 
   if (loading && products.length === 0) {
@@ -151,11 +157,11 @@ export function ProductList({
         </div>
       ) : (
         <div className="space-y-8">
-          {groupedProducts.map(([baseName, groupProducts]) => (
-            <div key={baseName} className="space-y-4">
-              <h3 className="text-lg font-semibold">{baseName}</h3>
+          {groupedProducts.map((group) => (
+            <div key={group.label.toLowerCase()} className="space-y-4">
+              <h3 className="text-lg font-semibold">{group.label}</h3>
               <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
-                {groupProducts.map((product) => (
+                {group.items.map((product) => (
                   <ProductCard
                     key={product.id}
                     product={product}

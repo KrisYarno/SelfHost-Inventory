@@ -112,7 +112,7 @@ export async function getProductsWithQuantities(
 ): Promise<{ products: ProductWithQuantity[]; total: number }> {
   const {
     search,
-    sortBy = "name",
+    sortBy = "baseNameNumeric",
     sortOrder = "asc",
     page = 1,
     pageSize = 50,
@@ -135,15 +135,24 @@ export async function getProductsWithQuantities(
   const total = await prisma.product.count({ where });
 
   // Get products
+  const orderBy: Prisma.ProductOrderByWithRelationInput[] = [];
+
+  if (sortBy === "baseNameNumeric") {
+    orderBy.push({ baseName: sortOrder }, { numericValue: sortOrder }, { variant: sortOrder });
+  } else if (sortBy === "name") {
+    orderBy.push({ name: sortOrder });
+  } else if (sortBy === "baseName") {
+    orderBy.push({ baseName: sortOrder });
+  } else if (sortBy === "numericValue") {
+    orderBy.push({ numericValue: sortOrder });
+  }
+
+  // Secondary sort by name for stability
+  orderBy.push({ name: "asc" });
+
   const products = await prisma.product.findMany({
     where,
-    orderBy: [
-      sortBy === "name" ? { name: sortOrder } : {},
-      sortBy === "baseName" ? { baseName: sortOrder } : {},
-      sortBy === "numericValue" ? { numericValue: sortOrder } : {},
-      // Secondary sort by name for consistency
-      { name: "asc" },
-    ],
+    orderBy,
     skip: (page - 1) * pageSize,
     take: pageSize,
   });
@@ -180,10 +189,14 @@ export async function isProductUnique(
   variant: string,
   excludeId?: number
 ): Promise<boolean> {
+  const normalizedBaseName = baseName.trim();
+  const normalizedVariant = variant.trim();
+
   const existing = await prisma.product.findFirst({
     where: {
-      baseName,
-      variant,
+      baseName: normalizedBaseName,
+      variant: normalizedVariant,
+      deletedAt: null,
       id: excludeId ? { not: excludeId } : undefined,
     },
   });

@@ -17,9 +17,26 @@ export async function GET(request: NextRequest) {
     const search = searchParams.get("search") || "";
     const page = parseInt(searchParams.get("page") || "1");
     const pageSize = parseInt(searchParams.get("pageSize") || "25");
-    const sortBy = searchParams.get("sortBy") || "name";
-    const sortOrder = searchParams.get("sortOrder") || "asc";
+    const sortByParam = searchParams.get("sortBy");
+    const allowedSorts = ["name", "baseName", "numericValue", "baseNameNumeric"] as const;
+    const sortBy = allowedSorts.includes(sortByParam as any)
+      ? (sortByParam as (typeof allowedSorts)[number])
+      : "baseNameNumeric";
+    const sortOrder = (searchParams.get("sortOrder") || "asc") as "asc" | "desc";
     const locationId = searchParams.get("locationId");
+    const orderBy: Prisma.ProductOrderByWithRelationInput[] = [];
+
+    if (sortBy === "baseNameNumeric") {
+      orderBy.push({ baseName: sortOrder }, { numericValue: sortOrder }, { variant: sortOrder });
+    } else if (sortBy === "name") {
+      orderBy.push({ name: sortOrder });
+    } else if (sortBy === "baseName") {
+      orderBy.push({ baseName: sortOrder });
+    } else if (sortBy === "numericValue") {
+      orderBy.push({ numericValue: sortOrder });
+    }
+
+    orderBy.push({ name: "asc" });
 
     // Build where clause - exclude soft deleted products
     const where: Prisma.ProductWhereInput = {
@@ -52,9 +69,7 @@ export async function GET(request: NextRequest) {
                 },
               },
         },
-        orderBy: {
-          [sortBy]: sortOrder,
-        },
+        orderBy,
         take: pageSize,
         skip: (page - 1) * pageSize,
       }),
