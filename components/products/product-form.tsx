@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,7 +11,9 @@ import { cn } from "@/lib/utils";
 
 interface ProductFormInputs {
   baseName: string;
-  size: string;
+  variantLabel: string;
+  numericValue: number | null;
+  unit: string;
   lowStockThreshold: number;
   locationId?: number;
   costPrice: number;
@@ -23,22 +25,33 @@ interface ProductFormProps {
   onSubmit: (data: any) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;
+  disableSubmit?: boolean;
   className?: string;
   locations?: Array<{ id: number; name: string }>;
+  externalError?: string | null;
+  defaultLocationId?: number;
+  externalFieldErrors?: Partial<{
+    baseName: string;
+    numericValue: string;
+    unit: string;
+    variantLabel: string;
+  }>;
 }
-
-// Regex to parse size like "1mg", "5 mg", "10 mL"
-const SIZE_REGEX = /^(\d+(?:\.\d+)?)\s*(mg|mL|mcg)$/i;
 
 export function ProductForm({
   product,
   onSubmit,
   onCancel,
   isSubmitting = false,
+  disableSubmit = false,
   className,
   locations = [],
+  externalError,
+  defaultLocationId,
+  externalFieldErrors,
 }: ProductFormProps) {
   const [error, setError] = useState<string | null>(null);
+  const allowedUnits = ["mg", "ml", "mcg", "iu"];
   
   const {
     register,
@@ -46,10 +59,13 @@ export function ProductForm({
     formState: { errors },
     watch,
     setValue,
+    setError: setFieldError,
   } = useForm<ProductFormInputs>({
     defaultValues: {
       baseName: product?.baseName || "",
-      size: product ? `${product.numericValue || ''} ${product.unit || ''}`.trim() : "",
+      variantLabel: product?.variant || "",
+      numericValue: product?.numericValue ? Number(product.numericValue) : null,
+      unit: product?.unit || "",
       lowStockThreshold: product?.lowStockThreshold || 10,
       locationId: locations[0]?.id,
       costPrice: product ? Number(product.costPrice ?? 0) : 0,
@@ -57,33 +73,90 @@ export function ProductForm({
     },
   });
 
-  const validateSize = (value: string) => {
-    if (!value) return "Size is required";
-    if (!SIZE_REGEX.test(value)) {
-      return "Size must be in format like '1mg', '5 mg', or '10 mL'";
+  // Set default location when provided (create mode only)
+  useEffect(() => {
+    if (!product && defaultLocationId) {
+      setValue("locationId", defaultLocationId);
     }
-    return true;
-  };
+  }, [defaultLocationId, product, setValue]);
+
+  const displayError = error || externalError || null;
+
+  // Surface server-side field errors
+  useEffect(() => {
+    if (!externalFieldErrors) return;
+    if (externalFieldErrors.baseName) {
+      setFieldError("baseName", { type: "server", message: externalFieldErrors.baseName });
+    }
+    if (externalFieldErrors.numericValue) {
+      setFieldError("numericValue", { type: "server", message: externalFieldErrors.numericValue });
+    }
+    if (externalFieldErrors.unit) {
+      setFieldError("unit" as any, { type: "server", message: externalFieldErrors.unit });
+    }
+    if (externalFieldErrors.variantLabel) {
+      setFieldError("variantLabel" as any, { type: "server", message: externalFieldErrors.variantLabel });
+    }
+  }, [externalFieldErrors, setFieldError]);
 
   const handleFormSubmit = async (data: ProductFormInputs) => {
     try {
       setError(null);
-      
-      // Parse the size field
-      const sizeMatch = data.size.match(SIZE_REGEX);
-      if (!sizeMatch) {
-        setError("Invalid size format");
+
+      const numericValueRaw =
+        data.numericValue !== null && data.numericValue !== undefined
+          ? Number(data.numericValue)
+          : undefined;
+      const hasNumeric = numericValueRaw !== undefined;
+      const numericValue = numericValueRaw;
+      const unit = data.unit?.trim();
+      const variantLabel = data.variantLabel?.trim() || "";
+
+      if (hasNumeric && Number.isNaN(numericValue)) {
+        setError("Numeric size must be a valid number");
         return;
       }
 
-      const numericValue = parseFloat(sizeMatch[1]);
-      const unit = sizeMatch[2].toLowerCase();
-      
-      // Format variant: use integer format if it's a whole number
-      const variant = `${numericValue % 1 === 0 ? numericValue.toFixed(0) : numericValue} ${unit}`;
-      
-      // Construct name with single space
-      const name = `${data.baseName} ${variant}`;
+      if (hasNumeric && !unit) {
+        setError("Select a unit when providing a size");
+        return;
+      }
+
+      if (unit && !hasNumeric) {
+        setError("Add a numeric size when selecting a unit");
+        return;
+      }
+
+      if (!hasNumeric && !variantLabel) {
+        setError("Provide either a size + unit or a variant label");
+        return;
+      }
+
+      const normalizedUnit = unit ? unit.toLowerCase() : undefined;
+      if (normalizedUnit && !allowedUnits.includes(normalizedUnit)) {
+        setError("Unit must be one of mg, mL, mcg, or IU");
+        return;
+      }
+
+      const sizeDisplay =
+        hasNumeric
+          ? (() => {
+              const numericForDisplay = numericValue ?? 0;
+              return Number.isInteger(numericForDisplay)
+                ? numericForDisplay.toFixed(0)
+                : numericForDisplay.toString();
+            })()
+          : "";
+
+      const unitDisplay =
+        normalizedUnit === "ml" ? "mL" : normalizedUnit || "";
+
+      const variant =
+        hasNumeric
+          ? [sizeDisplay, unitDisplay].filter(Boolean).join(" ").trim()
+          : variantLabel;
+
+      const name = `${data.baseName} ${variant}`.trim();
 
       const sanitizedCostPrice = Number.isFinite(data.costPrice) ? data.costPrice : 0;
       const sanitizedRetailPrice = Number.isFinite(data.retailPrice) ? data.retailPrice : 0;
@@ -92,8 +165,8 @@ export function ProductForm({
         name,
         baseName: data.baseName,
         variant,
-        unit,
-        numericValue,
+        unit: normalizedUnit,
+        numericValue: numericValue ?? undefined,
         lowStockThreshold: data.lowStockThreshold,
         locationId: data.locationId,
         costPrice: sanitizedCostPrice,
@@ -111,9 +184,9 @@ export function ProductForm({
       onSubmit={handleSubmit(handleFormSubmit)}
       className={cn("space-y-4", className)}
     >
-      {error && (
+      {displayError && (
         <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-          {error}
+          {displayError}
         </div>
       )}
 
@@ -129,12 +202,12 @@ export function ProductForm({
                 value: 1,
                 message: "Product name must be at least 1 character",
               },
-              maxLength: {
-                value: 255,
-                message: "Product name must be less than 255 characters",
-              },
-            })}
-            disabled={isSubmitting}
+            maxLength: {
+              value: 255,
+              message: "Product name must be less than 255 characters",
+            },
+          })}
+            disabled={isSubmitting || !!product}
           />
           {errors.baseName && (
             <p className="text-sm text-destructive">{errors.baseName.message}</p>
@@ -142,23 +215,91 @@ export function ProductForm({
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="size">Size</Label>
+          <Label htmlFor="numericValue">Size (optional)</Label>
           <Input
-            id="size"
-            placeholder="e.g., 5mg, 10 mL, 250mcg"
-            {...register("size", {
-              required: "Size is required",
-              validate: validateSize,
+            id="numericValue"
+            type="number"
+            step="0.01"
+            min="0"
+            placeholder="e.g., 15"
+            {...register("numericValue", {
+              valueAsNumber: true,
+              min: {
+                value: 0,
+                message: "Size must be 0 or greater",
+              },
             })}
             disabled={isSubmitting || !!product}
           />
           <p className="text-xs text-muted-foreground">
-            Enter size with unit (mg, mL, or mcg)
+            Add a numeric size when applicable (mg, mL, mcg, or IU)
           </p>
-          {errors.size && (
-            <p className="text-sm text-destructive">{errors.size.message}</p>
+          {errors.numericValue && (
+            <p className="text-sm text-destructive">{errors.numericValue.message}</p>
           )}
         </div>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor="unit">Unit</Label>
+          <Select
+            value={watch("unit")}
+            onValueChange={(value) => setValue("unit", value)}
+            disabled={isSubmitting || !!product}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Select unit (optional)" />
+            </SelectTrigger>
+            <SelectContent>
+              {allowedUnits.map((unit) => (
+                <SelectItem key={unit} value={unit}>
+                  {unit === "ml" ? "mL" : unit.toUpperCase()}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Required when a size is provided
+          </p>
+          {externalFieldErrors?.unit && (
+            <p className="text-sm text-destructive">{externalFieldErrors.unit}</p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="variantLabel">Variant Label</Label>
+          <Input
+            id="variantLabel"
+            placeholder="e.g., Spray, Vial, Capsule"
+            {...register("variantLabel")}
+            disabled={isSubmitting || !!product}
+          />
+          <p className="text-xs text-muted-foreground">
+            Use when there is no numeric size (or to label the variant)
+          </p>
+          {externalFieldErrors?.variantLabel && (
+            <p className="text-sm text-destructive">{externalFieldErrors.variantLabel}</p>
+          )}
+        </div>
+      </div>
+
+            <div className="rounded-md border p-3 text-sm">
+        <p className="text-muted-foreground">Preview name</p>
+        <p className="font-medium">
+          {(() => {
+            const base = watch("baseName") || "";
+            const numericVal = watch("numericValue");
+            const hasNumeric =
+              numericVal !== null &&
+              numericVal !== undefined &&
+              !Number.isNaN(numericVal as number);
+            const unitVal = watch("unit") || "";
+            const variantFromSize = hasNumeric ? `${numericVal ?? ""} ${unitVal}`.trim() : "";
+            const variant = variantFromSize || watch("variantLabel") || "";
+            return `${base} ${variant}`.trim() || "--";
+          })()}
+        </p>
       </div>
 
       {locations.length > 0 && !product && (
@@ -261,11 +402,11 @@ export function ProductForm({
           type="button"
           variant="outline"
           onClick={onCancel}
-          disabled={isSubmitting}
+          disabled={isSubmitting || disableSubmit}
         >
           Cancel
         </Button>
-        <Button type="submit" disabled={isSubmitting}>
+        <Button type="submit" disabled={isSubmitting || disableSubmit}>
           {isSubmitting ? (
             <>
               <span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -279,3 +420,6 @@ export function ProductForm({
     </form>
   );
 }
+
+
+

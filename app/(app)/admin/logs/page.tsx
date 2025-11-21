@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,6 +18,7 @@ import {
 import { format } from "date-fns";
 import { cn, formatNumber } from "@/lib/utils";
 import { useDebounce } from "@/hooks/use-debounce";
+import { usePaginatedLogs } from "@/hooks/use-paginated-logs";
 import { toast } from "sonner";
 
 interface InventoryLog {
@@ -48,40 +49,59 @@ export default function AdminLogsPage() {
   const [typeFilter, setTypeFilter] = useState("all");
   const [dateFrom, setDateFrom] = useState<Date | undefined>(undefined);
   const [dateTo, setDateTo] = useState<Date | undefined>(undefined);
-  const [data, setData] = useState<LogsResponse | null>(null);
   const [filters, setFilters] = useState<{ 
     users: Array<{ id: number; email: string }>;
     locations?: Array<string>;
   } | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
   
   const debouncedSearch = useDebounce(searchTerm, 300);
 
-  const fetchLogs = useCallback(async () => {
-    try {
+  const logFilters = useMemo(
+    () => ({
+      search: debouncedSearch,
+      user: userFilter,
+      location: locationFilter,
+      type: typeFilter,
+      dateFrom,
+      dateTo,
+    }),
+    [debouncedSearch, userFilter, locationFilter, typeFilter, dateFrom, dateTo]
+  );
+
+  const buildQuery = useCallback(
+    (page: number, pageSize: number, filters: typeof logFilters) => {
       const params = new URLSearchParams({
         page: page.toString(),
         pageSize: pageSize.toString(),
       });
-      
-      if (debouncedSearch) params.append("search", debouncedSearch);
-      if (userFilter !== "all") params.append("user", userFilter);
-      if (locationFilter !== "all") params.append("location", locationFilter);
-      if (typeFilter !== "all") params.append("type", typeFilter);
-      if (dateFrom) params.append("dateFrom", dateFrom.toISOString());
-      if (dateTo) params.append("dateTo", dateTo.toISOString());
-      
-      const response = await fetch(`/api/admin/logs?${params}`);
-      if (!response.ok) throw new Error("Failed to fetch logs");
-      const result = await response.json();
-      setData(result);
-    } catch (error) {
-      console.error('Error fetching logs:', error);
-      toast.error('Failed to load logs');
-    } finally {
-      setIsLoading(false);
-    }
-  }, [page, pageSize, debouncedSearch, userFilter, locationFilter, typeFilter, dateFrom, dateTo]);
+
+      if (filters.search) params.append("search", filters.search);
+      if (filters.user !== "all") params.append("user", filters.user);
+      if (filters.location !== "all") params.append("location", filters.location);
+      if (filters.type !== "all") params.append("type", filters.type);
+      if (filters.dateFrom) params.append("dateFrom", filters.dateFrom.toISOString());
+      if (filters.dateTo) params.append("dateTo", filters.dateTo.toISOString());
+
+      return params;
+    },
+    []
+  );
+
+  const {
+    data,
+    isLoading,
+    isRefreshing,
+    error,
+    refresh,
+  } = usePaginatedLogs<typeof logFilters, LogsResponse>({
+    endpoint: "/api/admin/logs",
+    page,
+    pageSize,
+    filters: logFilters,
+    buildQuery,
+  });
 
   const fetchFilters = useCallback(async () => {
     try {
@@ -95,16 +115,24 @@ export default function AdminLogsPage() {
   }, []);
 
   useEffect(() => {
-    fetchLogs();
-  }, [fetchLogs]);
+    if (!isLoading && isInitialLoading) {
+      setIsInitialLoading(false);
+    }
+  }, [isLoading, isInitialLoading]);
+
+  useEffect(() => {
+    if (error) {
+      toast.error(error);
+    }
+  }, [error]);
 
   useEffect(() => {
     fetchFilters();
-    
-    // Auto-refresh every 10 seconds
-    const interval = setInterval(fetchLogs, 10000);
-    return () => clearInterval(interval);
-  }, [fetchFilters, fetchLogs]);
+  }, [fetchFilters]);
+
+  const handleRefresh = async () => {
+    await refresh();
+  };
 
   const handleExportCSV = async () => {
     try {
@@ -146,7 +174,7 @@ export default function AdminLogsPage() {
     setPage(1);
   };
 
-  if (isLoading) {
+  if (isInitialLoading) {
     return (
       <div className="container mx-auto p-4 sm:p-6 space-y-6 overflow-x-hidden">
         <h1 className="text-3xl font-bold">Inventory Change Log</h1>
@@ -167,10 +195,27 @@ export default function AdminLogsPage() {
     <div className="container mx-auto p-4 sm:p-6 space-y-6 overflow-x-hidden">
       <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
         <h1 className="text-3xl font-bold">Inventory Change Log</h1>
-        <Button onClick={handleExportCSV} variant="outline">
-          <Download className="mr-2 h-4 w-4" />
-          Export CSV
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            onClick={handleRefresh}
+            variant="outline"
+            size="sm"
+            disabled={isRefreshing}
+          >
+            {isRefreshing ? (
+              <>
+                <span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                Refreshing...
+              </>
+            ) : (
+              "Refresh"
+            )}
+          </Button>
+          <Button onClick={handleExportCSV} variant="outline" size="sm">
+            <Download className="mr-2 h-4 w-4" />
+            Export CSV
+          </Button>
+        </div>
       </div>
 
       {/* Filters */}

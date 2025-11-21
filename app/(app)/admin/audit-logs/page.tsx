@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { format } from "date-fns";
@@ -32,6 +32,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ChevronLeft, ChevronRight, Download } from "lucide-react";
+import { usePaginatedLogs } from "@/hooks/use-paginated-logs";
 import { toast } from "sonner";
 
 interface AuditLog {
@@ -67,43 +68,74 @@ const actionTypeColors: Record<string, string> = {
   DATA_EXPORT: "bg-gray-500",
 };
 
+type AuditFilterState = {
+  actionType: string;
+  entityType: string;
+  userId: string;
+};
+
 export default function AuditLogsPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
-  const [logs, setLogs] = useState<AuditLog[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize] = useState(50);
   const [actionTypeFilter, setActionTypeFilter] = useState<string>("all");
   const [entityTypeFilter, setEntityTypeFilter] = useState<string>("all");
   const [userIdFilter, setUserIdFilter] = useState<string>("");
 
-  const fetchAuditLogs = useCallback(async () => {
-    try {
-      setIsLoading(true);
+  interface AuditLogsResponse {
+    logs: AuditLog[];
+    total: number;
+  }
+
+  const filters = useMemo<AuditFilterState>(
+    () => ({
+      actionType: actionTypeFilter,
+      entityType: entityTypeFilter,
+      userId: userIdFilter,
+    }),
+    [actionTypeFilter, entityTypeFilter, userIdFilter]
+  );
+
+  const buildQuery = useCallback(
+    (page: number, pageSize: number, f: AuditFilterState) => {
       const params = new URLSearchParams({
         limit: pageSize.toString(),
         offset: ((page - 1) * pageSize).toString(),
       });
 
-      if (actionTypeFilter && actionTypeFilter !== "all") params.append("actionType", actionTypeFilter);
-      if (entityTypeFilter && entityTypeFilter !== "all") params.append("entityType", entityTypeFilter);
-      if (userIdFilter) params.append("userId", userIdFilter);
+      if (f.actionType && f.actionType !== "all") {
+        params.append("actionType", f.actionType);
+      }
+      if (f.entityType && f.entityType !== "all") {
+        params.append("entityType", f.entityType);
+      }
+      if (f.userId) {
+        params.append("userId", f.userId);
+      }
 
-      const response = await fetch(`/api/admin/audit-logs?${params}`);
-      if (!response.ok) throw new Error("Failed to fetch audit logs");
+      return params;
+    },
+    []
+  );
 
-      const data = await response.json();
-      setLogs(data.logs);
-      setTotal(data.total);
-    } catch (error) {
-      console.error("Error fetching audit logs:", error);
-      toast.error("Failed to load audit logs");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [page, pageSize, actionTypeFilter, entityTypeFilter, userIdFilter]);
+  const {
+    data,
+    isLoading,
+    isRefreshing,
+    error,
+    refresh,
+  } = usePaginatedLogs<typeof filters, AuditLogsResponse>({
+    endpoint: "/api/admin/audit-logs",
+    page,
+    pageSize,
+    filters,
+    enabled: status === "authenticated" && !!session?.user?.isAdmin,
+    buildQuery,
+  });
+
+  const logs = data?.logs ?? [];
+  const total = data?.total ?? 0;
 
   useEffect(() => {
     if (status === "loading") return;
@@ -111,8 +143,14 @@ export default function AuditLogsPage() {
       router.push("/unauthorized");
       return;
     }
-    fetchAuditLogs();
-  }, [session, status, router, fetchAuditLogs]);
+  }, [session, status, router]);
+
+  useEffect(() => {
+    if (error) {
+      console.error("Error fetching audit logs:", error);
+      toast.error(error);
+    }
+  }, [error]);
 
   const handleExport = async () => {
     try {
@@ -175,10 +213,27 @@ export default function AuditLogsPage() {
             Track all administrative actions and changes
           </p>
         </div>
-        <Button onClick={handleExport} variant="outline">
-          <Download className="mr-2 h-4 w-4" />
-          Export
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            onClick={refresh}
+            variant="outline"
+            size="sm"
+            disabled={isRefreshing}
+          >
+            {isRefreshing ? (
+              <>
+                <span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                Refreshing...
+              </>
+            ) : (
+              "Refresh"
+            )}
+          </Button>
+          <Button onClick={handleExport} variant="outline" size="sm">
+            <Download className="mr-2 h-4 w-4" />
+            Export
+          </Button>
+        </div>
       </div>
 
       <Card>

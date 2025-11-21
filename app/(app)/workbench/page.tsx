@@ -92,8 +92,8 @@ export default function WorkbenchPage() {
     
     setLoading(true);
     try {
-      // First get all products
-      const productsResponse = await fetch("/api/products?isActive=true&pageSize=100");
+      // First get all products (non-deleted) with stable sort for grouping
+      const productsResponse = await fetch("/api/products?pageSize=100&sortBy=baseNameNumeric&sortOrder=asc");
       if (!productsResponse.ok) throw new Error("Failed to fetch products");
       
       const productsData = await productsResponse.json();
@@ -195,18 +195,24 @@ export default function WorkbenchPage() {
     });
   }, [products, searchTerm, showInStockOnly, showLowStockOnly, showOutOfStockOnly]);
 
-  // Group filtered products by baseName
-  const groupedProducts = filteredProducts.reduce((
-    acc: Record<string, ProductWithQuantity[]>,
-    product: ProductWithQuantity
-  ) => {
-    const baseName = product.baseName || 'Other';
-    if (!acc[baseName]) {
-      acc[baseName] = [];
-    }
-    acc[baseName].push(product);
-    return acc;
-  }, {} as Record<string, ProductWithQuantity[]>);
+  // Group filtered products by baseName (case-insensitive) while preserving a display label
+  const groupedProducts = useMemo(() => {
+    const groups = new Map<string, { label: string; products: ProductWithQuantity[] }>();
+    filteredProducts.forEach((product) => {
+      const raw = product.baseName || 'Other';
+      const key = raw.trim().toLowerCase() || 'other';
+      const existing = groups.get(key);
+      if (existing) {
+        existing.products.push(product);
+      } else {
+        groups.set(key, { label: raw, products: [product] });
+      }
+    });
+
+    return Array.from(groups.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([, value]) => value);
+  }, [filteredProducts]);
 
   return (
     <div className="flex flex-col h-full max-h-screen overflow-hidden">
@@ -339,10 +345,10 @@ export default function WorkbenchPage() {
               </div>
             ) : (
               <div className="space-y-6 pb-20 md:pb-0">
-                {Object.entries(groupedProducts).map(([baseName, groupProducts]) => (
-                  <div key={baseName}>
+                {groupedProducts.map((group) => (
+                  <div key={group.label.toLowerCase()}>
                     <h3 className="font-medium text-sm text-muted-foreground mb-3 sticky top-16 md:relative md:top-0 bg-background/95 backdrop-blur py-1 -mx-1 px-1">
-                      {baseName}
+                      {group.label}
                     </h3>
                     <div className={cn(
                       "grid gap-3 sm:gap-4",
@@ -350,7 +356,7 @@ export default function WorkbenchPage() {
                         ? "grid-cols-2"
                         : "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5"
                     )}>
-                      {groupProducts.map((product) => (
+                      {group.products.map((product) => (
                         <ProductTile
                           key={product.id}
                           product={product}

@@ -10,6 +10,7 @@ Modern inventory management built with Next.js (App Router), TypeScript, Prisma 
 - `/api/healthz` endpoint for container health.
 - Docker Compose stack with DB, migrate, app, nightly backup.
 - Caddy reverse proxy support via external Docker network.
+- Product data shape and create/delete flow details: see `docs/products-invariants.md` and `docs/products-create-delete-plan.md`.
 
 ## 📦 Getting Started
 
@@ -223,6 +224,8 @@ docker compose run --rm migrate node scripts/promote-admin.js you@advancedresear
 - `npm run migrate:baseline`
 - `node scripts/seed-default-location.js`
 - `node scripts/promote-admin.js you@advancedresearchpep.com`
+- `node scripts/analyze-products-invariants.js` (read-only snapshot)
+- `APPLY_CHANGES=true node scripts/backfill-product-variants.js` (idempotent backfill; dry-run by default)
 
 ## 🔐 Authentication & Authorization
 

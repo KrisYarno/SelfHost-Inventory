@@ -93,17 +93,27 @@ export function useUpdateProduct() {
   });
 }
 
-export function useDeleteProduct() {
+export function useDeleteProduct(csrfTokenFromCaller?: string) {
   const queryClient = useQueryClient();
-  const { token: csrfToken } = useCSRF();
+  const { token: csrfTokenHook, isLoading: csrfLoading, error: csrfError } = useCSRF();
+  const csrfToken = csrfTokenFromCaller ?? csrfTokenHook;
+  const isReady = !!csrfToken && (!csrfTokenFromCaller ? !csrfLoading : true);
   
-  return useMutation({
+  const mutation = useMutation({
     mutationFn: async (id: number) => {
+      if (!csrfToken) {
+        throw new Error('CSRF token not ready');
+      }
       const response = await fetch(`/api/products/${id}`, {
         method: 'DELETE',
         headers: withCSRFHeaders({}, csrfToken),
       });
-      if (!response.ok) throw new Error('Failed to delete product');
+      if (!response.ok) {
+        const errBody = await response.json().catch(() => ({}));
+        const err = new Error(errBody.error || 'Failed to delete product') as Error & { status?: number };
+        err.status = response.status;
+        throw err;
+      }
       return response.json();
     },
     onSuccess: () => {
@@ -111,4 +121,6 @@ export function useDeleteProduct() {
       queryClient.invalidateQueries({ queryKey: ['products'] });
     },
   });
+
+  return { ...mutation, csrfLoading, csrfError, isReady };
 }
