@@ -127,6 +127,7 @@ const config: Config = {
         md: "var(--shadow-md)",
         lg: "var(--shadow-lg)",
         xl: "var(--shadow-xl)",
+        inner: "var(--shadow-inner)",
         
         // Component-specific
         card: "var(--card-shadow)",

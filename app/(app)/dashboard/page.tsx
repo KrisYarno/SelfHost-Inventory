@@ -15,15 +15,12 @@ export default async function DashboardPage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-            <p className="text-sm text-muted-foreground">
-              Welcome back, {session.user.email?.split('@')[0]}
-            </p>
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 p-6">
+      <main className="flex-1 p-[var(--card-padding)]">
         <div className="mx-auto max-w-7xl">
           <div className="rounded-xl border border-border bg-card p-6">
             <h2 className="text-lg font-semibold mb-4">Account Information</h2>

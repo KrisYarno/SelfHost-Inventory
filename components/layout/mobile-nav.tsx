@@ -56,7 +56,7 @@ export function MobileNav() {
   const allNavigation = [...navigation, ...(isAdmin ? adminNavigation : [])];
 
   return (
-    <nav className="fixed bottom-0 z-50 w-full border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 md:hidden pb-[env(safe-area-inset-bottom)]">
+    <nav className="fixed bottom-0 z-50 w-full border-t border-border bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/60 md:hidden pb-[env(safe-area-inset-bottom)]">
       <div className="flex h-14 items-center justify-around px-2">
         {allNavigation.map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);

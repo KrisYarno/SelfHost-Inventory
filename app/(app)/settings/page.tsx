@@ -77,16 +77,13 @@ export default function SettingsPage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Application Settings</h1>
-            <p className="text-sm text-muted-foreground">
-              Configure your application preferences
-            </p>
           </div>
         </div>
       </header>
 
       {/* Main Content */}
       <main className="flex-1 p-6 overflow-y-auto">
-        <div className="mx-auto max-w-2xl space-y-6">
+        <div className="max-w-3xl space-y-6">
           {/* Theme Settings */}
           <Card>
             <CardHeader>
