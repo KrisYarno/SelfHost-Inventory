@@ -47,7 +47,7 @@ export function UserApprovalCard({ user, onApprove, onReject, isSelected, onTogg
 
   return (
     <>
-      <div className={`bg-card border ${isSelected ? 'border-primary' : 'border-border'} rounded-lg p-6 hover:shadow-md transition-shadow relative`}>
+      <div className={`border ${isSelected ? 'border-primary' : 'border-border/70'} rounded-2xl p-6 hover:shadow-md transition-shadow relative bg-white dark:bg-slate-800`}>
         {onToggleSelect && (
           <input
             type="checkbox"
@@ -93,7 +93,7 @@ export function UserApprovalCard({ user, onApprove, onReject, isSelected, onTogg
       {/* Reject Dialog */}
       {showRejectDialog && (
         <div className="fixed inset-0 bg-background/80 dark:bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-card rounded-lg p-6 max-w-md w-full border border-border">
+          <div className="rounded-2xl p-6 max-w-md w-full border border-border/70 bg-white dark:bg-slate-800 shadow-xl">
             <h3 className="text-lg font-semibold mb-4">Reject User Application</h3>
             <p className="text-sm text-muted-foreground mb-4">
               Are you sure you want to reject {user.username}&apos;s application?

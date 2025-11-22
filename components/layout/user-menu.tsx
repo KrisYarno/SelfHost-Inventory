@@ -90,7 +90,7 @@ export function UserMenu() {
             )}
             <span>Theme</span>
           </DropdownMenuSubTrigger>
-          <DropdownMenuSubContent>
+          <DropdownMenuSubContent className="bg-white dark:bg-slate-900/95 text-foreground rounded-xl border border-border/70 shadow-lg">
             <DropdownMenuItem
               onClick={() => setTheme("light")}
               className="cursor-pointer"

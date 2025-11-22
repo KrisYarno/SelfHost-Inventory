@@ -41,12 +41,12 @@ export function JournalProductRow({
       onSwipeRight={handleSwipeRight}
       onSwipeLeft={handleSwipeLeft}
       className={cn(
-        "rounded-lg border transition-colors overflow-visible",
+        "rounded-xl border transition-colors overflow-visible shadow-md",
         hasChange
           ? delta > 0
             ? "border-emerald-500/50 bg-emerald-500/5"
             : "border-red-500/50 bg-red-500/5"
-          : "border-border bg-card"
+          : "border-border/70 bg-white dark:bg-slate-800"
       )}
       role="article"
       aria-label={`Product ${product.name}, current quantity ${currentQuantity}`}

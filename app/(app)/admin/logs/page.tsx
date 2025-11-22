@@ -23,8 +23,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 import {
   Download,
   Filter,
@@ -32,7 +32,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Shield,
-  Shuffle,
 } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -41,6 +40,8 @@ import { useDebounce } from "@/hooks/use-debounce";
 import { usePaginatedLogs } from "@/hooks/use-paginated-logs";
 import { toast } from "sonner";
 import { getAuditTone, getInventoryLogTone } from "@/components/logs/log-style";
+import { StatusBadge } from "@/components/ui/status-badge";
+import { TransferLogTable } from "@/components/inventory/transfer-log-table";
 
 type TabKey = "change" | "audit" | "transfers";
 export default function AdminLogsHubPage() {
@@ -891,7 +892,9 @@ function TransferLogTab({ active }: { active: boolean }) {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-2">
           <CardTitle>Transfers</CardTitle>
-          <Badge variant="secondary">Latest {logs.length}</Badge>
+          <StatusBadge tone="info" className="bg-muted text-foreground border-border/70">
+            Latest {logs.length}
+          </StatusBadge>
         </CardHeader>
         <CardContent>
           {isLoading ? (
@@ -903,70 +906,7 @@ function TransferLogTab({ active }: { active: boolean }) {
           ) : logs.length === 0 ? (
             <p className="text-sm text-muted-foreground">No transfer activity recorded yet.</p>
           ) : (
-            <>
-              <div className="space-y-3 md:hidden">
-                {logs.map((log) => {
-                  const qty = log.quantity ?? 0;
-                  return (
-                    <div key={log.id} className="rounded-md border bg-card px-3 py-2 text-sm">
-                      <div className="flex items-center justify-between">
-                        <div className="font-medium">{log.productName}</div>
-                        <span className="text-xs text-muted-foreground">
-                          {format(new Date(log.createdAt), "MMM dd, HH:mm")}
-                        </span>
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">Transfer</Badge>
-                        <span className="flex items-center gap-1 text-xs">
-                          <span className="font-semibold">{qty}</span>
-                          <span>units</span>
-                        </span>
-                      </div>
-                      <div className="mt-1 text-xs">
-                        <span className="font-medium text-destructive">{log.fromLocationName}</span>
-                        <span className="mx-1">
-                          <Shuffle className="inline h-3 w-3" />
-                        </span>
-                        <span className="font-medium text-emerald-600">{log.toLocationName}</span>
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">by {log.userName}</div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="hidden md:block">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Date / Time</TableHead>
-                      <TableHead>Product</TableHead>
-                      <TableHead>From</TableHead>
-                      <TableHead>To</TableHead>
-                      <TableHead className="text-right">Quantity</TableHead>
-                      <TableHead>User</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {logs.map((log) => {
-                      const qty = log.quantity ?? 0;
-                      return (
-                        <TableRow key={log.id}>
-                          <TableCell>{format(new Date(log.createdAt), "MMM dd, yyyy HH:mm")}</TableCell>
-                          <TableCell>{log.productName}</TableCell>
-                          <TableCell className="text-destructive">{log.fromLocationName}</TableCell>
-                          <TableCell className="text-emerald-600">{log.toLocationName}</TableCell>
-                          <TableCell className="text-right">
-                            <span className="font-medium">{qty}</span>
-                          </TableCell>
-                          <TableCell>{log.userName}</TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              </div>
-            </>
+            <TransferLogTable logs={logs} />
           )}
 
           {error && (
