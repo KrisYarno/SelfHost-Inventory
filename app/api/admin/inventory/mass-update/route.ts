@@ -10,6 +10,7 @@ import {
   UpdateFailureReason,
   PaginatedMassUpdateResponse 
 } from "@/types/mass-update-errors";
+import { auditService } from "@/lib/audit";
 
 export const dynamic = 'force-dynamic';
 
@@ -462,9 +463,22 @@ export async function POST(request: NextRequest) {
       transactionId
     };
 
-    // Log the operation for audit
-    console.log(`Mass update ${transactionId}: ${successCount} successful, ${failures.length} failed`);
-    console.log('Final result:', JSON.stringify(result, null, 2));
+    // Log the operation for audit (single bulk entry)
+    if (successCount > 0) {
+      try {
+        await auditService.logBulkInventoryUpdate(
+          parseInt(session.user.id),
+          processedChanges.map((c) => ({
+            productId: c.productId,
+            productName: c.productName,
+            delta: c.delta,
+          })),
+          0,
+        );
+      } catch (auditError) {
+        console.error("Failed to log bulk inventory update:", auditError);
+      }
+    }
 
     return NextResponse.json(result);
 

@@ -40,11 +40,6 @@ const adminNavItems = [
     icon: Users,
   },
   {
-    title: "Audit Logs",
-    href: "/admin/audit-logs",
-    icon: Shield,
-  },
-  {
     title: "Settings",
     href: "/admin/settings",
     icon: Settings,
