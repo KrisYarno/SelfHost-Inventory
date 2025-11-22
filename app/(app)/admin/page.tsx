@@ -87,7 +87,7 @@ export default function AdminDashboardPage() {
   }
 
   return (
-    <div className="container mx-auto p-4 sm:p-6 space-y-6 overflow-x-hidden">
+    <div className="container mx-auto p-[var(--card-padding)] space-y-6 overflow-x-hidden">
       <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
         <h1 className="text-3xl font-bold">Admin Dashboard</h1>
         <div className="flex gap-2">

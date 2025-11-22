@@ -54,9 +54,6 @@ export default function ProductsPage() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Products</h1>
-            <p className="text-sm text-muted-foreground">
-              Manage your product catalog
-            </p>
           </div>
           <div className="flex items-center gap-4">
             {isAdmin && (
@@ -70,7 +67,7 @@ export default function ProductsPage() {
       </header>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-auto p-6">
+      <main className="flex-1 overflow-auto p-[var(--card-padding)]">
         <div className="mx-auto max-w-7xl">
           <ProductListOptimized
             onEdit={isAdmin ? handleEdit : undefined}

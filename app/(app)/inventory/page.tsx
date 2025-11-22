@@ -369,9 +369,6 @@ export default function InventoryPage() {
       <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Inventory Management</h1>
-          <p className="text-sm sm:text-base text-muted-foreground">
-            Track inventory levels, view transaction history, and manage stock adjustments.
-          </p>
         </div>
         <div className="flex gap-2 w-full sm:w-auto">
           <Button asChild variant="outline" size="sm" className="flex-1 sm:flex-initial">
