@@ -52,17 +52,17 @@ export function JournalProductRow({
       aria-label={`Product ${product.name}, current quantity ${currentQuantity}`}
       tabIndex={0}
     >
-      <div className="p-4 pr-2">
+      <div className="p-3 sm:p-4 pr-2">
         <div className="flex items-center gap-3 sm:gap-4">
         {/* Product Info */}
         <div className="flex-1 min-w-0">
           <h4 className="font-medium truncate" id={`product-name-${product.id}`}>{product.name}</h4>
-          <div className="flex items-center gap-2 mt-1">
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
             <ValueChip tone="neutral" className="text-[11px]" role="status" aria-label={`Current quantity: ${currentQuantity}`}>
               Current: {currentQuantity}
             </ValueChip>
             {hasChange && (
-              <>
+              <div className="flex items-center gap-1">
                 <span className="text-muted-foreground text-xs">-&gt;</span>
                 <ValueChip
                   tone={delta > 0 ? "positive" : "negative"}
@@ -72,7 +72,7 @@ export function JournalProductRow({
                 >
                   New: {adjustedQuantity}
                 </ValueChip>
-              </>
+              </div>
             )}
           </div>
         </div>
@@ -91,7 +91,7 @@ export function JournalProductRow({
       {/* Change Indicator */}
       {hasChange && (
         <div className="mt-2 pl-[72px]" role="status" aria-live="polite">
-          <ValueChip tone={delta > 0 ? "positive" : "negative"}>
+          <ValueChip tone={delta > 0 ? "positive" : "negative"} className="text-xs">
             {delta > 0 ? "+" : ""}
             {delta} units
           </ValueChip>

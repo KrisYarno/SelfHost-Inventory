@@ -23,10 +23,10 @@ export function ChangesSummary({
   onClear,
 }: ChangesSummaryProps) {
   return (
-    <Card className="mb-6 border-primary/50 bg-primary/5" role="region" aria-label="Changes summary">
-      <CardContent className="pt-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-6">
+    <Card className="mb-6 border-primary/30 bg-primary/5 rounded-lg shadow-sm sticky top-0 z-10 sm:static sm:shadow-none" role="region" aria-label="Changes summary">
+      <CardContent className="pt-4 sm:pt-6">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4">
+          <div className="flex items-center gap-4 sm:gap-6">
             <div className="flex items-center gap-2">
               <Package className="h-5 w-5 text-muted-foreground" aria-hidden="true" />
               <span className="font-medium" role="status" aria-label="{adjustmentCount} products have adjustments">
@@ -34,7 +34,7 @@ export function ChangesSummary({
               </span>
             </div>
 
-            <div className="h-8 w-px bg-border" role="separator" aria-orientation="vertical" />
+            <div className="h-6 w-px bg-border hidden sm:block" role="separator" aria-orientation="vertical" />
 
             <div className="flex items-center gap-4">
               {totalChanges.additions > 0 && (
@@ -77,7 +77,7 @@ export function ChangesSummary({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 sm:ml-auto">
             <Button 
               variant="ghost" 
               size="sm" 

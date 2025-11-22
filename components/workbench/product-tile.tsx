@@ -20,9 +20,11 @@ export function ProductTile({ product, onClick, className }: ProductTileProps) {
       onClick={() => !isOutOfStock && onClick(product)}
       disabled={isOutOfStock}
       className={cn(
-        "group relative flex flex-col items-center p-4 rounded-lg border bg-card text-card-foreground transition-all",
-        "hover:shadow-md hover:border-primary/50",
-        "focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
+        "group relative flex flex-col items-center p-4 rounded-xl border border-border/60",
+        "bg-gradient-to-br from-background via-muted/40 to-background",
+        "shadow-sm shadow-primary/10 hover:shadow-md hover:shadow-primary/20",
+        "hover:-translate-y-0.5 transition-all duration-200",
+        "focus:outline-none focus:ring-2 focus:ring-primary/70 focus:ring-offset-2",
         "disabled:opacity-50 disabled:cursor-not-allowed",
         "min-h-[120px]",
         className
