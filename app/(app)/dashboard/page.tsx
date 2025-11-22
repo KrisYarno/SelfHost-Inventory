@@ -22,7 +22,7 @@ export default async function DashboardPage() {
       {/* Main Content */}
       <main className="flex-1 p-[var(--card-padding)]">
         <div className="mx-auto max-w-7xl">
-          <div className="rounded-xl border border-border bg-card p-6">
+          <div className="rounded-2xl border border-border/70 bg-white dark:bg-slate-800 p-6 shadow-md">
             <h2 className="text-lg font-semibold mb-4">Account Information</h2>
             <div className="space-y-2">
               <div className="flex items-center gap-2">

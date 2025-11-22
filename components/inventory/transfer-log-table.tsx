@@ -2,9 +2,17 @@
 
 import * as React from 'react';
 import { format } from 'date-fns';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
+import { StatusBadge } from '@/components/ui/status-badge';
+import { ValueChip } from '@/components/ui/value-chip';
 
 export interface TransferLogRow {
   id: number;
@@ -28,7 +36,9 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
         <CardHeader>
           <CardTitle>Transfers</CardTitle>
         </CardHeader>
-        <CardContent className="text-sm text-muted-foreground">No transfer activity recorded yet.</CardContent>
+        <CardContent className="text-sm text-muted-foreground">
+          No transfer activity recorded yet.
+        </CardContent>
       </Card>
     );
   }
@@ -37,7 +47,9 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
     <Card className="mt-4">
       <CardHeader className="flex flex-row items-center justify-between gap-2">
         <CardTitle>Transfers</CardTitle>
-        <Badge variant="secondary">Latest {logs.length}</Badge>
+        <StatusBadge tone="info" className="bg-muted text-foreground border-border/70">
+          Latest {logs.length}
+        </StatusBadge>
       </CardHeader>
       <CardContent>
         {/* Mobile cards */}
@@ -45,22 +57,31 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
           {logs.map((log) => {
             const qty = log.quantity ?? 0;
             return (
-              <div key={log.id} className="rounded-md border bg-card px-3 py-2 text-sm">
-                <div className="flex items-center justify-between">
-                  <div className="font-medium">{log.productName}</div>
-                  <span className="text-xs text-muted-foreground">{format(new Date(log.createdAt), 'MMM dd, HH:mm')}</span>
-                </div>
-                <div className="mt-1 flex flex-wrap items-center gap-2">
-                  <Badge variant="outline">Transfer</Badge>
-                  <span className="flex items-center gap-1 text-xs">
-                    <span className="font-semibold">{qty}</span>
-                    <span>units</span>
+              <div
+                key={log.id}
+                className="rounded-xl border border-border/60 bg-white dark:bg-slate-800 px-4 py-3 text-sm shadow-sm transition hover:shadow-md"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="font-medium leading-tight line-clamp-1">{log.productName}</div>
+                  <span className="text-xs text-muted-foreground">
+                    {format(new Date(log.createdAt), 'MMM dd, HH:mm')}
                   </span>
                 </div>
-                <div className="mt-1 text-xs">
-                  <span className="font-medium text-destructive">{log.fromLocationName}</span>
-                  <span className="mx-1">→</span>
-                  <span className="font-medium text-emerald-600">{log.toLocationName}</span>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <StatusBadge tone="info">Transfer</StatusBadge>
+                  <ValueChip tone="neutral" className="bg-muted/70 text-foreground border-border/70">
+                    {qty} units
+                  </ValueChip>
+                  {log.batchId && (
+                    <StatusBadge tone="neutral" className="bg-slate-800/70 text-slate-200 border-border/60">
+                      Batch
+                    </StatusBadge>
+                  )}
+                </div>
+                <div className="mt-2 text-xs font-medium">
+                  <span className="text-destructive">{log.fromLocationName}</span>
+                  <span className="mx-2 text-muted-foreground">-&gt;</span>
+                  <span className="text-emerald-600">{log.toLocationName}</span>
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">by {log.userName}</div>
               </div>
@@ -104,4 +125,3 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
     </Card>
   );
 }
-

@@ -331,8 +331,10 @@ export default function JournalPage() {
     console.log('Journal page - totalChanges:', totalChanges);
   }, [adjustments, hasChanges, totalChanges]);
 
+  const hasAnyChanges = hasChanges();
+
   return (
-    <div className="container mx-auto px-4 py-6 max-w-7xl">
+    <div className={`container mx-auto px-4 py-6 max-w-7xl ${hasAnyChanges ? "pb-32" : "pb-10"}`}>
       <a href="#products-heading" className="skip-link">
         Skip to products list
       </a>
@@ -440,10 +442,14 @@ export default function JournalPage() {
       </Card>
 
       {/* Fixed Action Bar */}
-      {hasChanges() && (
-        <div className="fixed left-0 right-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70 border-t p-3 sm:p-4"
-             style={{ bottom: '4.5rem' }} /* lift above mobile nav */
-             role="region" aria-label="Action bar" aria-live="polite">
+      {hasAnyChanges && (
+        <div
+          className="fixed left-0 right-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70 border-t p-3 sm:p-4 shadow-card"
+          style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 4.75rem)" }} /* lift above mobile nav */
+          role="region"
+          aria-label="Action bar"
+          aria-live="polite"
+        >
           <div className="container mx-auto max-w-7xl flex justify-between items-center">
             <div className="flex items-center gap-4">
               <Badge 

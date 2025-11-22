@@ -4,32 +4,33 @@
 
 @layer base {
   :root {
-    /* Base Colors - Light Mode (Warmer, softer) */
-    --background: 30 20% 99%; /* #fdfcfb - Very warm, paper-like white */
-    --foreground: 220 10% 20%; /* #2e3238 - Soft charcoal */
-    --surface: 0 0% 100%; /* #ffffff - Pure white for contrast */
-    --surface-hover: 30 10% 97%; /* #fbfaf9 */
-    --border: 220 10% 92%; /* #e8e9eb - Soft gray border */
-    --ring: 220 10% 20%; /* #2e3238 */
+    /* Base Colors - Light Mode (creamy, softer) */
+    --background: 35 45% 98%; /* #fdfbf7 */
+    --foreground: 220 12% 18%; /* #2a2f35 */
+    --surface: 30 30% 99%; /* #fffaf3 */
+    --surface-hover: 30 35% 96%; /* #f7efe4 */
+    --border: 35 20% 85%; /* #e8dfd3 */
+    --ring: 35 45% 55%; /* warm ring */
     
-    /* Brand Colors - Light Mode */
-    --primary: 220 10% 20%; /* #2e3238 - Soft Charcoal Primary */
-    --primary-foreground: 0 0% 100%; /* #ffffff */
-    --accent: 262 80% 50%; /* #8b5cf6 - Vivid Violet */
-    --accent-foreground: 0 0% 100%; /* #ffffff */
+    /* Brand / Accent - Light Mode (creamy orange) */
+    --primary: 35 70% 65%; /* #f5b97a */
+    --primary-foreground: 25 70% 12%; /* deep brown for contrast */
+    --accent: 35 65% 70%; /* lighter creamy accent */
+    --accent-foreground: 25 70% 12%;
     
     /* Semantic Colors - Light Mode */
-    --success: 142 70% 40%; /* #1ea555 - Vibrant Green */
+    --success: 142 60% 40%; /* #1ea555 */
     --success-foreground: 0 0% 100%;
-    --warning: 35 95% 50%; /* #f9a01b - Warm Amber */
-    --warning-foreground: 0 0% 100%;
-    --error: 346 80% 50%; /* #e61e4d - Soft Red */
-    --info: 200 90% 45%; /* #0b9add - Bright Sky */
+    --warning: 35 80% 50%; /* warm amber */
+    --warning-foreground: 25 70% 12%;
+    --destructive: 348 75% 52%; /* softer red */
+    --destructive-foreground: 0 0% 100%;
+    --info: 210 65% 48%; /* calmer blue */
     
     /* Inventory Specific - Light Mode */
-    --inventory-increase: 142 70% 40%;
-    --inventory-decrease: 346 80% 50%;
-    --inventory-neutral: 220 10% 60%;
+    --inventory-increase: 142 60% 45%;
+    --inventory-decrease: 0 70% 50%;
+    --inventory-neutral: 220 10% 55%;
     
     /* Typography */
     --font-sans: 'Inter Variable', Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -39,8 +40,8 @@
     --spacing-unit: 0.25rem;
     
     /* Responsive Component Spacing */
-    --card-padding: clamp(1rem, 3vw, 1.5rem); /* 16px mobile -> 24px desktop */
-    --section-gap: clamp(1.5rem, 4vw, 2.5rem); /* 24px mobile -> 40px desktop */
+    --card-padding: clamp(1rem, 3vw, 1.5rem);
+    --section-gap: clamp(1.5rem, 4vw, 2.5rem);
     --inline-gap: clamp(0.75rem, 2vw, 1rem);
     --compact-gap: 0.5rem;
     
@@ -65,17 +66,17 @@
     --border-width-2: 2px;
     --focus-ring-width: 2px;
     
-    /* Shadows - Light Mode (Floating Layers) */
-    --shadow-sm: 0 2px 4px -1px rgb(0 0 0 / 0.06);
-    --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.04);
-    --shadow-md: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.04);
-    --shadow-lg: 0 20px 25px -5px rgb(0 0 0 / 0.08), 0 8px 10px -6px rgb(0 0 0 / 0.04);
-    --shadow-xl: 0 25px 50px -12px rgb(0 0 0 / 0.15);
+    /* Shadows - Light Mode (softer) */
+    --shadow-sm: 0 2px 4px -1px rgb(0 0 0 / 0.05);
+    --shadow: 0 4px 8px -2px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+    --shadow-md: 0 12px 18px -4px rgb(0 0 0 / 0.1), 0 6px 10px -6px rgb(0 0 0 / 0.08);
+    --shadow-lg: 0 20px 28px -6px rgb(0 0 0 / 0.12), 0 10px 16px -8px rgb(0 0 0 / 0.1);
+    --shadow-xl: 0 28px 36px -8px rgb(0 0 0 / 0.14);
     --shadow-inner: inset 0 2px 4px 0 rgb(0 0 0 / 0.05);
     
     /* Component Shadows */
-    --card-shadow: 0 4px 20px -2px rgb(0 0 0 / 0.08); /* Deep floating shadow */
-    --card-hover-shadow: 0 10px 25px -5px rgb(0 0 0 / 0.1);
+    --card-shadow: 0 6px 14px -6px rgb(0 0 0 / 0.12);
+    --card-hover-shadow: 0 12px 22px -8px rgb(0 0 0 / 0.14);
     --dropdown-shadow: var(--shadow-lg);
     --modal-shadow: var(--shadow-xl);
     
@@ -92,17 +93,17 @@
     
     /* Additional variables for shadcn/ui components */
     --radius: 0.5rem;
-    --muted: 30 10% 96%;
-    --muted-foreground: 220 10% 55%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 220 10% 20%;
-    --input: 220 10% 92%;
-    --card: 0 0% 100%;
-    --card-foreground: 220 10% 20%;
-    --destructive: 346 80% 50%;
+    --muted: 30 20% 96%;
+    --muted-foreground: 220 12% 40%;
+    --popover: 35 40% 99%;
+    --popover-foreground: 220 12% 18%;
+    --input: 35 20% 88%;
+    --card: 30 30% 99%;
+    --card-foreground: 220 12% 18%;
+    --destructive: 348 75% 52%;
     --destructive-foreground: 0 0% 100%;
-    --secondary: 30 10% 96%;
-    --secondary-foreground: 220 10% 20%;
+    --secondary: 35 20% 92%;
+    --secondary-foreground: 220 12% 18%;
   }
   
   .dark {
