@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -336,11 +336,13 @@ export default function JournalPage() {
       <a href="#products-heading" className="skip-link">
         Skip to products list
       </a>
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold mb-2" id="page-title">Inventory Journal</h1>
-        <p className="text-muted-foreground" id="page-description">
-          Make bulk inventory adjustments across multiple products
-        </p>
+      <div className="mb-4 sm:mb-6 sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 pb-3 pt-1">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-2xl sm:text-3xl font-bold" id="page-title">Inventory Journal</h1>
+          <p className="text-muted-foreground" id="page-description">
+            Make bulk inventory adjustments across multiple products
+          </p>
+        </div>
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
           <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
             {selectedLocationName}
@@ -348,16 +350,6 @@ export default function JournalPage() {
         </div>
       </div>
 
-
-      {/* Summary Card */}
-      {hasChanges() && (
-        <ChangesSummary
-          totalChanges={totalChanges}
-          adjustmentCount={Object.keys(adjustments).length}
-          onReview={() => setShowReviewDialog(true)}
-          onClear={clearAllAdjustments}
-        />
-      )}
 
       {/* Search and Filters */}
       <Card className="mb-6">
@@ -449,7 +441,9 @@ export default function JournalPage() {
 
       {/* Fixed Action Bar */}
       {hasChanges() && (
-        <div className="fixed bottom-0 left-0 right-0 bg-background border-t p-4" role="region" aria-label="Action bar" aria-live="polite">
+        <div className="fixed left-0 right-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70 border-t p-3 sm:p-4"
+             style={{ bottom: '4.5rem' }} /* lift above mobile nav */
+             role="region" aria-label="Action bar" aria-live="polite">
           <div className="container mx-auto max-w-7xl flex justify-between items-center">
             <div className="flex items-center gap-4">
               <Badge 

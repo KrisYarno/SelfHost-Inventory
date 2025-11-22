@@ -196,16 +196,16 @@ export default function MinimumSettingsPage() {
     setError(null);
 
     try {
-      const updates = Object.entries(edits).map(([productId, edit]) => ({
-        productId: Number(productId),
-        combinedMinimum: edit.combinedMin,
-        perLocation: edit.perLocation
-          ? Object.entries(edit.perLocation).map(([locationId, min]) => ({
-              locationId: Number(locationId),
-              minQuantity: min,
-            }))
-          : undefined,
-      }));
+        const updates = Object.entries(edits).map(([productId, edit]) => ({
+          productId: Number(productId),
+          combinedMinimum: edit.combinedMin,
+          perLocation: edit.perLocation
+            ? Object.entries(edit.perLocation).map(([locationId, min]) => ({
+                locationId: Number(locationId),
+                minQuantity: min,
+              }))
+            : undefined,
+        }));
 
       const res = await fetch('/api/admin/products/thresholds', {
         method: 'PATCH',
@@ -229,7 +229,7 @@ export default function MinimumSettingsPage() {
   const visibleLocations = locations.filter((loc) => visibleLocationIds.includes(loc.id));
 
   return (
-    <div className="space-y-4 pb-24">
+      <div className="space-y-4 pb-40 sm:pb-24">
       <div className="border-b border-border bg-background/80 px-4 py-4 sm:px-6 space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -348,8 +348,8 @@ export default function MinimumSettingsPage() {
                   return (
                     <tr key={product.id} className="border-t border-border">
                       <td className="sticky left-0 z-10 bg-background px-3 py-2 max-w-[260px]">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate font-medium">{product.name}</span>
+                          <div className="flex items-center gap-2 max-w-[240px] sm:max-w-none">
+                            <span className="truncate font-medium text-sm sm:text-base">{product.name}</span>
                           {belowCombined && (
                             <span
                               className="inline-block h-2 w-2 rounded-full bg-rose-400"
@@ -531,8 +531,9 @@ function StickySaveBar({
   error: string | null;
 }) {
   return (
-    <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/90 backdrop-blur">
-      <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-3 sm:px-6">
+      <div className="fixed inset-x-0 z-40 border-t border-border bg-background/90 backdrop-blur"
+        style={{ bottom: '4.5rem' }}>
+        <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-3 sm:px-6">
         <Button
           variant="outline"
           size="sm"

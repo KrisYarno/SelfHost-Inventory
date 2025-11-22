@@ -216,8 +216,10 @@ export default function StockerPage() {
               <Card
                 key={item.productId}
                 className={cn(
-                  'flex flex-col border-border bg-card',
-                  'transition-colors',
+                  'flex flex-col border border-border/70 bg-gradient-to-br from-card to-muted/40',
+                  'shadow-sm shadow-emerald-500/10 hover:shadow-md hover:shadow-emerald-500/20',
+                  'transition-all duration-200 hover:-translate-y-[2px]',
+                  'rounded-xl'
                 )}
               >
                 <CardHeader className="space-y-2 pb-2">
