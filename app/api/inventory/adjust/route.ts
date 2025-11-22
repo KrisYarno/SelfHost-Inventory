@@ -69,26 +69,16 @@ export async function POST(request: NextRequest) {
       body.expectedVersion
     );
 
-    // Log the inventory adjustment (special-case auto add for transfer)
-    if (product) {
+    // Log only transfer auto-add in audit trail; normal adjustments are change-log only
+    if (product && autoAddForTransfer) {
       const userId = parseInt(session.user.id);
-      if (autoAddForTransfer) {
-        await auditService.logInventoryTransferAutoAdd(
-          userId,
-          body.productId,
-          product.name,
-          body.delta,
-          body.locationId
-        );
-      } else {
-        await auditService.logInventoryAdjustment(
-          userId,
-          body.productId,
-          product.name,
-          body.delta,
-          body.locationId
-        );
-      }
+      await auditService.logInventoryTransferAutoAdd(
+        userId,
+        body.productId,
+        product.name,
+        body.delta,
+        body.locationId
+      );
     }
 
     const response = NextResponse.json({

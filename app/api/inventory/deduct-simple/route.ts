@@ -11,6 +11,8 @@ import {
 import { validateCSRFToken } from "@/lib/csrf";
 import { SimpleDeductSchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
+import { auditService } from "@/lib/audit";
+import { randomUUID } from "crypto";
 
 export const dynamic = 'force-dynamic';
 
@@ -41,6 +43,8 @@ export async function POST(request: NextRequest) {
       notes: body.notes,
     }));
 
+    const operationId = randomUUID();
+
     // Create the deduction transaction
     const result = await createInventoryTransaction(
       'DEDUCTION',
@@ -48,9 +52,25 @@ export async function POST(request: NextRequest) {
       transactionItems,
       { 
         orderReference: body.orderReference,
-        notes: body.notes 
+        notes: body.notes,
+        operationId,
       }
     );
+
+    // Audit as bulk inventory update/deduction (one row)
+    try {
+      await auditService.logBulkInventoryUpdate(
+        parseInt(session.user.id),
+        result.logs.map((log) => ({
+          productId: log.productId,
+          productName: log.products?.name ?? `Product ${log.productId}`,
+          delta: log.delta,
+        })),
+        body.locationId
+      );
+    } catch (auditError) {
+      console.error("Failed to log audit deduction:", auditError);
+    }
 
     const response = NextResponse.json({
       success: true,

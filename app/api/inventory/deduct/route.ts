@@ -13,6 +13,8 @@ import {
 import { validateCSRFToken } from "@/lib/csrf";
 import { DeductInventorySchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
+import { auditService } from "@/lib/audit";
+import { randomUUID } from "crypto";
 
 export const dynamic = 'force-dynamic';
 
@@ -57,6 +59,8 @@ export async function POST(request: NextRequest) {
       notes: body.notes
     }));
 
+    const operationId = randomUUID();
+
     // Process the transaction
     const result = await createInventoryTransaction(
       'SALE',
@@ -64,7 +68,8 @@ export async function POST(request: NextRequest) {
       items,
       {
         orderReference: body.orderReference,
-        notes: body.notes
+        notes: body.notes,
+        operationId,
       }
     );
 
@@ -74,6 +79,21 @@ export async function POST(request: NextRequest) {
       itemsProcessed: result.logs.length,
       message: `Successfully processed order ${body.orderReference}`,
     };
+
+    // Audit as bulk inventory update for deductions
+    try {
+      await auditService.logBulkInventoryUpdate(
+        parseInt(session.user.id),
+        result.logs.map((log) => ({
+          productId: log.productId,
+          productName: log.products?.name ?? `Product ${log.productId}`,
+          delta: log.delta,
+        })),
+        location.id
+      );
+    } catch (auditError) {
+      console.error("Failed to log audit deduction:", auditError);
+    }
 
     const responseWithHeaders = NextResponse.json(response);
     return applyRateLimitHeaders(responseWithHeaders, rateLimitHeaders);
