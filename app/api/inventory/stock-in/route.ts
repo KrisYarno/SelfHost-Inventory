@@ -1,19 +1,15 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth/next';
-import { ZodError } from 'zod';
-import { authOptions } from '@/lib/auth';
-import { createInventoryAdjustment } from '@/lib/inventory';
-import { inventory_logs_logType } from '@prisma/client';
-import { 
-  AppError, 
-  UnauthorizedError, 
-  errorLogger
-} from "@/lib/error-handling";
-import { validateCSRFToken } from '@/lib/csrf';
-import { StockInSchema } from '@/lib/validation/inventory';
-import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from '@/lib/rateLimit';
+import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth/next";
+import { ZodError } from "zod";
+import { authOptions } from "@/lib/auth";
+import { createInventoryAdjustment } from "@/lib/inventory";
+import { inventory_logs_logType } from "@prisma/client";
+import { AppError, UnauthorizedError, errorLogger } from "@/lib/error-handling";
+import { validateCSRFToken } from "@/lib/csrf";
+import { StockInSchema } from "@/lib/validation/inventory";
+import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
@@ -22,7 +18,7 @@ export async function POST(request: NextRequest) {
       throw new UnauthorizedError("add stock to inventory");
     }
 
-    const rateLimitHeaders = enforceRateLimit(request, 'inventory:stock-in', {
+    const rateLimitHeaders = enforceRateLimit(request, "inventory:stock-in", {
       identifier: session.user.id,
     });
 
@@ -50,7 +46,7 @@ export async function POST(request: NextRequest) {
     return applyRateLimitHeaders(response, rateLimitHeaders);
   } catch (error) {
     errorLogger.log(error as Error);
-    
+
     if (error instanceof RateLimitError) {
       return NextResponse.json(
         { error: error.message },
@@ -61,31 +57,31 @@ export async function POST(request: NextRequest) {
     if (error instanceof ZodError) {
       return NextResponse.json(
         {
-          error: 'Invalid request payload',
+          error: "Invalid request payload",
           details: error.flatten().fieldErrors,
         },
         { status: 400 }
       );
     }
-    
+
     if (error instanceof AppError) {
       return NextResponse.json(
-        { 
+        {
           error: {
             message: error.message,
-            code: error.code
-          }
+            code: error.code,
+          },
         },
         { status: error.statusCode }
       );
     }
-    
+
     return NextResponse.json(
-      { 
+      {
         error: {
           message: "Failed to add stock. Please try again.",
-          code: "STOCK_IN_FAILED"
-        }
+          code: "STOCK_IN_FAILED",
+        },
       },
       { status: 500 }
     );

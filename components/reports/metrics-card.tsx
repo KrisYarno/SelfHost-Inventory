@@ -42,17 +42,17 @@ export function MetricsCard({
         {trend && (
           <div className="flex items-center gap-1 mt-2">
             {trend.direction === 'up' ? (
-              <ArrowUp className="h-3 w-3 text-green-600" />
+              <ArrowUp className="h-3 w-3 text-positive" />
             ) : trend.direction === 'down' ? (
-              <ArrowDown className="h-3 w-3 text-red-600" />
+              <ArrowDown className="h-3 w-3 text-negative" />
             ) : (
               <Minus className="h-3 w-3 text-muted-foreground" />
             )}
             <span
               className={cn(
                 "text-xs font-medium",
-                trend.direction === 'up' && "text-green-600",
-                trend.direction === 'down' && "text-red-600",
+                trend.direction === 'up' && "text-positive",
+                trend.direction === 'down' && "text-negative",
                 trend.direction === 'stable' && "text-muted-foreground"
               )}
             >

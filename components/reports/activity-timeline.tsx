@@ -41,11 +41,11 @@ export function ActivityTimeline() {
   const getActivityIcon = (type: ActivityItem['type']) => {
     switch (type) {
       case 'stock_in':
-        return <PackagePlus className="h-4 w-4 text-green-600" />;
+        return <PackagePlus className="h-4 w-4 text-positive" />;
       case 'stock_out':
-        return <PackageMinus className="h-4 w-4 text-red-600" />;
+        return <PackageMinus className="h-4 w-4 text-negative" />;
       case 'adjustment':
-        return <Settings className="h-4 w-4 text-blue-600" />;
+        return <Settings className="h-4 w-4 text-info" />;
       default:
         return <Package className="h-4 w-4 text-muted-foreground" />;
     }
@@ -54,13 +54,13 @@ export function ActivityTimeline() {
   const getActivityColor = (type: ActivityItem['type']) => {
     switch (type) {
       case 'stock_in':
-        return "bg-green-100 text-green-800 border-green-200";
+        return "bg-positive-muted text-positive-foreground border-positive-border";
       case 'stock_out':
-        return "bg-red-100 text-red-800 border-red-200";
+        return "bg-negative-muted text-negative-foreground border-negative-border";
       case 'adjustment':
-        return "bg-blue-100 text-blue-800 border-blue-200";
+        return "bg-info-muted text-info-foreground border-info-border";
       default:
-        return "bg-gray-100 text-gray-800 border-gray-200";
+        return "bg-muted text-foreground border-border";
     }
   };
 

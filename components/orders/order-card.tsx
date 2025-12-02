@@ -54,12 +54,12 @@ export function OrderCard({ order, onSelect, onSwipe, className }: OrderCardProp
   const isLocked = !!order.lockedBy;
   const isOwnLock = order.lockedBy?.userId === 'current-user-id'; // Replace with actual user ID
 
-  // Status colors
+  // Status colors using semantic tokens
   const statusColors = {
-    pending: 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400',
-    packing: 'bg-blue-500/10 text-blue-700 dark:text-blue-400',
-    completed: 'bg-green-500/10 text-green-700 dark:text-green-400',
-    cancelled: 'bg-red-500/10 text-red-700 dark:text-red-400',
+    pending: 'bg-warning-muted text-warning-foreground',
+    packing: 'bg-info-muted text-info-foreground',
+    completed: 'bg-positive-muted text-positive-foreground',
+    cancelled: 'bg-negative-muted text-negative-foreground',
   };
 
   return (

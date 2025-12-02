@@ -3,12 +3,12 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    
+
     if (!session?.user?.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
 
     if (search) {
       whereClause.products = {
-        name: { contains: search }
+        name: { contains: search },
       };
     }
 
@@ -38,7 +38,7 @@ export async function GET(request: NextRequest) {
 
     if (locationFilter && locationFilter !== "all") {
       whereClause.locations = {
-        name: locationFilter
+        name: locationFilter,
       };
     }
 
@@ -67,18 +67,18 @@ export async function GET(request: NextRequest) {
         products: true,
         locations: true,
       },
-      orderBy: { changeTime: 'desc' },
+      orderBy: { changeTime: "desc" },
       skip: (page - 1) * pageSize,
       take: pageSize,
     });
 
     // Transform data
-    const transformedLogs = logs.map(log => ({
+    const transformedLogs = logs.map((log) => ({
       id: log.id,
       timestamp: log.changeTime.toISOString(),
       productName: log.products.name,
       userName: log.users.username,
-      locationName: log.locations?.name || 'Unknown',
+      locationName: log.locations?.name || "Unknown",
       delta: log.delta,
       logType: log.logType,
     }));
@@ -91,10 +91,7 @@ export async function GET(request: NextRequest) {
       totalPages: Math.ceil(total / pageSize),
     });
   } catch (error) {
-    console.error('Error fetching logs:', error);
-    return NextResponse.json(
-      { error: "Failed to fetch logs" },
-      { status: 500 }
-    );
+    console.error("Error fetching logs:", error);
+    return NextResponse.json({ error: "Failed to fetch logs" }, { status: 500 });
   }
 }

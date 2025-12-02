@@ -24,7 +24,6 @@ export function JournalProductRow({
   const hasChange = delta !== 0;
 
   const handleQuantityChange = (change: number) => {
-    console.log(`JournalProductRow: handleQuantityChange for product ${product.id} (${product.name}), new change: ${change}`);
     onQuantityChange(change);
   };
 
@@ -44,9 +43,9 @@ export function JournalProductRow({
         "rounded-xl border transition-colors overflow-visible shadow-md",
         hasChange
           ? delta > 0
-            ? "border-emerald-500/50 bg-emerald-500/5"
-            : "border-red-500/50 bg-red-500/5"
-          : "border-border/70 bg-white dark:bg-slate-800"
+            ? "border-positive-border bg-positive-muted"
+            : "border-negative-border bg-negative-muted"
+          : "border-border/70 bg-surface"
       )}
       role="article"
       aria-label={`Product ${product.name}, current quantity ${currentQuantity}`}

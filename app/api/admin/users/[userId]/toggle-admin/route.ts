@@ -1,21 +1,15 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth';
-import prisma from '@/lib/prisma';
-import { validateCSRFToken } from '@/lib/csrf';
+import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth";
+import prisma from "@/lib/prisma";
+import { validateCSRFToken } from "@/lib/csrf";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { userId: string } }
-) {
+export async function POST(request: NextRequest, { params }: { params: { userId: string } }) {
   try {
     const session = await getSession();
     if (!session || !session.user.isAdmin) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Validate CSRF token
@@ -26,10 +20,7 @@ export async function POST(
 
     const userId = parseInt(params.userId);
     if (isNaN(userId) || userId === 0) {
-      return NextResponse.json(
-        { error: 'Invalid user ID' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Invalid user ID" }, { status: 400 });
     }
 
     const body = await request.json();
@@ -41,20 +32,17 @@ export async function POST(
       data: { isAdmin },
     });
 
-    return NextResponse.json({ 
-      message: 'User role updated successfully',
+    return NextResponse.json({
+      message: "User role updated successfully",
       user: {
         id: user.id,
         email: user.email,
         username: user.username,
         isAdmin: user.isAdmin,
-      }
+      },
     });
   } catch (error) {
-    console.error('Error updating user role:', error);
-    return NextResponse.json(
-      { error: 'Failed to update user role' },
-      { status: 500 }
-    );
+    console.error("Error updating user role:", error);
+    return NextResponse.json({ error: "Failed to update user role" }, { status: 500 });
   }
 }

@@ -5,18 +5,14 @@ import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { DeductInventoryResponse } from "@/types/workbench";
 import { createInventoryTransaction } from "@/lib/inventory";
-import { 
-  AppError, 
-  UnauthorizedError, 
-  errorLogger
-} from "@/lib/error-handling";
+import { AppError, UnauthorizedError, errorLogger } from "@/lib/error-handling";
 import { validateCSRFToken } from "@/lib/csrf";
 import { DeductInventorySchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
 import { auditService } from "@/lib/audit";
 import { randomUUID } from "crypto";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 // POST /api/inventory/deduct - Process order deduction
 export async function POST(request: NextRequest) {
@@ -44,34 +40,25 @@ export async function POST(request: NextRequest) {
     });
 
     if (!location) {
-      throw new AppError(
-        "No location configured in the system",
-        "NO_LOCATION",
-        500
-      );
+      throw new AppError("No location configured in the system", "NO_LOCATION", 500);
     }
 
     // Prepare items for the transaction
-    const items = body.items.map(item => ({
+    const items = body.items.map((item) => ({
       productId: item.productId,
       locationId: location.id,
       quantityChange: -item.quantity, // Negative for deduction
-      notes: body.notes
+      notes: body.notes,
     }));
 
     const operationId = randomUUID();
 
     // Process the transaction
-    const result = await createInventoryTransaction(
-      'SALE',
-      session.user.id,
-      items,
-      {
-        orderReference: body.orderReference,
-        notes: body.notes,
-        operationId,
-      }
-    );
+    const result = await createInventoryTransaction("SALE", session.user.id, items, {
+      orderReference: body.orderReference,
+      notes: body.notes,
+      operationId,
+    });
 
     const response: DeductInventoryResponse = {
       success: true,
@@ -119,38 +106,38 @@ export async function POST(request: NextRequest) {
 
     if (error instanceof AppError) {
       return NextResponse.json(
-        { 
+        {
           error: {
             message: error.message,
-            code: error.code
-          }
+            code: error.code,
+          },
         },
         { status: error.statusCode }
       );
     }
-    
+
     // Handle Prisma errors
     if (error instanceof Error && error.message.includes("Insufficient stock")) {
       const match = error.message.match(/Product (.+) has insufficient stock/);
       const productName = match ? match[1] : "Unknown product";
       return NextResponse.json(
-        { 
+        {
           error: {
             message: `Not enough stock for ${productName}. Please check available inventory.`,
             code: "INVENTORY_INSUFFICIENT_STOCK",
-            context: { productName }
-          }
+            context: { productName },
+          },
         },
         { status: 400 }
       );
     }
-    
+
     return NextResponse.json(
-      { 
+      {
         error: {
           message: "Failed to process inventory deduction. Please try again.",
-          code: "DEDUCTION_FAILED"
-        }
+          code: "DEDUCTION_FAILED",
+        },
       },
       { status: 500 }
     );

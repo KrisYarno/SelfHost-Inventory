@@ -1,13 +1,13 @@
-'use client';
+"use client";
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
-import { toast } from 'sonner';
-import { Undo2 } from 'lucide-react';
-import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
-import { cn } from '@/lib/utils';
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
+import { Undo2 } from "lucide-react";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { cn } from "@/lib/utils";
 
 interface LocationMeta {
   id: number;
@@ -35,11 +35,11 @@ type MinEdit = {
 };
 
 type EditsMap = Record<number, MinEdit>;
-type FilterType = 'all' | 'needsSetup' | 'edited';
-type ViewMode = 'matrix' | 'list';
+type FilterType = "all" | "needsSetup" | "edited";
+type ViewMode = "matrix" | "list";
 
 function clampNumber(value: string) {
-  const parsed = parseInt(value || '0', 10);
+  const parsed = parseInt(value || "0", 10);
   if (Number.isNaN(parsed)) return 0;
   return Math.max(0, parsed);
 }
@@ -61,17 +61,17 @@ export default function MinimumSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<FilterType>('all');
-  const [view, setView] = useState<ViewMode>('matrix');
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<FilterType>("all");
+  const [view, setView] = useState<ViewMode>("matrix");
   const [drawerProduct, setDrawerProduct] = useState<ProductMinimum | null>(null);
   const { token: csrfToken } = useCSRF();
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const res = await fetch('/api/admin/products/thresholds');
-      if (!res.ok) throw new Error('Failed to load minimums');
+      const res = await fetch("/api/admin/products/thresholds");
+      if (!res.ok) throw new Error("Failed to load minimums");
       const data = await res.json();
 
       setProducts(data.products);
@@ -82,9 +82,9 @@ export default function MinimumSettingsPage() {
       setHistory([]);
       setError(null);
     } catch (err) {
-      console.error('Error loading minimums', err);
-      setError('Failed to load product minimums');
-      toast.error('Failed to load product minimums');
+      console.error("Error loading minimums", err);
+      setError("Failed to load product minimums");
+      toast.error("Failed to load product minimums");
     } finally {
       setIsLoading(false);
     }
@@ -160,15 +160,15 @@ export default function MinimumSettingsPage() {
       const perLocationEdits = Object.keys(edit?.perLocation ?? {}).length > 0;
       const hasChanged = perLocationEdits || edit?.combinedMin !== undefined;
       const hasMissingLocation = product.perLocation.some(
-        (loc) => (edit?.perLocation?.[loc.locationId] ?? loc.minQuantity ?? 0) <= 0,
+        (loc) => (edit?.perLocation?.[loc.locationId] ?? loc.minQuantity ?? 0) <= 0
       );
 
       switch (filter) {
-        case 'needsSetup':
+        case "needsSetup":
           return combinedMissing || hasMissingLocation;
-        case 'edited':
+        case "edited":
           return hasChanged;
-        case 'all':
+        case "all":
         default:
           return true;
       }
@@ -179,16 +179,16 @@ export default function MinimumSettingsPage() {
     const beforeUnload = (event: BeforeUnloadEvent) => {
       if (changesCount > 0) {
         event.preventDefault();
-        event.returnValue = '';
+        event.returnValue = "";
       }
     };
-    window.addEventListener('beforeunload', beforeUnload);
-    return () => window.removeEventListener('beforeunload', beforeUnload);
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [changesCount]);
 
   const handleSave = async () => {
     if (!changesCount) {
-      toast.info('No changes to save');
+      toast.info("No changes to save");
       return;
     }
 
@@ -196,31 +196,31 @@ export default function MinimumSettingsPage() {
     setError(null);
 
     try {
-        const updates = Object.entries(edits).map(([productId, edit]) => ({
-          productId: Number(productId),
-          combinedMinimum: edit.combinedMin,
-          perLocation: edit.perLocation
-            ? Object.entries(edit.perLocation).map(([locationId, min]) => ({
-                locationId: Number(locationId),
-                minQuantity: min,
-              }))
-            : undefined,
-        }));
+      const updates = Object.entries(edits).map(([productId, edit]) => ({
+        productId: Number(productId),
+        combinedMinimum: edit.combinedMin,
+        perLocation: edit.perLocation
+          ? Object.entries(edit.perLocation).map(([locationId, min]) => ({
+              locationId: Number(locationId),
+              minQuantity: min,
+            }))
+          : undefined,
+      }));
 
-      const res = await fetch('/api/admin/products/thresholds', {
-        method: 'PATCH',
-        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
+      const res = await fetch("/api/admin/products/thresholds", {
+        method: "PATCH",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({ updates }),
       });
 
-      if (!res.ok) throw new Error('Failed to save minimums');
+      if (!res.ok) throw new Error("Failed to save minimums");
 
-      toast.success('Minimums saved');
+      toast.success("Minimums saved");
       await loadData();
     } catch (err) {
-      console.error('Error saving minimums', err);
-      setError('Failed to save minimums');
-      toast.error('Failed to save minimums');
+      console.error("Error saving minimums", err);
+      setError("Failed to save minimums");
+      toast.error("Failed to save minimums");
     } finally {
       setIsSaving(false);
     }
@@ -229,7 +229,7 @@ export default function MinimumSettingsPage() {
   const visibleLocations = locations.filter((loc) => visibleLocationIds.includes(loc.id));
 
   return (
-      <div className="space-y-4 pb-44 sm:pb-28">
+    <div className="space-y-4 pb-44 sm:pb-28">
       <div className="border-b border-border bg-background/80 px-4 py-4 sm:px-6 space-y-3">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -238,10 +238,10 @@ export default function MinimumSettingsPage() {
               Combined order minimums and per-location refill minimums.
             </p>
           </div>
-          {view === 'matrix' && (
+          {view === "matrix" && (
             <div className="flex flex-wrap items-center gap-2">
               <Button
-                variant={showCombined ? 'default' : 'outline'}
+                variant={showCombined ? "default" : "outline"}
                 size="sm"
                 onClick={() => setShowCombined((prev) => !prev)}
                 aria-pressed={showCombined}
@@ -253,11 +253,11 @@ export default function MinimumSettingsPage() {
                 return (
                   <Button
                     key={location.id}
-                    variant={active ? 'default' : 'outline'}
+                    variant={active ? "default" : "outline"}
                     size="sm"
                     onClick={() =>
                       setVisibleLocationIds((prev) =>
-                        active ? prev.filter((id) => id !== location.id) : [...prev, location.id],
+                        active ? prev.filter((id) => id !== location.id) : [...prev, location.id]
                       )
                     }
                     aria-pressed={active}
@@ -280,31 +280,31 @@ export default function MinimumSettingsPage() {
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex flex-wrap gap-2">
-              {(['all', 'needsSetup', 'edited'] as FilterType[]).map((item) => (
+              {(["all", "needsSetup", "edited"] as FilterType[]).map((item) => (
                 <Button
                   key={item}
-                  variant={filter === item ? 'default' : 'outline'}
+                  variant={filter === item ? "default" : "outline"}
                   size="sm"
                   onClick={() => setFilter(item)}
                 >
-                  {item === 'all' && 'All products'}
-                  {item === 'needsSetup' && 'Needs setup'}
-                  {item === 'edited' && 'Edited (unsaved)'}
+                  {item === "all" && "All products"}
+                  {item === "needsSetup" && "Needs setup"}
+                  {item === "edited" && "Edited (unsaved)"}
                 </Button>
               ))}
             </div>
             <div className="ml-auto flex gap-1">
               <Button
-                variant={view === 'matrix' ? 'default' : 'outline'}
+                variant={view === "matrix" ? "default" : "outline"}
                 size="sm"
-                onClick={() => setView('matrix')}
+                onClick={() => setView("matrix")}
               >
                 Matrix
               </Button>
               <Button
-                variant={view === 'list' ? 'default' : 'outline'}
+                variant={view === "list" ? "default" : "outline"}
                 size="sm"
-                onClick={() => setView('list')}
+                onClick={() => setView("list")}
               >
                 List
               </Button>
@@ -322,15 +322,13 @@ export default function MinimumSettingsPage() {
             <div className="h-10 rounded-md bg-muted" />
             <div className="h-10 rounded-md bg-muted" />
           </div>
-        ) : view === 'matrix' ? (
+        ) : view === "matrix" ? (
           <div className="overflow-auto border border-border rounded-lg">
             <table className="min-w-full text-sm">
               <thead className="bg-muted/60 sticky top-0 z-10">
                 <tr>
                   <th className="sticky left-0 z-20 bg-muted/80 px-3 py-2 text-left">Product</th>
-                  {showCombined && (
-                    <th className="px-3 py-2 text-right">Combined min</th>
-                  )}
+                  {showCombined && <th className="px-3 py-2 text-right">Combined min</th>}
                   {visibleLocations.map((loc) => (
                     <th key={loc.id} className="px-3 py-2 text-right whitespace-nowrap">
                       {loc.name}
@@ -342,14 +340,15 @@ export default function MinimumSettingsPage() {
                 {filteredProducts.map((product) => {
                   const edit = edits[product.id];
                   const combinedValue = edit?.combinedMin ?? product.combinedMinimum;
-                  const belowCombined =
-                    combinedValue > 0 && product.totalStock < combinedValue;
+                  const belowCombined = combinedValue > 0 && product.totalStock < combinedValue;
 
                   return (
                     <tr key={product.id} className="border-t border-border">
                       <td className="sticky left-0 z-10 bg-background px-3 py-2 max-w-[260px]">
-                          <div className="flex items-center gap-2 max-w-[240px] sm:max-w-none">
-                            <span className="flex-1 min-w-0 truncate font-medium text-sm sm:text-base">{product.name}</span>
+                        <div className="flex items-center gap-2 max-w-[240px] sm:max-w-none">
+                          <span className="flex-1 min-w-0 truncate font-medium text-sm sm:text-base">
+                            {product.name}
+                          </span>
                           {belowCombined && (
                             <span
                               className="inline-block h-2 w-2 rounded-full bg-rose-400"
@@ -375,29 +374,25 @@ export default function MinimumSettingsPage() {
                       )}
                       {visibleLocations.map((loc) => {
                         const perMin = edit?.perLocation?.[loc.id];
-                        const currentLoc = product.perLocation.find(
-                          (l) => l.locationId === loc.id,
-                        );
+                        const currentLoc = product.perLocation.find((l) => l.locationId === loc.id);
                         const value = perMin ?? currentLoc?.minQuantity ?? 0;
-                        const belowLoc =
-                          currentLoc && value > 0 && currentLoc.quantity < value;
+                        const belowLoc = currentLoc && value > 0 && currentLoc.quantity < value;
                         return (
                           <td
                             key={`${product.id}-${loc.id}`}
                             className={cn(
-                              'px-3 py-2 text-right',
-                              belowLoc && 'bg-amber-500/10 text-amber-100',
+                              "px-3 py-2 text-right",
+                              belowLoc &&
+                                "bg-amber-100 text-amber-900 dark:bg-amber-500/15 dark:text-amber-200"
                             )}
                           >
                             <NumericInput
                               value={value}
-                              onChange={(val) =>
-                                handleLocationChange(product.id, loc.id, val)
-                              }
+                              onChange={(val) => handleLocationChange(product.id, loc.id, val)}
                               label={`Minimum for ${product.name} at ${loc.name}`}
                             />
                             <div className="text-[10px] text-muted-foreground">
-                              {currentLoc ? `Stock: ${currentLoc.quantity}` : 'Stock: 0'}
+                              {currentLoc ? `Stock: ${currentLoc.quantity}` : "Stock: 0"}
                             </div>
                           </td>
                         );
@@ -413,11 +408,9 @@ export default function MinimumSettingsPage() {
             {filteredProducts.map((product) => {
               const edit = edits[product.id];
               const combinedValue = edit?.combinedMin ?? product.combinedMinimum;
-              const belowCombined =
-                combinedValue > 0 && product.totalStock < combinedValue;
+              const belowCombined = combinedValue > 0 && product.totalStock < combinedValue;
               const hasEdits =
-                edit?.combinedMin !== undefined ||
-                Object.keys(edit?.perLocation ?? {}).length > 0;
+                edit?.combinedMin !== undefined || Object.keys(edit?.perLocation ?? {}).length > 0;
 
               return (
                 <div key={product.id} className="px-3 py-3 sm:px-4">
@@ -445,9 +438,7 @@ export default function MinimumSettingsPage() {
                       <span className="text-xs text-muted-foreground">Combined</span>
                       <StepperInput
                         value={combinedValue}
-                        onChange={(val) =>
-                          handleCombinedChange(product.id, String(val))
-                        }
+                        onChange={(val) => handleCombinedChange(product.id, String(val))}
                         ariaLabel={`Combined minimum for ${product.name}`}
                       />
                       <Button
@@ -472,9 +463,7 @@ export default function MinimumSettingsPage() {
           product={drawerProduct}
           edits={edits[drawerProduct.id]}
           onClose={() => setDrawerProduct(null)}
-          onCombinedChange={(value) =>
-            handleCombinedChange(drawerProduct.id, String(value))
-          }
+          onCombinedChange={(value) => handleCombinedChange(drawerProduct.id, String(value))}
           onLocationChange={(locationId, value) =>
             handleLocationChange(drawerProduct.id, locationId, String(value))
           }
@@ -531,11 +520,16 @@ function StickySaveBar({
   error: string | null;
 }) {
   return (
-      <div
-        className="fixed inset-x-0 z-40 border-t border-border bg-background/90 backdrop-blur"
-        style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 4.75rem)" }}
-      >
-        <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-3 sm:px-6">
+    <div
+      className={cn(
+        "fixed left-0 right-0 md:left-64 z-40 border-t backdrop-blur",
+        changes > 0
+          ? "border-amber-300 bg-amber-50/90 dark:border-amber-700 dark:bg-amber-900/30"
+          : "border-border bg-background/90"
+      )}
+      style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 4.75rem)" }}
+    >
+      <div className="mx-auto flex max-w-6xl items-center gap-2 px-4 py-3 sm:px-6">
         <Button
           variant="outline"
           size="sm"
@@ -546,20 +540,15 @@ function StickySaveBar({
           <Undo2 className="h-4 w-4" />
           Undo
         </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onReset}
-          disabled={changes === 0}
-        >
+        <Button variant="ghost" size="sm" onClick={onReset} disabled={changes === 0}>
           Reset
         </Button>
         <div className="flex-1 text-sm text-muted-foreground">
-          {changes > 0 ? `${changes} change${changes > 1 ? 's' : ''} pending` : 'No changes'}
+          {changes > 0 ? `${changes} change${changes > 1 ? "s" : ""} pending` : "No changes"}
           {error && <span className="ml-2 text-destructive">{error}</span>}
         </div>
         <Button onClick={onSave} disabled={changes === 0 || saving}>
-          {saving ? 'Saving...' : 'Save'}
+          {saving ? "Saving..." : "Save"}
         </Button>
       </div>
     </div>
@@ -634,9 +623,7 @@ function Drawer({
         <div className="flex items-start justify-between gap-2 border-b border-border px-4 py-3">
           <div>
             <p className="text-sm font-semibold">{product.name}</p>
-            <p className="text-xs text-muted-foreground">
-              {product.perLocation.length} locations
-            </p>
+            <p className="text-xs text-muted-foreground">{product.perLocation.length} locations</p>
           </div>
           <Button variant="ghost" size="sm" onClick={onClose}>
             Close
@@ -644,9 +631,7 @@ function Drawer({
         </div>
         <div className="space-y-4 overflow-y-auto px-4 py-3">
           <div className="space-y-2">
-            <label className="text-xs font-medium text-muted-foreground">
-              Combined minimum
-            </label>
+            <label className="text-xs font-medium text-muted-foreground">Combined minimum</label>
             <StepperInput
               value={combinedValue}
               onChange={(val) => onCombinedChange(val)}
@@ -695,9 +680,7 @@ function Drawer({
                   >
                     <div>
                       <p className="text-sm font-medium">{loc.locationName}</p>
-                      <p className="text-[11px] text-muted-foreground">
-                        Stock: {loc.quantity}
-                      </p>
+                      <p className="text-[11px] text-muted-foreground">Stock: {loc.quantity}</p>
                     </div>
                     <StepperInput
                       value={value}
@@ -715,4 +698,3 @@ function Drawer({
     </div>
   );
 }
-

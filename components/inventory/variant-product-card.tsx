@@ -152,11 +152,11 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
                         className={cn(
                           'flex items-center justify-between rounded-lg border px-3 py-2',
                           isBelowLocation
-                            ? 'border-amber-500/50 bg-amber-500/10'
+                            ? 'border-warning-border bg-warning-muted'
                             : location.quantity > 0
-                            ? 'border-emerald-500/30 bg-emerald-500/5'
+                            ? 'border-positive-border/50 bg-positive-muted/50'
                             : location.quantity < 0
-                            ? 'border-red-500/40 bg-red-500/10'
+                            ? 'border-negative-border bg-negative-muted'
                             : 'border-border bg-muted/30'
                         )}
                       >

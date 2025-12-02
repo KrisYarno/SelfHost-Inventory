@@ -1,32 +1,40 @@
-'use client';
+"use client";
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
-import Link from 'next/link';
-import { SimpleInventoryLogTable } from '@/components/inventory/simple-inventory-log-table';
-import { TransferDialog } from '@/components/inventory/transfer-dialog';
-import { TransferLogTable } from '@/components/inventory/transfer-log-table';
-import { VariantProductCard } from '@/components/inventory/variant-product-card';
-import { QuickAdjustDialog } from '@/components/inventory/quick-adjust-dialog';
-import { StockInDialog } from '@/components/inventory/stock-in-dialog';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Badge } from '@/components/ui/badge';
-import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from '@/components/ui/accordion';
-import { BookOpen, Loader2, RefreshCw, Download, Package } from 'lucide-react';
-import { toast } from 'sonner';
-import { useInfiniteScroll } from '@/hooks/use-infinite-scroll';
-import { useDebounce } from '@/hooks/use-debounce';
-import { fetchWithErrorHandling } from '@/lib/rate-limited-fetch';
-import type { 
-  InventoryLogWithRelations
-} from '@/types/inventory';
-import type { ProductWithQuantity } from '@/types/product';
-
+import { useState, useEffect, useMemo, useCallback } from "react";
+import Link from "next/link";
+import { SimpleInventoryLogTable } from "@/components/inventory/simple-inventory-log-table";
+import { TransferDialog } from "@/components/inventory/transfer-dialog";
+import { TransferLogTable } from "@/components/inventory/transfer-log-table";
+import { VariantProductCard } from "@/components/inventory/variant-product-card";
+import { QuickAdjustDialog } from "@/components/inventory/quick-adjust-dialog";
+import { StockInDialog } from "@/components/inventory/stock-in-dialog";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
+import {
+  Accordion,
+  AccordionItem,
+  AccordionTrigger,
+  AccordionContent,
+} from "@/components/ui/accordion";
+import { BookOpen, Loader2, RefreshCw, Download, Package } from "lucide-react";
+import { toast } from "sonner";
+import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
+import { useDebounce } from "@/hooks/use-debounce";
+import { fetchWithErrorHandling } from "@/lib/rate-limited-fetch";
+import type { InventoryLogWithRelations } from "@/types/inventory";
+import type { ProductWithQuantity } from "@/types/product";
 
 interface ProductWithLocations {
   id: number;
@@ -58,7 +66,7 @@ export default function InventoryPage() {
   const [showQuickAdjust, setShowQuickAdjust] = useState(false);
   const [showStockIn, setShowStockIn] = useState(false);
   const [showTransfer, setShowTransfer] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -77,9 +85,9 @@ export default function InventoryPage() {
   // Group products by baseName (category)
   const groupedProducts = useMemo(() => {
     const groups: Record<string, ProductWithLocations[]> = {};
-    
-    products.forEach(product => {
-      const category = product.baseName || 'Uncategorized';
+
+    products.forEach((product) => {
+      const category = product.baseName || "Uncategorized";
       if (!groups[category]) {
         groups[category] = [];
       }
@@ -90,7 +98,7 @@ export default function InventoryPage() {
     const sortedGroups: Record<string, ProductWithLocations[]> = {};
     Object.keys(groups)
       .sort((a, b) => a.localeCompare(b))
-      .forEach(key => {
+      .forEach((key) => {
         sortedGroups[key] = groups[key].sort((a, b) => {
           // Sort by variant name if they exist
           if (a.variant && b.variant) {
@@ -114,7 +122,7 @@ export default function InventoryPage() {
     }
 
     try {
-      const saved = localStorage.getItem('inventory-expanded-categories');
+      const saved = localStorage.getItem("inventory-expanded-categories");
       const parsed: string[] = saved ? JSON.parse(saved) : [];
       // Keep only categories that still exist; do NOT auto-expand new ones
       const next = parsed.filter((cat) => allCategories.includes(cat));
@@ -129,60 +137,63 @@ export default function InventoryPage() {
   const handleAccordionChange = (value: string | string[]) => {
     const newValue = Array.isArray(value) ? value : [value];
     setExpandedCategories(newValue);
-    localStorage.setItem('inventory-expanded-categories', JSON.stringify(newValue));
+    localStorage.setItem("inventory-expanded-categories", JSON.stringify(newValue));
   };
 
   // Fetch products with variants and pagination
-  const fetchProducts = useCallback(async (page: number = 1, append: boolean = false) => {
-    if (append) {
-      setIsLoadingMore(true);
-    } else {
-      setIsLoading(true);
-    }
-
-    try {
-      const params = new URLSearchParams({
-        page: page.toString(),
-        pageSize: '12',
-        ...(debouncedSearch && { search: debouncedSearch }),
-        // Don't filter by location - show all locations for each product
-      });
-
-      const data = await fetchWithErrorHandling(`/api/inventory/variants?${params}`);
-      
+  const fetchProducts = useCallback(
+    async (page: number = 1, append: boolean = false) => {
       if (append) {
-        setProducts(prev => [...prev, ...data.products]);
+        setIsLoadingMore(true);
       } else {
-        setProducts(data.products);
+        setIsLoading(true);
       }
-      
-      setPagination(data.pagination);
-    } catch (error) {
-      console.error('Error fetching inventory:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to load inventory';
-      toast.error(errorMessage);
-    } finally {
-      setIsLoading(false);
-      setIsLoadingMore(false);
-    }
-  }, [debouncedSearch]);
+
+      try {
+        const params = new URLSearchParams({
+          page: page.toString(),
+          pageSize: "12",
+          ...(debouncedSearch && { search: debouncedSearch }),
+          // Don't filter by location - show all locations for each product
+        });
+
+        const data = await fetchWithErrorHandling(`/api/inventory/variants?${params}`);
+
+        if (append) {
+          setProducts((prev) => [...prev, ...data.products]);
+        } else {
+          setProducts(data.products);
+        }
+
+        setPagination(data.pagination);
+      } catch (error) {
+        console.error("Error fetching inventory:", error);
+        const errorMessage = error instanceof Error ? error.message : "Failed to load inventory";
+        toast.error(errorMessage);
+      } finally {
+        setIsLoading(false);
+        setIsLoadingMore(false);
+      }
+    },
+    [debouncedSearch]
+  );
 
   // Fetch inventory logs
   const fetchLogs = useCallback(async () => {
     try {
-      const data = await fetchWithErrorHandling('/api/inventory/logs?pageSize=20');
+      const data = await fetchWithErrorHandling("/api/inventory/logs?pageSize=20");
       setLogs(data.logs);
     } catch {
-      toast.error('Failed to load inventory logs');
+      toast.error("Failed to load inventory logs");
     }
   }, []);
 
   const fetchTransfers = useCallback(async () => {
     try {
-      const data = await fetchWithErrorHandling('/api/inventory/transfers?pageSize=20');
+      const data = await fetchWithErrorHandling("/api/inventory/transfers?pageSize=20");
       setTransferLogs(data.transfers ?? []);
     } catch {
-      toast.error('Failed to load transfer history');
+      toast.error("Failed to load transfer history");
     }
   }, []);
 
@@ -197,14 +208,10 @@ export default function InventoryPage() {
   const handleRefresh = useCallback(async () => {
     setIsRefreshing(true);
     try {
-      await Promise.all([
-        fetchProducts(1, false),
-        fetchLogs(),
-        fetchTransfers(),
-      ]);
-      toast.success('Inventory refreshed');
+      await Promise.all([fetchProducts(1, false), fetchLogs(), fetchTransfers()]);
+      toast.success("Inventory refreshed");
     } catch {
-      toast.error('Failed to refresh inventory');
+      toast.error("Failed to refresh inventory");
     } finally {
       setIsRefreshing(false);
     }
@@ -233,15 +240,17 @@ export default function InventoryPage() {
 
   // Touch/Pull to refresh setup for mobile
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (typeof window === "undefined") return;
 
     let startY = 0;
     let currentY = 0;
     let pulling = false;
-    const pullIndicator = document.createElement('div');
-    pullIndicator.className = 'fixed top-0 left-0 right-0 h-16 bg-background/80 backdrop-blur-sm flex items-center justify-center transition-transform duration-300 z-40';
-    pullIndicator.style.transform = 'translateY(-100%)';
-    pullIndicator.innerHTML = '<div class="flex items-center gap-2"><svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span class="text-sm">Pull to refresh</span></div>';
+    const pullIndicator = document.createElement("div");
+    pullIndicator.className =
+      "fixed top-0 left-0 right-0 h-16 bg-background/80 backdrop-blur-sm flex items-center justify-center transition-transform duration-300 z-40";
+    pullIndicator.style.transform = "translateY(-100%)";
+    pullIndicator.innerHTML =
+      '<div class="flex items-center gap-2"><svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span class="text-sm">Pull to refresh</span></div>';
     document.body.appendChild(pullIndicator);
 
     const handleTouchStart = (e: TouchEvent) => {
@@ -271,33 +280,33 @@ export default function InventoryPage() {
       if (pullDistance > 80 && !isRefreshing) {
         handleRefresh();
       }
-      
-      pullIndicator.style.transform = 'translateY(-100%)';
+
+      pullIndicator.style.transform = "translateY(-100%)";
     };
 
-    document.addEventListener('touchstart', handleTouchStart, { passive: true });
-    document.addEventListener('touchmove', handleTouchMove, { passive: false });
-    document.addEventListener('touchend', handleTouchEnd);
+    document.addEventListener("touchstart", handleTouchStart, { passive: true });
+    document.addEventListener("touchmove", handleTouchMove, { passive: false });
+    document.addEventListener("touchend", handleTouchEnd);
 
     return () => {
-      document.removeEventListener('touchstart', handleTouchStart);
-      document.removeEventListener('touchmove', handleTouchMove);
-      document.removeEventListener('touchend', handleTouchEnd);
+      document.removeEventListener("touchstart", handleTouchStart);
+      document.removeEventListener("touchmove", handleTouchMove);
+      document.removeEventListener("touchend", handleTouchEnd);
       if (pullIndicator.parentNode) {
         pullIndicator.parentNode.removeChild(pullIndicator);
       }
     };
   }, [handleRefresh, isRefreshing]);
 
-  const handleProductAction = (productId: number, action: 'adjust' | 'stockIn' | 'transfer') => {
+  const handleProductAction = (productId: number, action: "adjust" | "stockIn" | "transfer") => {
     // Find the product and convert to ProductWithQuantity format
-    const product = products.find(p => p.id === productId);
+    const product = products.find((p) => p.id === productId);
     if (!product) return;
-    
+
     const productWithQuantity: ProductWithQuantity = {
       id: product.id,
       name: product.name,
-      baseName: product.baseName || '',
+      baseName: product.baseName || "",
       variant: product.variant,
       unit: null,
       numericValue: null,
@@ -310,15 +319,15 @@ export default function InventoryPage() {
       currentQuantity: product.totalQuantity,
       lastUpdated: new Date(),
       deletedAt: null,
-      deletedBy: null
+      deletedBy: null,
     };
-    
+
     setSelectedProduct(productWithQuantity);
-    if (action === 'adjust') {
+    if (action === "adjust") {
       setShowQuickAdjust(true);
-    } else if (action === 'stockIn') {
+    } else if (action === "stockIn") {
       setShowStockIn(true);
-    } else if (action === 'transfer') {
+    } else if (action === "transfer") {
       setShowTransfer(true);
     }
   };
@@ -334,19 +343,19 @@ export default function InventoryPage() {
       const response = await fetch("/api/inventory/export", {
         method: "GET",
       });
-      
+
       if (!response.ok) throw new Error("Failed to export data");
-      
+
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `inventory-${new Date().toISOString().split('T')[0]}.csv`;
+      a.download = `inventory-${new Date().toISOString().split("T")[0]}.csv`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-      
+
       toast.success("Export completed successfully");
     } catch (error) {
       toast.error("Failed to export data");
@@ -378,9 +387,9 @@ export default function InventoryPage() {
               <span className="sm:hidden">Journal</span>
             </Link>
           </Button>
-          <Button 
-            variant="outline" 
-            size="sm" 
+          <Button
+            variant="outline"
+            size="sm"
             onClick={handleExportCSV}
             className="flex-1 sm:flex-initial"
           >
@@ -388,14 +397,14 @@ export default function InventoryPage() {
             <span className="hidden sm:inline">Export CSV</span>
             <span className="sm:hidden">Export</span>
           </Button>
-          <Button 
-            variant="outline" 
-            size="sm" 
+          <Button
+            variant="outline"
+            size="sm"
             onClick={handleRefresh}
             disabled={isRefreshing}
             className="sm:hidden"
           >
-            <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
           </Button>
         </div>
       </div>
@@ -404,7 +413,9 @@ export default function InventoryPage() {
       <Card>
         <CardHeader>
           <CardTitle>Current Stock Levels</CardTitle>
-          <CardDescription>Real-time inventory quantities across all products and locations</CardDescription>
+          <CardDescription>
+            Real-time inventory quantities across all products and locations
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {/* Search Bar and Controls */}
@@ -424,7 +435,10 @@ export default function InventoryPage() {
                     size="sm"
                     onClick={() => {
                       setExpandedCategories(allCategories);
-                      localStorage.setItem('inventory-expanded-categories', JSON.stringify(allCategories));
+                      localStorage.setItem(
+                        "inventory-expanded-categories",
+                        JSON.stringify(allCategories)
+                      );
                     }}
                     className="whitespace-nowrap"
                   >
@@ -435,7 +449,7 @@ export default function InventoryPage() {
                     size="sm"
                     onClick={() => {
                       setExpandedCategories([]);
-                      localStorage.setItem('inventory-expanded-categories', JSON.stringify([]));
+                      localStorage.setItem("inventory-expanded-categories", JSON.stringify([]));
                     }}
                     className="whitespace-nowrap"
                   >
@@ -468,7 +482,9 @@ export default function InventoryPage() {
           ) : products.length === 0 ? (
             <div className="text-center py-12">
               <p className="text-muted-foreground">
-                {searchQuery ? 'No products found matching your search.' : 'No products found in inventory.'}
+                {searchQuery
+                  ? "No products found matching your search."
+                  : "No products found in inventory."}
               </p>
               {!searchQuery && (
                 <Button asChild className="mt-4">
@@ -478,8 +494,8 @@ export default function InventoryPage() {
             </div>
           ) : (
             <>
-              <Accordion 
-                type="multiple" 
+              <Accordion
+                type="multiple"
                 value={expandedCategories}
                 onValueChange={handleAccordionChange}
                 className="space-y-4"
@@ -490,11 +506,14 @@ export default function InventoryPage() {
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between w-full pr-4 gap-2">
                         <div className="flex items-center gap-2 sm:gap-3">
                           <Package className="h-4 w-4 sm:h-5 sm:w-5 text-muted-foreground shrink-0" />
-                          <span className="text-sm sm:text-base font-semibold truncate">{category}</span>
+                          <span className="text-sm sm:text-base font-semibold truncate">
+                            {category}
+                          </span>
                         </div>
                         <div className="flex items-center gap-2 text-xs sm:text-sm">
                           <Badge variant="secondary" className="font-normal px-2 py-0.5">
-                            {categoryProducts.length} {categoryProducts.length === 1 ? 'variant' : 'variants'}
+                            {categoryProducts.length}{" "}
+                            {categoryProducts.length === 1 ? "variant" : "variants"}
                           </Badge>
                           <Badge variant="outline" className="font-normal px-2 py-0.5">
                             {categoryProducts.reduce((sum, p) => sum + p.totalQuantity, 0)} units
@@ -508,9 +527,9 @@ export default function InventoryPage() {
                           <VariantProductCard
                             key={product.id}
                             product={product}
-                            onStockIn={(id) => handleProductAction(id, 'stockIn')}
-                            onAdjust={(id) => handleProductAction(id, 'adjust')}
-                            onTransfer={(id) => handleProductAction(id, 'transfer')}
+                            onStockIn={(id) => handleProductAction(id, "stockIn")}
+                            onAdjust={(id) => handleProductAction(id, "adjust")}
+                            onTransfer={(id) => handleProductAction(id, "transfer")}
                           />
                         ))}
                       </div>
@@ -529,7 +548,8 @@ export default function InventoryPage() {
                 )}
                 {!pagination.hasMore && products.length > 0 && (
                   <p className="text-sm text-muted-foreground">
-                    Showing all {pagination.total} products in {Object.keys(groupedProducts).length} categories
+                    Showing all {pagination.total} products in {Object.keys(groupedProducts).length}{" "}
+                    categories
                   </p>
                 )}
               </div>
@@ -571,35 +591,29 @@ export default function InventoryPage() {
                       </SelectTrigger>
                       <SelectContent>
                         {products.map((product) => (
-                          <SelectItem 
-                            key={product.id} 
-                            value={product.id.toString()}
-                          >
+                          <SelectItem key={product.id} value={product.id.toString()}>
                             {product.name}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
-                  
+
                   <div className="space-y-2">
                     <Label htmlFor="quantity">Quantity Change</Label>
-                    <Input 
-                      id="quantity" 
-                      type="number" 
+                    <Input
+                      id="quantity"
+                      type="number"
                       placeholder="Enter positive or negative number"
                     />
                   </div>
                 </div>
-                
+
                 <div className="space-y-2">
                   <Label htmlFor="reason">Reason</Label>
-                  <Input 
-                    id="reason" 
-                    placeholder="e.g., Damaged goods, Stock count correction"
-                  />
+                  <Input id="reason" placeholder="e.g., Damaged goods, Stock count correction" />
                 </div>
-                
+
                 <Button type="submit">Submit Adjustment</Button>
               </form>
             </CardContent>

@@ -114,7 +114,7 @@ export function DrillDownModal({
                     <TableCell className="capitalize">
                       {transaction.type.replace("_", " ")}
                     </TableCell>
-                    <TableCell className={transaction.quantity > 0 ? "text-green-600" : "text-red-600"}>
+                    <TableCell className={transaction.quantity > 0 ? "text-positive" : "text-negative"}>
                       {transaction.quantity > 0 ? "+" : ""}{transaction.quantity}
                     </TableCell>
                     <TableCell>{transaction.user}</TableCell>
@@ -149,11 +149,11 @@ export function DrillDownModal({
         <div className="grid grid-cols-3 gap-4">
           <div className="space-y-1">
             <p className="text-sm text-muted-foreground">Stock In</p>
-            <p className="text-2xl font-semibold text-green-600">+{data.totalStockIn || 0}</p>
+            <p className="text-2xl font-semibold text-positive">+{data.totalStockIn || 0}</p>
           </div>
           <div className="space-y-1">
             <p className="text-sm text-muted-foreground">Stock Out</p>
-            <p className="text-2xl font-semibold text-red-600">-{data.totalStockOut || 0}</p>
+            <p className="text-2xl font-semibold text-negative">-{data.totalStockOut || 0}</p>
           </div>
           <div className="space-y-1">
             <p className="text-sm text-muted-foreground">Adjustments</p>
@@ -182,7 +182,7 @@ export function DrillDownModal({
                 <TableCell className="capitalize">
                   {activity.type.replace("_", " ")}
                 </TableCell>
-                <TableCell className={activity.quantity > 0 ? "text-green-600" : "text-red-600"}>
+                <TableCell className={activity.quantity > 0 ? "text-positive" : "text-negative"}>
                   {activity.quantity > 0 ? "+" : ""}{activity.quantity}
                 </TableCell>
                 <TableCell>{activity.user}</TableCell>
@@ -227,7 +227,7 @@ export function DrillDownModal({
                   <TableCell className="capitalize">
                     {activity.type.replace("_", " ")}
                   </TableCell>
-                  <TableCell className={activity.quantity > 0 ? "text-green-600" : "text-red-600"}>
+                  <TableCell className={activity.quantity > 0 ? "text-positive" : "text-negative"}>
                     {activity.quantity > 0 ? "+" : ""}{activity.quantity}
                   </TableCell>
                   <TableCell>{activity.location}</TableCell>
@@ -290,10 +290,10 @@ export function DrillDownModal({
                   <span
                     className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
                       product.stock === 0
-                        ? "bg-red-100 text-red-800"
+                        ? "bg-red-100 text-red-800 dark:bg-red-400/15 dark:text-red-200"
                         : product.stock < 10
-                        ? "bg-yellow-100 text-yellow-800"
-                        : "bg-green-100 text-green-800"
+                        ? "bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-200"
+                        : "bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-200"
                     }`}
                   >
                     {product.stock === 0

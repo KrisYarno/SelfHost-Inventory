@@ -192,7 +192,7 @@ export function QuickAdjustDialog({
                   htmlFor="add"
                   className="flex items-center gap-2 cursor-pointer"
                 >
-                  <Plus className="h-4 w-4 text-green-600" />
+                  <Plus className="h-4 w-4 text-positive" />
                   Add Stock
                 </label>
               </div>
@@ -202,7 +202,7 @@ export function QuickAdjustDialog({
                   htmlFor="remove"
                   className="flex items-center gap-2 cursor-pointer"
                 >
-                  <Minus className="h-4 w-4 text-red-600" />
+                  <Minus className="h-4 w-4 text-negative" />
                   Remove Stock
                 </label>
               </div>
@@ -255,7 +255,7 @@ export function QuickAdjustDialog({
                   className={
                     adjustedQuantity < 0
                       ? "text-destructive font-semibold"
-                      : "text-emerald-500 font-semibold"
+                      : "text-positive font-semibold"
                   }
                 >
                   {adjustedQuantity} units
@@ -300,7 +300,6 @@ export function QuickAdjustDialog({
           <Button
             onClick={handleSubmit}
             disabled={!isValid || isSubmitting}
-            className="bg-sky-600 text-slate-50 hover:bg-sky-500"
           >
             {isSubmitting ? "Adjusting..." : "Confirm Adjustment"}
           </Button>

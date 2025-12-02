@@ -1,11 +1,11 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { AlertCircle, CheckCircle2, Mail } from 'lucide-react';
-import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
+import { useState } from "react";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { AlertCircle, CheckCircle2, Mail } from "lucide-react";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 interface TestResult {
   test: string;
@@ -37,21 +37,24 @@ export default function SendGridDebugPage() {
   const runDebugTests = async () => {
     setIsRunning(true);
     setResults(null);
-    
+
     try {
-      const response = await fetch('/api/test/sendgrid-debug', {
-        method: 'POST',
-        headers: withCSRFHeaders({
-          'Content-Type': 'application/json',
-        }, csrfToken),
+      const response = await fetch("/api/test/sendgrid-debug", {
+        method: "POST",
+        headers: withCSRFHeaders(
+          {
+            "Content-Type": "application/json",
+          },
+          csrfToken
+        ),
       });
-      
+
       const data = await response.json();
       setResults(data);
     } catch (error) {
       setResults({
-        error: 'Network error',
-        details: error instanceof Error ? error.message : 'Unknown error',
+        error: "Network error",
+        details: error instanceof Error ? error.message : "Unknown error",
       });
     } finally {
       setIsRunning(false);
@@ -61,7 +64,7 @@ export default function SendGridDebugPage() {
   return (
     <div className="container mx-auto p-6 max-w-4xl">
       <h1 className="text-3xl font-bold mb-6">SendGrid Debug</h1>
-      
+
       <Card className="mb-6">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -73,12 +76,8 @@ export default function SendGridDebugPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Button
-            onClick={runDebugTests}
-            disabled={isRunning}
-            className="w-full"
-          >
-            {isRunning ? 'Running Tests...' : 'Run Debug Tests'}
+          <Button onClick={runDebugTests} disabled={isRunning} className="w-full">
+            {isRunning ? "Running Tests..." : "Run Debug Tests"}
           </Button>
         </CardContent>
       </Card>
@@ -94,11 +93,11 @@ export default function SendGridDebugPage() {
                 <div className="space-y-2 text-sm">
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">API Key Length:</span>
-                    <span className="font-mono">{results.config.apiKeyLength || 'Not set'}</span>
+                    <span className="font-mono">{results.config.apiKeyLength || "Not set"}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">API Key Prefix:</span>
-                    <span className="font-mono">{results.config.apiKeyPrefix || 'Not set'}</span>
+                    <span className="font-mono">{results.config.apiKeyPrefix || "Not set"}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">From Email:</span>
@@ -106,7 +105,7 @@ export default function SendGridDebugPage() {
                   </div>
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">Template ID:</span>
-                    <span className="font-mono">{results.config.templateId || 'Not set'}</span>
+                    <span className="font-mono">{results.config.templateId || "Not set"}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">To Email:</span>
@@ -134,20 +133,16 @@ export default function SendGridDebugPage() {
                           <AlertCircle className="h-5 w-5 text-destructive" />
                         )}
                       </div>
-                      
+
                       {test.success ? (
                         <p className="text-sm text-muted-foreground">
                           Status Code: {test.statusCode}
                         </p>
                       ) : (
                         <div className="space-y-2">
-                          <p className="text-sm text-destructive">
-                            Error: {test.error}
-                          </p>
+                          <p className="text-sm text-destructive">Error: {test.error}</p>
                           {test.code && (
-                            <p className="text-sm text-muted-foreground">
-                              Code: {test.code}
-                            </p>
+                            <p className="text-sm text-muted-foreground">Code: {test.code}</p>
                           )}
                           {test.response ? (
                             <pre className="text-xs bg-muted p-2 rounded overflow-auto">
@@ -169,9 +164,7 @@ export default function SendGridDebugPage() {
               <AlertDescription>
                 <div className="space-y-2">
                   <p className="font-medium">{results.error}</p>
-                  {results.details && (
-                    <p className="text-sm">{results.details}</p>
-                  )}
+                  {results.details && <p className="text-sm">{results.details}</p>}
                 </div>
               </AlertDescription>
             </Alert>
@@ -188,13 +181,15 @@ export default function SendGridDebugPage() {
             <div>
               <h4 className="font-medium mb-1">1. Sender Authentication</h4>
               <p className="text-muted-foreground">
-                Make sure alerts@advancedresearchpep.com is verified in SendGrid under Settings &rarr; Sender Authentication
+                Make sure alerts@advancedresearchpep.com is verified in SendGrid under Settings
+                &rarr; Sender Authentication
               </p>
             </div>
             <div>
               <h4 className="font-medium mb-1">2. API Key Permissions</h4>
               <p className="text-muted-foreground">
-                Your API key needs &quot;Mail Send&quot; permission. Check in SendGrid under Settings &rarr; API Keys
+                Your API key needs &quot;Mail Send&quot; permission. Check in SendGrid under
+                Settings &rarr; API Keys
               </p>
             </div>
             <div>

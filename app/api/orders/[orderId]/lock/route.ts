@@ -2,10 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { OrderLockResponse } from "@/types/orders";
 
-export async function POST(
-  request: NextRequest,
-  _context: { params: { orderId: string } }
-) {
+export async function POST(request: NextRequest, _context: { params: { orderId: string } }) {
   try {
     const session = await getSession();
     if (!session) {
@@ -34,9 +31,6 @@ export async function POST(
     return NextResponse.json(response);
   } catch (error) {
     console.error("Error locking order:", error);
-    return NextResponse.json(
-      { error: "Failed to lock order" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to lock order" }, { status: 500 });
   }
 }

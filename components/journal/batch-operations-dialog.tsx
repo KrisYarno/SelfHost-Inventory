@@ -38,13 +38,11 @@ export function BatchOperationsDialog({
   };
 
   const handleImport = () => {
-    // Placeholder for CSV import functionality
-    console.log("Importing CSV:", selectedFile);
+    // TODO: Implement CSV import functionality
   };
 
   const handleBatchAdjust = () => {
-    // Placeholder for batch adjustment functionality
-    console.log("Batch adjust:", batchAction, batchQuantity);
+    // TODO: Implement batch adjustment functionality
   };
 
   return (

@@ -61,13 +61,13 @@ export function CombinedMinimumsReport() {
             return (
               <div
                 key={item.productId}
-                className="flex items-center justify-between rounded border border-slate-800 bg-slate-900/70 px-3 py-2"
+                className="flex items-center justify-between rounded border border-border bg-muted/50 px-3 py-2"
               >
                 <div>
-                  <p className="text-sm font-medium text-slate-100">
+                  <p className="text-sm font-medium text-foreground">
                     {item.productName}
                   </p>
-                  <p className="text-xs text-slate-400">
+                  <p className="text-xs text-muted-foreground">
                     {item.totalQuantity} / {item.combinedMinimum} units (
                     {percentage}%)
                   </p>

@@ -56,7 +56,9 @@ export async function GET(req: NextRequest) {
         } catch {}
       }
       files.sort((a, b) => b.mtimeMs - a.mtimeMs);
-      return new Response(JSON.stringify({ files }), { headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ files }), {
+        headers: { "content-type": "application/json" },
+      });
     }
 
     if (file) {
@@ -101,31 +103,47 @@ export async function POST() {
 
   try {
     const buildArgs = (withRoutinesEvents: boolean) => [
-      '-h', conn.host,
-      '-P', String(conn.port || 3306),
-      '-u', conn.user,
+      "-h",
+      conn.host,
+      "-P",
+      String(conn.port || 3306),
+      "-u",
+      conn.user,
       `-p${conn.password}`,
-      '--single-transaction', '--quick', '--no-tablespaces',
-      ...(withRoutinesEvents ? ['--routines', '--events'] : []),
+      "--single-transaction",
+      "--quick",
+      "--no-tablespaces",
+      ...(withRoutinesEvents ? ["--routines", "--events"] : []),
       conn.database,
     ];
 
-    const runDump = (args: string[]) => new Promise<{ code: number; out: Buffer; err: Buffer }>((resolve) => {
-      const ps = spawn("mysqldump", args);
-      const out: Buffer[] = [];
-      const err: Buffer[] = [];
-      ps.stdout.on("data", (chunk: Buffer) => out.push(chunk));
-      ps.stderr.on("data", (chunk: Buffer) => err.push(chunk));
-      ps.on("error", (e) => resolve({ code: 127, out: Buffer.concat(out), err: Buffer.from(String(e)) }));
-      ps.on("close", (code) => resolve({ code: code ?? 1, out: Buffer.concat(out), err: Buffer.concat(err) }));
-    });
+    const runDump = (args: string[]) =>
+      new Promise<{ code: number; out: Buffer; err: Buffer }>((resolve) => {
+        const ps = spawn("mysqldump", args);
+        const out: Buffer[] = [];
+        const err: Buffer[] = [];
+        ps.stdout.on("data", (chunk: Buffer) => out.push(chunk));
+        ps.stderr.on("data", (chunk: Buffer) => err.push(chunk));
+        ps.on("error", (e) =>
+          resolve({ code: 127, out: Buffer.concat(out), err: Buffer.from(String(e)) })
+        );
+        ps.on("close", (code) =>
+          resolve({ code: code ?? 1, out: Buffer.concat(out), err: Buffer.concat(err) })
+        );
+      });
 
     // Try with routines/events first, then fall back without them if it fails.
     let res = await runDump(buildArgs(true));
     if (res.code !== 0) {
       res = await runDump(buildArgs(false));
       if (res.code !== 0) {
-        return new Response(JSON.stringify({ error: `mysqldump failed (code ${res.code})`, details: res.err.toString() }), { status: 500 });
+        return new Response(
+          JSON.stringify({
+            error: `mysqldump failed (code ${res.code})`,
+            details: res.err.toString(),
+          }),
+          { status: 500 }
+        );
       }
     }
 

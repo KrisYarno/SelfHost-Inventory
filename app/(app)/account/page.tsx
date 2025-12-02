@@ -1,17 +1,23 @@
-'use client';
+"use client";
 
-import { useState, useEffect } from 'react';
-import { useSession } from 'next-auth/react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Switch } from '@/components/ui/switch';
-import { AlertCircle, CheckCircle2 } from 'lucide-react';
-import { toast } from 'sonner';
-import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
+import { useState, useEffect } from "react";
+import { useSession } from "next-auth/react";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Switch } from "@/components/ui/switch";
+import { AlertCircle, CheckCircle2 } from "lucide-react";
+import { toast } from "sonner";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 interface Location {
   id: number;
@@ -22,16 +28,16 @@ export default function AccountPage() {
   const { data: session } = useSession();
   const { token: csrfToken } = useCSRF();
   const [locations, setLocations] = useState<Location[]>([]);
-  const [defaultLocation, setDefaultLocation] = useState<string>('');
-  const [oldPassword, setOldPassword] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
+  const [defaultLocation, setDefaultLocation] = useState<string>("");
+  const [oldPassword, setOldPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [isLoadingLocation, setIsLoadingLocation] = useState(false);
   const [isLoadingPassword, setIsLoadingPassword] = useState(false);
-  const [passwordError, setPasswordError] = useState('');
+  const [passwordError, setPasswordError] = useState("");
   const [passwordSuccess, setPasswordSuccess] = useState(false);
   const [emailAlerts, setEmailAlerts] = useState(false);
-  const [phoneNumber, setPhoneNumber] = useState('');
+  const [phoneNumber, setPhoneNumber] = useState("");
   const [minLocationEmailAlerts, setMinLocationEmailAlerts] = useState(false);
   const [minLocationSmsAlerts, setMinLocationSmsAlerts] = useState(false);
   const [minCombinedEmailAlerts, setMinCombinedEmailAlerts] = useState(false);
@@ -43,25 +49,25 @@ export default function AccountPage() {
     const fetchData = async () => {
       try {
         // Fetch locations
-        const locResponse = await fetch('/api/locations');
+        const locResponse = await fetch("/api/locations");
         if (locResponse.ok) {
           const locData = await locResponse.json();
           setLocations(locData);
         }
-        
+
         // Fetch user preferences
-        const userResponse = await fetch('/api/user/preferences');
+        const userResponse = await fetch("/api/user/preferences");
         if (userResponse.ok) {
           const userData = await userResponse.json();
           setEmailAlerts(userData.emailAlerts || false);
-          setPhoneNumber(userData.phoneNumber || '');
+          setPhoneNumber(userData.phoneNumber || "");
           setMinLocationEmailAlerts(userData.minLocationEmailAlerts || false);
           setMinLocationSmsAlerts(userData.minLocationSmsAlerts || false);
           setMinCombinedEmailAlerts(userData.minCombinedEmailAlerts || false);
           setMinCombinedSmsAlerts(userData.minCombinedSmsAlerts || false);
         }
       } catch (error) {
-        console.error('Error fetching data:', error);
+        console.error("Error fetching data:", error);
       }
     };
 
@@ -78,19 +84,19 @@ export default function AccountPage() {
   const handleLocationSave = async () => {
     setIsLoadingLocation(true);
     try {
-      const response = await fetch('/api/account/default-location', {
-        method: 'PATCH',
-        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
+      const response = await fetch("/api/account/default-location", {
+        method: "PATCH",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({ locationId: parseInt(defaultLocation) }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to update default location');
+        throw new Error("Failed to update default location");
       }
 
-      toast.success('Default location updated successfully');
+      toast.success("Default location updated successfully");
     } catch {
-      toast.error('Failed to update default location');
+      toast.error("Failed to update default location");
     } finally {
       setIsLoadingLocation(false);
     }
@@ -98,48 +104,48 @@ export default function AccountPage() {
 
   const handlePasswordUpdate = async () => {
     // Reset states
-    setPasswordError('');
+    setPasswordError("");
     setPasswordSuccess(false);
 
     // Validate passwords
     if (!oldPassword || !newPassword || !confirmPassword) {
-      setPasswordError('All password fields are required');
+      setPasswordError("All password fields are required");
       return;
     }
 
     if (newPassword.length < 8) {
-      setPasswordError('New password must be at least 8 characters long');
+      setPasswordError("New password must be at least 8 characters long");
       return;
     }
 
     if (newPassword !== confirmPassword) {
-      setPasswordError('New passwords do not match');
+      setPasswordError("New passwords do not match");
       return;
     }
 
     setIsLoadingPassword(true);
     try {
-      const response = await fetch('/api/account/password', {
-        method: 'PATCH',
-        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
+      const response = await fetch("/api/account/password", {
+        method: "PATCH",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({ oldPassword, newPassword }),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to update password');
+        throw new Error(data.error || "Failed to update password");
       }
 
       setPasswordSuccess(true);
-      toast.success('Password updated successfully');
-      
+      toast.success("Password updated successfully");
+
       // Clear password fields
-      setOldPassword('');
-      setNewPassword('');
-      setConfirmPassword('');
+      setOldPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
     } catch (error) {
-      setPasswordError(error instanceof Error ? error.message : 'Failed to update password');
+      setPasswordError(error instanceof Error ? error.message : "Failed to update password");
     } finally {
       setIsLoadingPassword(false);
     }
@@ -148,9 +154,9 @@ export default function AccountPage() {
   const handleNotificationSave = async () => {
     setIsSavingNotifications(true);
     try {
-      const response = await fetch('/api/user/preferences', {
-        method: 'PATCH',
-        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
+      const response = await fetch("/api/user/preferences", {
+        method: "PATCH",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({
           phoneNumber,
           emailAlerts,
@@ -163,12 +169,12 @@ export default function AccountPage() {
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || 'Failed to update notifications');
+        throw new Error(data.error || "Failed to update notifications");
       }
 
-      toast.success('Notification preferences updated');
+      toast.success("Notification preferences updated");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Failed to update notifications');
+      toast.error(error instanceof Error ? error.message : "Failed to update notifications");
     } finally {
       setIsSavingNotifications(false);
     }
@@ -205,15 +211,17 @@ export default function AccountPage() {
                 </div>
                 <div>
                   <Label className="text-muted-foreground">Username</Label>
-                  <p className="text-sm">{session?.user?.name || 'Not set'}</p>
+                  <p className="text-sm">{session?.user?.name || "Not set"}</p>
                 </div>
                 <div>
                   <Label className="text-muted-foreground">Role</Label>
-                  <p className="text-sm">{session?.user?.isAdmin ? 'Administrator' : 'User'}</p>
+                  <p className="text-sm">{session?.user?.isAdmin ? "Administrator" : "User"}</p>
                 </div>
                 <div>
                   <Label className="text-muted-foreground">Account Status</Label>
-                  <p className="text-sm">{session?.user?.isApproved ? 'Approved' : 'Pending Approval'}</p>
+                  <p className="text-sm">
+                    {session?.user?.isApproved ? "Approved" : "Pending Approval"}
+                  </p>
                 </div>
               </div>
             </CardContent>
@@ -249,7 +257,7 @@ export default function AccountPage() {
                   disabled={isLoadingLocation || !defaultLocation}
                   className="w-full sm:w-auto"
                 >
-                  {isLoadingLocation ? 'Saving...' : 'Save Default Location'}
+                  {isLoadingLocation ? "Saving..." : "Save Default Location"}
                 </Button>
               </div>
             </CardContent>
@@ -284,7 +292,8 @@ export default function AccountPage() {
                   <div className="pr-4">
                     <p className="text-sm font-medium">Low stock email alerts</p>
                     <p className="text-xs text-muted-foreground">
-                      Receive the existing daily digest when products fall below their global thresholds.
+                      Receive the existing daily digest when products fall below their global
+                      thresholds.
                     </p>
                   </div>
                   <Switch
@@ -356,7 +365,7 @@ export default function AccountPage() {
                 disabled={isSavingNotifications}
                 className="w-full sm:w-auto"
               >
-                {isSavingNotifications ? 'Saving...' : 'Save Notification Preferences'}
+                {isSavingNotifications ? "Saving..." : "Save Notification Preferences"}
               </Button>
             </CardContent>
           </Card>
@@ -365,9 +374,7 @@ export default function AccountPage() {
           <Card>
             <CardHeader>
               <CardTitle>Change Password</CardTitle>
-              <CardDescription>
-                Update your password to keep your account secure
-              </CardDescription>
+              <CardDescription>Update your password to keep your account secure</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
@@ -377,7 +384,7 @@ export default function AccountPage() {
                     <AlertDescription>{passwordError}</AlertDescription>
                   </Alert>
                 )}
-                
+
                 {passwordSuccess && (
                   <Alert className="border-success bg-success/10">
                     <CheckCircle2 className="h-4 w-4 text-success" />
@@ -397,7 +404,7 @@ export default function AccountPage() {
                     className="mt-2"
                   />
                 </div>
-                
+
                 <div>
                   <Label htmlFor="new-password">New Password</Label>
                   <Input
@@ -408,7 +415,7 @@ export default function AccountPage() {
                     className="mt-2"
                   />
                 </div>
-                
+
                 <div>
                   <Label htmlFor="confirm-password">Confirm New Password</Label>
                   <Input
@@ -419,13 +426,13 @@ export default function AccountPage() {
                     className="mt-2"
                   />
                 </div>
-                
+
                 <Button
                   onClick={handlePasswordUpdate}
                   disabled={isLoadingPassword}
                   className="w-full sm:w-auto"
                 >
-                  {isLoadingPassword ? 'Updating...' : 'Update Password'}
+                  {isLoadingPassword ? "Updating..." : "Update Password"}
                 </Button>
               </div>
             </CardContent>

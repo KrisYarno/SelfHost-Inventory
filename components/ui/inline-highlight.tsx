@@ -10,7 +10,7 @@ export function InlineHighlight({
   return (
     <span
       className={cn(
-        "rounded-sm bg-slate-800/80 px-1 py-0.5 text-[13px] font-medium text-slate-100",
+        "rounded-sm bg-foreground/80 px-1 py-0.5 text-[13px] font-medium text-background",
         className
       )}
       {...props}

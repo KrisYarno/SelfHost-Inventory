@@ -15,7 +15,8 @@ export function ContextTag({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-md border border-slate-600 bg-slate-900/70 px-2 py-0.5 text-[11px] font-medium text-slate-200",
+        "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium",
+        "border-border bg-muted text-muted-foreground",
         className
       )}
       {...props}

@@ -43,13 +43,13 @@ export function LowStockAlert() {
   const getSeverityColor = (severity: string) => {
     switch (severity) {
       case "critical":
-        return "text-red-600 bg-red-50 border-red-200";
+        return "text-negative-foreground bg-negative-muted border-negative-border";
       case "high":
-        return "text-orange-600 bg-orange-50 border-orange-200";
+        return "text-warning-foreground bg-warning-muted border-warning-border";
       case "medium":
-        return "text-yellow-600 bg-yellow-50 border-yellow-200";
+        return "text-warning-foreground bg-warning-muted border-warning-border";
       default:
-        return "text-blue-600 bg-blue-50 border-blue-200";
+        return "text-info-foreground bg-info-muted border-info-border";
     }
   };
 
@@ -91,7 +91,7 @@ export function LowStockAlert() {
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <AlertTriangle className="h-5 w-5 text-orange-600" />
+          <AlertTriangle className="h-5 w-5 text-warning" />
           Low Stock Alerts
           {alerts.length > 0 && (
             <Badge variant="secondary" className="ml-auto">

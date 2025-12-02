@@ -43,9 +43,9 @@ export function UserActivity() {
   };
 
   const getActivityLevel = (totalTransactions: number) => {
-    if (totalTransactions > 100) return { level: "High", color: "text-green-600" };
-    if (totalTransactions > 50) return { level: "Medium", color: "text-yellow-600" };
-    return { level: "Low", color: "text-blue-600" };
+    if (totalTransactions > 100) return { level: "High", color: "text-positive" };
+    if (totalTransactions > 50) return { level: "Medium", color: "text-warning" };
+    return { level: "Low", color: "text-info" };
   };
 
   if (loading) {
@@ -126,19 +126,19 @@ export function UserActivity() {
                 </div>
 
                 <div className="grid grid-cols-3 gap-2 text-xs">
-                  <div className="text-center p-2 rounded bg-green-50 dark:bg-green-950">
-                    <Package className="h-4 w-4 mx-auto mb-1 text-green-600" />
-                    <div className="font-medium text-green-600">{user.stockInCount}</div>
+                  <div className="text-center p-2 rounded bg-emerald-50 dark:bg-emerald-950/50">
+                    <Package className="h-4 w-4 mx-auto mb-1 text-positive" />
+                    <div className="font-medium text-positive">{user.stockInCount}</div>
                     <div className="text-muted-foreground">Stock In</div>
                   </div>
-                  <div className="text-center p-2 rounded bg-red-50 dark:bg-red-950">
-                    <Package className="h-4 w-4 mx-auto mb-1 text-red-600" />
-                    <div className="font-medium text-red-600">{user.stockOutCount}</div>
+                  <div className="text-center p-2 rounded bg-red-50 dark:bg-red-950/50">
+                    <Package className="h-4 w-4 mx-auto mb-1 text-negative" />
+                    <div className="font-medium text-negative">{user.stockOutCount}</div>
                     <div className="text-muted-foreground">Stock Out</div>
                   </div>
-                  <div className="text-center p-2 rounded bg-blue-50 dark:bg-blue-950">
-                    <Settings className="h-4 w-4 mx-auto mb-1 text-blue-600" />
-                    <div className="font-medium text-blue-600">{user.adjustmentCount}</div>
+                  <div className="text-center p-2 rounded bg-sky-50 dark:bg-sky-950/50">
+                    <Settings className="h-4 w-4 mx-auto mb-1 text-info" />
+                    <div className="font-medium text-info">{user.adjustmentCount}</div>
                     <div className="text-muted-foreground">Adjustments</div>
                   </div>
                 </div>

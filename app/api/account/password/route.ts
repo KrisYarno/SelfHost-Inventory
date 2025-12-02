@@ -1,20 +1,17 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth';
-import { verifyPassword, hashPassword } from '@/lib/auth-helpers';
-import prisma from '@/lib/prisma';
-import { validateCSRFToken } from '@/lib/csrf';
+import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth";
+import { verifyPassword, hashPassword } from "@/lib/auth-helpers";
+import prisma from "@/lib/prisma";
+import { validateCSRFToken } from "@/lib/csrf";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function PATCH(request: NextRequest) {
   try {
     const session = await getSession();
-    
+
     if (!session || !session.user?.email) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Validate CSRF token
@@ -28,14 +25,14 @@ export async function PATCH(request: NextRequest) {
 
     if (!oldPassword || !newPassword) {
       return NextResponse.json(
-        { error: 'Old password and new password are required' },
+        { error: "Old password and new password are required" },
         { status: 400 }
       );
     }
 
     if (newPassword.length < 8) {
       return NextResponse.json(
-        { error: 'New password must be at least 8 characters long' },
+        { error: "New password must be at least 8 characters long" },
         { status: 400 }
       );
     }
@@ -46,16 +43,13 @@ export async function PATCH(request: NextRequest) {
     });
 
     if (!user) {
-      return NextResponse.json(
-        { error: 'User not found' },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
     // OAuth users don't have passwords
     if (!user.passwordHash) {
       return NextResponse.json(
-        { error: 'Password change not available for OAuth accounts' },
+        { error: "Password change not available for OAuth accounts" },
         { status: 400 }
       );
     }
@@ -63,10 +57,7 @@ export async function PATCH(request: NextRequest) {
     // Verify old password
     const isValidPassword = await verifyPassword(oldPassword, user.passwordHash);
     if (!isValidPassword) {
-      return NextResponse.json(
-        { error: 'Current password is incorrect' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Current password is incorrect" }, { status: 400 });
     }
 
     // Hash new password
@@ -79,13 +70,10 @@ export async function PATCH(request: NextRequest) {
     });
 
     return NextResponse.json({
-      message: 'Password updated successfully',
+      message: "Password updated successfully",
     });
   } catch (error) {
-    console.error('Error updating password:', error);
-    return NextResponse.json(
-      { error: 'Failed to update password' },
-      { status: 500 }
-    );
+    console.error("Error updating password:", error);
+    return NextResponse.json({ error: "Failed to update password" }, { status: 500 });
   }
 }

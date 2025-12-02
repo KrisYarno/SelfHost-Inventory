@@ -1,31 +1,38 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Mail, CheckCircle2, AlertCircle } from 'lucide-react';
-import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
+import { useState } from "react";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Mail, CheckCircle2, AlertCircle } from "lucide-react";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 export default function TestEmailPage() {
   const [isSending, setIsSending] = useState(false);
-  const [result, setResult] = useState<{ success?: boolean; message?: string; details?: unknown } | null>(null);
+  const [result, setResult] = useState<{
+    success?: boolean;
+    message?: string;
+    details?: unknown;
+  } | null>(null);
   const { token: csrfToken } = useCSRF();
 
   const sendTestEmail = async () => {
     setIsSending(true);
     setResult(null);
-    
+
     try {
-      const response = await fetch('/api/test/email', {
-        method: 'POST',
-        headers: withCSRFHeaders({
-          'Content-Type': 'application/json',
-        }, csrfToken),
+      const response = await fetch("/api/test/email", {
+        method: "POST",
+        headers: withCSRFHeaders(
+          {
+            "Content-Type": "application/json",
+          },
+          csrfToken
+        ),
       });
-      
+
       const data = await response.json();
-      
+
       if (response.ok) {
         setResult({
           success: true,
@@ -35,15 +42,15 @@ export default function TestEmailPage() {
       } else {
         setResult({
           success: false,
-          message: data.error || 'Failed to send test email',
+          message: data.error || "Failed to send test email",
           details: data.details,
         });
       }
     } catch (error) {
       setResult({
         success: false,
-        message: 'Network error occurred',
-        details: error instanceof Error ? error.message : 'Unknown error',
+        message: "Network error occurred",
+        details: error instanceof Error ? error.message : "Unknown error",
       });
     } finally {
       setIsSending(false);
@@ -53,11 +60,11 @@ export default function TestEmailPage() {
   const runStockCheck = async () => {
     setIsSending(true);
     setResult(null);
-    
+
     try {
-      const response = await fetch('/api/cron/stock-check'); // GET request, no CSRF needed
+      const response = await fetch("/api/cron/stock-check"); // GET request, no CSRF needed
       const data = await response.json();
-      
+
       if (response.ok) {
         setResult({
           success: true,
@@ -67,15 +74,15 @@ export default function TestEmailPage() {
       } else {
         setResult({
           success: false,
-          message: data.error || 'Stock check failed',
+          message: data.error || "Stock check failed",
           details: data.details,
         });
       }
     } catch (error) {
       setResult({
         success: false,
-        message: 'Network error occurred',
-        details: error instanceof Error ? error.message : 'Unknown error',
+        message: "Network error occurred",
+        details: error instanceof Error ? error.message : "Unknown error",
       });
     } finally {
       setIsSending(false);
@@ -85,7 +92,7 @@ export default function TestEmailPage() {
   return (
     <div className="container mx-auto p-6 max-w-2xl">
       <h1 className="text-3xl font-bold mb-6">Email Testing</h1>
-      
+
       <div className="space-y-6">
         <Card>
           <CardHeader>
@@ -106,13 +113,9 @@ export default function TestEmailPage() {
                 <li>Email formatting looks good</li>
               </ul>
             </div>
-            
-            <Button
-              onClick={sendTestEmail}
-              disabled={isSending}
-              className="w-full"
-            >
-              {isSending ? 'Sending...' : 'Send Test Email'}
+
+            <Button onClick={sendTestEmail} disabled={isSending} className="w-full">
+              {isSending ? "Sending..." : "Send Test Email"}
             </Button>
           </CardContent>
         </Card>
@@ -123,9 +126,7 @@ export default function TestEmailPage() {
               <AlertCircle className="h-5 w-5" />
               Run Stock Check
             </CardTitle>
-            <CardDescription>
-              Manually trigger the daily stock check process
-            </CardDescription>
+            <CardDescription>Manually trigger the daily stock check process</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="text-sm text-muted-foreground space-y-2">
@@ -136,20 +137,20 @@ export default function TestEmailPage() {
                 <li>Use real data from your inventory</li>
               </ul>
             </div>
-            
+
             <Button
               onClick={runStockCheck}
               disabled={isSending}
               variant="outline"
               className="w-full"
             >
-              {isSending ? 'Running...' : 'Run Stock Check Now'}
+              {isSending ? "Running..." : "Run Stock Check Now"}
             </Button>
           </CardContent>
         </Card>
 
         {result && (
-          <Alert className={result.success ? 'border-success' : 'border-destructive'}>
+          <Alert className={result.success ? "border-success" : "border-destructive"}>
             {result.success ? (
               <CheckCircle2 className="h-4 w-4 text-success" />
             ) : (

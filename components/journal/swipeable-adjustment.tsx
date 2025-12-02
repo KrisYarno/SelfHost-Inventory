@@ -126,21 +126,21 @@ export function SwipeableAdjustment({
       {swiping && (
         <>
           {swipeDistance > 0 && (
-            <div 
-              className="absolute inset-y-0 left-0 bg-green-500/20 flex items-center px-4"
+            <div
+              className="absolute inset-y-0 left-0 bg-positive-muted flex items-center px-4"
               style={{ width: Math.min(swipeDistance, 100) }}
               aria-hidden="true"
             >
-              <span className="text-green-600 font-medium">+1</span>
+              <span className="text-positive font-medium">+1</span>
             </div>
           )}
           {swipeDistance < 0 && (
-            <div 
-              className="absolute inset-y-0 right-0 bg-red-500/20 flex items-center justify-end px-4"
+            <div
+              className="absolute inset-y-0 right-0 bg-negative-muted flex items-center justify-end px-4"
               style={{ width: Math.min(Math.abs(swipeDistance), 100) }}
               aria-hidden="true"
             >
-              <span className="text-red-600 font-medium">-1</span>
+              <span className="text-negative font-medium">-1</span>
             </div>
           )}
         </>

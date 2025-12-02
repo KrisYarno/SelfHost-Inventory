@@ -14,7 +14,7 @@ export function SignOutButton({ className }: SignOutButtonProps) {
   return (
     <button
       onClick={handleSignOut}
-      className={className || 'text-gray-700 hover:text-gray-900'}
+      className={className || 'text-foreground/80 hover:text-foreground'}
     >
       Sign Out
     </button>

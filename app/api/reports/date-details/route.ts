@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { startOfDay, endOfDay, parseISO } from "date-fns";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
 
     const searchParams = request.nextUrl.searchParams;
     const dateParam = searchParams.get("date");
-    
+
     if (!dateParam) {
       return NextResponse.json({ error: "Date parameter required" }, { status: 400 });
     }
@@ -28,8 +28,8 @@ export async function GET(request: NextRequest) {
       where: {
         changeTime: {
           gte: dayStart,
-          lte: dayEnd
-        }
+          lte: dayEnd,
+        },
       },
       include: {
         products: true,
@@ -37,8 +37,8 @@ export async function GET(request: NextRequest) {
         locations: true,
       },
       orderBy: {
-        changeTime: 'desc'
-      }
+        changeTime: "desc",
+      },
     });
 
     // Calculate totals by type
@@ -46,29 +46,29 @@ export async function GET(request: NextRequest) {
     let totalStockOut = 0;
     let totalAdjustments = 0;
 
-    activities.forEach(activity => {
+    activities.forEach((activity) => {
       // Categorize based on delta value
       if (activity.delta > 0) {
         totalStockIn += activity.delta;
       } else if (activity.delta < 0) {
         totalStockOut += Math.abs(activity.delta);
       }
-      
+
       // Count adjustments separately
-      if (activity.logType === 'ADJUSTMENT') {
+      if (activity.logType === "ADJUSTMENT") {
         totalAdjustments += Math.abs(activity.delta);
       }
     });
 
-    const formattedActivities = activities.map(a => ({
+    const formattedActivities = activities.map((a) => ({
       id: a.id,
       timestamp: a.changeTime,
-      product: a.products?.name || 'Unknown',
-      type: a.delta > 0 ? 'stock_in' : a.delta < 0 ? 'stock_out' : 'adjustment',
+      product: a.products?.name || "Unknown",
+      type: a.delta > 0 ? "stock_in" : a.delta < 0 ? "stock_out" : "adjustment",
       quantity: a.delta,
-      user: a.users?.username || 'Unknown',
-      location: a.locations?.name || 'Unknown',
-      notes: ''
+      user: a.users?.username || "Unknown",
+      location: a.locations?.name || "Unknown",
+      notes: "",
     }));
 
     return NextResponse.json({
@@ -76,13 +76,10 @@ export async function GET(request: NextRequest) {
       totalStockIn,
       totalStockOut,
       totalAdjustments,
-      activities: formattedActivities
+      activities: formattedActivities,
     });
   } catch (error) {
     console.error("Error fetching date details:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch date details" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch date details" }, { status: 500 });
   }
 }

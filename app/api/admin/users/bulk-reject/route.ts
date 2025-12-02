@@ -4,18 +4,18 @@ import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    
+
     if (!session?.user?.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const { userIds, reason: _reason } = await request.json();
-    
+
     if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
       return NextResponse.json({ error: "Invalid user IDs" }, { status: 400 });
     }
@@ -44,15 +44,15 @@ export async function POST(request: NextRequest) {
     // Delete users
     const deleteResult = await prisma.user.deleteMany({
       where: {
-        id: { in: usersToReject.map(u => u.id) },
+        id: { in: usersToReject.map((u) => u.id) },
       },
     });
 
     // Log the bulk rejection action
     await auditService.logBulkUserRejection(
       parseInt(session.user.id),
-      usersToReject.map(u => u.id),
-      usersToReject.map(u => u.email)
+      usersToReject.map((u) => u.id),
+      usersToReject.map((u) => u.email)
     );
 
     return NextResponse.json({
@@ -60,10 +60,7 @@ export async function POST(request: NextRequest) {
       message: `Successfully rejected ${deleteResult.count} users`,
     });
   } catch (error) {
-    console.error('Error bulk rejecting users:', error);
-    return NextResponse.json(
-      { error: "Failed to reject users" },
-      { status: 500 }
-    );
+    console.error("Error bulk rejecting users:", error);
+    return NextResponse.json({ error: "Failed to reject users" }, { status: 500 });
   }
 }

@@ -1,17 +1,11 @@
 // Top-level directive
 "use client";
 
-
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { format } from "date-fns";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,15 +19,15 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import { Download, Filter, Search, ChevronLeft, ChevronRight, Shield } from "lucide-react";
 import {
-  Download,
-  Filter,
-  Search,
-  ChevronLeft,
-  ChevronRight,
-  Shield,
-} from "lucide-react";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn, formatNumber } from "@/lib/utils";
 import { useDebounce } from "@/hooks/use-debounce";
@@ -117,7 +111,7 @@ function ChangeLogTab({ active }: { active: boolean }) {
   const [typeFilter, setTypeFilter] = useState("all");
   const [dateFrom, setDateFrom] = useState<Date | undefined>(undefined);
   const [dateTo, setDateTo] = useState<Date | undefined>(undefined);
-  const [filters, setFilters] = useState<{ 
+  const [filters, setFilters] = useState<{
     users: Array<{ id: number; email: string }>;
     locations?: Array<string>;
   } | null>(null);
@@ -137,24 +131,21 @@ function ChangeLogTab({ active }: { active: boolean }) {
     [debouncedSearch, userFilter, locationFilter, typeFilter, dateFrom, dateTo]
   );
 
-  const buildQuery = useCallback(
-    (page: number, pageSize: number, filters: typeof logFilters) => {
-      const params = new URLSearchParams({
-        page: page.toString(),
-        pageSize: pageSize.toString(),
-      });
+  const buildQuery = useCallback((page: number, pageSize: number, filters: typeof logFilters) => {
+    const params = new URLSearchParams({
+      page: page.toString(),
+      pageSize: pageSize.toString(),
+    });
 
-      if (filters.search) params.append("search", filters.search);
-      if (filters.user !== "all") params.append("user", filters.user);
-      if (filters.location !== "all") params.append("location", filters.location);
-      if (filters.type !== "all") params.append("type", filters.type);
-      if (filters.dateFrom) params.append("dateFrom", filters.dateFrom.toISOString());
-      if (filters.dateTo) params.append("dateTo", filters.dateTo.toISOString());
+    if (filters.search) params.append("search", filters.search);
+    if (filters.user !== "all") params.append("user", filters.user);
+    if (filters.location !== "all") params.append("location", filters.location);
+    if (filters.type !== "all") params.append("type", filters.type);
+    if (filters.dateFrom) params.append("dateFrom", filters.dateFrom.toISOString());
+    if (filters.dateTo) params.append("dateTo", filters.dateTo.toISOString());
 
-      return params;
-    },
-    []
-  );
+    return params;
+  }, []);
 
   const { data, isLoading, isRefreshing, error, refresh } = usePaginatedLogs<
     typeof logFilters,
@@ -411,7 +402,7 @@ function ChangeLogTab({ active }: { active: boolean }) {
                     <td
                       className={cn(
                         "p-4 text-right font-mono font-medium",
-                        log.delta > 0 ? "text-green-600" : "text-red-600"
+                        log.delta > 0 ? "text-positive" : "text-negative"
                       )}
                     >
                       {log.delta > 0 ? "+" : ""}
@@ -425,7 +416,8 @@ function ChangeLogTab({ active }: { active: boolean }) {
 
           <div className="flex items-center justify-between p-4 border-t">
             <p className="text-sm text-muted-foreground">
-              Showing {(page - 1) * pageSize + 1} to {Math.min(page * pageSize, data?.total || 0)} of {data?.total || 0} entries
+              Showing {(page - 1) * pageSize + 1} to {Math.min(page * pageSize, data?.total || 0)}{" "}
+              of {data?.total || 0} entries
             </p>
             <div className="flex items-center gap-2">
               <Button
@@ -509,27 +501,24 @@ function AuditLogTab({ active }: { active: boolean }) {
     [actionTypeFilter, entityTypeFilter, userIdFilter]
   );
 
-  const buildQuery = useCallback(
-    (page: number, pageSize: number, f: AuditFilterState) => {
-      const params = new URLSearchParams({
-        limit: pageSize.toString(),
-        offset: ((page - 1) * pageSize).toString(),
-      });
+  const buildQuery = useCallback((page: number, pageSize: number, f: AuditFilterState) => {
+    const params = new URLSearchParams({
+      limit: pageSize.toString(),
+      offset: ((page - 1) * pageSize).toString(),
+    });
 
-      if (f.actionType && f.actionType !== "all") {
-        params.append("actionType", f.actionType);
-      }
-      if (f.entityType && f.entityType !== "all") {
-        params.append("entityType", f.entityType);
-      }
-      if (f.userId) {
-        params.append("userId", f.userId);
-      }
+    if (f.actionType && f.actionType !== "all") {
+      params.append("actionType", f.actionType);
+    }
+    if (f.entityType && f.entityType !== "all") {
+      params.append("entityType", f.entityType);
+    }
+    if (f.userId) {
+      params.append("userId", f.userId);
+    }
 
-      return params;
-    },
-    []
-  );
+    return params;
+  }, []);
 
   const { data, isLoading, isRefreshing, error, refresh } = usePaginatedLogs<
     AuditFilterState,
@@ -569,8 +558,10 @@ function AuditLogTab({ active }: { active: boolean }) {
         offset: "0",
       });
 
-      if (actionTypeFilter && actionTypeFilter !== "all") params.append("actionType", actionTypeFilter);
-      if (entityTypeFilter && entityTypeFilter !== "all") params.append("entityType", entityTypeFilter);
+      if (actionTypeFilter && actionTypeFilter !== "all")
+        params.append("actionType", actionTypeFilter);
+      if (entityTypeFilter && entityTypeFilter !== "all")
+        params.append("entityType", entityTypeFilter);
       if (userIdFilter) params.append("userId", userIdFilter);
 
       const response = await fetch(`/api/admin/audit-logs?${params}`);
@@ -579,7 +570,15 @@ function AuditLogTab({ active }: { active: boolean }) {
       const data = await response.json();
 
       const csv = [
-        ["Timestamp", "User", "Action Type", "Entity Type", "Action", "Affected Count", "IP Address"],
+        [
+          "Timestamp",
+          "User",
+          "Action Type",
+          "Entity Type",
+          "Action",
+          "Affected Count",
+          "IP Address",
+        ],
         ...data.logs.map((log: AuditLog) => [
           format(new Date(log.createdAt), "yyyy-MM-dd HH:mm:ss"),
           log.user.email,
@@ -639,9 +638,7 @@ function AuditLogTab({ active }: { active: boolean }) {
       <Card>
         <CardHeader>
           <CardTitle>Filter Logs</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            Narrow by action, entity type, or user.
-          </p>
+          <p className="text-sm text-muted-foreground">Narrow by action, entity type, or user.</p>
         </CardHeader>
         <CardContent>
           <div className="grid gap-4 md:grid-cols-4">
@@ -701,7 +698,9 @@ function AuditLogTab({ active }: { active: boolean }) {
       <Card>
         <CardHeader>
           <CardTitle>Audit Log Entries</CardTitle>
-          <p className="text-sm text-muted-foreground">Showing {logs.length} of {total} total entries</p>
+          <p className="text-sm text-muted-foreground">
+            Showing {logs.length} of {total} total entries
+          </p>
         </CardHeader>
         <CardContent>
           <ScrollArea className="h-[600px]">
@@ -740,7 +739,9 @@ function AuditLogTab({ active }: { active: boolean }) {
                       </TableCell>
                       <TableCell className="min-w-[160px]">
                         <div className="min-w-0">
-                          <div className="font-medium truncate max-w-[50vw] sm:max-w-none">{log.user.username}</div>
+                          <div className="font-medium truncate max-w-[50vw] sm:max-w-none">
+                            {log.user.username}
+                          </div>
                           <div className="text-sm text-muted-foreground truncate max-w-[60vw] sm:max-w-none">
                             {log.user.email}
                           </div>
@@ -756,16 +757,12 @@ function AuditLogTab({ active }: { active: boolean }) {
                           );
                         })()}
                       </TableCell>
-                      <TableCell className="max-w-[220px] truncate">
-                        {log.action}
-                      </TableCell>
+                      <TableCell className="max-w-[220px] truncate">{log.action}</TableCell>
                       <TableCell>
                         <div className="text-sm">
                           <div>{log.entityType}</div>
                           {log.entityId && (
-                            <div className="text-muted-foreground">
-                              ID: {log.entityId}
-                            </div>
+                            <div className="text-muted-foreground">ID: {log.entityId}</div>
                           )}
                         </div>
                       </TableCell>
@@ -909,11 +906,7 @@ function TransferLogTab({ active }: { active: boolean }) {
             <TransferLogTable logs={logs} />
           )}
 
-          {error && (
-            <p className="text-sm text-destructive mt-3">
-              {error}
-            </p>
-          )}
+          {error && <p className="text-sm text-destructive mt-3">{error}</p>}
         </CardContent>
       </Card>
     </div>

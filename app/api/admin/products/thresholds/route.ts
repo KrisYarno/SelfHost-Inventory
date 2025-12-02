@@ -1,20 +1,20 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth';
-import prisma from '@/lib/prisma';
-import { validateCSRFToken } from '@/lib/csrf';
+import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth";
+import prisma from "@/lib/prisma";
+import { validateCSRFToken } from "@/lib/csrf";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 // GET /api/admin/products/thresholds - Get all products with thresholds
 export async function GET(_request: NextRequest) {
   try {
     const session = await getSession();
     if (!session || !session.user.isAdmin) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const locations = await prisma.location.findMany({
-      orderBy: { name: 'asc' },
+      orderBy: { name: "asc" },
     });
 
     const products = await prisma.product.findMany({
@@ -24,19 +24,14 @@ export async function GET(_request: NextRequest) {
           include: { locations: true },
         },
       },
-      orderBy: { name: 'asc' },
+      orderBy: { name: "asc" },
     });
 
-    const payload = products.map(product => {
-      const totalStock = product.product_locations.reduce(
-        (sum, row) => sum + row.quantity,
-        0
-      );
+    const payload = products.map((product) => {
+      const totalStock = product.product_locations.reduce((sum, row) => sum + row.quantity, 0);
 
-      const perLocation = locations.map(location => {
-        const row = product.product_locations.find(
-          pl => pl.locationId === location.id
-        );
+      const perLocation = locations.map((location) => {
+        const row = product.product_locations.find((pl) => pl.locationId === location.id);
         return {
           locationId: location.id,
           locationName: location.name,
@@ -59,11 +54,8 @@ export async function GET(_request: NextRequest) {
       products: payload,
     });
   } catch (error) {
-    console.error('Error fetching product thresholds:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch thresholds' },
-      { status: 500 }
-    );
+    console.error("Error fetching product thresholds:", error);
+    return NextResponse.json({ error: "Failed to fetch thresholds" }, { status: 500 });
   }
 }
 
@@ -72,7 +64,7 @@ export async function PATCH(request: NextRequest) {
   try {
     const session = await getSession();
     if (!session || !session.user.isAdmin) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Validate CSRF token
@@ -91,30 +83,18 @@ export async function PATCH(request: NextRequest) {
     };
 
     if (!Array.isArray(updates) || updates.length === 0) {
-      return NextResponse.json(
-        { error: 'No updates provided' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "No updates provided" }, { status: 400 });
     }
 
     const ops: any[] = [];
 
     for (const update of updates) {
       if (!update.productId) {
-        return NextResponse.json(
-          { error: 'Invalid update format' },
-          { status: 400 }
-        );
+        return NextResponse.json({ error: "Invalid update format" }, { status: 400 });
       }
 
-      if (
-        update.combinedMinimum !== undefined &&
-        update.combinedMinimum < 0
-      ) {
-        return NextResponse.json(
-          { error: 'Combined minimum cannot be negative' },
-          { status: 400 }
-        );
+      if (update.combinedMinimum !== undefined && update.combinedMinimum < 0) {
+        return NextResponse.json({ error: "Combined minimum cannot be negative" }, { status: 400 });
       }
 
       if (update.combinedMinimum !== undefined) {
@@ -130,7 +110,7 @@ export async function PATCH(request: NextRequest) {
         for (const loc of update.perLocation) {
           if (loc.minQuantity < 0) {
             return NextResponse.json(
-              { error: 'Location minimum cannot be negative' },
+              { error: "Location minimum cannot be negative" },
               { status: 400 }
             );
           }
@@ -166,10 +146,7 @@ export async function PATCH(request: NextRequest) {
       updatedCount: updates.length,
     });
   } catch (error) {
-    console.error('Error updating thresholds:', error);
-    return NextResponse.json(
-      { error: 'Failed to update thresholds' },
-      { status: 500 }
-    );
+    console.error("Error updating thresholds:", error);
+    return NextResponse.json({ error: "Failed to update thresholds" }, { status: 500 });
   }
 }

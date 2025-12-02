@@ -4,12 +4,12 @@ import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { validateCSRFToken } from "@/lib/csrf";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    
+
     if (!session?.user?.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -22,11 +22,8 @@ export async function POST(request: NextRequest) {
 
     const { name } = await request.json();
 
-    if (!name || typeof name !== 'string' || name.trim().length === 0) {
-      return NextResponse.json(
-        { error: "Location name is required" },
-        { status: 400 }
-      );
+    if (!name || typeof name !== "string" || name.trim().length === 0) {
+      return NextResponse.json({ error: "Location name is required" }, { status: 400 });
     }
 
     // Check if location already exists
@@ -67,10 +64,7 @@ export async function POST(request: NextRequest) {
       message: "Location created successfully",
     });
   } catch (error) {
-    console.error('Error creating location:', error);
-    return NextResponse.json(
-      { error: "Failed to create location" },
-      { status: 500 }
-    );
+    console.error("Error creating location:", error);
+    return NextResponse.json({ error: "Failed to create location" }, { status: 500 });
   }
 }

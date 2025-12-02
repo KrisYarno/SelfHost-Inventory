@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { MetricsResponse } from "@/types/reports";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
@@ -81,7 +81,7 @@ export async function GET(request: NextRequest) {
 
     // Get activity count within date range
     const recentActivityCount = await prisma.inventory_logs.count({
-      where: activityFilter
+      where: activityFilter,
     });
 
     const totalInventoryValue = totalInventoryRetailValue;
@@ -96,16 +96,13 @@ export async function GET(request: NextRequest) {
         totalStockQuantity,
         lowStockProducts,
         recentActivityCount,
-        lastUpdated: new Date()
-      }
+        lastUpdated: new Date(),
+      },
     };
 
     return NextResponse.json(metrics);
   } catch (error) {
     console.error("Error fetching metrics:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch metrics" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch metrics" }, { status: 500 });
   }
 }

@@ -200,11 +200,11 @@ export function ApiDiagnosticPanel() {
   const getStatusIcon = (status: DiagnosticResult['status']) => {
     switch (status) {
       case 'success':
-        return <CheckCircle className="w-4 h-4 text-green-500" />;
+        return <CheckCircle className="w-4 h-4 text-positive" />;
       case 'warning':
-        return <AlertCircle className="w-4 h-4 text-yellow-500" />;
+        return <AlertCircle className="w-4 h-4 text-warning" />;
       case 'error':
-        return <XCircle className="w-4 h-4 text-red-500" />;
+        return <XCircle className="w-4 h-4 text-negative" />;
       case 'pending':
         return <Loader2 className="w-4 h-4 animate-spin" />;
     }
@@ -256,16 +256,16 @@ export function ApiDiagnosticPanel() {
           {results.length > 0 && (
             <div className="space-y-2">
               {results.map((result) => (
-                <div 
+                <div
                   key={result.test}
-                  className="flex items-center justify-between p-3 border rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer"
+                  className="flex items-center justify-between p-3 border rounded-lg hover:bg-muted/50 cursor-pointer"
                   onClick={() => setShowDetails(showDetails === result.test ? null : result.test)}
                 >
                   <div className="flex items-center gap-3">
                     {getStatusIcon(result.status)}
                     <div>
                       <div className="font-medium">{result.test}</div>
-                      <div className="text-sm text-gray-500">{result.message}</div>
+                      <div className="text-sm text-muted-foreground">{result.message}</div>
                     </div>
                   </div>
                   {getStatusBadge(result.status)}
@@ -307,7 +307,7 @@ export function ApiDiagnosticPanel() {
                         <li>Check network tab in DevTools</li>
                         <li>Try refreshing the page</li>
                         {results.find(r => r.test === 'CSRF Token' && r.status === 'error') && (
-                          <li className="text-red-600">CSRF token issue detected - ensure CSRF endpoint is available</li>
+                          <li className="text-negative">CSRF token issue detected - ensure CSRF endpoint is available</li>
                         )}
                       </ul>
                     </div>

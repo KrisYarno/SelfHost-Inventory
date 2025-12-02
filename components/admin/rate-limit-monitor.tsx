@@ -41,16 +41,16 @@ export function RateLimitMonitor() {
 
   const getStatusColor = (current: number, limit: number) => {
     const percentage = (current / limit) * 100;
-    if (percentage >= 90) return 'text-red-500';
-    if (percentage >= 70) return 'text-yellow-500';
-    return 'text-green-500';
+    if (percentage >= 90) return 'text-negative';
+    if (percentage >= 70) return 'text-warning';
+    return 'text-positive';
   };
 
   const getProgressColor = (current: number, limit: number) => {
     const percentage = (current / limit) * 100;
-    if (percentage >= 90) return 'bg-red-500';
-    if (percentage >= 70) return 'bg-yellow-500';
-    return 'bg-green-500';
+    if (percentage >= 90) return 'bg-negative';
+    if (percentage >= 70) return 'bg-warning';
+    return 'bg-positive';
   };
 
   if (loading) {
