@@ -21,7 +21,7 @@ export function ProductTile({ product, onClick, className }: ProductTileProps) {
       disabled={isOutOfStock}
       className={cn(
         "group relative flex flex-col items-center p-4 rounded-2xl border border-border/70",
-        "bg-white dark:bg-slate-800",
+        "bg-surface",
         "shadow-md hover:shadow-lg",
         "hover:-translate-y-0.5 transition-all duration-200",
         "focus:outline-none focus:ring-2 focus:ring-primary/70 focus:ring-offset-2",
@@ -30,31 +30,29 @@ export function ProductTile({ product, onClick, className }: ProductTileProps) {
         className
       )}
     >
-      {/* Stock badges */}
-      <div className="absolute top-2 right-2">
-        {isOutOfStock && (
-          <StatusBadge tone="negative">Out</StatusBadge>
-        )}
-        {!isOutOfStock && isLowStock && (
-          <StatusBadge tone="warning">Low</StatusBadge>
-        )}
-      </div>
-
       {/* Product Info */}
-      <div className="text-center space-y-1 flex-1 flex flex-col justify-center pt-4">
+      <div className="text-center space-y-1 flex-1 flex flex-col justify-center">
         <h3 className="font-medium text-sm line-clamp-1">{product.baseName}</h3>
         <p className="text-xs text-muted-foreground">{product.variant}</p>
-        <ValueChip
-          tone={
-            product.currentQuantity > 0
-              ? "positive"
-              : product.currentQuantity < 0
-              ? "negative"
-              : "neutral"
-          }
-        >
-          Stock: {product.currentQuantity}
-        </ValueChip>
+        <div className="flex items-center justify-center gap-1.5 flex-wrap">
+          <ValueChip
+            tone={
+              product.currentQuantity > 0
+                ? "positive"
+                : product.currentQuantity < 0
+                ? "negative"
+                : "neutral"
+            }
+          >
+            Stock: {product.currentQuantity}
+          </ValueChip>
+          {isOutOfStock && (
+            <StatusBadge tone="negative">Out</StatusBadge>
+          )}
+          {!isOutOfStock && isLowStock && (
+            <StatusBadge tone="warning">Low</StatusBadge>
+          )}
+        </div>
       </div>
 
       {/* Hover effect */}

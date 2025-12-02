@@ -1,11 +1,15 @@
-'use client';
+"use client";
 
-import { useEffect, useMemo, useState } from 'react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { cn } from '@/lib/utils';
-import { useLocation } from '@/contexts/location-context';
+import { useEffect, useMemo, useState, useCallback } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { useLocation } from "@/contexts/location-context";
+import {
+  StockInTransferDialog,
+  type StockInProduct,
+} from "@/components/inventory/stock-in-transfer-dialog";
 
 interface StockerItem {
   productId: number;
@@ -13,7 +17,7 @@ interface StockerItem {
   baseName?: string | null;
   unit?: string | null;
   numericValue?: number | null;
-  quantity: number;
+  currentQuantity: number;
   minQuantity: number;
   shortage: number;
 }
@@ -31,8 +35,7 @@ interface StockerResponse {
 function parseProductName(name: string): { base: string; size: number | null } {
   const trimmed = name.trim();
   // Match patterns like "Tirz 5mg", "AOD (2mg)", "B-12 10 mL"
-  const match =
-    trimmed.match(/^(.*?)(\d+(?:\.\d+)?)\s*(mg|ml|mL|mcg|g|units?)?\)?$/i);
+  const match = trimmed.match(/^(.*?)(\d+(?:\.\d+)?)\s*(mg|ml|mL|mcg|g|units?)?\)?$/i);
   if (!match) {
     return { base: trimmed.toLowerCase(), size: null };
   }
@@ -46,8 +49,7 @@ function parseProductName(name: string): { base: string; size: number | null } {
 
 function getSortFields(item: StockerItem): { base: string; size: number | null } {
   const base =
-    (item.baseName && item.baseName.trim().toLowerCase()) ||
-    item.productName.trim().toLowerCase();
+    (item.baseName && item.baseName.trim().toLowerCase()) || item.productName.trim().toLowerCase();
 
   let size: number | null = null;
   if (item.numericValue != null) {
@@ -74,57 +76,74 @@ export default function StockerPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const load = async () => {
-      setIsLoading(true);
-      setError(null);
-      try {
-        const params = new URLSearchParams();
-        if (selectedLocationId) {
-          params.set('locationId', String(selectedLocationId));
-        }
-        const query = params.toString();
-        const url = query ? `/api/stocker/minimums?${query}` : '/api/stocker/minimums';
-        const res = await fetch(url);
-        if (!res.ok) throw new Error('Failed to load stocker data');
-        const data: StockerResponse = await res.json();
-        setLocation(data.location);
-        setItems(data.items ?? []);
-      } catch (err) {
-        console.error('Error loading stocker data', err);
-        setError('Unable to load refill list. Please try again.');
-      } finally {
-        setIsLoading(false);
-      }
-    };
+  // Stock In dialog state
+  const [stockInDialogOpen, setStockInDialogOpen] = useState(false);
+  const [stockInProduct, setStockInProduct] = useState<StockInProduct | null>(null);
 
-    load();
+  const loadData = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (selectedLocationId) {
+        params.set("locationId", String(selectedLocationId));
+      }
+      const query = params.toString();
+      const url = query ? `/api/stocker/minimums?${query}` : "/api/stocker/minimums";
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Failed to load stocker data");
+      const data: StockerResponse = await res.json();
+      setLocation(data.location);
+      setItems(data.items ?? []);
+    } catch (err) {
+      console.error("Error loading stocker data", err);
+      setError("Unable to load refill list. Please try again.");
+    } finally {
+      setIsLoading(false);
+    }
   }, [selectedLocationId]);
 
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleStockIn = (item: StockerItem) => {
+    setStockInProduct({
+      productId: item.productId,
+      productName: item.productName,
+      quantity: item.currentQuantity,
+      minQuantity: item.minQuantity,
+      shortage: item.shortage,
+    });
+    setStockInDialogOpen(true);
+  };
+
+  const handleStockInSuccess = () => {
+    loadData();
+  };
+
   const sortedItems = useMemo(() => {
-    return items
-      .slice()
-      .sort((a, b) => {
-        const aParsed = getSortFields(a);
-        const bParsed = getSortFields(b);
+    return items.slice().sort((a, b) => {
+      const aParsed = getSortFields(a);
+      const bParsed = getSortFields(b);
 
-        // First sort by base name alphabetically
-        if (aParsed.base !== bParsed.base) {
-          return aParsed.base.localeCompare(bParsed.base, undefined, {
-            sensitivity: 'base',
-          });
-        }
-
-        // Within the same base name, sort by numeric size if available
-        if (aParsed.size !== null && bParsed.size !== null && aParsed.size !== bParsed.size) {
-          return aParsed.size - bParsed.size;
-        }
-
-        // Fallback to full product name for stability
-        return a.productName.localeCompare(b.productName, undefined, {
-          sensitivity: 'base',
+      // First sort by base name alphabetically
+      if (aParsed.base !== bParsed.base) {
+        return aParsed.base.localeCompare(bParsed.base, undefined, {
+          sensitivity: "base",
         });
+      }
+
+      // Within the same base name, sort by numeric size if available
+      if (aParsed.size !== null && bParsed.size !== null && aParsed.size !== bParsed.size) {
+        return aParsed.size - bParsed.size;
+      }
+
+      // Fallback to full product name for stability
+      return a.productName.localeCompare(b.productName, undefined, {
+        sensitivity: "base",
       });
+    });
   }, [items]);
 
   const totalProducts = items.length;
@@ -134,11 +153,12 @@ export default function StockerPage() {
     <div className="space-y-4 px-4 pb-24 pt-4 sm:px-6">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold">
-          Stocker{selectedLocation?.name
+          Stocker
+          {selectedLocation?.name
             ? ` – ${selectedLocation.name}`
             : location
-            ? ` – ${location.name}`
-            : ''}
+              ? ` – ${location.name}`
+              : ""}
         </h1>
         <p className="text-sm text-muted-foreground">
           Products that are at or below their location minimum. Use this list to pull stock from
@@ -146,10 +166,10 @@ export default function StockerPage() {
         </p>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <Badge variant="outline">
-            {totalProducts} product{totalProducts === 1 ? '' : 's'} need refill
+            {totalProducts} product{totalProducts === 1 ? "" : "s"} need refill
           </Badge>
           <Badge variant="outline">
-            {totalUnitsNeeded} unit{totalUnitsNeeded === 1 ? '' : 's'} needed
+            {totalUnitsNeeded} unit{totalUnitsNeeded === 1 ? "" : "s"} needed
           </Badge>
         </div>
       </header>
@@ -169,14 +189,14 @@ export default function StockerPage() {
       )}
 
       {!isLoading && !error && sortedItems.length === 0 && (
-        <Card className="border border-emerald-500/30 bg-emerald-500/5">
+        <Card className="border border-positive-border bg-positive-muted">
           <CardHeader>
             <CardTitle className="text-base">All set at this location</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
             No products are currently below their minimum at
-            {location ? ` ${location.name}` : ' this location'}. Check back after stock movements
-            or minimum changes.
+            {location ? ` ${location.name}` : " this location"}. Check back after stock movements or
+            minimum changes.
           </CardContent>
         </Card>
       )}
@@ -186,68 +206,63 @@ export default function StockerPage() {
           {sortedItems.map((item) => {
             const shortage = item.shortage;
             const stock =
-              item.quantity != null
-                ? item.quantity
+              item.currentQuantity != null
+                ? item.currentQuantity
                 : item.minQuantity != null && item.shortage != null
-                ? Math.max(0, item.minQuantity - item.shortage)
-                : 0;
+                  ? Math.max(0, item.minQuantity - item.shortage)
+                  : 0;
             const isOut = stock <= 0;
             const fillPercent =
               item.minQuantity > 0
                 ? Math.max(0, Math.min(100, (stock / item.minQuantity) * 100))
                 : 0;
 
-            let severityLabel = 'Needs refill';
+            let severityLabel = "Needs refill";
             let severityClass =
-              'bg-amber-500/10 text-amber-100 border border-amber-400/40';
+              "bg-warning-muted text-warning-foreground border border-warning-border";
 
             if (isOut) {
-              severityLabel = 'Out of stock';
-              severityClass = 'bg-red-500/10 text-red-100 border border-red-400/40';
+              severityLabel = "Out of stock";
+              severityClass =
+                "bg-negative-muted text-negative-foreground border border-negative-border";
             } else if (fillPercent <= 25) {
-              severityLabel = 'Critical';
-              severityClass = 'bg-red-500/10 text-red-100 border border-red-400/40';
+              severityLabel = "Critical";
+              severityClass =
+                "bg-negative-muted text-negative-foreground border border-negative-border";
             } else if (fillPercent <= 50) {
-              severityLabel = 'Low';
-              severityClass = 'bg-amber-500/10 text-amber-100 border border-amber-400/40';
+              severityLabel = "Low";
+              severityClass =
+                "bg-warning-muted text-warning-foreground border border-warning-border";
             }
 
             return (
               <Card
                 key={item.productId}
                 className={cn(
-                  'flex flex-col border border-border/70 bg-gradient-to-br from-card to-muted/40',
-                  'shadow-sm shadow-emerald-500/10 hover:shadow-md hover:shadow-emerald-500/20',
-                  'transition-all duration-200 hover:-translate-y-[2px]',
-                  'rounded-xl'
+                  "flex flex-col border border-border/70 bg-gradient-to-br from-card to-muted/40",
+                  "shadow-sm hover:shadow-md",
+                  "transition-all duration-200 hover:-translate-y-[2px]",
+                  "rounded-xl"
                 )}
               >
                 <CardHeader className="space-y-2 pb-2">
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <CardTitle className="text-base font-semibold">
-                        {item.productName}
-                      </CardTitle>
+                      <CardTitle className="text-base font-semibold">{item.productName}</CardTitle>
                     </div>
-                    <Badge className={cn('text-[11px] px-2 py-1', severityClass)}>
+                    <Badge className={cn("text-[11px] px-2 py-1", severityClass)}>
                       {severityLabel}
                     </Badge>
                   </div>
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>
-                      Stock:{' '}
-                      <span className="font-medium text-foreground">
-                        {stock}
-                      </span>
+                      Stock: <span className="font-medium text-foreground">{stock}</span>
                     </span>
                     <span>
                       Min: <span className="font-medium text-foreground">{item.minQuantity}</span>
                     </span>
                     <span>
-                      Need:{' '}
-                      <span className="font-medium text-foreground">
-                        {shortage}
-                      </span>
+                      Need: <span className="font-medium text-foreground">{shortage}</span>
                     </span>
                   </div>
                 </CardHeader>
@@ -255,12 +270,8 @@ export default function StockerPage() {
                   <div className="h-1.5 w-full rounded-full bg-muted">
                     <div
                       className={cn(
-                        'h-full rounded-full transition-all',
-                        isOut
-                          ? 'bg-red-500'
-                          : fillPercent <= 50
-                          ? 'bg-amber-500'
-                          : 'bg-emerald-500',
+                        "h-full rounded-full transition-all",
+                        isOut ? "bg-negative" : fillPercent <= 50 ? "bg-warning" : "bg-positive"
                       )}
                       style={{ width: `${fillPercent}%` }}
                     />
@@ -271,15 +282,9 @@ export default function StockerPage() {
                       variant="outline"
                       className="h-8 text-xs"
                       type="button"
-                      onClick={() => {
-                        // Placeholder: wire to stock-in or transfer modal.
-                        console.info('Open product from stocker', {
-                          productId: item.productId,
-                          productName: item.productName,
-                        });
-                      }}
+                      onClick={() => handleStockIn(item)}
                     >
-                      Open product
+                      Stock In
                     </Button>
                   </div>
                 </CardContent>
@@ -288,6 +293,16 @@ export default function StockerPage() {
           })}
         </div>
       )}
+
+      {/* Stock In Transfer Dialog */}
+      <StockInTransferDialog
+        open={stockInDialogOpen}
+        onOpenChange={setStockInDialogOpen}
+        product={stockInProduct}
+        destinationLocationId={selectedLocationId ?? location?.id ?? 0}
+        destinationLocationName={selectedLocation?.name ?? location?.name ?? "Unknown"}
+        onSuccess={handleStockInSuccess}
+      />
     </div>
   );
 }

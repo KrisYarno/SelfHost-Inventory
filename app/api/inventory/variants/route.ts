@@ -1,10 +1,10 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth/next';
-import { authOptions } from '@/lib/auth';
-import prisma from '@/lib/prisma';
-import { Product, product_locations, Location } from '@prisma/client';
+import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth/next";
+import { authOptions } from "@/lib/auth";
+import prisma from "@/lib/prisma";
+import { Product, product_locations, Location } from "@prisma/client";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 interface ProductWithLocations {
   id: number;
@@ -25,14 +25,14 @@ export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
     if (!session?.user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const searchParams = request.nextUrl.searchParams;
-    const _locationId = searchParams.get('locationId');
-    const page = parseInt(searchParams.get('page') || '1');
-    const pageSize = parseInt(searchParams.get('pageSize') || '12');
-    const search = searchParams.get('search') || '';
+    const _locationId = searchParams.get("locationId");
+    const page = parseInt(searchParams.get("page") || "1");
+    const pageSize = parseInt(searchParams.get("pageSize") || "12");
+    const search = searchParams.get("search") || "";
 
     // Build where clause for search - exclude soft deleted products
     const whereClause: any = {
@@ -54,10 +54,7 @@ export async function GET(request: NextRequest) {
       where: whereClause,
       skip: (page - 1) * pageSize,
       take: pageSize,
-      orderBy: [
-        { baseName: 'asc' },
-        { variant: 'asc' },
-      ],
+      orderBy: [{ baseName: "asc" }, { variant: "asc" }],
       include: {
         product_locations: {
           include: {
@@ -69,30 +66,34 @@ export async function GET(request: NextRequest) {
     });
 
     // Transform data to include location breakdown
-    const transformedProducts: ProductWithLocations[] = products.map((product: Product & {
-      product_locations: (product_locations & {
-        locations: Location;
-      })[];
-    }) => {
-      const locations = product.product_locations.map((pl) => ({
-        locationId: pl.locationId,
-        locationName: pl.locations.name,
-        quantity: pl.quantity,
-        minQuantity: pl.minQuantity ?? 0,
-      }));
+    const transformedProducts: ProductWithLocations[] = products.map(
+      (
+        product: Product & {
+          product_locations: (product_locations & {
+            locations: Location;
+          })[];
+        }
+      ) => {
+        const locations = product.product_locations.map((pl) => ({
+          locationId: pl.locationId,
+          locationName: pl.locations.name,
+          quantity: pl.quantity,
+          minQuantity: pl.minQuantity ?? 0,
+        }));
 
-      const totalQuantity = locations.reduce((sum: number, loc) => sum + loc.quantity, 0);
+        const totalQuantity = locations.reduce((sum: number, loc) => sum + loc.quantity, 0);
 
-      return {
-        id: product.id,
-        name: product.name,
-        baseName: product.baseName || '',
-        variant: product.variant,
-        combinedMinimum: product.lowStockThreshold ?? 0,
-        locations: locations.sort((a, b) => b.quantity - a.quantity), // Sort by quantity desc
-        totalQuantity,
-      };
-    });
+        return {
+          id: product.id,
+          name: product.name,
+          baseName: product.baseName || "",
+          variant: product.variant,
+          combinedMinimum: product.lowStockThreshold ?? 0,
+          locations: locations.sort((a, b) => b.quantity - a.quantity), // Sort by quantity desc
+          totalQuantity,
+        };
+      }
+    );
 
     return NextResponse.json({
       products: transformedProducts,
@@ -105,10 +106,7 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error) {
-    console.error('Error fetching inventory variants:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch inventory' },
-      { status: 500 }
-    );
+    console.error("Error fetching inventory variants:", error);
+    return NextResponse.json({ error: "Failed to fetch inventory" }, { status: 500 });
   }
 }

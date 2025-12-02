@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { subDays, format } from "date-fns";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 interface UserMetrics {
   userId: number;
@@ -32,9 +32,9 @@ export async function GET(request: Request) {
     }
 
     const { searchParams } = new URL(request.url);
-    const days = parseInt(searchParams.get('days') || '7');
-    const userId = searchParams.get('userId');
-    const locationId = searchParams.get('locationId');
+    const days = parseInt(searchParams.get("days") || "7");
+    const userId = searchParams.get("userId");
+    const locationId = searchParams.get("locationId");
 
     const endDate = new Date();
     const startDate = subDays(endDate, days);
@@ -47,8 +47,8 @@ export async function GET(request: Request) {
       where: userFilter,
       select: {
         id: true,
-        username: true
-      }
+        username: true,
+      },
     });
 
     // Get all logs for the period
@@ -56,47 +56,50 @@ export async function GET(request: Request) {
       where: {
         changeTime: {
           gte: startDate,
-          lte: endDate
+          lte: endDate,
         },
         ...(userId && { userId: parseInt(userId) }),
-        ...(locationId && { locationId: parseInt(locationId) })
+        ...(locationId && { locationId: parseInt(locationId) }),
       },
       include: {
         products: {
           select: {
             id: true,
-            name: true
-          }
-        }
-      }
+            name: true,
+          },
+        },
+      },
     });
 
     // Process metrics for each user
     const userMetricsMap = new Map<number, UserMetrics>();
 
-    users.forEach(user => {
+    users.forEach((user) => {
       userMetricsMap.set(user.id, {
         userId: user.id,
         username: user.username,
         dailyActivity: [],
         topProducts: [],
         totalActions: 0,
-        lastActiveDate: new Date(0)
+        lastActiveDate: new Date(0),
       });
     });
 
     // Group logs by user and date
-    const userDailyActivity = new Map<string, {
-      stockIn: number;
-      stockOut: number;
-      adjustments: number;
-      totalActions: number;
-    }>();
+    const userDailyActivity = new Map<
+      string,
+      {
+        stockIn: number;
+        stockOut: number;
+        adjustments: number;
+        totalActions: number;
+      }
+    >();
 
     const userProductInteractions = new Map<string, number>();
 
-    logs.forEach(log => {
-      const dateKey = format(log.changeTime, 'yyyy-MM-dd');
+    logs.forEach((log) => {
+      const dateKey = format(log.changeTime, "yyyy-MM-dd");
       const userDateKey = `${log.userId}-${dateKey}`;
       const userProductKey = `${log.userId}-${log.productId}`;
 
@@ -106,7 +109,7 @@ export async function GET(request: Request) {
           stockIn: 0,
           stockOut: 0,
           adjustments: 0,
-          totalActions: 0
+          totalActions: 0,
         });
       }
 
@@ -114,14 +117,14 @@ export async function GET(request: Request) {
       activity.totalActions++;
 
       // Categorize activity based on logType and delta
-      if (log.logType === 'ADJUSTMENT') {
+      if (log.logType === "ADJUSTMENT") {
         if (log.delta > 0) {
           activity.stockIn += log.delta;
         } else if (log.delta < 0) {
           activity.stockOut += Math.abs(log.delta);
         }
         activity.adjustments += Math.abs(log.delta);
-      } else if (log.logType === 'TRANSFER') {
+      } else if (log.logType === "TRANSFER") {
         if (log.delta > 0) {
           activity.stockIn += log.delta;
         } else if (log.delta < 0) {
@@ -153,36 +156,36 @@ export async function GET(request: Request) {
       // Build daily activity array
       for (let i = 0; i < days; i++) {
         const currentDate = subDays(endDate, i);
-        const dateKey = format(currentDate, 'yyyy-MM-dd');
+        const dateKey = format(currentDate, "yyyy-MM-dd");
         const userDateKey = `${userId}-${dateKey}`;
-        
+
         const activity = userDailyActivity.get(userDateKey) || {
           stockIn: 0,
           stockOut: 0,
           adjustments: 0,
-          totalActions: 0
+          totalActions: 0,
         };
 
         metrics.dailyActivity.unshift({
-          date: format(currentDate, 'MMM d'),
-          ...activity
+          date: format(currentDate, "MMM d"),
+          ...activity,
         });
       }
 
       // Build top products
       const userProducts: { productId: number; productName: string; interactions: number }[] = [];
-      
+
       logs
-        .filter(log => log.userId === userId)
-        .forEach(log => {
-          const existing = userProducts.find(p => p.productId === log.productId);
+        .filter((log) => log.userId === userId)
+        .forEach((log) => {
+          const existing = userProducts.find((p) => p.productId === log.productId);
           if (existing) {
             existing.interactions++;
           } else {
             userProducts.push({
               productId: log.productId,
               productName: log.products.name,
-              interactions: 1
+              interactions: 1,
             });
           }
         });
@@ -204,14 +207,11 @@ export async function GET(request: Request) {
       period: {
         startDate,
         endDate,
-        days
-      }
+        days,
+      },
     });
   } catch (error) {
     console.error("Error fetching user metrics:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch user metrics" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch user metrics" }, { status: 500 });
   }
 }

@@ -89,13 +89,13 @@ export function OrderDetailsSheet({ order, open, onOpenChange }: OrderDetailsShe
                 Created {timeElapsed}
               </SheetDescription>
             </div>
-            <Badge 
-              variant="secondary" 
+            <Badge
+              variant="secondary"
               className={cn(
                 "text-sm",
-                order.status === 'pending' && "bg-yellow-500/10 text-yellow-700 dark:text-yellow-400",
-                order.status === 'packing' && "bg-blue-500/10 text-blue-700 dark:text-blue-400",
-                order.status === 'completed' && "bg-green-500/10 text-green-700 dark:text-green-400",
+                order.status === 'pending' && "bg-warning-muted text-warning-foreground",
+                order.status === 'packing' && "bg-info-muted text-info-foreground",
+                order.status === 'completed' && "bg-positive-muted text-positive-foreground",
               )}
             >
               {order.status.replace('_', ' ')}
@@ -103,9 +103,9 @@ export function OrderDetailsSheet({ order, open, onOpenChange }: OrderDetailsShe
           </div>
           
           {isLocked && (
-            <div className="flex items-center gap-2 mt-3 p-3 bg-orange-500/10 rounded-lg">
-              <Lock className="w-4 h-4 text-orange-600 dark:text-orange-400" />
-              <span className="text-sm text-orange-600 dark:text-orange-400">
+            <div className="flex items-center gap-2 mt-3 p-3 bg-warning-muted rounded-lg">
+              <Lock className="w-4 h-4 text-warning" />
+              <span className="text-sm text-warning">
                 Locked by {isOwnLock ? 'you' : order.lockedBy?.userName}
               </span>
             </div>

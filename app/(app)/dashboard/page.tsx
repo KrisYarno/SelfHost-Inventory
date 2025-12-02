@@ -1,11 +1,11 @@
-import { getSession } from '@/lib/auth';
-import { redirect } from 'next/navigation';
+import { getSession } from "@/lib/auth";
+import { redirect } from "next/navigation";
 
 export default async function DashboardPage() {
   const session = await getSession();
 
   if (!session) {
-    redirect('/auth/signin');
+    redirect("/auth/signin");
   }
 
   return (
@@ -22,7 +22,7 @@ export default async function DashboardPage() {
       {/* Main Content */}
       <main className="flex-1 p-[var(--card-padding)]">
         <div className="mx-auto max-w-7xl">
-          <div className="rounded-2xl border border-border/70 bg-white dark:bg-slate-800 p-6 shadow-md">
+          <div className="rounded-2xl border border-border/70 bg-surface p-6 shadow-md">
             <h2 className="text-lg font-semibold mb-4">Account Information</h2>
             <div className="space-y-2">
               <div className="flex items-center gap-2">
@@ -35,11 +35,15 @@ export default async function DashboardPage() {
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">Role:</span>
-                <span className="text-sm font-medium">{session.user.isAdmin ? 'Admin' : 'User'}</span>
+                <span className="text-sm font-medium">
+                  {session.user.isAdmin ? "Admin" : "User"}
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">Status:</span>
-                <span className="text-sm font-medium">{session.user.isApproved ? 'Approved' : 'Pending Approval'}</span>
+                <span className="text-sm font-medium">
+                  {session.user.isApproved ? "Approved" : "Pending Approval"}
+                </span>
               </div>
             </div>
           </div>

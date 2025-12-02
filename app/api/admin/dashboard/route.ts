@@ -3,12 +3,12 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
     const session = await getServerSession(authOptions);
-    
+
     if (!session?.user?.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -20,17 +20,17 @@ export async function GET() {
       stockStats,
       recentTransactions,
       topMovingProducts,
-      recentActivity
+      recentActivity,
     ] = await Promise.all([
       // Total unique products
       prisma.product.count(),
-      
+
       // User statistics
       prisma.user.groupBy({
-        by: ['isApproved'],
+        by: ["isApproved"],
         _count: true,
       }),
-      
+
       // Stock statistics across all locations
       prisma.$queryRaw<Array<{ status: string; count: bigint }>>`
         SELECT 
@@ -54,16 +54,16 @@ export async function GET() {
             ELSE 'in_stock'
           END
       `,
-      
+
       // Recent transactions (last 24 hours)
       prisma.inventory_logs.count({
         where: {
           changeTime: {
-            gte: new Date(Date.now() - 24 * 60 * 60 * 1000)
-          }
-        }
+            gte: new Date(Date.now() - 24 * 60 * 60 * 1000),
+          },
+        },
       }),
-      
+
       // Top moving products (last 7 days)
       prisma.$queryRaw<Array<{ productId: number; name: string; movement: bigint }>>`
         SELECT 
@@ -77,32 +77,36 @@ export async function GET() {
         ORDER BY movement DESC
         LIMIT 10
       `,
-      
+
       // Recent activity
       prisma.inventory_logs.findMany({
         take: 10,
-        orderBy: { changeTime: 'desc' },
+        orderBy: { changeTime: "desc" },
         include: {
           users: true,
           products: true,
-          locations: true
-        }
-      })
+          locations: true,
+        },
+      }),
     ]);
 
     // Process user stats
-    const activeUsers = userStats.find((stat: { isApproved: boolean; _count: number }) => stat.isApproved === true)?._count || 0;
-    const pendingUsers = userStats.find((stat: { isApproved: boolean; _count: number }) => stat.isApproved === false)?._count || 0;
+    const activeUsers =
+      userStats.find((stat: { isApproved: boolean; _count: number }) => stat.isApproved === true)
+        ?._count || 0;
+    const pendingUsers =
+      userStats.find((stat: { isApproved: boolean; _count: number }) => stat.isApproved === false)
+        ?._count || 0;
     const totalUsers = activeUsers + pendingUsers;
 
     // Process stock stats
-    const stockStatsMap = stockStats.reduce((
-      acc: Record<string, number>,
-      stat: { status: string; count: bigint }
-    ) => {
-      acc[stat.status] = Number(stat.count);
-      return acc;
-    }, {} as Record<string, number>);
+    const stockStatsMap = stockStats.reduce(
+      (acc: Record<string, number>, stat: { status: string; count: bigint }) => {
+        acc[stat.status] = Number(stat.count);
+        return acc;
+      },
+      {} as Record<string, number>
+    );
 
     // Format response
     const metrics = {
@@ -113,28 +117,25 @@ export async function GET() {
       lowStockProducts: stockStatsMap.low_stock || 0,
       outOfStockProducts: stockStatsMap.out_of_stock || 0,
       recentTransactions,
-      topMovingProducts: topMovingProducts.map(p => ({
+      topMovingProducts: topMovingProducts.map((p) => ({
         id: p.productId,
         name: p.name,
-        movement: Number(p.movement)
+        movement: Number(p.movement),
       })),
-      recentActivity: recentActivity.map(log => ({
+      recentActivity: recentActivity.map((log) => ({
         id: log.id,
         user: log.users.username,
-        action: log.delta > 0 ? 'Added to' : 'Removed from',
+        action: log.delta > 0 ? "Added to" : "Removed from",
         product: log.products.name,
         quantity: log.delta,
         timestamp: log.changeTime.toISOString(),
-        location: log.locations?.name || 'Unknown'
-      }))
+        location: log.locations?.name || "Unknown",
+      })),
     };
 
     return NextResponse.json(metrics);
   } catch (error) {
-    console.error('Error fetching dashboard metrics:', error);
-    return NextResponse.json(
-      { error: "Failed to fetch dashboard metrics" },
-      { status: 500 }
-    );
+    console.error("Error fetching dashboard metrics:", error);
+    return NextResponse.json({ error: "Failed to fetch dashboard metrics" }, { status: 500 });
   }
 }

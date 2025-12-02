@@ -1,17 +1,13 @@
-import { redirect } from 'next/navigation';
-import { getSession } from '@/lib/auth';
-import { AdminSubNav } from '@/components/admin/admin-sub-nav';
+import { redirect } from "next/navigation";
+import { getSession } from "@/lib/auth";
+import { AdminSubNav } from "@/components/admin/admin-sub-nav";
 
-export default async function AdminLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const session = await getSession();
 
   // Redirect if not authenticated or not admin
   if (!session || !session.user.isAdmin) {
-    redirect('/unauthorized');
+    redirect("/unauthorized");
   }
 
   return (

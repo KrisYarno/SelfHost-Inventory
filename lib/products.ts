@@ -3,31 +3,7 @@ import { ProductWithQuantity, ProductFilters } from "@/types/product";
 import prisma from "@/lib/prisma";
 
 /**
- * Calculate current quantity for a product at a specific location
- * from the product_locations table
- */
-export async function getCurrentQuantity(
-  productId: number,
-  locationId: number
-): Promise<number> {
-  const productLocation = await prisma.product_locations.findUnique({
-    where: {
-      productId_locationId: {
-        productId,
-        locationId,
-      },
-    },
-    select: {
-      quantity: true,
-    },
-  });
-
-  return productLocation?.quantity || 0;
-}
-
-/**
  * Calculate current quantities for multiple products at a location
- * More efficient than calling getCurrentQuantity for each product
  */
 export async function getBulkCurrentQuantities(
   productIds: number[],

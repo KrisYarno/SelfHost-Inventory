@@ -1,5 +1,5 @@
 // Learn more: https://github.com/testing-library/jest-dom
-import '@testing-library/jest-dom'
+import "@testing-library/jest-dom";
 
 // Mock IntersectionObserver
 global.IntersectionObserver = class IntersectionObserver {
@@ -8,9 +8,9 @@ global.IntersectionObserver = class IntersectionObserver {
   observe() {}
   unobserve() {}
   takeRecords() {
-    return []
+    return [];
   }
-}
+};
 
 // Mock ResizeObserver
 global.ResizeObserver = class ResizeObserver {
@@ -18,12 +18,12 @@ global.ResizeObserver = class ResizeObserver {
   disconnect() {}
   observe() {}
   unobserve() {}
-}
+};
 
 // Mock window.matchMedia
-Object.defineProperty(window, 'matchMedia', {
+Object.defineProperty(window, "matchMedia", {
   writable: true,
-  value: jest.fn().mockImplementation(query => ({
+  value: jest.fn().mockImplementation((query) => ({
     matches: false,
     media: query,
     onchange: null,
@@ -33,20 +33,20 @@ Object.defineProperty(window, 'matchMedia', {
     removeEventListener: jest.fn(),
     dispatchEvent: jest.fn(),
   })),
-})
+});
 
 // Mock next-auth
-jest.mock('next-auth', () => ({
+jest.mock("next-auth", () => ({
   getServerSession: jest.fn(),
-}))
+}));
 
-jest.mock('next-auth/react', () => ({
-  useSession: jest.fn(() => ({ data: null, status: 'loading' })),
+jest.mock("next-auth/react", () => ({
+  useSession: jest.fn(() => ({ data: null, status: "loading" })),
   SessionProvider: ({ children }) => children,
-}))
+}));
 
 // Mock Prisma client
-jest.mock('@/lib/prisma', () => ({
+jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {
     product: {
@@ -70,4 +70,4 @@ jest.mock('@/lib/prisma', () => ({
     },
     $transaction: jest.fn(),
   },
-}))
+}));

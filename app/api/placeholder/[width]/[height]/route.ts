@@ -11,7 +11,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   const { width, height } = params;
   const w = parseInt(width) || 200;
   const h = parseInt(height) || 200;
-  
+
   // Create a simple SVG placeholder
   const svg = `
     <svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
@@ -29,7 +29,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       </text>
     </svg>
   `;
-  
+
   return new NextResponse(svg, {
     headers: {
       "Content-Type": "image/svg+xml",

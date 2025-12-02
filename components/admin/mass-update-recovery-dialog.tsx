@@ -45,49 +45,49 @@ const failureReasonConfig: Record<UpdateFailureReason, {
   VALIDATION_ERROR: {
     label: "Validation Error",
     icon: AlertCircle,
-    color: "text-red-600",
+    color: "text-negative",
     description: "The data provided is invalid"
   },
   INSUFFICIENT_STOCK: {
     label: "Insufficient Stock",
     icon: Package,
-    color: "text-orange-600",
+    color: "text-warning",
     description: "Not enough stock available"
   },
   PRODUCT_NOT_FOUND: {
     label: "Product Not Found",
     icon: Package,
-    color: "text-red-600",
+    color: "text-negative",
     description: "Product does not exist or was deleted"
   },
   LOCATION_NOT_FOUND: {
     label: "Location Not Found",
     icon: MapPin,
-    color: "text-red-600",
+    color: "text-negative",
     description: "Location does not exist"
   },
   CONCURRENT_UPDATE: {
     label: "Concurrent Update",
     icon: RefreshCw,
-    color: "text-yellow-600",
+    color: "text-warning",
     description: "Another user modified this data"
   },
   DATABASE_ERROR: {
     label: "Database Error",
     icon: Database,
-    color: "text-red-600",
+    color: "text-negative",
     description: "Database operation failed"
   },
   NETWORK_ERROR: {
     label: "Network Error",
     icon: Network,
-    color: "text-gray-600",
+    color: "text-muted-foreground",
     description: "Connection to server failed"
   },
   UNKNOWN_ERROR: {
     label: "Unknown Error",
     icon: HelpCircle,
-    color: "text-gray-600",
+    color: "text-muted-foreground",
     description: "An unexpected error occurred"
   }
 };
@@ -143,7 +143,7 @@ export function MassUpdateRecoveryDialog({
       <DialogContent className="max-w-3xl max-h-[80vh]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <AlertTriangle className="h-5 w-5 text-orange-600" />
+            <AlertTriangle className="h-5 w-5 text-warning" />
             Inventory Update Issues
           </DialogTitle>
           <DialogDescription>

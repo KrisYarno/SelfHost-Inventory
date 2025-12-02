@@ -1,35 +1,29 @@
-import { NextRequest, NextResponse } from 'next/server';
-import prisma from '@/lib/prisma';
-import { hashPassword } from '@/lib/auth-helpers';
-import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from '@/lib/rateLimit';
+import { NextRequest, NextResponse } from "next/server";
+import prisma from "@/lib/prisma";
+import { hashPassword } from "@/lib/auth-helpers";
+import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
 
 export async function POST(request: NextRequest) {
   try {
-    const rateLimitHeaders = enforceRateLimit(request, 'auth:signup');
+    const rateLimitHeaders = enforceRateLimit(request, "auth:signup");
 
     const { email, password, username } = await request.json();
 
     // Validate input
     if (!email || !password || !username) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
     // Check if user already exists
     const existingUser = await prisma.user.findFirst({
       where: {
-        OR: [
-          { email },
-          { username }
-        ]
-      }
+        OR: [{ email }, { username }],
+      },
     });
 
     if (existingUser) {
       return NextResponse.json(
-        { error: existingUser.email === email ? 'Email already in use' : 'Username already taken' },
+        { error: existingUser.email === email ? "Email already in use" : "Username already taken" },
         { status: 409 }
       );
     }
@@ -58,7 +52,7 @@ export async function POST(request: NextRequest) {
     // In a real app, you might send an email notification here
 
     const response = NextResponse.json({
-      message: 'Account created successfully. Please wait for administrator approval.',
+      message: "Account created successfully. Please wait for administrator approval.",
       user: {
         id: user.id,
         email: user.email,
@@ -73,10 +67,7 @@ export async function POST(request: NextRequest) {
         { status: error.status, headers: error.headers }
       );
     }
-    console.error('Signup error:', error);
-    return NextResponse.json(
-      { error: 'Failed to create account' },
-      { status: 500 }
-    );
+    console.error("Signup error:", error);
+    return NextResponse.json({ error: "Failed to create account" }, { status: 500 });
   }
 }

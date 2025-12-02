@@ -4,7 +4,7 @@ import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
@@ -77,18 +77,15 @@ export async function GET(request: NextRequest) {
     ]);
 
     // Transform products to include quantity
-    const productsWithQuantity = products.map(product => {
+    const productsWithQuantity = products.map((product) => {
       let currentQuantity = 0;
-      
+
       if (locationId) {
         // Single location quantity
         currentQuantity = product.product_locations[0]?.quantity || 0;
       } else {
         // Total across all locations
-        currentQuantity = product.product_locations.reduce(
-          (sum, pl) => sum + pl.quantity,
-          0
-        );
+        currentQuantity = product.product_locations.reduce((sum, pl) => sum + pl.quantity, 0);
       }
 
       return {
@@ -108,9 +105,6 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("Error fetching products:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch products" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch products" }, { status: 500 });
   }
 }

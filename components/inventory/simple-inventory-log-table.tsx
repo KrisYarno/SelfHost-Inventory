@@ -135,9 +135,9 @@ export function SimpleInventoryLogTable({
                             {from.changeTime && <span>{format(new Date(from.changeTime), 'MMM dd, HH:mm')}</span>}
                             {showLocation && (
                               <span className="flex items-center gap-1">
-                                <span className="text-red-600">{from.locations?.name || '-'}</span>
+                                <span className="text-negative">{from.locations?.name || '-'}</span>
                                 <span className="text-muted-foreground">-&gt;</span>
-                                <span className="text-emerald-600">{to.locations?.name || '-'}</span>
+                                <span className="text-positive">{to.locations?.name || '-'}</span>
                               </span>
                             )}
                           </div>
@@ -226,9 +226,9 @@ export function SimpleInventoryLogTable({
                         )}
                         {showLocation && (
                           <TableCell>
-                            <span className="text-red-600">{from.locations?.name || '-'}</span>
+                            <span className="text-negative">{from.locations?.name || '-'}</span>
                             <span className="mx-1">-&gt;</span>
-                            <span className="text-emerald-600">{to.locations?.name || '-'}</span>
+                            <span className="text-positive">{to.locations?.name || '-'}</span>
                           </TableCell>
                         )}
                         <TableCell>

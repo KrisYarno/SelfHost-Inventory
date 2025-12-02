@@ -47,7 +47,7 @@ export function UserApprovalCard({ user, onApprove, onReject, isSelected, onTogg
 
   return (
     <>
-      <div className={`border ${isSelected ? 'border-primary' : 'border-border/70'} rounded-2xl p-6 hover:shadow-md transition-shadow relative bg-white dark:bg-slate-800`}>
+      <div className={`border ${isSelected ? 'border-primary' : 'border-border/70'} rounded-2xl p-6 hover:shadow-md transition-shadow relative bg-surface`}>
         {onToggleSelect && (
           <input
             type="checkbox"
@@ -75,14 +75,14 @@ export function UserApprovalCard({ user, onApprove, onReject, isSelected, onTogg
             <button
               onClick={handleApprove}
               disabled={isProcessing}
-              className="px-4 py-2 bg-success text-white rounded-lg hover:bg-success/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium"
+              className="px-4 py-2 bg-positive text-positive-foreground rounded-lg hover:bg-positive/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium"
             >
               {isProcessing ? 'Processing...' : 'Approve'}
             </button>
             <button
               onClick={() => setShowRejectDialog(true)}
               disabled={isProcessing}
-              className="px-4 py-2 bg-error text-white rounded-lg hover:bg-error/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium"
+              className="px-4 py-2 bg-negative text-white rounded-lg hover:bg-negative/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium"
             >
               Reject
             </button>
@@ -93,7 +93,7 @@ export function UserApprovalCard({ user, onApprove, onReject, isSelected, onTogg
       {/* Reject Dialog */}
       {showRejectDialog && (
         <div className="fixed inset-0 bg-background/80 dark:bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="rounded-2xl p-6 max-w-md w-full border border-border/70 bg-white dark:bg-slate-800 shadow-xl">
+          <div className="rounded-2xl p-6 max-w-md w-full border border-border/70 bg-surface shadow-xl">
             <h3 className="text-lg font-semibold mb-4">Reject User Application</h3>
             <p className="text-sm text-muted-foreground mb-4">
               Are you sure you want to reject {user.username}&apos;s application?
@@ -125,7 +125,7 @@ export function UserApprovalCard({ user, onApprove, onReject, isSelected, onTogg
               <button
                 onClick={handleReject}
                 disabled={isProcessing}
-                className="px-4 py-2 bg-error text-white rounded-lg hover:bg-error/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium"
+                className="px-4 py-2 bg-negative text-white rounded-lg hover:bg-negative/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium"
               >
                 {isProcessing ? 'Rejecting...' : 'Confirm Rejection'}
               </button>

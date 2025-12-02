@@ -3,13 +3,13 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 // GET /api/admin/products/deleted - List all soft deleted products (Admin only)
 export async function GET(_request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    
+
     // Check if user is authenticated and is an admin
     if (!session?.user?.isApproved || !session.user.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -32,7 +32,7 @@ export async function GET(_request: NextRequest) {
         },
       },
       orderBy: {
-        deletedAt: 'desc',
+        deletedAt: "desc",
       },
     });
 
@@ -42,9 +42,6 @@ export async function GET(_request: NextRequest) {
     });
   } catch (error) {
     console.error("Error fetching deleted products:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch deleted products" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch deleted products" }, { status: 500 });
   }
 }

@@ -64,7 +64,7 @@ export function OrderItemComponent({
     <div
       className={cn(
         "flex items-center gap-3 p-3 rounded-xl border border-border/70",
-        "bg-white dark:bg-slate-800",
+        "bg-surface",
         "shadow-md hover:shadow-lg transition-shadow",
         isOverPicked && "border-amber-500/60 bg-amber-500/10",
         className

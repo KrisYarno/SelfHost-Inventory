@@ -3,12 +3,12 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    
+
     if (!session?.user?.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
 
     if (search) {
       whereClause.products = {
-        name: { contains: search }
+        name: { contains: search },
       };
     }
 
@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
 
     if (locationFilter && locationFilter !== "all") {
       whereClause.locations = {
-        name: locationFilter
+        name: locationFilter,
       };
     }
 
@@ -62,19 +62,19 @@ export async function GET(request: NextRequest) {
         products: true,
         locations: true,
       },
-      orderBy: { changeTime: 'desc' },
+      orderBy: { changeTime: "desc" },
     });
 
     // Build CSV content
-    const headers = ['Timestamp', 'Product Name', 'User', 'Location', 'Type', 'Change (Delta)'];
+    const headers = ["Timestamp", "Product Name", "User", "Location", "Type", "Change (Delta)"];
     const rows = [headers];
 
-    logs.forEach(log => {
+    logs.forEach((log) => {
       rows.push([
         log.changeTime.toISOString(),
         log.products.name,
         log.users.username,
-        log.locations?.name || 'Unknown',
+        log.locations?.name || "Unknown",
         log.logType,
         log.delta.toString(),
       ]);
@@ -82,22 +82,19 @@ export async function GET(request: NextRequest) {
 
     // Convert to CSV string
     const csvContent = rows
-      .map(row => row.map(cell => `"${cell.replace(/"/g, '""')}"`).join(','))
-      .join('\n');
+      .map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(","))
+      .join("\n");
 
     // Return as downloadable file
     return new NextResponse(csvContent, {
       status: 200,
       headers: {
-        'Content-Type': 'text/csv',
-        'Content-Disposition': `attachment; filename="inventory-logs-${new Date().toISOString().split('T')[0]}.csv"`,
+        "Content-Type": "text/csv",
+        "Content-Disposition": `attachment; filename="inventory-logs-${new Date().toISOString().split("T")[0]}.csv"`,
       },
     });
   } catch (error) {
-    console.error('Error exporting logs:', error);
-    return NextResponse.json(
-      { error: "Failed to export logs" },
-      { status: 500 }
-    );
+    console.error("Error exporting logs:", error);
+    return NextResponse.json({ error: "Failed to export logs" }, { status: 500 });
   }
 }

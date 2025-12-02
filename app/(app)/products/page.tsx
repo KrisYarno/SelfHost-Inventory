@@ -20,7 +20,7 @@ export default function ProductsPage() {
   const [quickAdjustOpen, setQuickAdjustOpen] = useState(false);
   const [stockInOpen, setStockInOpen] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
-  
+
   const isAdmin = session?.user?.isAdmin;
 
   const handleEdit = (product: ProductWithQuantity) => {
@@ -81,11 +81,8 @@ export default function ProductsPage() {
       </main>
 
       {/* Dialogs */}
-      <CreateProductDialog
-        open={createDialogOpen}
-        onOpenChange={setCreateDialogOpen}
-      />
-      
+      <CreateProductDialog open={createDialogOpen} onOpenChange={setCreateDialogOpen} />
+
       <EditProductDialog
         product={selectedProduct}
         open={editDialogOpen}
@@ -94,7 +91,7 @@ export default function ProductsPage() {
           if (!open) setSelectedProduct(null);
         }}
       />
-      
+
       <DeleteProductDialog
         product={selectedProduct}
         open={deleteDialogOpen}
@@ -103,7 +100,7 @@ export default function ProductsPage() {
           if (!open) setSelectedProduct(null);
         }}
       />
-      
+
       {selectedProduct && (
         <QuickAdjustDialog
           open={quickAdjustOpen}
@@ -115,7 +112,7 @@ export default function ProductsPage() {
           onSuccess={refreshProducts}
         />
       )}
-      
+
       {selectedProduct && (
         <StockInDialog
           open={stockInOpen}

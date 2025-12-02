@@ -3,7 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 interface RouteParams {
   params: {
@@ -15,7 +15,7 @@ interface RouteParams {
 export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
     const session = await getServerSession(authOptions);
-    
+
     // Check if user is authenticated and is an admin
     if (!session?.user?.isApproved || !session.user.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -57,9 +57,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     });
   } catch (error) {
     console.error("Error restoring product:", error);
-    return NextResponse.json(
-      { error: "Failed to restore product" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to restore product" }, { status: 500 });
   }
 }

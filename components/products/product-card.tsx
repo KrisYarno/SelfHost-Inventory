@@ -37,7 +37,7 @@ export function ProductCard({
   className,
 }: ProductCardProps) {
   return (
-    <Card 
+    <Card
       className={cn(
         "relative overflow-hidden transition-all duration-300 hover:shadow-lg",
         // Keep consistent height to reduce layout shift
@@ -45,12 +45,6 @@ export function ProductCard({
         className
       )}
     >
-      {product.currentQuantity <= 0 && (
-        <StatusBadge tone="negative" className="absolute right-2 top-2 z-10">
-          Out
-        </StatusBadge>
-      )}
-
       <div className="p-4">
         {/* Actions menu */}
         {(isAdmin || showInventoryActions) && (onEdit || onDelete || onQuickAdjust || onStockIn) && (
@@ -119,7 +113,7 @@ export function ProductCard({
           </div>
 
           {/* Badges */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <ValueChip
               tone={
                 product.currentQuantity > 0
@@ -131,6 +125,9 @@ export function ProductCard({
             >
               {product.currentQuantity} units
             </ValueChip>
+            {product.currentQuantity <= 0 && (
+              <StatusBadge tone="negative">Out</StatusBadge>
+            )}
           </div>
 
         </div>

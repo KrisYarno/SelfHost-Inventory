@@ -1,20 +1,26 @@
-'use client';
+"use client";
 
-import { useState, useEffect } from 'react';
-import { useTheme } from 'next-themes';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Separator } from '@/components/ui/separator';
-import { Monitor, Moon, Sun, Smartphone, Tablet, Info } from 'lucide-react';
-import { toast } from 'sonner';
+import { useState, useEffect } from "react";
+import { useTheme } from "next-themes";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Separator } from "@/components/ui/separator";
+import { Monitor, Moon, Sun, Smartphone, Tablet, Info } from "lucide-react";
+import { toast } from "sonner";
 
-type DisplayMode = 'auto' | 'mobile' | 'tablet' | 'desktop';
-type DateFormat = 'MM/DD/YYYY' | 'DD/MM/YYYY' | 'YYYY-MM-DD';
-type TimeFormat = '12h' | '24h';
+type DisplayMode = "auto" | "mobile" | "tablet" | "desktop";
+type DateFormat = "MM/DD/YYYY" | "DD/MM/YYYY" | "YYYY-MM-DD";
+type TimeFormat = "12h" | "24h";
 
 interface AppSettings {
   displayMode: DisplayMode;
@@ -26,9 +32,9 @@ interface AppSettings {
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
-  displayMode: 'auto',
-  dateFormat: 'MM/DD/YYYY',
-  timeFormat: '12h',
+  displayMode: "auto",
+  dateFormat: "MM/DD/YYYY",
+  timeFormat: "12h",
   itemsPerPage: 20,
   autoRefresh: true,
   refreshInterval: 30,
@@ -41,33 +47,33 @@ export default function SettingsPage() {
 
   // Load settings from localStorage
   useEffect(() => {
-    const savedSettings = localStorage.getItem('appSettings');
+    const savedSettings = localStorage.getItem("appSettings");
     if (savedSettings) {
       try {
         const parsed = JSON.parse(savedSettings);
         setSettings({ ...DEFAULT_SETTINGS, ...parsed });
       } catch (error) {
-        console.error('Error loading settings:', error);
+        console.error("Error loading settings:", error);
       }
     }
   }, []);
 
   const updateSetting = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
-    setSettings(prev => ({ ...prev, [key]: value }));
+    setSettings((prev) => ({ ...prev, [key]: value }));
     setHasChanges(true);
   };
 
   const saveSettings = () => {
-    localStorage.setItem('appSettings', JSON.stringify(settings));
+    localStorage.setItem("appSettings", JSON.stringify(settings));
     setHasChanges(false);
-    toast.success('Settings saved successfully');
+    toast.success("Settings saved successfully");
   };
 
   const resetSettings = () => {
     setSettings(DEFAULT_SETTINGS);
-    localStorage.removeItem('appSettings');
+    localStorage.removeItem("appSettings");
     setHasChanges(false);
-    toast.success('Settings reset to defaults');
+    toast.success("Settings reset to defaults");
   };
 
   return (
@@ -88,9 +94,7 @@ export default function SettingsPage() {
           <Card>
             <CardHeader>
               <CardTitle>Appearance</CardTitle>
-              <CardDescription>
-                Customize how the application looks
-              </CardDescription>
+              <CardDescription>Customize how the application looks</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="space-y-3">
@@ -98,21 +102,30 @@ export default function SettingsPage() {
                 <RadioGroup value={theme} onValueChange={setTheme}>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="light" id="light" />
-                    <Label htmlFor="light" className="flex items-center gap-2 font-normal cursor-pointer">
+                    <Label
+                      htmlFor="light"
+                      className="flex items-center gap-2 font-normal cursor-pointer"
+                    >
                       <Sun className="h-4 w-4" />
                       Light
                     </Label>
                   </div>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="dark" id="dark" />
-                    <Label htmlFor="dark" className="flex items-center gap-2 font-normal cursor-pointer">
+                    <Label
+                      htmlFor="dark"
+                      className="flex items-center gap-2 font-normal cursor-pointer"
+                    >
                       <Moon className="h-4 w-4" />
                       Dark
                     </Label>
                   </div>
                   <div className="flex items-center space-x-2">
                     <RadioGroupItem value="system" id="system" />
-                    <Label htmlFor="system" className="flex items-center gap-2 font-normal cursor-pointer">
+                    <Label
+                      htmlFor="system"
+                      className="flex items-center gap-2 font-normal cursor-pointer"
+                    >
                       <Monitor className="h-4 w-4" />
                       System
                     </Label>
@@ -124,9 +137,9 @@ export default function SettingsPage() {
 
               <div className="space-y-3">
                 <Label htmlFor="display-mode">Display Mode</Label>
-                <Select 
-                  value={settings.displayMode} 
-                  onValueChange={(value: DisplayMode) => updateSetting('displayMode', value)}
+                <Select
+                  value={settings.displayMode}
+                  onValueChange={(value: DisplayMode) => updateSetting("displayMode", value)}
                 >
                   <SelectTrigger id="display-mode">
                     <SelectValue />
@@ -169,16 +182,14 @@ export default function SettingsPage() {
           <Card>
             <CardHeader>
               <CardTitle>Regional Settings</CardTitle>
-              <CardDescription>
-                Date and time format preferences
-              </CardDescription>
+              <CardDescription>Date and time format preferences</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="space-y-3">
                 <Label htmlFor="date-format">Date Format</Label>
-                <Select 
-                  value={settings.dateFormat} 
-                  onValueChange={(value: DateFormat) => updateSetting('dateFormat', value)}
+                <Select
+                  value={settings.dateFormat}
+                  onValueChange={(value: DateFormat) => updateSetting("dateFormat", value)}
                 >
                   <SelectTrigger id="date-format">
                     <SelectValue />
@@ -193,9 +204,9 @@ export default function SettingsPage() {
 
               <div className="space-y-3">
                 <Label htmlFor="time-format">Time Format</Label>
-                <Select 
-                  value={settings.timeFormat} 
-                  onValueChange={(value: TimeFormat) => updateSetting('timeFormat', value)}
+                <Select
+                  value={settings.timeFormat}
+                  onValueChange={(value: TimeFormat) => updateSetting("timeFormat", value)}
                 >
                   <SelectTrigger id="time-format">
                     <SelectValue />
@@ -213,16 +224,14 @@ export default function SettingsPage() {
           <Card>
             <CardHeader>
               <CardTitle>Display Settings</CardTitle>
-              <CardDescription>
-                Configure data display preferences
-              </CardDescription>
+              <CardDescription>Configure data display preferences</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="space-y-3">
                 <Label htmlFor="items-per-page">Items per page</Label>
-                <Select 
-                  value={settings.itemsPerPage.toString()} 
-                  onValueChange={(value) => updateSetting('itemsPerPage', parseInt(value))}
+                <Select
+                  value={settings.itemsPerPage.toString()}
+                  onValueChange={(value) => updateSetting("itemsPerPage", parseInt(value))}
                 >
                   <SelectTrigger id="items-per-page">
                     <SelectValue />
@@ -247,14 +256,14 @@ export default function SettingsPage() {
                       Automatically refresh inventory data
                     </p>
                   </div>
-                  <Select 
-                    value={settings.autoRefresh ? settings.refreshInterval.toString() : 'off'} 
+                  <Select
+                    value={settings.autoRefresh ? settings.refreshInterval.toString() : "off"}
                     onValueChange={(value) => {
-                      if (value === 'off') {
-                        updateSetting('autoRefresh', false);
+                      if (value === "off") {
+                        updateSetting("autoRefresh", false);
                       } else {
-                        updateSetting('autoRefresh', true);
-                        updateSetting('refreshInterval', parseInt(value));
+                        updateSetting("autoRefresh", true);
+                        updateSetting("refreshInterval", parseInt(value));
                       }
                     }}
                   >
@@ -277,9 +286,7 @@ export default function SettingsPage() {
           <Card>
             <CardHeader>
               <CardTitle>About</CardTitle>
-              <CardDescription>
-                Application information and resources
-              </CardDescription>
+              <CardDescription>Application information and resources</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <Alert>
@@ -287,13 +294,11 @@ export default function SettingsPage() {
                 <AlertDescription>
                   <div className="space-y-2">
                     <p>Inventory Management System v1.0.0</p>
-                    <p className="text-xs">
-                      Built with Next.js, Prisma, and Tailwind CSS
-                    </p>
+                    <p className="text-xs">Built with Next.js, Prisma, and Tailwind CSS</p>
                   </div>
                 </AlertDescription>
               </Alert>
-              
+
               <div className="space-y-2 text-sm text-muted-foreground">
                 <p>For help and support, contact your system administrator.</p>
                 <p>© 2024 Inventory Management System</p>
@@ -308,9 +313,7 @@ export default function SettingsPage() {
                 <Button variant="outline" onClick={resetSettings}>
                   Reset to Defaults
                 </Button>
-                <Button onClick={saveSettings}>
-                  Save Changes
-                </Button>
+                <Button onClick={saveSettings}>Save Changes</Button>
               </div>
             </div>
           )}

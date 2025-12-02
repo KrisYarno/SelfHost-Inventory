@@ -1,29 +1,29 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth/next';
-import { ZodError } from 'zod';
-import { authOptions } from '@/lib/auth';
+import { NextRequest, NextResponse } from "next/server";
+import { getServerSession } from "next-auth/next";
+import { ZodError } from "zod";
+import { authOptions } from "@/lib/auth";
 import {
   createInventoryAdjustment,
   validateStockAvailability,
   OptimisticLockError,
-} from '@/lib/inventory';
-import { inventory_logs_logType } from '@prisma/client';
-import { auditService } from '@/lib/audit';
-import prisma from '@/lib/prisma';
-import { validateCSRFToken } from '@/lib/csrf';
-import { InventoryAdjustmentSchema } from '@/lib/validation/inventory';
-import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from '@/lib/rateLimit';
+} from "@/lib/inventory";
+import { inventory_logs_logType } from "@prisma/client";
+import { auditService } from "@/lib/audit";
+import prisma from "@/lib/prisma";
+import { validateCSRFToken } from "@/lib/csrf";
+import { InventoryAdjustmentSchema } from "@/lib/validation/inventory";
+import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
     if (!session?.user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const rateLimitHeaders = enforceRateLimit(request, 'inventory:adjust', {
+    const rateLimitHeaders = enforceRateLimit(request, "inventory:adjust", {
       identifier: session.user.id,
     });
 
@@ -46,17 +46,14 @@ export async function POST(request: NextRequest) {
       );
 
       if (!validation.isValid) {
-        return NextResponse.json(
-          { error: validation.error },
-          { status: 400 }
-        );
+        return NextResponse.json({ error: validation.error }, { status: 400 });
       }
     }
 
     // Get product info for audit log
     const product = await prisma.product.findUnique({
       where: { id: body.productId },
-      select: { name: true }
+      select: { name: true },
     });
 
     // Create the adjustment with version checking
@@ -98,31 +95,28 @@ export async function POST(request: NextRequest) {
     if (error instanceof ZodError) {
       return NextResponse.json(
         {
-          error: 'Invalid request payload',
+          error: "Invalid request payload",
           details: error.flatten().fieldErrors,
         },
         { status: 400 }
       );
     }
 
-    console.error('Error creating inventory adjustment:', error);
-    
+    console.error("Error creating inventory adjustment:", error);
+
     // Handle optimistic lock errors specifically
     if (error instanceof OptimisticLockError) {
       return NextResponse.json(
-        { 
+        {
           error: error.message,
-          type: 'OPTIMISTIC_LOCK_ERROR',
+          type: "OPTIMISTIC_LOCK_ERROR",
           currentVersion: error.currentVersion,
-          expectedVersion: error.expectedVersion
+          expectedVersion: error.expectedVersion,
         },
         { status: 409 } // Conflict status code
       );
     }
-    
-    return NextResponse.json(
-      { error: 'Failed to create inventory adjustment' },
-      { status: 500 }
-    );
+
+    return NextResponse.json({ error: "Failed to create inventory adjustment" }, { status: 500 });
   }
 }

@@ -19,7 +19,7 @@ const config: Config = {
         },
         border: "hsl(var(--border))",
         ring: "hsl(var(--ring))",
-        
+
         // UI colors
         muted: {
           DEFAULT: "hsl(var(--muted))",
@@ -33,7 +33,7 @@ const config: Config = {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
         },
-        
+
         // Brand colors
         primary: {
           DEFAULT: "hsl(var(--primary))",
@@ -43,21 +43,41 @@ const config: Config = {
           DEFAULT: "hsl(var(--accent))",
           foreground: "hsl(var(--accent-foreground))",
         },
-        
+
         // Semantic colors
-        success: "hsl(var(--success))",
+        success: {
+          DEFAULT: "hsl(var(--success))",
+          foreground: "hsl(var(--success-foreground))",
+        },
         warning: {
           DEFAULT: "hsl(var(--warning))",
           foreground: "hsl(var(--warning-foreground))",
+          muted: "hsl(var(--warning-muted))",
+          border: "hsl(var(--warning-border))",
         },
-        error: "hsl(var(--error))",
-        info: "hsl(var(--info))",
-        
-        // Inventory-specific colors
-        inventory: {
-          increase: "hsl(var(--inventory-increase))",
-          decrease: "hsl(var(--inventory-decrease))",
-          neutral: "hsl(var(--inventory-neutral))",
+        error: {
+          DEFAULT: "hsl(var(--error))",
+          foreground: "hsl(var(--destructive-foreground))",
+        },
+        info: {
+          DEFAULT: "hsl(var(--info))",
+          foreground: "hsl(var(--info-foreground))",
+          muted: "hsl(var(--info-muted))",
+          border: "hsl(var(--info-border))",
+        },
+
+        // Status colors (for deltas, changes, indicators)
+        positive: {
+          DEFAULT: "hsl(var(--positive))",
+          foreground: "hsl(var(--positive-foreground))",
+          muted: "hsl(var(--positive-muted))",
+          border: "hsl(var(--positive-border))",
+        },
+        negative: {
+          DEFAULT: "hsl(var(--negative))",
+          foreground: "hsl(var(--negative-foreground))",
+          muted: "hsl(var(--negative-muted))",
+          border: "hsl(var(--negative-border))",
         },
       },
       fontFamily: {
@@ -67,27 +87,27 @@ const config: Config = {
       fontSize: {
         // Display
         "display-lg": ["32px", { lineHeight: "40px", fontWeight: "700", letterSpacing: "-0.02em" }],
-        "display": ["28px", { lineHeight: "36px", fontWeight: "700", letterSpacing: "-0.02em" }],
-        
+        display: ["28px", { lineHeight: "36px", fontWeight: "700", letterSpacing: "-0.02em" }],
+
         // Headings
-        "h1": ["24px", { lineHeight: "32px", fontWeight: "600", letterSpacing: "-0.01em" }],
-        "h2": ["20px", { lineHeight: "28px", fontWeight: "600", letterSpacing: "-0.01em" }],
-        "h3": ["18px", { lineHeight: "24px", fontWeight: "600" }],
-        "h4": ["16px", { lineHeight: "24px", fontWeight: "600" }],
-        
+        h1: ["24px", { lineHeight: "32px", fontWeight: "600", letterSpacing: "-0.01em" }],
+        h2: ["20px", { lineHeight: "28px", fontWeight: "600", letterSpacing: "-0.01em" }],
+        h3: ["18px", { lineHeight: "24px", fontWeight: "600" }],
+        h4: ["16px", { lineHeight: "24px", fontWeight: "600" }],
+
         // Body
         "body-lg": ["16px", { lineHeight: "24px", fontWeight: "400" }],
-        "body": ["14px", { lineHeight: "20px", fontWeight: "400" }],
+        body: ["14px", { lineHeight: "20px", fontWeight: "400" }],
         "body-sm": ["13px", { lineHeight: "18px", fontWeight: "400" }],
-        
+
         // UI
-        "label": ["12px", { lineHeight: "16px", fontWeight: "500", letterSpacing: "0.01em" }],
-        "caption": ["11px", { lineHeight: "16px", fontWeight: "400", letterSpacing: "0.02em" }],
-        
+        label: ["12px", { lineHeight: "16px", fontWeight: "500", letterSpacing: "0.01em" }],
+        caption: ["11px", { lineHeight: "16px", fontWeight: "400", letterSpacing: "0.02em" }],
+
         // Numbers
         "metric-lg": ["28px", { lineHeight: "32px", fontWeight: "700" }],
-        "metric": ["20px", { lineHeight: "24px", fontWeight: "600" }],
-        "number": ["14px", { lineHeight: "20px", fontWeight: "500" }],
+        metric: ["20px", { lineHeight: "24px", fontWeight: "600" }],
+        number: ["14px", { lineHeight: "20px", fontWeight: "500" }],
       },
       spacing: {
         "0.5": "2px",
@@ -113,7 +133,7 @@ const config: Config = {
         xl: "1rem",
         "2xl": "1.5rem",
         full: "9999px",
-        
+
         // Component-specific
         card: "var(--card-radius)",
         button: "var(--button-radius)",
@@ -128,7 +148,7 @@ const config: Config = {
         lg: "var(--shadow-lg)",
         xl: "var(--shadow-xl)",
         inner: "var(--shadow-inner)",
-        
+
         // Component-specific
         card: "var(--card-shadow)",
         "card-hover": "var(--card-hover-shadow)",
@@ -158,15 +178,15 @@ const config: Config = {
         },
       },
       transitionTimingFunction: {
-        "in": "cubic-bezier(0.4, 0, 1, 1)",
-        "out": "cubic-bezier(0, 0, 0.2, 1)",
+        in: "cubic-bezier(0.4, 0, 1, 1)",
+        out: "cubic-bezier(0, 0, 0.2, 1)",
         "in-out": "cubic-bezier(0.4, 0, 0.2, 1)",
-        "bounce": "cubic-bezier(0.68, -0.55, 0.265, 1.55)",
+        bounce: "cubic-bezier(0.68, -0.55, 0.265, 1.55)",
       },
       transitionDuration: {
-        "fast": "150ms",
-        "normal": "300ms",
-        "slow": "500ms",
+        fast: "150ms",
+        normal: "300ms",
+        slow: "500ms",
       },
     },
   },

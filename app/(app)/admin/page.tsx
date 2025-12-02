@@ -4,14 +4,7 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { 
-  Package, 
-  Users, 
-  AlertTriangle,
-  ArrowRight,
-  Activity,
-  TrendingUp
-} from "lucide-react";
+import { Package, Users, AlertTriangle, ArrowRight, Activity, TrendingUp } from "lucide-react";
 import Link from "next/link";
 import { formatNumber } from "@/lib/utils";
 import { toast } from "sonner";
@@ -51,8 +44,8 @@ export default function AdminDashboardPage() {
       const data = await response.json();
       setMetrics(data);
     } catch (error) {
-      console.error('Error fetching dashboard data:', error);
-      toast.error('Failed to load dashboard data');
+      console.error("Error fetching dashboard data:", error);
+      toast.error("Failed to load dashboard data");
     } finally {
       setIsLoading(false);
     }
@@ -60,7 +53,7 @@ export default function AdminDashboardPage() {
 
   useEffect(() => {
     fetchDashboardData();
-    
+
     // Auto-refresh every 30 seconds
     const interval = setInterval(fetchDashboardData, 30000);
     return () => clearInterval(interval);
@@ -109,9 +102,7 @@ export default function AdminDashboardPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{metrics?.totalProducts || 0}</div>
-            <p className="text-xs text-muted-foreground">
-              Across all locations
-            </p>
+            <p className="text-xs text-muted-foreground">Across all locations</p>
           </CardContent>
         </Card>
 
@@ -148,9 +139,7 @@ export default function AdminDashboardPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{metrics?.recentTransactions || 0}</div>
-            <p className="text-xs text-muted-foreground">
-              Last 24 hours
-            </p>
+            <p className="text-xs text-muted-foreground">Last 24 hours</p>
           </CardContent>
         </Card>
       </div>
@@ -178,9 +167,7 @@ export default function AdminDashboardPage() {
                     {formatNumber(product.movement)} units
                   </div>
                 </div>
-              )) || (
-                <p className="text-muted-foreground">No product movement data</p>
-              )}
+              )) || <p className="text-muted-foreground">No product movement data</p>}
             </div>
           </CardContent>
         </Card>
@@ -209,19 +196,20 @@ export default function AdminDashboardPage() {
                     </p>
                   </div>
                   <div className="text-right">
-                    <p className={`text-sm font-medium ${
-                      activity.quantity > 0 ? 'text-green-600' : 'text-red-600'
-                    }`}>
-                      {activity.quantity > 0 ? '+' : ''}{activity.quantity}
+                    <p
+                      className={`text-sm font-medium ${
+                        activity.quantity > 0 ? "text-positive" : "text-negative"
+                      }`}
+                    >
+                      {activity.quantity > 0 ? "+" : ""}
+                      {activity.quantity}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       {new Date(activity.timestamp).toLocaleTimeString()}
                     </p>
                   </div>
                 </div>
-              )) || (
-                <p className="text-muted-foreground">No recent activity</p>
-              )}
+              )) || <p className="text-muted-foreground">No recent activity</p>}
             </div>
           </CardContent>
         </Card>

@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { ActivityResponse, ActivityItem } from "@/types/reports";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
@@ -22,65 +22,65 @@ export async function GET(request: NextRequest) {
       prisma.inventory_logs.findMany({
         skip,
         take: pageSize,
-        orderBy: { changeTime: 'desc' },
+        orderBy: { changeTime: "desc" },
         include: {
           users: {
             select: {
               id: true,
-              username: true
-            }
+              username: true,
+            },
           },
           products: {
             select: {
               id: true,
-              name: true
-            }
+              name: true,
+            },
           },
           locations: {
             select: {
               id: true,
-              name: true
-            }
-          }
-        }
+              name: true,
+            },
+          },
+        },
       }),
-      prisma.inventory_logs.count()
+      prisma.inventory_logs.count(),
     ]);
 
     // Transform logs to activity items
-    const activities: ActivityItem[] = logs.map(log => {
-      let type: ActivityItem['type'] = 'adjustment';
-      let description = '';
+    const activities: ActivityItem[] = logs.map((log) => {
+      let type: ActivityItem["type"] = "adjustment";
+      let description = "";
 
       // Determine activity type based on logType and delta
-      if (log.logType === 'TRANSFER') {
+      if (log.logType === "TRANSFER") {
         // Transfer activities
         if (log.delta > 0) {
-          type = 'stock_in';
+          type = "stock_in";
           description = `Received ${log.delta} units of ${log.products.name} via transfer`;
         } else if (log.delta < 0) {
-          type = 'stock_out';
+          type = "stock_out";
           description = `Transferred out ${Math.abs(log.delta)} units of ${log.products.name}`;
         } else {
-          type = 'adjustment';
+          type = "adjustment";
           description = `Transfer with no quantity change for ${log.products.name}`;
         }
-      } else if (log.logType === 'ADJUSTMENT') {
+      } else if (log.logType === "ADJUSTMENT") {
         // Adjustment activities - determine type based on delta
         if (log.delta > 0) {
-          type = 'stock_in';
+          type = "stock_in";
           description = `Stocked in ${log.delta} units of ${log.products.name}`;
         } else if (log.delta < 0) {
-          type = 'stock_out';
+          type = "stock_out";
           description = `Removed ${Math.abs(log.delta)} units of ${log.products.name}`;
         } else {
-          type = 'adjustment';
+          type = "adjustment";
           description = `No quantity change for ${log.products.name}`;
         }
       } else {
         // Fallback for any unexpected logType values
-        type = log.delta > 0 ? 'stock_in' : log.delta < 0 ? 'stock_out' : 'adjustment';
-        description = `${log.delta > 0 ? 'Added' : 'Removed'} ${Math.abs(log.delta)} units of ${log.products.name}`;
+        type = log.delta > 0 ? "stock_in" : log.delta < 0 ? "stock_out" : "adjustment";
+        description = `${log.delta > 0 ? "Added" : "Removed"} ${Math.abs(log.delta)} units of ${log.products.name}`;
       }
 
       return {
@@ -90,20 +90,20 @@ export async function GET(request: NextRequest) {
         description,
         user: {
           id: log.users.id,
-          username: log.users.username
+          username: log.users.username,
         },
         product: {
           id: log.products.id,
-          name: log.products.name
+          name: log.products.name,
         },
         location: {
           id: log.locations?.id || 1,
-          name: log.locations?.name || 'Default'
+          name: log.locations?.name || "Default",
         },
         metadata: {
           quantityChange: log.delta,
-          logType: log.logType
-        }
+          logType: log.logType,
+        },
       };
     });
 
@@ -113,16 +113,13 @@ export async function GET(request: NextRequest) {
         page,
         pageSize,
         total,
-        totalPages: Math.ceil(total / pageSize)
-      }
+        totalPages: Math.ceil(total / pageSize),
+      },
     };
 
     return NextResponse.json(response);
   } catch (error) {
     console.error("Error fetching activity:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch activity" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch activity" }, { status: 500 });
   }
 }

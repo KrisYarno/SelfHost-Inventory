@@ -251,28 +251,28 @@ export function ProductPerformance() {
                   <TableCell className="text-right">
                     {product.currentStock}
                   </TableCell>
-                  <TableCell className="text-right text-green-600">
+                  <TableCell className="text-right text-positive">
                     +{product.stockIn}
                   </TableCell>
-                  <TableCell className="text-right text-red-600">
+                  <TableCell className="text-right text-negative">
                     -{product.stockOut}
                   </TableCell>
                   <TableCell className="text-right font-medium">
                     <span className={cn(
-                      product.net > 0 && "text-green-600",
-                      product.net < 0 && "text-red-600"
+                      product.net > 0 && "text-positive",
+                      product.net < 0 && "text-negative"
                     )}>
                       {product.net > 0 ? '+' : ''}{product.net}
                     </span>
                   </TableCell>
                   <TableCell className="text-center">
                     {product.trend === 'up' ? (
-                      <Badge variant="default" className="bg-green-100 text-green-800">
+                      <Badge variant="default" className="bg-positive-muted text-positive-foreground border border-positive-border">
                         <TrendingUp className="h-3 w-3 mr-1" />
                         Up
                       </Badge>
                     ) : product.trend === 'down' ? (
-                      <Badge variant="default" className="bg-red-100 text-red-800">
+                      <Badge variant="default" className="bg-negative-muted text-negative-foreground border border-negative-border">
                         <TrendingDown className="h-3 w-3 mr-1" />
                         Down
                       </Badge>

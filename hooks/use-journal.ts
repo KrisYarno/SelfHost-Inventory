@@ -35,13 +35,11 @@ export const useJournalStore = create<JournalStore>()(
       adjustments: {},
 
       addAdjustment: (adjustment) => {
-        console.log('useJournalStore: addAdjustment called with:', adjustment);
         set((state) => {
           const newAdjustments = {
             ...state.adjustments,
             [adjustment.productId]: adjustment,
           };
-          console.log('useJournalStore: new adjustments state:', newAdjustments);
           return { adjustments: newAdjustments };
         });
       },

@@ -1,19 +1,19 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth';
-import sgMail from '@sendgrid/mail';
+import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth";
+import sgMail from "@sendgrid/mail";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function POST(_request: NextRequest) {
   try {
     const session = await getSession();
     if (!session || !session.user.isAdmin) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Check email exists
     if (!session.user.email) {
-      return NextResponse.json({ error: 'No email address found for user' }, { status: 400 });
+      return NextResponse.json({ error: "No email address found for user" }, { status: 400 });
     }
 
     // Initialize SendGrid
@@ -23,26 +23,26 @@ export async function POST(_request: NextRequest) {
 
     const tests = [];
     const userEmail = session.user.email;
-    
+
     // Test 1: Simple text email
     try {
       const simpleMsg = {
         to: userEmail,
-        from: process.env.SENDGRID_FROM_EMAIL || 'alerts@advancedresearchpep.com',
-        subject: 'Test 1: Simple Text Email',
-        text: 'This is a simple text email test from your inventory system.',
+        from: process.env.SENDGRID_FROM_EMAIL || "alerts@advancedresearchpep.com",
+        subject: "Test 1: Simple Text Email",
+        text: "This is a simple text email test from your inventory system.",
       };
-      
+
       const result1 = await sgMail.send(simpleMsg);
       tests.push({
-        test: 'Simple text email',
+        test: "Simple text email",
         success: true,
         statusCode: result1[0].statusCode,
         headers: result1[0].headers,
       });
     } catch (error: any) {
       tests.push({
-        test: 'Simple text email',
+        test: "Simple text email",
         success: false,
         error: error.message,
         code: error.code,
@@ -54,21 +54,21 @@ export async function POST(_request: NextRequest) {
     try {
       const htmlMsg = {
         to: userEmail,
-        from: process.env.SENDGRID_FROM_EMAIL || 'alerts@advancedresearchpep.com',
-        subject: 'Test 2: HTML Email',
-        text: 'This is the plain text version.',
-        html: '<strong>This is the HTML version.</strong>',
+        from: process.env.SENDGRID_FROM_EMAIL || "alerts@advancedresearchpep.com",
+        subject: "Test 2: HTML Email",
+        text: "This is the plain text version.",
+        html: "<strong>This is the HTML version.</strong>",
       };
-      
+
       const result2 = await sgMail.send(htmlMsg);
       tests.push({
-        test: 'HTML email',
+        test: "HTML email",
         success: true,
         statusCode: result2[0].statusCode,
       });
     } catch (error: any) {
       tests.push({
-        test: 'HTML email',
+        test: "HTML email",
         success: false,
         error: error.message,
         code: error.code,
@@ -81,19 +81,19 @@ export async function POST(_request: NextRequest) {
       try {
         const templateMsg = {
           to: session.user.email,
-          from: process.env.SENDGRID_FROM_EMAIL || 'alerts@advancedresearchpep.com',
+          from: process.env.SENDGRID_FROM_EMAIL || "alerts@advancedresearchpep.com",
           templateId: process.env.TEMPLATE_ID,
         };
-        
+
         const result3 = await sgMail.send(templateMsg);
         tests.push({
-          test: 'Template without data',
+          test: "Template without data",
           success: true,
           statusCode: result3[0].statusCode,
         });
       } catch (error: any) {
         tests.push({
-          test: 'Template without data',
+          test: "Template without data",
           success: false,
           error: error.message,
           code: error.code,
@@ -107,22 +107,22 @@ export async function POST(_request: NextRequest) {
       try {
         const templateDataMsg = {
           to: session.user.email,
-          from: process.env.SENDGRID_FROM_EMAIL || 'alerts@advancedresearchpep.com',
+          from: process.env.SENDGRID_FROM_EMAIL || "alerts@advancedresearchpep.com",
           templateId: process.env.TEMPLATE_ID,
           dynamicTemplateData: {
-            recipientName: 'Test User',
+            recipientName: "Test User",
           },
         };
-        
+
         const result4 = await sgMail.send(templateDataMsg);
         tests.push({
-          test: 'Template with minimal data',
+          test: "Template with minimal data",
           success: true,
           statusCode: result4[0].statusCode,
         });
       } catch (error: any) {
         tests.push({
-          test: 'Template with minimal data',
+          test: "Template with minimal data",
           success: false,
           error: error.message,
           code: error.code,
@@ -143,11 +143,11 @@ export async function POST(_request: NextRequest) {
       tests,
     });
   } catch (error) {
-    console.error('Debug test failed:', error);
+    console.error("Debug test failed:", error);
     return NextResponse.json(
-      { 
-        error: 'Debug test failed',
-        details: error instanceof Error ? error.message : 'Unknown error',
+      {
+        error: "Debug test failed",
+        details: error instanceof Error ? error.message : "Unknown error",
       },
       { status: 500 }
     );

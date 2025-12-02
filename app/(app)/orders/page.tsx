@@ -12,20 +12,20 @@ import { useOrders } from "@/hooks/use-orders";
 import { Order } from "@/types/orders";
 import { cn } from "@/lib/utils";
 
-type ViewMode = 'grid' | 'list';
-type OrderStatus = 'all' | 'pending' | 'in_progress' | 'completed';
+type ViewMode = "grid" | "list";
+type OrderStatus = "all" | "pending" | "in_progress" | "completed";
 
 export default function OrderPackerPage() {
-  const [viewMode, setViewMode] = useState<ViewMode>('list');
-  const [statusFilter, setStatusFilter] = useState<OrderStatus>('all');
+  const [viewMode, setViewMode] = useState<ViewMode>("list");
+  const [statusFilter, setStatusFilter] = useState<OrderStatus>("all");
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSheetOpen, setIsSheetOpen] = useState(false);
 
   // Use TanStack Query for data fetching
-  const { data, isLoading, error, refetch } = useOrders({ 
+  const { data, isLoading, error, refetch } = useOrders({
     status: statusFilter,
-    limit: 20 
+    limit: 20,
   });
 
   // Pull-to-refresh functionality
@@ -33,9 +33,9 @@ export default function OrderPackerPage() {
     setIsRefreshing(true);
     await refetch();
     setIsRefreshing(false);
-    
+
     // Haptic feedback
-    if ('vibrate' in navigator) {
+    if ("vibrate" in navigator) {
       navigator.vibrate(10);
     }
   }, [refetch]);
@@ -44,32 +44,36 @@ export default function OrderPackerPage() {
   const handleOrderSelect = useCallback((order: Order) => {
     setSelectedOrder(order);
     setIsSheetOpen(true);
-    
+
     // Haptic feedback
-    if ('vibrate' in navigator) {
+    if ("vibrate" in navigator) {
       navigator.vibrate(10);
     }
   }, []);
 
   // Handle swipe action
-  const handleOrderSwipe = useCallback((order: Order) => {
-    handleOrderSelect(order);
-  }, [handleOrderSelect]);
+  const handleOrderSwipe = useCallback(
+    (order: Order) => {
+      handleOrderSelect(order);
+    },
+    [handleOrderSelect]
+  );
 
   // Sync status indicator
-  const lastSyncTime = new Date().toLocaleTimeString('en-US', { 
-    hour: '2-digit', 
-    minute: '2-digit' 
+  const lastSyncTime = new Date().toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
   });
 
   // Count orders by status
-  const orderCounts = data?.orders.reduce((
-    acc: Record<string, number>,
-    order: Order
-  ) => {
-    acc[order.status] = (acc[order.status] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>) || {};
+  const orderCounts =
+    data?.orders.reduce(
+      (acc: Record<string, number>, order: Order) => {
+        acc[order.status] = (acc[order.status] || 0) + 1;
+        return acc;
+      },
+      {} as Record<string, number>
+    ) || {};
 
   return (
     <div className="flex flex-col h-full">
@@ -79,9 +83,7 @@ export default function OrderPackerPage() {
           <div className="flex items-center justify-between">
             <h1 className="text-2xl font-bold">Order Packer</h1>
             <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">
-                Synced {lastSyncTime}
-              </span>
+              <span className="text-xs text-muted-foreground">Synced {lastSyncTime}</span>
               <Button
                 variant="ghost"
                 size="icon"
@@ -89,10 +91,7 @@ export default function OrderPackerPage() {
                 disabled={isRefreshing}
                 className="h-8 w-8"
               >
-                <RefreshCw className={cn(
-                  "h-4 w-4",
-                  isRefreshing && "animate-spin"
-                )} />
+                <RefreshCw className={cn("h-4 w-4", isRefreshing && "animate-spin")} />
               </Button>
             </div>
           </div>
@@ -148,11 +147,13 @@ export default function OrderPackerPage() {
       {/* Content */}
       <div className="flex-1 overflow-auto p-4">
         {isLoading ? (
-          <div className={cn(
-            viewMode === 'grid' 
-              ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
-              : "space-y-3"
-          )}>
+          <div
+            className={cn(
+              viewMode === "grid"
+                ? "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
+                : "space-y-3"
+            )}
+          >
             {Array.from({ length: 6 }).map((_, i) => (
               <Skeleton key={i} className="h-28 w-full rounded-lg" />
             ))}
@@ -174,16 +175,18 @@ export default function OrderPackerPage() {
             <Package className="h-12 w-12 text-muted-foreground/50 mb-4" />
             <h3 className="text-lg font-semibold">No orders found</h3>
             <p className="text-sm text-muted-foreground mt-1">
-              {statusFilter === 'all' 
+              {statusFilter === "all"
                 ? "There are no orders to pack right now"
-                : `No ${statusFilter.replace('_', ' ')} orders`}
+                : `No ${statusFilter.replace("_", " ")} orders`}
             </p>
           </div>
         ) : (
-          <div className={cn(
-            viewMode === 'grid' && "hidden md:grid md:grid-cols-2 lg:grid-cols-3 gap-4",
-            viewMode === 'list' && "space-y-3"
-          )}>
+          <div
+            className={cn(
+              viewMode === "grid" && "hidden md:grid md:grid-cols-2 lg:grid-cols-3 gap-4",
+              viewMode === "list" && "space-y-3"
+            )}
+          >
             {data.orders.map((order) => (
               <OrderCard
                 key={order.id}
@@ -205,11 +208,7 @@ export default function OrderPackerPage() {
       </div>
 
       {/* Order Details Sheet */}
-      <OrderDetailsSheet
-        order={selectedOrder}
-        open={isSheetOpen}
-        onOpenChange={setIsSheetOpen}
-      />
+      <OrderDetailsSheet order={selectedOrder} open={isSheetOpen} onOpenChange={setIsSheetOpen} />
     </div>
   );
 }

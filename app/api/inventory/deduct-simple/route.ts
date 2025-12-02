@@ -3,18 +3,14 @@ import { getServerSession } from "next-auth";
 import { ZodError } from "zod";
 import { authOptions } from "@/lib/auth";
 import { createInventoryTransaction } from "@/lib/inventory";
-import { 
-  AppError, 
-  UnauthorizedError, 
-  errorLogger
-} from "@/lib/error-handling";
+import { AppError, UnauthorizedError, errorLogger } from "@/lib/error-handling";
 import { validateCSRFToken } from "@/lib/csrf";
 import { SimpleDeductSchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
 import { auditService } from "@/lib/audit";
 import { randomUUID } from "crypto";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
@@ -36,7 +32,7 @@ export async function POST(request: NextRequest) {
     const body = SimpleDeductSchema.parse(await request.json());
 
     // Transform items for inventory transaction
-    const transactionItems = body.items.map(item => ({
+    const transactionItems = body.items.map((item) => ({
       productId: item.productId,
       locationId: body.locationId,
       quantityChange: -Math.abs(item.quantity), // Ensure negative for deduction
@@ -47,10 +43,10 @@ export async function POST(request: NextRequest) {
 
     // Create the deduction transaction
     const result = await createInventoryTransaction(
-      'DEDUCTION',
+      "DEDUCTION",
       session.user.id,
       transactionItems,
-      { 
+      {
         orderReference: body.orderReference,
         notes: body.notes,
         operationId,
@@ -101,38 +97,38 @@ export async function POST(request: NextRequest) {
 
     if (error instanceof AppError) {
       return NextResponse.json(
-        { 
+        {
           error: {
             message: error.message,
-            code: error.code
-          }
+            code: error.code,
+          },
         },
         { status: error.statusCode }
       );
     }
-    
+
     // Handle Prisma errors
     if (error instanceof Error && error.message.includes("Insufficient stock")) {
       const match = error.message.match(/Product (.+) has insufficient stock/);
       const productName = match ? match[1] : "Unknown product";
       return NextResponse.json(
-        { 
+        {
           error: {
             message: `Not enough stock for ${productName}. Please check available inventory.`,
             code: "INVENTORY_INSUFFICIENT_STOCK",
-            context: { productName }
-          }
+            context: { productName },
+          },
         },
         { status: 400 }
       );
     }
-    
+
     return NextResponse.json(
-      { 
+      {
         error: {
           message: "Failed to process inventory deduction. Please try again.",
-          code: "DEDUCTION_FAILED"
-        }
+          code: "DEDUCTION_FAILED",
+        },
       },
       { status: 500 }
     );

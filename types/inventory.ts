@@ -145,3 +145,33 @@ export interface CombinedMinBreach {
   combinedMinimum: number;
   daysUntilEmpty: number | null;
 }
+
+// Batch transfer types for Stock In feature
+export interface BatchTransferRequest {
+  productId: number;
+  toLocationId: number;
+  transfers: Array<{
+    fromLocationId: number;
+    quantity: number;
+    expectedVersion?: number;
+  }>;
+}
+
+export interface BatchTransferResult {
+  success: boolean;
+  results: Array<{
+    fromLocationId: number;
+    quantity: number;
+    success: boolean;
+    error?: string;
+  }>;
+  totalTransferred: number;
+  batchId: string;
+}
+
+export interface ProductLocationQuantity {
+  locationId: number;
+  locationName: string;
+  quantity: number;
+  version: number;
+}

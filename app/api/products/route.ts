@@ -4,21 +4,13 @@ import { ZodError } from "zod";
 import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { ProductFilters } from "@/types/product";
-import {
-  getProductsWithQuantities,
-  isProductUnique,
-  formatProductName,
-} from "@/lib/products";
+import { getProductsWithQuantities, isProductUnique, formatProductName } from "@/lib/products";
 import { auditService } from "@/lib/audit";
 import { validateCSRFToken } from "@/lib/csrf";
 import { ProductCreateUISchema } from "@/lib/validation/product";
-import {
-  applyRateLimitHeaders,
-  enforceRateLimit,
-  RateLimitError,
-} from "@/lib/rateLimit";
+import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 // GET /api/products - List all products with filters
 export async function GET(request: NextRequest) {
@@ -29,18 +21,22 @@ export async function GET(request: NextRequest) {
     }
 
     const searchParams = request.nextUrl.searchParams;
-    
+
     // Parse filters from query params
     const requestedSort = searchParams.get("sortBy") as ProductFilters["sortBy"] | null;
-    const allowedSorts: ProductFilters["sortBy"][] = ["name", "baseName", "numericValue", "baseNameNumeric"];
-    const sortBy = requestedSort && allowedSorts.includes(requestedSort)
-      ? requestedSort
-      : "baseNameNumeric";
+    const allowedSorts: ProductFilters["sortBy"][] = [
+      "name",
+      "baseName",
+      "numericValue",
+      "baseNameNumeric",
+    ];
+    const sortBy =
+      requestedSort && allowedSorts.includes(requestedSort) ? requestedSort : "baseNameNumeric";
 
     const filters: ProductFilters = {
       search: searchParams.get("search") || undefined,
       sortBy,
-      sortOrder: searchParams.get("sortOrder") as ProductFilters["sortOrder"] || "asc",
+      sortOrder: (searchParams.get("sortOrder") as ProductFilters["sortOrder"]) || "asc",
       page: parseInt(searchParams.get("page") || "1"),
       pageSize: parseInt(searchParams.get("pageSize") || "25"),
     };
@@ -49,7 +45,11 @@ export async function GET(request: NextRequest) {
     const locationId = searchParams.get("locationId");
     const getTotal = searchParams.get("getTotal") === "true" || !locationId;
 
-    const { products, total } = await getProductsWithQuantities(filters, locationId ? parseInt(locationId) : undefined, getTotal);
+    const { products, total } = await getProductsWithQuantities(
+      filters,
+      locationId ? parseInt(locationId) : undefined,
+      getTotal
+    );
 
     return NextResponse.json({
       products,
@@ -59,10 +59,7 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("Error fetching products:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch products" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch products" }, { status: 500 });
   }
 }
 
@@ -70,7 +67,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    
+
     // Check if user is authenticated and is an admin
     if (!session?.user?.isApproved || !session.user.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -93,7 +90,7 @@ export async function POST(request: NextRequest) {
     const unit = body.unit ? body.unit.trim().toLowerCase() : null;
     const numericValue = body.numericValue ?? null;
     const name = formatProductName({ baseName, variant });
-    
+
     // Check uniqueness if baseName and variant are provided
     if (baseName && variant) {
       const isUnique = await isProductUnique(baseName, variant);
@@ -114,10 +111,7 @@ export async function POST(request: NextRequest) {
     });
 
     if (!location) {
-      return NextResponse.json(
-        { error: "Invalid location ID" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Invalid location ID" }, { status: 400 });
     }
 
     const costPrice = Number(body.costPrice ?? 0);
@@ -140,11 +134,7 @@ export async function POST(request: NextRequest) {
     });
 
     // Log the product creation
-    await auditService.logProductCreate(
-      parseInt(session.user.id),
-      product.id,
-      product.name
-    );
+    await auditService.logProductCreate(parseInt(session.user.id), product.id, product.name);
 
     const response = NextResponse.json(product, { status: 201 });
     return applyRateLimitHeaders(response, rateLimitHeaders);
@@ -167,9 +157,6 @@ export async function POST(request: NextRequest) {
     }
 
     console.error("Error creating product:", error);
-    return NextResponse.json(
-      { error: "Failed to create product" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to create product" }, { status: 500 });
   }
 }

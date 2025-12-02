@@ -108,8 +108,8 @@ export function AdjustmentInput({
         onKeyDown={handleKeyDown}
         className={cn(
           "h-8 text-center w-16 sm:w-20",
-          value > 0 && "text-green-600 border-green-500/50",
-          value < 0 && "text-red-600 border-red-500/50"
+          value > 0 && "text-positive border-positive-border",
+          value < 0 && "text-negative border-negative-border"
         )}
         aria-label={`Quantity adjustment value`}
         aria-valuemin={min}

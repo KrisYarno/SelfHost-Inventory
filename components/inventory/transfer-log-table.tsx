@@ -59,7 +59,7 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
             return (
               <div
                 key={log.id}
-                className="rounded-xl border border-border/60 bg-white dark:bg-slate-800 px-4 py-3 text-sm shadow-sm transition hover:shadow-md"
+                className="rounded-xl border border-border/60 bg-surface px-4 py-3 text-sm shadow-sm transition hover:shadow-md"
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="font-medium leading-tight line-clamp-1">{log.productName}</div>
@@ -73,15 +73,15 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
                     {qty} units
                   </ValueChip>
                   {log.batchId && (
-                    <StatusBadge tone="neutral" className="bg-slate-800/70 text-slate-200 border-border/60">
+                    <StatusBadge tone="neutral" className="bg-muted text-muted-foreground border-border/60">
                       Batch
                     </StatusBadge>
                   )}
                 </div>
                 <div className="mt-2 text-xs font-medium">
-                  <span className="text-destructive">{log.fromLocationName}</span>
+                  <span className="text-negative">{log.fromLocationName}</span>
                   <span className="mx-2 text-muted-foreground">-&gt;</span>
-                  <span className="text-emerald-600">{log.toLocationName}</span>
+                  <span className="text-positive">{log.toLocationName}</span>
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">by {log.userName}</div>
               </div>
@@ -109,8 +109,8 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
                   <TableRow key={log.id}>
                     <TableCell>{format(new Date(log.createdAt), 'MMM dd, yyyy HH:mm')}</TableCell>
                     <TableCell>{log.productName}</TableCell>
-                    <TableCell className="text-destructive">{log.fromLocationName}</TableCell>
-                    <TableCell className="text-emerald-600">{log.toLocationName}</TableCell>
+                    <TableCell className="text-negative">{log.fromLocationName}</TableCell>
+                    <TableCell className="text-positive">{log.toLocationName}</TableCell>
                     <TableCell className="text-right">
                       <span className="font-medium">{qty}</span>
                     </TableCell>

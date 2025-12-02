@@ -1,15 +1,15 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth';
-import prisma from '@/lib/prisma';
+import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth";
+import prisma from "@/lib/prisma";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 // GET /api/user/preferences - Get user preferences
 export async function GET() {
   try {
     const session = await getSession();
     if (!session) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const user = await prisma.user.findUnique({
@@ -26,16 +26,13 @@ export async function GET() {
     });
 
     if (!user) {
-      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
     return NextResponse.json(user);
   } catch (error) {
-    console.error('Error fetching user preferences:', error);
-    return NextResponse.json(
-      { error: 'Failed to fetch preferences' },
-      { status: 500 }
-    );
+    console.error("Error fetching user preferences:", error);
+    return NextResponse.json({ error: "Failed to fetch preferences" }, { status: 500 });
   }
 }
 
@@ -44,30 +41,30 @@ export async function PATCH(request: NextRequest) {
   try {
     const session = await getSession();
     if (!session) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const body = await request.json();
     const updateData: Record<string, unknown> = {};
 
-    if (typeof body.emailAlerts === 'boolean') {
+    if (typeof body.emailAlerts === "boolean") {
       updateData.emailAlerts = body.emailAlerts;
     }
 
     const booleanFields = [
-      'minLocationEmailAlerts',
-      'minLocationSmsAlerts',
-      'minCombinedEmailAlerts',
-      'minCombinedSmsAlerts',
+      "minLocationEmailAlerts",
+      "minLocationSmsAlerts",
+      "minCombinedEmailAlerts",
+      "minCombinedSmsAlerts",
     ] as const;
 
     booleanFields.forEach((field) => {
-      if (typeof body[field] === 'boolean') {
+      if (typeof body[field] === "boolean") {
         updateData[field] = body[field];
       }
     });
 
-    if (typeof body.phoneNumber === 'string') {
+    if (typeof body.phoneNumber === "string") {
       const trimmed = body.phoneNumber.trim();
       updateData.phoneNumber = trimmed.length ? trimmed : null;
     }
@@ -81,20 +78,14 @@ export async function PATCH(request: NextRequest) {
           where: { id: locationId },
         });
         if (!location) {
-          return NextResponse.json(
-            { error: 'Invalid location' },
-            { status: 400 }
-          );
+          return NextResponse.json({ error: "Invalid location" }, { status: 400 });
         }
         updateData.defaultLocationId = locationId;
       }
     }
 
     if (Object.keys(updateData).length === 0) {
-      return NextResponse.json(
-        { error: 'No valid fields to update' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
     }
 
     const updatedUser = await prisma.user.update({
@@ -113,10 +104,7 @@ export async function PATCH(request: NextRequest) {
 
     return NextResponse.json(updatedUser);
   } catch (error) {
-    console.error('Error updating user preferences:', error);
-    return NextResponse.json(
-      { error: 'Failed to update preferences' },
-      { status: 500 }
-    );
+    console.error("Error updating user preferences:", error);
+    return NextResponse.json({ error: "Failed to update preferences" }, { status: 500 });
   }
 }

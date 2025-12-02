@@ -22,16 +22,16 @@ export function StockLevelBadge({
 
   let label = 'In Stock';
   let variant: 'default' | 'secondary' | 'destructive' = 'default';
-  let styles = 'bg-emerald-500 hover:bg-emerald-600 text-white';
+  let styles = 'bg-positive-muted text-positive-foreground border border-positive-border';
 
   if (isOut) {
     label = 'Out of Stock';
     variant = 'destructive';
-    styles = 'bg-red-500 hover:bg-red-600';
+    styles = 'bg-negative-muted text-negative-foreground border border-negative-border';
   } else if (isLow) {
     label = 'Below Minimum';
     variant = 'secondary';
-    styles = 'bg-amber-500 hover:bg-amber-600 text-white';
+    styles = 'bg-warning-muted text-warning-foreground border border-warning-border';
   }
 
   return (
@@ -68,11 +68,11 @@ export function StockLevelIndicator({
         <div
           className={cn(
             'h-full transition-all duration-300',
-            isOutOfStock 
-              ? 'bg-red-500' 
-              : isLowStock 
-              ? 'bg-orange-500' 
-              : 'bg-green-500'
+            isOutOfStock
+              ? 'bg-negative'
+              : isLowStock
+              ? 'bg-warning'
+              : 'bg-positive'
           )}
           style={{ width: `${percentage}%` }}
         />

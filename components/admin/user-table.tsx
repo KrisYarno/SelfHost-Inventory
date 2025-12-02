@@ -162,7 +162,7 @@ export function UserTable({
       columns={columns}
       loading={loading}
       emptyMessage="No users found"
-      className="rounded-2xl border border-border/70 bg-white dark:bg-slate-800 shadow-md"
+      className="rounded-2xl border border-border/70 bg-surface shadow-md"
     />
   );
 }
