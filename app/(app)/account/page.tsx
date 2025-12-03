@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Switch } from "@/components/ui/switch";
-import { AlertCircle, CheckCircle2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
@@ -29,6 +29,15 @@ export default function AccountPage() {
   const { token: csrfToken } = useCSRF();
   const [locations, setLocations] = useState<Location[]>([]);
   const [defaultLocation, setDefaultLocation] = useState<string>("");
+
+  // Username state
+  const [username, setUsername] = useState("");
+  const [isEditingUsername, setIsEditingUsername] = useState(false);
+  const [isLoadingUsername, setIsLoadingUsername] = useState(false);
+  const [usernameError, setUsernameError] = useState("");
+
+  // Password state
+  const [hasPassword, setHasPassword] = useState<boolean | null>(null); // null = loading
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -36,6 +45,8 @@ export default function AccountPage() {
   const [isLoadingPassword, setIsLoadingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState("");
   const [passwordSuccess, setPasswordSuccess] = useState(false);
+
+  // Notification state
   const [emailAlerts, setEmailAlerts] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [minLocationEmailAlerts, setMinLocationEmailAlerts] = useState(false);
@@ -44,7 +55,7 @@ export default function AccountPage() {
   const [minCombinedSmsAlerts, setMinCombinedSmsAlerts] = useState(false);
   const [isSavingNotifications, setIsSavingNotifications] = useState(false);
 
-  // Fetch locations and user preferences
+  // Fetch locations, user preferences, and account details
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -55,7 +66,7 @@ export default function AccountPage() {
           setLocations(locData);
         }
 
-        // Fetch user preferences
+        // Fetch user preferences (includes hasPassword)
         const userResponse = await fetch("/api/user/preferences");
         if (userResponse.ok) {
           const userData = await userResponse.json();
@@ -65,6 +76,10 @@ export default function AccountPage() {
           setMinLocationSmsAlerts(userData.minLocationSmsAlerts || false);
           setMinCombinedEmailAlerts(userData.minCombinedEmailAlerts || false);
           setMinCombinedSmsAlerts(userData.minCombinedSmsAlerts || false);
+          setHasPassword(userData.hasPassword ?? false);
+          if (userData.username) {
+            setUsername(userData.username);
+          }
         }
       } catch (error) {
         console.error("Error fetching data:", error);
@@ -73,6 +88,13 @@ export default function AccountPage() {
 
     fetchData();
   }, []);
+
+  // Initialize username from session
+  useEffect(() => {
+    if (session?.user?.name && !username) {
+      setUsername(session.user.name);
+    }
+  }, [session, username]);
 
   // Set default location from session
   useEffect(() => {
@@ -99,6 +121,48 @@ export default function AccountPage() {
       toast.error("Failed to update default location");
     } finally {
       setIsLoadingLocation(false);
+    }
+  };
+
+  const handleUsernameSave = async () => {
+    setUsernameError("");
+
+    if (!username.trim()) {
+      setUsernameError("Username is required");
+      return;
+    }
+
+    if (username.length < 3 || username.length > 30) {
+      setUsernameError("Username must be 3-30 characters");
+      return;
+    }
+
+    if (!/^[a-z0-9._]+$/.test(username.toLowerCase())) {
+      setUsernameError("Username can only contain letters, numbers, dots, and underscores");
+      return;
+    }
+
+    setIsLoadingUsername(true);
+    try {
+      const response = await fetch("/api/account/username", {
+        method: "PATCH",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+        body: JSON.stringify({ username: username.toLowerCase() }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to update username");
+      }
+
+      setUsername(data.username);
+      setIsEditingUsername(false);
+      toast.success("Username updated successfully");
+    } catch (error) {
+      setUsernameError(error instanceof Error ? error.message : "Failed to update username");
+    } finally {
+      setIsLoadingUsername(false);
     }
   };
 
@@ -146,6 +210,54 @@ export default function AccountPage() {
       setConfirmPassword("");
     } catch (error) {
       setPasswordError(error instanceof Error ? error.message : "Failed to update password");
+    } finally {
+      setIsLoadingPassword(false);
+    }
+  };
+
+  // Create a new password (for OAuth-only users)
+  const handlePasswordCreate = async () => {
+    setPasswordError("");
+    setPasswordSuccess(false);
+
+    if (!newPassword || !confirmPassword) {
+      setPasswordError("Both password fields are required");
+      return;
+    }
+
+    if (newPassword.length < 8) {
+      setPasswordError("Password must be at least 8 characters long");
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      setPasswordError("Passwords do not match");
+      return;
+    }
+
+    setIsLoadingPassword(true);
+    try {
+      const response = await fetch("/api/account/password", {
+        method: "POST",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+        body: JSON.stringify({ newPassword, confirmPassword }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to create password");
+      }
+
+      setPasswordSuccess(true);
+      setHasPassword(true);
+      toast.success("Password created! You can now sign in with email and password.");
+
+      // Clear password fields
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (error) {
+      setPasswordError(error instanceof Error ? error.message : "Failed to create password");
     } finally {
       setIsLoadingPassword(false);
     }
@@ -211,7 +323,53 @@ export default function AccountPage() {
                 </div>
                 <div>
                   <Label className="text-muted-foreground">Username</Label>
-                  <p className="text-sm">{session?.user?.name || "Not set"}</p>
+                  {isEditingUsername ? (
+                    <div className="mt-1 space-y-2">
+                      <Input
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        placeholder="Enter username"
+                        className="max-w-xs"
+                      />
+                      {usernameError && (
+                        <p className="text-sm text-destructive">{usernameError}</p>
+                      )}
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          onClick={handleUsernameSave}
+                          disabled={isLoadingUsername}
+                        >
+                          {isLoadingUsername ? "Saving..." : "Save"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setIsEditingUsername(false);
+                            setUsernameError("");
+                            setUsername(session?.user?.name || "");
+                          }}
+                          disabled={isLoadingUsername}
+                        >
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm">{username || session?.user?.name || "Not set"}</p>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 w-6 p-0"
+                        onClick={() => setIsEditingUsername(true)}
+                      >
+                        <Pencil className="h-3 w-3" />
+                        <span className="sr-only">Edit username</span>
+                      </Button>
+                    </div>
+                  )}
                 </div>
                 <div>
                   <Label className="text-muted-foreground">Role</Label>
@@ -370,11 +528,23 @@ export default function AccountPage() {
             </CardContent>
           </Card>
 
-          {/* Change Password */}
+          {/* Password Management */}
           <Card>
             <CardHeader>
-              <CardTitle>Change Password</CardTitle>
-              <CardDescription>Update your password to keep your account secure</CardDescription>
+              <CardTitle>
+                {hasPassword === null
+                  ? "Password"
+                  : hasPassword
+                    ? "Change Password"
+                    : "Add Password"}
+              </CardTitle>
+              <CardDescription>
+                {hasPassword === null
+                  ? "Loading password status..."
+                  : hasPassword
+                    ? "Update your password to keep your account secure"
+                    : "Add a password to sign in with email and password in addition to Google"}
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
@@ -389,35 +559,41 @@ export default function AccountPage() {
                   <Alert className="border-success bg-success/10">
                     <CheckCircle2 className="h-4 w-4 text-success" />
                     <AlertDescription className="text-success">
-                      Password updated successfully
+                      {hasPassword ? "Password updated successfully" : "Password created successfully"}
                     </AlertDescription>
                   </Alert>
                 )}
 
-                <div>
-                  <Label htmlFor="old-password">Old Password</Label>
-                  <Input
-                    id="old-password"
-                    type="password"
-                    value={oldPassword}
-                    onChange={(e) => setOldPassword(e.target.value)}
-                    className="mt-2"
-                  />
-                </div>
+                {/* Show old password field only if user already has a password */}
+                {hasPassword && (
+                  <div>
+                    <Label htmlFor="old-password">Current Password</Label>
+                    <Input
+                      id="old-password"
+                      type="password"
+                      value={oldPassword}
+                      onChange={(e) => setOldPassword(e.target.value)}
+                      className="mt-2"
+                    />
+                  </div>
+                )}
 
                 <div>
-                  <Label htmlFor="new-password">New Password</Label>
+                  <Label htmlFor="new-password">
+                    {hasPassword ? "New Password" : "Password"}
+                  </Label>
                   <Input
                     id="new-password"
                     type="password"
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     className="mt-2"
+                    placeholder="Minimum 8 characters"
                   />
                 </div>
 
                 <div>
-                  <Label htmlFor="confirm-password">Confirm New Password</Label>
+                  <Label htmlFor="confirm-password">Confirm Password</Label>
                   <Input
                     id="confirm-password"
                     type="password"
@@ -428,11 +604,17 @@ export default function AccountPage() {
                 </div>
 
                 <Button
-                  onClick={handlePasswordUpdate}
-                  disabled={isLoadingPassword}
+                  onClick={hasPassword ? handlePasswordUpdate : handlePasswordCreate}
+                  disabled={isLoadingPassword || hasPassword === null}
                   className="w-full sm:w-auto"
                 >
-                  {isLoadingPassword ? "Updating..." : "Update Password"}
+                  {isLoadingPassword
+                    ? hasPassword
+                      ? "Updating..."
+                      : "Creating..."
+                    : hasPassword
+                      ? "Update Password"
+                      : "Create Password"}
                 </Button>
               </div>
             </CardContent>

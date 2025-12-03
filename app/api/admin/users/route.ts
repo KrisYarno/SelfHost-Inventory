@@ -20,8 +20,10 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get("limit") || "10");
     const skip = (page - 1) * limit;
 
-    // Build where clause
-    const where: any = {};
+    // Build where clause - always exclude soft-deleted users
+    const where: any = {
+      deletedAt: null,
+    };
 
     if (filter === "approved") {
       where.isApproved = true;

@@ -3,14 +3,17 @@
 import { signIn } from 'next-auth/react';
 import { useState } from 'react';
 import { useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 
 export function SignInForm() {
   const searchParams = useSearchParams();
   const callbackUrl = searchParams.get('callbackUrl') || '/workbench';
+  const errorParam = searchParams.get('error');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(errorParam === 'CredentialsSignin' ? 'Invalid email or password' : '');
   const [isLoading, setIsLoading] = useState(false);
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
 
   const handleCredentialsSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -19,14 +22,19 @@ export function SignInForm() {
 
     try {
       const result = await signIn('credentials', {
-        email,
+        email: email.toLowerCase().trim(),
         password,
         redirect: false,
         callbackUrl,
       });
 
       if (result?.error) {
-        setError(result.error);
+        // Map common errors to user-friendly messages
+        if (result.error === 'CredentialsSignin') {
+          setError('Invalid email or password');
+        } else {
+          setError(result.error);
+        }
       } else if (result?.url) {
         window.location.href = result.url;
       }
@@ -38,6 +46,7 @@ export function SignInForm() {
   };
 
   const handleGoogleSignIn = () => {
+    setIsGoogleLoading(true);
     signIn('google', { callbackUrl });
   };
 
@@ -119,7 +128,8 @@ export function SignInForm() {
             <button
               type="button"
               onClick={handleGoogleSignIn}
-              className="group relative w-full flex justify-center py-2 px-4 border border-border text-sm font-medium rounded-md text-foreground bg-surface hover:bg-muted focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary"
+              disabled={isGoogleLoading}
+              className="group relative w-full flex justify-center py-2 px-4 border border-border text-sm font-medium rounded-md text-foreground bg-surface hover:bg-muted focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <svg className="w-5 h-5 mr-2" viewBox="0 0 24 24">
                 <path
@@ -139,8 +149,15 @@ export function SignInForm() {
                   d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
                 />
               </svg>
-              Sign in with Google
+              {isGoogleLoading ? 'Redirecting...' : 'Sign in with Google'}
             </button>
+          </div>
+
+          <div className="text-center text-sm text-muted-foreground">
+            Don&apos;t have an account?{' '}
+            <Link href="/auth/signup" className="font-medium text-primary hover:text-primary/90">
+              Sign up
+            </Link>
           </div>
         </form>
       </div>

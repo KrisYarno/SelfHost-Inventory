@@ -20,12 +20,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid user IDs" }, { status: 400 });
     }
 
-    // Get users before deletion for email notifications
+    // Get users before soft deletion for email notifications
     const usersToReject = await prisma.user.findMany({
       where: {
         id: { in: userIds },
         isApproved: false, // Only reject non-approved users
         isAdmin: false, // Cannot reject admins
+        deletedAt: null, // Only reject active users
       },
       select: {
         id: true,
@@ -41,11 +42,12 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Delete users
-    const deleteResult = await prisma.user.deleteMany({
+    // Soft delete users
+    const updateResult = await prisma.user.updateMany({
       where: {
         id: { in: usersToReject.map((u) => u.id) },
       },
+      data: { deletedAt: new Date() },
     });
 
     // Log the bulk rejection action
@@ -56,8 +58,8 @@ export async function POST(request: NextRequest) {
     );
 
     return NextResponse.json({
-      rejected: deleteResult.count,
-      message: `Successfully rejected ${deleteResult.count} users`,
+      rejected: updateResult.count,
+      message: `Successfully rejected ${updateResult.count} users`,
     });
   } catch (error) {
     console.error("Error bulk rejecting users:", error);
