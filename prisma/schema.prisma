@@ -10,10 +10,11 @@ datasource db {
 model User {
   id                  Int                   @id @default(autoincrement())
   username            String                @db.VarChar(255)
-  passwordHash        String                @db.VarChar(255)
+  passwordHash        String?               @db.VarChar(255)
   isAdmin             Boolean               @default(false)
   email               String                @unique(map: "email") @db.VarChar(255)
   isApproved          Boolean               @default(false)
+  deletedAt           DateTime?             @db.DateTime(0)
   defaultLocationId   Int                   @default(1)
   emailAlerts         Boolean?              @default(false)
   phoneNumber         String?               @db.VarChar(20)
@@ -29,6 +30,7 @@ model User {
   locations           Location              @relation(fields: [defaultLocationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_default_location")
 
   @@index([defaultLocationId], map: "fk_user_default_location")
+  @@index([deletedAt], map: "idx_user_deleted")
   @@map("users")
 }
 

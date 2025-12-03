@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
-import { CheckCircle2, XCircle } from "lucide-react";
+import { CheckCircle2, XCircle, Trash2 } from "lucide-react";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 interface User {
@@ -252,6 +252,45 @@ export default function AdminUsersPage() {
     }
   };
 
+  const handleBulkDelete = async () => {
+    if (selectedUsers.size === 0) {
+      toast.error("No users selected");
+      return;
+    }
+
+    if (!confirm(`Are you sure you want to delete ${selectedUsers.size} users? This action cannot be undone.`)) {
+      return;
+    }
+
+    setBulkLoading(true);
+    try {
+      const response = await fetch("/api/admin/users/bulk-delete", {
+        method: "POST",
+        headers: withCSRFHeaders(
+          {
+            "Content-Type": "application/json",
+          },
+          csrfToken
+        ),
+        body: JSON.stringify({ userIds: Array.from(selectedUsers) }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to delete users");
+      }
+
+      const result = await response.json();
+      toast.success(`Successfully deleted ${result.deleted} users`);
+      setSelectedUsers(new Set());
+      await fetchUsers();
+    } catch (error) {
+      console.error("Error bulk deleting users:", error);
+      toast.error("Failed to delete users");
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
   const toggleUserSelection = (userId: number) => {
     const newSelection = new Set(selectedUsers);
     if (newSelection.has(userId)) {
@@ -276,18 +315,34 @@ export default function AdminUsersPage() {
             <h1 className="text-3xl font-bold">User Management</h1>
             <p className="text-sm text-muted-foreground">Manage user approvals and access levels</p>
           </div>
-          {selectedUsers.size > 0 && (
-            <div className="flex gap-2">
-              <Button onClick={handleBulkApprove} disabled={bulkLoading} variant="default">
-                <CheckCircle2 className="mr-2 h-4 w-4" />
-                Approve {selectedUsers.size} Users
-              </Button>
-              <Button onClick={handleBulkReject} disabled={bulkLoading} variant="destructive">
-                <XCircle className="mr-2 h-4 w-4" />
-                Reject {selectedUsers.size} Users
-              </Button>
-            </div>
-          )}
+          {selectedUsers.size > 0 && (() => {
+            const selectedUsersList = allUsers.filter(u => selectedUsers.has(u.id));
+            const pendingCount = selectedUsersList.filter(u => !u.isApproved).length;
+            const approvedCount = selectedUsersList.filter(u => u.isApproved).length;
+
+            return (
+              <div className="flex gap-2 flex-wrap">
+                {pendingCount > 0 && (
+                  <>
+                    <Button onClick={handleBulkApprove} disabled={bulkLoading} variant="default">
+                      <CheckCircle2 className="mr-2 h-4 w-4" />
+                      Approve {pendingCount}
+                    </Button>
+                    <Button onClick={handleBulkReject} disabled={bulkLoading} variant="outline">
+                      <XCircle className="mr-2 h-4 w-4" />
+                      Reject {pendingCount}
+                    </Button>
+                  </>
+                )}
+                {approvedCount > 0 && (
+                  <Button onClick={handleBulkDelete} disabled={bulkLoading} variant="destructive">
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Delete {approvedCount}
+                  </Button>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         {/* Pending Approvals Section */}

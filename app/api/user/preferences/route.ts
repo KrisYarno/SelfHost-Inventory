@@ -15,6 +15,8 @@ export async function GET() {
     const user = await prisma.user.findUnique({
       where: { id: parseInt(session.user.id) },
       select: {
+        username: true,
+        passwordHash: true,
         emailAlerts: true,
         defaultLocationId: true,
         phoneNumber: true,
@@ -29,7 +31,12 @@ export async function GET() {
       return NextResponse.json({ error: "User not found" }, { status: 404 });
     }
 
-    return NextResponse.json(user);
+    // Return user data with hasPassword flag (don't expose the actual hash)
+    return NextResponse.json({
+      ...user,
+      passwordHash: undefined, // Never send the hash to the client
+      hasPassword: !!user.passwordHash, // Boolean flag indicating if password exists
+    });
   } catch (error) {
     console.error("Error fetching user preferences:", error);
     return NextResponse.json({ error: "Failed to fetch preferences" }, { status: 500 });

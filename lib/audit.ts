@@ -170,6 +170,23 @@ class AuditService {
   }
 
   /**
+   * Log bulk user deletion
+   */
+  async logBulkUserDeletion(userId: number, userIds: number[], emails: string[]): Promise<void> {
+    const batchId = this.startBatch()
+    await this.log({
+      userId,
+      actionType: 'USER_DELETION',
+      entityType: 'USER',
+      action: `Bulk deleted ${userIds.length} users`,
+      details: { userIds, emails },
+      affectedCount: userIds.length,
+      batchId
+    })
+    this.endBatch()
+  }
+
+  /**
    * Log product creation
    */
   async logProductCreate(userId: number, productId: number, productName: string): Promise<void> {

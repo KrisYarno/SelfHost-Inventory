@@ -28,9 +28,10 @@ export async function DELETE(request: NextRequest, { params }: { params: { userI
       return NextResponse.json({ error: "Cannot delete your own account" }, { status: 400 });
     }
 
-    // Delete the user (this will also cascade delete their inventory logs)
-    await prisma.user.delete({
+    // Soft delete - set deletedAt timestamp instead of hard deleting
+    await prisma.user.update({
       where: { id: userId },
+      data: { deletedAt: new Date() },
     });
 
     return NextResponse.json({

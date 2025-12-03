@@ -54,7 +54,6 @@ export function UserTable({
         <Checkbox
           checked={selectedUsers.has(user.id)}
           onCheckedChange={() => onToggleSelect(user.id)}
-          disabled={user.isApproved}
         />
       )},
     }] : []),
