@@ -61,14 +61,22 @@ export async function GET(request: NextRequest) {
     });
 
     let runningTotal = initialStock._sum.delta || 0;
-    const dateMap = new Map<string, number>();
+    const dailyDeltas = new Map<string, number>();
 
-    // Calculate running totals
+    // First, aggregate all deltas by date
     inventoryChanges.forEach((change) => {
       const dateKey = format(change.changeTime, "yyyy-MM-dd");
-      const currentValue = dateMap.get(dateKey) || runningTotal;
-      dateMap.set(dateKey, currentValue + (change._sum.delta || 0));
-      runningTotal = currentValue + (change._sum.delta || 0);
+      const existingDelta = dailyDeltas.get(dateKey) || 0;
+      dailyDeltas.set(dateKey, existingDelta + (change._sum.delta || 0));
+    });
+
+    // Then calculate running totals from the aggregated daily deltas
+    const dateMap = new Map<string, number>();
+    const sortedDates = Array.from(dailyDeltas.keys()).sort();
+
+    sortedDates.forEach((dateKey) => {
+      runningTotal += dailyDeltas.get(dateKey) || 0;
+      dateMap.set(dateKey, runningTotal);
     });
 
     // Fill in missing dates

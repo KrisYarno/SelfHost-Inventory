@@ -7,6 +7,7 @@ import { ProductPerformance } from "@/components/reports/product-performance";
 import { UserActivity } from "@/components/reports/user-activity";
 import { LowStockAlert } from "@/components/reports/low-stock-alert";
 import { LineChartComponent, ActivityBarChart } from "@/components/reports/inventory-chart";
+import { ReorderRecommendations } from "@/components/reports/reorder-recommendations";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -17,6 +18,9 @@ import {
   DollarSign,
   FileDown,
   Image as ImageIcon,
+  ShoppingCart,
+  Activity,
+  Archive,
 } from "lucide-react";
 import { DashboardMetrics, StockLevelChartData, ActivityChartData } from "@/types/reports";
 import { useLocation } from "@/contexts/location-context";
@@ -160,6 +164,33 @@ export default function AdminReportsPage() {
 
     const filename = generateExportFilename("metrics", "csv", dateRange);
     const data = [
+      // Decision metrics (new)
+      {
+        metric: "Order Now",
+        value: metrics.orderNowCount,
+        additional: `${metrics.orderSoonCount} order soon`,
+      },
+      {
+        metric: "Reorder Health Score",
+        value: `${metrics.reorderHealthScore}%`,
+        additional: "Products in healthy stock position",
+      },
+      {
+        metric: "Monthly Carrying Cost",
+        value: formatCurrency(metrics.monthlyCarryingCost),
+        additional: "25% annual holding rate",
+      },
+      {
+        metric: "Dead Stock Value",
+        value: formatCurrency(metrics.deadStockValue),
+        additional: "No movement in 90 days",
+      },
+      {
+        metric: "Stockout Risk",
+        value: metrics.stockoutRiskCount,
+        additional: `Avg ${metrics.daysOfSupplyAvg} days supply`,
+      },
+      // Legacy metrics
       {
         metric: "Total Products",
         value: metrics.totalProducts,
@@ -301,35 +332,58 @@ export default function AdminReportsPage() {
         <div className="p-4 sm:p-6 space-y-6 max-w-7xl w-full mx-auto">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
             <MetricsCard
-              title="Total Products"
-              value={metrics?.totalProducts || 0}
-              subtitle={`${metrics?.activeProducts || 0} active`}
-              icon={<Package className="h-4 w-4" />}
+              title="Order Now"
+              value={metrics?.orderNowCount || 0}
+              subtitle={`${metrics?.orderSoonCount || 0} order soon`}
+              icon={<ShoppingCart className="h-4 w-4" />}
+              className={
+                metrics?.orderNowCount && metrics.orderNowCount > 0
+                  ? "border-red-500 bg-red-50 dark:bg-red-950/20"
+                  : ""
+              }
             />
             <MetricsCard
-              title="Total Stock"
-              value={metrics ? metrics.totalStockQuantity.toLocaleString() : "0"}
-              subtitle="Units in inventory"
-              icon={<Package className="h-4 w-4" />}
+              title="Health Score"
+              value={`${metrics?.reorderHealthScore || 0}%`}
+              subtitle="products in healthy stock"
+              icon={<Activity className="h-4 w-4" />}
+              className={
+                metrics?.reorderHealthScore !== undefined
+                  ? metrics.reorderHealthScore >= 80
+                    ? "border-green-500 bg-green-50 dark:bg-green-950/20"
+                    : metrics.reorderHealthScore >= 50
+                      ? "border-yellow-500 bg-yellow-50 dark:bg-yellow-950/20"
+                      : "border-red-500 bg-red-50 dark:bg-red-950/20"
+                  : ""
+              }
             />
             <MetricsCard
-              title="Inventory Cost Value"
-              value={formatCurrency(metrics?.totalInventoryCostValue)}
-              subtitle="At cost"
+              title="Monthly Carrying Cost"
+              value={formatCurrency(metrics?.monthlyCarryingCost)}
+              subtitle={`${formatCurrency(metrics?.totalInventoryCostValue)} total value`}
               icon={<DollarSign className="h-4 w-4" />}
             />
             <MetricsCard
-              title="Inventory Retail Value"
-              value={formatCurrency(metrics?.totalInventoryRetailValue)}
-              subtitle="At retail"
-              icon={<DollarSign className="h-4 w-4" />}
+              title="Dead Stock Value"
+              value={formatCurrency(metrics?.deadStockValue)}
+              subtitle={
+                metrics?.totalInventoryCostValue && metrics.totalInventoryCostValue > 0
+                  ? `${Math.round(((metrics.deadStockValue || 0) / metrics.totalInventoryCostValue) * 100)}% of inventory`
+                  : "No movement in 90 days"
+              }
+              icon={<Archive className="h-4 w-4" />}
+              className={
+                metrics?.deadStockValue && metrics.deadStockValue > 0
+                  ? "border-orange-500 bg-orange-50 dark:bg-orange-950/20"
+                  : ""
+              }
             />
             <MetricsCard
-              title="Low Stock Items"
-              value={metrics?.lowStockProducts || 0}
-              subtitle="Below threshold"
+              title="Stockout Risk"
+              value={metrics?.stockoutRiskCount || 0}
+              subtitle={`Avg ${metrics?.daysOfSupplyAvg || 0} days supply`}
               icon={<AlertTriangle className="h-4 w-4" />}
-              trend={metrics?.lowStockProducts ? { value: 12, direction: "up" } : undefined}
+              trend={metrics?.lowStockTrend}
             />
           </div>
           <CombinedMinimumsReport />
@@ -337,6 +391,7 @@ export default function AdminReportsPage() {
           <Tabs defaultValue="overview" className="space-y-4">
             <TabsList className="w-full overflow-x-auto whitespace-nowrap">
               <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="reorder">Reorder</TabsTrigger>
               <TabsTrigger value="products">Products</TabsTrigger>
               <TabsTrigger value="activity">Activity</TabsTrigger>
               <TabsTrigger value="users">Users</TabsTrigger>
@@ -396,6 +451,10 @@ export default function AdminReportsPage() {
                 <ActivityTimeline />
                 <LowStockAlert />
               </div>
+            </TabsContent>
+
+            <TabsContent value="reorder" className="space-y-6">
+              <ReorderRecommendations />
             </TabsContent>
 
             <TabsContent value="products" className="space-y-6">

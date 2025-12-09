@@ -125,18 +125,18 @@ export function UserActivity() {
                   <Progress value={progressValue} className="h-2" />
                 </div>
 
-                <div className="grid grid-cols-3 gap-2 text-xs">
-                  <div className="text-center p-2 rounded bg-emerald-50 dark:bg-emerald-950/50">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                  <div className="text-center p-2 rounded bg-positive-muted">
                     <Package className="h-4 w-4 mx-auto mb-1 text-positive" />
                     <div className="font-medium text-positive">{user.stockInCount}</div>
                     <div className="text-muted-foreground">Stock In</div>
                   </div>
-                  <div className="text-center p-2 rounded bg-red-50 dark:bg-red-950/50">
+                  <div className="text-center p-2 rounded bg-negative-muted">
                     <Package className="h-4 w-4 mx-auto mb-1 text-negative" />
                     <div className="font-medium text-negative">{user.stockOutCount}</div>
                     <div className="text-muted-foreground">Stock Out</div>
                   </div>
-                  <div className="text-center p-2 rounded bg-sky-50 dark:bg-sky-950/50">
+                  <div className="text-center p-2 rounded bg-info-muted">
                     <Settings className="h-4 w-4 mx-auto mb-1 text-info" />
                     <div className="font-medium text-info">{user.adjustmentCount}</div>
                     <div className="text-muted-foreground">Adjustments</div>

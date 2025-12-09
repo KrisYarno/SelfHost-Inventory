@@ -89,21 +89,17 @@ export async function GET(request: Request) {
         movementFrequency: 0,
       };
 
-      // Categorize movements based on logType and delta
+      // Categorize movements based on delta sign
+      // Both ADJUSTMENT and TRANSFER log types use delta to indicate direction
+      if (movement.delta > 0) {
+        existing.stockIn += movement.delta;
+      } else if (movement.delta < 0) {
+        existing.stockOut += Math.abs(movement.delta);
+      }
+
+      // Track adjustments separately for reporting (but don't double-count in netMovement)
       if (movement.logType === "ADJUSTMENT") {
-        if (movement.delta > 0) {
-          existing.stockIn += movement.delta;
-        } else if (movement.delta < 0) {
-          existing.stockOut += Math.abs(movement.delta);
-        }
         existing.adjustments += movement.delta;
-      } else if (movement.logType === "TRANSFER") {
-        if (movement.delta > 0) {
-          existing.stockIn += movement.delta;
-        } else if (movement.delta < 0) {
-          existing.stockOut += Math.abs(movement.delta);
-        }
-        // Transfers are not counted as adjustments
       }
 
       existing.movementFrequency += 1;
@@ -116,8 +112,9 @@ export async function GET(request: Request) {
     productMetrics.forEach((metrics, productId) => {
       const currentStock = currentStockMap.get(productId) || 0;
 
-      // Calculate net movement
-      metrics.netMovement = metrics.stockIn - metrics.stockOut + metrics.adjustments;
+      // Calculate net movement (stockIn - stockOut already captures all movement)
+      // Previously double-counted adjustments which are already in stockIn/stockOut
+      metrics.netMovement = metrics.stockIn - metrics.stockOut;
 
       // Calculate average stock (approximation)
       metrics.averageStock = Math.max(1, (currentStock + (currentStock - metrics.netMovement)) / 2);
@@ -134,8 +131,8 @@ export async function GET(request: Request) {
 
     // Sort by total movement (most active first)
     results.sort((a, b) => {
-      const totalA = a.stockIn + a.stockOut + Math.abs(a.adjustments);
-      const totalB = b.stockIn + b.stockOut + Math.abs(b.adjustments);
+      const totalA = a.stockIn + a.stockOut;
+      const totalB = b.stockIn + b.stockOut;
       return totalB - totalA;
     });
 
