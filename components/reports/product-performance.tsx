@@ -9,148 +9,66 @@ import { TrendingUp, TrendingDown, Minus, Loader2 } from "lucide-react";
 import { BarChartComponent } from "./inventory-chart";
 import { cn } from "@/lib/utils";
 import { useLocation } from "@/contexts/location-context";
+import { ProductMovementSummary, TrendDirection } from "@/types/reports";
 
-interface ProductPerformanceData {
-  productId: number;
-  productName: string;
-  currentStock: number;
-  stockIn: number;
-  stockOut: number;
-  net: number;
-  trend: 'up' | 'down' | 'stable';
-}
-
-interface InventoryItem {
-  productId: number;
-  quantity: number;
-  product: {
-    name: string;
-  };
-}
-
-interface ActivityLog {
-  productId: number;
-  changeType: string;
-  quantityChange: number;
-  delta: number;
-  logType: string;
-}
+const PAGE_SIZE = 20;
 
 export function ProductPerformance() {
-  const [products, setProducts] = useState<ProductPerformanceData[]>([]);
-  const [allProducts, setAllProducts] = useState<ProductPerformanceData[]>([]);
+  const [products, setProducts] = useState<ProductMovementSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
+  const [totalProducts, setTotalProducts] = useState(0);
   const { selectedLocationId } = useLocation();
   const observerRef = useRef<IntersectionObserver | null>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
 
-  const PAGE_SIZE = 20;
-
-  const fetchProductPerformance = useCallback(async () => {
+  const fetchProductPerformance = useCallback(async (pageNum: number, append: boolean = false) => {
     try {
-      setLoading(true);
-      setPage(1);
-      setProducts([]);
-      setAllProducts([]);
-      
-      // Fetch current inventory levels with pagination
+      if (!append) {
+        setLoading(true);
+        setProducts([]);
+      } else {
+        setLoadingMore(true);
+      }
+
+      // Use new server-side aggregation API
       const params = new URLSearchParams({
-        paginate: 'true',
-        page: '1',
-        pageSize: '100',
-        ...(selectedLocationId && { locationId: selectedLocationId.toString() })
-      });
-      
-      const inventoryResponse = await fetch(`/api/inventory/current-fast?${params}`);
-      if (!inventoryResponse.ok) throw new Error("Failed to fetch inventory");
-      const inventoryData = await inventoryResponse.json();
-
-      // Fetch recent activity to calculate performance (last 30 days)
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      
-      const activityResponse = await fetch("/api/inventory/logs?pageSize=5000");
-      if (!activityResponse.ok) throw new Error("Failed to fetch activity");
-      const activityData = await activityResponse.json();
-
-      // Process data to calculate performance metrics
-      const performanceMap = new Map<number, ProductPerformanceData>();
-
-      // Initialize with current inventory
-      inventoryData.inventory.forEach((item: InventoryItem) => {
-        performanceMap.set(item.productId, {
-          productId: item.productId,
-          productName: item.product.name,
-          currentStock: item.quantity,
-          stockIn: 0,
-          stockOut: 0,
-          net: 0,
-          trend: 'stable'
-        });
+        days: "30",
+        page: pageNum.toString(),
+        pageSize: PAGE_SIZE.toString(),
+        sortBy: "activity",
+        ...(selectedLocationId && { locationId: selectedLocationId.toString() }),
       });
 
-      // Calculate stock movements from logs
-      activityData.logs.forEach((log: ActivityLog) => {
-        const perf = performanceMap.get(log.productId);
-        if (perf) {
-          if (log.logType === 'STOCK_IN' && log.delta > 0) {
-            perf.stockIn += log.delta;
-          } else if (log.logType === 'SALE' && log.delta < 0) {
-            perf.stockOut += Math.abs(log.delta);
-          } else if (log.logType === 'ADJUSTMENT') {
-            if (log.delta > 0) {
-              perf.stockIn += log.delta;
-            } else {
-              perf.stockOut += Math.abs(log.delta);
-            }
-          }
-        }
-      });
+      const response = await fetch(`/api/reports/product-movement-summary?${params}`);
+      if (!response.ok) throw new Error("Failed to fetch product performance");
 
-      // Calculate net and trend
-      const performanceArray = Array.from(performanceMap.values()).map(perf => {
-        perf.net = perf.stockIn - perf.stockOut;
-        if (perf.net > 0) perf.trend = 'up';
-        else if (perf.net < 0) perf.trend = 'down';
-        else perf.trend = 'stable';
-        return perf;
-      });
+      const data = await response.json();
 
-      // Sort by absolute net movement (most active products first)
-      performanceArray.sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
+      if (append) {
+        setProducts((prev) => [...prev, ...data.products]);
+      } else {
+        setProducts(data.products);
+      }
 
-      setAllProducts(performanceArray);
-      setProducts(performanceArray.slice(0, PAGE_SIZE));
-      setHasMore(performanceArray.length > PAGE_SIZE);
+      setTotalProducts(data.pagination.total);
+      setHasMore(pageNum < data.pagination.totalPages);
+      setPage(pageNum);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load performance data");
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   }, [selectedLocationId]);
 
   const loadMoreProducts = useCallback(() => {
     if (loadingMore || !hasMore) return;
-
-    setLoadingMore(true);
-    const nextPage = page + 1;
-    const startIndex = page * PAGE_SIZE;
-    const endIndex = startIndex + PAGE_SIZE;
-    const nextProducts = allProducts.slice(startIndex, endIndex);
-
-    if (nextProducts.length > 0) {
-      setProducts(prev => [...prev, ...nextProducts]);
-      setPage(nextPage);
-      setHasMore(endIndex < allProducts.length);
-    } else {
-      setHasMore(false);
-    }
-    setLoadingMore(false);
-  }, [page, allProducts, loadingMore, hasMore]);
+    fetchProductPerformance(page + 1, true);
+  }, [page, loadingMore, hasMore, fetchProductPerformance]);
 
   // Infinite scroll observer
   useEffect(() => {
@@ -178,8 +96,9 @@ export function ProductPerformance() {
     };
   }, [loading, loadingMore, hasMore, loadMoreProducts]);
 
+  // Initial load and refresh on location change
   useEffect(() => {
-    fetchProductPerformance();
+    fetchProductPerformance(1, false);
   }, [fetchProductPerformance]);
 
   if (loading) {
@@ -211,12 +130,44 @@ export function ProductPerformance() {
     );
   }
 
-  const chartData = products.slice(0, 10).map(p => ({
-    product: p.productName.length > 20 ? p.productName.substring(0, 20) + '...' : p.productName,
+  const chartData = products.slice(0, 10).map((p) => ({
+    product: p.productName.length > 20 ? p.productName.substring(0, 20) + "..." : p.productName,
     stockIn: p.stockIn,
     stockOut: p.stockOut,
-    net: p.net
+    net: p.netMovement,
   }));
+
+  const getTrendBadge = (trend: TrendDirection) => {
+    switch (trend) {
+      case "up":
+        return (
+          <Badge
+            variant="default"
+            className="bg-positive-muted text-positive-foreground border border-positive-border"
+          >
+            <TrendingUp className="h-3 w-3 mr-1" />
+            Up
+          </Badge>
+        );
+      case "down":
+        return (
+          <Badge
+            variant="default"
+            className="bg-negative-muted text-negative-foreground border border-negative-border"
+          >
+            <TrendingDown className="h-3 w-3 mr-1" />
+            Down
+          </Badge>
+        );
+      default:
+        return (
+          <Badge variant="secondary">
+            <Minus className="h-3 w-3 mr-1" />
+            Stable
+          </Badge>
+        );
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -236,64 +187,39 @@ export function ProductPerformance() {
               <TableRow>
                 <TableHead>Product</TableHead>
                 <TableHead className="text-right">Current Stock</TableHead>
-                <TableHead className="text-right">Stock In</TableHead>
-                <TableHead className="text-right">Stock Out</TableHead>
+                <TableHead className="text-right hidden sm:table-cell">Stock In</TableHead>
+                <TableHead className="text-right hidden sm:table-cell">Stock Out</TableHead>
                 <TableHead className="text-right">Net Movement</TableHead>
-                <TableHead className="text-center">Trend</TableHead>
+                <TableHead className="text-center hidden md:table-cell">Trend</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {products.map((product) => (
                 <TableRow key={product.productId}>
-                  <TableCell className="font-medium">
-                    {product.productName}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {product.currentStock}
-                  </TableCell>
-                  <TableCell className="text-right text-positive">
-                    +{product.stockIn}
-                  </TableCell>
-                  <TableCell className="text-right text-negative">
-                    -{product.stockOut}
-                  </TableCell>
+                  <TableCell className="font-medium">{product.productName}</TableCell>
+                  <TableCell className="text-right">{product.currentStock}</TableCell>
+                  <TableCell className="text-right text-positive hidden sm:table-cell">+{product.stockIn}</TableCell>
+                  <TableCell className="text-right text-negative hidden sm:table-cell">-{product.stockOut}</TableCell>
                   <TableCell className="text-right font-medium">
-                    <span className={cn(
-                      product.net > 0 && "text-positive",
-                      product.net < 0 && "text-negative"
-                    )}>
-                      {product.net > 0 ? '+' : ''}{product.net}
+                    <span
+                      className={cn(
+                        product.netMovement > 0 && "text-positive",
+                        product.netMovement < 0 && "text-negative"
+                      )}
+                    >
+                      {product.netMovement > 0 ? "+" : ""}
+                      {product.netMovement}
                     </span>
                   </TableCell>
-                  <TableCell className="text-center">
-                    {product.trend === 'up' ? (
-                      <Badge variant="default" className="bg-positive-muted text-positive-foreground border border-positive-border">
-                        <TrendingUp className="h-3 w-3 mr-1" />
-                        Up
-                      </Badge>
-                    ) : product.trend === 'down' ? (
-                      <Badge variant="default" className="bg-negative-muted text-negative-foreground border border-negative-border">
-                        <TrendingDown className="h-3 w-3 mr-1" />
-                        Down
-                      </Badge>
-                    ) : (
-                      <Badge variant="secondary">
-                        <Minus className="h-3 w-3 mr-1" />
-                        Stable
-                      </Badge>
-                    )}
-                  </TableCell>
+                  <TableCell className="text-center hidden md:table-cell">{getTrendBadge(product.trend)}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
-          
+
           {/* Infinite scroll trigger */}
           {hasMore && (
-            <div 
-              ref={loadMoreRef} 
-              className="flex justify-center p-4"
-            >
+            <div ref={loadMoreRef} className="flex justify-center p-4">
               {loadingMore && (
                 <div className="flex items-center gap-2 text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -302,10 +228,10 @@ export function ProductPerformance() {
               )}
             </div>
           )}
-          
+
           {!hasMore && products.length > 0 && (
             <div className="text-center p-4 text-sm text-muted-foreground">
-              All {products.length} products loaded
+              All {products.length} of {totalProducts} products loaded
             </div>
           )}
         </CardContent>

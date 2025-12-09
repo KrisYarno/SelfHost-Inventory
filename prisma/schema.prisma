@@ -35,23 +35,23 @@ model User {
 }
 
 model Product {
-  id                  Int                   @id @default(autoincrement())
-  name                String                @db.VarChar(255)
-  baseName            String?               @db.VarChar(150)
-  variant             String?               @db.VarChar(100)
-  unit                String?               @db.VarChar(20)
-  numericValue        Decimal?              @db.Decimal(10, 2)
-  quantity            Int                   @default(0)
-  location            Int                   @default(1)
-  lowStockThreshold   Int?                  @default(1)
-  costPrice           Decimal               @default(0.00) @db.Decimal(10, 2)
-  retailPrice         Decimal               @default(0.00) @db.Decimal(10, 2)
-  deletedAt           DateTime?             @db.DateTime(0)
+  id                  Int                    @id @default(autoincrement())
+  name                String                 @db.VarChar(255)
+  baseName            String?                @db.VarChar(150)
+  variant             String?                @db.VarChar(100)
+  unit                String?                @db.VarChar(20)
+  numericValue        Decimal?               @db.Decimal(10, 2)
+  quantity            Int                    @default(0)
+  location            Int                    @default(1)
+  lowStockThreshold   Int?                   @default(1)
+  costPrice           Decimal                @default(0.00) @db.Decimal(10, 2)
+  retailPrice         Decimal                @default(0.00) @db.Decimal(10, 2)
+  deletedAt           DateTime?              @db.DateTime(0)
   deletedBy           Int?
   inventory_logs      inventory_logs[]
   notificationHistory NotificationHistory[]
   product_locations   product_locations[]
-  deletedByUser       User?                 @relation("DeletedProducts", fields: [deletedBy], references: [id])
+  deletedByUser       User?                  @relation("DeletedProducts", fields: [deletedBy], references: [id])
 
   @@index([baseName, numericValue, variant], map: "idx_product_sorting")
   @@index([deletedAt], map: "idx_deleted")
@@ -90,6 +90,9 @@ model inventory_logs {
   @@index([productId, locationId, changeTime], map: "idx_inventory_logs_product_location_time_desc")
   @@index([logType, changeTime], map: "idx_inventory_logs_type_time")
   @@index([userId, changeTime, productId, locationId, delta], map: "idx_inventory_logs_user_covering")
+  // Indices for reports system performance
+  @@index([changeTime, productId, delta], map: "idx_logs_time_product_delta")
+  @@index([productId, changeTime, delta], map: "idx_logs_product_time_delta")
 }
 
 model product_locations {

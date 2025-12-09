@@ -5,10 +5,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { 
-  Package, 
-  PackagePlus, 
-  PackageMinus, 
+import { cn } from "@/lib/utils";
+import {
+  Package,
+  PackagePlus,
+  PackageMinus,
   Settings,
   Clock
 } from "lucide-react";
@@ -109,7 +110,7 @@ export function ActivityTimeline() {
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <ScrollArea className="h-[400px] pr-4">
+        <ScrollArea className="h-[300px] sm:h-[400px] pr-4">
           <div className="space-y-4">
             {activities.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">
@@ -165,8 +166,4 @@ export function ActivityTimeline() {
       </CardContent>
     </Card>
   );
-}
-
-function cn(...classes: (string | boolean | undefined)[]) {
-  return classes.filter(Boolean).join(' ');
 }
