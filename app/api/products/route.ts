@@ -134,7 +134,7 @@ export async function POST(request: NextRequest) {
     });
 
     // Log the product creation
-    await auditService.logProductCreate(parseInt(session.user.id), product.id, product.name);
+    await auditService.logProductCreate(session.user.id, product.id, product.name);
 
     const response = NextResponse.json(product, { status: 201 });
     return applyRateLimitHeaders(response, rateLimitHeaders);

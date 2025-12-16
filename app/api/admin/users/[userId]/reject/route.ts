@@ -34,7 +34,7 @@ export async function DELETE(request: NextRequest, { params }: { params: { userI
     });
 
     // Log the rejection action
-    await auditService.logUserRejection(parseInt(session.user.id), user.id, user.email);
+    await auditService.logUserRejection(session.user.id, user.id, user.email);
 
     return NextResponse.json({
       message: "User rejected and removed successfully",

@@ -68,9 +68,8 @@ export async function POST(request: NextRequest) {
 
     // Log only transfer auto-add in audit trail; normal adjustments are change-log only
     if (product && autoAddForTransfer) {
-      const userId = parseInt(session.user.id);
       await auditService.logInventoryTransferAutoAdd(
-        userId,
+        session.user.id,
         body.productId,
         product.name,
         body.delta,

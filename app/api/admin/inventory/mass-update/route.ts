@@ -348,7 +348,7 @@ export async function POST(request: NextRequest) {
                 // Create inventory log entry
                 const log = await tx.inventory_logs.create({
                   data: {
-                    userId: parseInt(session.user.id),
+                    userId: session.user.id,
                     productId,
                     locationId,
                     delta,
@@ -475,7 +475,7 @@ export async function POST(request: NextRequest) {
     if (successCount > 0) {
       try {
         await auditService.logBulkInventoryUpdate(
-          parseInt(session.user.id),
+          session.user.id,
           processedChanges.map((c) => ({
             productId: c.productId,
             productName: c.productName,

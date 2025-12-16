@@ -143,7 +143,7 @@ export async function POST(request: NextRequest) {
         // Log the transfer
         const fromLocation = sourceLocationMap.get(transfer.fromLocationId)!;
         await auditService.logInventoryTransfer(
-          Number(session.user.id),
+          session.user.id,
           product.id,
           product.name,
           transfer.quantity,

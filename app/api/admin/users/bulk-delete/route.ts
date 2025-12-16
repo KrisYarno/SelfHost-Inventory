@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
 
     // Filter out the current user (cannot delete yourself)
     const filteredIds = userIds.filter(
-      (id: number) => id.toString() !== session.user.id
+      (id: number) => id !== session.user.id
     );
 
     if (filteredIds.length === 0) {
@@ -62,7 +62,7 @@ export async function POST(request: NextRequest) {
 
     // Log the bulk deletion action
     await auditService.logBulkUserDeletion(
-      parseInt(session.user.id),
+      session.user.id,
       usersToDelete.map((u) => u.id),
       usersToDelete.map((u) => u.email)
     );

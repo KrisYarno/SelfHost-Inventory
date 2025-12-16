@@ -51,7 +51,7 @@ export async function POST(request: NextRequest) {
 
     // Log the bulk approval action
     await auditService.logBulkUserApproval(
-      parseInt(session.user.id),
+      session.user.id,
       usersToApprove.map((u) => u.id),
       usersToApprove.map((u) => u.email)
     );

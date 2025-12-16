@@ -52,7 +52,7 @@ export function OrderCard({ order, onSelect, onSwipe, className }: OrderCardProp
   const itemCount = order.items.reduce((sum, item) => sum + item.quantity, 0);
   const timeElapsed = formatDistanceToNow(new Date(order.createdAt), { addSuffix: true });
   const isLocked = !!order.lockedBy;
-  const isOwnLock = order.lockedBy?.userId === 'current-user-id'; // Replace with actual user ID
+  const isOwnLock = order.lockedBy?.userId === 0; // TODO: Replace with actual user ID from session
 
   // Status colors using semantic tokens
   const statusColors = {

@@ -3,7 +3,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { UserApprovalCard } from "@/components/admin/user-approval-card";
-import { UserTable } from "@/components/admin/user-table";
+import { UserTable, User } from "@/components/admin/user-table";
+import { EditUserDialog } from "@/components/admin/edit-user-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,12 +12,15 @@ import { toast } from "sonner";
 import { CheckCircle2, XCircle, Trash2 } from "lucide-react";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
-interface User {
+interface Location {
   id: number;
-  email: string;
-  username: string;
-  isAdmin: boolean;
-  isApproved: boolean;
+  name: string;
+}
+
+interface Company {
+  id: string;
+  name: string;
+  slug: string;
 }
 
 interface UsersResponse {
@@ -42,6 +46,12 @@ export default function AdminUsersPage() {
   const [selectedUsers, setSelectedUsers] = useState<Set<number>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
 
+  // Edit dialog state
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [locations, setLocations] = useState<Location[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
+
   const fetchUsers = useCallback(async () => {
     try {
       setLoading(true);
@@ -58,11 +68,12 @@ export default function AdminUsersPage() {
       const pendingData: UsersResponse = await pendingResponse.json();
       setPendingUsers(pendingData.users);
 
-      // Fetch filtered users for the table
+      // Fetch filtered users for the table (with details for edit dialog)
       const params = new URLSearchParams({
         filter,
         page: page.toString(),
         limit: "10",
+        include: "details",
       });
       if (search) params.append("search", search);
 
@@ -80,9 +91,44 @@ export default function AdminUsersPage() {
     }
   }, [filter, search, page, router]);
 
+  // Fetch locations and companies for the edit dialog
+  const fetchLocationsAndCompanies = useCallback(async () => {
+    try {
+      const [locResponse, compResponse] = await Promise.all([
+        fetch("/api/locations"),
+        fetch("/api/admin/companies"),
+      ]);
+
+      if (locResponse.ok) {
+        const locData = await locResponse.json();
+        setLocations(locData.locations || locData || []);
+      }
+
+      if (compResponse.ok) {
+        const compData = await compResponse.json();
+        setCompanies(compData.companies || compData || []);
+      }
+    } catch (error) {
+      console.error("Error fetching locations/companies:", error);
+    }
+  }, []);
+
   useEffect(() => {
     fetchUsers();
   }, [fetchUsers]);
+
+  useEffect(() => {
+    fetchLocationsAndCompanies();
+  }, [fetchLocationsAndCompanies]);
+
+  const handleEdit = (user: User) => {
+    setEditingUser(user);
+    setEditDialogOpen(true);
+  };
+
+  const handleEditSuccess = () => {
+    fetchUsers();
+  };
 
   const handleApprove = async (userId: number) => {
     try {
@@ -153,30 +199,6 @@ export default function AdminUsersPage() {
     }
   };
 
-  const handleToggleAdmin = async (userId: number, currentIsAdmin: boolean) => {
-    try {
-      const response = await fetch(`/api/admin/users/${userId}/toggle-admin`, {
-        method: "POST",
-        headers: withCSRFHeaders(
-          {
-            "Content-Type": "application/json",
-          },
-          csrfToken
-        ),
-        body: JSON.stringify({ isAdmin: !currentIsAdmin }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to update user role");
-      }
-
-      toast.success(`User role updated to ${!currentIsAdmin ? "Admin" : "User"}`);
-      await fetchUsers();
-    } catch (error) {
-      console.error("Error updating user role:", error);
-      toast.error("Failed to update user role");
-    }
-  };
 
   const handleBulkApprove = async () => {
     if (selectedUsers.size === 0) {
@@ -434,7 +456,7 @@ export default function AdminUsersPage() {
               onApprove={handleApprove}
               onReject={handleReject}
               onDelete={handleDelete}
-              onToggleAdmin={handleToggleAdmin}
+              onEdit={handleEdit}
               selectedUsers={selectedUsers}
               onToggleSelect={toggleUserSelection}
             />
@@ -466,6 +488,16 @@ export default function AdminUsersPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Edit User Dialog */}
+      <EditUserDialog
+        user={editingUser}
+        open={editDialogOpen}
+        onOpenChange={setEditDialogOpen}
+        onSuccess={handleEditSuccess}
+        locations={locations}
+        companies={companies}
+      />
     </div>
   );
 }

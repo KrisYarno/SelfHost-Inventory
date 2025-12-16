@@ -17,6 +17,11 @@ const protectedRoutes = [
   "/api/users",
 ];
 
+// Public routes (no authentication required)
+const publicRoutes = [
+  "/api/webhooks", // Webhooks use signature verification instead of session auth
+];
+
 // Routes that require admin role
 const adminRoutes = ["/admin", "/api/admin"];
 
@@ -29,6 +34,9 @@ const rateLimitedRoutes = ["/api/", "/auth/"];
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
+  // Check if route is public (skip auth for webhooks)
+  const isPublicRoute = publicRoutes.some((route) => pathname.startsWith(route));
+
   // Apply rate limiting to API and auth routes
   const shouldRateLimit = rateLimitedRoutes.some((route) => pathname.includes(route));
 
@@ -39,6 +47,11 @@ export async function middleware(request: NextRequest) {
     if (rateLimitResponse) {
       return rateLimitResponse;
     }
+  }
+
+  // Skip authentication checks for public routes
+  if (isPublicRoute) {
+    return NextResponse.next();
   }
 
   // Check if the route is protected

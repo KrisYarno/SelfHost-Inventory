@@ -46,7 +46,7 @@ const mockOrders = [
       },
     ],
     lockedBy: {
-      userId: "user-123",
+      userId: 123,
       userName: "John Doe",
       lockedAt: new Date(Date.now() - 1000 * 60 * 2), // 2 minutes ago
     },

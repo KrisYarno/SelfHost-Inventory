@@ -35,6 +35,9 @@ export async function GET(request: NextRequest) {
       where.OR = [{ email: { contains: search } }, { username: { contains: search } }];
     }
 
+    // Check if detailed user info is requested (for edit dialog)
+    const includeDetails = searchParams.get("include") === "details";
+
     // Get users and count
     const [users, total] = await Promise.all([
       prisma.user.findMany({
@@ -45,6 +48,25 @@ export async function GET(request: NextRequest) {
           username: true,
           isAdmin: true,
           isApproved: true,
+          ...(includeDetails && {
+            defaultLocationId: true,
+            emailAlerts: true,
+            phoneNumber: true,
+            minLocationEmailAlerts: true,
+            minLocationSmsAlerts: true,
+            minCombinedEmailAlerts: true,
+            minCombinedSmsAlerts: true,
+            companies: {
+              select: {
+                companyId: true,
+                company: {
+                  select: {
+                    name: true,
+                  },
+                },
+              },
+            },
+          }),
         },
         orderBy: { id: "desc" },
         skip,
@@ -53,8 +75,19 @@ export async function GET(request: NextRequest) {
       prisma.user.count({ where }),
     ]);
 
+    // Transform the users to flatten company data if details were included
+    const transformedUsers = includeDetails
+      ? users.map((user: any) => ({
+          ...user,
+          companies: user.companies?.map((c: any) => ({
+            companyId: c.companyId,
+            companyName: c.company?.name,
+          })),
+        }))
+      : users;
+
     return NextResponse.json({
-      users,
+      users: transformedUsers,
       pagination: {
         page,
         limit,

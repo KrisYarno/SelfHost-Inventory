@@ -101,7 +101,7 @@ export const authOptions: NextAuthOptions = {
 
         // Return user object matching the User type in types/next-auth.d.ts
         return {
-          id: String(user.id),
+          id: user.id,
           email: user.email,
           username: user.username,
           isAdmin: user.isAdmin,
@@ -212,7 +212,7 @@ export const authOptions: NextAuthOptions = {
         });
 
         if (dbUser) {
-          token.id = dbUser.id.toString();
+          token.id = dbUser.id;
           token.email = dbUser.email;
           token.name = dbUser.username;
           token.isAdmin = dbUser.isAdmin;
@@ -233,7 +233,7 @@ export const authOptions: NextAuthOptions = {
         });
 
         if (dbUser) {
-          token.id = dbUser.id.toString();
+          token.id = dbUser.id;
           token.email = dbUser.email;
           token.name = dbUser.username;
           token.isAdmin = dbUser.isAdmin;
@@ -252,7 +252,7 @@ export const authOptions: NextAuthOptions = {
     },
     async session({ session, token }) {
       if (session.user) {
-        session.user.id = token.id as string;
+        session.user.id = token.id as number;
         session.user.email = token.email as string;
         session.user.name = token.name as string;
         session.user.isAdmin = token.isAdmin as boolean;

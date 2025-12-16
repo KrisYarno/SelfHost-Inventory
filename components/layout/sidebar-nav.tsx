@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, BookOpen, BarChart3, Truck } from "lucide-react";
+import { Home, Package, Settings, Warehouse, BookOpen, ShoppingCart, Truck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -42,16 +42,16 @@ const navigation = [
 
 const adminNavigation = [
   {
+    name: "Orders",
+    href: "/orders",
+    icon: ShoppingCart,
+    description: "External orders from integrations",
+  },
+  {
     name: "Admin",
     href: "/admin",
     icon: Settings,
     description: "Administration panel",
-  },
-  {
-    name: "Reports",
-    href: "/admin/reports",
-    icon: BarChart3,
-    description: "Analytics and reports",
   },
 ];
 

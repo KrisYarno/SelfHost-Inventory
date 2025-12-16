@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, ClipboardList, Truck } from "lucide-react";
+import { Home, Package, Settings, Warehouse, ClipboardList, Truck, ShoppingCart } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -40,6 +40,12 @@ const navigation = [
 ];
 
 const adminNavigation = [
+  {
+    name: "Orders",
+    href: "/orders",
+    icon: ShoppingCart,
+    label: "Orders",
+  },
   {
     name: "Admin",
     href: "/admin",
