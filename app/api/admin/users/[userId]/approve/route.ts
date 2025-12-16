@@ -31,7 +31,7 @@ export async function POST(request: NextRequest, { params }: { params: { userId:
     });
 
     // Log the approval action
-    await auditService.logUserApproval(parseInt(session.user.id), user.id, user.email);
+    await auditService.logUserApproval(session.user.id, user.id, user.email);
 
     return NextResponse.json({
       message: "User approved successfully",

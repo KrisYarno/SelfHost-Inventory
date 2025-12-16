@@ -56,7 +56,7 @@ export async function POST(request: NextRequest) {
     // Audit as bulk inventory update/deduction (one row)
     try {
       await auditService.logBulkInventoryUpdate(
-        parseInt(session.user.id),
+        session.user.id,
         result.logs.map((log) => ({
           productId: log.productId,
           productName: log.products?.name ?? `Product ${log.productId}`,

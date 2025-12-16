@@ -53,14 +53,14 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       where: { id: productId },
       data: {
         deletedAt: new Date(),
-        deletedBy: parseInt(session.user.id),
+        deletedBy: session.user.id,
       },
     });
 
     // Log the deletion in inventory logs for audit trail
     await prisma.inventory_logs.create({
       data: {
-        userId: parseInt(session.user.id),
+        userId: session.user.id,
         productId: productId,
         delta: 0,
         changeTime: new Date(),

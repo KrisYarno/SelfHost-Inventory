@@ -4,14 +4,27 @@ import { DataTable } from '@/components/ui/data-table';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
-import { UserCog, MoreHorizontal, Check, X, Trash2 } from 'lucide-react';
+import { Pencil, MoreHorizontal, Check, X, Trash2 } from 'lucide-react';
 
-interface User {
+interface CompanyAssociation {
+  companyId: string;
+  companyName?: string;
+}
+
+export interface User {
   id: number;
   email: string;
   username: string;
   isAdmin: boolean;
   isApproved: boolean;
+  defaultLocationId?: number;
+  emailAlerts?: boolean | null;
+  phoneNumber?: string | null;
+  minLocationEmailAlerts?: boolean;
+  minLocationSmsAlerts?: boolean;
+  minCombinedEmailAlerts?: boolean;
+  minCombinedSmsAlerts?: boolean;
+  companies?: CompanyAssociation[];
 }
 
 interface UserTableProps {
@@ -20,20 +33,20 @@ interface UserTableProps {
   onApprove?: (userId: number) => Promise<void>;
   onReject?: (userId: number) => Promise<void>;
   onDelete?: (userId: number) => Promise<void>;
-  onToggleAdmin?: (userId: number, currentIsAdmin: boolean) => Promise<void>;
+  onEdit?: (user: User) => void;
   selectedUsers?: Set<number>;
   onToggleSelect?: (userId: number) => void;
 }
 
-export function UserTable({ 
-  users, 
-  loading, 
-  onApprove, 
-  onReject, 
+export function UserTable({
+  users,
+  loading,
+  onApprove,
+  onReject,
   onDelete,
-  onToggleAdmin,
+  onEdit,
   selectedUsers,
-  onToggleSelect 
+  onToggleSelect
 }: UserTableProps) {
   const handleAction = async (action: 'approve' | 'reject', userId: number) => {
     if (action === 'approve' && onApprove) {
@@ -130,16 +143,16 @@ export function UserTable({
                   <DropdownMenuSeparator />
                 </>
               )}
-              {user.isApproved && onToggleAdmin && (
-                <DropdownMenuItem onClick={() => onToggleAdmin(user.id, user.isAdmin)}>
-                  <UserCog className="mr-2 h-4 w-4" />
-                  <span>{user.isAdmin ? "Remove Admin" : "Make Admin"}</span>
+              {user.isApproved && onEdit && (
+                <DropdownMenuItem onClick={() => onEdit(user)}>
+                  <Pencil className="mr-2 h-4 w-4" />
+                  <span>Edit User</span>
                 </DropdownMenuItem>
               )}
               {onDelete && (
                 <>
-                  {(user.isApproved && onToggleAdmin) && <DropdownMenuSeparator />}
-                  <DropdownMenuItem 
+                  {(user.isApproved && onEdit) && <DropdownMenuSeparator />}
+                  <DropdownMenuItem
                     onClick={() => onDelete(user.id)}
                     className="text-destructive focus:text-destructive"
                   >

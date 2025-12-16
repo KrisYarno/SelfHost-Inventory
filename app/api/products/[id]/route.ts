@@ -200,7 +200,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     }
 
     await auditService.logProductUpdate(
-      parseInt(session.user.id),
+      session.user.id,
       product.id,
       product.name,
       changes
@@ -274,12 +274,12 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       where: { id: productId },
       data: {
         deletedAt: new Date(),
-        deletedBy: parseInt(session.user.id),
+        deletedBy: session.user.id,
       },
     });
 
     // Log the product deletion
-    await auditService.logProductDelete(parseInt(session.user.id), product.id, product.name);
+    await auditService.logProductDelete(session.user.id, product.id, product.name);
 
     // Note: We don't create an inventory log for deletion as it's not an inventory change
     // The soft delete fields (deletedAt, deletedBy) serve as the audit trail

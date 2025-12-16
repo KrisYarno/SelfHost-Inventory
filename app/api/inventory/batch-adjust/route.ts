@@ -76,7 +76,7 @@ export async function POST(request: NextRequest) {
               data: {
                 productId: adjustment.productId,
                 locationId: adjustment.locationId,
-                userId: parseInt(session.user.id),
+                userId: session.user.id,
                 delta: adjustment.delta,
                 changeTime: new Date(),
                 logType: "ADJUSTMENT",
@@ -124,7 +124,7 @@ export async function POST(request: NextRequest) {
             data: {
               productId: adjustment.productId,
               locationId: adjustment.locationId,
-              userId: parseInt(session.user.id),
+              userId: session.user.id,
               delta: adjustment.delta,
               changeTime: new Date(),
               logType: "ADJUSTMENT",
@@ -151,7 +151,7 @@ export async function POST(request: NextRequest) {
     // Log the bulk inventory update after successful transaction
     if (results.auditUpdates.length > 0) {
       await auditService.logBulkInventoryUpdate(
-        parseInt(session.user.id),
+        session.user.id,
         results.auditUpdates,
         adjustments[0]?.locationId // Assuming all adjustments are for the same location
       );

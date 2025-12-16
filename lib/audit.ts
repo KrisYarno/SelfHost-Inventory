@@ -2,7 +2,7 @@ import prisma from '@/lib/prisma'
 import { headers } from 'next/headers'
 import { v4 as uuidv4 } from 'uuid'
 
-export type AuditActionType = 
+export type AuditActionType =
   | 'USER_APPROVAL'
   | 'USER_REJECTION'
   | 'USER_DELETION'
@@ -19,6 +19,8 @@ export type AuditActionType =
   | 'INVENTORY_BULK_UPDATE'
   | 'INVENTORY_TRANSFER'
   | 'INVENTORY_TRANSFER_AUTO_ADD'
+  | 'EXTERNAL_ORDER_FULFILLMENT'
+  | 'EXTERNAL_ORDER_PARTIAL_FULFILLMENT'
   | 'LOCATION_CREATE'
   | 'LOCATION_UPDATE'
   | 'LOCATION_DELETE'

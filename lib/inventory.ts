@@ -221,7 +221,7 @@ export async function getInventorySnapshot(
  * Creates an inventory adjustment and updates product_locations with optimistic locking
  */
 export async function createInventoryAdjustment(
-  userId: string,
+  userId: number,
   productId: number,
   locationId: number,
   delta: number,
@@ -285,7 +285,7 @@ export async function createInventoryAdjustment(
 
         // Create the log entry
         const log = await createInventoryLog({
-          userId: parseInt(userId),
+          userId,
           productId,
           locationId,
           delta,
@@ -347,7 +347,7 @@ export async function createInventoryAdjustment(
  * Atomically transfer quantity between two locations with optimistic locking
  */
 export async function createInventoryTransfer(options: {
-  userId: string;
+  userId: number;
   productId: number;
   fromLocationId: number;
   toLocationId: number;
@@ -427,13 +427,11 @@ export async function createInventoryTransfer(options: {
           );
         }
 
-        const numericUserId = parseInt(userId);
-
         // Create two TRANSFER logs
         const [fromLog, toLog] = await Promise.all([
           createInventoryLog(
             {
-              userId: numericUserId,
+              userId,
               productId,
               locationId: fromLocationId,
               delta: -quantity,
@@ -443,7 +441,7 @@ export async function createInventoryTransfer(options: {
           ),
           createInventoryLog(
             {
-              userId: numericUserId,
+              userId,
               productId,
               locationId: toLocationId,
               delta: quantity,
@@ -529,7 +527,7 @@ export class OptimisticLockError extends Error {
  */
 export async function createInventoryTransaction(
   type: string,
-  userId: string,
+  userId: number,
   items: Array<{
     productId: number;
     locationId: number;
@@ -597,7 +595,7 @@ export async function createInventoryTransaction(
 
       // Create log entry
       const log = await createInventoryLog({
-        userId: parseInt(userId),
+        userId,
         productId: item.productId,
         locationId: item.locationId,
         delta: item.quantityChange,
@@ -646,7 +644,7 @@ export async function createInventoryTransaction(
         id: `txn_${Date.now()}`,
         type,
         status: 'COMPLETED',
-        userId: parseInt(userId),
+        userId,
         metadata,
       },
       logs,

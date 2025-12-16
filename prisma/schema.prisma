@@ -27,6 +27,8 @@ model User {
   notificationHistory NotificationHistory[]
   deletedProducts     Product[]             @relation("DeletedProducts")
   auditLogs           AuditLog[]
+  companies           UserCompany[]
+  fulfilledOrders     ExternalOrder[]
   locations           Location              @relation(fields: [defaultLocationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_default_location")
 
   @@index([defaultLocationId], map: "fk_user_default_location")
@@ -52,6 +54,7 @@ model Product {
   notificationHistory NotificationHistory[]
   product_locations   product_locations[]
   deletedByUser       User?                  @relation("DeletedProducts", fields: [deletedBy], references: [id])
+  productLinks        ProductLink[]
 
   @@index([baseName, numericValue, variant], map: "idx_product_sorting")
   @@index([deletedAt], map: "idx_deleted")
@@ -156,4 +159,143 @@ model AuditLog {
 enum inventory_logs_logType {
   ADJUSTMENT
   TRANSFER
+}
+
+// Organizational Layer
+model Company {
+  id           String        @id @default(cuid())
+  name         String
+  slug         String        @unique
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  users        UserCompany[]
+  integrations Integration[]
+  orders       ExternalOrder[]
+  // Products are GLOBAL (shared inventory) - accessed via ProductLink through integrations
+
+  @@map("companies")
+}
+
+model UserCompany {
+  userId    Int
+  companyId String
+  user      User     @relation(fields: [userId], references: [id])
+  company   Company  @relation(fields: [companyId], references: [id])
+
+  @@id([userId, companyId])
+  @@map("user_companies")
+}
+
+// Integration Layer
+model Integration {
+  id            String   @id @default(cuid())
+  companyId     String
+  platform      String   @db.VarChar(50) // "SHOPIFY", "WOOCOMMERCE"
+  name          String   @db.VarChar(255)
+  storeUrl      String   @db.VarChar(500)
+
+  encryptedApiKey    String?  @db.Text
+  encryptedApiSecret String?  @db.Text
+  webhookSecret      String?  @db.Text
+
+  isActive      Boolean  @default(true)
+  lastSyncAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  company       Company  @relation(fields: [companyId], references: [id])
+  orders        ExternalOrder[]
+  productLinks  ProductLink[]
+
+  @@index([companyId])
+  @@index([platform])
+  @@map("integrations")
+}
+
+// Product Linking Layer
+model ProductLink {
+  id                 String      @id @default(cuid())
+  integrationId      String
+  internalProductId  Int
+
+  externalProductId  String      @db.VarChar(255)
+  externalVariantId  String?     @db.VarChar(255)
+  externalSku        String?     @db.VarChar(255)
+  externalTitle      String?     @db.VarChar(500)
+
+  createdAt          DateTime    @default(now())
+
+  integration        Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  internalProduct    Product     @relation(fields: [internalProductId], references: [id])
+  orderItems         ExternalOrderItem[]
+
+  @@unique([integrationId, externalProductId, externalVariantId])
+  @@index([internalProductId])
+  @@map("product_links")
+}
+
+// Order Storage Layer
+model ExternalOrder {
+  id              String      @id @default(cuid())
+  companyId       String
+  integrationId   String
+
+  externalId      String      @db.VarChar(255)
+  orderNumber     String      @db.VarChar(100)
+
+  nativeStatus    String      @db.VarChar(100)
+  financialStatus String?     @db.VarChar(100)
+  fulfillmentStatus String?   @db.VarChar(100)
+
+  total           Decimal     @db.Decimal(10, 2)
+  currency        String      @default("USD") @db.VarChar(10)
+  customerEmail   String?     @db.VarChar(255)
+  customerName    String?     @db.VarChar(255)
+
+  rawPayload      Json
+
+  internalStatus  String      @default("pending") @db.VarChar(50)
+  fulfilledAt     DateTime?
+  fulfilledBy     Int?
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  externalCreatedAt DateTime?
+
+  company         Company     @relation(fields: [companyId], references: [id])
+  integration     Integration @relation(fields: [integrationId], references: [id])
+  items           ExternalOrderItem[]
+  fulfilledByUser User?       @relation(fields: [fulfilledBy], references: [id])
+
+  @@unique([integrationId, externalId])
+  @@index([companyId, internalStatus])
+  @@index([companyId, createdAt])
+  @@map("external_orders")
+}
+
+// Order Items Layer
+model ExternalOrderItem {
+  id              String        @id @default(cuid())
+  orderId         String
+
+  externalItemId  String?       @db.VarChar(255)
+  externalProductId String      @db.VarChar(255)
+  externalVariantId String?     @db.VarChar(255)
+
+  name            String        @db.VarChar(500)
+  sku             String?       @db.VarChar(255)
+  quantity        Int
+  fulfilledQty    Int           @default(0)
+  price           Decimal       @db.Decimal(10, 2)
+
+  productLinkId   String?
+  isMapped        Boolean       @default(false)
+
+  order           ExternalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productLink     ProductLink?  @relation(fields: [productLinkId], references: [id])
+
+  @@index([orderId])
+  @@index([externalVariantId])
+  @@map("external_order_items")
 }

@@ -35,7 +35,7 @@ export class RateLimitError extends Error {
 type EnforceRateLimitOptions = {
   limit?: number;
   ttl?: number;
-  identifier?: string;
+  identifier?: string | number;
 };
 
 const buildHeaders = (limit: number, count: number, expiresAt: number): RateLimitHeaders => ({
@@ -55,9 +55,9 @@ const cleanupStore = () => {
   }
 };
 
-const getIdentifier = (req: NextRequest, explicitIdentifier?: string): string => {
-  if (explicitIdentifier) {
-    return explicitIdentifier;
+const getIdentifier = (req: NextRequest, explicitIdentifier?: string | number): string => {
+  if (explicitIdentifier !== undefined) {
+    return String(explicitIdentifier);
   }
 
   const forwarded = req.headers.get('x-forwarded-for');

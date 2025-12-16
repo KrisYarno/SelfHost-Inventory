@@ -93,7 +93,7 @@ export async function POST(request: NextRequest) {
     });
 
     await auditService.logInventoryTransfer(
-      Number(session.user.id),
+      session.user.id,
       product.id,
       product.name,
       body.quantity,

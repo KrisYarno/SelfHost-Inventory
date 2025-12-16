@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
 
     // Log the bulk rejection action
     await auditService.logBulkUserRejection(
-      parseInt(session.user.id),
+      session.user.id,
       usersToReject.map((u) => u.id),
       usersToReject.map((u) => u.email)
     );
