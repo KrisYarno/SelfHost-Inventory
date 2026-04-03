@@ -11,9 +11,7 @@ const publicRoutes = [
   "/api/placeholder",
   "/api/webhooks",    // Webhooks use HMAC signature verification
   "/api/cron",        // Cron routes use CRON_SECRET bearer token
-  "/auth/signin",
-  "/auth/signup",
-  "/auth/error",
+  "/auth/error",      // Auth pages handled separately (redirect if already logged in)
   "/auth/pending-approval",
   "/unauthorized",
   "/",                // Landing page
@@ -48,14 +46,24 @@ export async function middleware(request: NextRequest) {
     }
   }
 
-  // Skip authentication checks for public routes
+  // Handle auth routes before the public route early return
+  // (auth pages are public but should redirect authenticated users to workbench)
+  const isAuthRoute = authRoutes.some((route) => pathname.startsWith(route));
+  if (isAuthRoute) {
+    const token = await getToken({ req: request, secret: process.env.NEXTAUTH_SECRET });
+    if (token?.isApproved) {
+      return NextResponse.redirect(new URL("/workbench", request.url));
+    }
+    return NextResponse.next();
+  }
+
+  // Skip authentication checks for other public routes
   if (isPublicRoute) {
     return NextResponse.next();
   }
 
   // Everything below this line requires authentication
   const isAdminRoute = adminRoutes.some((route) => pathname.startsWith(route));
-  const isAuthRoute = authRoutes.some((route) => pathname.startsWith(route));
 
   // Get the token
   const token = await getToken({
@@ -91,11 +99,6 @@ export async function middleware(request: NextRequest) {
       return NextResponse.json({ error: "Admin access required" }, { status: 403 });
     }
     return NextResponse.redirect(new URL("/unauthorized", request.url));
-  }
-
-  // Redirect authenticated users away from auth pages
-  if (isAuthRoute && token.isApproved) {
-    return NextResponse.redirect(new URL("/workbench", request.url));
   }
 
   return NextResponse.next();
