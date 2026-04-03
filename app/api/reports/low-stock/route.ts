@@ -3,7 +3,7 @@ import { getSession } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { LowStockResponse, LowStockAlert } from "@/types/reports";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
@@ -13,27 +13,27 @@ export async function GET(request: NextRequest) {
     }
 
     const searchParams = request.nextUrl.searchParams;
-    const threshold = parseInt(searchParams.get("threshold") || "10");
+    const defaultThreshold = parseInt(searchParams.get("threshold") || "10");
 
-    // Get all products (excluding soft deleted)
+    // Get all products with their location quantities (source of truth)
     const products = await prisma.product.findMany({
       where: {
         deletedAt: null,
       },
+      include: {
+        product_locations: {
+          select: { quantity: true },
+        },
+      },
     });
 
-    // Get current inventory levels
-    const inventoryLevels = await prisma.inventory_logs.groupBy({
-      by: ['productId'],
-      _sum: {
-        delta: true
-      }
-    });
-
-    // Create a map of current stock levels
+    // Build stock map from product_locations (not log deltas)
     const stockMap = new Map<number, number>();
-    inventoryLevels.forEach(level => {
-      stockMap.set(level.productId, level._sum.delta || 0);
+    products.forEach((product) => {
+      const totalQuantity = product.product_locations.reduce(
+        (sum: number, pl: { quantity: number }) => sum + pl.quantity, 0
+      );
+      stockMap.set(product.id, totalQuantity);
     });
 
     // Get activity from last 30 days to calculate usage
@@ -43,20 +43,20 @@ export async function GET(request: NextRequest) {
     const recentActivity = await prisma.inventory_logs.findMany({
       where: {
         changeTime: { gte: thirtyDaysAgo },
-        delta: { lt: 0 }
+        delta: { lt: 0 },
       },
       select: {
         productId: true,
         delta: true,
-        changeTime: true
-      }
+        changeTime: true,
+      },
     });
 
     // Calculate average daily usage per product
     const usageMap = new Map<number, number>();
     const productUsage = new Map<number, number[]>();
 
-    recentActivity.forEach(log => {
+    recentActivity.forEach((log) => {
       if (!productUsage.has(log.productId)) {
         productUsage.set(log.productId, []);
       }
@@ -64,10 +64,7 @@ export async function GET(request: NextRequest) {
     });
 
     productUsage.forEach((usages, productId) => {
-      const totalUsage = usages.reduce(
-        (sum: number, usage: number) => sum + usage,
-        0
-      );
+      const totalUsage = usages.reduce((sum: number, usage: number) => sum + usage, 0);
       const avgDailyUsage = totalUsage / 30;
       usageMap.set(productId, avgDailyUsage);
     });
@@ -75,22 +72,23 @@ export async function GET(request: NextRequest) {
     // Build low stock alerts
     const alerts: LowStockAlert[] = [];
 
-    products.forEach(product => {
+    products.forEach((product) => {
       const currentStock = stockMap.get(product.id) || 0;
-      
-      if (currentStock < threshold) {
+      const productThreshold = product.lowStockThreshold ?? defaultThreshold;
+
+      if (currentStock < productThreshold) {
         const avgDailyUsage = usageMap.get(product.id) || 0;
         const daysUntilEmpty = avgDailyUsage > 0 ? Math.floor(currentStock / avgDailyUsage) : null;
-        const percentageRemaining = threshold > 0 ? (currentStock / threshold) * 100 : 0;
+        const percentageRemaining = productThreshold > 0 ? (currentStock / productThreshold) * 100 : 0;
 
         alerts.push({
           productId: product.id,
           productName: product.name,
           currentStock,
-          threshold,
+          threshold: productThreshold,
           percentageRemaining: Math.round(percentageRemaining),
           averageDailyUsage: Math.round(avgDailyUsage * 10) / 10,
-          daysUntilEmpty
+          daysUntilEmpty,
         });
       }
     });
@@ -100,15 +98,12 @@ export async function GET(request: NextRequest) {
 
     const response: LowStockResponse = {
       alerts,
-      threshold
+      threshold: defaultThreshold,
     };
 
     return NextResponse.json(response);
   } catch (error) {
     console.error("Error fetching low stock alerts:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch low stock alerts" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch low stock alerts" }, { status: 500 });
   }
 }

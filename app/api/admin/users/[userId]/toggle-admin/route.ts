@@ -1,21 +1,20 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getSession } from '@/lib/auth';
-import prisma from '@/lib/prisma';
-import { validateCSRFToken } from '@/lib/csrf';
+import { NextRequest, NextResponse } from "next/server";
+import { getSession } from "@/lib/auth";
+import prisma from "@/lib/prisma";
+import { validateCSRFToken } from "@/lib/csrf";
+import { z } from "zod";
 
-export const dynamic = 'force-dynamic';
+const ToggleAdminSchema = z.object({
+  isAdmin: z.boolean(),
+});
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { userId: string } }
-) {
+export const dynamic = "force-dynamic";
+
+export async function POST(request: NextRequest, { params }: { params: { userId: string } }) {
   try {
     const session = await getSession();
     if (!session || !session.user.isAdmin) {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     // Validate CSRF token
@@ -26,14 +25,26 @@ export async function POST(
 
     const userId = parseInt(params.userId);
     if (isNaN(userId) || userId === 0) {
-      return NextResponse.json(
-        { error: 'Invalid user ID' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Invalid user ID" }, { status: 400 });
     }
 
     const body = await request.json();
-    const { isAdmin } = body;
+    const parsed = ToggleAdminSchema.safeParse(body);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: "Invalid request body", details: parsed.error.flatten().fieldErrors },
+        { status: 400 }
+      );
+    }
+    const { isAdmin } = parsed.data;
+
+    // Prevent admins from removing their own admin status
+    if (userId === session.user.id && !isAdmin) {
+      return NextResponse.json(
+        { error: "Cannot remove your own admin privileges" },
+        { status: 400 }
+      );
+    }
 
     // Update user admin status
     const user = await prisma.user.update({
@@ -41,20 +52,17 @@ export async function POST(
       data: { isAdmin },
     });
 
-    return NextResponse.json({ 
-      message: 'User role updated successfully',
+    return NextResponse.json({
+      message: "User role updated successfully",
       user: {
         id: user.id,
         email: user.email,
         username: user.username,
         isAdmin: user.isAdmin,
-      }
+      },
     });
   } catch (error) {
-    console.error('Error updating user role:', error);
-    return NextResponse.json(
-      { error: 'Failed to update user role' },
-      { status: 500 }
-    );
+    console.error("Error updating user role:", error);
+    return NextResponse.json({ error: "Failed to update user role" }, { status: 500 });
   }
 }
