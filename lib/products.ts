@@ -3,31 +3,7 @@ import { ProductWithQuantity, ProductFilters } from "@/types/product";
 import prisma from "@/lib/prisma";
 
 /**
- * Calculate current quantity for a product at a specific location
- * from the product_locations table
- */
-export async function getCurrentQuantity(
-  productId: number,
-  locationId: number
-): Promise<number> {
-  const productLocation = await prisma.product_locations.findUnique({
-    where: {
-      productId_locationId: {
-        productId,
-        locationId,
-      },
-    },
-    select: {
-      quantity: true,
-    },
-  });
-
-  return productLocation?.quantity || 0;
-}
-
-/**
  * Calculate current quantities for multiple products at a location
- * More efficient than calling getCurrentQuantity for each product
  */
 export async function getBulkCurrentQuantities(
   productIds: number[],
@@ -112,7 +88,7 @@ export async function getProductsWithQuantities(
 ): Promise<{ products: ProductWithQuantity[]; total: number }> {
   const {
     search,
-    sortBy = "name",
+    sortBy = "baseNameNumeric",
     sortOrder = "asc",
     page = 1,
     pageSize = 50,
@@ -135,15 +111,24 @@ export async function getProductsWithQuantities(
   const total = await prisma.product.count({ where });
 
   // Get products
+  const orderBy: Prisma.ProductOrderByWithRelationInput[] = [];
+
+  if (sortBy === "baseNameNumeric") {
+    orderBy.push({ baseName: sortOrder }, { numericValue: sortOrder }, { variant: sortOrder });
+  } else if (sortBy === "name") {
+    orderBy.push({ name: sortOrder });
+  } else if (sortBy === "baseName") {
+    orderBy.push({ baseName: sortOrder });
+  } else if (sortBy === "numericValue") {
+    orderBy.push({ numericValue: sortOrder });
+  }
+
+  // Secondary sort by name for stability
+  orderBy.push({ name: "asc" });
+
   const products = await prisma.product.findMany({
     where,
-    orderBy: [
-      sortBy === "name" ? { name: sortOrder } : {},
-      sortBy === "baseName" ? { baseName: sortOrder } : {},
-      sortBy === "numericValue" ? { numericValue: sortOrder } : {},
-      // Secondary sort by name for consistency
-      { name: "asc" },
-    ],
+    orderBy,
     skip: (page - 1) * pageSize,
     take: pageSize,
   });
@@ -180,25 +165,17 @@ export async function isProductUnique(
   variant: string,
   excludeId?: number
 ): Promise<boolean> {
+  const normalizedBaseName = baseName.trim();
+  const normalizedVariant = variant.trim();
+
   const existing = await prisma.product.findFirst({
     where: {
-      baseName,
-      variant,
+      baseName: normalizedBaseName,
+      variant: normalizedVariant,
+      deletedAt: null,
       id: excludeId ? { not: excludeId } : undefined,
     },
   });
 
   return !existing;
-}
-
-/**
- * Get the next available numeric value
- */
-export async function getNextNumericValue(): Promise<number> {
-  const product = await prisma.product.findFirst({
-    orderBy: { numericValue: "desc" },
-    select: { numericValue: true },
-  });
-
-  return product?.numericValue ? Number(product.numericValue) + 1 : 1;
 }

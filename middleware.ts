@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
-import { createRateLimiter } from "./lib/rate-limit";
+import { enforceRateLimit, RateLimitError } from "./lib/rateLimit";
 
 // Public routes that skip authentication entirely
 // Everything else requires auth by default (deny-by-default)
@@ -38,11 +38,15 @@ export async function middleware(request: NextRequest) {
   const shouldRateLimit = rateLimitedRoutes.some((route) => pathname.includes(route));
 
   if (shouldRateLimit) {
-    const limiter = createRateLimiter(pathname);
-    const rateLimitResponse = await limiter.limit(request);
-
-    if (rateLimitResponse) {
-      return rateLimitResponse;
+    try {
+      enforceRateLimit(request, `middleware:${pathname}`);
+    } catch (error) {
+      if (error instanceof RateLimitError) {
+        return NextResponse.json(
+          { error: error.message, retryAfter: error.headers['Retry-After'] },
+          { status: 429, headers: error.headers }
+        );
+      }
     }
   }
 

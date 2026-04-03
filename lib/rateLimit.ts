@@ -35,7 +35,7 @@ export class RateLimitError extends Error {
 type EnforceRateLimitOptions = {
   limit?: number;
   ttl?: number;
-  identifier?: string;
+  identifier?: string | number;
 };
 
 const buildHeaders = (limit: number, count: number, expiresAt: number): RateLimitHeaders => ({
@@ -55,9 +55,9 @@ const cleanupStore = () => {
   }
 };
 
-const getIdentifier = (req: NextRequest, explicitIdentifier?: string): string => {
-  if (explicitIdentifier) {
-    return explicitIdentifier;
+const getIdentifier = (req: NextRequest, explicitIdentifier?: string | number): string => {
+  if (explicitIdentifier !== undefined) {
+    return String(explicitIdentifier);
   }
 
   const forwarded = req.headers.get('x-forwarded-for');
@@ -111,6 +111,21 @@ export function enforceRateLimit(
   }
 
   return buildHeaders(limit, existing.count, existing.expiresAt);
+}
+
+export function getRateLimitStats(): Array<{
+  key: string;
+  count: number;
+  expiresAt: number;
+}> {
+  const now = Date.now();
+  const stats: Array<{ key: string; count: number; expiresAt: number }> = [];
+  store.forEach((entry, key) => {
+    if (entry.expiresAt > now) {
+      stats.push({ key, count: entry.count, expiresAt: entry.expiresAt });
+    }
+  });
+  return stats;
 }
 
 export function applyRateLimitHeaders(

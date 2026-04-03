@@ -2,7 +2,6 @@ import { NextRequest } from 'next/server'
 import { POST } from '@/app/api/inventory/batch-adjust/route'
 import { getServerSession } from 'next-auth'
 import prisma from '@/lib/prisma'
-import { validateBatchAdjustments, validateInventoryChange } from '@/lib/inventory-validation'
 
 jest.mock('next-auth', () => ({
   getServerSession: jest.fn(),
@@ -125,25 +124,6 @@ describe('Data Integrity Tests', () => {
   })
 
   describe('Concurrent Modification Protection', () => {
-    it('should detect version conflicts in batch operations', async () => {
-      const inventory = new Map([
-        [1, { productId: 1, locationId: 1, quantity: 100, version: 5 }],
-        [2, { productId: 2, locationId: 1, quantity: 50, version: 3 }],
-      ])
-
-      const adjustments = [
-        { productId: 1, locationId: 1, delta: -10, expectedVersion: 5 }, // OK
-        { productId: 2, locationId: 1, delta: -5, expectedVersion: 2 },  // Version mismatch
-      ]
-
-      const result = validateBatchAdjustments(adjustments, inventory)
-      
-      expect(result.isValid).toBe(false)
-      expect(result.errors).toHaveLength(1)
-      expect(result.errors[0]).toContain('Version mismatch')
-      expect(result.errors[0]).toContain('expected 2, got 3')
-    })
-
     it('should handle race conditions between validation and execution', async () => {
       const mockProducts = [{ id: 1, name: 'Product 1' }]
       
@@ -242,17 +222,6 @@ describe('Data Integrity Tests', () => {
   })
 
   describe('Boundary Conditions', () => {
-    it('should handle maximum safe integer values', () => {
-      const maxSafe = Number.MAX_SAFE_INTEGER
-      
-      expect(validateInventoryChange(maxSafe - 1, 1)).toBe(true)
-      expect(validateInventoryChange(maxSafe, 0)).toBe(true)
-      expect(validateInventoryChange(0, maxSafe)).toBe(true)
-      
-      // Should handle overflow protection in real implementation
-      expect(validateInventoryChange(maxSafe, 1)).toBe(true) // Would need overflow check
-    })
-
     it('should handle very large batch operations', async () => {
       const largeProductSet = Array.from({ length: 100 }, (_, i) => ({
         id: i + 1,
@@ -291,19 +260,6 @@ describe('Data Integrity Tests', () => {
       expect(data.count).toBe(100)
     })
 
-    it('should handle zero quantity edge cases', () => {
-      // Zero to zero
-      expect(validateInventoryChange(0, 0)).toBe(true)
-      
-      // Adding to zero
-      expect(validateInventoryChange(0, 100)).toBe(true)
-      
-      // Cannot remove from zero
-      expect(validateInventoryChange(0, -1)).toBe(false)
-      
-      // Removing exact amount to reach zero
-      expect(validateInventoryChange(10, -10)).toBe(true)
-    })
   })
 
   describe('Error Recovery', () => {

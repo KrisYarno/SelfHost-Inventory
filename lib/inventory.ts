@@ -3,10 +3,8 @@ import {
   inventory_logs_logType,
   Prisma
 } from '@prisma/client';
-import type { 
-  StockValidation,
-  CurrentInventoryLevel,
-  InventorySnapshot
+import type {
+  StockValidation
 } from '@/types/inventory';
 import { 
   InsufficientStockError, 
@@ -100,128 +98,10 @@ export async function getCurrentQuantity(
 }
 
 /**
- * Gets current inventory levels for all products
- */
-export async function getCurrentInventoryLevels(
-  locationId?: number
-): Promise<CurrentInventoryLevel[]> {
-  // Get product locations with related data
-  const productLocations = await prisma.product_locations.findMany({
-    where: locationId ? { locationId } : undefined,
-    include: {
-      products: true,
-      locations: true,
-    },
-  });
-  
-  const inventoryLevels: CurrentInventoryLevel[] = [];
-  
-  // Map product locations to inventory levels
-  for (const pl of productLocations) {
-    // Get the last update time
-    const lastLog = await prisma.inventory_logs.findFirst({
-      where: {
-        productId: pl.productId,
-        locationId: pl.locationId,
-      },
-      orderBy: {
-        changeTime: 'desc',
-      },
-      select: {
-        changeTime: true,
-      },
-    });
-    
-    inventoryLevels.push({
-      productId: pl.productId,
-      product: pl.products,
-      locationId: pl.locationId,
-      location: pl.locations,
-      quantity: pl.quantity,
-      lastUpdated: lastLog?.changeTime || new Date(0),
-    });
-  }
-  
-  // If specific location requested, also include products with 0 quantity
-  if (locationId) {
-    const productsWithInventory = new Set(inventoryLevels.map(il => il.productId));
-    const allProducts = await prisma.product.findMany();
-    const location = await prisma.location.findUnique({ where: { id: locationId } });
-    
-    for (const product of allProducts) {
-      if (!productsWithInventory.has(product.id) && location) {
-        inventoryLevels.push({
-          productId: product.id,
-          product,
-          locationId,
-          location,
-          quantity: 0,
-          lastUpdated: new Date(0),
-        });
-      }
-    }
-  }
-  
-  return inventoryLevels;
-}
-
-/**
- * Gets inventory snapshot at a specific point in time
- * by summing inventory logs up to that timestamp
- */
-export async function getInventorySnapshot(
-  timestamp: Date,
-  locationId?: number
-): Promise<InventorySnapshot> {
-  // Get all products
-  const products = await prisma.product.findMany();
-  
-  // Get all locations or specific location
-  const locations = await prisma.location.findMany({
-    where: locationId ? { id: locationId } : undefined,
-  });
-  
-  const inventory: Array<{
-    productId: number;
-    locationId: number;
-    quantity: number;
-  }> = [];
-  
-  // For each product/location, sum deltas up to the timestamp
-  for (const product of products) {
-    for (const location of locations) {
-      const result = await prisma.inventory_logs.aggregate({
-        where: {
-          productId: product.id,
-          locationId: location.id,
-          changeTime: {
-            lte: timestamp,
-          },
-        },
-        _sum: {
-          delta: true,
-        },
-      });
-      
-      inventory.push({
-        productId: product.id,
-        locationId: location.id,
-        quantity: result._sum.delta || 0,
-      });
-    }
-  }
-  
-  return {
-    timestamp,
-    inventory,
-  };
-}
-
-/**
  * Creates an inventory adjustment and updates product_locations with optimistic locking
  */
 export async function createInventoryAdjustment(
-  userId: string,
+  userId: number,
   productId: number,
   locationId: number,
   delta: number,
@@ -285,7 +165,7 @@ export async function createInventoryAdjustment(
 
         // Create the log entry
         const log = await createInventoryLog({
-          userId: parseInt(userId),
+          userId,
           productId,
           locationId,
           delta,
@@ -344,6 +224,171 @@ export async function createInventoryAdjustment(
 }
 
 /**
+ * Atomically transfer quantity between two locations with optimistic locking
+ */
+export async function createInventoryTransfer(options: {
+  userId: number;
+  productId: number;
+  fromLocationId: number;
+  toLocationId: number;
+  quantity: number;
+  expectedFromVersion?: number;
+  expectedToVersion?: number;
+}) {
+  const {
+    userId,
+    productId,
+    fromLocationId,
+    toLocationId,
+    quantity,
+    expectedFromVersion,
+    expectedToVersion,
+  } = options;
+
+  if (fromLocationId === toLocationId) {
+    throw new Error('Source and destination locations must be different.');
+  }
+  if (quantity <= 0) {
+    throw new Error('Transfer quantity must be greater than zero.');
+  }
+
+  const maxRetries = 3;
+  let retryCount = 0;
+
+  while (retryCount < maxRetries) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        // Load current rows for optimistic checks
+        const [fromRow, toRow] = await Promise.all([
+          tx.product_locations.findUnique({
+            where: { productId_locationId: { productId, locationId: fromLocationId } },
+          }),
+          tx.product_locations.findUnique({
+            where: { productId_locationId: { productId, locationId: toLocationId } },
+          }),
+        ]);
+
+        // Version checks if provided
+        if (expectedFromVersion !== undefined && fromRow) {
+          if (fromRow.version !== expectedFromVersion) {
+            throw new OptimisticLockError(
+              'Source location inventory was modified by another user.',
+              fromRow.version,
+              expectedFromVersion
+            );
+          }
+        }
+        if (expectedToVersion !== undefined && toRow) {
+          if (toRow.version !== expectedToVersion) {
+            throw new OptimisticLockError(
+              'Destination location inventory was modified by another user.',
+              toRow.version,
+              expectedToVersion
+            );
+          }
+        }
+
+        // Validate availability at source within transaction
+        const availability = await validateStockAvailability(
+          productId,
+          fromLocationId,
+          quantity,
+          tx
+        );
+        if (!availability.isValid) {
+          const product = await tx.product.findUnique({ where: { id: productId }, select: { name: true } });
+          if (!product) {
+            throw new ProductNotFoundError(productId);
+          }
+          throw new InsufficientStockError(
+            product.name,
+            availability.currentQuantity,
+            availability.requestedQuantity
+          );
+        }
+
+        // Create two TRANSFER logs
+        const [fromLog, toLog] = await Promise.all([
+          createInventoryLog(
+            {
+              userId,
+              productId,
+              locationId: fromLocationId,
+              delta: -quantity,
+              logType: inventory_logs_logType.TRANSFER,
+            },
+            tx
+          ),
+          createInventoryLog(
+            {
+              userId,
+              productId,
+              locationId: toLocationId,
+              delta: quantity,
+              logType: inventory_logs_logType.TRANSFER,
+            },
+            tx
+          ),
+        ]);
+
+        // Decrement source (must exist after validation)
+        const updatedFrom = await tx.product_locations.upsert({
+          where: { productId_locationId: { productId, locationId: fromLocationId } },
+          update: {
+            quantity: { decrement: quantity },
+            version: { increment: 1 },
+          },
+          create: {
+            productId,
+            locationId: fromLocationId,
+            quantity: 0,
+            version: 1,
+          },
+        });
+
+        // Increment destination (create if needed)
+        const updatedTo = await tx.product_locations.upsert({
+          where: { productId_locationId: { productId, locationId: toLocationId } },
+          update: {
+            quantity: { increment: quantity },
+            version: { increment: 1 },
+          },
+          create: {
+            productId,
+            locationId: toLocationId,
+            quantity,
+            version: 1,
+          },
+        });
+
+        // Maintain Product.quantity legacy semantics for location 1
+        if (fromLocationId === 1) {
+          await tx.product.update({ where: { id: productId }, data: { quantity: { decrement: quantity } } });
+        }
+        if (toLocationId === 1) {
+          await tx.product.update({ where: { id: productId }, data: { quantity: { increment: quantity } } });
+        }
+
+        return {
+          logs: { from: fromLog, to: toLog },
+          fromVersion: updatedFrom.version,
+          toVersion: updatedTo.version,
+        };
+      });
+    } catch (error) {
+      if (error instanceof OptimisticLockError && retryCount < maxRetries - 1) {
+        retryCount++;
+        await new Promise((resolve) => setTimeout(resolve, 100 * retryCount));
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw new Error('Max retries exceeded for inventory transfer.');
+}
+
+/**
  * Custom error class for optimistic lock violations
  */
 export class OptimisticLockError extends Error {
@@ -362,7 +407,7 @@ export class OptimisticLockError extends Error {
  */
 export async function createInventoryTransaction(
   type: string,
-  userId: string,
+  userId: number,
   items: Array<{
     productId: number;
     locationId: number;
@@ -430,7 +475,7 @@ export async function createInventoryTransaction(
 
       // Create log entry
       const log = await createInventoryLog({
-        userId: parseInt(userId),
+        userId,
         productId: item.productId,
         locationId: item.locationId,
         delta: item.quantityChange,
@@ -479,7 +524,7 @@ export async function createInventoryTransaction(
         id: `txn_${Date.now()}`,
         type,
         status: 'COMPLETED',
-        userId: parseInt(userId),
+        userId,
         metadata,
       },
       logs,
@@ -488,13 +533,3 @@ export async function createInventoryTransaction(
   });
 }
 
-/**
- * Helper to calculate quantity change (simplified)
- */
-export function calculateQuantityChange(
-  changeType: string,
-  quantity: number
-): number {
-  // For the actual schema, we just use positive/negative deltas
-  return quantity;
-}

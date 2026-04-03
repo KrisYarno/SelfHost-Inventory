@@ -1,14 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
-import { memoryStore, rateLimitConfigs } from "@/lib/rate-limit";
-
-interface EndpointStats {
-  endpoint: string;
-  current: number;
-  limit: number;
-  resetTime: string;
-  blocked: number;
-}
+import { getRateLimitStats } from "@/lib/rateLimit";
 
 export async function GET(request: NextRequest) {
   // Check if user is admin
@@ -21,60 +13,31 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Get all entries from memory store
-  const allEntries = memoryStore.getAllEntries();
+  const stats = getRateLimitStats();
 
-  // Aggregate data by endpoint
-  const endpointStats = new Map<string, EndpointStats>();
+  // Group by scope prefix for a summary view
+  const grouped = new Map<string, { current: number; entries: number; resetTime: string }>();
 
-  // Define endpoints to monitor
-  const monitoredEndpoints = [
-    { path: "/api/auth/signin", config: rateLimitConfigs.auth.signin },
-    { path: "/api/auth/signup", config: rateLimitConfigs.auth.signup },
-    { path: "/api/inventory", config: rateLimitConfigs.api.inventory },
-    { path: "/api/reports", config: rateLimitConfigs.api.reports },
-    { path: "/api/admin/users", config: rateLimitConfigs.admin.userManagement },
-    { path: "/api/products", config: rateLimitConfigs.api.default },
-  ];
-
-  // Initialize stats for all monitored endpoints
-  monitoredEndpoints.forEach(({ path, config }) => {
-    endpointStats.set(path, {
-      endpoint: path,
-      current: 0,
-      limit: config.max,
-      resetTime: new Date(Date.now() + config.windowMs).toISOString(),
-      blocked: 0,
-    });
-  });
-
-  // Process actual entries
-  const entries = Array.from(allEntries.entries());
-  for (const [key, entry] of entries) {
-    // Extract endpoint from key (format: "type:identifier:endpoint" or similar)
-    // This is a simplified extraction - adjust based on your actual key format
-    for (const { path } of monitoredEndpoints) {
-      if (key.includes(path)) {
-        const stats = endpointStats.get(path);
-        if (stats) {
-          stats.current = Math.max(stats.current, entry.count);
-          stats.resetTime = new Date(entry.resetTime).toISOString();
-
-          // Count blocked requests (those exceeding the limit)
-          const config = monitoredEndpoints.find((e) => e.path === path)?.config;
-          if (config && entry.count > config.max) {
-            stats.blocked++;
-          }
-        }
-        break;
-      }
+  for (const entry of stats) {
+    const scope = entry.key.split(":").slice(0, -1).join(":") || entry.key;
+    const existing = grouped.get(scope);
+    if (!existing || entry.count > existing.current) {
+      grouped.set(scope, {
+        current: entry.count,
+        entries: (existing?.entries ?? 0) + 1,
+        resetTime: new Date(entry.expiresAt).toISOString(),
+      });
+    } else {
+      existing.entries += 1;
     }
   }
 
-  // Convert to array and sort by usage percentage
-  const rateLimitData = Array.from(endpointStats.values()).sort(
-    (a, b) => b.current / b.limit - a.current / a.limit
-  );
+  const rateLimitData = Array.from(grouped.entries()).map(([scope, data]) => ({
+    endpoint: scope,
+    current: data.current,
+    entries: data.entries,
+    resetTime: data.resetTime,
+  }));
 
   return NextResponse.json(rateLimitData);
 }
