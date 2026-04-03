@@ -20,6 +20,7 @@ import {
   ShoppingCart,
   Activity,
   Archive,
+  Info,
 } from "lucide-react";
 import { DashboardMetrics, StockLevelChartData, ActivityChartData } from "@/types/reports";
 import { useLocation } from "@/contexts/location-context";
@@ -51,6 +52,7 @@ export default function AdminReportsPage() {
   const [inventoryTrends, setInventoryTrends] = useState<StockLevelChartData[]>([]);
   const [dailyActivity, setDailyActivity] = useState<ActivityChartData[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [hasRecentActivity, setHasRecentActivity] = useState(true);
   const [dateRange, setDateRange] = useState<DateRange | undefined>({
     from: startOfDay(subDays(new Date(), 6)),
     to: endOfDay(new Date()),
@@ -87,6 +89,7 @@ export default function AdminReportsPage() {
       if (!response.ok) throw new Error("Failed to fetch metrics");
       const data = await response.json();
       setMetrics(data.metrics);
+      setHasRecentActivity(data.metrics.recentActivityCount > 0);
     } catch (error) {
       console.error("Error fetching metrics:", error);
     }
@@ -385,6 +388,16 @@ export default function AdminReportsPage() {
               trend={metrics?.lowStockTrend}
             />
           </div>
+          {!hasRecentActivity && metrics && (
+            <div className="flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/30 px-4 py-3 text-sm text-blue-800 dark:text-blue-300">
+              <Info className="h-4 w-4 shrink-0" />
+              <span>
+                No inventory activity was recorded in the selected date range. Cost and value
+                metrics reflect current stock levels, but movement-based metrics (trends,
+                activity charts) will appear empty.
+              </span>
+            </div>
+          )}
           <CombinedMinimumsReport />
 
           <Tabs defaultValue="overview" className="space-y-4">

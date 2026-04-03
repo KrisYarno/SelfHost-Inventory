@@ -36,16 +36,13 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
       return NextResponse.json({ error: "Product not found" }, { status: 404 });
     }
 
-    // Get current stock across all locations
-    const stockLevels = await prisma.inventory_logs.groupBy({
-      by: ["locationId"],
-      _sum: {
-        delta: true,
-      },
+    // Get current stock from product_locations (source of truth)
+    const stockLevels = await prisma.product_locations.findMany({
       where: { productId },
+      select: { quantity: true },
     });
 
-    const currentStock = stockLevels.reduce((sum, level) => sum + (level._sum.delta || 0), 0);
+    const currentStock = stockLevels.reduce((sum, level) => sum + level.quantity, 0);
 
     // Get transactions within date range
     const transactions = await prisma.inventory_logs.findMany({
@@ -74,27 +71,31 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
       },
     });
 
-    // Get daily trend data - using simpler approach
-    const dailyChanges = await prisma.inventory_logs.groupBy({
-      by: ["changeTime"],
-      _sum: {
-        delta: true,
-      },
+    // Get daily trend data - aggregate by date (YYYY-MM-DD) instead of exact timestamp
+    const dailyLogs = await prisma.inventory_logs.findMany({
       where: dateFilter,
-      orderBy: {
-        changeTime: "asc",
-      },
+      select: { changeTime: true, delta: true },
+      orderBy: { changeTime: "asc" },
     });
+
+    // Group deltas by date
+    const dailyMap = new Map<string, number>();
+    for (const log of dailyLogs) {
+      const dateKey = format(log.changeTime, "yyyy-MM-dd");
+      dailyMap.set(dateKey, (dailyMap.get(dateKey) || 0) + log.delta);
+    }
 
     // Calculate cumulative totals
     let runningTotal = 0;
-    const dailyTrend = dailyChanges.map((change) => {
-      runningTotal += change._sum.delta || 0;
-      return {
-        date: format(change.changeTime, "MMM dd"),
-        quantity: runningTotal,
-      };
-    });
+    const dailyTrend = Array.from(dailyMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([dateKey, delta]) => {
+        runningTotal += delta;
+        return {
+          date: format(new Date(dateKey + "T00:00:00"), "MMM dd"),
+          quantity: runningTotal,
+        };
+      });
 
     const formattedTransactions = transactions.map((t) => ({
       id: t.id,

@@ -14,51 +14,65 @@ export async function GET() {
       where: { isApproved: true },
     });
 
-    // Get activity summary for each user
-    const userActivities: UserActivitySummary[] = await Promise.all(
-      users.map(async (user) => {
-        // Get transaction counts by type
-        const [totalCount, stockInCount, stockOutCount, adjustmentCount, lastLog] =
-          await Promise.all([
-            prisma.inventory_logs.count({
-              where: { userId: user.id },
-            }),
-            prisma.inventory_logs.count({
-              where: {
-                userId: user.id,
-                delta: { gt: 0 },
-              },
-            }),
-            prisma.inventory_logs.count({
-              where: {
-                userId: user.id,
-                delta: { lt: 0 },
-              },
-            }),
-            prisma.inventory_logs.count({
-              where: {
-                userId: user.id,
-                logType: "ADJUSTMENT",
-              },
-            }),
-            prisma.inventory_logs.findFirst({
-              where: { userId: user.id },
-              orderBy: { changeTime: "desc" },
-              select: { changeTime: true },
-            }),
-          ]);
+    // Fetch all logs in a single query instead of 5 queries per user
+    const allLogs = await prisma.inventory_logs.findMany({
+      where: {
+        userId: { in: users.map((u) => u.id) },
+      },
+      select: {
+        userId: true,
+        delta: true,
+        logType: true,
+        changeTime: true,
+      },
+    });
 
-        return {
-          userId: user.id,
-          username: user.username,
-          totalTransactions: totalCount,
-          stockInCount,
-          stockOutCount,
-          adjustmentCount,
-          lastActivity: lastLog?.changeTime || new Date(),
+    // Aggregate in JS
+    const statsMap = new Map<
+      number,
+      {
+        totalTransactions: number;
+        stockInCount: number;
+        stockOutCount: number;
+        adjustmentCount: number;
+        lastActivity: Date | null;
+      }
+    >();
+
+    for (const log of allLogs) {
+      let stats = statsMap.get(log.userId);
+      if (!stats) {
+        stats = {
+          totalTransactions: 0,
+          stockInCount: 0,
+          stockOutCount: 0,
+          adjustmentCount: 0,
+          lastActivity: null,
         };
-      })
-    );
+        statsMap.set(log.userId, stats);
+      }
+
+      stats.totalTransactions++;
+      if (log.delta > 0) stats.stockInCount++;
+      if (log.delta < 0) stats.stockOutCount++;
+      if (log.logType === "ADJUSTMENT") stats.adjustmentCount++;
+      if (!stats.lastActivity || log.changeTime > stats.lastActivity) {
+        stats.lastActivity = log.changeTime;
+      }
+    }
+
+    const userActivities: UserActivitySummary[] = users.map((user) => {
+      const stats = statsMap.get(user.id);
+      return {
+        userId: user.id,
+        username: user.username,
+        totalTransactions: stats?.totalTransactions || 0,
+        stockInCount: stats?.stockInCount || 0,
+        stockOutCount: stats?.stockOutCount || 0,
+        adjustmentCount: stats?.adjustmentCount || 0,
+        lastActivity: stats?.lastActivity || null,
+      };
+    });
 
     // Sort by total transactions (most active first)
     userActivities.sort((a, b) => b.totalTransactions - a.totalTransactions);

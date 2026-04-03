@@ -35,11 +35,6 @@ interface ProductRecord {
   costPrice: Decimal;
 }
 
-interface StockGroupByResult {
-  productId: number;
-  _sum: { delta: number | null };
-}
-
 /**
  * Calculate stock status based on current stock vs minimum threshold
  */
@@ -99,19 +94,16 @@ export async function GET(request: NextRequest) {
     );
 
     // ============================================
-    // Query 2: Get current stock per product (TOTAL across all locations)
+    // Query 2: Get current stock per product from product_locations (source of truth)
     // ============================================
-    const stockData = await prisma.inventory_logs.groupBy({
-      by: ["productId"],
-      _sum: { delta: true },
+    const stockData = await prisma.product_locations.findMany({
+      select: { productId: true, quantity: true },
     });
 
-    const stockMap = new Map<number, number>(
-      stockData.map((item: StockGroupByResult) => [
-        item.productId,
-        item._sum.delta || 0,
-      ])
-    );
+    const stockMap = new Map<number, number>();
+    for (const pl of stockData) {
+      stockMap.set(pl.productId, (stockMap.get(pl.productId) || 0) + pl.quantity);
+    }
 
     // ============================================
     // Calculate status for each product

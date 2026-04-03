@@ -75,15 +75,15 @@ export async function GET(request: NextRequest) {
       activityMap.set(dateKey, dayData);
     });
 
-    // Convert to array format
+    // Convert to array format, sorted by raw date key (YYYY-MM-DD) before formatting
     const activityData = Array.from(activityMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
       .map(([date, data]) => ({
         date: format(parseISO(date), "MMM dd"),
         stockIn: data.stockIn,
         stockOut: data.stockOut,
         adjustments: data.adjustments,
-      }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+      }));
 
     return NextResponse.json({ data: activityData });
   } catch (error) {

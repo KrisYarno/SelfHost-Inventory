@@ -33,19 +33,16 @@ export async function GET(request: NextRequest) {
 
     const locationFilter = locationId ? { locationId: parseInt(locationId) } : {};
 
-    // Query 1: Get current stock levels (sum of all deltas per product)
-    const currentStockData = await prisma.inventory_logs.groupBy({
-      by: ["productId"],
-      where: locationFilter,
-      _sum: { delta: true },
+    // Query 1: Get current stock levels from product_locations (source of truth)
+    const currentStockData = await prisma.product_locations.findMany({
+      where: locationId ? { locationId: parseInt(locationId) } : {},
+      select: { productId: true, quantity: true },
     });
 
-    const currentStockMap = new Map<number, number>(
-      currentStockData.map((item: { productId: number; _sum: { delta: number | null } }) => [
-        item.productId,
-        item._sum.delta || 0,
-      ])
-    );
+    const currentStockMap = new Map<number, number>();
+    for (const pl of currentStockData) {
+      currentStockMap.set(pl.productId, (currentStockMap.get(pl.productId) || 0) + pl.quantity);
+    }
 
     // Query 2: Get movement data within date range (minimal select for performance)
     const movements = await prisma.inventory_logs.findMany({

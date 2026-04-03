@@ -43,9 +43,9 @@ export function UserActivity() {
   };
 
   const getActivityLevel = (totalTransactions: number) => {
-    if (totalTransactions > 100) return { level: "High", color: "text-green-600" };
-    if (totalTransactions > 50) return { level: "Medium", color: "text-yellow-600" };
-    return { level: "Low", color: "text-blue-600" };
+    if (totalTransactions > 100) return { level: "High", color: "text-positive" };
+    if (totalTransactions > 50) return { level: "Medium", color: "text-warning" };
+    return { level: "Low", color: "text-info" };
   };
 
   if (loading) {
@@ -108,7 +108,9 @@ export function UserActivity() {
                     <div>
                       <h4 className="font-medium">{user.username}</h4>
                       <p className="text-xs text-muted-foreground">
-                        Last active {formatDistanceToNow(new Date(user.lastActivity), { addSuffix: true })}
+                        {user.lastActivity
+                          ? `Last active ${formatDistanceToNow(new Date(user.lastActivity), { addSuffix: true })}`
+                          : "No activity yet"}
                       </p>
                     </div>
                   </div>
@@ -125,20 +127,20 @@ export function UserActivity() {
                   <Progress value={progressValue} className="h-2" />
                 </div>
 
-                <div className="grid grid-cols-3 gap-2 text-xs">
-                  <div className="text-center p-2 rounded bg-green-50 dark:bg-green-950">
-                    <Package className="h-4 w-4 mx-auto mb-1 text-green-600" />
-                    <div className="font-medium text-green-600">{user.stockInCount}</div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                  <div className="text-center p-2 rounded bg-positive-muted">
+                    <Package className="h-4 w-4 mx-auto mb-1 text-positive" />
+                    <div className="font-medium text-positive">{user.stockInCount}</div>
                     <div className="text-muted-foreground">Stock In</div>
                   </div>
-                  <div className="text-center p-2 rounded bg-red-50 dark:bg-red-950">
-                    <Package className="h-4 w-4 mx-auto mb-1 text-red-600" />
-                    <div className="font-medium text-red-600">{user.stockOutCount}</div>
+                  <div className="text-center p-2 rounded bg-negative-muted">
+                    <Package className="h-4 w-4 mx-auto mb-1 text-negative" />
+                    <div className="font-medium text-negative">{user.stockOutCount}</div>
                     <div className="text-muted-foreground">Stock Out</div>
                   </div>
-                  <div className="text-center p-2 rounded bg-blue-50 dark:bg-blue-950">
-                    <Settings className="h-4 w-4 mx-auto mb-1 text-blue-600" />
-                    <div className="font-medium text-blue-600">{user.adjustmentCount}</div>
+                  <div className="text-center p-2 rounded bg-info-muted">
+                    <Settings className="h-4 w-4 mx-auto mb-1 text-info" />
+                    <div className="font-medium text-info">{user.adjustmentCount}</div>
                     <div className="text-muted-foreground">Adjustments</div>
                   </div>
                 </div>
