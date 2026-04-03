@@ -22,7 +22,7 @@ import {
   Clock,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
-import type { MetricsResponse, LowStockResponse, ActivityResponse } from "@/types/reports";
+import type { MetricsResponse, ActivityResponse } from "@/types/reports";
 
 // ---------------------------------------------------------------------------
 // Data fetching helpers

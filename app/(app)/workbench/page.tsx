@@ -19,7 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { SearchInput } from "@/components/ui/search-input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ProductWithQuantity } from "@/types/product";
-import { Package, RotateCcw } from "lucide-react";
+import { RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { useLocation } from "@/contexts/location-context";
 import { cn } from "@/lib/utils";

@@ -327,7 +327,7 @@ export default function JournalPage() {
           {showFilters && (
             <div className="mt-4" id="journal-filters" role="region" aria-label="Product filters">
               <JournalFilters
-                onFilterChange={(filters) => {
+                onFilterChange={(_filters) => {
                   // TODO: Implement filter logic here
                 }}
               />
