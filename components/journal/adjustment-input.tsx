@@ -92,7 +92,7 @@ export function AdjustmentInput({
         size="icon"
         onClick={handleDecrement}
         disabled={value <= min}
-        className="h-9 w-9 sm:h-8 sm:w-8"
+        className="h-11 w-11 sm:h-8 sm:w-8"
         aria-label={`Decrease quantity (current adjustment: ${value})`}
         title="Decrease quantity"
       >
@@ -107,7 +107,7 @@ export function AdjustmentInput({
         onFocus={handleInputFocus}
         onKeyDown={handleKeyDown}
         className={cn(
-          "h-9 text-center w-16 sm:w-20 sm:h-8",
+          "h-11 text-center w-16 sm:w-20 sm:h-8",
           value > 0 && "text-positive border-positive-border",
           value < 0 && "text-negative border-negative-border"
         )}
@@ -124,7 +124,7 @@ export function AdjustmentInput({
         size="icon"
         onClick={handleIncrement}
         disabled={value >= max}
-        className="h-9 w-9 sm:h-8 sm:w-8"
+        className="h-11 w-11 sm:h-8 sm:w-8"
         aria-label={`Increase quantity (current adjustment: ${value})`}
         title="Increase quantity"
       >

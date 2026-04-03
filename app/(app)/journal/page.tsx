@@ -384,8 +384,7 @@ export default function JournalPage() {
       {/* Fixed Action Bar */}
       {hasAnyChanges && (
         <div
-          className="fixed left-0 right-0 bg-surface border-t-2 border-primary shadow-lg"
-          style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 4.75rem)" }}
+          className="fixed left-0 right-0 md:left-64 bg-surface border-t-2 border-primary shadow-lg z-30 bottom-[4.75rem] md:bottom-0"
           role="region"
           aria-label="Pending changes summary"
           aria-live="polite"

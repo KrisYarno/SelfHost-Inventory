@@ -240,12 +240,14 @@
     @apply bg-background border border-border rounded-input transition-colors duration-fast ease-out;
   }
   
-  /* Enforce 44px minimum touch targets on interactive elements */
-  .input,
-  input,
-  select,
-  textarea {
-    min-height: 44px;
+  /* Enforce 44px minimum touch targets on mobile only */
+  @media (max-width: 768px) {
+    .input,
+    input,
+    select,
+    textarea {
+      min-height: 44px;
+    }
   }
 
   .input:focus {
