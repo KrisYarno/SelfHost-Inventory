@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useProducts } from "@/hooks/use-products";
+import { useIsMobile } from "@/hooks/use-is-mobile";
 
 interface ProductListProps {
   onEdit?: (product: ProductWithQuantity) => void;
@@ -35,26 +36,16 @@ export function ProductListOptimized({
   const [page, setPage] = useState(1);
   const [stockFilter, setStockFilter] = useState<StockFilter>("all");
   const [isScrolled, setIsScrolled] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
+  const isMobile = useIsMobile();
   const pageSize = 25;
   
   const { data, isLoading, error } = useProducts({
     search,
     page,
     pageSize,
-    sortBy: 'name',
+    sortBy: 'baseNameNumeric',
     sortOrder: 'asc',
   });
-
-  // Check if mobile on mount and resize
-  useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth < 768);
-    };
-    checkMobile();
-    window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
-  }, []);
 
   // Handle scroll for collapsing search bar on mobile
   useEffect(() => {
@@ -76,11 +67,11 @@ export function ProductListOptimized({
     setPage(1);
   };
 
-  const products = data?.products || [];
   const total = data?.total || 0;
 
   // Apply client-side stock filtering
   const filteredProducts = useMemo(() => {
+    const products = data?.products ?? [];
     return products.filter((product) => {
       switch (stockFilter) {
         case "in-stock":
@@ -93,18 +84,24 @@ export function ProductListOptimized({
           return true;
       }
     });
-  }, [products, stockFilter]);
+  }, [data?.products, stockFilter]);
 
-  // Memoize filtered categories
+  // Memoize filtered categories (case-insensitive keys, preserving first label)
   const categories = useMemo(() => {
-    const categoryMap = new Map<string, number>();
+    const categoryMap = new Map<string, { label: string; count: number }>();
     filteredProducts.forEach((product) => {
-      const category = product.baseName || "Uncategorized";
-      categoryMap.set(category, (categoryMap.get(category) || 0) + 1);
+      const raw = product.baseName || "Uncategorized";
+      const key = raw.trim().toLowerCase() || "uncategorized";
+      const existing = categoryMap.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        categoryMap.set(key, { label: raw, count: 1 });
+      }
     });
-    return Array.from(categoryMap.entries()).sort((a, b) =>
-      a[0].localeCompare(b[0])
-    );
+    return Array.from(categoryMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([, value]) => [value.label, value.count] as [string, number]);
   }, [filteredProducts]);
 
   const activeFilterCount = stockFilter !== "all" ? 1 : 0;

@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDebounce } from "@/hooks/use-debounce";
+import { groupProductsByBaseName } from "@/lib/product-utils";
 
 interface ProductListProps {
   onEdit?: (product: ProductWithQuantity) => void;
@@ -46,8 +47,7 @@ export function ProductList({
       
       const params = new URLSearchParams();
       if (debouncedSearch) params.set("search", debouncedSearch);
-      if (!showInactive) params.set("isActive", "true");
-      params.set("sortBy", "sortOrder");
+      params.set("sortBy", "baseNameNumeric");
       params.set("sortOrder", "asc");
       params.set("getTotal", "true"); // Request total quantities across all locations
       
@@ -71,17 +71,10 @@ export function ProductList({
   }, [fetchProducts]);
 
   // Group products by baseName
-  const groupedProducts = useMemo(() => {
-    const groups = new Map<string, ProductWithQuantity[]>();
-    
-    products.forEach(product => {
-      const baseName = product.baseName || 'Other';
-      const existing = groups.get(baseName) || [];
-      groups.set(baseName, [...existing, product]);
-    });
-    
-    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [products]);
+  const groupedProducts = useMemo(
+    () => groupProductsByBaseName(products),
+    [products]
+  );
 
   if (loading && products.length === 0) {
     return (
@@ -151,11 +144,11 @@ export function ProductList({
         </div>
       ) : (
         <div className="space-y-8">
-          {groupedProducts.map(([baseName, groupProducts]) => (
-            <div key={baseName} className="space-y-4">
-              <h3 className="text-lg font-semibold">{baseName}</h3>
+          {groupedProducts.map((group) => (
+            <div key={group.label.toLowerCase()} className="space-y-4">
+              <h3 className="text-lg font-semibold">{group.label}</h3>
               <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
-                {groupProducts.map((product) => (
+                {group.products.map((product) => (
                   <ProductCard
                     key={product.id}
                     product={product}

@@ -23,10 +23,6 @@ interface JournalStore {
     removals: number;
     total: number;
   };
-  
-  // Local storage management
-  loadFromLocalStorage: () => void;
-  saveToLocalStorage: () => void;
 }
 
 export const useJournalStore = create<JournalStore>()(
@@ -35,13 +31,11 @@ export const useJournalStore = create<JournalStore>()(
       adjustments: {},
 
       addAdjustment: (adjustment) => {
-        console.log('useJournalStore: addAdjustment called with:', adjustment);
         set((state) => {
           const newAdjustments = {
             ...state.adjustments,
             [adjustment.productId]: adjustment,
           };
-          console.log('useJournalStore: new adjustments state:', newAdjustments);
           return { adjustments: newAdjustments };
         });
       },
@@ -81,13 +75,6 @@ export const useJournalStore = create<JournalStore>()(
         };
       },
 
-      loadFromLocalStorage: () => {
-        // This is handled automatically by the persist middleware
-      },
-
-      saveToLocalStorage: () => {
-        // This is handled automatically by the persist middleware
-      },
     }),
     {
       name: 'journal-adjustments',

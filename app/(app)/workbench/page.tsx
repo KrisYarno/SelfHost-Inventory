@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { useWorkbench } from "@/hooks/use-workbench";
+import { useInventoryProducts } from "@/hooks/use-inventory-products";
+import { useIsMobile } from "@/hooks/use-is-mobile";
+import { groupProductsByBaseName } from "@/lib/product-utils";
 import { ProductTile } from "@/components/workbench/product-tile";
 import { QuantityPicker } from "@/components/workbench/quantity-picker";
 import { OrderList } from "@/components/workbench/order-list";
@@ -22,8 +25,6 @@ import { useLocation } from "@/contexts/location-context";
 import { cn } from "@/lib/utils";
 
 export default function WorkbenchPage() {
-  const [products, setProducts] = useState<ProductWithQuantity[]>([]);
-  const [loading, setLoading] = useState(true);
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
   const [showCompleteDialog, setShowCompleteDialog] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
@@ -32,11 +33,16 @@ export default function WorkbenchPage() {
   const [showOutOfStockOnly, setShowOutOfStockOnly] = useState(false);
   const [stockFilter, setStockFilter] = useState<StockFilter>("all");
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
-  
+
   const { selectedLocationId } = useLocation();
-  
+  const isMobile = useIsMobile();
+  const { data: products = [], isLoading: loading, refetch: refetchProducts } = useInventoryProducts({
+    locationId: selectedLocationId,
+    sortBy: "baseNameNumeric",
+    sortOrder: "asc",
+  });
+
   const {
     orderItems,
     orderReference,
@@ -47,23 +53,13 @@ export default function WorkbenchPage() {
     getTotalQuantity,
   } = useWorkbench();
 
-  // Check if mobile on mount and resize
-  useEffect(() => {
-    const checkMobile = () => {
-      setIsMobile(window.innerWidth < 768);
-    };
-    checkMobile();
-    window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
-  }, []);
-
   // Handle scroll for collapsing search bar on mobile
   useEffect(() => {
     const handleScroll = () => {
       setIsScrolled(window.scrollY > 50);
     };
-    window.addEventListener('scroll', handleScroll);
-    return () => window.removeEventListener('scroll', handleScroll);
+    window.addEventListener("scroll", handleScroll);
+    return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
   // Sync stock filter with checkboxes
@@ -78,51 +74,6 @@ export default function WorkbenchPage() {
       setStockFilter("all");
     }
   }, [showInStockOnly, showLowStockOnly, showOutOfStockOnly]);
-
-  // Fetch products when location changes
-  useEffect(() => {
-    if (selectedLocationId) {
-      fetchProducts();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedLocationId]);
-
-  const fetchProducts = async () => {
-    if (!selectedLocationId) return;
-    
-    setLoading(true);
-    try {
-      // First get all products
-      const productsResponse = await fetch("/api/products?isActive=true&pageSize=100");
-      if (!productsResponse.ok) throw new Error("Failed to fetch products");
-      
-      const productsData = await productsResponse.json();
-      
-      // Then get inventory levels for the selected location
-      const inventoryResponse = await fetch(`/api/inventory/current-fast?locationId=${selectedLocationId}`);
-      if (!inventoryResponse.ok) throw new Error("Failed to fetch inventory");
-      
-      const inventoryData = await inventoryResponse.json();
-      
-      // Map inventory quantities to products
-      const inventoryMap = new Map(
-        inventoryData.inventory.map((item: { productId: number; quantity: number }) => [item.productId, item.quantity])
-      );
-      
-      // Update products with current quantities
-      const productsWithQuantity = productsData.products.map((product: { id: number; [key: string]: unknown }) => ({
-        ...product,
-        currentQuantity: inventoryMap.get(product.id) || 0,
-      }));
-      
-      setProducts(productsWithQuantity);
-    } catch (error) {
-      console.error("Error fetching products:", error);
-      toast.error("Failed to load products");
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleProductClick = (product: ProductWithQuantity) => {
     if (product.currentQuantity > 0) {
@@ -182,13 +133,14 @@ export default function WorkbenchPage() {
       if (searchTerm) {
         const searchLower = searchTerm.toLowerCase();
         const words = product.name.toLowerCase().split(/\s+/);
-        const matchesSearch = words.some(word => word.startsWith(searchLower));
+        const matchesSearch = words.some((word) => word.startsWith(searchLower));
         if (!matchesSearch) return false;
       }
 
       // Stock filters
       if (showInStockOnly && product.currentQuantity <= 0) return false;
-      if (showLowStockOnly && (product.currentQuantity <= 0 || product.currentQuantity > 10)) return false;
+      if (showLowStockOnly && (product.currentQuantity <= 0 || product.currentQuantity > 10))
+        return false;
       if (showOutOfStockOnly && product.currentQuantity !== 0) return false;
 
       return true;
@@ -196,17 +148,10 @@ export default function WorkbenchPage() {
   }, [products, searchTerm, showInStockOnly, showLowStockOnly, showOutOfStockOnly]);
 
   // Group filtered products by baseName
-  const groupedProducts = filteredProducts.reduce((
-    acc: Record<string, ProductWithQuantity[]>,
-    product: ProductWithQuantity
-  ) => {
-    const baseName = product.baseName || 'Other';
-    if (!acc[baseName]) {
-      acc[baseName] = [];
-    }
-    acc[baseName].push(product);
-    return acc;
-  }, {} as Record<string, ProductWithQuantity[]>);
+  const groupedProducts = useMemo(
+    () => groupProductsByBaseName(filteredProducts),
+    [filteredProducts]
+  );
 
   return (
     <div className="flex flex-col h-full max-h-screen overflow-hidden">
@@ -218,9 +163,7 @@ export default function WorkbenchPage() {
               <Package className="h-5 w-5 sm:h-6 sm:w-6" />
               Workbench
             </h1>
-            <p className="text-xs sm:text-sm text-muted-foreground">
-              Quick order processing
-            </p>
+            <p className="text-xs sm:text-sm text-muted-foreground">Quick order processing</p>
           </div>
         </div>
       </header>
@@ -231,12 +174,14 @@ export default function WorkbenchPage() {
         <div className="flex-1 p-4 sm:p-6 overflow-y-auto">
           <div className="max-w-6xl mx-auto">
             {/* Search and Filters */}
-            <div className={cn(
-              "mb-4 md:mb-6 space-y-4",
-              "sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60",
-              "transition-all duration-300",
-              isMobile && isScrolled ? "py-2" : "pb-4"
-            )}>
+            <div
+              className={cn(
+                "mb-4 md:mb-6 space-y-4",
+                "sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60",
+                "transition-all duration-300",
+                isMobile && isScrolled ? "py-2" : "pb-4"
+              )}
+            >
               {/* Search Bar */}
               <div className="flex gap-2">
                 <SearchInput
@@ -257,7 +202,7 @@ export default function WorkbenchPage() {
                   />
                 )}
               </div>
-              
+
               {/* Filter Toggles - Desktop Only */}
               {!isMobile && (
                 <div className="flex flex-wrap gap-4">
@@ -280,7 +225,7 @@ export default function WorkbenchPage() {
                       Show in stock only
                     </Label>
                   </div>
-                  
+
                   <div className="flex items-center space-x-2">
                     <Checkbox
                       id="low-stock"
@@ -300,7 +245,7 @@ export default function WorkbenchPage() {
                       Show low stock only
                     </Label>
                   </div>
-                  
+
                   <div className="flex items-center space-x-2">
                     <Checkbox
                       id="out-of-stock"
@@ -332,25 +277,27 @@ export default function WorkbenchPage() {
             ) : filteredProducts.length === 0 ? (
               <div className="text-center py-12">
                 <p className="text-muted-foreground">
-                  {products.length === 0 
-                    ? "No products available" 
+                  {products.length === 0
+                    ? "No products available"
                     : "No products match your filters"}
                 </p>
               </div>
             ) : (
               <div className="space-y-6 pb-20 md:pb-0">
-                {Object.entries(groupedProducts).map(([baseName, groupProducts]) => (
-                  <div key={baseName}>
+                {groupedProducts.map((group) => (
+                  <div key={group.label.toLowerCase()}>
                     <h3 className="font-medium text-sm text-muted-foreground mb-3 sticky top-16 md:relative md:top-0 bg-background/95 backdrop-blur py-1 -mx-1 px-1">
-                      {baseName}
+                      {group.label}
                     </h3>
-                    <div className={cn(
-                      "grid gap-3 sm:gap-4",
-                      isMobile
-                        ? "grid-cols-2"
-                        : "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5"
-                    )}>
-                      {groupProducts.map((product) => (
+                    <div
+                      className={cn(
+                        "grid gap-3 sm:gap-4",
+                        isMobile
+                          ? "grid-cols-2"
+                          : "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5"
+                      )}
+                    >
+                      {group.products.map((product) => (
                         <ProductTile
                           key={product.id}
                           product={product}
@@ -399,7 +346,7 @@ export default function WorkbenchPage() {
                 <span className="text-muted-foreground">Total quantity:</span>
                 <span className="font-medium">{getTotalQuantity()} units</span>
               </div>
-              
+
               <div className="flex gap-2 pt-2">
                 <Button
                   variant="outline"
@@ -433,10 +380,7 @@ export default function WorkbenchPage() {
 
       {/* Mobile FAB */}
       {isMobile && (
-        <FloatingCartButton
-          itemCount={getTotalItems()}
-          onClick={() => setMobileCartOpen(true)}
-        />
+        <FloatingCartButton itemCount={getTotalItems()} onClick={() => setMobileCartOpen(true)} />
       )}
 
       {/* Mobile Cart Sheet */}
@@ -459,7 +403,7 @@ export default function WorkbenchPage() {
         open={showCompleteDialog}
         onOpenChange={setShowCompleteDialog}
         onSuccess={() => {
-          fetchProducts();
+          refetchProducts();
           setMobileCartOpen(false);
         }}
       />

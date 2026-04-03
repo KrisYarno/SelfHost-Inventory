@@ -1,10 +1,18 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Search, Filter, RotateCcw, Save, FileSpreadsheet, AlertCircle } from "lucide-react";
+import {
+  Search,
+  Filter,
+  RotateCcw,
+  Save,
+  FileSpreadsheet,
+  AlertCircle,
+  MapPin,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -16,28 +24,27 @@ import { ReviewChangesDialog } from "@/components/journal/review-changes-dialog"
 import { JournalFilters } from "@/components/journal/journal-filters";
 import { BatchOperationsDialog } from "@/components/journal/batch-operations-dialog";
 import { useJournalStore } from "@/hooks/use-journal";
+import { useInventoryProducts } from "@/hooks/use-inventory-products";
 import { useLocation } from "@/contexts/location-context";
 import type { ProductWithQuantity } from "@/types/product";
 import { getUserFriendlyMessage, handleBatchOperationErrors } from "@/lib/error-handling";
 import { useInventoryChangeAnnouncer } from "@/hooks/use-accessibility-announcer";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
-import { fetchWithErrorHandling } from "@/lib/rate-limited-fetch";
+import { ContextTag } from "@/components/ui/context-tag";
 
 export default function JournalPage() {
   const { data: session, status } = useSession();
   const router = useRouter();
-  const { selectedLocationId } = useLocation();
+  const { selectedLocationId, locations } = useLocation();
   const { token: csrfToken } = useCSRF();
-  const [products, setProducts] = useState<ProductWithQuantity[]>([]);
-  const [filteredProducts, setFilteredProducts] = useState<ProductWithQuantity[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [showReviewDialog, setShowReviewDialog] = useState(false);
   const [showBatchOperations, setShowBatchOperations] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  
-  const { announceChange, announceBatchSubmission, announceSubmissionResult } = useInventoryChangeAnnouncer();
+
+  const { announceChange, announceBatchSubmission, announceSubmissionResult } =
+    useInventoryChangeAnnouncer();
 
   const {
     adjustments,
@@ -47,94 +54,35 @@ export default function JournalPage() {
     getAdjustmentForProduct,
     hasChanges,
     getTotalChanges,
-    loadFromLocalStorage,
-    saveToLocalStorage,
   } = useJournalStore();
 
-  // Load products when location changes
+  const { data: products = [], isLoading, refetch: refetchProducts } = useInventoryProducts({
+    locationId: selectedLocationId,
+    includeInactive: true,
+  });
+
+  // Redirect unauthenticated users
   useEffect(() => {
     if (status === "loading") return;
     if (!session) {
       router.push("/auth/signin");
-      return;
     }
-
-    if (selectedLocationId) {
-      fetchProducts();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, status, router, selectedLocationId]);
-
-  // Load draft from localStorage on mount
-  useEffect(() => {
-    loadFromLocalStorage();
-  }, [loadFromLocalStorage]);
-
-  // Auto-save to localStorage when adjustments change
-  useEffect(() => {
-    if (hasChanges()) {
-      saveToLocalStorage();
-    }
-  }, [adjustments, hasChanges, saveToLocalStorage]);
+  }, [session, status, router]);
 
   // Filter products based on search term
-  useEffect(() => {
-    const filtered = products.filter((product) =>
+  const filteredProducts = useMemo(() => {
+    if (!searchTerm) return products;
+    return products.filter((product) =>
       product.name.toLowerCase().includes(searchTerm.toLowerCase())
     );
-    setFilteredProducts(filtered);
   }, [searchTerm, products]);
-
-  const fetchProducts = async () => {
-    if (!selectedLocationId) return;
-    
-    try {
-      setIsLoading(true);
-      
-      // Fetch products and inventory data in parallel with automatic retry handling
-      const [productsData, inventoryData] = await Promise.all([
-        fetchWithErrorHandling<{ products: any[] }>(
-          "/api/products?includeInactive=true"
-        ),
-        fetchWithErrorHandling<{ inventory: any[] }>(
-          `/api/inventory/current-fast?locationId=${selectedLocationId}`
-        ),
-      ]);
-      
-      // Map inventory quantities and versions to products
-      const inventoryMap = new Map(
-        inventoryData.inventory.map((item: { productId: number; quantity: number; version?: number }) => 
-          [item.productId, { quantity: item.quantity, version: item.version || 0 }]
-        )
-      );
-      
-      // Update products with current quantities and versions
-      const productsWithQuantity = productsData.products.map((product: any) => {
-        const inventoryInfo = inventoryMap.get(product.id) as { quantity: number; version: number } | undefined;
-        return {
-          ...product,
-          currentQuantity: inventoryInfo?.quantity || 0,
-          version: inventoryInfo?.version || 0,
-        };
-      });
-      
-      setProducts(productsWithQuantity);
-      setFilteredProducts(productsWithQuantity);
-    } catch (error) {
-      console.error("Error fetching products:", error);
-      const errorMessage = error instanceof Error ? error.message : "Failed to load products";
-      toast.error(errorMessage);
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   const handleQuantityChange = (productId: number, change: number) => {
     console.log(`handleQuantityChange called: productId=${productId}, change=${change}`);
-    
-    const product = products.find(p => p.id === productId);
+
+    const product = products.find((p) => p.id === productId);
     if (!product) return;
-    
+
     if (change === 0) {
       removeAdjustment(productId);
     } else {
@@ -143,15 +91,15 @@ export default function JournalPage() {
         quantityChange: change,
         version: product?.version,
       });
-      
+
       // Announce the change for screen readers
       const newQuantity = (product.currentQuantity || 0) + change;
       announceChange(product.name, change, newQuantity);
     }
-    
+
     // Log current state after change
-    console.log('Current adjustments:', adjustments);
-    console.log('Total changes:', getTotalChanges());
+    console.log("Current adjustments:", adjustments);
+    console.log("Total changes:", getTotalChanges());
   };
 
   const handleSubmitAdjustments = async () => {
@@ -160,29 +108,29 @@ export default function JournalPage() {
       return;
     }
 
-    console.log('Starting submission with adjustments:', adjustments);
-    console.log('Total changes before submission:', getTotalChanges());
+    console.log("Starting submission with adjustments:", adjustments);
+    console.log("Total changes before submission:", getTotalChanges());
 
     setIsSubmitting(true);
-    
+
     // Announce submission start
     const totalChanges = getTotalChanges();
     announceBatchSubmission(Object.keys(adjustments).length, totalChanges.total);
-    
+
     try {
       // Prepare batch adjustment request
-      const batchAdjustments = Object.values(adjustments).map(adjustment => ({
+      const batchAdjustments = Object.values(adjustments).map((adjustment) => ({
         productId: adjustment.productId,
         locationId: selectedLocationId,
         delta: adjustment.quantityChange,
         expectedVersion: adjustment.version,
       }));
-      
-      console.log('Batch adjustments to send:', batchAdjustments);
-      
+
+      console.log("Batch adjustments to send:", batchAdjustments);
+
       // Check if we actually have adjustments to send
       if (batchAdjustments.length === 0) {
-        console.error('No adjustments to send!');
+        console.error("No adjustments to send!");
         toast.error("No adjustments to save");
         setIsSubmitting(false);
         return;
@@ -200,13 +148,13 @@ export default function JournalPage() {
 
       if (!response.ok) {
         const errorData = await response.json();
-        
+
         // Handle structured error response
-        if (errorData.error && typeof errorData.error === 'object') {
+        if (errorData.error && typeof errorData.error === "object") {
           const { message, code, context } = errorData.error;
-          
+
           // Handle optimistic lock errors specially
-          if (code === 'OPTIMISTIC_LOCK_ERROR') {
+          if (code === "OPTIMISTIC_LOCK_ERROR") {
             toast.error(
               <div className="space-y-2">
                 <div className="flex items-start gap-2">
@@ -224,18 +172,18 @@ export default function JournalPage() {
             );
             // Automatically refresh after a short delay
             setTimeout(() => {
-              fetchProducts();
+              refetchProducts();
             }, 1000);
             return;
           }
-          
+
           // Handle batch operation errors
-          if (code === 'BATCH_OPERATION_PARTIAL_FAILURE' && context?.results) {
+          if (code === "BATCH_OPERATION_PARTIAL_FAILURE" && context?.results) {
             const { successful, failed, summary } = handleBatchOperationErrors(
               context.results,
               "Journal Adjustments"
             );
-            
+
             toast.error(
               <div className="space-y-2">
                 <div className="flex items-start gap-2">
@@ -247,7 +195,7 @@ export default function JournalPage() {
                       <ul className="text-sm mt-2 space-y-1">
                         {failed.slice(0, 3).map((f, i) => (
                           <li key={i} className="text-muted-foreground">
-                            • {f.error?.message || 'Unknown error'}
+                            • {f.error?.message || "Unknown error"}
                           </li>
                         ))}
                         {failed.length > 3 && (
@@ -262,21 +210,21 @@ export default function JournalPage() {
               </div>,
               { duration: 8000 }
             );
-            
+
             // Refresh to show what succeeded
             if (successful.length > 0) {
               clearAllAdjustments();
-              fetchProducts();
+              refetchProducts();
               setShowReviewDialog(false);
             }
             return;
           }
-          
+
           // Create a proper error object
           const error = new Error(message);
           (error as any).code = code;
           (error as any).context = context;
-          
+
           throw error;
         } else {
           throw new Error(errorData.error || "Failed to submit adjustments");
@@ -284,19 +232,22 @@ export default function JournalPage() {
       }
 
       const result = await response.json();
-      
+
       toast.success(`Successfully submitted ${result.logs.length} adjustments`);
-      announceSubmissionResult(true, `${result.logs.length} adjustments were applied successfully.`);
+      announceSubmissionResult(
+        true,
+        `${result.logs.length} adjustments were applied successfully.`
+      );
       clearAllAdjustments();
-      fetchProducts(); // Refresh quantities and versions
+      refetchProducts(); // Refresh quantities and versions
       setShowReviewDialog(false);
     } catch (error) {
       console.error("Error submitting adjustments:", error);
-      
+
       // Generate user-friendly error message
       const friendlyError = getUserFriendlyMessage(error as Error);
       announceSubmissionResult(false, friendlyError.description);
-      
+
       toast.error(
         <div className="space-y-2">
           <div className="flex items-start gap-2">
@@ -320,36 +271,38 @@ export default function JournalPage() {
   };
 
   const totalChanges = getTotalChanges();
-  
+  const selectedLocationName =
+    locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Select a location";
+
   // Debug: log the current state
   useEffect(() => {
-    console.log('Journal page - adjustments updated:', adjustments);
-    console.log('Journal page - hasChanges:', hasChanges());
-    console.log('Journal page - totalChanges:', totalChanges);
+    console.log("Journal page - adjustments updated:", adjustments);
+    console.log("Journal page - hasChanges:", hasChanges());
+    console.log("Journal page - totalChanges:", totalChanges);
   }, [adjustments, hasChanges, totalChanges]);
 
+  const hasAnyChanges = hasChanges();
+
   return (
-    <div className="container mx-auto px-4 py-6 max-w-7xl">
+    <div className={`container mx-auto px-4 py-6 max-w-7xl ${hasAnyChanges ? "pb-32" : "pb-10"}`}>
       <a href="#products-heading" className="skip-link">
         Skip to products list
       </a>
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold mb-2" id="page-title">Inventory Journal</h1>
-        <p className="text-muted-foreground" id="page-description">
-          Make bulk inventory adjustments across multiple products
-        </p>
+      <div className="mb-4 sm:mb-6 sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 pb-3 pt-1">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-2xl sm:text-3xl font-bold" id="page-title">
+            Inventory Journal
+          </h1>
+          <p className="text-muted-foreground" id="page-description">
+            Make bulk inventory adjustments across multiple products
+          </p>
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+          <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
+            {selectedLocationName}
+          </ContextTag>
+        </div>
       </div>
-
-
-      {/* Summary Card */}
-      {hasChanges() && (
-        <ChangesSummary
-          totalChanges={totalChanges}
-          adjustmentCount={Object.keys(adjustments).length}
-          onReview={() => setShowReviewDialog(true)}
-          onClear={clearAllAdjustments}
-        />
-      )}
 
       {/* Search and Filters */}
       <Card className="mb-6">
@@ -391,10 +344,10 @@ export default function JournalPage() {
               Batch
             </Button>
           </div>
-          
+
           {showFilters && (
             <div className="mt-4" id="journal-filters" role="region" aria-label="Product filters">
-              <JournalFilters 
+              <JournalFilters
                 onFilterChange={(filters) => {
                   // Implement filter logic here
                   console.log("Filters:", filters);
@@ -412,25 +365,35 @@ export default function JournalPage() {
         </CardHeader>
         <CardContent role="main" aria-labelledby="products-heading">
           <ScrollArea className="h-[70vh] sm:h-[600px]" aria-label="Products list">
-            <div className="space-y-2 pr-3 sm:pr-0" role="list" aria-live="polite" aria-relevant="additions removals">
+            <div
+              className="space-y-2 pr-3 sm:pr-0"
+              role="list"
+              aria-live="polite"
+              aria-relevant="additions removals"
+            >
               {isLoading ? (
-                <div className="text-center py-8 text-muted-foreground" role="status" aria-live="polite">
+                <div
+                  className="text-center py-8 text-muted-foreground"
+                  role="status"
+                  aria-live="polite"
+                >
                   <span aria-label="Loading products">Loading products...</span>
                 </div>
               ) : filteredProducts.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground" role="status" aria-live="polite">
+                <div
+                  className="text-center py-8 text-muted-foreground"
+                  role="status"
+                  aria-live="polite"
+                >
                   <span>No products found</span>
                 </div>
               ) : (
-                filteredProducts.map((product, index) => (
+                filteredProducts.map((product) => (
                   <div key={product.id} role="listitem">
                     <JournalProductRow
                       product={product}
                       adjustment={getAdjustmentForProduct(product.id)}
-                      onQuantityChange={(change) => 
-                        handleQuantityChange(product.id, change)
-                      }
-                      index={index}
+                      onQuantityChange={(change) => handleQuantityChange(product.id, change)}
                     />
                   </div>
                 ))
@@ -441,16 +404,25 @@ export default function JournalPage() {
       </Card>
 
       {/* Fixed Action Bar */}
-      {hasChanges() && (
-        <div className="fixed bottom-0 left-0 right-0 bg-background border-t p-4" role="region" aria-label="Action bar" aria-live="polite">
+      {hasAnyChanges && (
+        <div
+          className="fixed left-0 right-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70 border-t p-3 sm:p-4 shadow-card"
+          style={{
+            bottom: "calc(env(safe-area-inset-bottom, 0px) + 4.75rem)",
+          }} /* lift above mobile nav */
+          role="region"
+          aria-label="Action bar"
+          aria-live="polite"
+        >
           <div className="container mx-auto max-w-7xl flex justify-between items-center">
             <div className="flex items-center gap-4">
-              <Badge 
+              <Badge
                 variant={totalChanges.total > 0 ? "default" : "destructive"}
                 role="status"
                 aria-label={`Total change: ${totalChanges.total > 0 ? "+" : ""}${totalChanges.total} units`}
               >
-                Total: {totalChanges.total > 0 ? "+" : ""}{totalChanges.total}
+                Total: {totalChanges.total > 0 ? "+" : ""}
+                {totalChanges.total}
               </Badge>
               <span className="text-sm text-muted-foreground" role="status">
                 {Object.keys(adjustments).length} products affected
@@ -490,10 +462,7 @@ export default function JournalPage() {
       />
 
       {/* Batch Operations Dialog */}
-      <BatchOperationsDialog
-        open={showBatchOperations}
-        onOpenChange={setShowBatchOperations}
-      />
+      <BatchOperationsDialog open={showBatchOperations} onOpenChange={setShowBatchOperations} />
     </div>
   );
 }
