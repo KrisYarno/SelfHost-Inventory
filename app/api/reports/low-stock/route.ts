@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/auth";
+import { requireApproved } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { LowStockResponse, LowStockAlert } from "@/types/reports";
 
@@ -7,10 +7,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
   try {
-    const session = await getSession();
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    await requireApproved();
 
     const searchParams = request.nextUrl.searchParams;
     const defaultThreshold = parseInt(searchParams.get("threshold") || "10");

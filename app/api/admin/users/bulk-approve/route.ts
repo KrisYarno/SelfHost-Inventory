@@ -1,21 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { requireAdmin } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
-    
-    if (!session?.user?.isAdmin) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const { user } = await requireAdmin();
 
     const { userIds } = await request.json();
-    
+
     if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
       return NextResponse.json({ error: "Invalid user IDs" }, { status: 400 });
     }
@@ -42,7 +37,7 @@ export async function POST(request: NextRequest) {
     // Update users in bulk
     const updateResult = await prisma.user.updateMany({
       where: {
-        id: { in: usersToApprove.map(u => u.id) },
+        id: { in: usersToApprove.map((u) => u.id) },
       },
       data: {
         isApproved: true,
@@ -51,9 +46,9 @@ export async function POST(request: NextRequest) {
 
     // Log the bulk approval action
     await auditService.logBulkUserApproval(
-      parseInt(session.user.id),
-      usersToApprove.map(u => u.id),
-      usersToApprove.map(u => u.email)
+      user.id,
+      usersToApprove.map((u) => u.id),
+      usersToApprove.map((u) => u.email)
     );
 
     return NextResponse.json({
@@ -61,10 +56,7 @@ export async function POST(request: NextRequest) {
       message: `Successfully approved ${updateResult.count} users`,
     });
   } catch (error) {
-    console.error('Error bulk approving users:', error);
-    return NextResponse.json(
-      { error: "Failed to approve users" },
-      { status: 500 }
-    );
+    console.error("Error bulk approving users:", error);
+    return NextResponse.json({ error: "Failed to approve users" }, { status: 500 });
   }
 }

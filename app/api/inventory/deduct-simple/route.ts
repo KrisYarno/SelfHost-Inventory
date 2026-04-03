@@ -1,28 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
+import { requireApproved } from "@/lib/api-utils";
 import { ZodError } from "zod";
-import { authOptions } from "@/lib/auth";
 import { createInventoryTransaction } from "@/lib/inventory";
-import { 
-  AppError, 
-  UnauthorizedError, 
-  errorLogger
-} from "@/lib/error-handling";
+import { AppError, errorLogger } from "@/lib/error-handling";
 import { validateCSRFToken } from "@/lib/csrf";
 import { SimpleDeductSchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
+import { auditService } from "@/lib/audit";
+import { randomUUID } from "crypto";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.isApproved) {
-      throw new UnauthorizedError("process inventory deductions");
-    }
+    const { user } = await requireApproved();
 
     const rateLimitHeaders = enforceRateLimit(request, "inventory:deduct-simple", {
-      identifier: session.user.id,
+      identifier: user.id,
     });
 
     // Validate CSRF token
@@ -34,23 +28,41 @@ export async function POST(request: NextRequest) {
     const body = SimpleDeductSchema.parse(await request.json());
 
     // Transform items for inventory transaction
-    const transactionItems = body.items.map(item => ({
+    const transactionItems = body.items.map((item) => ({
       productId: item.productId,
       locationId: body.locationId,
       quantityChange: -Math.abs(item.quantity), // Ensure negative for deduction
       notes: body.notes,
     }));
 
+    const operationId = randomUUID();
+
     // Create the deduction transaction
     const result = await createInventoryTransaction(
-      'DEDUCTION',
-      session.user.id,
+      "DEDUCTION",
+      user.id,
       transactionItems,
-      { 
+      {
         orderReference: body.orderReference,
-        notes: body.notes 
+        notes: body.notes,
+        operationId,
       }
     );
+
+    // Audit as bulk inventory update/deduction (one row)
+    try {
+      await auditService.logBulkInventoryUpdate(
+        user.id,
+        result.logs.map((log) => ({
+          productId: log.productId,
+          productName: log.products?.name ?? `Product ${log.productId}`,
+          delta: log.delta,
+        })),
+        body.locationId
+      );
+    } catch (auditError) {
+      console.error("Failed to log audit deduction:", auditError);
+    }
 
     const response = NextResponse.json({
       success: true,
@@ -81,38 +93,38 @@ export async function POST(request: NextRequest) {
 
     if (error instanceof AppError) {
       return NextResponse.json(
-        { 
+        {
           error: {
             message: error.message,
-            code: error.code
-          }
+            code: error.code,
+          },
         },
         { status: error.statusCode }
       );
     }
-    
+
     // Handle Prisma errors
     if (error instanceof Error && error.message.includes("Insufficient stock")) {
       const match = error.message.match(/Product (.+) has insufficient stock/);
       const productName = match ? match[1] : "Unknown product";
       return NextResponse.json(
-        { 
+        {
           error: {
             message: `Not enough stock for ${productName}. Please check available inventory.`,
             code: "INVENTORY_INSUFFICIENT_STOCK",
-            context: { productName }
-          }
+            context: { productName },
+          },
         },
         { status: 400 }
       );
     }
-    
+
     return NextResponse.json(
-      { 
+      {
         error: {
           message: "Failed to process inventory deduction. Please try again.",
-          code: "DEDUCTION_FAILED"
-        }
+          code: "DEDUCTION_FAILED",
+        },
       },
       { status: 500 }
     );

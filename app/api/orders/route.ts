@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/auth";
-import prisma from "@/lib/prisma";
+import { requireApproved } from "@/lib/api-utils";
 import { OrdersResponse } from "@/types/orders";
 
 // Mock data for now - replace with actual database queries
@@ -10,7 +9,7 @@ const mockOrders = [
     orderNumber: "ORD-2024-001",
     createdAt: new Date(Date.now() - 1000 * 60 * 5), // 5 minutes ago
     updatedAt: new Date(Date.now() - 1000 * 60 * 5),
-    status: 'pending' as const,
+    status: "pending" as const,
     items: [
       {
         id: "1-1",
@@ -35,7 +34,7 @@ const mockOrders = [
     orderNumber: "ORD-2024-002",
     createdAt: new Date(Date.now() - 1000 * 60 * 15), // 15 minutes ago
     updatedAt: new Date(Date.now() - 1000 * 60 * 15),
-    status: 'packing' as const,
+    status: "packing" as const,
     items: [
       {
         id: "2-1",
@@ -47,7 +46,7 @@ const mockOrders = [
       },
     ],
     lockedBy: {
-      userId: "user-123",
+      userId: 123,
       userName: "John Doe",
       lockedAt: new Date(Date.now() - 1000 * 60 * 2), // 2 minutes ago
     },
@@ -57,7 +56,7 @@ const mockOrders = [
     orderNumber: "ORD-2024-003",
     createdAt: new Date(Date.now() - 1000 * 60 * 30), // 30 minutes ago
     updatedAt: new Date(Date.now() - 1000 * 60 * 30),
-    status: 'pending' as const,
+    status: "pending" as const,
     items: [
       {
         id: "3-1",
@@ -89,10 +88,7 @@ const mockOrders = [
 
 export async function GET(request: NextRequest) {
   try {
-    const session = await getSession();
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    await requireApproved();
 
     // Get query parameters
     const searchParams = request.nextUrl.searchParams;
@@ -103,7 +99,7 @@ export async function GET(request: NextRequest) {
     // Filter orders based on status if provided
     let filteredOrders = mockOrders;
     if (status && status !== "all") {
-      filteredOrders = mockOrders.filter(order => order.status === status);
+      filteredOrders = mockOrders.filter((order) => order.status === status);
     }
 
     // Simple pagination logic (would be replaced with proper DB queries)
@@ -121,9 +117,6 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(response);
   } catch (error) {
     console.error("Error fetching orders:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch orders" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch orders" }, { status: 500 });
   }
 }

@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
 import { ZodError } from "zod";
-import { authOptions } from "@/lib/auth";
+import { requireApproved, requireAdmin } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { getCurrentQuantity, isProductUnique, formatProductName } from "@/lib/products";
+import { isProductUnique, formatProductName } from "@/lib/products";
+import { getCurrentQuantity } from "@/lib/inventory";
 import { auditService } from "@/lib/audit";
 import { validateCSRFToken } from "@/lib/csrf";
 import { ProductUpdateSchema } from "@/lib/validation/product";
 import { enforceRateLimit, RateLimitError, applyRateLimitHeaders } from "@/lib/rateLimit";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 interface RouteParams {
   params: {
@@ -20,10 +20,7 @@ interface RouteParams {
 // GET /api/products/[id] - Get single product
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.isApproved) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    await requireApproved();
 
     const productId = parseInt(params.id);
     if (isNaN(productId)) {
@@ -31,7 +28,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     const product = await prisma.product.findFirst({
-      where: { 
+      where: {
         id: productId,
         deletedAt: null,
       },
@@ -66,9 +63,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       where: { id: 1 },
     });
 
-    const currentQuantity = location 
-      ? await getCurrentQuantity(product.id, location.id)
-      : 0;
+    const currentQuantity = location ? await getCurrentQuantity(product.id, location.id) : 0;
 
     return NextResponse.json({
       ...product,
@@ -76,25 +71,17 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     });
   } catch (error) {
     console.error("Error fetching product:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch product" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch product" }, { status: 500 });
   }
 }
 
 // PUT /api/products/[id] - Update product (Admin only)
 export async function PUT(request: NextRequest, { params }: RouteParams) {
   try {
-    const session = await getServerSession(authOptions);
-    
-    // Check if user is authenticated and is an admin
-    if (!session?.user?.isApproved || !session.user.isAdmin) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const { user } = await requireAdmin();
 
     const rateLimitHeaders = enforceRateLimit(request, "products:PUT", {
-      identifier: session.user.id,
+      identifier: user.id,
     });
 
     // Validate CSRF token
@@ -123,8 +110,8 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     if (body.baseName !== undefined || body.variant !== undefined) {
       const newBaseName = body.baseName ?? existingProduct.baseName;
       const newVariant = body.variant ?? existingProduct.variant;
-      
-      const isUnique = await isProductUnique(newBaseName || '', newVariant || '', productId);
+
+      const isUnique = await isProductUnique(newBaseName || "", newVariant || "", productId);
       if (!isUnique) {
         return NextResponse.json(
           { error: "Product with this base name and variant already exists" },
@@ -135,15 +122,15 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 
     // Build update data
     const updateData: any = {};
-    
+
     if (body.baseName !== undefined) {
       updateData.baseName = body.baseName.trim();
     }
-    
+
     if (body.variant !== undefined) {
       updateData.variant = body.variant.trim();
     }
-    
+
     // Update name if baseName or variant changed
     if (body.baseName !== undefined || body.variant !== undefined) {
       updateData.name = formatProductName({
@@ -151,7 +138,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
         variant: updateData.variant ?? existingProduct.variant,
       });
     }
-    
+
     // Update numeric fields if provided
     if (body.lowStockThreshold !== undefined) {
       updateData.lowStockThreshold = Math.max(0, body.lowStockThreshold);
@@ -181,18 +168,30 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     if (body.variant !== undefined && body.variant !== existingProduct.variant) {
       changes.variant = { from: existingProduct.variant, to: body.variant };
     }
-    if (body.lowStockThreshold !== undefined && body.lowStockThreshold !== existingProduct.lowStockThreshold) {
-      changes.lowStockThreshold = { from: existingProduct.lowStockThreshold, to: body.lowStockThreshold };
+    if (
+      body.lowStockThreshold !== undefined &&
+      body.lowStockThreshold !== existingProduct.lowStockThreshold
+    ) {
+      changes.lowStockThreshold = {
+        from: existingProduct.lowStockThreshold,
+        to: body.lowStockThreshold,
+      };
     }
-    if (body.costPrice !== undefined && Number(body.costPrice) !== Number(existingProduct.costPrice)) {
+    if (
+      body.costPrice !== undefined &&
+      Number(body.costPrice) !== Number(existingProduct.costPrice)
+    ) {
       changes.costPrice = { from: Number(existingProduct.costPrice), to: body.costPrice };
     }
-    if (body.retailPrice !== undefined && Number(body.retailPrice) !== Number(existingProduct.retailPrice)) {
+    if (
+      body.retailPrice !== undefined &&
+      Number(body.retailPrice) !== Number(existingProduct.retailPrice)
+    ) {
       changes.retailPrice = { from: Number(existingProduct.retailPrice), to: body.retailPrice };
     }
 
     await auditService.logProductUpdate(
-      parseInt(session.user.id),
+      user.id,
       product.id,
       product.name,
       changes
@@ -219,25 +218,17 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     }
 
     console.error("Error updating product:", error);
-    return NextResponse.json(
-      { error: "Failed to update product" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to update product" }, { status: 500 });
   }
 }
 
 // DELETE /api/products/[id] - Soft delete product (Admin only)
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
   try {
-    const session = await getServerSession(authOptions);
-    
-    // Check if user is authenticated and is an admin
-    if (!session?.user?.isApproved || !session.user.isAdmin) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const { user } = await requireAdmin();
 
     const rateLimitHeaders = enforceRateLimit(request, "products:DELETE", {
-      identifier: session.user.id,
+      identifier: user.id,
     });
 
     // Validate CSRF token
@@ -269,16 +260,12 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       where: { id: productId },
       data: {
         deletedAt: new Date(),
-        deletedBy: parseInt(session.user.id),
+        deletedBy: user.id,
       },
     });
 
     // Log the product deletion
-    await auditService.logProductDelete(
-      parseInt(session.user.id),
-      product.id,
-      product.name
-    );
+    await auditService.logProductDelete(user.id, product.id, product.name);
 
     // Note: We don't create an inventory log for deletion as it's not an inventory change
     // The soft delete fields (deletedAt, deletedBy) serve as the audit trail
@@ -297,9 +284,6 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     }
 
     console.error("Error deleting product:", error);
-    return NextResponse.json(
-      { error: "Failed to delete product" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to delete product" }, { status: 500 });
   }
 }

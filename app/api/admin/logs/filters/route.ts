@@ -1,46 +1,38 @@
 import { NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { requireAdmin } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const session = await getServerSession(authOptions);
-    
-    if (!session?.user?.isAdmin) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    await requireAdmin();
 
     // Get unique users and locations
     const [users, locations] = await Promise.all([
       prisma.user.findMany({
-        select: { 
+        select: {
           id: true,
           email: true,
-          username: true 
+          username: true,
         },
-        orderBy: { username: 'asc' },
+        orderBy: { username: "asc" },
       }),
       prisma.location.findMany({
         select: { name: true },
-        orderBy: { name: 'asc' },
+        orderBy: { name: "asc" },
       }),
     ]);
 
     return NextResponse.json({
-      users: users.map(u => ({
+      users: users.map((u) => ({
         id: u.id,
-        email: u.email || u.username
+        email: u.email || u.username,
       })),
-      locations: locations.map(l => l.name),
+      locations: locations.map((l) => l.name),
     });
   } catch (error) {
-    console.error('Error fetching filters:', error);
-    return NextResponse.json(
-      { error: "Failed to fetch filters" },
-      { status: 500 }
-    );
+    console.error("Error fetching filters:", error);
+    return NextResponse.json({ error: "Failed to fetch filters" }, { status: 500 });
   }
 }

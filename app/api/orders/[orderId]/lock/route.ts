@@ -1,19 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/auth";
+import { requireApproved } from "@/lib/api-utils";
 import { OrderLockResponse } from "@/types/orders";
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: { orderId: string } }
-) {
+export async function POST(request: NextRequest, _context: { params: { orderId: string } }) {
   try {
-    const session = await getSession();
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const { user } = await requireApproved();
 
     const body = await request.json();
-    const { userId } = body;
+    const { userId: _userId } = body;
 
     // Mock implementation - replace with actual database logic
     // In a real implementation, you would:
@@ -25,8 +19,8 @@ export async function POST(
     const response: OrderLockResponse = {
       success: true,
       lockedBy: {
-        userId: session.user.id,
-        userName: session.user.name || "Unknown User",
+        userId: user.id,
+        userName: user.name || "Unknown User",
         lockedAt: new Date(),
       },
     };
@@ -34,9 +28,6 @@ export async function POST(
     return NextResponse.json(response);
   } catch (error) {
     console.error("Error locking order:", error);
-    return NextResponse.json(
-      { error: "Failed to lock order" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to lock order" }, { status: 500 });
   }
 }

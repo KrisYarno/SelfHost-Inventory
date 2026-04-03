@@ -1,19 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/auth";
+import { requireApproved } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { format } from "date-fns";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { id: string } }
-) {
+export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const session = await getSession();
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    await requireApproved();
 
     const productId = parseInt(params.id);
     if (isNaN(productId)) {
@@ -44,11 +38,11 @@ export async function GET(
 
     // Get current stock across all locations
     const stockLevels = await prisma.inventory_logs.groupBy({
-      by: ['locationId'],
+      by: ["locationId"],
       _sum: {
-        delta: true
+        delta: true,
       },
-      where: { productId }
+      where: { productId },
     });
 
     const currentStock = stockLevels.reduce((sum, level) => sum + (level._sum.delta || 0), 0);
@@ -61,55 +55,55 @@ export async function GET(
         locations: true,
       },
       orderBy: {
-        changeTime: 'desc'
+        changeTime: "desc",
       },
-      take: 50
+      take: 50,
     });
 
     // Calculate 30-day movement
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
+
     const movement = await prisma.inventory_logs.aggregate({
       where: {
         productId,
-        changeTime: { gte: thirtyDaysAgo }
+        changeTime: { gte: thirtyDaysAgo },
       },
       _sum: {
-        delta: true
-      }
+        delta: true,
+      },
     });
 
     // Get daily trend data - using simpler approach
     const dailyChanges = await prisma.inventory_logs.groupBy({
-      by: ['changeTime'],
+      by: ["changeTime"],
       _sum: {
-        delta: true
+        delta: true,
       },
       where: dateFilter,
       orderBy: {
-        changeTime: 'asc'
-      }
+        changeTime: "asc",
+      },
     });
 
     // Calculate cumulative totals
     let runningTotal = 0;
-    const dailyTrend = dailyChanges.map(change => {
+    const dailyTrend = dailyChanges.map((change) => {
       runningTotal += change._sum.delta || 0;
       return {
-        date: format(change.changeTime, 'MMM dd'),
-        quantity: runningTotal
+        date: format(change.changeTime, "MMM dd"),
+        quantity: runningTotal,
       };
     });
 
-    const formattedTransactions = transactions.map(t => ({
+    const formattedTransactions = transactions.map((t) => ({
       id: t.id,
       date: t.changeTime,
       type: t.logType,
       quantity: t.delta,
-      user: t.users?.username || 'Unknown',
-      location: t.locations?.name || 'Unknown',
-      notes: ''
+      user: t.users?.username || "Unknown",
+      location: t.locations?.name || "Unknown",
+      notes: "",
     }));
 
     return NextResponse.json({
@@ -117,13 +111,10 @@ export async function GET(
       currentStock,
       movement30Days: movement._sum.delta || 0,
       transactions: formattedTransactions,
-      dailyTrend: dailyTrend || []
+      dailyTrend: dailyTrend || [],
     });
   } catch (error) {
     console.error("Error fetching product details:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch product details" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch product details" }, { status: 500 });
   }
 }

@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { requireAdmin } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 interface RouteParams {
   params: {
@@ -14,12 +13,7 @@ interface RouteParams {
 // POST /api/admin/products/[id]/restore - Restore a soft deleted product (Admin only)
 export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
-    const session = await getServerSession(authOptions);
-    
-    // Check if user is authenticated and is an admin
-    if (!session?.user?.isApproved || !session.user.isAdmin) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    await requireAdmin();
 
     const productId = parseInt(params.id);
     if (isNaN(productId)) {
@@ -57,9 +51,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     });
   } catch (error) {
     console.error("Error restoring product:", error);
-    return NextResponse.json(
-      { error: "Failed to restore product" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to restore product" }, { status: 500 });
   }
 }

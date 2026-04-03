@@ -1,29 +1,21 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getServerSession } from 'next-auth/next';
-import { ZodError } from 'zod';
-import { authOptions } from '@/lib/auth';
-import { createInventoryAdjustment } from '@/lib/inventory';
-import { inventory_logs_logType } from '@prisma/client';
-import { 
-  AppError, 
-  UnauthorizedError, 
-  errorLogger
-} from "@/lib/error-handling";
-import { validateCSRFToken } from '@/lib/csrf';
-import { StockInSchema } from '@/lib/validation/inventory';
-import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from '@/lib/rateLimit';
+import { NextRequest, NextResponse } from "next/server";
+import { requireApproved } from "@/lib/api-utils";
+import { ZodError } from "zod";
+import { createInventoryAdjustment } from "@/lib/inventory";
+import { inventory_logs_logType } from "@prisma/client";
+import { AppError, errorLogger } from "@/lib/error-handling";
+import { validateCSRFToken } from "@/lib/csrf";
+import { StockInSchema } from "@/lib/validation/inventory";
+import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.isApproved) {
-      throw new UnauthorizedError("add stock to inventory");
-    }
+    const { user } = await requireApproved();
 
-    const rateLimitHeaders = enforceRateLimit(request, 'inventory:stock-in', {
-      identifier: session.user.id,
+    const rateLimitHeaders = enforceRateLimit(request, "inventory:stock-in", {
+      identifier: user.id,
     });
 
     // Validate CSRF token
@@ -36,7 +28,7 @@ export async function POST(request: NextRequest) {
 
     // Create the stock-in adjustment
     const result = await createInventoryAdjustment(
-      session.user.id,
+      user.id,
       body.productId,
       body.locationId,
       body.quantity, // Positive for adding stock
@@ -50,7 +42,7 @@ export async function POST(request: NextRequest) {
     return applyRateLimitHeaders(response, rateLimitHeaders);
   } catch (error) {
     errorLogger.log(error as Error);
-    
+
     if (error instanceof RateLimitError) {
       return NextResponse.json(
         { error: error.message },
@@ -61,31 +53,31 @@ export async function POST(request: NextRequest) {
     if (error instanceof ZodError) {
       return NextResponse.json(
         {
-          error: 'Invalid request payload',
+          error: "Invalid request payload",
           details: error.flatten().fieldErrors,
         },
         { status: 400 }
       );
     }
-    
+
     if (error instanceof AppError) {
       return NextResponse.json(
-        { 
+        {
           error: {
             message: error.message,
-            code: error.code
-          }
+            code: error.code,
+          },
         },
         { status: error.statusCode }
       );
     }
-    
+
     return NextResponse.json(
-      { 
+      {
         error: {
           message: "Failed to add stock. Please try again.",
-          code: "STOCK_IN_FAILED"
-        }
+          code: "STOCK_IN_FAILED",
+        },
       },
       { status: 500 }
     );

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getServerSession } from "next-auth";
+import { requireApproved } from "@/lib/api-utils";
 import { ZodError } from "zod";
-import { authOptions } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
 import { validateCSRFToken } from "@/lib/csrf";
@@ -10,13 +9,10 @@ import { enforceRateLimit, RateLimitError, applyRateLimitHeaders } from "@/lib/r
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const { user } = await requireApproved();
 
     const rateLimitHeaders = enforceRateLimit(request, "inventory:batch-adjust", {
-      identifier: session.user.id,
+      identifier: user.id,
     });
 
     const isValidCSRF = await validateCSRFToken(request);
@@ -24,17 +20,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
     }
 
-    const { adjustments } = BatchInventoryAdjustmentSchema.parse(
-      await request.json()
-    );
+    const { adjustments } = BatchInventoryAdjustmentSchema.parse(await request.json());
 
     // Get product names for audit logging
     const productIds = adjustments.map((adj) => adj.productId);
     const products = await prisma.product.findMany({
       where: { id: { in: productIds } },
-      select: { id: true, name: true }
+      select: { id: true, name: true },
     });
-    const productMap = new Map(products.map(p => [p.id, p.name]));
+    const productMap = new Map(products.map((p) => [p.id, p.name]));
 
     // Execute all adjustments in a transaction
     const results = await prisma.$transaction(async (tx: any) => {
@@ -58,7 +52,7 @@ export async function POST(request: NextRequest) {
 
           if (!inventory) {
             // Create new inventory record if it doesn't exist
-            const newInventory = await tx.product_locations.create({
+            await tx.product_locations.create({
               data: {
                 productId: adjustment.productId,
                 locationId: adjustment.locationId,
@@ -68,7 +62,9 @@ export async function POST(request: NextRequest) {
             });
 
             if (adjustment.delta < 0) {
-              throw new Error(`No inventory found for product ${adjustment.productId} at location ${adjustment.locationId}`);
+              throw new Error(
+                `No inventory found for product ${adjustment.productId} at location ${adjustment.locationId}`
+              );
             }
 
             // Create log entry for new inventory
@@ -76,7 +72,7 @@ export async function POST(request: NextRequest) {
               data: {
                 productId: adjustment.productId,
                 locationId: adjustment.locationId,
-                userId: parseInt(session.user.id),
+                userId: user.id,
                 delta: adjustment.delta,
                 changeTime: new Date(),
                 logType: "ADJUSTMENT",
@@ -84,25 +80,30 @@ export async function POST(request: NextRequest) {
             });
 
             logs.push(log);
-            
+
             // Collect audit info for new inventory
             auditUpdates.push({
               productId: adjustment.productId,
-              productName: productMap.get(adjustment.productId) || 'Unknown Product',
-              delta: adjustment.delta
+              productName: productMap.get(adjustment.productId) || "Unknown Product",
+              delta: adjustment.delta,
             });
-            
+
             continue;
           }
 
           // Check version if provided (optimistic locking)
-          if (adjustment.expectedVersion !== undefined && inventory.version !== adjustment.expectedVersion) {
+          if (
+            adjustment.expectedVersion !== undefined &&
+            inventory.version !== adjustment.expectedVersion
+          ) {
             throw new Error(`Inventory has been modified by another user`);
           }
 
           const newQuantity = inventory.quantity + adjustment.delta;
           if (newQuantity < 0) {
-            throw new Error(`Insufficient inventory: current ${inventory.quantity}, trying to remove ${Math.abs(adjustment.delta)}`);
+            throw new Error(
+              `Insufficient inventory: current ${inventory.quantity}, trying to remove ${Math.abs(adjustment.delta)}`
+            );
           }
 
           // Update inventory
@@ -119,7 +120,7 @@ export async function POST(request: NextRequest) {
             data: {
               productId: adjustment.productId,
               locationId: adjustment.locationId,
-              userId: parseInt(session.user.id),
+              userId: user.id,
               delta: adjustment.delta,
               changeTime: new Date(),
               logType: "ADJUSTMENT",
@@ -127,16 +128,16 @@ export async function POST(request: NextRequest) {
           });
 
           logs.push(log);
-          
+
           // Collect audit info
           auditUpdates.push({
             productId: adjustment.productId,
-            productName: productMap.get(adjustment.productId) || 'Unknown Product',
-            delta: adjustment.delta
+            productName: productMap.get(adjustment.productId) || "Unknown Product",
+            delta: adjustment.delta,
           });
         } catch (error: any) {
           // Re-throw with product context
-          throw new Error(`Product ${adjustment.productId}: ${error.message || 'Unknown error'}`);
+          throw new Error(`Product ${adjustment.productId}: ${error.message || "Unknown error"}`);
         }
       }
 
@@ -146,19 +147,18 @@ export async function POST(request: NextRequest) {
     // Log the bulk inventory update after successful transaction
     if (results.auditUpdates.length > 0) {
       await auditService.logBulkInventoryUpdate(
-        parseInt(session.user.id),
+        user.id,
         results.auditUpdates,
         adjustments[0]?.locationId // Assuming all adjustments are for the same location
       );
     }
 
-    const response = NextResponse.json({ 
-      success: true, 
+    const response = NextResponse.json({
+      success: true,
       logs: results.logs,
-      count: results.logs.length 
+      count: results.logs.length,
     });
     return applyRateLimitHeaders(response, rateLimitHeaders);
-
   } catch (error: any) {
     if (error instanceof RateLimitError) {
       return NextResponse.json(
@@ -182,22 +182,23 @@ export async function POST(request: NextRequest) {
     // Check if it's an optimistic lock error
     if (error.message?.includes("modified by another user")) {
       return NextResponse.json(
-        { 
+        {
           error: {
-            message: "One or more items have been modified by another user. Please refresh and try again.",
-            code: "OPTIMISTIC_LOCK_ERROR"
-          }
+            message:
+              "One or more items have been modified by another user. Please refresh and try again.",
+            code: "OPTIMISTIC_LOCK_ERROR",
+          },
         },
         { status: 409 }
       );
     }
 
     return NextResponse.json(
-      { 
+      {
         error: {
           message: error?.message || "Failed to process batch adjustments",
-          code: "BATCH_OPERATION_FAILED"
-        }
+          code: "BATCH_OPERATION_FAILED",
+        },
       },
       { status: 500 }
     );

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/auth";
+import { requireAdmin } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { validateCSRFToken } from "@/lib/csrf";
 import { z } from "zod";
@@ -12,10 +12,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest, { params }: { params: { userId: string } }) {
   try {
-    const session = await getSession();
-    if (!session || !session.user.isAdmin) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    const { user: adminUser } = await requireAdmin();
 
     // Validate CSRF token
     const isValidCSRF = await validateCSRFToken(request);
@@ -39,7 +36,7 @@ export async function POST(request: NextRequest, { params }: { params: { userId:
     const { isAdmin } = parsed.data;
 
     // Prevent admins from removing their own admin status
-    if (userId === session.user.id && !isAdmin) {
+    if (userId === adminUser.id && !isAdmin) {
       return NextResponse.json(
         { error: "Cannot remove your own admin privileges" },
         { status: 400 }

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getSession } from "@/lib/auth";
-import prisma from "@/lib/prisma";
+import { requireApproved } from "@/lib/api-utils";
 import { Order } from "@/types/orders";
 
 // Mock order details - replace with actual database query
@@ -11,7 +10,7 @@ const getOrderById = (orderId: string): Order | null => {
       orderNumber: "ORD-2024-001",
       createdAt: new Date(Date.now() - 1000 * 60 * 5),
       updatedAt: new Date(Date.now() - 1000 * 60 * 5),
-      status: 'pending',
+      status: "pending",
       items: [
         {
           id: "1-1",
@@ -32,35 +31,23 @@ const getOrderById = (orderId: string): Order | null => {
       ],
     },
   ];
-  
-  return mockOrders.find(order => order.id === orderId) || null;
+
+  return mockOrders.find((order) => order.id === orderId) || null;
 };
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: { orderId: string } }
-) {
+export async function GET(_request: NextRequest, { params }: { params: { orderId: string } }) {
   try {
-    const session = await getSession();
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+    await requireApproved();
 
     const order = getOrderById(params.orderId);
-    
+
     if (!order) {
-      return NextResponse.json(
-        { error: "Order not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "Order not found" }, { status: 404 });
     }
 
     return NextResponse.json(order);
   } catch (error) {
     console.error("Error fetching order:", error);
-    return NextResponse.json(
-      { error: "Failed to fetch order" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch order" }, { status: 500 });
   }
 }
