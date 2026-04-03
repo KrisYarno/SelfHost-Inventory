@@ -42,7 +42,7 @@ export async function GET(
     }
 
     // Don't return encrypted credentials in GET
-    const { encryptedApiKey, encryptedApiSecret, webhookSecret, ...safeData } =
+    const { encryptedApiKey: _encryptedApiKey, encryptedApiSecret: _encryptedApiSecret, webhookSecret: _webhookSecret, ...safeData } =
       integration;
 
     return NextResponse.json({ integration: safeData });
@@ -127,7 +127,7 @@ export async function PUT(
     });
 
     // Don't return encrypted credentials
-    const { encryptedApiKey, encryptedApiSecret, webhookSecret: _, ...safeData } =
+    const { encryptedApiKey: _encryptedApiKey, encryptedApiSecret: _encryptedApiSecret, webhookSecret: _whs, ...safeData } =
       integration;
 
     return NextResponse.json({ integration: safeData });

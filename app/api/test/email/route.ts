@@ -51,8 +51,7 @@ export async function POST(_request: NextRequest) {
       from: process.env.SENDGRID_FROM_EMAIL,
       subject: `Low Stock Alert - ${testData.items.length} Products Need Attention`,
       itemCount: testData.items.length,
-      hasSendGridKey: !!process.env.SENDGRID_API_KEY,
-      keyPrefix: process.env.SENDGRID_API_KEY?.substring(0, 10) + "...",
+      apiKeyConfigured: !!process.env.SENDGRID_API_KEY,
     });
   } catch (error) {
     console.error("Test email failed:", error);

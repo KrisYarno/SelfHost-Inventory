@@ -3,14 +3,15 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { 
-  LayoutDashboard, 
-  Users, 
+import {
+  LayoutDashboard,
+  Users,
   FileText,
   Settings,
   Package,
-  Shield,
-  BarChart3
+  BarChart3,
+  Building2,
+  Plug
 } from "lucide-react";
 
 const adminNavItems = [
@@ -40,9 +41,14 @@ const adminNavItems = [
     icon: Users,
   },
   {
-    title: "Audit Logs",
-    href: "/admin/audit-logs",
-    icon: Shield,
+    title: "Companies",
+    href: "/admin/companies",
+    icon: Building2,
+  },
+  {
+    title: "Integrations",
+    href: "/admin/integrations",
+    icon: Plug,
   },
   {
     title: "Settings",

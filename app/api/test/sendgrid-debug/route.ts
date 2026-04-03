@@ -134,8 +134,7 @@ export async function POST(_request: NextRequest) {
     return NextResponse.json({
       success: true,
       config: {
-        apiKeyLength: process.env.SENDGRID_API_KEY?.length,
-        apiKeyPrefix: process.env.SENDGRID_API_KEY?.substring(0, 10),
+        apiKeyConfigured: !!process.env.SENDGRID_API_KEY,
         fromEmail: process.env.SENDGRID_FROM_EMAIL,
         templateId: process.env.TEMPLATE_ID,
         toEmail: session.user.email,

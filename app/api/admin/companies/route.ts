@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
  * GET /api/admin/companies
  * List all companies (admin only)
  */
-export async function GET(request: NextRequest) {
+export async function GET(_request: NextRequest) {
   try {
     await requireAdmin();
 

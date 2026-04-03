@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "node:crypto";
 import prisma from "@/lib/prisma";
 import { syncIntegrationOrders } from "@/lib/external-orders/sync";
 
@@ -8,7 +9,12 @@ export const runtime = "nodejs";
 function isAuthorized(request: NextRequest): boolean {
   const token = process.env.INTERNAL_SYNC_TOKEN;
   if (!token) return false;
-  return request.headers.get("x-internal-sync-token") === token;
+  const provided = request.headers.get("x-internal-sync-token");
+  if (!provided) return false;
+  const expected = Buffer.from(token);
+  const actual = Buffer.from(provided);
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
 }
 
 export async function POST(request: NextRequest) {

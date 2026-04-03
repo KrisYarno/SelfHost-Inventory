@@ -64,7 +64,7 @@ export function ProductList({
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, showInactive]);
+  }, [debouncedSearch]);
 
   useEffect(() => {
     fetchProducts();

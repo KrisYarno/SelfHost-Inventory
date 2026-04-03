@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
  * GET /api/admin/integrations
  * List all integrations (admin only)
  */
-export async function GET(request: NextRequest) {
+export async function GET(_request: NextRequest) {
   try {
     await requireAdmin();
 

@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
 // GET /api/products - List all products with filters
 export async function GET(request: NextRequest) {
   try {
-    const { user } = await requireApproved();
+    const { user: _user } = await requireApproved();
 
     const searchParams = request.nextUrl.searchParams;
 

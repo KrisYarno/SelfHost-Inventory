@@ -1,3 +1,6 @@
+/**
+ * @jest-environment node
+ */
 import { NextRequest } from 'next/server'
 import { POST } from '@/app/api/inventory/batch-adjust/route'
 import { getServerSession } from 'next-auth'

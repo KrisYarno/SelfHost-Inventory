@@ -127,7 +127,7 @@ export async function POST(request: NextRequest) {
 
     for (const transfer of body.transfers) {
       try {
-        const result = await createInventoryTransfer({
+        const _result = await createInventoryTransfer({
           userId: user.id,
           productId: body.productId,
           fromLocationId: transfer.fromLocationId,

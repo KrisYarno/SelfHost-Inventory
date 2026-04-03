@@ -1,22 +1,25 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { MetricsCard } from "@/components/reports/metrics-card";
 import { ActivityTimeline } from "@/components/reports/activity-timeline";
 import { ProductPerformance } from "@/components/reports/product-performance";
 import { UserActivity } from "@/components/reports/user-activity";
 import { LowStockAlert } from "@/components/reports/low-stock-alert";
 import { LineChartComponent, ActivityBarChart } from "@/components/reports/inventory-chart";
+import { ReorderRecommendations } from "@/components/reports/reorder-recommendations";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { 
-  Download, 
-  RefreshCw, 
-  Package, 
+import {
+  Download,
+  RefreshCw,
   AlertTriangle,
   DollarSign,
   FileDown,
-  Image
+  Image as ImageIcon,
+  ShoppingCart,
+  Activity,
+  Archive,
 } from "lucide-react";
 import { DashboardMetrics, StockLevelChartData, ActivityChartData } from "@/types/reports";
 import { useLocation } from "@/contexts/location-context";
@@ -25,6 +28,7 @@ import { DateRange } from "react-day-picker";
 import { format, startOfDay, endOfDay, subDays } from "date-fns";
 import { exportToCSV, exportChartAsImage, generateExportFilename } from "@/lib/export-utils";
 import { DrillDownModal } from "@/components/reports/drill-down-modal";
+import { CombinedMinimumsReport } from "@/components/reports/combined-minimums";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,9 +38,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-const currencyFormatter = new Intl.NumberFormat('en-US', {
-  style: 'currency',
-  currency: 'USD',
+const currencyFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
   maximumFractionDigits: 2,
 });
 
@@ -46,13 +50,11 @@ export default function AdminReportsPage() {
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [inventoryTrends, setInventoryTrends] = useState<StockLevelChartData[]>([]);
   const [dailyActivity, setDailyActivity] = useState<ActivityChartData[]>([]);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [dateRange, setDateRange] = useState<DateRange | undefined>({
     from: startOfDay(subDays(new Date(), 6)),
     to: endOfDay(new Date()),
   });
-  const [datePreset, setDatePreset] = useState<DateRangePreset>("last7days");
   const [drillDownModal, setDrillDownModal] = useState<{
     isOpen: boolean;
     type: "product" | "date" | "user" | "location";
@@ -64,30 +66,11 @@ export default function AdminReportsPage() {
     title: "",
     data: null,
   });
-  
+
   const { selectedLocationId } = useLocation();
   const chartRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
 
-  useEffect(() => {
-    fetchAllData();
-  }, [selectedLocationId, dateRange]);
-
-  const fetchAllData = async () => {
-    try {
-      setLoading(true);
-      await Promise.all([
-        fetchMetrics(),
-        fetchInventoryTrends(),
-        fetchDailyActivity()
-      ]);
-    } catch (error) {
-      console.error("Error fetching data:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchMetrics = async () => {
+  const fetchMetrics = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (dateRange?.from) {
@@ -99,7 +82,7 @@ export default function AdminReportsPage() {
       if (selectedLocationId) {
         params.append("locationId", selectedLocationId.toString());
       }
-      
+
       const response = await fetch(`/api/reports/metrics?${params}`);
       if (!response.ok) throw new Error("Failed to fetch metrics");
       const data = await response.json();
@@ -107,9 +90,9 @@ export default function AdminReportsPage() {
     } catch (error) {
       console.error("Error fetching metrics:", error);
     }
-  };
+  }, [dateRange, selectedLocationId]);
 
-  const fetchInventoryTrends = async () => {
+  const fetchInventoryTrends = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (dateRange?.from) {
@@ -121,7 +104,7 @@ export default function AdminReportsPage() {
       if (selectedLocationId) {
         params.append("locationId", selectedLocationId.toString());
       }
-      
+
       const response = await fetch(`/api/reports/inventory-trends?${params}`);
       if (!response.ok) throw new Error("Failed to fetch inventory trends");
       const data = await response.json();
@@ -129,9 +112,9 @@ export default function AdminReportsPage() {
     } catch (error) {
       console.error("Error fetching inventory trends:", error);
     }
-  };
+  }, [dateRange, selectedLocationId]);
 
-  const fetchDailyActivity = async () => {
+  const fetchDailyActivity = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (dateRange?.from) {
@@ -143,7 +126,7 @@ export default function AdminReportsPage() {
       if (selectedLocationId) {
         params.append("locationId", selectedLocationId.toString());
       }
-      
+
       const response = await fetch(`/api/reports/daily-activity?${params}`);
       if (!response.ok) throw new Error("Failed to fetch daily activity");
       const data = await response.json();
@@ -151,7 +134,19 @@ export default function AdminReportsPage() {
     } catch (error) {
       console.error("Error fetching daily activity:", error);
     }
-  };
+  }, [dateRange, selectedLocationId]);
+
+  const fetchAllData = useCallback(async () => {
+    try {
+      await Promise.all([fetchMetrics(), fetchInventoryTrends(), fetchDailyActivity()]);
+    } catch (error) {
+      console.error("Error fetching data:", error);
+    }
+  }, [fetchMetrics, fetchInventoryTrends, fetchDailyActivity]);
+
+  useEffect(() => {
+    fetchAllData();
+  }, [fetchAllData]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -159,20 +154,62 @@ export default function AdminReportsPage() {
     setRefreshing(false);
   };
 
-  const handleDateRangeChange = (newDateRange: DateRange | undefined, preset: DateRangePreset) => {
+  const handleDateRangeChange = (newDateRange: DateRange | undefined, _preset: DateRangePreset) => {
     setDateRange(newDateRange);
-    setDatePreset(preset);
   };
-  
+
   const handleExportMetrics = () => {
     if (!metrics) return;
-    
+
     const filename = generateExportFilename("metrics", "csv", dateRange);
     const data = [
-      { metric: "Total Products", value: metrics.totalProducts, additional: `${metrics.activeProducts} active` },
-      { metric: "Total Stock", value: metrics.totalStockQuantity, additional: "Units in inventory" },
-      { metric: "Inventory Cost Value", value: formatCurrency(metrics.totalInventoryCostValue), additional: "At cost" },
-      { metric: "Inventory Retail Value", value: formatCurrency(metrics.totalInventoryRetailValue), additional: "At retail" },
+      // Decision metrics (new)
+      {
+        metric: "Order Now",
+        value: metrics.orderNowCount,
+        additional: `${metrics.orderSoonCount} order soon`,
+      },
+      {
+        metric: "Reorder Health Score",
+        value: `${metrics.reorderHealthScore}%`,
+        additional: "Products in healthy stock position",
+      },
+      {
+        metric: "Monthly Carrying Cost",
+        value: formatCurrency(metrics.monthlyCarryingCost),
+        additional: "25% annual holding rate",
+      },
+      {
+        metric: "Dead Stock Value",
+        value: formatCurrency(metrics.deadStockValue),
+        additional: "No movement in 90 days",
+      },
+      {
+        metric: "Stockout Risk",
+        value: metrics.stockoutRiskCount,
+        additional: `Avg ${metrics.daysOfSupplyAvg} days supply`,
+      },
+      // Legacy metrics
+      {
+        metric: "Total Products",
+        value: metrics.totalProducts,
+        additional: `${metrics.activeProducts} active`,
+      },
+      {
+        metric: "Total Stock",
+        value: metrics.totalStockQuantity,
+        additional: "Units in inventory",
+      },
+      {
+        metric: "Inventory Cost Value",
+        value: formatCurrency(metrics.totalInventoryCostValue),
+        additional: "At cost",
+      },
+      {
+        metric: "Inventory Retail Value",
+        value: formatCurrency(metrics.totalInventoryRetailValue),
+        additional: "At retail",
+      },
       { metric: "Low Stock Items", value: metrics.lowStockProducts, additional: "Below threshold" },
     ];
     exportToCSV(data, filename, [
@@ -189,7 +226,11 @@ export default function AdminReportsPage() {
     await exportChartAsImage(chartElement, filename);
   };
 
-  const handleDrillDown = async (type: "product" | "date" | "user" | "location", identifier: string, title: string) => {
+  const handleDrillDown = async (
+    type: "product" | "date" | "user" | "location",
+    identifier: string,
+    title: string
+  ) => {
     try {
       let data = null;
       const params = new URLSearchParams();
@@ -224,7 +265,7 @@ export default function AdminReportsPage() {
     }
   };
 
-  const closeDrillDownModal = () => setDrillDownModal(prev => ({ ...prev, isOpen: false }));
+  const closeDrillDownModal = () => setDrillDownModal((prev) => ({ ...prev, isOpen: false }));
 
   return (
     <div className="flex flex-col h-full overflow-x-hidden">
@@ -233,11 +274,13 @@ export default function AdminReportsPage() {
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
               <h1 className="text-2xl font-semibold tracking-tight">Reports</h1>
-              <p className="text-sm text-muted-foreground">Analytics and insights for your inventory</p>
+              <p className="text-sm text-muted-foreground">
+                Analytics and insights for your inventory
+              </p>
             </div>
             <div className="flex items-center gap-2 self-start sm:self-auto">
               <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing}>
-                <RefreshCw className={`h-4 w-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+                <RefreshCw className={`h-4 w-4 mr-2 ${refreshing ? "animate-spin" : ""}`} />
                 Refresh
               </Button>
               <DropdownMenu>
@@ -254,12 +297,16 @@ export default function AdminReportsPage() {
                     <FileDown className="h-4 w-4 mr-2" />
                     Export Metrics (CSV)
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => handleExportChart("inventory-trend", "inventory-trend")}>
-                    <Image className="h-4 w-4 mr-2" />
+                  <DropdownMenuItem
+                    onClick={() => handleExportChart("inventory-trend", "inventory-trend")}
+                  >
+                    <ImageIcon className="h-4 w-4 mr-2" aria-hidden="true" />
                     Export Inventory Trend (PNG)
                   </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => handleExportChart("daily-activity", "daily-activity")}>
-                    <Image className="h-4 w-4 mr-2" />
+                  <DropdownMenuItem
+                    onClick={() => handleExportChart("daily-activity", "daily-activity")}
+                  >
+                    <ImageIcon className="h-4 w-4 mr-2" aria-hidden="true" />
                     Export Daily Activity (PNG)
                   </DropdownMenuItem>
                 </DropdownMenuContent>
@@ -271,7 +318,8 @@ export default function AdminReportsPage() {
             <div className="text-sm text-muted-foreground hidden sm:block truncate min-w-0">
               {dateRange?.from && dateRange?.to && (
                 <span>
-                  Showing data from {format(dateRange.from, "MMM dd, yyyy")} to {format(dateRange.to, "MMM dd, yyyy")}
+                  Showing data from {format(dateRange.from, "MMM dd, yyyy")} to{" "}
+                  {format(dateRange.to, "MMM dd, yyyy")}
                 </span>
               )}
             </div>
@@ -282,16 +330,67 @@ export default function AdminReportsPage() {
       <main className="flex-1 overflow-y-auto overflow-x-hidden">
         <div className="p-4 sm:p-6 space-y-6 max-w-7xl w-full mx-auto">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-            <MetricsCard title="Total Products" value={metrics?.totalProducts || 0} subtitle={`${metrics?.activeProducts || 0} active`} icon={<Package className="h-4 w-4" />} />
-            <MetricsCard title="Total Stock" value={metrics ? metrics.totalStockQuantity.toLocaleString() : '0'} subtitle="Units in inventory" icon={<Package className="h-4 w-4" />} />
-            <MetricsCard title="Inventory Cost Value" value={formatCurrency(metrics?.totalInventoryCostValue)} subtitle="At cost" icon={<DollarSign className="h-4 w-4" />} />
-            <MetricsCard title="Inventory Retail Value" value={formatCurrency(metrics?.totalInventoryRetailValue)} subtitle="At retail" icon={<DollarSign className="h-4 w-4" />} />
-            <MetricsCard title="Low Stock Items" value={metrics?.lowStockProducts || 0} subtitle="Below threshold" icon={<AlertTriangle className="h-4 w-4" />} trend={metrics?.lowStockProducts ? { value: 12, direction: 'up' } : undefined} />
+            <MetricsCard
+              title="Order Now"
+              value={metrics?.orderNowCount || 0}
+              subtitle={`${metrics?.orderSoonCount || 0} order soon`}
+              icon={<ShoppingCart className="h-4 w-4" />}
+              className={
+                metrics?.orderNowCount && metrics.orderNowCount > 0
+                  ? "border-red-500 bg-red-50 dark:bg-red-950/20"
+                  : ""
+              }
+            />
+            <MetricsCard
+              title="Health Score"
+              value={`${metrics?.reorderHealthScore || 0}%`}
+              subtitle="products in healthy stock"
+              icon={<Activity className="h-4 w-4" />}
+              className={
+                metrics?.reorderHealthScore !== undefined
+                  ? metrics.reorderHealthScore >= 80
+                    ? "border-green-500 bg-green-50 dark:bg-green-950/20"
+                    : metrics.reorderHealthScore >= 50
+                      ? "border-yellow-500 bg-yellow-50 dark:bg-yellow-950/20"
+                      : "border-red-500 bg-red-50 dark:bg-red-950/20"
+                  : ""
+              }
+            />
+            <MetricsCard
+              title="Monthly Carrying Cost"
+              value={formatCurrency(metrics?.monthlyCarryingCost)}
+              subtitle={`${formatCurrency(metrics?.totalInventoryCostValue)} total value`}
+              icon={<DollarSign className="h-4 w-4" />}
+            />
+            <MetricsCard
+              title="Dead Stock Value"
+              value={formatCurrency(metrics?.deadStockValue)}
+              subtitle={
+                metrics?.totalInventoryCostValue && metrics.totalInventoryCostValue > 0
+                  ? `${Math.round(((metrics.deadStockValue || 0) / metrics.totalInventoryCostValue) * 100)}% of inventory`
+                  : "No movement in 90 days"
+              }
+              icon={<Archive className="h-4 w-4" />}
+              className={
+                metrics?.deadStockValue && metrics.deadStockValue > 0
+                  ? "border-orange-500 bg-orange-50 dark:bg-orange-950/20"
+                  : ""
+              }
+            />
+            <MetricsCard
+              title="Stockout Risk"
+              value={metrics?.stockoutRiskCount || 0}
+              subtitle={`Avg ${metrics?.daysOfSupplyAvg || 0} days supply`}
+              icon={<AlertTriangle className="h-4 w-4" />}
+              trend={metrics?.lowStockTrend}
+            />
           </div>
+          <CombinedMinimumsReport />
 
           <Tabs defaultValue="overview" className="space-y-4">
             <TabsList className="w-full overflow-x-auto whitespace-nowrap">
               <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="reorder">Reorder</TabsTrigger>
               <TabsTrigger value="products">Products</TabsTrigger>
               <TabsTrigger value="activity">Activity</TabsTrigger>
               <TabsTrigger value="users">Users</TabsTrigger>
@@ -299,7 +398,11 @@ export default function AdminReportsPage() {
 
             <TabsContent value="overview" className="space-y-6">
               <div className="grid gap-6 lg:grid-cols-2">
-                <div ref={(el) => { chartRefs.current["inventory-trend"] = el; }}>
+                <div
+                  ref={(el) => {
+                    chartRefs.current["inventory-trend"] = el;
+                  }}
+                >
                   <LineChartComponent
                     data={inventoryTrends}
                     title="Inventory Trend"
@@ -309,12 +412,20 @@ export default function AdminReportsPage() {
                       if (dateMatch && dateRange?.from) {
                         const targetDate = new Date(dateRange.from);
                         targetDate.setDate(parseInt(dateMatch[2]));
-                        handleDrillDown("date", targetDate.toISOString().split('T')[0], `Details for ${data.date}`);
+                        handleDrillDown(
+                          "date",
+                          targetDate.toISOString().split("T")[0],
+                          `Details for ${data.date}`
+                        );
                       }
                     }}
                   />
                 </div>
-                <div ref={(el) => { chartRefs.current["daily-activity"] = el; }}>
+                <div
+                  ref={(el) => {
+                    chartRefs.current["daily-activity"] = el;
+                  }}
+                >
                   <ActivityBarChart
                     data={dailyActivity}
                     title="Daily Activity"
@@ -324,7 +435,11 @@ export default function AdminReportsPage() {
                       if (dateMatch && dateRange?.from) {
                         const targetDate = new Date(dateRange.from);
                         targetDate.setDate(parseInt(dateMatch[2]));
-                        handleDrillDown("date", targetDate.toISOString().split('T')[0], `Activity on ${data.date}`);
+                        handleDrillDown(
+                          "date",
+                          targetDate.toISOString().split("T")[0],
+                          `Activity on ${data.date}`
+                        );
                       }
                     }}
                   />
@@ -335,6 +450,10 @@ export default function AdminReportsPage() {
                 <ActivityTimeline />
                 <LowStockAlert />
               </div>
+            </TabsContent>
+
+            <TabsContent value="reorder" className="space-y-6">
+              <ReorderRecommendations />
             </TabsContent>
 
             <TabsContent value="products" className="space-y-6">

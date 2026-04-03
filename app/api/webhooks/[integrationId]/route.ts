@@ -86,7 +86,7 @@ export async function POST(
         ?.toLowerCase()
         .startsWith("application/x-www-form-urlencoded")
     ) {
-      if (process.env.WEBHOOK_DEBUG_HEADERS === "1") {
+      if (process.env.WEBHOOK_DEBUG_HEADERS === "1" && process.env.NODE_ENV !== "production") {
         console.error(`Ignoring unsigned WooCommerce form-encoded request for ${integrationId}`);
       }
       return NextResponse.json({ success: true, ignored: true });
@@ -136,7 +136,7 @@ export async function POST(
         `Webhook verification failed for ${integrationId}:`,
         verification.error
       );
-      if (process.env.WEBHOOK_DEBUG_HEADERS === "1") {
+      if (process.env.WEBHOOK_DEBUG_HEADERS === "1" && process.env.NODE_ENV !== "production") {
         const headerNames = Array.from(request.headers.keys()).sort();
         const secretLen = webhookSecret.length;
         const debug: Record<string, unknown> = {
@@ -180,6 +180,7 @@ export async function POST(
       // Enable with WEBHOOK_DEBUG_BODY=1. This can include sensitive data; keep disabled in normal operation.
       if (
         process.env.WEBHOOK_DEBUG_BODY === "1" &&
+        process.env.NODE_ENV !== "production" &&
         platform === "SHOPIFY" &&
         request.headers.get("x-shopify-test") === "true"
       ) {

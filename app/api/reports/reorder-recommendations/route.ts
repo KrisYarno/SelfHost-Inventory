@@ -94,7 +94,7 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    const productMap = new Map<number, ProductRecord>(
+    const _productMap = new Map<number, ProductRecord>(
       products.map((p: ProductRecord) => [p.id, p])
     );
 

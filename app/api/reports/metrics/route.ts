@@ -8,7 +8,6 @@ import {
   getOrderStatus,
   calculateMonthlyCarryingCost,
   calculateReorderHealthScore,
-  calculateTrend,
   isDeadStock,
   isStockoutRisk,
   DEAD_STOCK_DAYS,

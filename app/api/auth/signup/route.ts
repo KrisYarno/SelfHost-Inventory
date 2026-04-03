@@ -48,9 +48,22 @@ export async function POST(request: NextRequest) {
     }
 
     // Validate password strength
-    if (password.length < 8) {
+    const passwordErrors: string[] = [];
+    if (password.length < 10) {
+      passwordErrors.push("at least 10 characters");
+    }
+    if (!/[a-z]/.test(password)) {
+      passwordErrors.push("at least one lowercase letter");
+    }
+    if (!/[A-Z]/.test(password)) {
+      passwordErrors.push("at least one uppercase letter");
+    }
+    if (!/[0-9]/.test(password)) {
+      passwordErrors.push("at least one digit");
+    }
+    if (passwordErrors.length > 0) {
       return NextResponse.json(
-        { error: "Password must be at least 8 characters long" },
+        { error: `Password must contain: ${passwordErrors.join(", ")}` },
         { status: 400 }
       );
     }

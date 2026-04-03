@@ -104,7 +104,6 @@ export async function POST() {
       String(conn.port || 3306),
       "-u",
       conn.user,
-      `-p${conn.password}`,
       "--single-transaction",
       "--quick",
       "--no-tablespaces",
@@ -114,7 +113,9 @@ export async function POST() {
 
     const runDump = (args: string[]) =>
       new Promise<{ code: number; out: Buffer; err: Buffer }>((resolve) => {
-        const ps = spawn("mysqldump", args);
+        const ps = spawn("mysqldump", args, {
+          env: { ...process.env, MYSQL_PWD: conn.password },
+        });
         const out: Buffer[] = [];
         const err: Buffer[] = [];
         ps.stdout.on("data", (chunk: Buffer) => out.push(chunk));
