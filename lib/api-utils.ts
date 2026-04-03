@@ -8,7 +8,7 @@ import { ZodError } from 'zod';
 type SessionUser = {
   id: number;
   email: string;
-  name: string;
+  name: string | null;
   isAdmin: boolean;
   isApproved: boolean;
   defaultLocationId: number | null;

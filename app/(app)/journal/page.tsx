@@ -58,7 +58,6 @@ export default function JournalPage() {
 
   const { data: products = [], isLoading, refetch: refetchProducts } = useInventoryProducts({
     locationId: selectedLocationId,
-    includeInactive: true,
   });
 
   // Redirect unauthenticated users

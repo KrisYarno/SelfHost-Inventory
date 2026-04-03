@@ -5,18 +5,17 @@ import type { ProductWithQuantity } from "@/types/product";
 
 interface UseInventoryProductsOptions {
   locationId: number | null;
-  includeInactive?: boolean;
   sortBy?: string;
   sortOrder?: "asc" | "desc";
 }
 
 export function useInventoryProducts(options: UseInventoryProductsOptions) {
-  const { locationId, includeInactive = false, sortBy = "name", sortOrder = "asc" } = options;
+  const { locationId, sortBy = "name", sortOrder = "asc" } = options;
 
   const queryClient = useQueryClient();
 
   const query = useQuery<ProductWithQuantity[]>({
-    queryKey: ["inventory-products", locationId, includeInactive, sortBy, sortOrder],
+    queryKey: ["inventory-products", locationId, sortBy, sortOrder],
     queryFn: async () => {
       if (!locationId) return [];
 
@@ -24,7 +23,6 @@ export function useInventoryProducts(options: UseInventoryProductsOptions) {
         pageSize: "500",
         sortBy,
         sortOrder,
-        ...(includeInactive && { includeInactive: "true" }),
       });
 
       const [productsRes, inventoryRes] = await Promise.all([
