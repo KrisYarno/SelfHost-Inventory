@@ -1,7 +1,8 @@
 "use client";
 
 import { ProductWithQuantity } from "@/types/product";
-import { Badge } from "@/components/ui/badge";
+import { ValueChip } from "@/components/ui/value-chip";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { cn } from "@/lib/utils";
 
 interface ProductTileProps {
@@ -19,49 +20,49 @@ export function ProductTile({ product, onClick, className }: ProductTileProps) {
       onClick={() => !isOutOfStock && onClick(product)}
       disabled={isOutOfStock}
       className={cn(
-        "group relative flex flex-col items-center p-4 rounded-lg border bg-card text-card-foreground transition-all",
-        "hover:shadow-md hover:border-primary/50",
-        "focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2",
+        "group relative flex flex-col items-center p-4 rounded-2xl border",
+        "shadow-md hover:shadow-lg",
+        "hover:-translate-y-0.5 transition-all duration-200",
+        "focus:outline-none focus:ring-2 focus:ring-primary/70 focus:ring-offset-2",
         "disabled:opacity-50 disabled:cursor-not-allowed",
-        "min-h-[120px]",
+        "min-h-[140px]",
+        // Urgency-based styling
+        isOutOfStock
+          ? "border-negative-border bg-negative-muted"
+          : isLowStock
+            ? "border-warning-border bg-warning-muted"
+            : "border-border/70 bg-surface",
         className
       )}
     >
-      {/* Stock badges */}
-      <div className="absolute top-2 right-2">
-        {isOutOfStock && (
-          <Badge
-            variant="destructive"
-            className="text-xs px-1.5 py-0.5"
-          >
-            Out
-          </Badge>
-        )}
-        {isLowStock && (
-          <Badge
-            variant="secondary"
-            className="text-xs px-1.5 py-0.5 bg-warning/20 text-warning-foreground"
-          >
-            Low
-          </Badge>
-        )}
-      </div>
-
       {/* Product Info */}
-      <div className="text-center space-y-1 flex-1 flex flex-col justify-center pt-4">
-        <h3 className="font-medium text-sm line-clamp-1">{product.baseName}</h3>
+      <div className="text-center space-y-1 flex-1 flex flex-col justify-center">
+        <h3 className="text-body-lg font-semibold line-clamp-1">{product.baseName}</h3>
         <p className="text-xs text-muted-foreground">{product.variant}</p>
-        <p className="text-xs font-medium">
-          Stock: <span className={cn(
-            isOutOfStock && "text-destructive",
-            isLowStock && "text-warning"
-          )}>{product.currentQuantity}</span>
-        </p>
+        <div className="flex items-center justify-center gap-1.5 flex-wrap">
+          <ValueChip
+            tone={
+              product.currentQuantity > 0
+                ? "positive"
+                : product.currentQuantity < 0
+                ? "negative"
+                : "neutral"
+            }
+          >
+            Stock: {product.currentQuantity}
+          </ValueChip>
+          {isOutOfStock && (
+            <StatusBadge tone="negative">Out</StatusBadge>
+          )}
+          {!isOutOfStock && isLowStock && (
+            <StatusBadge tone="warning">Low</StatusBadge>
+          )}
+        </div>
       </div>
 
       {/* Hover effect */}
       {!isOutOfStock && (
-        <div className="absolute inset-0 rounded-lg bg-primary/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+        <div className="absolute inset-0 rounded-2xl bg-primary/10 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
       )}
     </button>
   );

@@ -12,12 +12,15 @@ import {
   FileSpreadsheet,
   AlertCircle,
   MapPin,
+  TrendingUp,
+  TrendingDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { ValueChip } from "@/components/ui/value-chip";
 import { JournalProductRow } from "@/components/journal/journal-product-row";
 import { ReviewChangesDialog } from "@/components/journal/review-changes-dialog";
 import { JournalFilters } from "@/components/journal/journal-filters";
@@ -29,6 +32,7 @@ import { getUserFriendlyMessage, handleBatchOperationErrors } from "@/lib/error-
 import { useInventoryChangeAnnouncer } from "@/hooks/use-accessibility-announcer";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { ContextTag } from "@/components/ui/context-tag";
+import { PageHeader } from "@/components/layout/page-header";
 
 export default function JournalPage() {
   const { data: session, status } = useSession();
@@ -75,8 +79,6 @@ export default function JournalPage() {
   }, [searchTerm, products]);
 
   const handleQuantityChange = (productId: number, change: number) => {
-    console.log(`handleQuantityChange called: productId=${productId}, change=${change}`);
-
     const product = products.find((p) => p.id === productId);
     if (!product) return;
 
@@ -94,9 +96,6 @@ export default function JournalPage() {
       announceChange(product.name, change, newQuantity);
     }
 
-    // Log current state after change
-    console.log("Current adjustments:", adjustments);
-    console.log("Total changes:", getTotalChanges());
   };
 
   const handleSubmitAdjustments = async () => {
@@ -104,9 +103,6 @@ export default function JournalPage() {
       toast.error("No location selected");
       return;
     }
-
-    console.log("Starting submission with adjustments:", adjustments);
-    console.log("Total changes before submission:", getTotalChanges());
 
     setIsSubmitting(true);
 
@@ -122,8 +118,6 @@ export default function JournalPage() {
         delta: adjustment.quantityChange,
         expectedVersion: adjustment.version,
       }));
-
-      console.log("Batch adjustments to send:", batchAdjustments);
 
       // Check if we actually have adjustments to send
       if (batchAdjustments.length === 0) {
@@ -271,13 +265,6 @@ export default function JournalPage() {
   const selectedLocationName =
     locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Select a location";
 
-  // Debug: log the current state
-  useEffect(() => {
-    console.log("Journal page - adjustments updated:", adjustments);
-    console.log("Journal page - hasChanges:", hasChanges());
-    console.log("Journal page - totalChanges:", totalChanges);
-  }, [adjustments, hasChanges, totalChanges]);
-
   const hasAnyChanges = hasChanges();
 
   return (
@@ -285,21 +272,16 @@ export default function JournalPage() {
       <a href="#products-heading" className="skip-link">
         Skip to products list
       </a>
-      <div className="mb-4 sm:mb-6 sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 pb-3 pt-1">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-2xl sm:text-3xl font-bold" id="page-title">
-            Inventory Journal
-          </h1>
-          <p className="text-muted-foreground" id="page-description">
-            Make bulk inventory adjustments across multiple products
-          </p>
-        </div>
-        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-          <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
-            {selectedLocationName}
-          </ContextTag>
-        </div>
-      </div>
+      <PageHeader
+        title="Inventory Journal"
+        description="Make bulk inventory adjustments across multiple products"
+        sticky
+        className="mb-4 sm:mb-6 -mx-4 -mt-6 sm:-mx-4"
+      >
+        <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
+          {selectedLocationName}
+        </ContextTag>
+      </PageHeader>
 
       {/* Search and Filters */}
       <Card className="mb-6">
@@ -346,8 +328,7 @@ export default function JournalPage() {
             <div className="mt-4" id="journal-filters" role="region" aria-label="Product filters">
               <JournalFilters
                 onFilterChange={(filters) => {
-                  // Implement filter logic here
-                  console.log("Filters:", filters);
+                  // TODO: Implement filter logic here
                 }}
               />
             </div>
@@ -403,46 +384,50 @@ export default function JournalPage() {
       {/* Fixed Action Bar */}
       {hasAnyChanges && (
         <div
-          className="fixed left-0 right-0 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/70 border-t p-3 sm:p-4 shadow-card"
-          style={{
-            bottom: "calc(env(safe-area-inset-bottom, 0px) + 4.75rem)",
-          }} /* lift above mobile nav */
+          className="fixed left-0 right-0 bg-surface border-t-2 border-primary shadow-lg"
+          style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 4.75rem)" }}
           role="region"
-          aria-label="Action bar"
+          aria-label="Pending changes summary"
           aria-live="polite"
         >
-          <div className="container mx-auto max-w-7xl flex justify-between items-center">
-            <div className="flex items-center gap-4">
-              <Badge
-                variant={totalChanges.total > 0 ? "default" : "destructive"}
-                role="status"
-                aria-label={`Total change: ${totalChanges.total > 0 ? "+" : ""}${totalChanges.total} units`}
-              >
-                Total: {totalChanges.total > 0 ? "+" : ""}
-                {totalChanges.total}
-              </Badge>
-              <span className="text-sm text-muted-foreground" role="status">
-                {Object.keys(adjustments).length} products affected
-              </span>
-            </div>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                onClick={clearAllAdjustments}
-                className="gap-2"
-                aria-label="Reset all adjustments"
-              >
-                <RotateCcw className="h-4 w-4" aria-hidden="true" />
-                Reset
-              </Button>
-              <Button
-                onClick={() => setShowReviewDialog(true)}
-                className="gap-2"
-                aria-label={`Review ${Object.keys(adjustments).length} changes`}
-              >
-                <Save className="h-4 w-4" aria-hidden="true" />
-                Review Changes
-              </Button>
+          <div className="container mx-auto max-w-7xl px-4 py-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              {/* Summary chips */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <Badge variant="outline" className="font-mono tabular-nums">
+                  {Object.keys(adjustments).length} products
+                </Badge>
+                {totalChanges.additions > 0 && (
+                  <ValueChip tone="positive" className="gap-1">
+                    <TrendingUp className="h-3 w-3" />
+                    +{totalChanges.additions}
+                  </ValueChip>
+                )}
+                {totalChanges.removals > 0 && (
+                  <ValueChip tone="negative" className="gap-1">
+                    <TrendingDown className="h-3 w-3" />
+                    -{totalChanges.removals}
+                  </ValueChip>
+                )}
+                <ValueChip
+                  tone={totalChanges.total > 0 ? "positive" : totalChanges.total < 0 ? "negative" : "neutral"}
+                  className="font-semibold"
+                >
+                  Net: {totalChanges.total > 0 ? "+" : ""}{totalChanges.total}
+                </ValueChip>
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-2 flex-shrink-0">
+                <Button variant="ghost" size="sm" onClick={clearAllAdjustments}>
+                  <RotateCcw className="h-4 w-4 mr-1" />
+                  Reset
+                </Button>
+                <Button size="sm" onClick={() => setShowReviewDialog(true)}>
+                  <Save className="h-4 w-4 mr-1" />
+                  Review & Submit
+                </Button>
+              </div>
             </div>
           </div>
         </div>

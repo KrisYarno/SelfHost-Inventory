@@ -14,6 +14,8 @@ interface MetricsCardProps {
   };
   icon?: React.ReactNode;
   className?: string;
+  unconfigured?: boolean;
+  unconfiguredMessage?: string;
 }
 
 export function MetricsCard({
@@ -22,7 +24,9 @@ export function MetricsCard({
   subtitle,
   trend,
   icon,
-  className
+  className,
+  unconfigured,
+  unconfiguredMessage,
 }: MetricsCardProps) {
   return (
     <Card className={cn("", className)}>
@@ -35,30 +39,41 @@ export function MetricsCard({
         )}
       </CardHeader>
       <CardContent>
-        <div className="text-2xl font-bold">{value}</div>
-        {subtitle && (
-          <p className="text-xs text-muted-foreground">{subtitle}</p>
-        )}
-        {trend && (
-          <div className="flex items-center gap-1 mt-2">
-            {trend.direction === 'up' ? (
-              <ArrowUp className="h-3 w-3 text-green-600" />
-            ) : trend.direction === 'down' ? (
-              <ArrowDown className="h-3 w-3 text-red-600" />
-            ) : (
-              <Minus className="h-3 w-3 text-muted-foreground" />
+        {unconfigured ? (
+          <div>
+            <div className="text-body-lg text-muted-foreground italic">Not configured</div>
+            {unconfiguredMessage && (
+              <p className="text-xs text-muted-foreground mt-1">{unconfiguredMessage}</p>
             )}
-            <span
-              className={cn(
-                "text-xs font-medium",
-                trend.direction === 'up' && "text-green-600",
-                trend.direction === 'down' && "text-red-600",
-                trend.direction === 'stable' && "text-muted-foreground"
-              )}
-            >
-              {trend.value}%
-            </span>
           </div>
+        ) : (
+          <>
+            <div className="text-2xl font-bold">{value}</div>
+            {subtitle && (
+              <p className="text-xs text-muted-foreground">{subtitle}</p>
+            )}
+            {trend && (
+              <div className="flex items-center gap-1 mt-2">
+                {trend.direction === 'up' ? (
+                  <ArrowUp className="h-3 w-3 text-positive" />
+                ) : trend.direction === 'down' ? (
+                  <ArrowDown className="h-3 w-3 text-negative" />
+                ) : (
+                  <Minus className="h-3 w-3 text-muted-foreground" />
+                )}
+                <span
+                  className={cn(
+                    "text-xs font-medium",
+                    trend.direction === 'up' && "text-positive",
+                    trend.direction === 'down' && "text-negative",
+                    trend.direction === 'stable' && "text-muted-foreground"
+                  )}
+                >
+                  {trend.value}%
+                </span>
+              </div>
+            )}
+          </>
         )}
       </CardContent>
     </Card>

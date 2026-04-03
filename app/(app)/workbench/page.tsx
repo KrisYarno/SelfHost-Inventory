@@ -23,6 +23,7 @@ import { Package, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { useLocation } from "@/contexts/location-context";
 import { cn } from "@/lib/utils";
+import { PageHeader } from "@/components/layout/page-header";
 
 export default function WorkbenchPage() {
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
@@ -156,17 +157,7 @@ export default function WorkbenchPage() {
   return (
     <div className="flex flex-col h-full max-h-screen overflow-hidden">
       {/* Header */}
-      <header className="border-b border-border bg-background px-4 sm:px-6 py-3 sm:py-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl sm:text-2xl font-semibold tracking-tight flex items-center gap-2">
-              <Package className="h-5 w-5 sm:h-6 sm:w-6" />
-              Workbench
-            </h1>
-            <p className="text-xs sm:text-sm text-muted-foreground">Quick order processing</p>
-          </div>
-        </div>
-      </header>
+      <PageHeader title="Workbench" description="Quick order processing" />
 
       {/* Main Content - Two Column Layout */}
       <main className="flex-1 flex flex-col lg:flex-row overflow-hidden">
@@ -286,9 +277,15 @@ export default function WorkbenchPage() {
               <div className="space-y-6 pb-20 md:pb-0">
                 {groupedProducts.map((group) => (
                   <div key={group.label.toLowerCase()}>
-                    <h3 className="font-medium text-sm text-muted-foreground mb-3 sticky top-16 md:relative md:top-0 bg-background/95 backdrop-blur py-1 -mx-1 px-1">
-                      {group.label}
-                    </h3>
+                    <div className="flex items-center gap-3 mb-3 sticky top-16 md:relative md:top-0 bg-background/95 backdrop-blur py-2 -mx-1 px-1">
+                      <h3 className="text-label uppercase tracking-wider text-muted-foreground">
+                        {group.label}
+                      </h3>
+                      <div className="flex-1 h-px bg-border" />
+                      <span className="text-caption text-muted-foreground tabular-nums">
+                        {group.products.length}
+                      </span>
+                    </div>
                     <div
                       className={cn(
                         "grid gap-3 sm:gap-4",
@@ -360,7 +357,7 @@ export default function WorkbenchPage() {
                 <Button
                   onClick={handleCompleteOrder}
                   disabled={orderItems.length === 0 || !orderReference.trim()}
-                  className="flex-1"
+                  className="flex-1 disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100"
                 >
                   Complete & Deduct
                 </Button>

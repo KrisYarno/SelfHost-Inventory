@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, BookOpen, BarChart3 } from "lucide-react";
+import { Home, Package, Settings, Warehouse, BookOpen, ShoppingCart, Truck } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -31,21 +31,27 @@ const navigation = [
     icon: BookOpen,
     description: "Bulk inventory adjustments",
   },
+  {
+    name: "Stocker",
+    href: "/stocker",
+    icon: Truck,
+    description: "Refill tasks for on-site stockers",
+  },
   // Reports moved under Admin menu (see below)
 ];
 
 const adminNavigation = [
   {
+    name: "Orders",
+    href: "/orders",
+    icon: ShoppingCart,
+    description: "External orders from integrations",
+  },
+  {
     name: "Admin",
     href: "/admin",
     icon: Settings,
     description: "Administration panel",
-  },
-  {
-    name: "Reports",
-    href: "/admin/reports",
-    icon: BarChart3,
-    description: "Analytics and reports",
   },
 ];
 
@@ -66,7 +72,7 @@ export function SidebarNav() {
             key={item.name}
             href={item.href}
             className={cn(
-              "group flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+              "group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors min-h-[44px]",
               "hover:bg-surface-hover hover:text-foreground",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
               isActive

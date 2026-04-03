@@ -1,6 +1,7 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
+import { ValueChip } from "@/components/ui/value-chip";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { cn } from "@/lib/utils";
 import { AdjustmentInput } from "./adjustment-input";
 import { SwipeableAdjustment } from "./swipeable-adjustment";
@@ -11,21 +12,22 @@ interface JournalProductRowProps {
   product: ProductWithQuantity;
   adjustment?: JournalAdjustment;
   onQuantityChange: (change: number) => void;
-  index?: number;
 }
 
 export function JournalProductRow({
   product,
   adjustment,
   onQuantityChange,
-  index = 0,
 }: JournalProductRowProps) {
   const currentQuantity = product.currentQuantity || 0;
-  const adjustedQuantity = currentQuantity + (adjustment?.quantityChange || 0);
-  const hasChange = adjustment && adjustment.quantityChange !== 0;
+  const delta = adjustment?.quantityChange || 0;
+  const adjustedQuantity = currentQuantity + delta;
+  const hasChange = delta !== 0;
+
+  const isOutOfStock = currentQuantity === 0;
+  const isLowStock = currentQuantity > 0 && currentQuantity <= (product.lowStockThreshold || 10);
 
   const handleQuantityChange = (change: number) => {
-    console.log(`JournalProductRow: handleQuantityChange for product ${product.id} (${product.name}), new change: ${change}`);
     onQuantityChange(change);
   };
 
@@ -42,40 +44,45 @@ export function JournalProductRow({
       onSwipeRight={handleSwipeRight}
       onSwipeLeft={handleSwipeLeft}
       className={cn(
-        "rounded-lg border transition-colors overflow-visible",
-        hasChange && "border-primary/50 bg-primary/5"
+        "rounded-xl border transition-colors overflow-visible shadow-md",
+        hasChange
+          ? delta > 0
+            ? "border-positive-border bg-positive-muted"
+            : "border-negative-border bg-negative-muted"
+          : isOutOfStock
+            ? "border-negative-border/50 bg-negative-muted/30"
+            : isLowStock
+              ? "border-warning-border/50 bg-warning-muted/30"
+              : "border-border/70 bg-surface"
       )}
       role="article"
       aria-label={`Product ${product.name}, current quantity ${currentQuantity}`}
       tabIndex={0}
     >
-      <div className="p-4 pr-2">
-        <div className="flex items-center gap-3 sm:gap-4">
-        {/* Product Info */}
-        <div className="flex-1 min-w-0">
-          <h4 className="font-medium truncate" id={`product-name-${product.id}`}>{product.name}</h4>
-          <div className="flex items-center gap-2 mt-1">
-            <Badge variant="outline" className="text-xs" role="status" aria-label={`Current quantity: ${currentQuantity}`}>
-              Current: {currentQuantity}
-            </Badge>
-            {hasChange && (
-              <>
-                <span className="text-muted-foreground">→</span>
-                <Badge
-                  variant={adjustment.quantityChange > 0 ? "default" : "destructive"}
-                  className="text-xs"
-                  role="status"
-                  aria-label={`New quantity will be: ${adjustedQuantity}`}
-                >
-                  New: {adjustedQuantity}
-                </Badge>
-              </>
-            )}
+      <div className="p-3 sm:p-4">
+        <div className="flex items-center gap-3">
+          {/* Left: Product info */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <h4 className="text-h4 truncate" id={`product-name-${product.id}`}>{product.name}</h4>
+              {isOutOfStock && (
+                <StatusBadge tone="negative" className="flex-shrink-0">Out</StatusBadge>
+              )}
+              {isLowStock && (
+                <StatusBadge tone="warning" className="flex-shrink-0">Low</StatusBadge>
+              )}
+            </div>
           </div>
-        </div>
 
-        {/* Adjustment Controls */}
-        <div className="flex items-center gap-2 flex-shrink-0">
+          {/* Center: Current quantity -- prominent */}
+          <div className="text-right flex-shrink-0 mr-2">
+            <div className="text-metric font-mono tabular-nums" role="status" aria-label={`Current quantity: ${currentQuantity}`}>
+              {currentQuantity}
+            </div>
+            <div className="text-caption text-muted-foreground">current</div>
+          </div>
+
+          {/* Right: Adjustment controls */}
           <AdjustmentInput
             value={adjustment?.quantityChange || 0}
             onChange={handleQuantityChange}
@@ -83,23 +90,19 @@ export function JournalProductRow({
             productName={product.name}
           />
         </div>
-      </div>
 
-      {/* Change Indicator */}
-      {hasChange && (
-        <div className="mt-2 pl-[72px]" role="status" aria-live="polite">
-          <span
-            className={cn(
-              "text-sm font-medium",
-              adjustment.quantityChange > 0 ? "text-green-600" : "text-red-600"
-            )}
-            aria-label={`Change: ${adjustment.quantityChange > 0 ? "increase" : "decrease"} by ${Math.abs(adjustment.quantityChange)} units`}
-          >
-            {adjustment.quantityChange > 0 ? "+" : ""}
-            {adjustment.quantityChange} units
-          </span>
-        </div>
-      )}
+        {/* Change preview row */}
+        {hasChange && (
+          <div className="mt-2 flex items-center justify-end gap-2" role="status" aria-live="polite">
+            <span className="text-caption text-muted-foreground">New:</span>
+            <ValueChip tone={delta > 0 ? "positive" : "negative"} className="text-body-sm font-mono tabular-nums">
+              {adjustedQuantity}
+            </ValueChip>
+            <ValueChip tone={delta > 0 ? "positive" : "negative"} className="text-caption">
+              {delta > 0 ? "+" : ""}{delta}
+            </ValueChip>
+          </div>
+        )}
       </div>
     </SwipeableAdjustment>
   );

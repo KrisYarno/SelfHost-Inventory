@@ -75,14 +75,14 @@ export function ReviewChangesDialog({
             <span className="sr-only">{adjustmentList.length} products will be adjusted</span>
           </div>
           <div className="text-center">
-            <div className="text-2xl font-bold text-green-600" aria-hidden="true">
+            <div className="text-2xl font-bold text-positive" aria-hidden="true">
               +{totals.additions}
             </div>
             <div className="text-sm text-muted-foreground">Added</div>
             <span className="sr-only">{totals.additions} units will be added to inventory</span>
           </div>
           <div className="text-center">
-            <div className="text-2xl font-bold text-red-600" aria-hidden="true">
+            <div className="text-2xl font-bold text-negative" aria-hidden="true">
               -{totals.removals}
             </div>
             <div className="text-sm text-muted-foreground">Removed</div>
@@ -126,7 +126,7 @@ export function ReviewChangesDialog({
                   aria-label={`${product.name}: changing from ${product.currentQuantity || 0} to ${newQuantity}`}
                 >
                   <div className="flex-1">
-                    <h3 className="font-medium">{product.name}</h3>
+                    <h3 className="text-body-lg font-semibold">{product.name}</h3>
                     <div className="flex items-center gap-2 text-sm">
                       <span className="text-muted-foreground">
                         {product.currentQuantity || 0}
@@ -145,15 +145,15 @@ export function ReviewChangesDialog({
 
                   <div className="flex items-center gap-2" aria-hidden="true">
                     {adjustment.quantityChange > 0 ? (
-                      <TrendingUp className="h-4 w-4 text-green-600" aria-label="Increase" />
+                      <TrendingUp className="h-4 w-4 text-positive" aria-label="Increase" />
                     ) : (
-                      <TrendingDown className="h-4 w-4 text-red-600" aria-label="Decrease" />
+                      <TrendingDown className="h-4 w-4 text-negative" aria-label="Decrease" />
                     )}
                     <span
                       className={
                         adjustment.quantityChange > 0
-                          ? "text-green-600 font-medium"
-                          : "text-red-600 font-medium"
+                          ? "text-positive font-medium"
+                          : "text-negative font-medium"
                       }
                     >
                       {adjustment.quantityChange > 0 ? "+" : ""}

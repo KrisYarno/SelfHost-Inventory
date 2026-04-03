@@ -1,0 +1,301 @@
+"use client";
+
+import { useEffect, useMemo, useState, useCallback } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { useLocation } from "@/contexts/location-context";
+import { PageHeader } from "@/components/layout/page-header";
+import {
+  StockInTransferDialog,
+  type StockInProduct,
+} from "@/components/inventory/stock-in-transfer-dialog";
+
+interface StockerItem {
+  productId: number;
+  productName: string;
+  baseName?: string | null;
+  unit?: string | null;
+  numericValue?: number | null;
+  currentQuantity: number;
+  minQuantity: number;
+  shortage: number;
+}
+
+interface StockerLocation {
+  id: number;
+  name: string;
+}
+
+interface StockerResponse {
+  location: StockerLocation;
+  items: StockerItem[];
+}
+
+function parseProductName(name: string): { base: string; size: number | null } {
+  const trimmed = name.trim();
+  // Match patterns like "Tirz 5mg", "AOD (2mg)", "B-12 10 mL"
+  const match = trimmed.match(/^(.*?)(\d+(?:\.\d+)?)\s*(mg|ml|mL|mcg|g|units?)?\)?$/i);
+  if (!match) {
+    return { base: trimmed.toLowerCase(), size: null };
+  }
+  const base = match[1].trim().toLowerCase();
+  const size = Number.parseFloat(match[2]);
+  if (Number.isNaN(size)) {
+    return { base, size: null };
+  }
+  return { base, size };
+}
+
+function getSortFields(item: StockerItem): { base: string; size: number | null } {
+  const base =
+    (item.baseName && item.baseName.trim().toLowerCase()) || item.productName.trim().toLowerCase();
+
+  let size: number | null = null;
+  if (item.numericValue != null) {
+    const numeric = Number(item.numericValue);
+    if (!Number.isNaN(numeric)) {
+      size = numeric;
+    }
+  }
+
+  if (size === null) {
+    return parseProductName(item.productName);
+  }
+
+  return { base, size };
+}
+
+export default function StockerPage() {
+  const { selectedLocationId, selectedLocation } = useLocation?.() ?? {
+    selectedLocationId: undefined,
+    selectedLocation: null,
+  };
+  const [location, setLocation] = useState<StockerLocation | null>(null);
+  const [items, setItems] = useState<StockerItem[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Stock In dialog state
+  const [stockInDialogOpen, setStockInDialogOpen] = useState(false);
+  const [stockInProduct, setStockInProduct] = useState<StockInProduct | null>(null);
+
+  const loadData = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (selectedLocationId) {
+        params.set("locationId", String(selectedLocationId));
+      }
+      const query = params.toString();
+      const url = query ? `/api/stocker/minimums?${query}` : "/api/stocker/minimums";
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("Failed to load stocker data");
+      const data: StockerResponse = await res.json();
+      setLocation(data.location);
+      setItems(data.items ?? []);
+    } catch (err) {
+      console.error("Error loading stocker data", err);
+      setError("Unable to load refill list. Please try again.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [selectedLocationId]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleStockIn = (item: StockerItem) => {
+    setStockInProduct({
+      productId: item.productId,
+      productName: item.productName,
+      quantity: item.currentQuantity,
+      minQuantity: item.minQuantity,
+      shortage: item.shortage,
+    });
+    setStockInDialogOpen(true);
+  };
+
+  const handleStockInSuccess = () => {
+    loadData();
+  };
+
+  const sortedItems = useMemo(() => {
+    return items.slice().sort((a, b) => {
+      const aParsed = getSortFields(a);
+      const bParsed = getSortFields(b);
+
+      // First sort by base name alphabetically
+      if (aParsed.base !== bParsed.base) {
+        return aParsed.base.localeCompare(bParsed.base, undefined, {
+          sensitivity: "base",
+        });
+      }
+
+      // Within the same base name, sort by numeric size if available
+      if (aParsed.size !== null && bParsed.size !== null && aParsed.size !== bParsed.size) {
+        return aParsed.size - bParsed.size;
+      }
+
+      // Fallback to full product name for stability
+      return a.productName.localeCompare(b.productName, undefined, {
+        sensitivity: "base",
+      });
+    });
+  }, [items]);
+
+  const totalProducts = items.length;
+  const totalUnitsNeeded = items.reduce((sum, item) => sum + item.shortage, 0);
+
+  return (
+    <div className="space-y-4 px-4 pb-24 pt-4 sm:px-6">
+      <PageHeader
+        title={`Stocker${selectedLocation?.name ? ` \u2013 ${selectedLocation.name}` : location ? ` \u2013 ${location.name}` : ""}`}
+        description="Products that are at or below their location minimum. Use this list to pull stock from storage, prep labels, or move inventory between locations."
+        className="-mx-4 -mt-4 sm:-mx-6"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">
+            {totalProducts} product{totalProducts === 1 ? "" : "s"} need refill
+          </Badge>
+          <Badge variant="outline">
+            {totalUnitsNeeded} unit{totalUnitsNeeded === 1 ? "" : "s"} needed
+          </Badge>
+        </div>
+      </PageHeader>
+
+      {isLoading && (
+        <div className="space-y-2">
+          <div className="h-16 rounded-lg bg-muted" />
+          <div className="h-16 rounded-lg bg-muted" />
+          <div className="h-16 rounded-lg bg-muted" />
+        </div>
+      )}
+
+      {!isLoading && error && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      {!isLoading && !error && sortedItems.length === 0 && (
+        <Card className="border border-positive-border bg-positive-muted">
+          <CardHeader>
+            <CardTitle className="text-base">All set at this location</CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            No products are currently below their minimum at
+            {location ? ` ${location.name}` : " this location"}. Check back after stock movements or
+            minimum changes.
+          </CardContent>
+        </Card>
+      )}
+
+      {!isLoading && !error && sortedItems.length > 0 && (
+        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+          {sortedItems.map((item) => {
+            const shortage = item.shortage;
+            const stock =
+              item.currentQuantity != null
+                ? item.currentQuantity
+                : item.minQuantity != null && item.shortage != null
+                  ? Math.max(0, item.minQuantity - item.shortage)
+                  : 0;
+            const isOut = stock <= 0;
+            const fillPercent =
+              item.minQuantity > 0
+                ? Math.max(0, Math.min(100, (stock / item.minQuantity) * 100))
+                : 0;
+
+            let severityLabel = "Needs refill";
+            let severityClass =
+              "bg-warning-muted text-warning-foreground border border-warning-border";
+
+            if (isOut) {
+              severityLabel = "Out of stock";
+              severityClass =
+                "bg-negative-muted text-negative-foreground border border-negative-border";
+            } else if (fillPercent <= 25) {
+              severityLabel = "Critical";
+              severityClass =
+                "bg-negative-muted text-negative-foreground border border-negative-border";
+            } else if (fillPercent <= 50) {
+              severityLabel = "Low";
+              severityClass =
+                "bg-warning-muted text-warning-foreground border border-warning-border";
+            }
+
+            return (
+              <Card
+                key={item.productId}
+                className={cn(
+                  "flex flex-col border border-border/70 bg-gradient-to-br from-card to-muted/40",
+                  "shadow-sm hover:shadow-md",
+                  "transition-all duration-200 hover:-translate-y-[2px]",
+                  "rounded-xl"
+                )}
+              >
+                <CardHeader className="space-y-2 pb-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <CardTitle className="text-base font-semibold">{item.productName}</CardTitle>
+                    </div>
+                    <Badge className={cn("text-[11px] px-2 py-1", severityClass)}>
+                      {severityLabel}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>
+                      Stock: <span className="font-medium text-foreground">{stock}</span>
+                    </span>
+                    <span>
+                      Min: <span className="font-medium text-foreground">{item.minQuantity}</span>
+                    </span>
+                    <span>
+                      Need: <span className="font-medium text-foreground">{shortage}</span>
+                    </span>
+                  </div>
+                </CardHeader>
+                <CardContent className="space-y-3 pt-0">
+                  <div className="h-1.5 w-full rounded-full bg-muted">
+                    <div
+                      className={cn(
+                        "h-full rounded-full transition-all",
+                        isOut ? "bg-negative" : fillPercent <= 50 ? "bg-warning" : "bg-positive"
+                      )}
+                      style={{ width: `${fillPercent}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 text-xs"
+                      type="button"
+                      onClick={() => handleStockIn(item)}
+                    >
+                      Stock In
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Stock In Transfer Dialog */}
+      <StockInTransferDialog
+        open={stockInDialogOpen}
+        onOpenChange={setStockInDialogOpen}
+        product={stockInProduct}
+        destinationLocationId={selectedLocationId ?? location?.id ?? 0}
+        destinationLocationName={selectedLocation?.name ?? location?.name ?? "Unknown"}
+        onSuccess={handleStockInSuccess}
+      />
+    </div>
+  );
+}

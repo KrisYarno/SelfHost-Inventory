@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { Package, RefreshCw, Loader2 } from "lucide-react";
+import Link from "next/link";
+import { Package, RefreshCw, Loader2, Plug } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ExternalOrderCard } from "@/components/orders/external-order-card";
@@ -144,16 +145,29 @@ export default function OrdersPage() {
           </div>
         ) : orders.length === 0 ? (
           // Empty state
-          <div className="flex flex-col items-center justify-center py-12 text-center">
-            <Package className="h-12 w-12 text-muted-foreground/50 mb-4" />
-            <h3 className="text-lg font-semibold mb-2">No Orders Found</h3>
-            <p className="text-sm text-muted-foreground">
-              {searchQuery
-                ? "No orders match your search criteria"
-                : status !== "all"
-                ? `No ${status} orders found`
-                : "No orders available"}
-            </p>
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <div className="rounded-2xl bg-muted/50 p-6 mb-6">
+              <Package className="h-16 w-16 text-muted-foreground/40" />
+            </div>
+            <h3 className="text-h3 mb-2">No Orders Found</h3>
+            {searchQuery || status !== "all" ? (
+              <p className="text-body text-muted-foreground max-w-sm">
+                No orders match your current filters. Try adjusting your search or status filter.
+              </p>
+            ) : (
+              <>
+                <p className="text-body text-muted-foreground max-w-sm mb-6">
+                  Orders will appear here once you connect a Shopify or WooCommerce store.
+                  Set up an integration to start syncing orders automatically.
+                </p>
+                <Button asChild variant="outline">
+                  <Link href="/admin/integrations">
+                    <Plug className="h-4 w-4 mr-2" />
+                    Set Up Integration
+                  </Link>
+                </Button>
+              </>
+            )}
           </div>
         ) : (
           // Orders grid

@@ -11,6 +11,7 @@ import { QuickAdjustDialog } from "@/components/inventory/quick-adjust-dialog";
 import { StockInDialog } from "@/components/inventory/stock-in-dialog";
 import { ProductWithQuantity } from "@/types/product";
 import { Plus } from "lucide-react";
+import { PageHeader } from "@/components/layout/page-header";
 
 export default function ProductsPage() {
   const { data: session } = useSession();
@@ -20,7 +21,7 @@ export default function ProductsPage() {
   const [quickAdjustOpen, setQuickAdjustOpen] = useState(false);
   const [stockInOpen, setStockInOpen] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
-  
+
   const isAdmin = session?.user?.isAdmin;
 
   const handleEdit = (product: ProductWithQuantity) => {
@@ -50,27 +51,17 @@ export default function ProductsPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <header className="border-b border-border bg-background px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Products</h1>
-            <p className="text-sm text-muted-foreground">
-              Manage your product catalog
-            </p>
-          </div>
-          <div className="flex items-center gap-4">
-            {isAdmin && (
-              <Button onClick={() => setCreateDialogOpen(true)}>
-                <Plus className="mr-2 h-4 w-4" />
-                Add Product
-              </Button>
-            )}
-          </div>
-        </div>
-      </header>
+      <PageHeader title="Products">
+        {isAdmin && (
+          <Button onClick={() => setCreateDialogOpen(true)}>
+            <Plus className="mr-2 h-4 w-4" />
+            Add Product
+          </Button>
+        )}
+      </PageHeader>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-auto p-6">
+      <main className="flex-1 overflow-auto p-[var(--card-padding)]">
         <div className="mx-auto max-w-7xl">
           <ProductListOptimized
             onEdit={isAdmin ? handleEdit : undefined}
@@ -84,11 +75,8 @@ export default function ProductsPage() {
       </main>
 
       {/* Dialogs */}
-      <CreateProductDialog
-        open={createDialogOpen}
-        onOpenChange={setCreateDialogOpen}
-      />
-      
+      <CreateProductDialog open={createDialogOpen} onOpenChange={setCreateDialogOpen} />
+
       <EditProductDialog
         product={selectedProduct}
         open={editDialogOpen}
@@ -97,7 +85,7 @@ export default function ProductsPage() {
           if (!open) setSelectedProduct(null);
         }}
       />
-      
+
       <DeleteProductDialog
         product={selectedProduct}
         open={deleteDialogOpen}
@@ -106,7 +94,7 @@ export default function ProductsPage() {
           if (!open) setSelectedProduct(null);
         }}
       />
-      
+
       {selectedProduct && (
         <QuickAdjustDialog
           open={quickAdjustOpen}
@@ -118,7 +106,7 @@ export default function ProductsPage() {
           onSuccess={refreshProducts}
         />
       )}
-      
+
       {selectedProduct && (
         <StockInDialog
           open={stockInOpen}

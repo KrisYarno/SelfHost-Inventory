@@ -30,7 +30,7 @@ export function AppShell({ children }: AppShellProps) {
           <div className="flex h-full flex-col">
             {/* Logo/Brand Section */}
             <div className="flex h-16 items-center border-b border-border px-6">
-              <h1 className="text-xl font-semibold">Inventory</h1>
+              <div className="text-xl font-semibold">Inventory</div>
             </div>
             
             {/* Location Switcher */}
@@ -62,7 +62,7 @@ export function AppShell({ children }: AppShellProps) {
         {/* Mobile Header */}
         <header className="fixed top-0 z-40 w-full border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
           <div className="flex h-16 items-center justify-between px-4">
-            <h1 className="text-lg font-semibold">Inventory</h1>
+            <div className="text-lg font-semibold">Inventory</div>
             <div className="flex items-center gap-2">
               <LocationSwitcher />
               <UserMenu />
