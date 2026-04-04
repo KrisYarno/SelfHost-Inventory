@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -95,21 +95,23 @@ export function GlobalSearch() {
     staleTime: 30_000,
   });
 
-  // Build unified results list
-  const results: SearchResult[] = [];
-
-  if (productData?.products) {
-    for (const p of productData.products as ProductResult[]) {
-      results.push({
-        id: `product-${p.id}`,
-        label: p.name,
-        description: p.sku || undefined,
-        href: `/products`,
-        type: "product",
-        icon: Package,
-      });
+  // Build unified results list (memoized to stabilize dependency arrays)
+  const results = useMemo<SearchResult[]>(() => {
+    const items: SearchResult[] = [];
+    if (productData?.products) {
+      for (const p of productData.products as ProductResult[]) {
+        items.push({
+          id: `product-${p.id}`,
+          label: p.name,
+          description: p.sku || undefined,
+          href: `/products`,
+          type: "product",
+          icon: Package,
+        });
+      }
     }
-  }
+    return items;
+  }, [productData]);
 
   // Reset selected index when results change
   useEffect(() => {

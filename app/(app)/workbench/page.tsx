@@ -56,7 +56,6 @@ export default function WorkbenchPage() {
     clearOrder,
     getTotalItems,
     getTotalQuantity,
-    orderQueue,
     advanceQueue,
     getQueuePosition,
   } = useWorkbench();
