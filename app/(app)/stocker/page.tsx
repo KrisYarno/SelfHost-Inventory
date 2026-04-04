@@ -329,7 +329,9 @@ export default function StockerPage() {
   }, [sortedItems, selectedLocation?.name, location?.name]);
 
   const handlePrintPickList = useCallback(() => {
-    const locationName = selectedLocation?.name ?? location?.name ?? "Unknown";
+    const escapeHTML = (str: string) =>
+      str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const locationName = escapeHTML(selectedLocation?.name ?? location?.name ?? "Unknown");
     const dateStr = new Date().toLocaleDateString(undefined, {
       weekday: "short",
       year: "numeric",
@@ -341,7 +343,7 @@ export default function StockerPage() {
       .map(
         (item) =>
           `<tr>
-            <td style="padding:6px 12px;border-bottom:1px solid #ddd;text-align:left">${item.productName}</td>
+            <td style="padding:6px 12px;border-bottom:1px solid #ddd;text-align:left">${escapeHTML(item.productName)}</td>
             <td style="padding:6px 12px;border-bottom:1px solid #ddd;text-align:center">${item.currentQuantity}</td>
             <td style="padding:6px 12px;border-bottom:1px solid #ddd;text-align:center">${item.minQuantity}</td>
             <td style="padding:6px 12px;border-bottom:1px solid #ddd;text-align:center;font-weight:600">${item.shortage}</td>

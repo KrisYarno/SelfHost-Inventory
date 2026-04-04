@@ -123,8 +123,8 @@ export async function GET(request: NextRequest) {
       if (quantity > 0 && quantity < threshold) {
         lowStockProducts++;
       }
-      // Health score: product is healthy if stock is above its threshold
-      if (quantity > threshold) {
+      // Health score: product is healthy if stock is at or above its threshold
+      if (quantity >= threshold) {
         healthyProducts++;
       }
       totalInventoryCostValue += productCostValue;
@@ -177,9 +177,11 @@ export async function GET(request: NextRequest) {
     // Calculate derived metrics
     const totalInventoryValue = totalInventoryRetailValue;
     const monthlyCarryingCost = calculateMonthlyCarryingCost(totalInventoryCostValue);
+    // Use products at the selected location as denominator (not total products globally)
+    const productsAtLocation = locationId ? productStockMap.size : totalProducts;
     const reorderHealthScore =
-      totalProducts > 0
-        ? Math.round((healthyProducts / totalProducts) * 100)
+      productsAtLocation > 0
+        ? Math.round((healthyProducts / productsAtLocation) * 100)
         : 100;
     const daysOfSupplyAvg =
       productsWithMovement > 0 ? Math.round(daysOfSupplySum / productsWithMovement) : 0;

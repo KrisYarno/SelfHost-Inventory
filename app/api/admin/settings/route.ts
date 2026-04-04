@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { validateCSRFToken } from "@/lib/csrf";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +40,11 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     await requireAdmin();
+
+    const isValidCSRF = await validateCSRFToken(request);
+    if (!isValidCSRF) {
+      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
+    }
 
     const body = await request.json();
     const { weeklyReportsEnabled } = body;
