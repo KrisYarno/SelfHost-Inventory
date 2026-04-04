@@ -7,7 +7,6 @@ import {
   calculateDaysOfSupply,
   getOrderStatus,
   calculateMonthlyCarryingCost,
-  calculateReorderHealthScore,
   isDeadStock,
   isStockoutRisk,
   DEAD_STOCK_DAYS,
@@ -101,6 +100,7 @@ export async function GET(request: NextRequest) {
 
     // Initialize counters for new metrics
     let lowStockProducts = 0;
+    let healthyProducts = 0;
     let totalInventoryCostValue = 0;
     let totalInventoryRetailValue = 0;
     let orderNowCount = 0;
@@ -122,6 +122,10 @@ export async function GET(request: NextRequest) {
       // Legacy metrics
       if (quantity > 0 && quantity < threshold) {
         lowStockProducts++;
+      }
+      // Health score: product is healthy if stock is above its threshold
+      if (quantity > threshold) {
+        healthyProducts++;
       }
       totalInventoryCostValue += productCostValue;
       totalInventoryRetailValue += quantity * retail;
@@ -173,12 +177,10 @@ export async function GET(request: NextRequest) {
     // Calculate derived metrics
     const totalInventoryValue = totalInventoryRetailValue;
     const monthlyCarryingCost = calculateMonthlyCarryingCost(totalInventoryCostValue);
-    const reorderHealthScore = calculateReorderHealthScore({
-      orderNow: orderNowCount,
-      orderSoon: orderSoonCount,
-      watch: watchCount,
-      ok: okCount,
-    });
+    const reorderHealthScore =
+      totalProducts > 0
+        ? Math.round((healthyProducts / totalProducts) * 100)
+        : 100;
     const daysOfSupplyAvg =
       productsWithMovement > 0 ? Math.round(daysOfSupplySum / productsWithMovement) : 0;
 

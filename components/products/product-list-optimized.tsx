@@ -8,8 +8,9 @@ import { MobileFilterSheet, StockFilter } from "./mobile-filter-sheet";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, X } from "lucide-react";
+import { Search, X, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { exportToCSV } from "@/lib/export-utils";
 import { useProducts } from "@/hooks/use-products";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 
@@ -104,6 +105,23 @@ export function ProductListOptimized({
       .map(([, value]) => [value.label, value.count] as [string, number]);
   }, [filteredProducts]);
 
+  const handleExportCSV = () => {
+    if (filteredProducts.length === 0) return;
+    exportToCSV(
+      filteredProducts,
+      [
+        { key: "name", label: "Product Name" },
+        { key: "baseName", label: "Category" },
+        { key: "variant", label: "Variant" },
+        { key: "currentQuantity", label: "Quantity" },
+        { key: "lowStockThreshold", label: "Low Stock Threshold" },
+        { key: "costPrice", label: "Cost Price" },
+        { key: "retailPrice", label: "Retail Price" },
+      ],
+      `products-${new Date().toISOString().split("T")[0]}.csv`
+    );
+  };
+
   const activeFilterCount = stockFilter !== "all" ? 1 : 0;
 
   if (error) {
@@ -158,6 +176,12 @@ export function ProductListOptimized({
               onClearFilters={clearFilters}
               activeFilterCount={activeFilterCount}
             />
+          )}
+          {filteredProducts.length > 0 && (
+            <Button variant="outline" size="sm" onClick={handleExportCSV} className="shrink-0">
+              <Download className="h-4 w-4" />
+              <span className="hidden sm:inline ml-1">Export CSV</span>
+            </Button>
           )}
         </div>
       </div>

@@ -4,14 +4,17 @@ import { useState } from "react";
 import { useSession } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import { ProductListOptimized } from "@/components/products/product-list-optimized";
+import { DeletedProductsList } from "@/components/products/deleted-products-list";
 import { CreateProductDialog } from "@/components/products/create-product-dialog";
 import { EditProductDialog } from "@/components/products/edit-product-dialog";
 import { DeleteProductDialog } from "@/components/products/delete-product-dialog";
 import { QuickAdjustDialog } from "@/components/inventory/quick-adjust-dialog";
 import { StockInDialog } from "@/components/inventory/stock-in-dialog";
 import { ProductWithQuantity } from "@/types/product";
-import { Plus } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 
 export default function ProductsPage() {
   const { data: session } = useSession();
@@ -21,6 +24,7 @@ export default function ProductsPage() {
   const [quickAdjustOpen, setQuickAdjustOpen] = useState(false);
   const [stockInOpen, setStockInOpen] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
+  const [showDeleted, setShowDeleted] = useState(false);
 
   const isAdmin = session?.user?.isAdmin;
 
@@ -53,24 +57,41 @@ export default function ProductsPage() {
       {/* Header */}
       <PageHeader title="Products">
         {isAdmin && (
-          <Button onClick={() => setCreateDialogOpen(true)}>
-            <Plus className="mr-2 h-4 w-4" />
-            Add Product
-          </Button>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Switch
+                id="show-deleted"
+                checked={showDeleted}
+                onCheckedChange={setShowDeleted}
+              />
+              <Label htmlFor="show-deleted" className="text-sm cursor-pointer flex items-center gap-1.5">
+                <Trash2 className="h-3.5 w-3.5" />
+                Deleted
+              </Label>
+            </div>
+            <Button onClick={() => setCreateDialogOpen(true)}>
+              <Plus className="mr-2 h-4 w-4" />
+              Add Product
+            </Button>
+          </div>
         )}
       </PageHeader>
 
       {/* Main Content */}
       <main className="flex-1 overflow-auto p-[var(--card-padding)]">
         <div className="mx-auto max-w-7xl">
-          <ProductListOptimized
-            onEdit={isAdmin ? handleEdit : undefined}
-            onDelete={isAdmin ? handleDelete : undefined}
-            onQuickAdjust={handleQuickAdjust}
-            onStockIn={handleStockIn}
-            isAdmin={isAdmin}
-            showInventoryActions={true}
-          />
+          {showDeleted && isAdmin ? (
+            <DeletedProductsList />
+          ) : (
+            <ProductListOptimized
+              onEdit={isAdmin ? handleEdit : undefined}
+              onDelete={isAdmin ? handleDelete : undefined}
+              onQuickAdjust={handleQuickAdjust}
+              onStockIn={handleStockIn}
+              isAdmin={isAdmin}
+              showInventoryActions={true}
+            />
+          )}
         </div>
       </main>
 

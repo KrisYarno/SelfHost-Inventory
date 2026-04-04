@@ -1,5 +1,7 @@
 import prisma from '@/lib/prisma';
 import { emailService, LowStockItem } from '@/lib/email';
+import { smsService } from '@/lib/sms';
+import type { CombinedMinBreach, LocationMinBreach } from '@/types/inventory';
 
 export interface LowStockProduct {
   id: number;
@@ -62,6 +64,101 @@ export class StockChecker {
     });
 
     return lowStockProducts;
+  }
+
+  /**
+   * Compute per-location and combined minimum breaches
+   */
+  async checkMinimums(): Promise<{
+    locationBreaches: LocationMinBreach[];
+    combinedBreaches: CombinedMinBreach[];
+  }> {
+    const products = await prisma.product.findMany({
+      where: { deletedAt: null },
+      include: {
+        product_locations: {
+          include: { locations: true },
+        },
+      },
+    });
+
+    const locationBreaches: LocationMinBreach[] = [];
+    const combinedBreaches: CombinedMinBreach[] = [];
+
+    for (const product of products) {
+      let totalQuantity = 0;
+
+      for (const locationRow of product.product_locations) {
+        totalQuantity += locationRow.quantity;
+        const min = locationRow.minQuantity ?? 0;
+        if (min > 0 && locationRow.quantity < min) {
+          locationBreaches.push({
+            productId: product.id,
+            productName: product.name,
+            locationId: locationRow.locationId,
+            locationName: locationRow.locations.name,
+            currentQuantity: locationRow.quantity,
+            minQuantity: min,
+          });
+        }
+      }
+
+      const combinedMin = product.lowStockThreshold ?? 0;
+      if (combinedMin > 0 && totalQuantity < combinedMin) {
+        const daysUntilEmpty = await this.calculateDaysUntilEmpty(
+          product.id,
+          totalQuantity
+        );
+        combinedBreaches.push({
+          productId: product.id,
+          productName: product.name,
+          totalQuantity,
+          combinedMinimum: combinedMin,
+          daysUntilEmpty,
+        });
+      }
+    }
+
+    return { locationBreaches, combinedBreaches };
+  }
+
+  /**
+   * Check per-location minimum breaches for a single location.
+   * Returns items sorted by shortage (largest first).
+   */
+  async checkLocationMinimums(locationId: number): Promise<{
+    items: Array<{
+      productId: number;
+      productName: string;
+      locationId: number;
+      locationName: string;
+      currentQuantity: number;
+      minQuantity: number;
+      shortage: number;
+    }>;
+  }> {
+    const rows = await prisma.product_locations.findMany({
+      where: { locationId },
+      include: {
+        products: { select: { id: true, name: true } },
+        locations: { select: { name: true } },
+      },
+    });
+
+    const items = rows
+      .filter((row) => (row.minQuantity ?? 0) > 0 && row.quantity < row.minQuantity!)
+      .map((row) => ({
+        productId: row.productId,
+        productName: row.products.name,
+        locationId: row.locationId,
+        locationName: row.locations.name,
+        currentQuantity: row.quantity,
+        minQuantity: row.minQuantity ?? 0,
+        shortage: Math.max((row.minQuantity ?? 0) - row.quantity, 0),
+      }))
+      .sort((a, b) => b.shortage - a.shortage);
+
+    return { items };
   }
 
   /**
@@ -178,6 +275,130 @@ export class StockChecker {
   }
 
   /**
+   * Send notifications for minimum breaches via email/SMS
+   */
+  async sendMinimumNotifications(
+    locationBreaches: LocationMinBreach[],
+    combinedBreaches: CombinedMinBreach[]
+  ): Promise<void> {
+    if (!locationBreaches.length && !combinedBreaches.length) {
+      return;
+    }
+
+    const users = await prisma.user.findMany({
+      where: {
+        isApproved: true,
+        OR: [
+          { minLocationEmailAlerts: true },
+          { minLocationSmsAlerts: true },
+          { minCombinedEmailAlerts: true },
+          { minCombinedSmsAlerts: true },
+          { emailAlerts: true },
+        ],
+      },
+    });
+
+    if (!users.length) return;
+
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    for (const user of users) {
+      const locationItems = locationBreaches.filter(
+        (breach) =>
+          user.defaultLocationId &&
+          breach.locationId === user.defaultLocationId
+      );
+      const combinedItems = combinedBreaches;
+
+      const recent = await prisma.notificationHistory.findMany({
+        where: {
+          userId: user.id,
+          sentAt: { gte: yesterday },
+          notificationType: {
+            in: ["LOW_STOCK_LOCATION", "LOW_STOCK_COMBINED"],
+          },
+        },
+      });
+
+      const seenLoc = new Set(
+        recent
+          .filter((n) => n.notificationType === "LOW_STOCK_LOCATION")
+          .map((n) => `${n.productId}:${n.locationId ?? "none"}`)
+      );
+      const seenCombined = new Set(
+        recent
+          .filter((n) => n.notificationType === "LOW_STOCK_COMBINED")
+          .map((n) => `${n.productId}`)
+      );
+
+      const locToNotify = locationItems.filter(
+        (item) =>
+          !seenLoc.has(`${item.productId}:${item.locationId}`)
+      );
+      const combinedToNotify = combinedItems.filter(
+        (item) => !seenCombined.has(`${item.productId}`)
+      );
+
+      if (!locToNotify.length && !combinedToNotify.length) {
+        continue;
+      }
+
+      // Email notifications
+      if (
+        (user.minLocationEmailAlerts && locToNotify.length > 0) ||
+        (user.minCombinedEmailAlerts && combinedToNotify.length > 0) ||
+        (user.emailAlerts && combinedToNotify.length > 0)
+      ) {
+        await emailService.sendMinimumsDigest(user.email, {
+          recipientName: user.username,
+          locationItems: user.minLocationEmailAlerts
+            ? locToNotify
+            : [],
+          combinedItems:
+            user.minCombinedEmailAlerts || user.emailAlerts
+              ? combinedToNotify
+              : [],
+        });
+      }
+
+      // SMS notifications
+      if (
+        user.phoneNumber &&
+        user.smsVerified &&
+        ((user.minLocationSmsAlerts && locToNotify.length > 0) ||
+          (user.minCombinedSmsAlerts && combinedToNotify.length > 0))
+      ) {
+        await smsService.sendMinimumsSummary(user.phoneNumber, {
+          locationItems: user.minLocationSmsAlerts
+            ? locToNotify
+            : [],
+          combinedItems: user.minCombinedSmsAlerts
+            ? combinedToNotify
+            : [],
+        });
+      }
+
+      await prisma.notificationHistory.createMany({
+        data: [
+          ...locToNotify.map((item) => ({
+            userId: user.id,
+            productId: item.productId,
+            locationId: item.locationId,
+            notificationType: "LOW_STOCK_LOCATION",
+          })),
+          ...combinedToNotify.map((item) => ({
+            userId: user.id,
+            productId: item.productId,
+            locationId: null,
+            notificationType: "LOW_STOCK_COMBINED",
+          })),
+        ],
+      });
+    }
+  }
+
+  /**
    * Run the complete stock check and notification process
    */
   async runDailyCheck(): Promise<{
@@ -196,6 +417,25 @@ export class StockChecker {
     return {
       lowStockCount: lowStockProducts.length,
       notificationsSent: lowStockProducts.length, // This could be more accurate
+    };
+  }
+
+  /**
+   * Run combined + location minimum checks and notify
+   */
+  async runMinimumsCheck(): Promise<{
+    locationBreaches: number;
+    combinedBreaches: number;
+  }> {
+    const { locationBreaches, combinedBreaches } =
+      await this.checkMinimums();
+    await this.sendMinimumNotifications(
+      locationBreaches,
+      combinedBreaches
+    );
+    return {
+      locationBreaches: locationBreaches.length,
+      combinedBreaches: combinedBreaches.length,
     };
   }
 }

@@ -1,22 +1,27 @@
-'use client';
+"use client";
 
-import { useState, useEffect, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
-import { UserApprovalCard } from '@/components/admin/user-approval-card';
-import { UserTable } from '@/components/admin/user-table';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { toast } from 'sonner';
-import { CheckCircle2, XCircle } from 'lucide-react';
-import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
+import { useState, useEffect, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import { UserApprovalCard } from "@/components/admin/user-approval-card";
+import { UserTable, User } from "@/components/admin/user-table";
+import { EditUserDialog } from "@/components/admin/edit-user-dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { toast } from "sonner";
+import { CheckCircle2, XCircle, Trash2, Download } from "lucide-react";
+import { exportToCSV } from "@/lib/export-utils";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
-interface User {
+interface Location {
   id: number;
-  email: string;
-  username: string;
-  isAdmin: boolean;
-  isApproved: boolean;
+  name: string;
+}
+
+interface Company {
+  id: string;
+  name: string;
+  slug: string;
 }
 
 interface UsersResponse {
@@ -35,161 +40,188 @@ export default function AdminUsersPage() {
   const [pendingUsers, setPendingUsers] = useState<User[]>([]);
   const [allUsers, setAllUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<'all' | 'approved' | 'pending'>('all');
-  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState<"all" | "approved" | "pending">("all");
+  const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [selectedUsers, setSelectedUsers] = useState<Set<number>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
 
+  // Edit dialog state
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [locations, setLocations] = useState<Location[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
+
   const fetchUsers = useCallback(async () => {
     try {
       setLoading(true);
-      
+
       // Fetch pending users for the approval cards
-      const pendingResponse = await fetch('/api/admin/users?filter=pending&limit=100');
+      const pendingResponse = await fetch("/api/admin/users?filter=pending&limit=100");
       if (!pendingResponse.ok) {
         if (pendingResponse.status === 401) {
-          router.push('/auth/signin');
+          router.push("/auth/signin");
           return;
         }
-        throw new Error('Failed to fetch pending users');
+        throw new Error("Failed to fetch pending users");
       }
       const pendingData: UsersResponse = await pendingResponse.json();
       setPendingUsers(pendingData.users);
 
-      // Fetch filtered users for the table
+      // Fetch filtered users for the table (with details for edit dialog)
       const params = new URLSearchParams({
         filter,
         page: page.toString(),
-        limit: '10',
+        limit: "10",
+        include: "details",
       });
-      if (search) params.append('search', search);
-      
+      if (search) params.append("search", search);
+
       const allResponse = await fetch(`/api/admin/users?${params}`);
       if (!allResponse.ok) {
-        throw new Error('Failed to fetch users');
+        throw new Error("Failed to fetch users");
       }
       const allData: UsersResponse = await allResponse.json();
       setAllUsers(allData.users);
       setTotalPages(allData.pagination.totalPages);
     } catch (error) {
-      console.error('Error fetching users:', error);
+      console.error("Error fetching users:", error);
     } finally {
       setLoading(false);
     }
   }, [filter, search, page, router]);
 
+  // Fetch locations and companies for the edit dialog
+  const fetchLocationsAndCompanies = useCallback(async () => {
+    try {
+      const [locResponse, compResponse] = await Promise.all([
+        fetch("/api/locations"),
+        fetch("/api/admin/companies"),
+      ]);
+
+      if (locResponse.ok) {
+        const locData = await locResponse.json();
+        setLocations(locData.locations || locData || []);
+      }
+
+      if (compResponse.ok) {
+        const compData = await compResponse.json();
+        setCompanies(compData.companies || compData || []);
+      }
+    } catch (error) {
+      console.error("Error fetching locations/companies:", error);
+    }
+  }, []);
+
   useEffect(() => {
     fetchUsers();
   }, [fetchUsers]);
 
+  useEffect(() => {
+    fetchLocationsAndCompanies();
+  }, [fetchLocationsAndCompanies]);
+
+  const handleEdit = (user: User) => {
+    setEditingUser(user);
+    setEditDialogOpen(true);
+  };
+
+  const handleEditSuccess = () => {
+    fetchUsers();
+  };
+
   const handleApprove = async (userId: number) => {
     try {
       const response = await fetch(`/api/admin/users/${userId}/approve`, {
-        method: 'POST',
+        method: "POST",
         headers: withCSRFHeaders({}, csrfToken),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to approve user');
+        throw new Error("Failed to approve user");
       }
 
       // Refresh the user lists
       await fetchUsers();
-      toast.success('User approved successfully');
+      toast.success("User approved successfully");
     } catch (error) {
-      console.error('Error approving user:', error);
-      toast.error('Failed to approve user');
+      console.error("Error approving user:", error);
+      toast.error("Failed to approve user");
     }
   };
 
   const handleReject = async (userId: number, reason?: string) => {
     try {
       const response = await fetch(`/api/admin/users/${userId}/reject`, {
-        method: 'DELETE',
-        headers: withCSRFHeaders({
-          'Content-Type': 'application/json',
-        }, csrfToken),
+        method: "DELETE",
+        headers: withCSRFHeaders(
+          {
+            "Content-Type": "application/json",
+          },
+          csrfToken
+        ),
         body: JSON.stringify({ reason }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to reject user');
+        throw new Error("Failed to reject user");
       }
 
       // Refresh the user lists
       await fetchUsers();
-      toast.success('User rejected successfully');
+      toast.success("User rejected successfully");
     } catch (error) {
-      console.error('Error rejecting user:', error);
-      toast.error('Failed to reject user');
+      console.error("Error rejecting user:", error);
+      toast.error("Failed to reject user");
     }
   };
 
   const handleDelete = async (userId: number) => {
-    if (!confirm('Are you sure you want to delete this user? This action cannot be undone.')) {
+    if (!confirm("Are you sure you want to delete this user? This action cannot be undone.")) {
       return;
     }
 
     try {
       const response = await fetch(`/api/admin/users/${userId}`, {
-        method: 'DELETE',
+        method: "DELETE",
         headers: withCSRFHeaders({}, csrfToken),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to delete user');
+        throw new Error("Failed to delete user");
       }
 
-      toast.success('User deleted successfully');
+      toast.success("User deleted successfully");
       await fetchUsers();
     } catch (error) {
-      console.error('Error deleting user:', error);
-      toast.error('Failed to delete user');
+      console.error("Error deleting user:", error);
+      toast.error("Failed to delete user");
     }
   };
 
-  const handleToggleAdmin = async (userId: number, currentIsAdmin: boolean) => {
-    try {
-      const response = await fetch(`/api/admin/users/${userId}/toggle-admin`, {
-        method: 'POST',
-        headers: withCSRFHeaders({
-          'Content-Type': 'application/json',
-        }, csrfToken),
-        body: JSON.stringify({ isAdmin: !currentIsAdmin }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to update user role');
-      }
-
-      toast.success(`User role updated to ${!currentIsAdmin ? 'Admin' : 'User'}`);
-      await fetchUsers();
-    } catch (error) {
-      console.error('Error updating user role:', error);
-      toast.error('Failed to update user role');
-    }
-  };
 
   const handleBulkApprove = async () => {
     if (selectedUsers.size === 0) {
-      toast.error('No users selected');
+      toast.error("No users selected");
       return;
     }
 
     setBulkLoading(true);
     try {
-      const response = await fetch('/api/admin/users/bulk-approve', {
-        method: 'POST',
-        headers: withCSRFHeaders({
-          'Content-Type': 'application/json',
-        }, csrfToken),
+      const response = await fetch("/api/admin/users/bulk-approve", {
+        method: "POST",
+        headers: withCSRFHeaders(
+          {
+            "Content-Type": "application/json",
+          },
+          csrfToken
+        ),
         body: JSON.stringify({ userIds: Array.from(selectedUsers) }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to approve users');
+        throw new Error("Failed to approve users");
       }
 
       const result = await response.json();
@@ -197,8 +229,8 @@ export default function AdminUsersPage() {
       setSelectedUsers(new Set());
       await fetchUsers();
     } catch (error) {
-      console.error('Error bulk approving users:', error);
-      toast.error('Failed to approve users');
+      console.error("Error bulk approving users:", error);
+      toast.error("Failed to approve users");
     } finally {
       setBulkLoading(false);
     }
@@ -206,7 +238,7 @@ export default function AdminUsersPage() {
 
   const handleBulkReject = async () => {
     if (selectedUsers.size === 0) {
-      toast.error('No users selected');
+      toast.error("No users selected");
       return;
     }
 
@@ -216,16 +248,19 @@ export default function AdminUsersPage() {
 
     setBulkLoading(true);
     try {
-      const response = await fetch('/api/admin/users/bulk-reject', {
-        method: 'POST',
-        headers: withCSRFHeaders({
-          'Content-Type': 'application/json',
-        }, csrfToken),
+      const response = await fetch("/api/admin/users/bulk-reject", {
+        method: "POST",
+        headers: withCSRFHeaders(
+          {
+            "Content-Type": "application/json",
+          },
+          csrfToken
+        ),
         body: JSON.stringify({ userIds: Array.from(selectedUsers) }),
       });
 
       if (!response.ok) {
-        throw new Error('Failed to reject users');
+        throw new Error("Failed to reject users");
       }
 
       const result = await response.json();
@@ -233,11 +268,64 @@ export default function AdminUsersPage() {
       setSelectedUsers(new Set());
       await fetchUsers();
     } catch (error) {
-      console.error('Error bulk rejecting users:', error);
-      toast.error('Failed to reject users');
+      console.error("Error bulk rejecting users:", error);
+      toast.error("Failed to reject users");
     } finally {
       setBulkLoading(false);
     }
+  };
+
+  const handleBulkDelete = async () => {
+    if (selectedUsers.size === 0) {
+      toast.error("No users selected");
+      return;
+    }
+
+    if (!confirm(`Are you sure you want to delete ${selectedUsers.size} users? This action cannot be undone.`)) {
+      return;
+    }
+
+    setBulkLoading(true);
+    try {
+      const response = await fetch("/api/admin/users/bulk-delete", {
+        method: "POST",
+        headers: withCSRFHeaders(
+          {
+            "Content-Type": "application/json",
+          },
+          csrfToken
+        ),
+        body: JSON.stringify({ userIds: Array.from(selectedUsers) }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to delete users");
+      }
+
+      const result = await response.json();
+      toast.success(`Successfully deleted ${result.deleted} users`);
+      setSelectedUsers(new Set());
+      await fetchUsers();
+    } catch (error) {
+      console.error("Error bulk deleting users:", error);
+      toast.error("Failed to delete users");
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  const handleExportCSV = () => {
+    if (allUsers.length === 0) return;
+    exportToCSV(
+      allUsers,
+      [
+        { key: "username", label: "Username" },
+        { key: "email", label: "Email" },
+        { key: "isAdmin", label: "Admin" },
+        { key: "isApproved", label: "Approved" },
+      ],
+      `users-${new Date().toISOString().split("T")[0]}.csv`
+    );
   };
 
   const toggleUserSelection = (userId: number) => {
@@ -251,9 +339,7 @@ export default function AdminUsersPage() {
   };
 
   const selectAllPending = () => {
-    const pendingIds = allUsers
-      .filter(user => !user.isApproved)
-      .map(user => user.id);
+    const pendingIds = allUsers.filter((user) => !user.isApproved).map((user) => user.id);
     setSelectedUsers(new Set(pendingIds));
   };
 
@@ -264,30 +350,42 @@ export default function AdminUsersPage() {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 min-w-0">
           <div>
             <h1 className="text-3xl font-bold">User Management</h1>
-            <p className="text-sm text-muted-foreground">
-              Manage user approvals and access levels
-            </p>
+            <p className="text-sm text-muted-foreground">Manage user approvals and access levels</p>
           </div>
-          {selectedUsers.size > 0 && (
-            <div className="flex gap-2">
-              <Button
-                onClick={handleBulkApprove}
-                disabled={bulkLoading}
-                variant="default"
-              >
-                <CheckCircle2 className="mr-2 h-4 w-4" />
-                Approve {selectedUsers.size} Users
-              </Button>
-              <Button
-                onClick={handleBulkReject}
-                disabled={bulkLoading}
-                variant="destructive"
-              >
-                <XCircle className="mr-2 h-4 w-4" />
-                Reject {selectedUsers.size} Users
-              </Button>
-            </div>
+          {selectedUsers.size === 0 && allUsers.length > 0 && (
+            <Button variant="outline" size="sm" onClick={handleExportCSV}>
+              <Download className="h-4 w-4" />
+              <span className="hidden sm:inline ml-1">Export CSV</span>
+            </Button>
           )}
+          {selectedUsers.size > 0 && (() => {
+            const selectedUsersList = allUsers.filter(u => selectedUsers.has(u.id));
+            const pendingCount = selectedUsersList.filter(u => !u.isApproved).length;
+            const approvedCount = selectedUsersList.filter(u => u.isApproved).length;
+
+            return (
+              <div className="flex gap-2 flex-wrap">
+                {pendingCount > 0 && (
+                  <>
+                    <Button onClick={handleBulkApprove} disabled={bulkLoading} variant="default">
+                      <CheckCircle2 className="mr-2 h-4 w-4" />
+                      Approve {pendingCount}
+                    </Button>
+                    <Button onClick={handleBulkReject} disabled={bulkLoading} variant="outline">
+                      <XCircle className="mr-2 h-4 w-4" />
+                      Reject {pendingCount}
+                    </Button>
+                  </>
+                )}
+                {approvedCount > 0 && (
+                  <Button onClick={handleBulkDelete} disabled={bulkLoading} variant="destructive">
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Delete {approvedCount}
+                  </Button>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         {/* Pending Approvals Section */}
@@ -297,11 +395,7 @@ export default function AdminUsersPage() {
               <CardTitle className="flex items-center justify-between">
                 <span>Pending Approvals ({pendingUsers.length})</span>
                 {pendingUsers.length > 1 && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={selectAllPending}
-                  >
+                  <Button size="sm" variant="outline" onClick={selectAllPending}>
                     Select All Pending
                   </Button>
                 )}
@@ -332,36 +426,36 @@ export default function AdminUsersPage() {
               <div className="flex gap-2 flex-wrap">
                 <Button
                   onClick={() => {
-                    setFilter('all');
+                    setFilter("all");
                     setPage(1);
                   }}
-                  variant={filter === 'all' ? 'default' : 'outline'}
+                  variant={filter === "all" ? "default" : "outline"}
                   size="sm"
                 >
                   All Users
                 </Button>
                 <Button
                   onClick={() => {
-                    setFilter('approved');
+                    setFilter("approved");
                     setPage(1);
                   }}
-                  variant={filter === 'approved' ? 'default' : 'outline'}
+                  variant={filter === "approved" ? "default" : "outline"}
                   size="sm"
                 >
                   Approved
                 </Button>
                 <Button
                   onClick={() => {
-                    setFilter('pending');
+                    setFilter("pending");
                     setPage(1);
                   }}
-                  variant={filter === 'pending' ? 'default' : 'outline'}
+                  variant={filter === "pending" ? "default" : "outline"}
                   size="sm"
                 >
                   Pending
                 </Button>
               </div>
-              
+
               <div className="flex-1 max-w-md min-w-0">
                 <Input
                   type="text"
@@ -376,7 +470,6 @@ export default function AdminUsersPage() {
             </div>
           </CardHeader>
           <CardContent>
-
             {/* Enhanced Users Table */}
             <UserTable
               users={allUsers}
@@ -384,7 +477,7 @@ export default function AdminUsersPage() {
               onApprove={handleApprove}
               onReject={handleReject}
               onDelete={handleDelete}
-              onToggleAdmin={handleToggleAdmin}
+              onEdit={handleEdit}
               selectedUsers={selectedUsers}
               onToggleSelect={toggleUserSelection}
             />
@@ -393,7 +486,7 @@ export default function AdminUsersPage() {
             {totalPages > 1 && (
               <div className="mt-6 flex justify-center gap-2">
                 <Button
-                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
                   disabled={page === 1}
                   variant="outline"
                   size="sm"
@@ -404,7 +497,7 @@ export default function AdminUsersPage() {
                   Page {page} of {totalPages}
                 </span>
                 <Button
-                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page === totalPages}
                   variant="outline"
                   size="sm"
@@ -416,6 +509,16 @@ export default function AdminUsersPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Edit User Dialog */}
+      <EditUserDialog
+        user={editingUser}
+        open={editDialogOpen}
+        onOpenChange={setEditDialogOpen}
+        onSuccess={handleEditSuccess}
+        locations={locations}
+        companies={companies}
+      />
     </div>
   );
 }

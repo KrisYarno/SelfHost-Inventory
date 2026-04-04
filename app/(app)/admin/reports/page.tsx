@@ -215,11 +215,11 @@ export default function AdminReportsPage() {
       },
       { metric: "Low Stock Items", value: metrics.lowStockProducts, additional: "Below threshold" },
     ];
-    exportToCSV(data, filename, [
+    exportToCSV(data, [
       { key: "metric", label: "Metric" },
       { key: "value", label: "Value" },
       { key: "additional", label: "Details" },
-    ]);
+    ], filename);
   };
 
   const handleExportChart = async (chartId: string, chartName: string) => {
@@ -364,6 +364,8 @@ export default function AdminReportsPage() {
               value={formatCurrency(metrics?.monthlyCarryingCost)}
               subtitle={`${formatCurrency(metrics?.totalInventoryCostValue)} total value`}
               icon={<DollarSign className="h-4 w-4" />}
+              unconfigured={!metrics?.totalInventoryCostValue || metrics.totalInventoryCostValue === 0}
+              unconfiguredMessage="Set product costs to enable this metric"
             />
             <MetricsCard
               title="Dead Stock Value"
@@ -379,6 +381,8 @@ export default function AdminReportsPage() {
                   ? "border-orange-500 bg-orange-50 dark:bg-orange-950/20"
                   : ""
               }
+              unconfigured={(!metrics?.deadStockValue || metrics.deadStockValue === 0) && (!metrics?.totalInventoryCostValue || metrics.totalInventoryCostValue === 0)}
+              unconfiguredMessage="Set product costs to enable this metric"
             />
             <MetricsCard
               title="Stockout Risk"

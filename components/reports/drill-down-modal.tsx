@@ -51,9 +51,9 @@ export function DrillDownModal({
     );
     
     if (Array.isArray(data)) {
-      exportToCSV(data, filename);
+      exportToCSV(data, [], filename);
     } else if (data.details) {
-      exportToCSV(data.details, filename);
+      exportToCSV(data.details, [], filename);
     }
   };
 
