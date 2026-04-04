@@ -12,7 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Download, Search, X, Printer, CheckCircle2 } from "lucide-react";
+import { Download, Search, X, Printer, CheckCircle2, ChevronDown, ChevronRight, ArrowRightLeft, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { exportToCSV } from "@/lib/export-utils";
 import { useLocation } from "@/contexts/location-context";
@@ -21,6 +21,7 @@ import {
   StockInTransferDialog,
   type StockInProduct,
 } from "@/components/inventory/stock-in-transfer-dialog";
+import type { ProductLocationQuantity } from "@/types/inventory";
 
 interface StockerItem {
   productId: number;
@@ -78,6 +79,131 @@ function getSortFields(item: StockerItem): { base: string; size: number | null }
 }
 
 type SortOption = "urgency" | "name" | "units-needed";
+
+interface SurplusLocation {
+  locationId: number;
+  locationName: string;
+  available: number;
+  surplus: number; // amount above what that location needs
+  version: number;
+}
+
+interface TransferSuggestionsProps {
+  item: StockerItem;
+  destinationLocationId: number;
+  onRequestTransfer: (item: StockerItem) => void;
+}
+
+function TransferSuggestions({ item, destinationLocationId, onRequestTransfer }: TransferSuggestionsProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [surplusLocations, setSurplusLocations] = useState<SurplusLocation[]>([]);
+  const [hasFetched, setHasFetched] = useState(false);
+
+  const fetchSurplusData = useCallback(async () => {
+    if (hasFetched) return;
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/api/inventory/product/${item.productId}/locations`);
+      if (!res.ok) throw new Error("Failed to fetch");
+      const data: { locations: ProductLocationQuantity[] } = await res.json();
+
+      // Filter to locations that have stock and are not the current location
+      const otherLocations = data.locations
+        .filter((loc) => loc.locationId !== destinationLocationId && loc.quantity > 0)
+        .map((loc) => ({
+          locationId: loc.locationId,
+          locationName: loc.locationName,
+          available: loc.quantity,
+          surplus: loc.quantity, // simplified: all available stock is potential surplus
+          version: loc.version,
+        }))
+        .sort((a, b) => b.available - a.available);
+
+      setSurplusLocations(otherLocations);
+      setHasFetched(true);
+    } catch (err) {
+      console.error("Error fetching surplus data:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [item.productId, destinationLocationId, hasFetched]);
+
+  const handleToggle = () => {
+    const willOpen = !isOpen;
+    setIsOpen(willOpen);
+    if (willOpen && !hasFetched) {
+      fetchSurplusData();
+    }
+  };
+
+  return (
+    <div className="border-t border-border/50 pt-2">
+      <button
+        type="button"
+        onClick={handleToggle}
+        className="flex w-full items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {isOpen ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+        <ArrowRightLeft className="h-3 w-3" />
+        <span>Transfer from...</span>
+      </button>
+
+      {isOpen && (
+        <div className="mt-2 space-y-2">
+          {isLoading ? (
+            <div className="flex items-center justify-center py-3">
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            </div>
+          ) : surplusLocations.length === 0 ? (
+            <p className="text-xs text-muted-foreground italic py-1">
+              No other locations have this product in stock.
+            </p>
+          ) : (
+            <>
+              <div className="space-y-1.5">
+                {surplusLocations.map((loc) => {
+                  const suggestedQty = Math.min(loc.available, item.shortage);
+                  return (
+                    <div
+                      key={loc.locationId}
+                      className="flex items-center justify-between rounded-md bg-muted/50 px-2.5 py-1.5 text-xs"
+                    >
+                      <div className="min-w-0">
+                        <span className="font-medium text-foreground truncate block">
+                          {loc.locationName}
+                        </span>
+                        <span className="text-muted-foreground">
+                          {loc.available} available
+                        </span>
+                      </div>
+                      <Badge variant="outline" className="text-[10px] px-1.5 py-0.5 ml-2 shrink-0">
+                        can send {suggestedQty}
+                      </Badge>
+                    </div>
+                  );
+                })}
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 w-full text-xs gap-1.5"
+                onClick={() => onRequestTransfer(item)}
+              >
+                <ArrowRightLeft className="h-3 w-3" />
+                Request Transfer
+              </Button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function StockerPage() {
   const { selectedLocationId, selectedLocation } = useLocation?.() ?? {
@@ -474,6 +600,11 @@ export default function StockerPage() {
                       Stock In
                     </Button>
                   </div>
+                  <TransferSuggestions
+                    item={item}
+                    destinationLocationId={selectedLocationId ?? location?.id ?? 0}
+                    onRequestTransfer={handleStockIn}
+                  />
                 </CardContent>
               </Card>
             );

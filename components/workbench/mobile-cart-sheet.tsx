@@ -3,14 +3,13 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import {
   Sheet,
   SheetContent,
   SheetDescription,
   SheetHeader,
   SheetTitle,
-  SheetTrigger,
-  SheetFooter,
 } from "@/components/ui/sheet";
 import { OrderList } from "./order-list";
 import { RotateCcw, ShoppingCart } from "lucide-react";
@@ -25,6 +24,7 @@ interface MobileCartSheetProps {
   onClearOrder: () => void;
   onCompleteOrder: () => void;
   canComplete: boolean;
+  queuePosition?: { current: number; total: number } | null;
 }
 
 export function MobileCartSheet({
@@ -37,6 +37,7 @@ export function MobileCartSheet({
   onClearOrder,
   onCompleteOrder,
   canComplete,
+  queuePosition,
 }: MobileCartSheetProps) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -45,6 +46,11 @@ export function MobileCartSheet({
           <SheetTitle className="flex items-center gap-2">
             <ShoppingCart className="h-5 w-5" />
             Current Order
+            {queuePosition && (
+              <Badge variant="secondary" className="text-xs ml-1">
+                {queuePosition.current} of {queuePosition.total}
+              </Badge>
+            )}
           </SheetTitle>
           <SheetDescription>
             Review and complete your order
@@ -69,7 +75,7 @@ export function MobileCartSheet({
         </div>
 
         {/* Order Summary and Actions */}
-        <div className="space-y-4 pt-4 border-t">
+        <div className="mt-auto space-y-4 border-t border-border bg-background/80 -mx-6 px-6 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-4">
           <div className="space-y-2">
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">Total items:</span>

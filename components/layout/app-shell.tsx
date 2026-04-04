@@ -7,6 +7,7 @@ import { MobileNav } from "./mobile-nav";
 import { UserMenu } from "./user-menu";
 import { LocationSwitcher } from "./location-switcher";
 import { ThemeToggleSidebar } from "@/components/theme-toggle-sidebar";
+import { GlobalSearch } from "./global-search";
 
 interface AppShellProps {
   children: React.ReactNode;
@@ -37,7 +38,12 @@ export function AppShell({ children }: AppShellProps) {
             <div className="border-b border-border p-4">
               <LocationSwitcher />
             </div>
-            
+
+            {/* Global Search */}
+            <div className="border-b border-border p-4">
+              <GlobalSearch />
+            </div>
+
             {/* Navigation */}
             <div className="flex-1 overflow-y-auto">
               <SidebarNav />
@@ -64,6 +70,7 @@ export function AppShell({ children }: AppShellProps) {
           <div className="flex h-16 items-center justify-between px-4">
             <div className="text-lg font-semibold">Inventory</div>
             <div className="flex items-center gap-2">
+              <GlobalSearch />
               <LocationSwitcher />
               <UserMenu />
             </div>

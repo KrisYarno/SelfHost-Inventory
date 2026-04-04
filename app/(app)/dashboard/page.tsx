@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import type { MetricsResponse, ActivityResponse } from "@/types/reports";
+import { Sparkline } from "@/components/ui/sparkline";
 
 // ---------------------------------------------------------------------------
 // Data fetching helpers
@@ -80,6 +81,16 @@ async function fetchActivity(): Promise<ActivityResponse> {
   return res.json();
 }
 
+async function fetchTrendData(
+  locationId: number | null
+): Promise<{ data: { date: string; quantity: number }[] }> {
+  const params = new URLSearchParams();
+  if (locationId) params.set("locationId", String(locationId));
+  const res = await fetch(`/api/reports/inventory-trends?${params}`);
+  if (!res.ok) throw new Error("Failed to fetch trend data");
+  return res.json();
+}
+
 // ---------------------------------------------------------------------------
 // Stat Card
 // ---------------------------------------------------------------------------
@@ -91,6 +102,7 @@ function StatCard({
   accent,
   subtitle,
   loading,
+  sparklineData,
 }: {
   title: string;
   value: string | number;
@@ -98,6 +110,7 @@ function StatCard({
   accent?: string;
   subtitle?: string;
   loading?: boolean;
+  sparklineData?: number[];
 }) {
   return (
     <Card>
@@ -112,7 +125,12 @@ function StatCard({
           <div className="flex items-start justify-between">
             <div className="space-y-1">
               <p className="text-body-sm text-muted-foreground">{title}</p>
-              <p className="text-2xl font-bold tracking-tight">{value}</p>
+              <div className="flex items-center gap-2">
+                <p className="text-2xl font-bold tracking-tight">{value}</p>
+                {sparklineData && sparklineData.length >= 2 && (
+                  <Sparkline data={sparklineData} width={60} height={20} />
+                )}
+              </div>
               {subtitle && (
                 <p className="text-xs text-muted-foreground">{subtitle}</p>
               )}
@@ -171,6 +189,14 @@ export default function DashboardPage() {
     enabled: !!selectedLocationId,
   });
 
+  // --- Trend data (7-day sparkline) ---
+  const { data: trendData } = useQuery({
+    queryKey: ["dashboard-trends", selectedLocationId],
+    queryFn: () => fetchTrendData(selectedLocationId),
+  });
+
+  const sparklineValues = trendData?.data?.map((d) => d.quantity) ?? [];
+
   // --- Recent activity ---
   const {
     data: activityData,
@@ -216,6 +242,7 @@ export default function DashboardPage() {
               accent="hsl(199, 89%, 48%)"
               subtitle="units across all locations"
               loading={metricsLoading}
+              sparklineData={sparklineValues}
             />
             <StatCard
               title="Low Stock Alerts"

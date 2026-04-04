@@ -158,6 +158,14 @@ model AuditLog {
   @@map("audit_logs")
 }
 
+model SystemSetting {
+  key       String   @id @db.VarChar(100)
+  value     String   @db.Text
+  updatedAt DateTime @default(now()) @updatedAt @db.DateTime(0)
+
+  @@map("system_settings")
+}
+
 enum inventory_logs_logType {
   ADJUSTMENT
   TRANSFER

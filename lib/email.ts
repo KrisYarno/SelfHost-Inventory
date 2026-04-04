@@ -1,4 +1,5 @@
 import sgMail from '@sendgrid/mail';
+import type { CombinedMinBreach, LocationMinBreach } from '@/types/inventory';
 
 // Initialize SendGrid with API key
 if (process.env.SENDGRID_API_KEY) {
@@ -25,6 +26,34 @@ export interface LowStockEmailData {
   unsubscribeToken?: string;
 }
 
+export interface MinimumDigestData {
+  recipientName: string;
+  locationItems: LocationMinBreach[];
+  combinedItems: CombinedMinBreach[];
+}
+
+export interface WeeklyReportData {
+  recipientName: string;
+  dateRange: string;
+  totalProducts: number;
+  totalStock: number;
+  lowStockCount: number;
+  lowStockItems: Array<{
+    name: string;
+    currentStock: number;
+    minimum: number;
+    deficit: number;
+  }>;
+  topMovers: Array<{
+    name: string;
+    unitsMoved: number;
+  }>;
+  stockByLocation: Array<{
+    name: string;
+    totalStock: number;
+  }>;
+}
+
 export class EmailService {
   private from = process.env.SENDGRID_FROM_EMAIL || 'alerts@advancedresearchpep.com';
   private templateId = process.env.TEMPLATE_ID;
@@ -49,6 +78,27 @@ export class EmailService {
       console.error('Error sending email:', error);
       throw new Error('Failed to send email');
     }
+  }
+
+  async sendMinimumsDigest(
+    to: string | string[],
+    data: MinimumDigestData
+  ): Promise<void> {
+    if (!process.env.SENDGRID_API_KEY) {
+      console.warn('SendGrid API key not configured, minimum email not sent');
+      return;
+    }
+
+    const subject = `Minimum Alert – ${data.locationItems.length + data.combinedItems.length} item(s)`;
+    const html = this.generateMinimumsHTML(data);
+    const text = this.generateMinimumsText(data);
+
+    await this.sendEmail({
+      to,
+      subject,
+      text,
+      html,
+    });
   }
 
   async sendLowStockDigest(
@@ -209,6 +259,325 @@ View inventory at: ${process.env.NEXTAUTH_URL}/inventory
 
 You're receiving this email because you've opted into low stock alerts.
 ${data.unsubscribeToken ? `Unsubscribe: ${process.env.NEXTAUTH_URL}/unsubscribe?token=${data.unsubscribeToken}` : ''}
+    `.trim();
+  }
+
+  private generateMinimumsHTML(data: MinimumDigestData): string {
+    const locationRows = data.locationItems
+      .map(
+        (item) => `
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;">${item.productName}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;">${item.locationName}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.currentQuantity}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.minQuantity}</td>
+        </tr>`
+      )
+      .join("");
+
+    const combinedRows = data.combinedItems
+      .map(
+        (item) => `
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;">${item.productName}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.totalQuantity}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.combinedMinimum}</td>
+          <td style="padding:8px;border-bottom:1px solid #1f2937;text-align:center;">${item.daysUntilEmpty ?? "N/A"}</td>
+        </tr>`
+      )
+      .join("");
+
+    return `
+      <h2 style="color:#e5e7eb;margin-bottom:16px;">Hello ${data.recipientName},</h2>
+      <p style="color:#cbd5f5;">Here are the current minimum alerts.</p>
+      ${
+        locationRows
+          ? `<h3 style="color:#fbbf24;margin-top:24px;">Location minimum breaches</h3>
+             <table style="width:100%;border-collapse:collapse;color:#f9fafb;">
+               <thead>
+                 <tr>
+                   <th align="left">Product</th>
+                   <th align="left">Location</th>
+                   <th>Current</th>
+                   <th>Minimum</th>
+                 </tr>
+               </thead>
+               <tbody>${locationRows}</tbody>
+             </table>`
+          : ""
+      }
+      ${
+        combinedRows
+          ? `<h3 style="color:#f87171;margin-top:24px;">Combined minimum breaches</h3>
+             <table style="width:100%;border-collapse:collapse;color:#f9fafb;">
+               <thead>
+                 <tr>
+                   <th align="left">Product</th>
+                   <th>Total</th>
+                   <th>Minimum</th>
+                   <th>Days until empty</th>
+                 </tr>
+               </thead>
+               <tbody>${combinedRows}</tbody>
+             </table>`
+          : ""
+      }
+      <p style="color:#9ca3af;margin-top:24px;">Manage notifications at ${process.env.NEXTAUTH_URL}/account</p>
+    `;
+  }
+
+  private generateMinimumsText(data: MinimumDigestData): string {
+    const loc = data.locationItems
+      .map(
+        (item) =>
+          ` - ${item.productName} @ ${item.locationName}: ${item.currentQuantity}/${item.minQuantity}`
+      )
+      .join("\n");
+    const combined = data.combinedItems
+      .map(
+        (item) =>
+          ` - ${item.productName}: ${item.totalQuantity}/${item.combinedMinimum} (days until empty: ${
+            item.daysUntilEmpty ?? "N/A"
+          })`
+      )
+      .join("\n");
+
+    return `
+Minimum alerts for ${data.recipientName}
+
+Location minimums:
+${loc || "None"}
+
+Combined minimums:
+${combined || "None"}
+
+Manage notifications: ${process.env.NEXTAUTH_URL}/account
+    `.trim();
+  }
+
+  generateWeeklyReportHTML(data: WeeklyReportData): string {
+    const appUrl = process.env.NEXTAUTH_URL || '';
+
+    const lowStockRows = data.lowStockItems
+      .map(
+        (item) => `
+        <tr>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${item.name}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${item.currentStock}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${item.minimum}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #dc2626; font-weight: 600;">${item.deficit}</td>
+        </tr>`
+      )
+      .join("");
+
+    const topMoverRows = data.topMovers
+      .map(
+        (item) => `
+        <tr>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${item.name}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${item.unitsMoved}</td>
+        </tr>`
+      )
+      .join("");
+
+    const locationRows = data.stockByLocation
+      .map(
+        (loc) => `
+        <tr>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${loc.name}</td>
+          <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center; color: #374151;">${loc.totalStock}</td>
+        </tr>`
+      )
+      .join("");
+
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Weekly Inventory Report</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f3f4f6;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color: #f3f4f6;">
+    <tr>
+      <td align="center" style="padding: 24px 16px;">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width: 600px; width: 100%; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color: #1e40af; padding: 24px 32px;">
+              <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 700;">Weekly Inventory Report</h1>
+              <p style="margin: 4px 0 0; color: #bfdbfe; font-size: 14px;">${data.dateRange}</p>
+            </td>
+          </tr>
+
+          <!-- Greeting -->
+          <tr>
+            <td style="padding: 24px 32px 8px;">
+              <p style="margin: 0; color: #4b5563; font-size: 15px;">Hi ${data.recipientName},</p>
+              <p style="margin: 8px 0 0; color: #4b5563; font-size: 15px;">Here is your weekly inventory summary.</p>
+            </td>
+          </tr>
+
+          <!-- Stats Row -->
+          <tr>
+            <td style="padding: 16px 32px 24px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td width="33%" align="center" style="padding: 16px 8px; background-color: #eff6ff; border-radius: 8px;">
+                    <p style="margin: 0; font-size: 28px; font-weight: 700; color: #1e40af;">${data.totalProducts}</p>
+                    <p style="margin: 4px 0 0; font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px;">Products</p>
+                  </td>
+                  <td width="6"></td>
+                  <td width="33%" align="center" style="padding: 16px 8px; background-color: #f0fdf4; border-radius: 8px;">
+                    <p style="margin: 0; font-size: 28px; font-weight: 700; color: #16a34a;">${data.totalStock}</p>
+                    <p style="margin: 4px 0 0; font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px;">Total Stock</p>
+                  </td>
+                  <td width="6"></td>
+                  <td width="33%" align="center" style="padding: 16px 8px; background-color: ${data.lowStockCount > 0 ? '#fef2f2' : '#f0fdf4'}; border-radius: 8px;">
+                    <p style="margin: 0; font-size: 28px; font-weight: 700; color: ${data.lowStockCount > 0 ? '#dc2626' : '#16a34a'};">${data.lowStockCount}</p>
+                    <p style="margin: 4px 0 0; font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px;">Low Stock</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          ${
+            data.lowStockItems.length > 0
+              ? `
+          <!-- Low Stock Section -->
+          <tr>
+            <td style="padding: 0 32px 24px;">
+              <h2 style="margin: 0 0 12px; font-size: 16px; font-weight: 600; color: #dc2626;">Products Below Minimums</h2>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden;">
+                <tr style="background-color: #f9fafb;">
+                  <th style="padding: 10px 12px; text-align: left; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase;">Product</th>
+                  <th style="padding: 10px 12px; text-align: center; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase;">Stock</th>
+                  <th style="padding: 10px 12px; text-align: center; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase;">Minimum</th>
+                  <th style="padding: 10px 12px; text-align: center; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase;">Deficit</th>
+                </tr>
+                ${lowStockRows}
+              </table>
+            </td>
+          </tr>`
+              : ""
+          }
+
+          ${
+            data.topMovers.length > 0
+              ? `
+          <!-- Top Movers Section -->
+          <tr>
+            <td style="padding: 0 32px 24px;">
+              <h2 style="margin: 0 0 12px; font-size: 16px; font-weight: 600; color: #374151;">Top 10 Movers This Week</h2>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden;">
+                <tr style="background-color: #f9fafb;">
+                  <th style="padding: 10px 12px; text-align: left; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase;">Product</th>
+                  <th style="padding: 10px 12px; text-align: center; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase;">Units Moved</th>
+                </tr>
+                ${topMoverRows}
+              </table>
+            </td>
+          </tr>`
+              : ""
+          }
+
+          ${
+            data.stockByLocation.length > 0
+              ? `
+          <!-- Location Summary Section -->
+          <tr>
+            <td style="padding: 0 32px 24px;">
+              <h2 style="margin: 0 0 12px; font-size: 16px; font-weight: 600; color: #374151;">Stock by Location</h2>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden;">
+                <tr style="background-color: #f9fafb;">
+                  <th style="padding: 10px 12px; text-align: left; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase;">Location</th>
+                  <th style="padding: 10px 12px; text-align: center; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase;">Total Stock</th>
+                </tr>
+                ${locationRows}
+              </table>
+            </td>
+          </tr>`
+              : ""
+          }
+
+          <!-- CTA Button -->
+          <tr>
+            <td align="center" style="padding: 0 32px 32px;">
+              <a href="${appUrl}/dashboard"
+                 style="display: inline-block; background-color: #1e40af; color: #ffffff; padding: 12px 28px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px;">
+                View Dashboard
+              </a>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 20px 32px; background-color: #f9fafb; border-top: 1px solid #e5e7eb;">
+              <p style="margin: 0; color: #9ca3af; font-size: 12px; text-align: center;">
+                You are receiving this email because you opted into email alerts.
+                <br>
+                <a href="${appUrl}/account" style="color: #3b82f6; text-decoration: underline;">Manage notification preferences</a>
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+  }
+
+  generateWeeklyReportText(data: WeeklyReportData): string {
+    const appUrl = process.env.NEXTAUTH_URL || '';
+
+    const lowStockList = data.lowStockItems.length > 0
+      ? data.lowStockItems
+          .map(
+            (item) =>
+              `  - ${item.name}: ${item.currentStock} in stock (minimum: ${item.minimum}, deficit: ${item.deficit})`
+          )
+          .join("\n")
+      : "  None";
+
+    const moversList = data.topMovers.length > 0
+      ? data.topMovers
+          .map((item) => `  - ${item.name}: ${item.unitsMoved} units moved`)
+          .join("\n")
+      : "  No activity";
+
+    const locationList = data.stockByLocation.length > 0
+      ? data.stockByLocation
+          .map((loc) => `  - ${loc.name}: ${loc.totalStock} units`)
+          .join("\n")
+      : "  No locations";
+
+    return `
+Weekly Inventory Report — ${data.dateRange}
+
+Hi ${data.recipientName},
+
+Summary:
+  Total Products: ${data.totalProducts}
+  Total Stock: ${data.totalStock}
+  Low Stock Alerts: ${data.lowStockCount}
+
+Products Below Minimums:
+${lowStockList}
+
+Top 10 Movers This Week:
+${moversList}
+
+Stock by Location:
+${locationList}
+
+View dashboard: ${appUrl}/dashboard
+
+Manage notification preferences: ${appUrl}/account
     `.trim();
   }
 }

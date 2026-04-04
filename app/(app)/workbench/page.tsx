@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useWorkbench } from "@/hooks/use-workbench";
 import { useInventoryProducts } from "@/hooks/use-inventory-products";
 import { useIsMobile } from "@/hooks/use-is-mobile";
@@ -8,7 +8,8 @@ import { groupProductsByBaseName } from "@/lib/product-utils";
 import { ProductTile } from "@/components/workbench/product-tile";
 import { QuantityPicker } from "@/components/workbench/quantity-picker";
 import { OrderList } from "@/components/workbench/order-list";
-import { CompleteOrderDialog } from "@/components/workbench/complete-order-dialog";
+import { OrderQueue } from "@/components/workbench/order-queue";
+import { CompleteOrderDialog, type DeductionDetail } from "@/components/workbench/complete-order-dialog";
 import { FloatingCartButton } from "@/components/workbench/floating-cart-button";
 import { MobileCartSheet } from "@/components/workbench/mobile-cart-sheet";
 import { MobileFilterSheet, StockFilter } from "@/components/products/mobile-filter-sheet";
@@ -19,9 +20,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { SearchInput } from "@/components/ui/search-input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ProductWithQuantity } from "@/types/product";
-import { RotateCcw } from "lucide-react";
+import { RotateCcw, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { useLocation } from "@/contexts/location-context";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/page-header";
 
@@ -37,6 +39,8 @@ export default function WorkbenchPage() {
   const [isScrolled, setIsScrolled] = useState(false);
 
   const { selectedLocationId } = useLocation();
+  const { token: csrfToken } = useCSRF();
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMobile = useIsMobile();
   const { data: products = [], isLoading: loading, refetch: refetchProducts } = useInventoryProducts({
     locationId: selectedLocationId,
@@ -52,6 +56,9 @@ export default function WorkbenchPage() {
     clearOrder,
     getTotalItems,
     getTotalQuantity,
+    orderQueue,
+    advanceQueue,
+    getQueuePosition,
   } = useWorkbench();
 
   // Handle scroll for collapsing search bar on mobile
@@ -62,6 +69,81 @@ export default function WorkbenchPage() {
     window.addEventListener("scroll", handleScroll);
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
+
+  // Clean up undo timer on unmount
+  useEffect(() => {
+    return () => {
+      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    };
+  }, []);
+
+  const handleUndoDeduction = useCallback(
+    async (items: DeductionDetail[], orderRef: string) => {
+      if (!csrfToken) {
+        toast.error("Session expired. Cannot undo.");
+        return;
+      }
+
+      try {
+        // Reverse each deduction by adding back the quantities
+        const results = await Promise.all(
+          items.map((item) =>
+            fetch("/api/inventory/adjust", {
+              method: "POST",
+              headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+              body: JSON.stringify({
+                productId: item.productId,
+                locationId: item.locationId,
+                delta: item.quantity, // positive delta to add back
+                logType: "ADJUSTMENT",
+              }),
+            })
+          )
+        );
+
+        const allOk = results.every((r) => r.ok);
+        if (allOk) {
+          toast.success(`Undone: ${items.length} item${items.length !== 1 ? "s" : ""} restored for order ${orderRef}`);
+          refetchProducts();
+        } else {
+          toast.error("Some items could not be restored. Check inventory manually.");
+        }
+      } catch (err) {
+        console.error("Undo deduction error:", err);
+        toast.error("Failed to undo deduction. Please adjust inventory manually.");
+      }
+    },
+    [csrfToken, refetchProducts]
+  );
+
+  const showUndoToast = useCallback(
+    (orderRef: string, items: DeductionDetail[]) => {
+      toast(
+        <div className="flex items-center justify-between w-full gap-3">
+          <span className="text-sm">
+            Order <span className="font-mono font-medium">{orderRef}</span> completed.
+          </span>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1.5 rounded-md bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:bg-foreground/90 transition-colors shrink-0"
+            onClick={() => {
+              toast.dismiss(`undo-${orderRef}`);
+              handleUndoDeduction(items, orderRef);
+            }}
+          >
+            <Undo2 className="h-3 w-3" />
+            Undo
+          </button>
+        </div>,
+        {
+          id: `undo-${orderRef}`,
+          duration: 10000,
+          dismissible: true,
+        }
+      );
+    },
+    [handleUndoDeduction]
+  );
 
   // Sync stock filter with checkboxes
   useEffect(() => {
@@ -313,6 +395,9 @@ export default function WorkbenchPage() {
         {/* Right Side - Order Panel (Desktop Only) */}
         {!isMobile && (
           <div className="w-full lg:w-96 border-t lg:border-t-0 lg:border-l border-border bg-muted/5 flex flex-col">
+            {/* Order Queue */}
+            <OrderQueue />
+
             {/* Order Header */}
             <div className="p-4 border-b bg-background">
               <h2 className="text-lg font-semibold mb-3">Current Order</h2>
@@ -392,6 +477,7 @@ export default function WorkbenchPage() {
           onClearOrder={handleClearOrder}
           onCompleteOrder={handleCompleteOrder}
           canComplete={orderItems.length > 0 && !!orderReference.trim()}
+          queuePosition={getQueuePosition()}
         />
       )}
 
@@ -399,9 +485,16 @@ export default function WorkbenchPage() {
       <CompleteOrderDialog
         open={showCompleteDialog}
         onOpenChange={setShowCompleteDialog}
-        onSuccess={() => {
+        onSuccess={({ orderReference: completedRef, items: deductedItems }) => {
           refetchProducts();
           setMobileCartOpen(false);
+          // Show undo toast for 10 seconds
+          showUndoToast(completedRef, deductedItems);
+          // Advance to the next order in the queue
+          const next = advanceQueue();
+          if (next) {
+            toast.info(`Loaded next order: ${next}`);
+          }
         }}
       />
     </div>

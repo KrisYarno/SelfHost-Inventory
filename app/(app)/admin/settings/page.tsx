@@ -6,13 +6,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
-import { 
-  MapPin, 
-  Plus, 
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import {
+  MapPin,
+  Plus,
   Trash2,
   Settings as SettingsIcon,
   Building2,
-  AlertTriangle
+  AlertTriangle,
+  Mail,
 } from "lucide-react";
 import Link from "next/link";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
@@ -28,6 +31,7 @@ interface Location {
 
 interface SystemSettings {
   locations: Location[];
+  weeklyReportsEnabled: boolean;
 }
 
 export default function AdminSettingsPage() {
@@ -36,6 +40,7 @@ export default function AdminSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isAddingLocation, setIsAddingLocation] = useState(false);
   const [isDeletingLocation, setIsDeletingLocation] = useState(false);
+  const [isTogglingWeekly, setIsTogglingWeekly] = useState(false);
   const { token: csrfToken } = useCSRF();
 
   const fetchSettings = async () => {
@@ -45,8 +50,8 @@ export default function AdminSettingsPage() {
       const result = await response.json();
       setData(result);
     } catch (error) {
-      console.error('Error fetching settings:', error);
-      toast.error('Failed to load settings');
+      console.error("Error fetching settings:", error);
+      toast.error("Failed to load settings");
     } finally {
       setIsLoading(false);
     }
@@ -61,7 +66,7 @@ export default function AdminSettingsPage() {
       toast.error("Location name cannot be empty");
       return;
     }
-    
+
     try {
       setIsAddingLocation(true);
       const response = await fetch("/api/admin/locations", {
@@ -69,12 +74,12 @@ export default function AdminSettingsPage() {
         headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({ name: newLocationName.trim() }),
       });
-      
+
       if (!response.ok) {
         const error = await response.json();
         throw new Error(error.error || "Failed to add location");
       }
-      
+
       toast.success("Location added successfully");
       setNewLocationName("");
       await fetchSettings();
@@ -86,9 +91,9 @@ export default function AdminSettingsPage() {
   };
 
   const handleDeleteLocation = async (location: Location) => {
-    const hasData = (location._count?.product_locations || 0) > 0 || 
-                    (location._count?.inventory_logs || 0) > 0;
-    
+    const hasData =
+      (location._count?.product_locations || 0) > 0 || (location._count?.inventory_logs || 0) > 0;
+
     if (hasData) {
       const confirmDelete = confirm(
         `${location.name} has associated inventory data. Are you sure you want to delete it?`
@@ -102,18 +107,47 @@ export default function AdminSettingsPage() {
         method: "DELETE",
         headers: withCSRFHeaders({}, csrfToken),
       });
-      
+
       if (!response.ok) {
         const error = await response.json();
         throw new Error(error.error || "Failed to delete location");
       }
-      
+
       toast.success("Location deleted successfully");
       await fetchSettings();
     } catch (error: any) {
       toast.error(error.message || "Failed to delete location");
     } finally {
       setIsDeletingLocation(false);
+    }
+  };
+
+  const handleToggleWeeklyReports = async (enabled: boolean) => {
+    try {
+      setIsTogglingWeekly(true);
+      const response = await fetch("/api/admin/settings", {
+        method: "POST",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+        body: JSON.stringify({ weeklyReportsEnabled: enabled }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to update setting");
+      }
+
+      setData((prev) =>
+        prev ? { ...prev, weeklyReportsEnabled: enabled } : prev
+      );
+      toast.success(
+        enabled
+          ? "Weekly inventory reports enabled"
+          : "Weekly inventory reports disabled"
+      );
+    } catch (error: any) {
+      toast.error(error.message || "Failed to update setting");
+    } finally {
+      setIsTogglingWeekly(false);
     }
   };
 
@@ -153,6 +187,35 @@ export default function AdminSettingsPage() {
         </Link>
       </div>
 
+      {/* Weekly Reports Toggle */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Mail className="h-5 w-5" />
+            Weekly Inventory Reports
+          </CardTitle>
+          <CardDescription>
+            Send a weekly email summary to all users who have email alerts enabled.
+            Includes stock levels, low-stock warnings, top movers, and per-location breakdown.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between">
+            <Label htmlFor="weekly-reports-toggle" className="cursor-pointer">
+              {data?.weeklyReportsEnabled
+                ? "Weekly reports are enabled"
+                : "Weekly reports are disabled"}
+            </Label>
+            <Switch
+              id="weekly-reports-toggle"
+              checked={data?.weeklyReportsEnabled ?? false}
+              onCheckedChange={handleToggleWeeklyReports}
+              disabled={isTogglingWeekly}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Location Management */}
       <div className="grid gap-6">
         <Card>
@@ -161,9 +224,7 @@ export default function AdminSettingsPage() {
               <MapPin className="h-5 w-5" />
               Location Management
             </CardTitle>
-            <CardDescription>
-              Manage inventory locations
-            </CardDescription>
+            <CardDescription>Manage inventory locations</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex gap-2">
@@ -171,13 +232,9 @@ export default function AdminSettingsPage() {
                 placeholder="New location name"
                 value={newLocationName}
                 onChange={(e) => setNewLocationName(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handleAddLocation()}
+                onKeyPress={(e) => e.key === "Enter" && handleAddLocation()}
               />
-              <Button
-                onClick={handleAddLocation}
-                disabled={isAddingLocation}
-                size="icon"
-              >
+              <Button onClick={handleAddLocation} disabled={isAddingLocation} size="icon">
                 <Plus className="h-4 w-4" />
               </Button>
             </div>
@@ -191,8 +248,8 @@ export default function AdminSettingsPage() {
                   <div>
                     <p className="font-medium">{location.name}</p>
                     <p className="text-xs text-muted-foreground">
-                      {location._count?.product_locations || 0} products, 
-                      {' '}{location._count?.inventory_logs || 0} transactions
+                      {location._count?.product_locations || 0} products,{" "}
+                      {location._count?.inventory_logs || 0} transactions
                     </p>
                   </div>
                   <Button
@@ -206,11 +263,9 @@ export default function AdminSettingsPage() {
                   </Button>
                 </div>
               ))}
-              
+
               {data?.locations.length === 0 && (
-                <p className="text-center text-muted-foreground py-4">
-                  No locations found
-                </p>
+                <p className="text-center text-muted-foreground py-4">No locations found</p>
               )}
             </div>
           </CardContent>
@@ -224,15 +279,16 @@ export default function AdminSettingsPage() {
             <Building2 className="h-5 w-5" />
             System Information
           </CardTitle>
-          <CardDescription>
-            Overview of your inventory management system
-          </CardDescription>
+          <CardDescription>Overview of your inventory management system</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
             <div>
               <p className="text-sm font-medium text-muted-foreground">Purpose</p>
-              <p className="text-sm">This system is designed for physical inventory count management, integrating seamlessly into your order packing workflow.</p>
+              <p className="text-sm">
+                This system is designed for physical inventory count management, integrating
+                seamlessly into your order packing workflow.
+              </p>
             </div>
             <div>
               <p className="text-sm font-medium text-muted-foreground">Total Locations</p>

@@ -10,13 +10,16 @@ export interface OrderItem {
 export interface WorkbenchState {
   // Current order items
   orderItems: OrderItem[];
-  
+
   // Order reference/number
   orderReference: string;
-  
+
   // UI state
   isProcessing: boolean;
-  
+
+  // Order queue
+  orderQueue: string[];
+
   // Actions
   addItem: (product: ProductWithQuantity, quantity: number) => void;
   updateItemQuantity: (productId: number, quantity: number) => void;
@@ -24,7 +27,15 @@ export interface WorkbenchState {
   setOrderReference: (reference: string) => void;
   clearOrder: () => void;
   setIsProcessing: (processing: boolean) => void;
-  
+
+  // Queue actions
+  addToQueue: (reference: string) => void;
+  removeFromQueue: (index: number) => void;
+  clearQueue: () => void;
+  advanceQueue: () => string | null;
+  reorderQueue: (fromIndex: number, toIndex: number) => void;
+  getQueuePosition: () => { current: number; total: number } | null;
+
   // Computed values
   getTotalItems: () => number;
   getTotalQuantity: () => number;

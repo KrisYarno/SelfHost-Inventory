@@ -14,14 +14,21 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { toast } from "sonner";
-import { CheckCircle, AlertCircle } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
 import { getUserFriendlyMessage } from "@/lib/error-handling";
+
+export interface DeductionDetail {
+  productId: number;
+  productName: string;
+  quantity: number;
+  locationId: number;
+}
 
 interface CompleteOrderDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSuccess?: () => void;
+  onSuccess?: (details: { orderReference: string; items: DeductionDetail[] }) => void;
 }
 
 export function CompleteOrderDialog({
@@ -32,9 +39,14 @@ export function CompleteOrderDialog({
   const router = useRouter();
   const { orderItems, orderReference, clearOrder, getTotalQuantity, isProcessing, setIsProcessing } = useWorkbench();
   const { selectedLocationId } = useLocation();
-  const { token: csrfToken } = useCSRF();
+  const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
 
   const handleComplete = async () => {
+    if (!csrfToken) {
+      toast.error("Secure session is still initializing. Please wait a moment and try again.");
+      return;
+    }
+
     if (!orderReference.trim()) {
       toast.error("Order reference is required");
       return;
@@ -81,18 +93,16 @@ export function CompleteOrderDialog({
         }
       }
 
-      const result = await response.json();
+      await response.json();
 
-      // Show success message
-      toast.success(
-        <div className="flex items-center gap-2">
-          <CheckCircle className="h-4 w-4" />
-          <span>Order {orderReference} processed successfully</span>
-        </div>,
-        {
-          description: `${result.itemsProcessed} items deducted from inventory`,
-        }
-      );
+      // Capture deduction details BEFORE clearing
+      const deductionDetails: DeductionDetail[] = orderItems.map((item) => ({
+        productId: item.product.id,
+        productName: item.product.name,
+        quantity: item.quantity,
+        locationId: selectedLocationId!,
+      }));
+      const completedOrderRef = orderReference;
 
       // Clear the order and close dialog
       clearOrder();
@@ -100,10 +110,10 @@ export function CompleteOrderDialog({
 
       // Refresh the page to update product quantities
       router.refresh();
-      
-      // Call the onSuccess callback to refresh products
+
+      // Call the onSuccess callback with deduction details for undo support
       if (onSuccess) {
-        onSuccess();
+        onSuccess({ orderReference: completedOrderRef, items: deductionDetails });
       }
     } catch (error) {
       console.error("Error processing order:", error);
@@ -182,8 +192,8 @@ export function CompleteOrderDialog({
               </ul>
             </div>
 
-            <p className="text-sm text-destructive font-medium">
-              This action cannot be undone.
+            <p className="text-sm text-muted-foreground">
+              You can undo this within 10 seconds after completion.
             </p>
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -191,7 +201,7 @@ export function CompleteOrderDialog({
           <AlertDialogCancel disabled={isProcessing}>Cancel</AlertDialogCancel>
           <AlertDialogAction
             onClick={handleComplete}
-            disabled={isProcessing}
+            disabled={isProcessing || csrfLoading || !csrfToken}
           >
             {isProcessing ? "Processing..." : "Complete Order"}
           </AlertDialogAction>
