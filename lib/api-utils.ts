@@ -55,7 +55,7 @@ export function errorResponse(
 
 // --- Route wrapper with standard error handling ---
 
-type RouteHandler = (req: NextRequest, ctx?: any) => Promise<NextResponse>;
+type RouteHandler = (req: NextRequest, ctx?: any) => Promise<NextResponse | Response>;
 
 export function apiHandler(handler: RouteHandler): RouteHandler {
   return async (req, ctx) => {

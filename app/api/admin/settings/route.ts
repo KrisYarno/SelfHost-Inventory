@@ -1,65 +1,55 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/api-utils";
+import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { validateCSRFToken } from "@/lib/csrf";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  try {
-    await requireAdmin();
+export const GET = apiHandler(async () => {
+  await requireAdmin();
 
-    // Get all locations with counts
-    const locations = await prisma.location.findMany({
-      include: {
-        _count: {
-          select: {
-            product_locations: true,
-            inventory_logs: true,
-          },
+  // Get all locations with counts
+  const locations = await prisma.location.findMany({
+    include: {
+      _count: {
+        select: {
+          product_locations: true,
+          inventory_logs: true,
         },
       },
-      orderBy: { name: "asc" },
-    });
+    },
+    orderBy: { name: "asc" },
+  });
 
-    // Get system-level settings
-    const weeklyReportsSetting = await prisma.systemSetting.findUnique({
+  // Get system-level settings
+  const weeklyReportsSetting = await prisma.systemSetting.findUnique({
+    where: { key: "weeklyReportsEnabled" },
+  });
+
+  return NextResponse.json({
+    locations,
+    weeklyReportsEnabled: weeklyReportsSetting?.value === "true",
+  });
+});
+
+export const POST = apiHandler(async (request: NextRequest) => {
+  await requireAdmin();
+
+  const isValidCSRF = await validateCSRFToken(request);
+  if (!isValidCSRF) {
+    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
+  }
+
+  const body = await request.json();
+  const { weeklyReportsEnabled } = body;
+
+  if (typeof weeklyReportsEnabled === "boolean") {
+    await prisma.systemSetting.upsert({
       where: { key: "weeklyReportsEnabled" },
+      update: { value: String(weeklyReportsEnabled) },
+      create: { key: "weeklyReportsEnabled", value: String(weeklyReportsEnabled) },
     });
-
-    return NextResponse.json({
-      locations,
-      weeklyReportsEnabled: weeklyReportsSetting?.value === "true",
-    });
-  } catch (error) {
-    console.error("Error fetching settings:", error);
-    return NextResponse.json({ error: "Failed to fetch settings" }, { status: 500 });
   }
-}
 
-export async function POST(request: NextRequest) {
-  try {
-    await requireAdmin();
-
-    const isValidCSRF = await validateCSRFToken(request);
-    if (!isValidCSRF) {
-      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-    }
-
-    const body = await request.json();
-    const { weeklyReportsEnabled } = body;
-
-    if (typeof weeklyReportsEnabled === "boolean") {
-      await prisma.systemSetting.upsert({
-        where: { key: "weeklyReportsEnabled" },
-        update: { value: String(weeklyReportsEnabled) },
-        create: { key: "weeklyReportsEnabled", value: String(weeklyReportsEnabled) },
-      });
-    }
-
-    return NextResponse.json({ success: true });
-  } catch (error) {
-    console.error("Error updating settings:", error);
-    return NextResponse.json({ error: "Failed to update settings" }, { status: 500 });
-  }
-}
+  return NextResponse.json({ success: true });
+});

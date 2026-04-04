@@ -1,17 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getToken } from "next-auth/jwt";
+import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import { getRateLimitStats } from "@/lib/rateLimit";
 
-export async function GET(request: NextRequest) {
-  // Check if user is admin
-  const token = await getToken({
-    req: request,
-    secret: process.env.NEXTAUTH_SECRET,
-  });
-
-  if (!token || !token.isAdmin) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+export const GET = apiHandler(async (request: NextRequest) => {
+  await requireAdmin();
 
   const stats = getRateLimitStats();
 
@@ -40,4 +32,4 @@ export async function GET(request: NextRequest) {
   }));
 
   return NextResponse.json(rateLimitData);
-}
+});

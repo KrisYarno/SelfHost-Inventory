@@ -1,111 +1,101 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-utils";
+import { requireAuth, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
 // GET /api/user/preferences - Get user preferences
-export async function GET() {
-  try {
-    const { user: sessionUser } = await requireAuth();
+export const GET = apiHandler(async () => {
+  const { user: sessionUser } = await requireAuth();
 
-    const user = await prisma.user.findUnique({
-      where: { id: sessionUser.id },
-      select: {
-        username: true,
-        passwordHash: true,
-        emailAlerts: true,
-        defaultLocationId: true,
-        phoneNumber: true,
-        minLocationEmailAlerts: true,
-        minLocationSmsAlerts: true,
-        minCombinedEmailAlerts: true,
-        minCombinedSmsAlerts: true,
-      },
-    });
+  const user = await prisma.user.findUnique({
+    where: { id: sessionUser.id },
+    select: {
+      username: true,
+      passwordHash: true,
+      emailAlerts: true,
+      defaultLocationId: true,
+      phoneNumber: true,
+      minLocationEmailAlerts: true,
+      minLocationSmsAlerts: true,
+      minCombinedEmailAlerts: true,
+      minCombinedSmsAlerts: true,
+    },
+  });
 
-    if (!user) {
-      return NextResponse.json({ error: "User not found" }, { status: 404 });
-    }
-
-    // Return user data with hasPassword flag (don't expose the actual hash)
-    return NextResponse.json({
-      ...user,
-      passwordHash: undefined, // Never send the hash to the client
-      hasPassword: !!user.passwordHash, // Boolean flag indicating if password exists
-    });
-  } catch (error) {
-    console.error("Error fetching user preferences:", error);
-    return NextResponse.json({ error: "Failed to fetch preferences" }, { status: 500 });
+  if (!user) {
+    return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
-}
+
+  // Return user data with hasPassword flag (don't expose the actual hash)
+  return NextResponse.json({
+    ...user,
+    passwordHash: undefined, // Never send the hash to the client
+    hasPassword: !!user.passwordHash, // Boolean flag indicating if password exists
+  });
+});
 
 // PATCH /api/user/preferences - Update user preferences
-export async function PATCH(request: NextRequest) {
-  try {
-    const { user: sessionUser } = await requireAuth();
+export const PATCH = apiHandler(async (request: NextRequest) => {
+  const { user: sessionUser } = await requireAuth();
 
-    const body = await request.json();
-    const updateData: Record<string, unknown> = {};
+  const body = await request.json();
+  const updateData: Record<string, unknown> = {};
 
-    if (typeof body.emailAlerts === "boolean") {
-      updateData.emailAlerts = body.emailAlerts;
-    }
-
-    const booleanFields = [
-      "minLocationEmailAlerts",
-      "minLocationSmsAlerts",
-      "minCombinedEmailAlerts",
-      "minCombinedSmsAlerts",
-    ] as const;
-
-    booleanFields.forEach((field) => {
-      if (typeof body[field] === "boolean") {
-        updateData[field] = body[field];
-      }
-    });
-
-    if (typeof body.phoneNumber === "string") {
-      const trimmed = body.phoneNumber.trim();
-      updateData.phoneNumber = trimmed.length ? trimmed : null;
-    }
-
-    // Update defaultLocationId if provided
-    if (body.defaultLocationId !== undefined) {
-      const locationId = parseInt(body.defaultLocationId);
-      if (!isNaN(locationId)) {
-        // Verify location exists
-        const location = await prisma.location.findUnique({
-          where: { id: locationId },
-        });
-        if (!location) {
-          return NextResponse.json({ error: "Invalid location" }, { status: 400 });
-        }
-        updateData.defaultLocationId = locationId;
-      }
-    }
-
-    if (Object.keys(updateData).length === 0) {
-      return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
-    }
-
-    const updatedUser = await prisma.user.update({
-      where: { id: sessionUser.id },
-      data: updateData,
-      select: {
-        emailAlerts: true,
-        defaultLocationId: true,
-        phoneNumber: true,
-        minLocationEmailAlerts: true,
-        minLocationSmsAlerts: true,
-        minCombinedEmailAlerts: true,
-        minCombinedSmsAlerts: true,
-      },
-    });
-
-    return NextResponse.json(updatedUser);
-  } catch (error) {
-    console.error("Error updating user preferences:", error);
-    return NextResponse.json({ error: "Failed to update preferences" }, { status: 500 });
+  if (typeof body.emailAlerts === "boolean") {
+    updateData.emailAlerts = body.emailAlerts;
   }
-}
+
+  const booleanFields = [
+    "minLocationEmailAlerts",
+    "minLocationSmsAlerts",
+    "minCombinedEmailAlerts",
+    "minCombinedSmsAlerts",
+  ] as const;
+
+  booleanFields.forEach((field) => {
+    if (typeof body[field] === "boolean") {
+      updateData[field] = body[field];
+    }
+  });
+
+  if (typeof body.phoneNumber === "string") {
+    const trimmed = body.phoneNumber.trim();
+    updateData.phoneNumber = trimmed.length ? trimmed : null;
+  }
+
+  // Update defaultLocationId if provided
+  if (body.defaultLocationId !== undefined) {
+    const locationId = parseInt(body.defaultLocationId);
+    if (!isNaN(locationId)) {
+      // Verify location exists
+      const location = await prisma.location.findUnique({
+        where: { id: locationId },
+      });
+      if (!location) {
+        return NextResponse.json({ error: "Invalid location" }, { status: 400 });
+      }
+      updateData.defaultLocationId = locationId;
+    }
+  }
+
+  if (Object.keys(updateData).length === 0) {
+    return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
+  }
+
+  const updatedUser = await prisma.user.update({
+    where: { id: sessionUser.id },
+    data: updateData,
+    select: {
+      emailAlerts: true,
+      defaultLocationId: true,
+      phoneNumber: true,
+      minLocationEmailAlerts: true,
+      minLocationSmsAlerts: true,
+      minCombinedEmailAlerts: true,
+      minCombinedSmsAlerts: true,
+    },
+  });
+
+  return NextResponse.json(updatedUser);
+});

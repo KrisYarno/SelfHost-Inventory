@@ -49,6 +49,15 @@ export type StockInRequest = {
   logType?: inventory_logs_logType;
 };
 
+export type InventoryTransferRequest = {
+  productId: number;
+  fromLocationId: number;
+  toLocationId: number;
+  quantity: number;
+  expectedFromVersion?: number;
+  expectedToVersion?: number;
+};
+
 // API Response types
 export type InventoryLogResponse = {
   logs: InventoryLogWithRelations[];
@@ -118,3 +127,51 @@ export type InventorySnapshot = {
     quantity: number;
   }>;
 };
+
+// Minimum breach tracking for alerting + UI
+export interface LocationMinBreach {
+  productId: number;
+  productName: string;
+  locationId: number;
+  locationName: string;
+  currentQuantity: number;
+  minQuantity: number;
+}
+
+export interface CombinedMinBreach {
+  productId: number;
+  productName: string;
+  totalQuantity: number;
+  combinedMinimum: number;
+  daysUntilEmpty: number | null;
+}
+
+// Batch transfer types for Stock In feature
+export interface BatchTransferRequest {
+  productId: number;
+  toLocationId: number;
+  transfers: Array<{
+    fromLocationId: number;
+    quantity: number;
+    expectedVersion?: number;
+  }>;
+}
+
+export interface BatchTransferResult {
+  success: boolean;
+  results: Array<{
+    fromLocationId: number;
+    quantity: number;
+    success: boolean;
+    error?: string;
+  }>;
+  totalTransferred: number;
+  batchId: string;
+}
+
+export interface ProductLocationQuantity {
+  locationId: number;
+  locationName: string;
+  quantity: number;
+  version: number;
+}

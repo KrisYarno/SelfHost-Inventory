@@ -1,33 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved } from "@/lib/api-utils";
+import { requireApproved, apiHandler } from "@/lib/api-utils";
 import { OrderLockResponse } from "@/types/orders";
 
-export async function POST(request: NextRequest, _context: { params: { orderId: string } }) {
-  try {
-    const { user } = await requireApproved();
+export const POST = apiHandler(async (request: NextRequest, _context: { params: { orderId: string } }) => {
+  const { user } = await requireApproved();
 
-    const body = await request.json();
-    const { userId: _userId } = body;
+  const body = await request.json();
+  const { userId: _userId } = body;
 
-    // Mock implementation - replace with actual database logic
-    // In a real implementation, you would:
-    // 1. Check if the order exists
-    // 2. Check if it's already locked by another user
-    // 3. Update the order with lock information
-    // 4. Return the lock details
+  const response: OrderLockResponse = {
+    success: true,
+    lockedBy: {
+      userId: user.id,
+      userName: user.name || "Unknown User",
+      lockedAt: new Date(),
+    },
+  };
 
-    const response: OrderLockResponse = {
-      success: true,
-      lockedBy: {
-        userId: user.id,
-        userName: user.name || "Unknown User",
-        lockedAt: new Date(),
-      },
-    };
-
-    return NextResponse.json(response);
-  } catch (error) {
-    console.error("Error locking order:", error);
-    return NextResponse.json({ error: "Failed to lock order" }, { status: 500 });
-  }
-}
+  return NextResponse.json(response);
+});

@@ -1,65 +1,58 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/api-utils";
+import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { validateCSRFToken } from "@/lib/csrf";
+import { CreateLocationSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
 
-export async function POST(request: NextRequest) {
-  try {
-    await requireAdmin();
+export const POST = apiHandler(async (request: NextRequest) => {
+  await requireAdmin();
 
-    // Validate CSRF token
-    const isValidCSRF = await validateCSRFToken(request);
-    if (!isValidCSRF) {
-      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-    }
-
-    const { name } = await request.json();
-
-    if (!name || typeof name !== "string" || name.trim().length === 0) {
-      return NextResponse.json({ error: "Location name is required" }, { status: 400 });
-    }
-
-    // Check if location already exists
-    const existing = await prisma.location.findFirst({
-      where: {
-        name: {
-          equals: name.trim(),
-        },
-      },
-    });
-
-    if (existing) {
-      return NextResponse.json(
-        { error: "Location with this name already exists" },
-        { status: 400 }
-      );
-    }
-
-    // Get the next available ID (since location.id is not auto-increment)
-    const maxIdResult = await prisma.location.aggregate({
-      _max: {
-        id: true,
-      },
-    });
-
-    const nextId = (maxIdResult._max.id || 0) + 1;
-
-    // Create new location
-    const location = await prisma.location.create({
-      data: {
-        id: nextId,
-        name: name.trim(),
-      },
-    });
-
-    return NextResponse.json({
-      location,
-      message: "Location created successfully",
-    });
-  } catch (error) {
-    console.error("Error creating location:", error);
-    return NextResponse.json({ error: "Failed to create location" }, { status: 500 });
+  // Validate CSRF token
+  const isValidCSRF = await validateCSRFToken(request);
+  if (!isValidCSRF) {
+    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
   }
-}
+
+  const body = await request.json();
+  const parsed = CreateLocationSchema.parse(body);
+
+  // Check if location already exists
+  const existing = await prisma.location.findFirst({
+    where: {
+      name: {
+        equals: parsed.name,
+      },
+    },
+  });
+
+  if (existing) {
+    return NextResponse.json(
+      { error: "Location with this name already exists" },
+      { status: 400 }
+    );
+  }
+
+  // Get the next available ID (since location.id is not auto-increment)
+  const maxIdResult = await prisma.location.aggregate({
+    _max: {
+      id: true,
+    },
+  });
+
+  const nextId = (maxIdResult._max.id || 0) + 1;
+
+  // Create new location
+  const location = await prisma.location.create({
+    data: {
+      id: nextId,
+      name: parsed.name,
+    },
+  });
+
+  return NextResponse.json({
+    location,
+    message: "Location created successfully",
+  });
+});

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, ClipboardList } from "lucide-react";
+import { Home, Package, Settings, Warehouse, ClipboardList, Truck, ShoppingCart } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -31,9 +31,21 @@ const navigation = [
     icon: ClipboardList,
     label: "Journal",
   },
+  {
+    name: "Stocker",
+    href: "/stocker",
+    icon: Truck,
+    label: "Stocker",
+  },
 ];
 
 const adminNavigation = [
+  {
+    name: "Orders",
+    href: "/orders",
+    icon: ShoppingCart,
+    label: "Orders",
+  },
   {
     name: "Admin",
     href: "/admin",
@@ -50,7 +62,7 @@ export function MobileNav() {
   const allNavigation = [...navigation, ...(isAdmin ? adminNavigation : [])];
 
   return (
-    <nav className="fixed bottom-0 z-50 w-full border-t border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 md:hidden pb-[env(safe-area-inset-bottom)]">
+    <nav className="fixed bottom-0 z-50 w-full border-t border-border bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/60 md:hidden pb-[env(safe-area-inset-bottom)]">
       <div className="flex h-14 items-center justify-around px-2">
         {allNavigation.map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);

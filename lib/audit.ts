@@ -2,7 +2,7 @@ import prisma from '@/lib/prisma'
 import { headers } from 'next/headers'
 import { v4 as uuidv4 } from 'uuid'
 
-export type AuditActionType = 
+export type AuditActionType =
   | 'USER_APPROVAL'
   | 'USER_REJECTION'
   | 'USER_DELETION'
@@ -17,6 +17,10 @@ export type AuditActionType =
   | 'INVENTORY_STOCK_IN'
   | 'INVENTORY_DEDUCTION'
   | 'INVENTORY_BULK_UPDATE'
+  | 'INVENTORY_TRANSFER'
+  | 'INVENTORY_TRANSFER_AUTO_ADD'
+  | 'EXTERNAL_ORDER_FULFILLMENT'
+  | 'EXTERNAL_ORDER_PARTIAL_FULFILLMENT'
   | 'LOCATION_CREATE'
   | 'LOCATION_UPDATE'
   | 'LOCATION_DELETE'
@@ -168,6 +172,23 @@ class AuditService {
   }
 
   /**
+   * Log bulk user deletion
+   */
+  async logBulkUserDeletion(userId: number, userIds: number[], emails: string[]): Promise<void> {
+    const batchId = this.startBatch()
+    await this.log({
+      userId,
+      actionType: 'USER_DELETION',
+      entityType: 'USER',
+      action: `Bulk deleted ${userIds.length} users`,
+      details: { userIds, emails },
+      affectedCount: userIds.length,
+      batchId
+    })
+    this.endBatch()
+  }
+
+  /**
    * Log product creation
    */
   async logProductCreate(userId: number, productId: number, productName: string): Promise<void> {
@@ -220,6 +241,59 @@ class AuditService {
       entityId: productId,
       action: `Adjusted inventory for "${productName}" by ${delta > 0 ? '+' : ''}${delta}`,
       details: { productName, delta, locationId }
+    })
+  }
+
+  /**
+   * Log an inventory transfer between two locations
+   */
+  async logInventoryTransfer(
+    userId: number,
+    productId: number,
+    productName: string,
+    quantity: number,
+    fromLocationId: number,
+    fromLocationName: string,
+    toLocationId: number,
+    toLocationName: string,
+    batchId?: string,
+  ): Promise<void> {
+    await this.log({
+      userId,
+      actionType: 'INVENTORY_TRANSFER',
+      entityType: 'INVENTORY',
+      entityId: productId,
+      action: `Transferred ${quantity} units of "${productName}" from ${fromLocationName} → ${toLocationName}`,
+      details: {
+        productId,
+        productName,
+        quantity,
+        fromLocationId,
+        fromLocationName,
+        toLocationId,
+        toLocationName,
+      },
+      batchId,
+    })
+  }
+
+  /**
+   * Log an auto-add used to complete a transfer
+   */
+  async logInventoryTransferAutoAdd(
+    userId: number,
+    productId: number,
+    productName: string,
+    delta: number,
+    locationId: number,
+  ): Promise<void> {
+    await this.log({
+      userId,
+      actionType: 'INVENTORY_TRANSFER_AUTO_ADD',
+      entityType: 'INVENTORY',
+      entityId: productId,
+      action: `Auto-added ${delta} units of "${productName}" at location ${locationId} to complete a transfer`,
+      details: { productId, productName, delta, locationId },
     })
   }
 

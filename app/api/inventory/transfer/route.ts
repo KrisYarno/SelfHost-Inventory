@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved } from "@/lib/api-utils";
-import { ZodError } from "zod";
+import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import {
   createInventoryTransfer,
@@ -10,11 +9,11 @@ import {
 import { TransferSchema } from "@/lib/validation/inventory";
 import { auditService } from "@/lib/audit";
 import { validateCSRFToken } from "@/lib/csrf";
-import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
+import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 
 export const dynamic = "force-dynamic";
 
-export async function POST(request: NextRequest) {
+export const POST = apiHandler(async (request: NextRequest) => {
   let batchStarted = false;
 
   try {
@@ -111,41 +110,9 @@ export async function POST(request: NextRequest) {
       batchId,
     });
     return applyRateLimitHeaders(response, rateLimitHeaders);
-  } catch (error: unknown) {
-    if (error instanceof RateLimitError) {
-      return NextResponse.json(
-        { error: error.message },
-        { status: error.status, headers: error.headers }
-      );
-    }
-
-    if (error instanceof ZodError) {
-      return NextResponse.json(
-        {
-          error: "Invalid request payload",
-          details: error.flatten().fieldErrors,
-        },
-        { status: 400 }
-      );
-    }
-
-    if (error instanceof OptimisticLockError) {
-      return NextResponse.json(
-        {
-          error: error.message,
-          type: "OPTIMISTIC_LOCK_ERROR",
-          currentVersion: error.currentVersion,
-          expectedVersion: error.expectedVersion,
-        },
-        { status: 409 }
-      );
-    }
-
-    console.error("Error performing inventory transfer:", error);
-    return NextResponse.json({ error: "Failed to perform inventory transfer" }, { status: 500 });
   } finally {
     if (batchStarted) {
       auditService.endBatch();
     }
   }
-}
+});

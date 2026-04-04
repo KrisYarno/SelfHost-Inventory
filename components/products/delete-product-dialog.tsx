@@ -13,6 +13,7 @@ import { Product } from "@/types/product";
 import { toast } from "sonner";
 import { AlertTriangle } from "lucide-react";
 import { useDeleteProduct } from "@/hooks/use-products";
+import { useCSRF } from "@/hooks/use-csrf";
 
 interface DeleteProductDialogProps {
   product: Product | null;
@@ -25,16 +26,42 @@ export function DeleteProductDialog({
   open,
   onOpenChange,
 }: DeleteProductDialogProps) {
-  const deleteProduct = useDeleteProduct();
+  const { token: csrfToken, isLoading: csrfLoading, error: csrfError, refreshToken } = useCSRF();
+  const deleteProduct = useDeleteProduct(csrfToken || undefined);
 
   const handleDelete = async () => {
     if (!product) return;
+    if (!deleteProduct.isReady) {
+      toast.error("Preparing delete request. Please try again in a moment.");
+      if (csrfError) {
+        await refreshToken();
+      }
+      return;
+    }
     
     try {
       await deleteProduct.mutateAsync(product.id);
-      toast.success(`Product "${product.name}" has been deleted`);
+      toast.success(`Product "${product.name}" has been deleted (soft delete)`);
       onOpenChange(false);
     } catch (error) {
+      const status = (error as any)?.status;
+      if (status === 400 && error instanceof Error && error.message.includes("already deleted")) {
+        toast.success(`Product "${product.name}" is already deleted`);
+        onOpenChange(false);
+        return;
+      }
+      if (status === 401 || status === 403) {
+        toast.error("Delete requires admin access and a valid session. Please refresh/sign in.");
+        return;
+      }
+      if (status === 404) {
+        toast.error("Product not found. Please refresh the page.");
+        return;
+      }
+      if (status === 403 && error instanceof Error && error.message.toLowerCase().includes("csrf")) {
+        toast.error("Security check failed. Refresh and try again.");
+        return;
+      }
       console.error("Error deleting product:", error);
       toast.error(error instanceof Error ? error.message : "Failed to delete product");
     }
@@ -71,6 +98,12 @@ export function DeleteProductDialog({
           </div>
         )}
         
+        {csrfError && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
+            Unable to load security token. Please refresh and try again.
+          </div>
+        )}
+        
         <DialogFooter>
           <Button
             variant="outline"
@@ -82,7 +115,7 @@ export function DeleteProductDialog({
           <Button
             variant="destructive"
             onClick={handleDelete}
-            disabled={deleteProduct.isPending}
+            disabled={deleteProduct.isPending || csrfLoading || !deleteProduct.isReady}
           >
             {deleteProduct.isPending ? (
               <>

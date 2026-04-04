@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useRef, TouchEvent } from "react";
+import { useState, TouchEvent } from "react";
 import { formatDistanceToNow } from "date-fns";
-import { Package, Clock, Lock, ChevronRight } from "lucide-react";
+import { Package, Lock, ChevronRight } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -52,14 +52,14 @@ export function OrderCard({ order, onSelect, onSwipe, className }: OrderCardProp
   const itemCount = order.items.reduce((sum, item) => sum + item.quantity, 0);
   const timeElapsed = formatDistanceToNow(new Date(order.createdAt), { addSuffix: true });
   const isLocked = !!order.lockedBy;
-  const isOwnLock = order.lockedBy?.userId === 'current-user-id'; // Replace with actual user ID
+  const isOwnLock = order.lockedBy?.userId === 0; // TODO: Replace with actual user ID from session
 
-  // Status colors
+  // Status colors using semantic tokens
   const statusColors = {
-    pending: 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400',
-    packing: 'bg-blue-500/10 text-blue-700 dark:text-blue-400',
-    completed: 'bg-green-500/10 text-green-700 dark:text-green-400',
-    cancelled: 'bg-red-500/10 text-red-700 dark:text-red-400',
+    pending: 'bg-warning-muted text-warning-foreground',
+    packing: 'bg-info-muted text-info-foreground',
+    completed: 'bg-positive-muted text-positive-foreground',
+    cancelled: 'bg-negative-muted text-negative-foreground',
   };
 
   return (

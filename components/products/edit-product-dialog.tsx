@@ -29,7 +29,7 @@ export function EditProductDialog({
   const router = useRouter();
   const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
 
-  const handleSubmit = async (data: any) => {
+  const handleSubmit = async (data: ProductFormData) => {
     if (!product) return;
     
     try {

@@ -6,49 +6,37 @@ import { cn } from '@/lib/utils';
 
 interface StockLevelBadgeProps {
   quantity: number;
-  lowStockThreshold?: number;
-  outOfStockThreshold?: number;
+  threshold?: number;
   className?: string;
   showQuantity?: boolean;
 }
 
 export function StockLevelBadge({
   quantity,
-  lowStockThreshold = 10,
-  outOfStockThreshold = 0,
+  threshold = 0,
   className,
   showQuantity = true,
 }: StockLevelBadgeProps) {
-  const getStockStatus = () => {
-    if (quantity <= outOfStockThreshold) {
-      return {
-        label: 'Out of Stock',
-        variant: 'destructive' as const,
-        className: 'bg-red-500 hover:bg-red-600',
-      };
-    } else if (quantity <= lowStockThreshold) {
-      return {
-        label: 'Low Stock',
-        variant: 'secondary' as const,
-        className: 'bg-orange-500 hover:bg-orange-600 text-white',
-      };
-    } else {
-      return {
-        label: 'In Stock',
-        variant: 'default' as const,
-        className: 'bg-green-500 hover:bg-green-600',
-      };
-    }
-  };
+  const isOut = quantity <= 0;
+  const isLow = !isOut && threshold > 0 && quantity <= threshold;
 
-  const status = getStockStatus();
+  let label = 'In Stock';
+  let variant: 'default' | 'secondary' | 'destructive' = 'default';
+  let styles = 'bg-positive-muted text-positive-foreground border border-positive-border';
+
+  if (isOut) {
+    label = 'Out of Stock';
+    variant = 'destructive';
+    styles = 'bg-negative-muted text-negative-foreground border border-negative-border';
+  } else if (isLow) {
+    label = 'Below Minimum';
+    variant = 'secondary';
+    styles = 'bg-warning-muted text-warning-foreground border border-warning-border';
+  }
 
   return (
-    <Badge 
-      variant={status.variant}
-      className={cn(status.className, className)}
-    >
-      {showQuantity ? `${quantity} units` : status.label}
+    <Badge variant={variant} className={cn(styles, className)}>
+      {showQuantity ? `${quantity} units` : label}
     </Badge>
   );
 }
@@ -80,11 +68,11 @@ export function StockLevelIndicator({
         <div
           className={cn(
             'h-full transition-all duration-300',
-            isOutOfStock 
-              ? 'bg-red-500' 
-              : isLowStock 
-              ? 'bg-orange-500' 
-              : 'bg-green-500'
+            isOutOfStock
+              ? 'bg-negative'
+              : isLowStock
+              ? 'bg-warning'
+              : 'bg-positive'
           )}
           style={{ width: `${percentage}%` }}
         />

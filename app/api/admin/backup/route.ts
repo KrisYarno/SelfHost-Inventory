@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { requireAdmin } from "@/lib/api-utils";
+import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -25,60 +25,50 @@ function parseDatabaseUrl(url: string) {
   }
 }
 
-export async function GET(req: NextRequest) {
-  try {
-    await requireAdmin();
+export const GET = apiHandler(async (req: NextRequest) => {
+  await requireAdmin();
 
-    const { searchParams } = new URL(req.url);
-    const list = searchParams.get("list");
-    const file = searchParams.get("file");
-    const dir = getBackupDir();
-    if (list) {
-      const entries = await fs.readdir(dir).catch(() => []);
-      const files = (entries || [])
-        .filter((f) => f.endsWith(".sql") || f.endsWith(".sql.gz"))
-        .map((name) => ({ name, mtimeMs: 0 }));
-      // Get mtimes
-      for (const f of files) {
-        try {
-          const st = await fs.stat(path.join(dir, f.name));
-          f.mtimeMs = st.mtimeMs;
-        } catch {}
-      }
-      files.sort((a, b) => b.mtimeMs - a.mtimeMs);
-      return new Response(JSON.stringify({ files }), {
-        headers: { "content-type": "application/json" },
-      });
+  const { searchParams } = new URL(req.url);
+  const list = searchParams.get("list");
+  const file = searchParams.get("file");
+  const dir = getBackupDir();
+  if (list) {
+    const entries = await fs.readdir(dir).catch(() => []);
+    const files = (entries || [])
+      .filter((f) => f.endsWith(".sql") || f.endsWith(".sql.gz"))
+      .map((name) => ({ name, mtimeMs: 0 }));
+    // Get mtimes
+    for (const f of files) {
+      try {
+        const st = await fs.stat(path.join(dir, f.name));
+        f.mtimeMs = st.mtimeMs;
+      } catch {}
     }
-
-    if (file) {
-      const full = path.join(dir, path.basename(file));
-      const data = await fs.readFile(full);
-      const isGz = full.endsWith(".sql.gz");
-      // Convert Node Buffer -> fresh ArrayBuffer (not SharedArrayBuffer)
-      const ab = new Uint8Array(data).buffer;
-      return new Response(ab, {
-        headers: {
-          "content-type": isGz ? "application/gzip" : "application/sql",
-          "content-disposition": `attachment; filename="${path.basename(full)}"`,
-        },
-      });
-    }
-
-    return new Response(JSON.stringify({ error: "Bad request" }), { status: 400 });
-  } catch (e: any) {
-    const status = e?.statusCode || 500;
-    return new Response(JSON.stringify({ error: e?.message || "Failed" }), { status });
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return new Response(JSON.stringify({ files }), {
+      headers: { "content-type": "application/json" },
+    });
   }
-}
 
-export async function POST() {
-  try {
-    await requireAdmin();
-  } catch (e: any) {
-    const status = e?.statusCode || 500;
-    return new Response(JSON.stringify({ error: e?.message || "Unauthorized" }), { status });
+  if (file) {
+    const full = path.join(dir, path.basename(file));
+    const data = await fs.readFile(full);
+    const isGz = full.endsWith(".sql.gz");
+    // Convert Node Buffer -> fresh ArrayBuffer (not SharedArrayBuffer)
+    const ab = new Uint8Array(data).buffer;
+    return new Response(ab, {
+      headers: {
+        "content-type": isGz ? "application/gzip" : "application/sql",
+        "content-disposition": `attachment; filename="${path.basename(full)}"`,
+      },
+    });
   }
+
+  return new Response(JSON.stringify({ error: "Bad request" }), { status: 400 });
+});
+
+export const POST = apiHandler(async () => {
+  await requireAdmin();
 
   const dir = getBackupDir();
   const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
@@ -96,68 +86,64 @@ export async function POST() {
     await fs.mkdir(dir, { recursive: true });
   } catch {}
 
-  try {
-    const buildArgs = (withRoutinesEvents: boolean) => [
-      "-h",
-      conn.host,
-      "-P",
-      String(conn.port || 3306),
-      "-u",
-      conn.user,
-      "--single-transaction",
-      "--quick",
-      "--no-tablespaces",
-      ...(withRoutinesEvents ? ["--routines", "--events"] : []),
-      conn.database,
-    ];
+  const buildArgs = (withRoutinesEvents: boolean) => [
+    "-h",
+    conn.host,
+    "-P",
+    String(conn.port || 3306),
+    "-u",
+    conn.user,
+    "--single-transaction",
+    "--quick",
+    "--no-tablespaces",
+    ...(withRoutinesEvents ? ["--routines", "--events"] : []),
+    conn.database,
+  ];
 
-    const runDump = (args: string[]) =>
-      new Promise<{ code: number; out: Buffer; err: Buffer }>((resolve) => {
-        const ps = spawn("mysqldump", args, {
-          env: { ...process.env, MYSQL_PWD: conn.password },
-        });
-        const out: Buffer[] = [];
-        const err: Buffer[] = [];
-        ps.stdout.on("data", (chunk: Buffer) => out.push(chunk));
-        ps.stderr.on("data", (chunk: Buffer) => err.push(chunk));
-        ps.on("error", (e) =>
-          resolve({ code: 127, out: Buffer.concat(out), err: Buffer.from(String(e)) })
-        );
-        ps.on("close", (code) =>
-          resolve({ code: code ?? 1, out: Buffer.concat(out), err: Buffer.concat(err) })
-        );
+  const runDump = (args: string[]) =>
+    new Promise<{ code: number; out: Buffer; err: Buffer }>((resolve) => {
+      const ps = spawn("mysqldump", args, {
+        env: { ...process.env, MYSQL_PWD: conn.password },
       });
-
-    // Try with routines/events first, then fall back without them if it fails.
-    let res = await runDump(buildArgs(true));
-    if (res.code !== 0) {
-      res = await runDump(buildArgs(false));
-      if (res.code !== 0) {
-        return new Response(
-          JSON.stringify({
-            error: `mysqldump failed (code ${res.code})`,
-            details: res.err.toString(),
-          }),
-          { status: 500 }
-        );
-      }
-    }
-
-    // Write to file under /backup for persistence
-    try {
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(full, res.out);
-    } catch {}
-
-    // Return as download (Buffer -> fresh ArrayBuffer)
-    const ab = new Uint8Array(res.out).buffer;
-    return new Response(ab, {
-      headers: {
-        "content-type": "application/sql",
-        "content-disposition": `attachment; filename=\"${filename}\"`,
-      },
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      ps.stdout.on("data", (chunk: Buffer) => out.push(chunk));
+      ps.stderr.on("data", (chunk: Buffer) => err.push(chunk));
+      ps.on("error", (e) =>
+        resolve({ code: 127, out: Buffer.concat(out), err: Buffer.from(String(e)) })
+      );
+      ps.on("close", (code) =>
+        resolve({ code: code ?? 1, out: Buffer.concat(out), err: Buffer.concat(err) })
+      );
     });
-  } catch (e: any) {
-    return new Response(JSON.stringify({ error: e?.message || "Backup failed" }), { status: 500 });
+
+  // Try with routines/events first, then fall back without them if it fails.
+  let res = await runDump(buildArgs(true));
+  if (res.code !== 0) {
+    res = await runDump(buildArgs(false));
+    if (res.code !== 0) {
+      return new Response(
+        JSON.stringify({
+          error: `mysqldump failed (code ${res.code})`,
+          details: res.err.toString(),
+        }),
+        { status: 500 }
+      );
+    }
   }
-}
+
+  // Write to file under /backup for persistence
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(full, res.out);
+  } catch {}
+
+  // Return as download (Buffer -> fresh ArrayBuffer)
+  const ab = new Uint8Array(res.out).buffer;
+  return new Response(ab, {
+    headers: {
+      "content-type": "application/sql",
+      "content-disposition": `attachment; filename=\"${filename}\"`,
+    },
+  });
+});

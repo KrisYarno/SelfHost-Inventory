@@ -5,7 +5,10 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Download, HardDrive, RefreshCw } from "lucide-react";
 
-interface ListedFile { name: string; mtimeMs: number }
+interface ListedFile {
+  name: string;
+  mtimeMs: number;
+}
 
 export default function AdminBackupPage() {
   const [files, setFiles] = useState<ListedFile[]>([]);
@@ -37,7 +40,7 @@ export default function AdminBackupPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `backup-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.sql`;
+      a.download = `backup-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.sql`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -67,11 +70,20 @@ export default function AdminBackupPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">Database Backups</h1>
-          <p className="text-muted-foreground">Create a manual backup and download or retrieve the latest backups from the backup volume.</p>
+          <p className="text-muted-foreground">
+            Create a manual backup and download or retrieve the latest backups from the backup
+            volume.
+          </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={fetchList}><RefreshCw className="h-4 w-4 mr-2" />Refresh</Button>
-          <Button onClick={createBackup} disabled={loading}><HardDrive className="h-4 w-4 mr-2" />{loading ? "Creating…" : "Create Backup"}</Button>
+          <Button variant="outline" onClick={fetchList}>
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+          <Button onClick={createBackup} disabled={loading}>
+            <HardDrive className="h-4 w-4 mr-2" />
+            {loading ? "Creating…" : "Create Backup"}
+          </Button>
         </div>
       </div>
 
@@ -102,4 +114,3 @@ export default function AdminBackupPage() {
     </div>
   );
 }
-

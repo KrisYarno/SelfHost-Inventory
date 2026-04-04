@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved } from "@/lib/api-utils";
+import { requireApproved, apiHandler } from "@/lib/api-utils";
 import { Order } from "@/types/orders";
 
 // Mock order details - replace with actual database query
@@ -35,19 +35,14 @@ const getOrderById = (orderId: string): Order | null => {
   return mockOrders.find((order) => order.id === orderId) || null;
 };
 
-export async function GET(_request: NextRequest, { params }: { params: { orderId: string } }) {
-  try {
-    await requireApproved();
+export const GET = apiHandler(async (_request: NextRequest, { params }: { params: { orderId: string } }) => {
+  await requireApproved();
 
-    const order = getOrderById(params.orderId);
+  const order = getOrderById(params.orderId);
 
-    if (!order) {
-      return NextResponse.json({ error: "Order not found" }, { status: 404 });
-    }
-
-    return NextResponse.json(order);
-  } catch (error) {
-    console.error("Error fetching order:", error);
-    return NextResponse.json({ error: "Failed to fetch order" }, { status: 500 });
+  if (!order) {
+    return NextResponse.json({ error: "Order not found" }, { status: 404 });
   }
-}
+
+  return NextResponse.json(order);
+});

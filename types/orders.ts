@@ -22,7 +22,7 @@ export interface Order {
   total?: number
   notes?: string
   lockedBy?: {
-    userId: string
+    userId: number
     userName: string
     lockedAt: Date
   }
@@ -37,13 +37,13 @@ export interface OrdersResponse {
 
 export interface OrderLockRequest {
   orderId: string
-  userId: string
+  userId: number
 }
 
 export interface OrderLockResponse {
   success: boolean
   lockedBy?: {
-    userId: string
+    userId: number
     userName: string
     lockedAt: Date
   }

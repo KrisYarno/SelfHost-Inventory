@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import { decryptValue, isEncrypted } from "@/lib/encryption";
@@ -22,13 +23,11 @@ export const runtime = "nodejs";
  * 5. Tries to auto-map items using existing ProductLink records
  * 6. Returns 200 OK
  */
-export async function POST(
+export const POST = apiHandler(async (
   request: NextRequest,
   { params }: { params: { integrationId: string } }
-) {
+) => {
   const integrationId = params.integrationId;
-
-  try {
     // Read body as bytes FIRST (before JSON parsing) for HMAC verification
     const rawBodyBuffer = Buffer.from(await request.arrayBuffer());
     const rawBodyText = rawBodyBuffer.toString("utf8");
@@ -389,20 +388,13 @@ export async function POST(
       data: { lastSyncAt: new Date() },
     });
 
-    // 6. Return 200 OK
-    return NextResponse.json({
-      success: true,
-      orderId: externalOrder.id,
-      orderNumber: normalizedOrder.externalOrderNumber,
-    });
-  } catch (error) {
-    console.error(`Error processing webhook for ${integrationId}:`, error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
-  }
-}
+  // 6. Return 200 OK
+  return NextResponse.json({
+    success: true,
+    orderId: externalOrder.id,
+    orderNumber: normalizedOrder.externalOrderNumber,
+  });
+});
 
 function resolveWebhookSecret(
   integration: {

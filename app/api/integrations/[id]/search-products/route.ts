@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { ZodError } from 'zod';
-import { requireAdmin } from '@/lib/api-utils';
+import { requireAdmin, apiHandler } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import { enforceRateLimit, RateLimitError, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { SearchProductsQuerySchema } from '@/lib/validation/product-links';
@@ -17,89 +16,59 @@ interface RouteParams {
 /**
  * GET /api/integrations/[id]/search-products?q=search_term
  * Search external platform products
- *
- * This is currently a stub that returns mock data.
- * Actual platform API calls will be implemented later.
  */
-export async function GET(request: NextRequest, { params }: RouteParams) {
-  try {
-    const { user } = await requireAdmin();
+export const GET = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
+  const { user } = await requireAdmin();
 
-    const rateLimitHeaders = enforceRateLimit(request, 'integration-search:GET', {
-      identifier: user.id,
-      limit: 60, // Higher limit for search queries
-    });
+  const rateLimitHeaders = enforceRateLimit(request, 'integration-search:GET', {
+    identifier: user.id,
+    limit: 60,
+  });
 
-    const integrationId = params.id;
+  const integrationId = params.id;
 
-    // Get search query from URL params
-    const { searchParams } = new URL(request.url);
-    const q = searchParams.get('q');
+  // Get search query from URL params
+  const { searchParams } = new URL(request.url);
+  const q = searchParams.get('q');
 
-    const queryValidation = SearchProductsQuerySchema.parse({ q });
+  const queryValidation = SearchProductsQuerySchema.parse({ q });
 
-    // Check if integration exists and is active
-    const integration = await prisma.integration.findUnique({
-      where: {
-        id: integrationId,
-      },
-    });
+  // Check if integration exists and is active
+  const integration = await prisma.integration.findUnique({
+    where: {
+      id: integrationId,
+    },
+  });
 
-    if (!integration) {
-      return NextResponse.json({ error: 'Integration not found' }, { status: 404 });
-    }
+  if (!integration) {
+    return NextResponse.json({ error: 'Integration not found' }, { status: 404 });
+  }
 
-    if (!integration.isActive) {
-      return NextResponse.json(
-        { error: 'Integration is not active' },
-        { status: 400 }
-      );
-    }
-
-    // TODO: Implement actual platform API calls based on integration.platform
-    // For now, return mock data
-    const mockResults: ExternalProductSearchResult[] = generateMockSearchResults(
-      queryValidation.q,
-      integration.platform
-    );
-
-    const response = NextResponse.json({
-      query: queryValidation.q,
-      platform: integration.platform,
-      results: mockResults,
-      isStub: true, // Flag to indicate this is mock data
-    });
-
-    return applyRateLimitHeaders(response, rateLimitHeaders);
-  } catch (error) {
-    if (error instanceof RateLimitError) {
-      return NextResponse.json(
-        { error: error.message },
-        { status: error.status, headers: error.headers }
-      );
-    }
-
-    if (error instanceof ZodError) {
-      return NextResponse.json(
-        {
-          error: 'Invalid query parameters',
-          details: error.flatten().fieldErrors,
-        },
-        { status: 400 }
-      );
-    }
-
-    console.error('Error searching external products:', error);
+  if (!integration.isActive) {
     return NextResponse.json(
-      { error: 'Failed to search external products' },
-      { status: 500 }
+      { error: 'Integration is not active' },
+      { status: 400 }
     );
   }
-}
+
+  // TODO: Implement actual platform API calls based on integration.platform
+  const mockResults: ExternalProductSearchResult[] = generateMockSearchResults(
+    queryValidation.q,
+    integration.platform
+  );
+
+  const response = NextResponse.json({
+    query: queryValidation.q,
+    platform: integration.platform,
+    results: mockResults,
+    isStub: true,
+  });
+
+  return applyRateLimitHeaders(response, rateLimitHeaders);
+});
 
 /**
  * Generate mock search results for development/testing
- * This will be replaced with actual API calls to external platforms
  */
 function generateMockSearchResults(
   query: string,
@@ -133,7 +102,6 @@ function generateMockSearchResults(
     },
   ];
 
-  // Add platform-specific formatting
   if (platform === 'SHOPIFY') {
     return baseResults.map((result) => ({
       ...result,

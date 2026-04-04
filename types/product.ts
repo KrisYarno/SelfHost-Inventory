@@ -35,7 +35,7 @@ export interface ProductsResponse {
 // Filter options for product list
 export interface ProductFilters {
   search?: string;
-  sortBy?: "name" | "baseName" | "numericValue";
+  sortBy?: "name" | "baseName" | "numericValue" | "baseNameNumeric";
   sortOrder?: "asc" | "desc";
   page?: number;
   pageSize?: number;

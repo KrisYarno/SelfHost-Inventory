@@ -2,7 +2,6 @@
 
 import { ProductWithQuantity } from "@/types/product";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { MoreHorizontal, Edit, Trash2, TrendingUp, Package } from "lucide-react";
@@ -13,6 +12,8 @@ import {
   DropdownMenuTrigger,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { ValueChip } from "@/components/ui/value-chip";
+import { StatusBadge } from "@/components/ui/status-badge";
 
 interface ProductCardProps {
   product: ProductWithQuantity;
@@ -36,7 +37,7 @@ export function ProductCard({
   className,
 }: ProductCardProps) {
   return (
-    <Card 
+    <Card
       className={cn(
         "relative overflow-hidden transition-all duration-300 hover:shadow-lg",
         // Keep consistent height to reduce layout shift
@@ -112,13 +113,21 @@ export function ProductCard({
           </div>
 
           {/* Badges */}
-          <div className="flex items-center gap-2">
-            <Badge 
-              variant={product.currentQuantity > 0 ? "default" : "destructive"}
-              className="text-xs font-mono"
+          <div className="flex items-center gap-2 flex-wrap">
+            <ValueChip
+              tone={
+                product.currentQuantity > 0
+                  ? "positive"
+                  : product.currentQuantity < 0
+                  ? "negative"
+                  : "neutral"
+              }
             >
-              Qty: {product.currentQuantity}
-            </Badge>
+              {product.currentQuantity} units
+            </ValueChip>
+            {product.currentQuantity <= 0 && (
+              <StatusBadge tone="negative">Out</StatusBadge>
+            )}
           </div>
 
         </div>

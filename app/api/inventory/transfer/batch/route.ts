@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved } from "@/lib/api-utils";
-import { ZodError } from "zod";
+import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import {
   createInventoryTransfer,
@@ -10,17 +9,15 @@ import {
 import { BatchTransferSchema } from "@/lib/validation/inventory";
 import { auditService } from "@/lib/audit";
 import { validateCSRFToken } from "@/lib/csrf";
-import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
+import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import type { BatchTransferResult } from "@/types/inventory";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST /api/inventory/transfer/batch
- * Execute multiple transfers from various source locations to a single destination
- * Used by the Stock In feature on the Stocker page
  */
-export async function POST(request: NextRequest) {
+export const POST = apiHandler(async (request: NextRequest) => {
   let batchStarted = false;
 
   try {
@@ -136,7 +133,6 @@ export async function POST(request: NextRequest) {
           expectedFromVersion: transfer.expectedVersion,
         });
 
-        // Log the transfer
         const fromLocation = sourceLocationMap.get(transfer.fromLocationId)!;
         await auditService.logInventoryTransfer(
           user.id,
@@ -157,7 +153,6 @@ export async function POST(request: NextRequest) {
         });
         totalTransferred += transfer.quantity;
       } catch (error) {
-        // Record the failure but continue with remaining transfers
         const errorMessage =
           error instanceof OptimisticLockError
             ? "Inventory was modified by another user"
@@ -183,35 +178,12 @@ export async function POST(request: NextRequest) {
     };
 
     const httpResponse = NextResponse.json(response, {
-      status: allSucceeded ? 200 : 207, // 207 Multi-Status for partial success
+      status: allSucceeded ? 200 : 207,
     });
     return applyRateLimitHeaders(httpResponse, rateLimitHeaders);
-  } catch (error: unknown) {
-    if (error instanceof RateLimitError) {
-      return NextResponse.json(
-        { error: error.message },
-        { status: error.status, headers: error.headers }
-      );
-    }
-
-    if (error instanceof ZodError) {
-      return NextResponse.json(
-        {
-          error: "Invalid request payload",
-          details: error.flatten().fieldErrors,
-        },
-        { status: 400 }
-      );
-    }
-
-    console.error("Error performing batch inventory transfer:", error);
-    return NextResponse.json(
-      { error: "Failed to perform batch inventory transfer" },
-      { status: 500 }
-    );
   } finally {
     if (batchStarted) {
       auditService.endBatch();
     }
   }
-}
+});

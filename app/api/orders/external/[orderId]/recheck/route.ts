@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved } from "@/lib/api-utils";
+import { requireApproved, apiHandler } from "@/lib/api-utils";
 import { validateCSRFToken } from "@/lib/csrf";
 import prisma from "@/lib/prisma";
 import { decryptValue, isEncrypted } from "@/lib/encryption";
@@ -63,126 +63,119 @@ async function fetchWooOrder(baseUrl: string, consumerKey: string, consumerSecre
   return await resp.json();
 }
 
-export async function POST(
+export const POST = apiHandler(async (
   request: NextRequest,
   { params }: { params: { orderId: string } }
-) {
-  try {
-    const { user } = await requireApproved();
+) => {
+  const { user } = await requireApproved();
 
-    const isValidCSRF = await validateCSRFToken(request);
-    if (!isValidCSRF) {
-      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-    }
+  const isValidCSRF = await validateCSRFToken(request);
+  if (!isValidCSRF) {
+    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
+  }
 
-    const order = await prisma.externalOrder.findUnique({
-      where: { id: params.orderId },
-      include: {
-        integration: true,
-      },
+  const order = await prisma.externalOrder.findUnique({
+    where: { id: params.orderId },
+    include: {
+      integration: true,
+    },
+  });
+
+  if (!order || !order.integration) {
+    return NextResponse.json({ error: "Order not found" }, { status: 404 });
+  }
+
+  // Ensure user is in the same company (admin can bypass)
+  if (!user.isAdmin) {
+    const membership = await prisma.userCompany.findFirst({
+      where: { userId: user.id, companyId: order.companyId },
     });
-
-    if (!order || !order.integration) {
-      return NextResponse.json({ error: "Order not found" }, { status: 404 });
+    if (!membership) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
+  }
 
-    // Ensure user is in the same company (admin can bypass)
-    if (!user.isAdmin) {
-      const membership = await prisma.userCompany.findFirst({
-        where: { userId: user.id, companyId: order.companyId },
-      });
-      if (!membership) {
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-      }
+  const platform = order.integration.platform as PlatformType;
+  const apiKey = decryptOrNull(order.integration.encryptedApiKey);
+  const apiSecret = decryptOrNull(order.integration.encryptedApiSecret);
+
+  let remoteOrder: any;
+  if (platform === "SHOPIFY") {
+    if (!apiKey) {
+      return NextResponse.json({ error: "Missing Shopify Admin API token" }, { status: 400 });
     }
-
-    const platform = order.integration.platform as PlatformType;
-    const apiKey = decryptOrNull(order.integration.encryptedApiKey);
-    const apiSecret = decryptOrNull(order.integration.encryptedApiSecret);
-
-    let remoteOrder: any;
-    if (platform === "SHOPIFY") {
-      if (!apiKey) {
-        return NextResponse.json({ error: "Missing Shopify Admin API token" }, { status: 400 });
-      }
-      const shopDomain = hostFromStoreUrl(order.integration.storeUrl);
-      remoteOrder = await fetchShopifyOrder(shopDomain, apiKey, order.externalId);
-    } else if (platform === "WOOCOMMERCE") {
-      if (!apiKey || !apiSecret) {
-        return NextResponse.json({ error: "Missing WooCommerce API credentials" }, { status: 400 });
-      }
-      remoteOrder = await fetchWooOrder(order.integration.storeUrl, apiKey, apiSecret, order.externalId);
-    } else {
-      return NextResponse.json({ error: "Unsupported platform" }, { status: 400 });
+    const shopDomain = hostFromStoreUrl(order.integration.storeUrl);
+    remoteOrder = await fetchShopifyOrder(shopDomain, apiKey, order.externalId);
+  } else if (platform === "WOOCOMMERCE") {
+    if (!apiKey || !apiSecret) {
+      return NextResponse.json({ error: "Missing WooCommerce API credentials" }, { status: 400 });
     }
+    remoteOrder = await fetchWooOrder(order.integration.storeUrl, apiKey, apiSecret, order.externalId);
+  } else {
+    return NextResponse.json({ error: "Unsupported platform" }, { status: 400 });
+  }
 
-    const adapter = getPlatformAdapter(platform);
-    const normalized = adapter.parseOrderWebhook(JSON.stringify(remoteOrder));
-    const derivedMeta = deriveExternalOrderMeta({
-      platform,
-      storeUrl: order.integration.storeUrl,
-      externalId: normalized.externalId,
-      normalized,
-      rawPayload: normalized.rawPayload as any,
-    });
+  const adapter = getPlatformAdapter(platform);
+  const normalized = adapter.parseOrderWebhook(JSON.stringify(remoteOrder));
+  const derivedMeta = deriveExternalOrderMeta({
+    platform,
+    storeUrl: order.integration.storeUrl,
+    externalId: normalized.externalId,
+    normalized,
+    rawPayload: normalized.rawPayload as any,
+  });
 
-    const externalOrder = await prisma.externalOrder.upsert({
-      where: {
-        integrationId_externalId: {
-          integrationId: order.integration.id,
-          externalId: normalized.externalId,
-        },
-      },
-      create: {
-        companyId: order.companyId,
+  const externalOrder = await prisma.externalOrder.upsert({
+    where: {
+      integrationId_externalId: {
         integrationId: order.integration.id,
         externalId: normalized.externalId,
-        orderNumber: normalized.externalOrderNumber,
-        nativeStatus: normalized.nativeStatus,
-        financialStatus: normalized.financialStatus,
-        fulfillmentStatus: normalized.fulfillmentStatus,
-        platformStatusRaw: derivedMeta.platformStatusRaw as any,
-        externalStatusHash: derivedMeta.externalStatusHash,
-        externalOrderUrl: derivedMeta.externalOrderUrl,
-        total: normalized.total,
-        currency: normalized.currency,
-        customerEmail: normalized.customer?.email,
-        customerName: normalized.customer?.name,
-        rawPayload: normalized.rawPayload as any,
-        internalStatus: order.internalStatus,
-        externalCreatedAt: normalized.createdAt,
-        externalUpdatedAt: derivedMeta.externalUpdatedAt,
-        lastSeenAt: derivedMeta.lastSeenAt,
       },
-      update: {
-        orderNumber: normalized.externalOrderNumber,
-        nativeStatus: normalized.nativeStatus,
-        financialStatus: normalized.financialStatus,
-        fulfillmentStatus: normalized.fulfillmentStatus,
-        platformStatusRaw: derivedMeta.platformStatusRaw as any,
-        externalStatusHash: derivedMeta.externalStatusHash,
-        externalOrderUrl: derivedMeta.externalOrderUrl,
-        total: normalized.total,
-        currency: normalized.currency,
-        customerEmail: normalized.customer?.email,
-        customerName: normalized.customer?.name,
-        rawPayload: normalized.rawPayload as any,
-        updatedAt: new Date(),
-        externalCreatedAt: normalized.createdAt,
-        externalUpdatedAt: derivedMeta.externalUpdatedAt,
-        lastSeenAt: derivedMeta.lastSeenAt,
-      },
-    });
-
-    return NextResponse.json({
-      success: true,
-      orderId: externalOrder.id,
+    },
+    create: {
+      companyId: order.companyId,
+      integrationId: order.integration.id,
+      externalId: normalized.externalId,
+      orderNumber: normalized.externalOrderNumber,
+      nativeStatus: normalized.nativeStatus,
+      financialStatus: normalized.financialStatus,
+      fulfillmentStatus: normalized.fulfillmentStatus,
+      platformStatusRaw: derivedMeta.platformStatusRaw as any,
+      externalStatusHash: derivedMeta.externalStatusHash,
+      externalOrderUrl: derivedMeta.externalOrderUrl,
+      total: normalized.total,
+      currency: normalized.currency,
+      customerEmail: normalized.customer?.email,
+      customerName: normalized.customer?.name,
+      rawPayload: normalized.rawPayload as any,
+      internalStatus: order.internalStatus,
+      externalCreatedAt: normalized.createdAt,
+      externalUpdatedAt: derivedMeta.externalUpdatedAt,
       lastSeenAt: derivedMeta.lastSeenAt,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    console.error("Error rechecking external order:", error);
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
-}
+    },
+    update: {
+      orderNumber: normalized.externalOrderNumber,
+      nativeStatus: normalized.nativeStatus,
+      financialStatus: normalized.financialStatus,
+      fulfillmentStatus: normalized.fulfillmentStatus,
+      platformStatusRaw: derivedMeta.platformStatusRaw as any,
+      externalStatusHash: derivedMeta.externalStatusHash,
+      externalOrderUrl: derivedMeta.externalOrderUrl,
+      total: normalized.total,
+      currency: normalized.currency,
+      customerEmail: normalized.customer?.email,
+      customerName: normalized.customer?.name,
+      rawPayload: normalized.rawPayload as any,
+      updatedAt: new Date(),
+      externalCreatedAt: normalized.createdAt,
+      externalUpdatedAt: derivedMeta.externalUpdatedAt,
+      lastSeenAt: derivedMeta.lastSeenAt,
+    },
+  });
 
+  return NextResponse.json({
+    success: true,
+    orderId: externalOrder.id,
+    lastSeenAt: derivedMeta.lastSeenAt,
+  });
+});

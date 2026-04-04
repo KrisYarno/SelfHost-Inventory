@@ -1,63 +1,56 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin } from "@/lib/api-utils";
+import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
+import { BulkUserIdsSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
 
-export async function POST(request: NextRequest) {
-  try {
-    const { user } = await requireAdmin();
+export const POST = apiHandler(async (request: NextRequest) => {
+  const { user } = await requireAdmin();
 
-    const { userIds, reason: _reason } = await request.json();
+  const body = await request.json();
+  const { userIds } = BulkUserIdsSchema.parse(body);
 
-    if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
-      return NextResponse.json({ error: "Invalid user IDs" }, { status: 400 });
-    }
+  // Get users before soft deletion for email notifications
+  const usersToReject = await prisma.user.findMany({
+    where: {
+      id: { in: userIds },
+      isApproved: false, // Only reject non-approved users
+      isAdmin: false, // Cannot reject admins
+      deletedAt: null, // Only reject active users
+    },
+    select: {
+      id: true,
+      email: true,
+      username: true,
+    },
+  });
 
-    // Get users before soft deletion for email notifications
-    const usersToReject = await prisma.user.findMany({
-      where: {
-        id: { in: userIds },
-        isApproved: false, // Only reject non-approved users
-        isAdmin: false, // Cannot reject admins
-        deletedAt: null, // Only reject active users
-      },
-      select: {
-        id: true,
-        email: true,
-        username: true,
-      },
-    });
-
-    if (usersToReject.length === 0) {
-      return NextResponse.json({
-        rejected: 0,
-        message: "No users to reject",
-      });
-    }
-
-    // Soft delete users
-    const updateResult = await prisma.user.updateMany({
-      where: {
-        id: { in: usersToReject.map((u) => u.id) },
-      },
-      data: { deletedAt: new Date() },
-    });
-
-    // Log the bulk rejection action
-    await auditService.logBulkUserRejection(
-      user.id,
-      usersToReject.map((u) => u.id),
-      usersToReject.map((u) => u.email)
-    );
-
+  if (usersToReject.length === 0) {
     return NextResponse.json({
-      rejected: updateResult.count,
-      message: `Successfully rejected ${updateResult.count} users`,
+      rejected: 0,
+      message: "No users to reject",
     });
-  } catch (error) {
-    console.error("Error bulk rejecting users:", error);
-    return NextResponse.json({ error: "Failed to reject users" }, { status: 500 });
   }
-}
+
+  // Soft delete users
+  const updateResult = await prisma.user.updateMany({
+    where: {
+      id: { in: usersToReject.map((u) => u.id) },
+    },
+    data: { deletedAt: new Date() },
+  });
+
+  // Log the bulk rejection action
+  await auditService.logBulkUserRejection(
+    user.id,
+    usersToReject.map((u) => u.id),
+    usersToReject.map((u) => u.email)
+  );
+
+  return NextResponse.json({
+    rejected: updateResult.count,
+    message: `Successfully rejected ${updateResult.count} users`,
+  });
+});

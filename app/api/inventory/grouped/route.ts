@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved } from "@/lib/api-utils";
+import { requireApproved, apiHandler } from "@/lib/api-utils";
 import { getCurrentInventoryLevelsFast } from "@/lib/inventory-fast";
 import prisma from "@/lib/prisma";
 import type { CurrentInventoryLevel } from "@/types/inventory";
@@ -14,100 +14,90 @@ interface GroupedInventory {
   locationCount: number;
 }
 
-export async function GET(request: NextRequest) {
-  try {
-    await requireApproved();
+export const GET = apiHandler(async (request: NextRequest) => {
+  await requireApproved();
 
-    const searchParams = request.nextUrl.searchParams;
-    const locationId = searchParams.get("locationId");
-    const page = parseInt(searchParams.get("page") || "1");
-    const pageSize = parseInt(searchParams.get("pageSize") || "12");
-    const search = searchParams.get("search") || "";
+  const searchParams = request.nextUrl.searchParams;
+  const locationId = searchParams.get("locationId");
+  const page = parseInt(searchParams.get("page") || "1");
+  const pageSize = parseInt(searchParams.get("pageSize") || "12");
+  const search = searchParams.get("search") || "";
 
-    // Get all inventory levels (we'll paginate after grouping)
-    const allInventory = await getCurrentInventoryLevelsFast(
-      locationId ? parseInt(locationId) : undefined
-    );
+  // Get all inventory levels (we'll paginate after grouping)
+  const allInventory = await getCurrentInventoryLevelsFast(
+    locationId ? parseInt(locationId) : undefined
+  );
 
-    // If no location is specified, we need to get inventory from all locations
-    if (!locationId) {
-      // Group by product to get all locations for each product
-      const productLocations = await prisma.product_locations.findMany({
-        include: {
-          products: true,
-          locations: true,
-        },
-      });
+  // If no location is specified, we need to get inventory from all locations
+  if (!locationId) {
+    const productLocations = await prisma.product_locations.findMany({
+      include: {
+        products: true,
+        locations: true,
+      },
+    });
 
-      // Convert to CurrentInventoryLevel format
-      const allInventoryWithLocations: CurrentInventoryLevel[] = productLocations.map((pl) => ({
-        productId: pl.productId,
-        product: pl.products,
-        locationId: pl.locationId,
-        location: pl.locations,
-        quantity: pl.quantity,
-        lastUpdated: new Date(0),
-      }));
+    const allInventoryWithLocations: CurrentInventoryLevel[] = productLocations.map((pl) => ({
+      productId: pl.productId,
+      product: pl.products,
+      locationId: pl.locationId,
+      location: pl.locations,
+      quantity: pl.quantity,
+      lastUpdated: new Date(0),
+    }));
 
-      // Use this for grouping instead
-      allInventory.length = 0;
-      allInventory.push(...allInventoryWithLocations);
+    allInventory.length = 0;
+    allInventory.push(...allInventoryWithLocations);
+  }
+
+  // Group inventory by baseName
+  const groups = new Map<string, CurrentInventoryLevel[]>();
+
+  allInventory.forEach((item) => {
+    const key = item.product.baseName || item.product.name;
+
+    if (search && !key.toLowerCase().includes(search.toLowerCase())) {
+      return;
     }
 
-    // Group inventory by baseName
-    const groups = new Map<string, CurrentInventoryLevel[]>();
+    const existing = groups.get(key) || [];
+    groups.set(key, [...existing, item]);
+  });
 
-    allInventory.forEach((item) => {
-      const key = item.product.baseName || item.product.name;
+  // Convert to array and calculate aggregated data
+  const groupedInventory: GroupedInventory[] = Array.from(groups.entries()).map(
+    ([baseName, items]) => {
+      const totalQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
+      const variants = new Set(items.map((item) => item.product.variant).filter(Boolean));
 
-      // Apply search filter if provided
-      if (search && !key.toLowerCase().includes(search.toLowerCase())) {
-        return;
-      }
+      return {
+        baseName,
+        items,
+        totalQuantity,
+        variantCount: variants.size,
+        locationCount: new Set(items.map((item) => item.locationId)).size,
+      };
+    }
+  );
 
-      const existing = groups.get(key) || [];
-      groups.set(key, [...existing, item]);
-    });
+  groupedInventory.sort((a, b) => a.baseName.localeCompare(b.baseName));
 
-    // Convert to array and calculate aggregated data
-    const groupedInventory: GroupedInventory[] = Array.from(groups.entries()).map(
-      ([baseName, items]) => {
-        const totalQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
-        const variants = new Set(items.map((item) => item.product.variant).filter(Boolean));
+  // Paginate the grouped results
+  const total = groupedInventory.length;
+  const totalPages = Math.ceil(total / pageSize);
+  const start = (page - 1) * pageSize;
+  const end = start + pageSize;
+  const paginatedGroups = groupedInventory.slice(start, end);
 
-        return {
-          baseName,
-          items,
-          totalQuantity,
-          variantCount: variants.size,
-          locationCount: new Set(items.map((item) => item.locationId)).size,
-        };
-      }
-    );
-
-    // Sort groups by baseName
-    groupedInventory.sort((a, b) => a.baseName.localeCompare(b.baseName));
-
-    // Paginate the grouped results
-    const total = groupedInventory.length;
-    const totalPages = Math.ceil(total / pageSize);
-    const start = (page - 1) * pageSize;
-    const end = start + pageSize;
-    const paginatedGroups = groupedInventory.slice(start, end);
-
-    return NextResponse.json({
-      groups: paginatedGroups,
-      pagination: {
-        page,
-        pageSize,
-        total,
-        totalPages,
-        hasMore: page < totalPages,
-      },
-      asOf: new Date(),
-    });
-  } catch (error) {
-    console.error("Error fetching grouped inventory:", error);
-    return NextResponse.json({ error: "Failed to fetch grouped inventory" }, { status: 500 });
-  }
-}
+  return NextResponse.json({
+    groups: paginatedGroups,
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages,
+      hasMore: page < totalPages,
+    },
+    asOf: new Date(),
+  });
+});

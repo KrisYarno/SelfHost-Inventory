@@ -50,10 +50,10 @@ export function GroupedProductCard({
   const firstProduct = productGroup[0];
 
   return (
-    <Card className="group overflow-hidden hover:shadow-md transition-shadow">
+    <Card className="group overflow-hidden hover:shadow-md transition-shadow surface-elevated border-none ring-1 ring-border/50">
       <CardContent className="p-0">
         {/* Main Product Section */}
-        <div className="p-4 sm:p-6 space-y-3 sm:space-y-4">
+        <div className="p-[var(--card-padding)] space-y-3 sm:space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-1 flex-1 min-w-0">
               <h3 className="font-semibold text-base sm:text-lg truncate">{aggregatedData.baseName}</h3>
@@ -80,7 +80,7 @@ export function GroupedProductCard({
             <div className="flex items-center gap-2">
               <StockLevelBadge 
                 quantity={aggregatedData.totalQuantity} 
-                lowStockThreshold={aggregatedData.lowStockThreshold}
+                threshold={aggregatedData.lowStockThreshold}
                 showQuantity={false}
               />
               {productGroup.length > 1 && (
@@ -165,7 +165,7 @@ export function GroupedProductCard({
                     <div className="flex items-center gap-2 sm:gap-3">
                       <StockLevelBadge 
                         quantity={item.quantity} 
-                        lowStockThreshold={item.product.lowStockThreshold || 10}
+                        threshold={item.product.lowStockThreshold || 10}
                         showQuantity={false}
                         className="h-5 sm:h-6"
                       />
