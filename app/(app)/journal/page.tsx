@@ -362,7 +362,7 @@ export default function JournalPage() {
           <CardTitle id="products-heading">Products</CardTitle>
         </CardHeader>
         <CardContent role="main" aria-labelledby="products-heading">
-          <ScrollArea className="h-[calc(100vh-20rem)] sm:h-[600px]" aria-label="Products list">
+          <ScrollArea className="h-[calc(100dvh-26rem)] sm:h-[600px]" aria-label="Products list">
             <div
               className="space-y-2 pr-3 sm:pr-0"
               role="list"
