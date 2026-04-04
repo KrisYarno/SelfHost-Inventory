@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import { getRateLimitStats } from "@/lib/rateLimit";
 
-export const GET = apiHandler(async (request: NextRequest) => {
+export const GET = apiHandler(async (_request: NextRequest) => {
   await requireAdmin();
 
   const stats = getRateLimitStats();

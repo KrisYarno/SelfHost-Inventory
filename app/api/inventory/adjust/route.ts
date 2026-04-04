@@ -3,7 +3,6 @@ import { requireApproved, apiHandler } from "@/lib/api-utils";
 import {
   createInventoryAdjustment,
   validateStockAvailability,
-  OptimisticLockError,
 } from "@/lib/inventory";
 import { inventory_logs_logType } from "@prisma/client";
 import { auditService } from "@/lib/audit";

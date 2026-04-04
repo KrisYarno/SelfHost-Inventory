@@ -4,7 +4,6 @@ import prisma from "@/lib/prisma";
 import {
   createInventoryTransfer,
   validateStockAvailability,
-  OptimisticLockError,
 } from "@/lib/inventory";
 import { TransferSchema } from "@/lib/validation/inventory";
 import { auditService } from "@/lib/audit";
