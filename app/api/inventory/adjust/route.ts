@@ -10,7 +10,7 @@ import { auditService } from "@/lib/audit";
 import prisma from "@/lib/prisma";
 import { validateCSRFToken } from "@/lib/csrf";
 import { InventoryAdjustmentSchema } from "@/lib/validation/inventory";
-import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
+import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 
 export const dynamic = "force-dynamic";
 

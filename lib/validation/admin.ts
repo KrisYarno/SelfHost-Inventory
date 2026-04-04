@@ -16,12 +16,24 @@ export const UpdateLocationSchema = z.object({
   message: 'At least one field must be provided',
 });
 
+// Shared password strength rules
+const strongPassword = z.string()
+  .min(10, 'Password must be at least 10 characters')
+  .regex(/[a-z]/, 'Must contain a lowercase letter')
+  .regex(/[A-Z]/, 'Must contain an uppercase letter')
+  .regex(/[0-9]/, 'Must contain a digit');
+
+export const CreatePasswordSchema = z.object({
+  newPassword: strongPassword,
+  confirmPassword: z.string(),
+}).refine(data => data.newPassword === data.confirmPassword, {
+  message: 'Passwords do not match',
+  path: ['confirmPassword'],
+});
+
 export const ChangePasswordSchema = z.object({
   currentPassword: z.string().min(1, 'Current password is required'),
-  newPassword: z.string().min(10, 'Password must be at least 10 characters')
-    .regex(/[a-z]/, 'Must contain a lowercase letter')
-    .regex(/[A-Z]/, 'Must contain an uppercase letter')
-    .regex(/[0-9]/, 'Must contain a digit'),
+  newPassword: strongPassword,
   confirmPassword: z.string(),
 }).refine(data => data.newPassword === data.confirmPassword, {
   message: 'Passwords do not match',

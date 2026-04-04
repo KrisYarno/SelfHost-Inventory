@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin, apiHandler } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
-import { enforceRateLimit, RateLimitError, applyRateLimitHeaders } from '@/lib/rateLimit';
+import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { SearchProductsQuerySchema } from '@/lib/validation/product-links';
 import { ExternalProductSearchResult } from '@/types/product-links';
 

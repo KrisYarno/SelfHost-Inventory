@@ -2,6 +2,8 @@ import { getSession } from '@/lib/auth';
 import { NextRequest, NextResponse } from 'next/server';
 import { AppError, errorLogger } from '@/lib/error-handling';
 import { ZodError } from 'zod';
+import { RateLimitError } from '@/lib/rateLimit';
+import { OptimisticLockError } from '@/lib/inventory';
 
 // --- Auth guard types ---
 
@@ -65,6 +67,21 @@ export function apiHandler(handler: RouteHandler): RouteHandler {
       if (error instanceof ZodError) {
         const firstMessage = error.errors[0]?.message || 'Validation failed';
         return errorResponse(firstMessage, 400, 'VALIDATION_ERROR');
+      }
+
+      if (error instanceof RateLimitError) {
+        const resp = errorResponse(error.message, error.status, 'RATE_LIMITED');
+        for (const [key, value] of Object.entries(error.headers)) {
+          resp.headers.set(key, value);
+        }
+        return resp;
+      }
+
+      if (error instanceof OptimisticLockError) {
+        return NextResponse.json(
+          { error: error.message, code: 'OPTIMISTIC_LOCK_ERROR', currentVersion: error.currentVersion, expectedVersion: error.expectedVersion },
+          { status: 409 }
+        );
       }
 
       if (error instanceof AppError) {

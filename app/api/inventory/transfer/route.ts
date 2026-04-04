@@ -39,17 +39,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
     if (!availability.isValid) {
       return NextResponse.json(
         {
-          error: {
-            message: availability.error || "Insufficient stock at source location",
-            code: "INVENTORY_INSUFFICIENT_STOCK",
-            context: {
-              productId: body.productId,
-              fromLocationId: body.fromLocationId,
-              currentQuantity: availability.currentQuantity,
-              requestedQuantity: availability.requestedQuantity,
-              shortfall: availability.shortfall,
-            },
-          },
+          error: availability.error || "Insufficient stock at source location",
+          code: "INVENTORY_INSUFFICIENT_STOCK",
+          currentQuantity: availability.currentQuantity,
+          requestedQuantity: availability.requestedQuantity,
+          shortfall: availability.shortfall,
         },
         { status: 400 }
       );

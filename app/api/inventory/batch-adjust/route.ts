@@ -4,7 +4,7 @@ import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
 import { validateCSRFToken } from "@/lib/csrf";
 import { BatchInventoryAdjustmentSchema } from "@/lib/validation/inventory";
-import { enforceRateLimit, RateLimitError, applyRateLimitHeaders } from "@/lib/rateLimit";
+import { enforceRateLimit, applyRateLimitHeaders } from "@/lib/rateLimit";
 
 export const POST = apiHandler(async (request: NextRequest) => {
   const { user } = await requireApproved();

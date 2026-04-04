@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { hashPassword } from "@/lib/auth-helpers";
 import { apiHandler } from "@/lib/api-utils";
-import { applyRateLimitHeaders, enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
+import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 
 // Allowed email domains, matching auth.ts
 const allowedDomains = (process.env.ALLOWED_EMAIL_DOMAINS || 'advancedresearchpep.com')

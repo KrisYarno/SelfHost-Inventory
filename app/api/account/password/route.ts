@@ -3,7 +3,7 @@ import { requireAuth, apiHandler } from "@/lib/api-utils";
 import { verifyPassword, hashPassword } from "@/lib/auth-helpers";
 import prisma from "@/lib/prisma";
 import { validateCSRFToken } from "@/lib/csrf";
-import { ChangePasswordSchema } from "@/lib/validation/admin";
+import { CreatePasswordSchema, ChangePasswordSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
 
@@ -21,28 +21,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
   }
 
   const body = await request.json();
-  const { newPassword, confirmPassword } = body;
-
-  if (!newPassword) {
-    return NextResponse.json(
-      { error: "Password is required" },
-      { status: 400 }
-    );
-  }
-
-  if (newPassword !== confirmPassword) {
-    return NextResponse.json(
-      { error: "Passwords do not match" },
-      { status: 400 }
-    );
-  }
-
-  if (newPassword.length < 8) {
-    return NextResponse.json(
-      { error: "Password must be at least 8 characters long" },
-      { status: 400 }
-    );
-  }
+  const { newPassword } = CreatePasswordSchema.parse(body);
 
   // Get user
   const user = await prisma.user.findUnique({
