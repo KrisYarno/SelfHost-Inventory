@@ -60,8 +60,8 @@ export function JournalProductRow({
       tabIndex={0}
     >
       <div className="p-3 sm:p-4">
-        <div className="flex items-center gap-3">
-          {/* Left: Product info */}
+        {/* Desktop: single row */}
+        <div className="hidden sm:flex items-center gap-3">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <h4 className="text-h4 truncate" id={`product-name-${product.id}`}>{product.name}</h4>
@@ -73,22 +73,45 @@ export function JournalProductRow({
               )}
             </div>
           </div>
-
-          {/* Center: Current quantity -- prominent */}
           <div className="text-right flex-shrink-0 mr-2">
             <div className="text-metric font-mono tabular-nums" role="status" aria-label={`Current quantity: ${currentQuantity}`}>
               {currentQuantity}
             </div>
             <div className="text-caption text-muted-foreground">current</div>
           </div>
-
-          {/* Right: Adjustment controls */}
           <AdjustmentInput
             value={adjustment?.quantityChange || 0}
             onChange={handleQuantityChange}
             currentQuantity={currentQuantity}
             productName={product.name}
           />
+        </div>
+
+        {/* Mobile: stacked layout */}
+        <div className="sm:hidden space-y-2">
+          {/* Row 1: Name + badges + current qty */}
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0 flex-1">
+              <h4 className="text-body-lg font-semibold truncate" id={`product-name-mobile-${product.id}`}>{product.name}</h4>
+              {isOutOfStock && <StatusBadge tone="negative" className="flex-shrink-0 text-[10px] px-1.5 py-0">Out</StatusBadge>}
+              {isLowStock && <StatusBadge tone="warning" className="flex-shrink-0 text-[10px] px-1.5 py-0">Low</StatusBadge>}
+            </div>
+            <div className="text-right flex-shrink-0">
+              <span className="text-lg font-bold font-mono tabular-nums" role="status" aria-label={`Current quantity: ${currentQuantity}`}>
+                {currentQuantity}
+              </span>
+              <span className="text-[10px] text-muted-foreground ml-1">current</span>
+            </div>
+          </div>
+          {/* Row 2: Full-width adjustment controls */}
+          <div className="flex justify-center">
+            <AdjustmentInput
+              value={adjustment?.quantityChange || 0}
+              onChange={handleQuantityChange}
+              currentQuantity={currentQuantity}
+              productName={product.name}
+            />
+          </div>
         </div>
 
         {/* Change preview row */}

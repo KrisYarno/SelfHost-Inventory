@@ -304,8 +304,19 @@ export default function JournalPage() {
             </div>
             <Button
               variant="outline"
+              size="icon"
               onClick={() => setShowFilters(!showFilters)}
-              className="gap-2"
+              className="sm:hidden flex-shrink-0"
+              aria-label="Toggle filters"
+              aria-expanded={showFilters}
+              aria-controls="journal-filters"
+            >
+              <Filter className="h-4 w-4" aria-hidden="true" />
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => setShowFilters(!showFilters)}
+              className="hidden sm:flex gap-2"
               aria-label="Toggle filters"
               aria-expanded={showFilters}
               aria-controls="journal-filters"
@@ -315,8 +326,17 @@ export default function JournalPage() {
             </Button>
             <Button
               variant="outline"
+              size="icon"
               onClick={() => setShowBatchOperations(true)}
-              className="gap-2"
+              className="sm:hidden flex-shrink-0"
+              aria-label="Open batch operations dialog"
+            >
+              <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => setShowBatchOperations(true)}
+              className="hidden sm:flex gap-2"
               aria-label="Open batch operations dialog"
             >
               <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
@@ -342,7 +362,7 @@ export default function JournalPage() {
           <CardTitle id="products-heading">Products</CardTitle>
         </CardHeader>
         <CardContent role="main" aria-labelledby="products-heading">
-          <ScrollArea className="h-[70vh] sm:h-[600px]" aria-label="Products list">
+          <ScrollArea className="h-[calc(100vh-20rem)] sm:h-[600px]" aria-label="Products list">
             <div
               className="space-y-2 pr-3 sm:pr-0"
               role="list"
