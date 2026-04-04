@@ -105,8 +105,8 @@ export async function GET(request: NextRequest) {
     let totalInventoryRetailValue = 0;
     let orderNowCount = 0;
     let orderSoonCount = 0;
-    let watchCount = 0;
-    let okCount = 0;
+    let _watchCount = 0;
+    let _okCount = 0;
     let deadStockValue = 0;
     let stockoutRiskCount = 0;
     let daysOfSupplySum = 0;
@@ -144,10 +144,10 @@ export async function GET(request: NextRequest) {
           orderSoonCount++;
           break;
         case "RUNNING_LOW":
-          watchCount++;
+          _watchCount++;
           break;
         case "OKAY":
-          okCount++;
+          _okCount++;
           break;
       }
 
