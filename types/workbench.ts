@@ -23,6 +23,8 @@ export interface UnmappedExternalItem {
   sku?: string;
   quantity: number;
   externalItemId?: string;
+  externalProductId?: string;
+  externalVariantId?: string;
 }
 
 // Workbench state interface
@@ -46,7 +48,7 @@ export interface WorkbenchState {
 
   // Actions
   addItem: (product: ProductWithQuantity, quantity: number, source?: 'manual' | 'wc-order', fulfillmentItemId?: string) => void;
-  updateItemQuantity: (productId: number, quantity: number) => void;
+  updateItemQuantity: (productId: number, quantity: number, fulfillmentItemId?: string) => void;
   removeItem: (productId: number, fulfillmentItemId?: string) => void;
   setOrderReference: (reference: string) => void;
   clearOrder: () => void;

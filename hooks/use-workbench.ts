@@ -54,18 +54,18 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     });
   },
 
-  updateItemQuantity: (productId: number, quantity: number) => {
+  // Amendment 5: updateItemQuantity uses fulfillmentItemId to distinguish same-product entries
+  updateItemQuantity: (productId: number, quantity: number, fulfillmentItemId?: string) => {
     set((state) => {
       const newItems = state.orderItems.map((item) => {
-        if (item.product.id === productId) {
-          // Don't exceed available stock
-          const actualQuantity = Math.min(quantity, item.product.currentQuantity);
-          return { ...item, quantity: actualQuantity };
-        }
-        return item;
+        if (item.product.id !== productId) return item;
+        // Discriminate by fulfillmentItemId when both WC and manual entries exist
+        if (fulfillmentItemId !== undefined && item.fulfillmentItemId !== fulfillmentItemId) return item;
+        if (fulfillmentItemId === undefined && item.fulfillmentItemId !== undefined) return item;
+        const actualQuantity = Math.min(quantity, item.product.currentQuantity);
+        return { ...item, quantity: actualQuantity };
       });
 
-      // Remove items with 0 quantity
       return { orderItems: newItems.filter((item) => item.quantity > 0) };
     });
   },
@@ -228,6 +228,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
             sku: item.sku ?? undefined,
             quantity: remainingQty,
             externalItemId: item.id,
+            externalProductId: item.externalProductId ?? undefined,
+            externalVariantId: item.externalVariantId ?? undefined,
           });
         }
       }

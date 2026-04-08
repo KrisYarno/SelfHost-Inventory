@@ -109,7 +109,7 @@ export default function WorkbenchPage() {
               headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
               body: JSON.stringify({
                 items: wcItems.map((item) => ({
-                  fulfillmentItemId: item.fulfillmentItemId,
+                  itemId: item.fulfillmentItemId,
                   productId: item.productId,
                   quantity: item.quantity,
                   locationId: item.locationId,

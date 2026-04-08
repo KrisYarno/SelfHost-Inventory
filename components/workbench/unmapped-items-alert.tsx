@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 // ---------------------------------------------------------------------------
 
 interface UnmappedItemsAlertProps {
-  items: Array<{ name: string; sku?: string; quantity: number }>;
+  items: Array<{ name: string; sku?: string; quantity: number; externalProductId?: string; externalVariantId?: string }>;
   integrationId?: string;
   onItemMapped?: () => void;
 }
@@ -143,7 +143,8 @@ export function UnmappedItemsAlert({
           onOpenChange={setMapDialogOpen}
           integrationId={integrationId}
           externalProduct={{
-            externalId: "",
+            externalId: mapDialogItem.externalProductId || "",
+            externalVariantId: mapDialogItem.externalVariantId,
             title: mapDialogItem.name,
             sku: mapDialogItem.sku,
           }}

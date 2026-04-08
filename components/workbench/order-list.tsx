@@ -42,7 +42,7 @@ export function OrderList() {
               key={item.fulfillmentItemId ?? `manual-${item.product.id}`}
               item={item}
               onUpdateQuantity={(quantity) =>
-                updateItemQuantity(item.product.id, quantity)
+                updateItemQuantity(item.product.id, quantity, item.fulfillmentItemId)
               }
               onRemove={() => removeItem(item.product.id, item.fulfillmentItemId)}
             />
