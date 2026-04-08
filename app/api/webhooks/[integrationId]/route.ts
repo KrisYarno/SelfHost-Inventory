@@ -3,9 +3,8 @@ import { apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import { decryptValue, isEncrypted } from "@/lib/encryption";
-import { deriveExternalOrderMeta } from "@/lib/external-orders/meta";
+import { upsertOrderWithItems } from "@/lib/external-orders/shared";
 import type { PlatformType } from "@/lib/platforms/core/types";
-import type { Prisma } from "@prisma/client";
 import { createHash, createHmac } from "crypto";
 
 export const dynamic = "force-dynamic";
@@ -251,132 +250,14 @@ export const POST = apiHandler(async (
       );
     }
 
-    const computedInternalStatus = deriveInternalStatus(platform, normalizedOrder);
-    const derivedMeta = deriveExternalOrderMeta({
-      platform,
+    // 4. Upsert ExternalOrder and ExternalOrderItem records (atomic transaction)
+    const { orderId: upsertedOrderId } = await upsertOrderWithItems(prisma, {
+      integrationId: integration.id,
+      companyId: integration.companyId,
       storeUrl: integration.storeUrl,
-      externalId: normalizedOrder.externalId,
       normalized: normalizedOrder,
-      rawPayload: normalizedOrder.rawPayload as any,
+      status: { statusMode: "compute", platform },
     });
-
-    // 4. Upsert ExternalOrder and ExternalOrderItem records
-    // Use idempotency via unique constraint on [integrationId, externalId]
-    const externalOrder = await prisma.externalOrder.upsert({
-      where: {
-        integrationId_externalId: {
-          integrationId: integration.id,
-          externalId: normalizedOrder.externalId,
-        },
-      },
-      create: {
-        companyId: integration.companyId,
-        integrationId: integration.id,
-        externalId: normalizedOrder.externalId,
-        orderNumber: normalizedOrder.externalOrderNumber,
-        nativeStatus: normalizedOrder.nativeStatus,
-        financialStatus: normalizedOrder.financialStatus,
-        fulfillmentStatus: normalizedOrder.fulfillmentStatus,
-        platformStatusRaw: derivedMeta.platformStatusRaw as Prisma.InputJsonValue,
-        externalStatusHash: derivedMeta.externalStatusHash,
-        externalOrderUrl: derivedMeta.externalOrderUrl,
-        total: normalizedOrder.total,
-        currency: normalizedOrder.currency,
-        customerEmail: normalizedOrder.customer?.email,
-        customerName: normalizedOrder.customer?.name,
-        rawPayload: normalizedOrder.rawPayload as Prisma.InputJsonValue,
-        internalStatus: computedInternalStatus,
-        externalCreatedAt: normalizedOrder.createdAt,
-        externalUpdatedAt: derivedMeta.externalUpdatedAt,
-        lastSeenAt: derivedMeta.lastSeenAt,
-      },
-      update: {
-        orderNumber: normalizedOrder.externalOrderNumber,
-        nativeStatus: normalizedOrder.nativeStatus,
-        financialStatus: normalizedOrder.financialStatus,
-        fulfillmentStatus: normalizedOrder.fulfillmentStatus,
-        platformStatusRaw: derivedMeta.platformStatusRaw as Prisma.InputJsonValue,
-        externalStatusHash: derivedMeta.externalStatusHash,
-        externalOrderUrl: derivedMeta.externalOrderUrl,
-        total: normalizedOrder.total,
-        currency: normalizedOrder.currency,
-        customerEmail: normalizedOrder.customer?.email,
-        customerName: normalizedOrder.customer?.name,
-        rawPayload: normalizedOrder.rawPayload as Prisma.InputJsonValue,
-        internalStatus: computedInternalStatus,
-        updatedAt: new Date(),
-        externalCreatedAt: normalizedOrder.createdAt,
-        externalUpdatedAt: derivedMeta.externalUpdatedAt,
-        lastSeenAt: derivedMeta.lastSeenAt,
-      },
-    });
-
-    // 5. Try to auto-map items using existing ProductLink records
-    const seenExternalItemIds = new Set<string>();
-    for (const lineItem of normalizedOrder.lineItems) {
-      if (lineItem.externalId) seenExternalItemIds.add(lineItem.externalId);
-      // Look up existing ProductLink
-      let productLink = null;
-      if (lineItem.externalProductId) {
-        productLink = await prisma.productLink.findFirst({
-          where: {
-            integrationId: integration.id,
-            externalProductId: lineItem.externalProductId,
-            externalVariantId: lineItem.externalVariantId ?? null,
-          },
-        });
-      }
-
-      // Upsert order item (find by orderId + externalItemId, then create or update)
-      const existingItem = await prisma.externalOrderItem.findFirst({
-        where: {
-          orderId: externalOrder.id,
-          externalItemId: lineItem.externalId,
-        },
-      });
-
-      if (existingItem) {
-        await prisma.externalOrderItem.update({
-          where: { id: existingItem.id },
-          data: {
-            name: lineItem.name,
-            sku: lineItem.sku,
-            quantity: lineItem.quantity,
-            price: lineItem.unitPrice,
-            productLinkId: productLink?.id,
-            isMapped: !!productLink,
-          },
-        });
-      } else {
-        await prisma.externalOrderItem.create({
-          data: {
-            orderId: externalOrder.id,
-            externalItemId: lineItem.externalId,
-            externalProductId: lineItem.externalProductId || "",
-            externalVariantId: lineItem.externalVariantId,
-            name: lineItem.name,
-            sku: lineItem.sku,
-            quantity: lineItem.quantity,
-            price: lineItem.unitPrice,
-            productLinkId: productLink?.id,
-            isMapped: !!productLink,
-          },
-        });
-      }
-    }
-
-    // Remove any items that were removed on the source order
-    if (seenExternalItemIds.size > 0) {
-      await prisma.externalOrderItem.deleteMany({
-        where: {
-          orderId: externalOrder.id,
-          AND: [
-            { externalItemId: { not: null } },
-            { externalItemId: { notIn: Array.from(seenExternalItemIds) } },
-          ],
-        },
-      });
-    }
 
     console.log(
       `Successfully processed webhook for integration ${integrationId}, order ${normalizedOrder.externalOrderNumber}`
@@ -391,7 +272,7 @@ export const POST = apiHandler(async (
   // 6. Return 200 OK
   return NextResponse.json({
     success: true,
-    orderId: externalOrder.id,
+    orderId: upsertedOrderId,
     orderNumber: normalizedOrder.externalOrderNumber,
   });
 });
@@ -582,30 +463,3 @@ function extractExternalOrderId(rawBodyText: string): string | null {
   }
 }
 
-function deriveInternalStatus(
-  platform: PlatformType,
-  order: {
-    nativeStatus: string;
-    financialStatus: string | null;
-    fulfillmentStatus: string | null;
-    rawPayload?: any;
-  }
-): "pending" | "processing" | "fulfilled" | "cancelled" {
-  if (platform === "WOOCOMMERCE") {
-    const status = (order.nativeStatus || "").toLowerCase();
-    if (status === "completed") return "fulfilled";
-    if (status === "processing") return "processing";
-    if (["cancelled", "refunded", "failed"].includes(status)) return "cancelled";
-    return "pending";
-  }
-
-  // Shopify doesn't have a single canonical status; infer completion/cancellation from raw fields.
-  const fulfillment = (order.fulfillmentStatus || "").toLowerCase();
-  const financial = (order.financialStatus || "").toLowerCase();
-  const cancelledAt = (order.rawPayload as any)?.cancelled_at ?? (order.rawPayload as any)?.cancelledAt;
-
-  if (cancelledAt || financial === "voided" || financial === "refunded") return "cancelled";
-  if (fulfillment === "fulfilled") return "fulfilled";
-  if (financial === "paid" || financial === "partially_paid") return "processing";
-  return "pending";
-}

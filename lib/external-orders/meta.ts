@@ -42,7 +42,7 @@ function buildExternalOrderUrl(
   if (platform === "WOOCOMMERCE") {
     try {
       const base = new URL(storeUrl);
-      return `${base.origin}/wp-admin/post.php?post=${externalId}&action=edit`;
+      return `${base.origin}/wp-admin/admin.php?page=wc-orders&action=edit&id=${externalId}`;
     } catch {
       return null;
     }

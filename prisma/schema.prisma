@@ -313,6 +313,7 @@ model ExternalOrderItem {
   order           ExternalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
   productLink     ProductLink?  @relation(fields: [productLinkId], references: [id])
 
+  @@unique([orderId, externalItemId], map: "idx_order_item_unique")
   @@index([orderId])
   @@index([externalVariantId])
   @@map("external_order_items")

@@ -1,7 +1,6 @@
 import prisma from "@/lib/prisma";
-import { decryptValue, isEncrypted } from "@/lib/encryption";
-import { deriveExternalOrderMeta } from "@/lib/external-orders/meta";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
+import { decryptOrNull, hostFromStoreUrl, upsertOrderWithItems } from "@/lib/external-orders/shared";
 import type { PlatformType } from "@/lib/platforms/core/types";
 
 type SyncResult = {
@@ -30,21 +29,6 @@ function getEnvInt(name: string, fallback: number): number {
   if (!raw) return fallback;
   const parsed = parseInt(raw, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function decryptOrNull(value: string | null): string | null {
-  if (!value) return null;
-  if (!isEncrypted(value)) return value;
-  return decryptValue(value);
-}
-
-function hostFromStoreUrl(storeUrl: string): string {
-  try {
-    const url = new URL(storeUrl);
-    return url.host;
-  } catch {
-    return storeUrl.replace(/^https?:\/\//, "").replace(/\/+$/, "");
-  }
 }
 
 function startDateForSync(lastSyncAt: Date | null, lookbackDays: number): Date {
@@ -185,33 +169,6 @@ async function fetchWooOrders(params: {
   return results.slice(0, params.maxOrders);
 }
 
-function deriveInternalStatus(
-  platform: PlatformType,
-  order: {
-    nativeStatus: string;
-    financialStatus: string | null;
-    fulfillmentStatus: string | null;
-    rawPayload?: any;
-  }
-): "pending" | "processing" | "fulfilled" | "cancelled" {
-  if (platform === "WOOCOMMERCE") {
-    const status = (order.nativeStatus || "").toLowerCase();
-    if (status === "completed") return "fulfilled";
-    if (status === "processing") return "processing";
-    if (["cancelled", "refunded", "failed"].includes(status)) return "cancelled";
-    return "pending";
-  }
-
-  const fulfillment = (order.fulfillmentStatus || "").toLowerCase();
-  const financial = (order.financialStatus || "").toLowerCase();
-  const cancelledAt = (order.rawPayload as any)?.cancelled_at ?? (order.rawPayload as any)?.cancelledAt;
-
-  if (cancelledAt || financial === "voided" || financial === "refunded") return "cancelled";
-  if (fulfillment === "fulfilled") return "fulfilled";
-  if (financial === "paid" || financial === "partially_paid") return "processing";
-  return "pending";
-}
-
 export async function syncIntegrationOrders(
   integrationId: string,
   options: SyncOptions = {}
@@ -275,127 +232,14 @@ export async function syncIntegrationOrders(
   for (const order of remoteOrders) {
     try {
       const normalized = adapter.parseOrderWebhook(JSON.stringify(order));
-      const internalStatus = deriveInternalStatus(platform, normalized);
-      const derivedMeta = deriveExternalOrderMeta({
-        platform,
+
+      await upsertOrderWithItems(prisma, {
+        integrationId: integration.id,
+        companyId: integration.companyId,
         storeUrl: integration.storeUrl,
-        externalId: normalized.externalId,
         normalized,
-        rawPayload: normalized.rawPayload as any,
+        status: { statusMode: "compute", platform },
       });
-
-      const externalOrder = await prisma.externalOrder.upsert({
-        where: {
-          integrationId_externalId: {
-            integrationId: integration.id,
-            externalId: normalized.externalId,
-          },
-        },
-        create: {
-          companyId: integration.companyId,
-          integrationId: integration.id,
-          externalId: normalized.externalId,
-          orderNumber: normalized.externalOrderNumber,
-          nativeStatus: normalized.nativeStatus,
-          financialStatus: normalized.financialStatus,
-          fulfillmentStatus: normalized.fulfillmentStatus,
-          platformStatusRaw: derivedMeta.platformStatusRaw as any,
-          externalStatusHash: derivedMeta.externalStatusHash,
-          externalOrderUrl: derivedMeta.externalOrderUrl,
-          total: normalized.total,
-          currency: normalized.currency,
-          customerEmail: normalized.customer?.email,
-          customerName: normalized.customer?.name,
-          rawPayload: normalized.rawPayload as any,
-          internalStatus,
-          externalCreatedAt: normalized.createdAt,
-          externalUpdatedAt: derivedMeta.externalUpdatedAt,
-          lastSeenAt: derivedMeta.lastSeenAt,
-        },
-        update: {
-          orderNumber: normalized.externalOrderNumber,
-          nativeStatus: normalized.nativeStatus,
-          financialStatus: normalized.financialStatus,
-          fulfillmentStatus: normalized.fulfillmentStatus,
-          platformStatusRaw: derivedMeta.platformStatusRaw as any,
-          externalStatusHash: derivedMeta.externalStatusHash,
-          externalOrderUrl: derivedMeta.externalOrderUrl,
-          total: normalized.total,
-          currency: normalized.currency,
-          customerEmail: normalized.customer?.email,
-          customerName: normalized.customer?.name,
-          rawPayload: normalized.rawPayload as any,
-          internalStatus,
-          updatedAt: new Date(),
-          externalCreatedAt: normalized.createdAt,
-          externalUpdatedAt: derivedMeta.externalUpdatedAt,
-          lastSeenAt: derivedMeta.lastSeenAt,
-        },
-      });
-
-      const seenExternalItemIds = new Set<string>();
-      for (const lineItem of normalized.lineItems) {
-        if (lineItem.externalId) seenExternalItemIds.add(lineItem.externalId);
-
-        const productLink =
-          lineItem.externalProductId
-            ? await prisma.productLink.findFirst({
-                where: {
-                  integrationId: integration.id,
-                  externalProductId: lineItem.externalProductId,
-                  externalVariantId: lineItem.externalVariantId ?? null,
-                },
-              })
-            : null;
-
-        const existingItem = await prisma.externalOrderItem.findFirst({
-          where: {
-            orderId: externalOrder.id,
-            externalItemId: lineItem.externalId,
-          },
-        });
-
-        if (existingItem) {
-          await prisma.externalOrderItem.update({
-            where: { id: existingItem.id },
-            data: {
-              name: lineItem.name,
-              sku: lineItem.sku,
-              quantity: lineItem.quantity,
-              price: lineItem.unitPrice,
-              productLinkId: productLink?.id,
-              isMapped: !!productLink,
-            },
-          });
-        } else {
-          await prisma.externalOrderItem.create({
-            data: {
-              orderId: externalOrder.id,
-              externalItemId: lineItem.externalId,
-              externalProductId: lineItem.externalProductId || "",
-              externalVariantId: lineItem.externalVariantId,
-              name: lineItem.name,
-              sku: lineItem.sku,
-              quantity: lineItem.quantity,
-              price: lineItem.unitPrice,
-              productLinkId: productLink?.id,
-              isMapped: !!productLink,
-            },
-          });
-        }
-      }
-
-      if (seenExternalItemIds.size > 0) {
-        await prisma.externalOrderItem.deleteMany({
-          where: {
-            orderId: externalOrder.id,
-            AND: [
-              { externalItemId: { not: null } },
-              { externalItemId: { notIn: Array.from(seenExternalItemIds) } },
-            ],
-          },
-        });
-      }
 
       upserted += 1;
     } catch (error) {

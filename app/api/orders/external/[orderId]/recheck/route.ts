@@ -2,28 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import { validateCSRFToken } from "@/lib/csrf";
 import prisma from "@/lib/prisma";
-import { decryptValue, isEncrypted } from "@/lib/encryption";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
+import { decryptOrNull, hostFromStoreUrl, upsertOrderWithItems } from "@/lib/external-orders/shared";
 import type { PlatformType } from "@/lib/platforms/core/types";
-import { deriveExternalOrderMeta } from "@/lib/external-orders/meta";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-
-function decryptOrNull(value: string | null): string | null {
-  if (!value) return null;
-  if (!isEncrypted(value)) return value;
-  return decryptValue(value);
-}
-
-function hostFromStoreUrl(storeUrl: string): string {
-  try {
-    const url = new URL(storeUrl);
-    return url.host;
-  } catch {
-    return storeUrl.replace(/^https?:\/\//, "").replace(/\/+$/, "");
-  }
-}
 
 async function fetchShopifyOrder(shopDomain: string, accessToken: string, externalId: string) {
   const apiVersion = process.env.SHOPIFY_API_VERSION || "2025-10";
@@ -117,65 +101,22 @@ export const POST = apiHandler(async (
 
   const adapter = getPlatformAdapter(platform);
   const normalized = adapter.parseOrderWebhook(JSON.stringify(remoteOrder));
-  const derivedMeta = deriveExternalOrderMeta({
-    platform,
-    storeUrl: order.integration.storeUrl,
-    externalId: normalized.externalId,
-    normalized,
-    rawPayload: normalized.rawPayload as any,
-  });
 
-  const externalOrder = await prisma.externalOrder.upsert({
-    where: {
-      integrationId_externalId: {
-        integrationId: order.integration.id,
-        externalId: normalized.externalId,
-      },
-    },
-    create: {
-      companyId: order.companyId,
-      integrationId: order.integration.id,
-      externalId: normalized.externalId,
-      orderNumber: normalized.externalOrderNumber,
-      nativeStatus: normalized.nativeStatus,
-      financialStatus: normalized.financialStatus,
-      fulfillmentStatus: normalized.fulfillmentStatus,
-      platformStatusRaw: derivedMeta.platformStatusRaw as any,
-      externalStatusHash: derivedMeta.externalStatusHash,
-      externalOrderUrl: derivedMeta.externalOrderUrl,
-      total: normalized.total,
-      currency: normalized.currency,
-      customerEmail: normalized.customer?.email,
-      customerName: normalized.customer?.name,
-      rawPayload: normalized.rawPayload as any,
-      internalStatus: order.internalStatus,
-      externalCreatedAt: normalized.createdAt,
-      externalUpdatedAt: derivedMeta.externalUpdatedAt,
-      lastSeenAt: derivedMeta.lastSeenAt,
-    },
-    update: {
-      orderNumber: normalized.externalOrderNumber,
-      nativeStatus: normalized.nativeStatus,
-      financialStatus: normalized.financialStatus,
-      fulfillmentStatus: normalized.fulfillmentStatus,
-      platformStatusRaw: derivedMeta.platformStatusRaw as any,
-      externalStatusHash: derivedMeta.externalStatusHash,
-      externalOrderUrl: derivedMeta.externalOrderUrl,
-      total: normalized.total,
-      currency: normalized.currency,
-      customerEmail: normalized.customer?.email,
-      customerName: normalized.customer?.name,
-      rawPayload: normalized.rawPayload as any,
-      updatedAt: new Date(),
-      externalCreatedAt: normalized.createdAt,
-      externalUpdatedAt: derivedMeta.externalUpdatedAt,
-      lastSeenAt: derivedMeta.lastSeenAt,
-    },
+  // Use statusMode: 'preserve' to keep the existing internalStatus
+  // (prevents recheck from overriding manual fulfillment state).
+  // Also now processes line items (fixes Bug 1: recheck missing line items).
+  const result = await upsertOrderWithItems(prisma, {
+    integrationId: order.integration.id,
+    companyId: order.companyId,
+    storeUrl: order.integration.storeUrl,
+    normalized,
+    status: { statusMode: "preserve", internalStatus: order.internalStatus },
   });
 
   return NextResponse.json({
     success: true,
-    orderId: externalOrder.id,
-    lastSeenAt: derivedMeta.lastSeenAt,
+    orderId: result.orderId,
+    itemsProcessed: result.itemsProcessed,
+    itemsMapped: result.itemsMapped,
   });
 });
