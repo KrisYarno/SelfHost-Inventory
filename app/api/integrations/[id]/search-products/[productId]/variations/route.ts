@@ -2,80 +2,89 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, apiHandler } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
-import { SearchProductsQuerySchema } from '@/lib/validation/product-links';
 import { ExternalProductSearchResult } from '@/types/product-links';
 import { decryptOrNull, hostFromStoreUrl } from '@/lib/external-orders/shared';
 
 export const dynamic = 'force-dynamic';
 
 // ---------------------------------------------------------------------------
-// WooCommerce product search
+// WooCommerce variations fetch
 // ---------------------------------------------------------------------------
 
-async function searchWooCommerce(
+async function fetchWooVariations(
   storeUrl: string,
   consumerKey: string,
   consumerSecret: string,
-  query: string,
-): Promise<ExternalProductSearchResult[]> {
-  const url = new URL('/wp-json/wc/v3/products', storeUrl);
-  url.searchParams.set('search', query);
-  url.searchParams.set('per_page', '20');
-
+  productId: string,
+): Promise<{ variations: any[]; parentName: string }> {
   const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
+  const headers = {
+    Authorization: `Basic ${auth}`,
+    'Content-Type': 'application/json',
+  };
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
 
-  let resp: Response;
   try {
-    resp = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        Authorization: `Basic ${auth}`,
-        'Content-Type': 'application/json',
-      },
-      signal: controller.signal,
-      cache: 'no-store',
-    });
+    // Fetch parent product name and variations in parallel
+    const parentUrl = new URL(`/wp-json/wc/v3/products/${productId}`, storeUrl);
+    const variationsUrl = new URL(
+      `/wp-json/wc/v3/products/${productId}/variations`,
+      storeUrl,
+    );
+    variationsUrl.searchParams.set('per_page', '100');
+
+    const [parentResp, variationsResp] = await Promise.all([
+      fetch(parentUrl.toString(), {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+        cache: 'no-store',
+      }),
+      fetch(variationsUrl.toString(), {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+        cache: 'no-store',
+      }),
+    ]);
+
+    if (!parentResp.ok) {
+      const body = await parentResp.text().catch(() => '');
+      throw new Error(
+        `WooCommerce API error ${parentResp.status}: ${body.slice(0, 300)}`,
+      );
+    }
+    if (!variationsResp.ok) {
+      const body = await variationsResp.text().catch(() => '');
+      throw new Error(
+        `WooCommerce API error ${variationsResp.status}: ${body.slice(0, 300)}`,
+      );
+    }
+
+    const parent = (await parentResp.json()) as any;
+    const variations = (await variationsResp.json()) as any[];
+
+    return { variations, parentName: parent.name ?? '' };
   } finally {
     clearTimeout(timeout);
   }
-
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(`WooCommerce API error ${resp.status}: ${body.slice(0, 300)}`);
-  }
-
-  const products = (await resp.json()) as any[];
-
-  return products.map((p: any): ExternalProductSearchResult => ({
-    externalId: String(p.id),
-    externalVariantId: undefined,
-    title: p.name ?? '',
-    sku: p.sku || undefined,
-    price: p.price ? parseFloat(p.price) : undefined,
-    imageUrl: p.images?.[0]?.src ?? undefined,
-    hasVariations: p.type === 'variable',
-    type: p.type ?? undefined,
-  }));
 }
 
 // ---------------------------------------------------------------------------
-// Shopify product search
+// Shopify variants fetch
 // ---------------------------------------------------------------------------
 
-async function searchShopify(
+async function fetchShopifyVariants(
   shopDomain: string,
   accessToken: string,
-  query: string,
-): Promise<ExternalProductSearchResult[]> {
+  productId: string,
+): Promise<{ variants: any[]; parentName: string }> {
   const apiVersion = process.env.SHOPIFY_API_VERSION || '2025-10';
   const url = new URL(
-    `https://${shopDomain}/admin/api/${apiVersion}/products.json`,
+    `https://${shopDomain}/admin/api/${apiVersion}/products/${productId}.json`,
   );
-  url.searchParams.set('title', query);
-  url.searchParams.set('limit', '20');
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -100,44 +109,40 @@ async function searchShopify(
     throw new Error(`Shopify API error ${resp.status}: ${body.slice(0, 300)}`);
   }
 
-  const data = (await resp.json()) as { products?: any[] };
-  const products = data.products || [];
-
-  return products.map((p: any): ExternalProductSearchResult => ({
-    externalId: String(p.id),
-    externalVariantId: undefined,
-    title: p.title ?? '',
-    sku: p.variants?.[0]?.sku || undefined,
-    price: p.variants?.[0]?.price
-      ? parseFloat(p.variants[0].price)
-      : undefined,
-    imageUrl: p.image?.src ?? undefined,
-    hasVariations: (p.variants?.length ?? 0) > 1,
-    type: p.product_type ?? undefined,
-  }));
+  const data = (await resp.json()) as { product?: any };
+  const product = data.product || {};
+  return {
+    variants: product.variants || [],
+    parentName: product.title ?? '',
+  };
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/integrations/[id]/search-products?q=search_term
+// Format variation attribute list into a readable title
+// ---------------------------------------------------------------------------
+
+function formatVariantTitle(attributes: any[]): string {
+  if (!Array.isArray(attributes) || attributes.length === 0) return '';
+  return attributes.map((a: any) => a.option ?? a.value ?? '').filter(Boolean).join(' / ');
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/integrations/[id]/search-products/[productId]/variations
 // ---------------------------------------------------------------------------
 
 export const GET = apiHandler(async (
   request: NextRequest,
-  { params }: { params: { id: string } },
+  { params }: { params: { id: string; productId: string } },
 ) => {
   const { user } = await requireApproved();
 
   const integrationId = params.id;
+  const productId = params.productId;
 
   const rateLimitHeaders = enforceRateLimit(request, `wc-search:${integrationId}`, {
     identifier: user.id.toString(),
     limit: 30,
   });
-
-  // Validate search query
-  const { searchParams } = new URL(request.url);
-  const q = searchParams.get('q');
-  const queryValidation = SearchProductsQuerySchema.parse({ q });
 
   // Load integration
   const integration = await prisma.integration.findUnique({
@@ -163,7 +168,7 @@ export const GET = apiHandler(async (
     );
   }
 
-  let products: ExternalProductSearchResult[];
+  let results: ExternalProductSearchResult[];
 
   try {
     if (integration.platform === 'WOOCOMMERCE') {
@@ -173,19 +178,43 @@ export const GET = apiHandler(async (
           { status: 500 },
         );
       }
-      products = await searchWooCommerce(
+
+      const { variations, parentName } = await fetchWooVariations(
         integration.storeUrl,
         apiKey,
         apiSecret,
-        queryValidation.q,
+        productId,
       );
+
+      results = variations.map((v: any): ExternalProductSearchResult => ({
+        externalId: String(productId),
+        externalVariantId: String(v.id),
+        title: parentName,
+        variantTitle: formatVariantTitle(v.attributes),
+        sku: v.sku || undefined,
+        price: v.price ? parseFloat(v.price) : undefined,
+        imageUrl: v.image?.src ?? undefined,
+        type: 'variation',
+      }));
     } else if (integration.platform === 'SHOPIFY') {
       const shopDomain = hostFromStoreUrl(integration.storeUrl);
-      products = await searchShopify(
+
+      const { variants, parentName } = await fetchShopifyVariants(
         shopDomain,
         apiKey,
-        queryValidation.q,
+        productId,
       );
+
+      results = variants.map((v: any): ExternalProductSearchResult => ({
+        externalId: String(productId),
+        externalVariantId: String(v.id),
+        title: parentName,
+        variantTitle: [v.option1, v.option2, v.option3].filter(Boolean).join(' / '),
+        sku: v.sku || undefined,
+        price: v.price ? parseFloat(v.price) : undefined,
+        imageUrl: v.image?.src ?? undefined,
+        type: 'variant',
+      }));
     } else {
       return NextResponse.json(
         { error: `Unsupported platform: ${integration.platform}` },
@@ -206,8 +235,7 @@ export const GET = apiHandler(async (
   }
 
   const response = NextResponse.json({
-    products,
-    isStub: false,
+    variations: results,
     platform: integration.platform,
   });
 

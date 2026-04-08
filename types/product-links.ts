@@ -22,6 +22,8 @@ export interface ExternalProductSearchResult {
   sku?: string;
   price?: number;
   imageUrl?: string;
+  hasVariations?: boolean;
+  type?: string;
 }
 
 export interface CreateProductLinkRequest {

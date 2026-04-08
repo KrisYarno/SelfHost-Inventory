@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Package, Check, AlertTriangle, ExternalLink, ShoppingCart, RefreshCw } from "lucide-react";
+import { Package, Check, AlertTriangle, ExternalLink, ShoppingCart, RefreshCw, Link2 } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -16,6 +16,7 @@ import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { PlatformBadge } from "@/components/orders/platform-badge";
 import { FulfillOrderDialog } from "@/components/orders/fulfill-order-dialog";
+import { ProductMapDialog } from "@/components/products/product-map-dialog";
 import { cn } from "@/lib/utils";
 import type { ExternalOrder } from "@/types/external-orders";
 import { STATUS_COLORS } from "@/types/external-orders";
@@ -38,6 +39,13 @@ export function ExternalOrderDetailsSheet({
 }: ExternalOrderDetailsSheetProps) {
   const [showFulfillDialog, setShowFulfillDialog] = useState(false);
   const [isRechecking, setIsRechecking] = useState(false);
+  const [mapDialogOpen, setMapDialogOpen] = useState(false);
+  const [mappingItem, setMappingItem] = useState<{
+    externalId: string;
+    externalVariantId?: string;
+    title: string;
+    sku?: string;
+  } | null>(null);
 
   if (!order) return null;
 
@@ -210,9 +218,29 @@ export function ExternalOrderDetailsSheet({
                               </span>
                             </div>
                           ) : (
-                            <div className="flex items-center gap-1.5 text-xs text-orange-700">
-                              <AlertTriangle className="h-3 w-3" />
-                              <span>Not mapped to internal product</span>
+                            <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-1.5 text-xs text-orange-700">
+                                <AlertTriangle className="h-3 w-3" />
+                                <span>Not mapped to internal product</span>
+                              </div>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-6 px-2 text-xs"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setMappingItem({
+                                    externalId: item.externalProductId,
+                                    externalVariantId: item.externalVariantId || undefined,
+                                    title: item.productLink?.externalTitle || item.name,
+                                    sku: item.productLink?.externalSku || item.sku || undefined,
+                                  });
+                                  setMapDialogOpen(true);
+                                }}
+                              >
+                                <Link2 className="h-3 w-3 mr-1" />
+                                Map
+                              </Button>
                             </div>
                           )}
                         </div>
@@ -394,6 +422,22 @@ export function ExternalOrderDetailsSheet({
         }}
         csrfToken={csrfToken}
       />
+
+      {/* Product Mapping Dialog */}
+      {mappingItem && order.integration && (
+        <ProductMapDialog
+          open={mapDialogOpen}
+          onOpenChange={setMapDialogOpen}
+          integrationId={order.integration.id}
+          externalProduct={mappingItem}
+          onMapped={() => {
+            // Refresh order data to show updated mapping status
+            if (onRefresh) {
+              onRefresh();
+            }
+          }}
+        />
+      )}
     </>
   );
 }

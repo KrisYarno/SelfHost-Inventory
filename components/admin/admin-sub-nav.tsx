@@ -11,7 +11,8 @@ import {
   Package,
   BarChart3,
   Building2,
-  Plug
+  Plug,
+  Link2
 } from "lucide-react";
 
 const adminNavItems = [
@@ -49,6 +50,11 @@ const adminNavItems = [
     title: "Integrations",
     href: "/admin/integrations",
     icon: Plug,
+  },
+  {
+    title: "Mappings",
+    href: "/admin/product-mappings",
+    icon: Link2,
   },
   {
     title: "Settings",

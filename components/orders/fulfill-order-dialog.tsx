@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { CheckCircle, AlertCircle, AlertTriangle, Package, MapPin, Loader2 } from "lucide-react";
+import { CheckCircle, AlertCircle, AlertTriangle, Package, MapPin, Loader2, Link2 } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -16,6 +16,8 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Button } from "@/components/ui/button";
+import { ProductMapDialog } from "@/components/products/product-map-dialog";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import type { ExternalOrder } from "@/types/external-orders";
@@ -47,6 +49,13 @@ export function FulfillOrderDialog({
   const [isLoadingLocations, setIsLoadingLocations] = useState(false);
   const [isLoadingValidation, setIsLoadingValidation] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [mapDialogOpen, setMapDialogOpen] = useState(false);
+  const [mappingItem, setMappingItem] = useState<{
+    externalId: string;
+    externalVariantId?: string;
+    title: string;
+    sku?: string;
+  } | null>(null);
 
   const loadLocations = useCallback(async () => {
     setIsLoadingLocations(true);
@@ -262,6 +271,34 @@ export function FulfillOrderDialog({
                     These items will be skipped during fulfillment. Map them to internal
                     products to include them.
                   </p>
+                  <div className="mt-2 space-y-1">
+                    {order.items
+                      ?.filter((item) => !item.isMapped)
+                      .map((item) => (
+                        <div key={item.id} className="flex items-center gap-2">
+                          <span className="text-xs text-muted-foreground truncate max-w-[200px]">
+                            {item.name}
+                          </span>
+                          <Button
+                            size="sm"
+                            variant="link"
+                            className="h-auto p-0 text-xs"
+                            onClick={() => {
+                              setMappingItem({
+                                externalId: item.externalProductId,
+                                externalVariantId: item.externalVariantId || undefined,
+                                title: item.productLink?.externalTitle || item.name,
+                                sku: item.productLink?.externalSku || item.sku || undefined,
+                              });
+                              setMapDialogOpen(true);
+                            }}
+                          >
+                            <Link2 className="h-3 w-3 mr-1" />
+                            Map now
+                          </Button>
+                        </div>
+                      ))}
+                  </div>
                 </div>
               </div>
             )}
@@ -402,6 +439,20 @@ export function FulfillOrderDialog({
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
+
+      {/* Product Mapping Dialog */}
+      {mappingItem && order?.integration && (
+        <ProductMapDialog
+          open={mapDialogOpen}
+          onOpenChange={setMapDialogOpen}
+          integrationId={order.integration.id}
+          externalProduct={mappingItem}
+          onMapped={() => {
+            // Re-validate to see updated mapping status
+            loadValidation();
+          }}
+        />
+      )}
     </AlertDialog>
   );
 }
