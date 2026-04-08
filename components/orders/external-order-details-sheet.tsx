@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useSession } from "next-auth/react";
 import { Package, Check, AlertTriangle, ExternalLink, ShoppingCart, RefreshCw, Link2 } from "lucide-react";
 import {
   Sheet,
@@ -39,6 +40,8 @@ export function ExternalOrderDetailsSheet({
 }: ExternalOrderDetailsSheetProps) {
   const [showFulfillDialog, setShowFulfillDialog] = useState(false);
   const [isRechecking, setIsRechecking] = useState(false);
+  const { data: session } = useSession();
+  const isAdmin = session?.user?.isAdmin ?? false;
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
   const [mappingItem, setMappingItem] = useState<{
     externalId: string;
@@ -223,24 +226,26 @@ export function ExternalOrderDetailsSheet({
                                 <AlertTriangle className="h-3 w-3" />
                                 <span>Not mapped to internal product</span>
                               </div>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-6 px-2 text-xs"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setMappingItem({
-                                    externalId: item.externalProductId,
-                                    externalVariantId: item.externalVariantId || undefined,
-                                    title: item.productLink?.externalTitle || item.name,
-                                    sku: item.productLink?.externalSku || item.sku || undefined,
-                                  });
-                                  setMapDialogOpen(true);
-                                }}
-                              >
-                                <Link2 className="h-3 w-3 mr-1" />
-                                Map
-                              </Button>
+                              {isAdmin && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-6 px-2 text-xs"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setMappingItem({
+                                      externalId: item.externalProductId,
+                                      externalVariantId: item.externalVariantId || undefined,
+                                      title: item.productLink?.externalTitle || item.name,
+                                      sku: item.productLink?.externalSku || item.sku || undefined,
+                                    });
+                                    setMapDialogOpen(true);
+                                  }}
+                                >
+                                  <Link2 className="h-3 w-3 mr-1" />
+                                  Map
+                                </Button>
+                              )}
                             </div>
                           )}
                         </div>

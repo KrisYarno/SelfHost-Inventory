@@ -74,8 +74,9 @@ async function searchShopify(
   const url = new URL(
     `https://${shopDomain}/admin/api/${apiVersion}/products.json`,
   );
-  url.searchParams.set('title', query);
-  url.searchParams.set('limit', '20');
+  // Shopify REST Admin API does not support title search natively.
+  // Fetch a larger batch and filter client-side by title/sku match.
+  url.searchParams.set('limit', '50');
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -101,7 +102,15 @@ async function searchShopify(
   }
 
   const data = (await resp.json()) as { products?: any[] };
-  const products = data.products || [];
+  const allProducts = data.products || [];
+
+  // Client-side filter since Shopify REST API has no title search param
+  const lowerQuery = query.toLowerCase();
+  const products = allProducts.filter((p: any) => {
+    const title = (p.title ?? '').toLowerCase();
+    const sku = (p.variants?.[0]?.sku ?? '').toLowerCase();
+    return title.includes(lowerQuery) || sku.includes(lowerQuery);
+  }).slice(0, 20);
 
   return products.map((p: any): ExternalProductSearchResult => ({
     externalId: String(p.id),
