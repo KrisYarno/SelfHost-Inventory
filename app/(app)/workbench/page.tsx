@@ -10,9 +10,12 @@ import { QuantityPicker } from "@/components/workbench/quantity-picker";
 import { OrderList } from "@/components/workbench/order-list";
 import { OrderQueue } from "@/components/workbench/order-queue";
 import { CompleteOrderDialog, type DeductionDetail } from "@/components/workbench/complete-order-dialog";
+import { WCOrderSelector } from "@/components/workbench/wc-order-selector";
+import { UnmappedItemsAlert } from "@/components/workbench/unmapped-items-alert";
 import { FloatingCartButton } from "@/components/workbench/floating-cart-button";
 import { MobileCartSheet } from "@/components/workbench/mobile-cart-sheet";
 import { MobileFilterSheet, StockFilter } from "@/components/products/mobile-filter-sheet";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
@@ -58,7 +61,15 @@ export default function WorkbenchPage() {
     getTotalQuantity,
     advanceQueue,
     getQueuePosition,
+    orderSource,
+    setOrderSource,
+    selectedExternalOrder,
+    unmappedExternalItems,
+    selectExternalOrder,
+    clearExternalOrder,
   } = useWorkbench();
+
+  const isWCOrder = !!selectedExternalOrder;
 
   // Handle scroll for collapsing search bar on mobile
   useEffect(() => {
@@ -76,17 +87,41 @@ export default function WorkbenchPage() {
     };
   }, []);
 
+  // Amendment 7: Undo handler with unfulfill API for WC orders
   const handleUndoDeduction = useCallback(
-    async (items: DeductionDetail[], orderRef: string) => {
+    async (items: DeductionDetail[], orderRef: string, externalOrderId?: string) => {
       if (!csrfToken) {
         toast.error("Session expired. Cannot undo.");
         return;
       }
 
       try {
-        // Reverse each deduction by adding back the quantities
-        const results = await Promise.all(
-          items.map((item) =>
+        const wcItems = items.filter((item) => item.fulfillmentItemId);
+        const manualItems = items.filter((item) => !item.fulfillmentItemId);
+
+        const promises: Promise<Response>[] = [];
+
+        // Undo WC fulfillment via unfulfill API
+        if (externalOrderId && wcItems.length > 0) {
+          promises.push(
+            fetch(`/api/orders/${externalOrderId}/unfulfill`, {
+              method: "POST",
+              headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+              body: JSON.stringify({
+                items: wcItems.map((item) => ({
+                  fulfillmentItemId: item.fulfillmentItemId,
+                  productId: item.productId,
+                  quantity: item.quantity,
+                  locationId: item.locationId,
+                })),
+              }),
+            })
+          );
+        }
+
+        // Undo manual deductions via adjust API (same as existing)
+        for (const item of manualItems) {
+          promises.push(
             fetch("/api/inventory/adjust", {
               method: "POST",
               headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
@@ -97,9 +132,10 @@ export default function WorkbenchPage() {
                 logType: "ADJUSTMENT",
               }),
             })
-          )
-        );
+          );
+        }
 
+        const results = await Promise.all(promises);
         const allOk = results.every((r) => r.ok);
         if (allOk) {
           toast.success(`Undone: ${items.length} item${items.length !== 1 ? "s" : ""} restored for order ${orderRef}`);
@@ -116,18 +152,22 @@ export default function WorkbenchPage() {
   );
 
   const showUndoToast = useCallback(
-    (orderRef: string, items: DeductionDetail[]) => {
+    (orderRef: string, items: DeductionDetail[], externalOrderId?: string) => {
+      const message = externalOrderId
+        ? `Order ${orderRef} fulfilled.`
+        : `Order ${orderRef} completed.`;
+
       toast(
         <div className="flex items-center justify-between w-full gap-3">
           <span className="text-sm">
-            Order <span className="font-mono font-medium">{orderRef}</span> completed.
+            <span className="font-mono font-medium">{message}</span>
           </span>
           <button
             type="button"
             className="inline-flex items-center gap-1.5 rounded-md bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:bg-foreground/90 transition-colors shrink-0"
             onClick={() => {
               toast.dismiss(`undo-${orderRef}`);
-              handleUndoDeduction(items, orderRef);
+              handleUndoDeduction(items, orderRef, externalOrderId);
             }}
           >
             <Undo2 className="h-3 w-3" />
@@ -165,8 +205,9 @@ export default function WorkbenchPage() {
 
   const handleQuantityConfirm = (quantity: number) => {
     if (selectedProduct) {
-      addItem(selectedProduct, quantity);
-      toast.success(`Added ${quantity} × ${selectedProduct.name}`);
+      // Manual additions always use 'manual' source
+      addItem(selectedProduct, quantity, 'manual');
+      toast.success(`Added ${quantity} x ${selectedProduct.name}`);
     }
   };
 
@@ -235,6 +276,9 @@ export default function WorkbenchPage() {
     [filteredProducts]
   );
 
+  // Dynamic button text based on order source
+  const completeButtonText = isWCOrder ? "Complete & Fulfill" : "Complete & Deduct";
+
   return (
     <div className="flex flex-col h-full max-h-screen overflow-hidden">
       {/* Header */}
@@ -245,6 +289,62 @@ export default function WorkbenchPage() {
         {/* Left Side - Product Grid */}
         <div className="flex-1 p-4 sm:p-6 overflow-y-auto">
           <div className="max-w-6xl mx-auto">
+            {/* Mobile: Order source toggle above search */}
+            {isMobile && (
+              <div className="mb-3">
+                <Tabs
+                  value={orderSource}
+                  onValueChange={(v) => setOrderSource(v as 'manual' | 'wc-order')}
+                >
+                  <TabsList className="w-full">
+                    <TabsTrigger value="manual" className="flex-1">Manual</TabsTrigger>
+                    <TabsTrigger value="wc-order" className="flex-1">From Order</TabsTrigger>
+                  </TabsList>
+                  {orderSource === 'wc-order' && (
+                    <TabsContent value="wc-order" className="mt-2">
+                      <WCOrderSelector
+                        onOrderSelected={(order) => selectExternalOrder(order, products)}
+                        selectedOrder={selectedExternalOrder}
+                        onClear={clearExternalOrder}
+                      />
+                      {unmappedExternalItems.length > 0 && (
+                        <div className="mt-2">
+                          <UnmappedItemsAlert
+                            items={unmappedExternalItems}
+                            onItemMapped={() => {
+                              // Re-select the same order to re-populate after mapping
+                              if (selectedExternalOrder) {
+                                // The WCOrderSelector handles re-fetch internally
+                              }
+                            }}
+                          />
+                        </div>
+                      )}
+                    </TabsContent>
+                  )}
+                </Tabs>
+                {/* Mobile: slim selected order banner when in WC mode */}
+                {isMobile && isWCOrder && orderSource === 'manual' && (
+                  <div className="mt-2 flex items-center justify-between rounded-md border border-blue-200 bg-blue-50/50 dark:border-blue-900 dark:bg-blue-950/30 px-3 py-1.5">
+                    <span className="text-xs font-mono">
+                      WC #{selectedExternalOrder.orderNumber}
+                      {selectedExternalOrder.customerName && (
+                        <span className="ml-1.5 text-muted-foreground font-sans">
+                          {selectedExternalOrder.customerName}
+                        </span>
+                      )}
+                    </span>
+                    <button
+                      onClick={clearExternalOrder}
+                      className="text-xs text-muted-foreground hover:text-destructive ml-2"
+                    >
+                      x
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Search and Filters */}
             <div
               className={cn(
@@ -397,19 +497,53 @@ export default function WorkbenchPage() {
             {/* Order Queue */}
             <OrderQueue />
 
-            {/* Order Header */}
+            {/* Order Header with Order Source Toggle */}
             <div className="p-4 border-b bg-background">
               <h2 className="text-lg font-semibold mb-3">Current Order</h2>
-              <div className="space-y-2">
-                <Label htmlFor="order-reference">Order Reference</Label>
-                <Input
-                  id="order-reference"
-                  placeholder="Enter order number..."
-                  value={orderReference}
-                  onChange={(e) => setOrderReference(e.target.value)}
-                  className="font-mono"
-                />
-              </div>
+
+              {/* Order Source Tabs */}
+              <Tabs
+                value={orderSource}
+                onValueChange={(v) => setOrderSource(v as 'manual' | 'wc-order')}
+              >
+                <TabsList className="w-full mb-3">
+                  <TabsTrigger value="manual" className="flex-1">Manual</TabsTrigger>
+                  <TabsTrigger value="wc-order" className="flex-1">From Order</TabsTrigger>
+                </TabsList>
+
+                {/* Manual tab: preserve existing text input */}
+                <TabsContent value="manual">
+                  <div className="space-y-2">
+                    <Label htmlFor="order-reference">Order Reference</Label>
+                    <Input
+                      id="order-reference"
+                      placeholder="Enter order number..."
+                      value={orderReference}
+                      onChange={(e) => setOrderReference(e.target.value)}
+                      className="font-mono"
+                    />
+                  </div>
+                </TabsContent>
+
+                {/* From Order tab: WC order selector */}
+                <TabsContent value="wc-order">
+                  <WCOrderSelector
+                    onOrderSelected={(order) => selectExternalOrder(order, products)}
+                    selectedOrder={selectedExternalOrder}
+                    onClear={clearExternalOrder}
+                  />
+                  {unmappedExternalItems.length > 0 && (
+                    <div className="mt-2">
+                      <UnmappedItemsAlert
+                        items={unmappedExternalItems}
+                        onItemMapped={() => {
+                          // Re-select triggers re-fetch through the selector
+                        }}
+                      />
+                    </div>
+                  )}
+                </TabsContent>
+              </Tabs>
             </div>
 
             {/* Order Items */}
@@ -443,7 +577,7 @@ export default function WorkbenchPage() {
                   disabled={orderItems.length === 0 || !orderReference.trim()}
                   className="flex-1 disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100"
                 >
-                  Complete & Deduct
+                  {completeButtonText}
                 </Button>
               </div>
             </div>
@@ -484,12 +618,12 @@ export default function WorkbenchPage() {
       <CompleteOrderDialog
         open={showCompleteDialog}
         onOpenChange={setShowCompleteDialog}
-        onSuccess={({ orderReference: completedRef, items: deductedItems }) => {
+        onSuccess={({ orderReference: completedRef, items: deductedItems, externalOrderId }) => {
           refetchProducts();
           setMobileCartOpen(false);
-          // Show undo toast for 10 seconds
-          showUndoToast(completedRef, deductedItems);
-          // Advance to the next order in the queue
+          // Show undo toast for 10 seconds (Amendment 7: includes unfulfill for WC orders)
+          showUndoToast(completedRef, deductedItems, externalOrderId);
+          // Advance to the next order in the queue (Amendment 6: forces manual mode)
           const next = advanceQueue();
           if (next) {
             toast.info(`Loaded next order: ${next}`);

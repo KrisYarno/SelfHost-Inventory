@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { WorkbenchState, OrderItem } from "@/types/workbench";
 import { ProductWithQuantity } from "@/types/product";
+import type { ExternalOrder } from "@/types/external-orders";
+import { toast } from "sonner";
 
 export const useWorkbench = create<WorkbenchState>((set, get) => ({
   // Initial state
@@ -9,29 +11,44 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   isProcessing: false,
   orderQueue: [],
 
+  // WC order integration state
+  orderSource: 'manual' as const,
+  selectedExternalOrder: null,
+  unmappedExternalItems: [],
+
   // Actions
-  addItem: (product: ProductWithQuantity, quantity: number) => {
+  // Amendment 5: items with different sources don't merge (even same product)
+  addItem: (product: ProductWithQuantity, quantity: number, source?: 'manual' | 'wc-order', fulfillmentItemId?: string) => {
     set((state) => {
+      const itemSource = source || 'manual';
+
+      // Only merge items with the same product AND same source
       const existingItemIndex = state.orderItems.findIndex(
-        (item) => item.product.id === product.id
+        (item) => item.product.id === product.id && (item.source || 'manual') === itemSource
       );
 
       if (existingItemIndex !== -1) {
         // Update existing item quantity
         const newItems = [...state.orderItems];
+        newItems[existingItemIndex] = { ...newItems[existingItemIndex] };
         newItems[existingItemIndex].quantity += quantity;
-        
+
         // Don't exceed available stock
         if (newItems[existingItemIndex].quantity > product.currentQuantity) {
           newItems[existingItemIndex].quantity = product.currentQuantity;
         }
-        
+
         return { orderItems: newItems };
       } else {
         // Add new item
         const actualQuantity = Math.min(quantity, product.currentQuantity);
         return {
-          orderItems: [...state.orderItems, { product, quantity: actualQuantity }],
+          orderItems: [...state.orderItems, {
+            product,
+            quantity: actualQuantity,
+            source: itemSource,
+            fulfillmentItemId,
+          }],
         };
       }
     });
@@ -47,15 +64,24 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         }
         return item;
       });
-      
+
       // Remove items with 0 quantity
       return { orderItems: newItems.filter((item) => item.quantity > 0) };
     });
   },
 
-  removeItem: (productId: number) => {
+  // Amendment 5: removeItem uses fulfillmentItemId to distinguish same-product entries
+  removeItem: (productId: number, fulfillmentItemId?: string) => {
     set((state) => ({
-      orderItems: state.orderItems.filter((item) => item.product.id !== productId),
+      orderItems: state.orderItems.filter((item) => {
+        if (item.product.id !== productId) return true;
+        // If fulfillmentItemId provided, only remove matching entry
+        if (fulfillmentItemId !== undefined) {
+          return item.fulfillmentItemId !== fulfillmentItemId;
+        }
+        // If no fulfillmentItemId, remove manual entries for this product
+        return item.fulfillmentItemId !== undefined;
+      }),
     }));
   },
 
@@ -63,11 +89,15 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set({ orderReference: reference });
   },
 
+  // Amendment 6: clearOrder also resets WC state
   clearOrder: () => {
     set({
       orderItems: [],
       orderReference: "",
       isProcessing: false,
+      orderSource: 'manual',
+      selectedExternalOrder: null,
+      unmappedExternalItems: [],
     });
   },
 
@@ -102,6 +132,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set({ orderQueue: [] });
   },
 
+  // Amendment 6: advanceQueue forces manual mode since queue only stores string references
   advanceQueue: () => {
     const state = get();
     if (state.orderQueue.length === 0) return null;
@@ -111,6 +142,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       orderReference: next,
       isProcessing: false,
       orderQueue: rest,
+      orderSource: 'manual',
+      selectedExternalOrder: null,
+      unmappedExternalItems: [],
     });
     return next;
   },
@@ -131,6 +165,96 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const total = state.orderQueue.length + 1; // +1 for the current order
     if (total <= 1) return null;
     return { current: 1, total };
+  },
+
+  // WC order actions
+  setOrderSource: (source: 'manual' | 'wc-order') => {
+    set({ orderSource: source });
+  },
+
+  selectExternalOrder: (order: ExternalOrder, products: ProductWithQuantity[]) => {
+    const cartItems: OrderItem[] = [];
+    const unmappedItems: Array<{
+      name: string;
+      sku?: string;
+      quantity: number;
+      externalItemId?: string;
+    }> = [];
+
+    if (order.items) {
+      for (const item of order.items) {
+        // Skip fully fulfilled items
+        const remainingQty = item.quantity - item.fulfilledQty;
+        if (remainingQty <= 0) continue;
+
+        if (item.isMapped && item.productLink?.internalProduct) {
+          // Find matching product in the loaded products array
+          const matchingProduct = products.find(
+            (p) => p.id === item.productLink!.internalProductId
+          );
+
+          if (matchingProduct) {
+            let qty = remainingQty;
+
+            // Amendment 8: warn if order needs more than available stock, cap at stock
+            if (qty > matchingProduct.currentQuantity) {
+              toast.warning(
+                `${matchingProduct.name}: order needs ${qty}, only ${matchingProduct.currentQuantity} in stock`
+              );
+              qty = matchingProduct.currentQuantity;
+            }
+
+            if (qty > 0) {
+              cartItems.push({
+                product: matchingProduct,
+                quantity: qty,
+                fulfillmentItemId: item.id,
+                source: 'wc-order',
+              });
+            }
+          } else {
+            // Product was mapped but not found in loaded products array
+            unmappedItems.push({
+              name: item.name,
+              sku: item.sku ?? undefined,
+              quantity: remainingQty,
+              externalItemId: item.id,
+            });
+          }
+        } else {
+          // Not mapped — store as unmapped
+          unmappedItems.push({
+            name: item.name,
+            sku: item.sku ?? undefined,
+            quantity: remainingQty,
+            externalItemId: item.id,
+          });
+        }
+      }
+    }
+
+    set({
+      orderSource: 'wc-order',
+      selectedExternalOrder: {
+        id: order.id,
+        orderNumber: order.orderNumber,
+        customerName: order.customerName ?? undefined,
+        total: order.total,
+      },
+      orderReference: order.orderNumber,
+      orderItems: cartItems,
+      unmappedExternalItems: unmappedItems,
+    });
+  },
+
+  clearExternalOrder: () => {
+    set({
+      selectedExternalOrder: null,
+      unmappedExternalItems: [],
+      orderItems: [],
+      orderReference: "",
+      orderSource: 'manual',
+    });
   },
 
   // Computed values

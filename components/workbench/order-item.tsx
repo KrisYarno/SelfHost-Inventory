@@ -87,6 +87,11 @@ export function OrderItemComponent({
           >
             Stock: {availableStock}
           </ValueChip>
+          {item.source === 'wc-order' && (
+            <span className="inline-flex items-center rounded-full bg-blue-50 dark:bg-blue-950/40 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+              from order
+            </span>
+          )}
           {isOverPicked && (
             <StatusBadge tone="warning">Over picked</StatusBadge>
           )}

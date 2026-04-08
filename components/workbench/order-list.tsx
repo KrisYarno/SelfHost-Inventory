@@ -39,12 +39,12 @@ export function OrderList() {
         <div className="p-4 space-y-2">
           {orderItems.map((item) => (
             <OrderItemComponent
-              key={item.product.id}
+              key={item.fulfillmentItemId ?? `manual-${item.product.id}`}
               item={item}
               onUpdateQuantity={(quantity) =>
                 updateItemQuantity(item.product.id, quantity)
               }
-              onRemove={() => removeItem(item.product.id)}
+              onRemove={() => removeItem(item.product.id, item.fulfillmentItemId)}
             />
           ))}
         </div>
