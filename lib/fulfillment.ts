@@ -379,15 +379,18 @@ export async function fulfillExternalOrder(
             tx
           );
 
-          // Legacy product.quantity mirror for location 1 (atomic, matches the
-          // product_locations UPDATE above). Safe because product_locations
-          // decrement already succeeded, so the mirror decrement should too.
+          // Legacy product.quantity mirror for location 1. This is a derived
+          // value that should track product_locations[productId, 1].quantity.
+          // No stock guard here: the authoritative check already happened in
+          // the product_locations UPDATE above, and the mirror must track
+          // the source of truth even if that means going temporarily negative
+          // during a concurrent race. Removing the guard also prevents silent
+          // desync when another code path has already decremented the mirror.
           if (locationId === 1) {
             await tx.$executeRaw(Prisma.sql`
               UPDATE products
               SET quantity = quantity - ${quantityToFulfill}
               WHERE id = ${productId}
-                AND quantity >= ${quantityToFulfill}
             `);
           }
 

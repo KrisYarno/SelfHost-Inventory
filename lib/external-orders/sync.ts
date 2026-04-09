@@ -182,16 +182,26 @@ export async function syncIntegrationOrders(
 
   const platform = integration.platform as PlatformType;
 
-  // P1-3: MySQL advisory lock prevents concurrent sync runs on the same
-  // integration. GET_LOCK with timeout 0 returns 1 on success, 0 on contention.
-  // The lock is automatically released when the connection closes, but we
-  // also release it explicitly in the finally block.
-  const lockKey = `ext-sync:${integrationId}`;
-  const lockAcquired = await prisma.$queryRaw<
-    Array<{ locked: number | bigint | null }>
-  >`SELECT GET_LOCK(${lockKey}, 0) AS locked`;
-  const gotLock = Number(lockAcquired?.[0]?.locked ?? 0) === 1;
-  if (!gotLock) {
+  // P1-3 hardening: timestamp-based row lock instead of MySQL GET_LOCK.
+  // GET_LOCK is session-scoped, so under Prisma's connection pooling the
+  // RELEASE_LOCK call in finally could land on a different connection and
+  // silently no-op. The row lock works across connections and has built-in
+  // TTL: stale locks older than 5 minutes are re-acquirable, so a crashed
+  // sync can't permanently block an integration.
+  const lockAcquiredAt = new Date();
+  const staleThreshold = new Date(lockAcquiredAt.getTime() - 5 * 60 * 1000);
+  const acquireResult = await prisma.integration.updateMany({
+    where: {
+      id: integrationId,
+      OR: [
+        { syncLockedAt: null },
+        { syncLockedAt: { lt: staleThreshold } },
+      ],
+    },
+    data: { syncLockedAt: lockAcquiredAt },
+  });
+
+  if (acquireResult.count === 0) {
     console.warn(
       `[sync] Skipping integration ${integrationId}: another sync run holds the lock`
     );
@@ -304,12 +314,21 @@ export async function syncIntegrationOrders(
       : integration.lastSyncAt?.toISOString() ?? now.toISOString(),
   };
   } finally {
-    // P1-3: Always release the advisory lock, even on error
+    // Release the row lock. The `syncLockedAt: lockAcquiredAt` condition is a
+    // fencing token: we only clear the lock if we're still the owner. If the
+    // stale-lock threshold elapsed and another process acquired it, our
+    // release no-ops and we don't stomp on their work.
     try {
-      await prisma.$queryRaw`SELECT RELEASE_LOCK(${lockKey})`;
+      await prisma.integration.updateMany({
+        where: {
+          id: integrationId,
+          syncLockedAt: lockAcquiredAt,
+        },
+        data: { syncLockedAt: null },
+      });
     } catch (releaseError) {
       console.error(
-        `[sync] Failed to release advisory lock for ${integrationId}:`,
+        `[sync] Failed to release row lock for ${integrationId}:`,
         releaseError
       );
     }

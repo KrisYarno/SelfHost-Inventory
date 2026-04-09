@@ -134,7 +134,7 @@ export function MobileCartSheet({
               disabled={!canComplete}
               className="flex-1"
             >
-              Complete Order
+              {isWCOrder ? "Complete & Fulfill" : "Complete Order"}
             </Button>
           </div>
         </div>

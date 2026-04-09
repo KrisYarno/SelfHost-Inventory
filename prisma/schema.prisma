@@ -221,6 +221,11 @@ model Integration {
   lastStockSyncError     String?  @db.Text
   syncLocationId         Int?     // Which location to sync stock from (null = all locations)
 
+  // P1-3 hardening: timestamp-based sync lock. Replaces the GET_LOCK approach
+  // which was unreliable under Prisma connection pooling. Stale locks (older
+  // than 5 minutes) are treated as expired by the acquire query.
+  syncLockedAt           DateTime?
+
   company       Company  @relation(fields: [companyId], references: [id])
   orders        ExternalOrder[]
   productLinks  ProductLink[]

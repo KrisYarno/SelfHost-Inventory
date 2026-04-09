@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireApproved, requireAdmin, apiHandler } from '@/lib/api-utils';
+import {
+  requireApproved,
+  requireAdmin,
+  requireCompanyMembership,
+  apiHandler,
+} from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import { validateCSRFToken } from '@/lib/csrf';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
@@ -80,6 +85,11 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     return NextResponse.json({ error: 'Integration not found' }, { status: 404 });
   }
 
+  // P0-4 extension: verify user belongs to the integration's company. Previously
+  // any admin could create mappings between their own products and any
+  // company's integrations.
+  await requireCompanyMembership(user.id, integration.companyId, user.isAdmin);
+
   if (!integration.isActive) {
     return NextResponse.json(
       { error: 'Integration is not active' },
@@ -149,6 +159,9 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: RouteP
 
   const existingLink = await prisma.productLink.findUnique({
     where: { id: queryValidation.linkId },
+    include: {
+      integration: { select: { companyId: true } },
+    },
   });
 
   if (!existingLink) {
@@ -161,6 +174,13 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: RouteP
       { status: 400 }
     );
   }
+
+  // P0-4 extension: verify user belongs to the link's integration's company.
+  await requireCompanyMembership(
+    user.id,
+    existingLink.integration.companyId,
+    user.isAdmin
+  );
 
   await prisma.productLink.delete({
     where: { id: queryValidation.linkId },

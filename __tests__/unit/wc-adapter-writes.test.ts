@@ -290,62 +290,72 @@ describe('updateOrderStatus', () => {
   // 12. 429 retry with Retry-After header (P1 coverage gap)
   it('retries once on 429 with Retry-After header', async () => {
     jest.useFakeTimers();
+    try {
+      const fetchMock = jest
+        .fn()
+        .mockResolvedValueOnce(
+          mockResponse(429, { message: 'Rate limited' }, { 'Retry-After': '1' })
+        )
+        .mockResolvedValueOnce(
+          mockResponse(200, { id: 123, status: 'completed' })
+        );
+      global.fetch = fetchMock;
 
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValueOnce(
-        mockResponse(429, { message: 'Rate limited' }, { 'Retry-After': '1' })
-      )
-      .mockResolvedValueOnce(mockResponse(200, { id: 123, status: 'completed' }));
-    global.fetch = fetchMock;
+      const promise = adapter.updateOrderStatus(
+        storeUrl,
+        credentials,
+        '123',
+        'completed'
+      );
 
-    const promise = adapter.updateOrderStatus(
-      storeUrl,
-      credentials,
-      '123',
-      'completed'
-    );
+      // Advance through the 1-second Retry-After wait
+      await jest.advanceTimersByTimeAsync(1100);
 
-    // Advance through the 1-second Retry-After wait
-    await jest.advanceTimersByTimeAsync(1100);
+      const result = await promise;
 
-    const result = await promise;
-
-    expect(result.success).toBe(true);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-
-    jest.useRealTimers();
+      expect(result.success).toBe(true);
+      // Also verify it's a PUT, not a POST
+      expect((global.fetch as jest.Mock).mock.calls[0][1].method).toBe('PUT');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   // 13. 429 retry fails a second time (P1 coverage gap)
   it('returns error when 429 retry also fails', async () => {
     jest.useFakeTimers();
+    try {
+      const fetchMock = jest
+        .fn()
+        .mockResolvedValueOnce(
+          mockResponse(429, { message: 'Rate limited' }, { 'Retry-After': '1' })
+        )
+        .mockResolvedValueOnce(
+          mockResponse(
+            429,
+            { message: 'Still rate limited' },
+            { 'Retry-After': '1' }
+          )
+        );
+      global.fetch = fetchMock;
 
-    const fetchMock = jest
-      .fn()
-      .mockResolvedValueOnce(
-        mockResponse(429, { message: 'Rate limited' }, { 'Retry-After': '1' })
-      )
-      .mockResolvedValueOnce(
-        mockResponse(429, { message: 'Still rate limited' }, { 'Retry-After': '1' })
+      const promise = adapter.updateOrderStatus(
+        storeUrl,
+        credentials,
+        '123',
+        'completed'
       );
-    global.fetch = fetchMock;
 
-    const promise = adapter.updateOrderStatus(
-      storeUrl,
-      credentials,
-      '123',
-      'completed'
-    );
+      await jest.advanceTimersByTimeAsync(1100);
 
-    await jest.advanceTimersByTimeAsync(1100);
+      const result = await promise;
 
-    const result = await promise;
-
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('429');
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-
-    jest.useRealTimers();
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('429');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

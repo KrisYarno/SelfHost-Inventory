@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, apiHandler } from "@/lib/api-utils";
+import { requireApproved, requireCompanyMembership, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import type { ExternalOrdersResponse, PlatformType, InternalOrderStatus } from "@/types/external-orders";
 
@@ -21,6 +21,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const where: any = {};
 
   if (companyId) {
+    // P0-4 extension: verify user belongs to the requested company. Previously
+    // any approved user could pass an arbitrary companyId and see cross-company
+    // orders. Admins bypass via requireCompanyMembership.
+    await requireCompanyMembership(user.id, companyId, user.isAdmin);
     where.companyId = companyId;
   } else {
     const userCompanies = await prisma.userCompany.findMany({
