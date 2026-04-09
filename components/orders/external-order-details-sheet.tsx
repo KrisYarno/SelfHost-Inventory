@@ -324,7 +324,11 @@ export function ExternalOrderDetailsSheet({
                       <p>{format(new Date(order.lastSeenAt), "MMM d, yyyy h:mm a")}</p>
                     </div>
                   )}
-                  {order.externalOrderUrl && (
+                  {/* P2: externalOrderUrl comes from the raw WC/Shopify payload,
+                      which could inject a javascript: URL or internal-network
+                      address. Only render as a clickable link when the URL
+                      starts with https://. */}
+                  {order.externalOrderUrl && order.externalOrderUrl.startsWith('https://') && (
                     <div className="col-span-2">
                       <span className="text-muted-foreground">Source Link:</span>
                       <a

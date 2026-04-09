@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireApproved, apiHandler } from '@/lib/api-utils';
+import { requireApproved, requireCompanyMembership, apiHandler } from '@/lib/api-utils';
 import { fulfillExternalOrder } from '@/lib/fulfillment';
 import { validateCSRFToken } from '@/lib/csrf';
 import { FulfillmentRequestSchema } from '@/lib/validation/fulfillment';
@@ -30,6 +30,17 @@ export const POST = apiHandler(async (
   }
 
   const body = FulfillmentRequestSchema.parse(await request.json());
+
+  // P0-4: Verify user belongs to the order's company. Load just the companyId
+  // up-front so we don't expose fulfillment to cross-tenant callers.
+  const orderCompany = await prisma.externalOrder.findUnique({
+    where: { id: params.orderId },
+    select: { companyId: true },
+  });
+  if (!orderCompany) {
+    return NextResponse.json({ error: 'Order not found' }, { status: 404 });
+  }
+  await requireCompanyMembership(user.id, orderCompany.companyId, user.isAdmin);
 
   // Perform fulfillment
   const result = await fulfillExternalOrder(

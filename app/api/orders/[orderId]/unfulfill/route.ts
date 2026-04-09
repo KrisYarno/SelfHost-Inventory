@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireApproved, apiHandler } from '@/lib/api-utils';
+import { requireApproved, requireCompanyMembership, apiHandler } from '@/lib/api-utils';
 import { validateCSRFToken } from '@/lib/csrf';
 import { UnfulfillRequestSchema } from '@/lib/validation/unfulfill';
 import {
@@ -32,6 +32,16 @@ export const POST = apiHandler(async (
   }
 
   const body = UnfulfillRequestSchema.parse(await request.json());
+
+  // P0-4: Verify user belongs to the order's company.
+  const orderCompany = await prisma.externalOrder.findUnique({
+    where: { id: params.orderId },
+    select: { companyId: true },
+  });
+  if (!orderCompany) {
+    return NextResponse.json({ error: 'Order not found' }, { status: 404 });
+  }
+  await requireCompanyMembership(user.id, orderCompany.companyId, user.isAdmin);
 
   const restored: Array<{
     itemId: string;

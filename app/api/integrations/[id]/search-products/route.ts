@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireApproved, apiHandler } from '@/lib/api-utils';
+import { requireApproved, requireCompanyMembership, apiHandler } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { SearchProductsQuerySchema } from '@/lib/validation/product-links';
@@ -156,6 +156,10 @@ export const GET = apiHandler(async (
   if (!integration) {
     return NextResponse.json({ error: 'Integration not found' }, { status: 404 });
   }
+
+  // P0-4: Verify user belongs to the integration's company before exposing
+  // credentials-backed external search. Throws 404 to avoid leaking existence.
+  await requireCompanyMembership(user.id, integration.companyId, user.isAdmin);
 
   if (!integration.isActive) {
     return NextResponse.json({ error: 'Integration is not active' }, { status: 400 });

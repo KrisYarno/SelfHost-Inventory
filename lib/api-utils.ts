@@ -4,6 +4,7 @@ import { AppError, errorLogger } from '@/lib/error-handling';
 import { ZodError } from 'zod';
 import { RateLimitError } from '@/lib/rateLimit';
 import { OptimisticLockError } from '@/lib/inventory';
+import prisma from '@/lib/prisma';
 
 // --- Auth guard types ---
 
@@ -43,6 +44,29 @@ export async function requireAdmin(): Promise<AuthResult> {
     throw new AppError('Admin access required', 'FORBIDDEN', 403);
   }
   return { user };
+}
+
+// --- Multi-tenant company membership guard (P0-4) ---
+
+/**
+ * Verifies that the given user is a member of the given company. Admins bypass
+ * the check because they manage all companies. Throws AppError with 404 on miss
+ * so the response doesn't leak whether the resource exists at all (prevents
+ * enumeration attacks via differential 403 vs 404).
+ */
+export async function requireCompanyMembership(
+  userId: number,
+  companyId: string,
+  isAdmin: boolean
+): Promise<void> {
+  if (isAdmin) return;
+  const membership = await prisma.userCompany.findFirst({
+    where: { userId, companyId },
+    select: { userId: true },
+  });
+  if (!membership) {
+    throw new AppError('Resource not found', 'NOT_FOUND', 404);
+  }
 }
 
 // --- Standard error response builder ---

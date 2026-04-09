@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, requireCompanyMembership, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { validateCSRFToken } from "@/lib/csrf";
 
 export const dynamic = "force-dynamic";
 
 export const GET = apiHandler(async (request: NextRequest) => {
-  await requireAdmin();
+  const { user } = await requireAdmin();
 
   const searchParams = request.nextUrl.searchParams;
   const integrationId = searchParams.get("integrationId");
@@ -19,7 +19,27 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const where: any = {};
 
   if (integrationId) {
+    // P0-4: if a specific integration is requested, verify the user belongs
+    // to its company (admins bypass via requireCompanyMembership).
+    const integration = await prisma.integration.findUnique({
+      where: { id: integrationId },
+      select: { companyId: true },
+    });
+    if (!integration) {
+      return NextResponse.json({ error: "Integration not found" }, { status: 404 });
+    }
+    await requireCompanyMembership(user.id, integration.companyId, user.isAdmin);
     where.integrationId = integrationId;
+  } else if (!user.isAdmin) {
+    // P0-4: without a specific integration filter, scope to the user's companies
+    // via the integration relation. Platform admins see everything.
+    const userCompanies = await prisma.userCompany.findMany({
+      where: { userId: user.id },
+      select: { companyId: true },
+    });
+    where.integration = {
+      companyId: { in: userCompanies.map((uc) => uc.companyId) },
+    };
   }
 
   if (search) {
@@ -70,7 +90,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
 });
 
 export const DELETE = apiHandler(async (request: NextRequest) => {
-  await requireAdmin();
+  const { user } = await requireAdmin();
 
   const isValidCSRF = await validateCSRFToken(request);
   if (!isValidCSRF) {
@@ -89,6 +109,9 @@ export const DELETE = apiHandler(async (request: NextRequest) => {
 
   const existingLink = await prisma.productLink.findUnique({
     where: { id: linkId },
+    include: {
+      integration: { select: { companyId: true } },
+    },
   });
 
   if (!existingLink) {
@@ -97,6 +120,13 @@ export const DELETE = apiHandler(async (request: NextRequest) => {
       { status: 404 }
     );
   }
+
+  // P0-4: Verify user belongs to the link's integration's company.
+  await requireCompanyMembership(
+    user.id,
+    existingLink.integration.companyId,
+    user.isAdmin
+  );
 
   // Delete the product link. With onDelete: SetNull, the FK on ExternalOrderItem
   // will be nulled automatically by the database. But we also need to set isMapped = false.

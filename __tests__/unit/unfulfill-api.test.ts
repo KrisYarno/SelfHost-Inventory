@@ -17,10 +17,14 @@ jest.mock('@/lib/prisma', () => {
   return { __esModule: true, default: mock }
 })
 
+// P0-4: requireCompanyMembership mock — default to pass (member). Tests that
+// want to simulate cross-company rejection use mockRequireCompanyMembership.
+const mockRequireCompanyMembership = jest.fn().mockResolvedValue(undefined)
 jest.mock('@/lib/api-utils', () => ({
   requireApproved: jest.fn().mockResolvedValue({
     user: { id: 1, email: 'test@test.com', name: 'Test', isAdmin: false, isApproved: true, defaultLocationId: 1 },
   }),
+  requireCompanyMembership: (...args: any[]) => mockRequireCompanyMembership(...args),
   apiHandler: jest.fn((handler: any) => handler),
 }))
 
@@ -68,11 +72,17 @@ function getMockPrisma(): DeepMockProxy<PrismaClient> {
 
 beforeEach(() => {
   mockReset(getMockPrisma())
+  jest.clearAllMocks()
   _csrfValid = true
   _auditCalls.length = 0
   _inventoryLogImpl = () => Promise.resolve({ id: 100 })
   mockPushOrderStatus.mockReset().mockResolvedValue({ success: true })
-  jest.clearAllMocks()
+  mockRequireCompanyMembership.mockReset().mockResolvedValue(undefined)
+  // P0-4: The pre-transaction order lookup returns "order exists" by default
+  // so existing tests pass. Test 4 overrides to simulate a missing order.
+  getMockPrisma().externalOrder.findUnique.mockResolvedValue({
+    companyId: 'co-test',
+  } as any)
 })
 
 // ---------------------------------------------------------------------------
@@ -269,11 +279,14 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 4. Order not found: 404
+  // 4. Order not found: 404 (caught by pre-transaction company check)
   // -----------------------------------------------------------------------
   it('returns 404 when order is not found', async () => {
     const tx = setupTransaction()
 
+    // P0-4: the pre-transaction company check hits findUnique FIRST.
+    // Override the default "order exists" mock to simulate a missing order.
+    getMockPrisma().externalOrder.findUnique.mockResolvedValueOnce(null)
     tx.externalOrder.findUnique.mockResolvedValue(null)
 
     const req = buildRequest({
@@ -282,10 +295,38 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
       ],
     })
 
-    // The AppError thrown inside the transaction propagates
+    const response = await POST(req, { params: { orderId: 'nonexistent' } })
+    const data = await response.json()
+
+    expect(response.status).toBe(404)
+    expect(data.error).toBe('Order not found')
+  })
+
+  // -----------------------------------------------------------------------
+  // 4b. P0-4: cross-company access is rejected by membership check
+  // -----------------------------------------------------------------------
+  it('P0-4: rejects unfulfill when user does not belong to order company', async () => {
+    // Pre-check: order exists but user is not a member of its company
+    getMockPrisma().externalOrder.findUnique.mockResolvedValueOnce({
+      companyId: 'co-other',
+    } as any)
+    // requireCompanyMembership throws AppError for non-members
+    mockRequireCompanyMembership.mockRejectedValueOnce(
+      Object.assign(new Error('Resource not found'), { code: 'NOT_FOUND', statusCode: 404 })
+    )
+
+    const req = buildRequest({
+      items: [
+        { itemId: 'item-1', productId: 1, quantity: 1, locationId: 1 },
+      ],
+    })
+
     await expect(
-      POST(req, { params: { orderId: 'nonexistent' } })
-    ).rejects.toThrow('not found')
+      POST(req, { params: { orderId: 'order-1' } })
+    ).rejects.toThrow('Resource not found')
+
+    // Transaction must NOT have been started
+    expect(getMockPrisma().$transaction).not.toHaveBeenCalled()
   })
 
   // -----------------------------------------------------------------------
