@@ -74,8 +74,10 @@ async function searchShopify(
   const url = new URL(
     `https://${shopDomain}/admin/api/${apiVersion}/products.json`,
   );
-  // Shopify REST Admin API does not support title search natively.
-  // Fetch a larger batch and filter client-side by title/sku match.
+  // P1-11: Shopify REST Admin API supports `title` as a prefix match. Use it
+  // for the authoritative search instead of fetching 50 and filtering
+  // client-side, which silently truncated results for stores with >50 products.
+  url.searchParams.set('title', query);
   url.searchParams.set('limit', '50');
 
   const controller = new AbortController();
@@ -104,13 +106,17 @@ async function searchShopify(
   const data = (await resp.json()) as { products?: any[] };
   const allProducts = data.products || [];
 
-  // Client-side filter since Shopify REST API has no title search param
+  // P1-11: Server already filtered by title prefix via `title` param. We still
+  // do a local SKU filter since Shopify's title filter doesn't match SKUs, and
+  // trim to the top 20 for UI responsiveness.
   const lowerQuery = query.toLowerCase();
-  const products = allProducts.filter((p: any) => {
-    const title = (p.title ?? '').toLowerCase();
-    const sku = (p.variants?.[0]?.sku ?? '').toLowerCase();
-    return title.includes(lowerQuery) || sku.includes(lowerQuery);
-  }).slice(0, 20);
+  const products = allProducts
+    .filter((p: any) => {
+      const title = (p.title ?? '').toLowerCase();
+      const sku = (p.variants?.[0]?.sku ?? '').toLowerCase();
+      return title.includes(lowerQuery) || sku.includes(lowerQuery);
+    })
+    .slice(0, 20);
 
   return products.map((p: any): ExternalProductSearchResult => ({
     externalId: String(p.id),

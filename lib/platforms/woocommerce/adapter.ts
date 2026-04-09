@@ -148,7 +148,7 @@ export class WooCommerceAdapter implements PlatformAdapter {
   ): Promise<BatchStockUpdateResult> {
     const auth = Buffer.from(`${credentials.key}:${credentials.secret}`).toString('base64');
     let succeeded = 0;
-    const failed: Array<{ productId: string; error: string }> = [];
+    const failed: Array<{ productId: string; variantId?: string; error: string }> = [];
 
     // Separate simple products from variations
     const simpleUpdates: Array<{ productId: string; stockStatus: 'instock' | 'outofstock' }> = [];
@@ -224,11 +224,30 @@ export class WooCommerceAdapter implements PlatformAdapter {
         const data = (await resp.json()) as { update?: Array<{ id?: number; error?: { message?: string } }> };
         const results = data.update || [];
 
-        // Match results back to batch items
-        for (let i = 0; i < batch.length; i++) {
-          const result = results[i];
-          if (result?.error?.message) {
-            failed.push({ productId: batch[i].productId, error: result.error.message });
+        // P1-1: Match results back to batch items by ID, not array index.
+        // WooCommerce does not guarantee response order, and items that fail
+        // with errors may be omitted. Build a map keyed on the numeric ID.
+        const responseById = new Map<number, { id?: number; error?: { message?: string } }>();
+        for (const r of results) {
+          if (r?.id != null) {
+            responseById.set(r.id, r);
+          }
+        }
+
+        for (const item of batch) {
+          const numericId = parseInt(item.productId, 10);
+          const result = responseById.get(numericId);
+          if (!result) {
+            // Item missing from response entirely
+            failed.push({
+              productId: item.productId,
+              error: 'Missing from batch response',
+            });
+          } else if (result.error?.message) {
+            failed.push({
+              productId: item.productId,
+              error: result.error.message,
+            });
           } else {
             succeeded++;
           }
@@ -258,7 +277,13 @@ export class WooCommerceAdapter implements PlatformAdapter {
           if (!resp.ok) {
             const body = await resp.text();
             for (const item of batch) {
-              failed.push({ productId: item.variantId, error: `HTTP ${resp.status}: ${body.slice(0, 200)}` });
+              // P1-7: Populate both productId (parent) and variantId so callers
+              // can locate the failure in logs and UI without a lookup.
+              failed.push({
+                productId: parentId,
+                variantId: item.variantId,
+                error: `HTTP ${resp.status}: ${body.slice(0, 200)}`,
+              });
             }
             continue;
           }
@@ -266,10 +291,29 @@ export class WooCommerceAdapter implements PlatformAdapter {
           const data = (await resp.json()) as { update?: Array<{ id?: number; error?: { message?: string } }> };
           const results = data.update || [];
 
-          for (let i = 0; i < batch.length; i++) {
-            const result = results[i];
-            if (result?.error?.message) {
-              failed.push({ productId: batch[i].variantId, error: result.error.message });
+          // P1-1: Match results by ID not index
+          const responseById = new Map<number, { id?: number; error?: { message?: string } }>();
+          for (const r of results) {
+            if (r?.id != null) {
+              responseById.set(r.id, r);
+            }
+          }
+
+          for (const item of batch) {
+            const numericVariantId = parseInt(item.variantId, 10);
+            const result = responseById.get(numericVariantId);
+            if (!result) {
+              failed.push({
+                productId: parentId,
+                variantId: item.variantId,
+                error: 'Missing from batch response',
+              });
+            } else if (result.error?.message) {
+              failed.push({
+                productId: parentId,
+                variantId: item.variantId,
+                error: result.error.message,
+              });
             } else {
               succeeded++;
             }
@@ -277,7 +321,11 @@ export class WooCommerceAdapter implements PlatformAdapter {
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error';
           for (const item of batch) {
-            failed.push({ productId: item.variantId, error: message });
+            failed.push({
+              productId: parentId,
+              variantId: item.variantId,
+              error: message,
+            });
           }
         }
       }

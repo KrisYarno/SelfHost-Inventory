@@ -92,11 +92,14 @@ export interface NormalizedOrder {
 }
 
 /**
- * Result of a batch stock update operation
+ * Result of a batch stock update operation.
+ * P1-7: `variantId` is populated when the failed row is a variation, so
+ * callers can disambiguate which product/variant failed without having to
+ * re-parse the original request batch.
  */
 export interface BatchStockUpdateResult {
   succeeded: number;
-  failed: Array<{ productId: string; error: string }>;
+  failed: Array<{ productId: string; variantId?: string; error: string }>;
 }
 
 /**

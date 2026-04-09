@@ -182,6 +182,34 @@ export async function syncIntegrationOrders(
 
   const platform = integration.platform as PlatformType;
 
+  // P1-3: MySQL advisory lock prevents concurrent sync runs on the same
+  // integration. GET_LOCK with timeout 0 returns 1 on success, 0 on contention.
+  // The lock is automatically released when the connection closes, but we
+  // also release it explicitly in the finally block.
+  const lockKey = `ext-sync:${integrationId}`;
+  const lockAcquired = await prisma.$queryRaw<
+    Array<{ locked: number | bigint | null }>
+  >`SELECT GET_LOCK(${lockKey}, 0) AS locked`;
+  const gotLock = Number(lockAcquired?.[0]?.locked ?? 0) === 1;
+  if (!gotLock) {
+    console.warn(
+      `[sync] Skipping integration ${integrationId}: another sync run holds the lock`
+    );
+    return {
+      integrationId,
+      platform,
+      since: new Date().toISOString(),
+      fetched: 0,
+      upserted: 0,
+      skipped: 0,
+      deleted: 0,
+      errors: [{ message: 'Sync skipped — another run is in progress' }],
+      lastSyncAt: integration.lastSyncAt?.toISOString() ?? new Date(0).toISOString(),
+    };
+  }
+
+  try {
+
   const lookbackDays = Math.max(
     1,
     options.lookbackDays ??
@@ -250,11 +278,17 @@ export async function syncIntegrationOrders(
     }
   }
 
+  // P1-2: Only advance lastSyncAt when at least one order successfully
+  // upserted. On total failure, leave it unchanged so the next run retries
+  // the same window rather than silently skipping the failed orders.
   const now = new Date();
-  await prisma.integration.update({
-    where: { id: integration.id },
-    data: { lastSyncAt: now },
-  });
+  const shouldAdvanceCursor = upserted > 0 || remoteOrders.length === 0;
+  if (shouldAdvanceCursor) {
+    await prisma.integration.update({
+      where: { id: integration.id },
+      data: { lastSyncAt: now },
+    });
+  }
 
   return {
     integrationId: integration.id,
@@ -265,6 +299,19 @@ export async function syncIntegrationOrders(
     skipped,
     deleted: 0,
     errors: errors.slice(0, 20),
-    lastSyncAt: now.toISOString(),
+    lastSyncAt: shouldAdvanceCursor
+      ? now.toISOString()
+      : integration.lastSyncAt?.toISOString() ?? now.toISOString(),
   };
+  } finally {
+    // P1-3: Always release the advisory lock, even on error
+    try {
+      await prisma.$queryRaw`SELECT RELEASE_LOCK(${lockKey})`;
+    } catch (releaseError) {
+      console.error(
+        `[sync] Failed to release advisory lock for ${integrationId}:`,
+        releaseError
+      );
+    }
+  }
 }

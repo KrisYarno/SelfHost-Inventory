@@ -164,6 +164,32 @@ export function ProductMapDialog({
   }, [externalProduct, selectedVariation]);
 
   // -----------------------------------------------------------------------
+  // P1-12: Load existing mappings for this integration so we can grey out
+  // internal products that are already linked. Prevents users from clicking
+  // "Map" on an already-mapped product and getting a confusing server error.
+  // -----------------------------------------------------------------------
+  const { data: existingMappings } = useQuery({
+    queryKey: ["product-map-existing", integrationId],
+    queryFn: async () => {
+      const res = await fetch(
+        `/api/admin/product-mappings?integrationId=${integrationId}&pageSize=500`
+      );
+      if (!res.ok) return { mappings: [] };
+      return res.json() as Promise<{
+        mappings: Array<{ id: string; internalProductId: number }>;
+      }>;
+    },
+    enabled: open,
+    staleTime: 60_000,
+  });
+
+  const mappedProductIds = useMemo<Set<number>>(() => {
+    return new Set(
+      (existingMappings?.mappings ?? []).map((m) => m.internalProductId)
+    );
+  }, [existingMappings]);
+
+  // -----------------------------------------------------------------------
   // Fetch variations for variable products (lazy-load per Amendment 2)
   // -----------------------------------------------------------------------
   const {
@@ -518,8 +544,8 @@ export function ProductMapDialog({
 
                   {!suggestionsLoading && (
                     <div className="space-y-1.5">
-                      {/* Quick Map for single SKU match */}
-                      {singleSkuMatch && (
+                      {/* Quick Map for single SKU match — hide if already mapped */}
+                      {singleSkuMatch && !mappedProductIds.has(singleSkuMatch.id) && (
                         <div className="rounded-lg border-2 border-primary/40 bg-primary/5 p-3">
                           <div className="flex items-center justify-between gap-2">
                             <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -556,7 +582,11 @@ export function ProductMapDialog({
                       {suggestions
                         .filter(
                           (s) =>
-                            !(singleSkuMatch && s.id === singleSkuMatch.id)
+                            !(
+                              singleSkuMatch &&
+                              !mappedProductIds.has(singleSkuMatch.id) &&
+                              s.id === singleSkuMatch.id
+                            )
                         )
                         .map((product) => (
                           <ProductRow
@@ -583,6 +613,7 @@ export function ProductMapDialog({
                             }
                             isMapping={mappingProductId === product.id}
                             disabled={mappingProductId !== null || csrfLoading}
+                            isAlreadyMapped={mappedProductIds.has(product.id)}
                             onMap={() => handleMap(product.id)}
                           />
                         ))}
@@ -634,6 +665,7 @@ export function ProductMapDialog({
                         product={product}
                         isMapping={mappingProductId === product.id}
                         disabled={mappingProductId !== null || csrfLoading}
+                        isAlreadyMapped={mappedProductIds.has(product.id)}
                         onMap={() => handleMap(product.id)}
                       />
                     ))}
@@ -663,23 +695,38 @@ function ProductRow({
   badge,
   isMapping,
   disabled,
+  isAlreadyMapped,
   onMap,
 }: {
   product: InternalProduct;
   badge?: React.ReactNode;
   isMapping: boolean;
   disabled: boolean;
+  isAlreadyMapped?: boolean;
   onMap: () => void;
 }) {
   const quantity = product.totalQuantity ?? product.currentQuantity;
 
   return (
-    <div className="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 transition-colors hover:bg-muted/30">
+    <div
+      className={`flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 transition-colors hover:bg-muted/30 ${
+        isAlreadyMapped ? "opacity-60" : ""
+      }`}
+    >
       <div className="flex items-center gap-2 min-w-0 flex-1">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <p className="text-sm font-medium truncate">{product.name}</p>
             {badge}
+            {isAlreadyMapped && (
+              <Badge
+                variant="secondary"
+                className="text-[10px] px-1.5 py-0 shrink-0"
+              >
+                <Link2 className="h-2.5 w-2.5 mr-0.5" />
+                Mapped
+              </Badge>
+            )}
           </div>
           <p className="text-xs text-muted-foreground">{quantity} units</p>
         </div>
@@ -688,11 +735,16 @@ function ProductRow({
         variant="outline"
         size="sm"
         onClick={onMap}
-        disabled={disabled}
+        disabled={disabled || isAlreadyMapped}
         className="shrink-0"
+        title={
+          isAlreadyMapped ? "This product is already mapped" : undefined
+        }
       >
         {isMapping ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : isAlreadyMapped ? (
+          "Already Mapped"
         ) : (
           "Map This"
         )}
