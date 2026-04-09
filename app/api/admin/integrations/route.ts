@@ -24,6 +24,10 @@ export const GET = apiHandler(async (_request: NextRequest) => {
       lastSyncAt: true,
       createdAt: true,
       updatedAt: true,
+      stockSyncEnabled: true,
+      fulfillmentPushEnabled: true,
+      lastStockSyncAt: true,
+      lastStockSyncError: true,
       company: {
         select: {
           name: true,

@@ -92,6 +92,22 @@ export interface NormalizedOrder {
 }
 
 /**
+ * Result of a batch stock update operation
+ */
+export interface BatchStockUpdateResult {
+  succeeded: number;
+  failed: Array<{ productId: string; error: string }>;
+}
+
+/**
+ * Result of an order status update operation
+ */
+export interface OrderStatusUpdateResult {
+  success: boolean;
+  error?: string;
+}
+
+/**
  * Platform adapter interface
  * Each platform (Shopify, WooCommerce) must implement this interface
  */
@@ -126,4 +142,28 @@ export interface PlatformAdapter {
    * @throws Error if parsing fails
    */
   parseOrderWebhook(rawBody: string): NormalizedOrder;
+
+  // Write methods (optional — not all platforms support writes)
+
+  /**
+   * Batch-update product stock status on the external platform.
+   * Amendment 11: pushes stock_status ("instock" | "outofstock") only, never
+   * manage_stock or stock_quantity.
+   * Amendment 6: splits updates into simple products and per-parent variation groups.
+   */
+  batchUpdateProductStock?(
+    storeUrl: string,
+    credentials: { key: string; secret: string },
+    updates: Array<{ productId: string; variantId?: string; stockStatus: 'instock' | 'outofstock' }>
+  ): Promise<BatchStockUpdateResult>;
+
+  /**
+   * Update an order's status on the external platform.
+   */
+  updateOrderStatus?(
+    storeUrl: string,
+    credentials: { key: string; secret: string },
+    orderId: string,
+    status: string
+  ): Promise<OrderStatusUpdateResult>;
 }

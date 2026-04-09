@@ -11,6 +11,8 @@ import type {
   NormalizedOrder,
   NormalizedLineItem,
   NormalizedCustomer,
+  BatchStockUpdateResult,
+  OrderStatusUpdateResult,
 } from '../core/types';
 import { extractShopifyHeaders, verifyShopifyWebhook } from './webhooks';
 
@@ -114,6 +116,31 @@ export class ShopifyAdapter implements PlatformAdapter {
       rawPayload: parsed,
     };
   }
+
+  // ---------------------------------------------------------------------------
+  // Write methods — stubs (Shopify writes not implemented in this phase)
+  // ---------------------------------------------------------------------------
+
+  async batchUpdateProductStock(
+    _storeUrl: string,
+    _credentials: { key: string; secret: string },
+    _updates: Array<{ productId: string; variantId?: string; stockStatus: 'instock' | 'outofstock' }>
+  ): Promise<BatchStockUpdateResult> {
+    return { succeeded: 0, failed: [{ productId: 'all', error: 'Shopify write not implemented' }] };
+  }
+
+  async updateOrderStatus(
+    _storeUrl: string,
+    _credentials: { key: string; secret: string },
+    _orderId: string,
+    _status: string
+  ): Promise<OrderStatusUpdateResult> {
+    return { success: false, error: 'Shopify write not implemented' };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers
+  // ---------------------------------------------------------------------------
 
   /**
    * Extract native status from Shopify order

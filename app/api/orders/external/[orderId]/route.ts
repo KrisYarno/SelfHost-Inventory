@@ -17,7 +17,7 @@ export const GET = apiHandler(async (
         select: { id: true, name: true, slug: true },
       },
       integration: {
-        select: { id: true, platform: true, name: true, storeUrl: true },
+        select: { id: true, platform: true, name: true, storeUrl: true, fulfillmentPushEnabled: true },
       },
       items: {
         include: {

@@ -72,6 +72,7 @@ export interface ExternalOrder {
     platform: PlatformType;
     name: string;
     storeUrl: string;
+    fulfillmentPushEnabled?: boolean;
   };
   items?: ExternalOrderItem[];
   fulfilledByUser?: {

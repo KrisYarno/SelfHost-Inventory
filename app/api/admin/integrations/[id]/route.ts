@@ -65,6 +65,9 @@ export const PUT = apiHandler(async (
     apiSecret,
     webhookSecret,
     isActive,
+    stockSyncEnabled,
+    fulfillmentPushEnabled,
+    syncLocationId,
   } = body;
 
   const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : apiKey;
@@ -91,6 +94,9 @@ export const PUT = apiHandler(async (
   if (name !== undefined) updateData.name = name;
   if (storeUrl !== undefined) updateData.storeUrl = storeUrl;
   if (isActive !== undefined) updateData.isActive = isActive;
+  if (typeof stockSyncEnabled === "boolean") updateData.stockSyncEnabled = stockSyncEnabled;
+  if (typeof fulfillmentPushEnabled === "boolean") updateData.fulfillmentPushEnabled = fulfillmentPushEnabled;
+  if (syncLocationId !== undefined) updateData.syncLocationId = syncLocationId === null ? null : Number(syncLocationId);
 
   // Only update encrypted fields if new values are provided
   if (normalizedApiKey) {

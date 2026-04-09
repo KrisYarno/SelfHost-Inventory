@@ -214,6 +214,13 @@ model Integration {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
+  // Stock sync & fulfillment push configuration (Phase D)
+  stockSyncEnabled       Boolean  @default(false)
+  fulfillmentPushEnabled Boolean  @default(false)
+  lastStockSyncAt        DateTime?
+  lastStockSyncError     String?  @db.Text
+  syncLocationId         Int?     // Which location to sync stock from (null = all locations)
+
   company       Company  @relation(fields: [companyId], references: [id])
   orders        ExternalOrder[]
   productLinks  ProductLink[]

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,8 +30,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
-import { Plug, Plus, Pencil, Trash2, Copy, Link2, Power, PowerOff, RefreshCw } from "lucide-react";
+import { Plug, Plus, Pencil, Trash2, Copy, Link2, Power, PowerOff, RefreshCw, Loader2, ChevronDown, ChevronRight, AlertTriangle } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 interface Company {
@@ -49,6 +51,10 @@ interface Integration {
   isActive: boolean;
   lastSyncAt: string | null;
   createdAt: string;
+  stockSyncEnabled: boolean;
+  fulfillmentPushEnabled: boolean;
+  lastStockSyncAt: string | null;
+  lastStockSyncError: string | null;
   company: {
     name: string;
   };
@@ -88,6 +94,9 @@ export default function AdminIntegrationsPage() {
   const [syncTarget, setSyncTarget] = useState<Integration | null>(null);
   const [syncLookbackDays, setSyncLookbackDays] = useState("1");
   const [syncMaxOrders, setSyncMaxOrders] = useState("250");
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const [stockSyncing, setStockSyncing] = useState<Set<string>>(new Set());
+  const [togglingField, setTogglingField] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -316,6 +325,84 @@ export default function AdminIntegrationsPage() {
     setSyncLookbackDays("1");
     setSyncMaxOrders("250");
     setSyncDialogOpen(true);
+  };
+
+  const toggleExpanded = (id: string) => {
+    setExpandedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleToggleField = async (
+    integration: Integration,
+    field: "stockSyncEnabled" | "fulfillmentPushEnabled",
+    value: boolean
+  ) => {
+    const key = `${integration.id}-${field}`;
+    setTogglingField(key);
+    try {
+      const response = await fetch(`/api/admin/integrations/${integration.id}`, {
+        method: "PUT",
+        headers: withCSRFHeaders(
+          { "Content-Type": "application/json" },
+          csrfToken
+        ),
+        body: JSON.stringify({ [field]: value }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || `Failed to update ${field}`);
+      }
+
+      const label = field === "stockSyncEnabled" ? "Stock sync" : "Fulfillment push";
+      toast.success(`${label} ${value ? "enabled" : "disabled"}`);
+      await fetchData();
+    } catch (error) {
+      console.error(`Error toggling ${field}:`, error);
+      toast.error(error instanceof Error ? error.message : `Failed to update ${field}`);
+    } finally {
+      setTogglingField(null);
+    }
+  };
+
+  const handleStockSyncNow = async (integration: Integration) => {
+    setStockSyncing((prev) => new Set(prev).add(integration.id));
+    try {
+      const response = await fetch(
+        `/api/admin/integrations/${integration.id}/stock-sync`,
+        {
+          method: "POST",
+          headers: withCSRFHeaders(
+            { "Content-Type": "application/json" },
+            csrfToken
+          ),
+        }
+      );
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "Stock sync failed");
+      }
+
+      const result = data.result || data;
+      toast.success(
+        `Stock sync complete: ${result.synced ?? 0} synced, ${result.failed ?? 0} failed`
+      );
+      await fetchData();
+    } catch (error) {
+      console.error("Error syncing stock:", error);
+      toast.error(error instanceof Error ? error.message : "Stock sync failed");
+    } finally {
+      setStockSyncing((prev) => {
+        const next = new Set(prev);
+        next.delete(integration.id);
+        return next;
+      });
+    }
   };
 
   const closeCreateDialog = () => {
@@ -603,85 +690,209 @@ export default function AdminIntegrationsPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {companyIntegrations.map((integration) => (
-                        <TableRow key={integration.id}>
-                          <TableCell>
-                            <Badge variant="outline">
-                              {integration.platform === "SHOPIFY" ? "Shopify" : "WooCommerce"}
-                            </Badge>
-                          </TableCell>
-                          <TableCell className="font-medium">
-                            {integration.name}
-                          </TableCell>
-                          <TableCell>
-                            <a
-                              href={integration.storeUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-sm text-blue-600 hover:underline flex items-center gap-1"
+                      {companyIntegrations.map((integration) => {
+                        const isExpanded = expandedRows.has(integration.id);
+                        const isSyncingStock = stockSyncing.has(integration.id);
+                        const platformLabel = integration.platform === "SHOPIFY" ? "Shopify" : "WooCommerce";
+
+                        return (
+                          <React.Fragment key={integration.id}>
+                            <TableRow
+                              className="cursor-pointer"
+                              onClick={() => toggleExpanded(integration.id)}
                             >
-                              {integration.storeUrl}
-                              <Link2 className="h-3 w-3" />
-                            </a>
-                          </TableCell>
-                          <TableCell>
-                            <Badge variant={integration.isActive ? "default" : "secondary"}>
-                              {integration.isActive ? "Active" : "Inactive"}
-                            </Badge>
-                          </TableCell>
-                          <TableCell className="text-sm text-muted-foreground">
-                            {integration.lastSyncAt
-                              ? new Date(integration.lastSyncAt).toLocaleString()
-                              : "Never"}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <div className="flex justify-end gap-2">
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => copyWebhookUrl(integration.id)}
-                                title="Copy webhook URL"
-                              >
-                                <Copy className="h-3 w-3" />
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => openSyncDialog(integration)}
-                                title="Sync recent orders"
-                              >
-                                <RefreshCw className="h-3 w-3" />
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => handleToggleActive(integration)}
-                                title={integration.isActive ? "Deactivate" : "Activate"}
-                              >
-                                {integration.isActive ? (
-                                  <PowerOff className="h-3 w-3" />
-                                ) : (
-                                  <Power className="h-3 w-3" />
-                                )}
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => openEditDialog(integration)}
-                              >
-                                <Pencil className="h-3 w-3" />
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="destructive"
-                                onClick={() => handleDelete(integration)}
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </Button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      ))}
+                              <TableCell>
+                                <div className="flex items-center gap-1">
+                                  {isExpanded ? (
+                                    <ChevronDown className="h-3 w-3 text-muted-foreground" />
+                                  ) : (
+                                    <ChevronRight className="h-3 w-3 text-muted-foreground" />
+                                  )}
+                                  <Badge variant="outline">{platformLabel}</Badge>
+                                </div>
+                              </TableCell>
+                              <TableCell className="font-medium">
+                                {integration.name}
+                              </TableCell>
+                              <TableCell>
+                                <a
+                                  href={integration.storeUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-sm text-blue-600 hover:underline flex items-center gap-1"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  {integration.storeUrl}
+                                  <Link2 className="h-3 w-3" />
+                                </a>
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex items-center gap-2">
+                                  <Badge variant={integration.isActive ? "default" : "secondary"}>
+                                    {integration.isActive ? "Active" : "Inactive"}
+                                  </Badge>
+                                  {/* Sync status dot */}
+                                  {integration.stockSyncEnabled && (
+                                    <span
+                                      className={`inline-block h-2 w-2 rounded-full ${
+                                        integration.lastStockSyncError
+                                          ? "bg-amber-500"
+                                          : "bg-green-500"
+                                      }`}
+                                      title={
+                                        integration.lastStockSyncError
+                                          ? "Stock sync has errors"
+                                          : "Stock sync healthy"
+                                      }
+                                    />
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-sm text-muted-foreground">
+                                {integration.lastSyncAt
+                                  ? new Date(integration.lastSyncAt).toLocaleString()
+                                  : "Never"}
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <div className="flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => copyWebhookUrl(integration.id)}
+                                    title="Copy webhook URL"
+                                  >
+                                    <Copy className="h-3 w-3" />
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => openSyncDialog(integration)}
+                                    title="Sync recent orders"
+                                  >
+                                    <RefreshCw className="h-3 w-3" />
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => handleToggleActive(integration)}
+                                    title={integration.isActive ? "Deactivate" : "Activate"}
+                                  >
+                                    {integration.isActive ? (
+                                      <PowerOff className="h-3 w-3" />
+                                    ) : (
+                                      <Power className="h-3 w-3" />
+                                    )}
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => openEditDialog(integration)}
+                                  >
+                                    <Pencil className="h-3 w-3" />
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="destructive"
+                                    onClick={() => handleDelete(integration)}
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </Button>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+
+                            {/* Expanded row: sync toggles, status, sync button */}
+                            {isExpanded && (
+                              <TableRow>
+                                <TableCell colSpan={6} className="bg-muted/30 px-6 py-4">
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    {/* Stock Sync toggle */}
+                                    <div className="space-y-3">
+                                      <div className="flex items-center justify-between">
+                                        <div>
+                                          <p className="text-sm font-medium">Stock Sync</p>
+                                          <p className="text-xs text-muted-foreground">
+                                            Push stock status to {platformLabel}
+                                          </p>
+                                        </div>
+                                        <Switch
+                                          checked={integration.stockSyncEnabled}
+                                          disabled={togglingField === `${integration.id}-stockSyncEnabled`}
+                                          onCheckedChange={(checked) =>
+                                            handleToggleField(integration, "stockSyncEnabled", checked)
+                                          }
+                                        />
+                                      </div>
+
+                                      {/* Last Synced display */}
+                                      {integration.stockSyncEnabled && (
+                                        <div className="text-xs text-muted-foreground">
+                                          Last synced:{" "}
+                                          {integration.lastStockSyncAt
+                                            ? formatDistanceToNow(
+                                                new Date(integration.lastStockSyncAt),
+                                                { addSuffix: true }
+                                              )
+                                            : "Never"}
+                                        </div>
+                                      )}
+
+                                      {/* Sync Stock Now button */}
+                                      {integration.stockSyncEnabled && (
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          disabled={isSyncingStock}
+                                          onClick={() => handleStockSyncNow(integration)}
+                                        >
+                                          {isSyncingStock ? (
+                                            <Loader2 className="h-3 w-3 mr-2 animate-spin" />
+                                          ) : (
+                                            <RefreshCw className="h-3 w-3 mr-2" />
+                                          )}
+                                          Sync Stock Now
+                                        </Button>
+                                      )}
+
+                                      {/* Error display */}
+                                      {integration.lastStockSyncError && (
+                                        <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+                                          <div className="flex items-start gap-2">
+                                            <AlertTriangle className="h-4 w-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                                            <div className="text-xs text-amber-800 break-all">
+                                              <p className="font-medium mb-1">Sync Error</p>
+                                              <p>{integration.lastStockSyncError}</p>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {/* Fulfillment Push toggle */}
+                                    <div className="space-y-3">
+                                      <div className="flex items-center justify-between">
+                                        <div>
+                                          <p className="text-sm font-medium">Fulfillment Push</p>
+                                          <p className="text-xs text-muted-foreground">
+                                            Update order status on {platformLabel} after fulfillment
+                                          </p>
+                                        </div>
+                                        <Switch
+                                          checked={integration.fulfillmentPushEnabled}
+                                          disabled={togglingField === `${integration.id}-fulfillmentPushEnabled`}
+                                          onCheckedChange={(checked) =>
+                                            handleToggleField(integration, "fulfillmentPushEnabled", checked)
+                                          }
+                                        />
+                                      </div>
+                                    </div>
+                                  </div>
+                                </TableCell>
+                              </TableRow>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </div>

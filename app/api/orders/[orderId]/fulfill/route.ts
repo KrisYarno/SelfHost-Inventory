@@ -8,6 +8,8 @@ import {
   enforceRateLimit,
 } from '@/lib/rateLimit';
 import { auditService } from '@/lib/audit';
+import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
+import prisma from '@/lib/prisma';
 
 export const dynamic = 'force-dynamic';
 
@@ -79,6 +81,42 @@ export const POST = apiHandler(async (
     }
   } catch (auditError) {
     console.error('Failed to log audit fulfillment:', auditError);
+  }
+
+  // Push fulfillment status to external platform (best-effort, never fails the fulfillment)
+  if (result.integrationId && result.externalId && fulfilledCount > 0) {
+    try {
+      const integration = await prisma.integration.findUnique({
+        where: { id: result.integrationId },
+        select: { fulfillmentPushEnabled: true },
+      });
+
+      if (integration?.fulfillmentPushEnabled) {
+        // Amendment 7: Use full order totals for completed check
+        const totalQuantity = result.totalQuantity ?? 0;
+        const totalFulfilled = result.totalFulfilled ?? 0;
+        const wcStatus = totalFulfilled >= totalQuantity ? 'completed' : 'processing';
+
+        const pushResult = await pushOrderStatusToExternal(
+          result.integrationId,
+          result.externalId,
+          wcStatus
+        );
+
+        if (!pushResult.success) {
+          console.error(
+            `Fulfillment push failed for order ${params.orderId}:`,
+            pushResult.error
+          );
+        }
+      }
+    } catch (pushError) {
+      console.error(
+        `Fulfillment push error for order ${params.orderId}:`,
+        pushError
+      );
+      // Don't fail the fulfillment. Log for manual follow-up.
+    }
   }
 
   const response = NextResponse.json({

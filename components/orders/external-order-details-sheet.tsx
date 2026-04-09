@@ -354,6 +354,33 @@ export function ExternalOrderDetailsSheet({
                         {format(new Date(order.fulfilledAt), "MMM d, yyyy 'at' h:mm a")}
                       </p>
                     </div>
+
+                    {/* Fulfillment push status indicator */}
+                    {order.integration?.fulfillmentPushEnabled && (
+                      <div className="mt-2">
+                        {order.internalStatus === "fulfilled" ? (
+                          <div className="flex items-center gap-1.5 text-xs text-green-700">
+                            <Check className="h-3 w-3" />
+                            <span>
+                              Status synced to{" "}
+                              {order.integration.platform === "SHOPIFY"
+                                ? "Shopify"
+                                : "WooCommerce"}
+                            </span>
+                          </div>
+                        ) : order.internalStatus === "processing" ? (
+                          <div className="flex items-center gap-1.5 text-xs text-blue-700">
+                            <Check className="h-3 w-3" />
+                            <span>
+                              Partial status synced to{" "}
+                              {order.integration.platform === "SHOPIFY"
+                                ? "Shopify"
+                                : "WooCommerce"}
+                            </span>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
                   </div>
                 </>
               )}

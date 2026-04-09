@@ -11,6 +11,7 @@ import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
 import { inventory_logs_logType } from '@prisma/client';
 import { createInventoryLog } from '@/lib/inventory';
+import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
 
 export const dynamic = 'force-dynamic';
 
@@ -46,13 +47,23 @@ export const POST = apiHandler(async (
   }> = [];
 
   let newOrderStatus: string = '';
+  let orderExternalId: string = '';
+  let orderIntegrationId: string = '';
 
   await prisma.$transaction(
     async (tx) => {
-      // Amendment 2: Load order at top of transaction
+      // Amendment 2: Load order at top of transaction (include integration for push)
       const order = await tx.externalOrder.findUnique({
         where: { id: params.orderId },
-        include: { items: true },
+        include: {
+          items: true,
+          integration: {
+            select: {
+              id: true,
+              fulfillmentPushEnabled: true,
+            },
+          },
+        },
       });
 
       if (!order) {
@@ -62,6 +73,10 @@ export const POST = apiHandler(async (
       if (order.internalStatus === 'cancelled') {
         throw new AppError(`Cannot unfulfill cancelled order ${params.orderId}`, 'ORDER_CANCELLED', 400);
       }
+
+      // Capture external order info for fulfillment push
+      orderExternalId = order.externalId;
+      orderIntegrationId = order.integrationId;
 
       // Process each unfulfillment item
       for (const unfulfillItem of body.items) {
@@ -232,6 +247,41 @@ export const POST = apiHandler(async (
     }
   } catch (auditError) {
     console.error('Failed to log audit unfulfillment:', auditError);
+  }
+
+  // Push status revert to external platform (best-effort, never fails the unfulfillment)
+  if (orderIntegrationId && orderExternalId && restored.length > 0) {
+    try {
+      const integration = await prisma.integration.findUnique({
+        where: { id: orderIntegrationId },
+        select: { fulfillmentPushEnabled: true },
+      });
+
+      if (integration?.fulfillmentPushEnabled) {
+        // If totalFulfilled became 0: push 'processing' (safe revert, WC doesn't have 'pending')
+        // Otherwise still partially fulfilled: push 'processing'
+        const wcStatus = 'processing';
+
+        const pushResult = await pushOrderStatusToExternal(
+          orderIntegrationId,
+          orderExternalId,
+          wcStatus
+        );
+
+        if (!pushResult.success) {
+          console.error(
+            `Unfulfillment push failed for order ${params.orderId}:`,
+            pushResult.error
+          );
+        }
+      }
+    } catch (pushError) {
+      console.error(
+        `Unfulfillment push error for order ${params.orderId}:`,
+        pushError
+      );
+      // Don't fail the unfulfillment. Log for manual follow-up.
+    }
   }
 
   const response = NextResponse.json({

@@ -1,6 +1,10 @@
 import { decryptValue, isEncrypted } from "@/lib/encryption";
 import { deriveExternalOrderMeta } from "@/lib/external-orders/meta";
-import type { PlatformType, NormalizedOrder } from "@/lib/platforms/core/types";
+import { AppError } from "@/lib/error-handling";
+import { getPlatformAdapter } from "@/lib/platforms/core/registry";
+import prisma from "@/lib/prisma";
+import type { PlatformType, PlatformAdapter, NormalizedOrder } from "@/lib/platforms/core/types";
+import type { Integration } from "@prisma/client";
 import type { Prisma, PrismaClient } from "@prisma/client";
 
 // ---------------------------------------------------------------------------
@@ -293,4 +297,81 @@ export async function upsertOrderWithItems(
     },
     { timeout: 10000 }
   );
+}
+
+// ---------------------------------------------------------------------------
+// getIntegrationClient — Amendment 1
+// ---------------------------------------------------------------------------
+
+export type IntegrationClient = {
+  adapter: PlatformAdapter;
+  storeUrl: string;
+  credentials: { key: string; secret: string };
+  integration: Integration;
+};
+
+/**
+ * Load an integration, decrypt its credentials, and return a ready-to-use
+ * client bundle.  Used by stock sync, fulfillment push, and manual sync.
+ */
+export async function getIntegrationClient(
+  integrationId: string
+): Promise<IntegrationClient> {
+  const integration = await prisma.integration.findUnique({
+    where: { id: integrationId },
+  });
+  if (!integration || !integration.isActive) {
+    throw new AppError(
+      "Integration not found or inactive",
+      "NOT_FOUND",
+      404
+    );
+  }
+
+  const adapter = getPlatformAdapter(integration.platform as PlatformType);
+
+  const key = decryptOrNull(integration.encryptedApiKey);
+  const secret = decryptOrNull(integration.encryptedApiSecret);
+  if (!key || !secret) {
+    throw new AppError(
+      "Failed to decrypt integration credentials",
+      "CREDENTIAL_ERROR",
+      500
+    );
+  }
+
+  return {
+    adapter,
+    storeUrl: integration.storeUrl,
+    credentials: { key, secret },
+    integration,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// pushOrderStatusToExternal — Batch 3: Fulfillment Write-Back
+// ---------------------------------------------------------------------------
+
+/**
+ * Push an order status update to an external platform.
+ * Uses getIntegrationClient + adapter.updateOrderStatus().
+ * Best-effort: callers should wrap in try/catch and never let failures
+ * block local operations.
+ */
+export async function pushOrderStatusToExternal(
+  integrationId: string,
+  externalOrderId: string,
+  status: string
+): Promise<{ success: boolean; error?: string }> {
+  const { adapter, storeUrl, credentials } =
+    await getIntegrationClient(integrationId);
+
+  if (!adapter.updateOrderStatus) {
+    return {
+      success: false,
+      error: `Adapter for ${adapter.platform} does not support updateOrderStatus`,
+    };
+  }
+
+  return adapter.updateOrderStatus(storeUrl, credentials, externalOrderId, status);
 }

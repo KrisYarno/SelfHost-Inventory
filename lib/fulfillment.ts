@@ -37,6 +37,13 @@ export interface FulfillmentResult {
     error: string;
   }>;
   inventoryLogIds: number[];
+  // Amendment 5: External order info for fulfillment push
+  externalId?: string;
+  integrationId?: string;
+  integrationPlatform?: string;
+  // Amendment 7: Full order totals for completed vs processing determination
+  totalQuantity?: number;
+  totalFulfilled?: number;
 }
 
 /**
@@ -230,10 +237,17 @@ export async function fulfillExternalOrder(
 
   return await prisma.$transaction(
     async (tx) => {
-      // Get order with items
+      // Get order with items and integration (Amendment 5: need integration for push)
       const order = await tx.externalOrder.findUnique({
         where: { id: orderId },
         include: {
+          integration: {
+            select: {
+              id: true,
+              platform: true,
+              fulfillmentPushEnabled: true,
+            },
+          },
           items: {
             include: {
               productLink: {
@@ -249,6 +263,11 @@ export async function fulfillExternalOrder(
       if (!order) {
         throw new Error(`Order ${orderId} not found`);
       }
+
+      // Amendment 5: Populate external order info for fulfillment push
+      result.externalId = order.externalId;
+      result.integrationId = order.integrationId;
+      result.integrationPlatform = order.integration.platform;
 
       // Process each fulfillment item
       for (const fulfillmentItem of items) {
@@ -458,6 +477,10 @@ export async function fulfillExternalOrder(
           fulfilledBy,
         },
       });
+
+      // Amendment 7: Include full order totals for completed vs processing check
+      result.totalQuantity = totalQuantity;
+      result.totalFulfilled = totalFulfilled;
 
       return result;
     },
