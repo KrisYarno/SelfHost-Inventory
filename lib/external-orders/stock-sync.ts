@@ -168,7 +168,7 @@ export async function syncStockToExternal(
 
     await prisma.integration.update({
       where: { id: integrationId },
-      data: { lastStockSyncError: errorJson },
+      data: { lastStockSyncAt: new Date(), lastStockSyncError: errorJson },
     });
 
     return {
