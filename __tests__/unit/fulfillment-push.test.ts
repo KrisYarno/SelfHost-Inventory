@@ -161,4 +161,18 @@ describe('pushOrderStatusToExternal', () => {
       pushOrderStatusToExternal('nonexistent', 'ext-order-123', 'completed')
     ).rejects.toThrow('Integration not found or inactive');
   });
+
+  // 6. Inactive integration: getIntegrationClient throws (P1 coverage gap)
+  it('rejects push when integration is inactive', async () => {
+    mockPrisma.integration.findUnique.mockResolvedValue(
+      makeIntegration({ isActive: false })
+    );
+
+    await expect(
+      pushOrderStatusToExternal('int-1', 'ext-order-123', 'completed')
+    ).rejects.toThrow('Integration not found or inactive');
+
+    // Adapter must NOT have been called for an inactive integration
+    expect(mockAdapter.updateOrderStatus).not.toHaveBeenCalled();
+  });
 });

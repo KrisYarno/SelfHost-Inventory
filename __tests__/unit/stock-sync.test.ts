@@ -291,6 +291,56 @@ describe('syncStockToExternal', () => {
     expect(updates[0].stockStatus).toBe('instock');
   });
 
+  // 7b. syncLocationId with zero stock at target (P1 coverage gap)
+  // This is the operationally dangerous case: other locations have stock but
+  // the sync location has zero, so we must push outofstock. If this test were
+  // missing, a regression that fell back to summing all locations would ship.
+  it('pushes outofstock when syncLocationId target has zero stock (other locations positive)', async () => {
+    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    setupClient(adapter, { syncLocationId: 2 });
+
+    mockPrisma.productLink.findMany.mockResolvedValue([
+      makeProductLink({
+        externalProductId: '10',
+        locations: [
+          { locationId: 1, quantity: 100 }, // big stock elsewhere
+          { locationId: 2, quantity: 0 },   // zero at the sync location
+          { locationId: 3, quantity: 50 },
+        ],
+      }),
+    ] as any);
+    mockPrisma.integration.update.mockResolvedValue({} as any);
+
+    await syncStockToExternal('int-1');
+
+    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    expect(updates).toHaveLength(1);
+    expect(updates[0].stockStatus).toBe('outofstock');
+  });
+
+  // 7c. syncLocationId points to a location that has no row at all
+  it('pushes outofstock when syncLocationId target has no product_locations row', async () => {
+    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    setupClient(adapter, { syncLocationId: 99 }); // non-existent location
+
+    mockPrisma.productLink.findMany.mockResolvedValue([
+      makeProductLink({
+        externalProductId: '10',
+        locations: [
+          { locationId: 1, quantity: 100 },
+          { locationId: 2, quantity: 50 },
+        ],
+      }),
+    ] as any);
+    mockPrisma.integration.update.mockResolvedValue({} as any);
+
+    await syncStockToExternal('int-1');
+
+    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    expect(updates).toHaveLength(1);
+    expect(updates[0].stockStatus).toBe('outofstock');
+  });
+
   // 8. syncLocationId null: sums all locations
   it('sums all location quantities when syncLocationId is null', async () => {
     const adapter = makeAdapter({ succeeded: 1, failed: [] });

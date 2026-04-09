@@ -12,7 +12,10 @@ const customJestConfig = {
     // Handle module aliases (this will be automatically configured for you soon)
     "^@/(.*)$": "<rootDir>/$1",
   },
-  testEnvironment: "jest-environment-jsdom",
+  // P1-14: Default to node so server-side API tests behave correctly without
+  // each file having to declare `@jest-environment node`. React component tests
+  // that need jsdom can opt in per-file with `@jest-environment jsdom`.
+  testEnvironment: "jest-environment-node",
   testMatch: ["**/__tests__/**/*.(ts|tsx|js|jsx)", "**/*.(test|spec).(ts|tsx|js|jsx)"],
   testPathIgnorePatterns: ["/node_modules/", "/.next/", "/.claude/"],
   collectCoverageFrom: [

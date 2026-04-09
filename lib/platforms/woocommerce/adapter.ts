@@ -337,7 +337,7 @@ export class WooCommerceAdapter implements PlatformAdapter {
   /**
    * Update an order's status on WooCommerce.
    * PUT /wp-json/wc/v3/orders/{orderId} with { status }.
-   * 10-second timeout. Basic Auth.
+   * 10-second timeout. Basic Auth. Honors Retry-After on 429 and retries once.
    */
   async updateOrderStatus(
     storeUrl: string,
@@ -349,15 +349,27 @@ export class WooCommerceAdapter implements PlatformAdapter {
 
     try {
       const url = new URL(`/wp-json/wc/v3/orders/${orderId}`, storeUrl).toString();
-      const resp = await fetch(url, {
-        method: 'PUT',
-        headers: {
-          Authorization: `Basic ${auth}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ status }),
-        signal: AbortSignal.timeout(10_000),
-      });
+
+      const doFetch = () =>
+        fetch(url, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Basic ${auth}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ status }),
+          signal: AbortSignal.timeout(10_000),
+        });
+
+      let resp = await doFetch();
+
+      // Honor Retry-After on 429 (matches batchUpdateProductStock behavior)
+      if (resp.status === 429) {
+        const retryAfter = parseInt(resp.headers.get('Retry-After') || '', 10);
+        const waitMs = (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 5) * 1000;
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        resp = await doFetch();
+      }
 
       if (!resp.ok) {
         const body = await resp.text();
