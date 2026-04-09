@@ -226,6 +226,11 @@ model Integration {
   // than 5 minutes) are treated as expired by the acquire query.
   syncLockedAt           DateTime?
 
+  // Phase 7c: webhook delivery health visibility
+  lastWebhookReceivedAt  DateTime?
+  lastWebhookError       String?   @db.Text
+  webhookFailureCount    Int       @default(0)
+
   company       Company  @relation(fields: [companyId], references: [id])
   orders        ExternalOrder[]
   productLinks  ProductLink[]

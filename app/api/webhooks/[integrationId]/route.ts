@@ -5,6 +5,7 @@ import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import { decryptValue, isEncrypted } from "@/lib/encryption";
 import { upsertOrderWithItems } from "@/lib/external-orders/shared";
 import type { PlatformType } from "@/lib/platforms/core/types";
+import type { Prisma } from "@prisma/client";
 import { createHash, createHmac } from "crypto";
 
 export const dynamic = "force-dynamic";
@@ -134,6 +135,8 @@ export const POST = apiHandler(async (
         `Webhook verification failed for ${integrationId}:`,
         verification.error
       );
+      // Phase 7c.3: record delivery failure for health display
+      await recordWebhookFailure(integration.id, verification.error || "Unknown verification error");
       if (process.env.WEBHOOK_DEBUG_HEADERS === "1" && process.env.NODE_ENV !== "production") {
         const headerNames = Array.from(request.headers.keys()).sort();
         const secretLen = webhookSecret.length;
@@ -215,7 +218,13 @@ export const POST = apiHandler(async (
         return NextResponse.json({ success: true, ignored: true });
       }
 
-      await prisma.$transaction(async (tx) => {
+      // Phase 7c: protect fulfilled orders from silent deletion.
+      // If any item on the order has been fulfilled locally (fulfilledQty > 0
+      // OR internalStatus is 'fulfilled'), refuse to delete and keep the audit
+      // trail intact. The inventory was already deducted — we need the order
+      // row to explain why. The WC side is now divergent; the operator must
+      // decide whether to unfulfill + delete manually, or accept divergence.
+      const deleteResult = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         const existing = await tx.externalOrder.findUnique({
           where: {
             integrationId_externalId: {
@@ -223,18 +232,60 @@ export const POST = apiHandler(async (
               externalId,
             },
           },
-          select: { id: true },
+          select: {
+            id: true,
+            orderNumber: true,
+            internalStatus: true,
+            items: { select: { fulfilledQty: true } },
+          },
         });
 
-        if (!existing) return;
+        if (!existing) {
+          return { action: "not_found" as const };
+        }
+
+        const hasFulfilledItems = existing.items.some(
+          (item: { fulfilledQty: number }) => item.fulfilledQty > 0
+        );
+        const isFulfilled = existing.internalStatus === "fulfilled";
+
+        if (hasFulfilledItems || isFulfilled) {
+          // Protected — keep the order, keep its items, keep the audit trail.
+          return {
+            action: "protected" as const,
+            orderNumber: existing.orderNumber,
+          };
+        }
+
+        // Safe to delete — no fulfillment work to preserve
         await tx.externalOrderItem.deleteMany({ where: { orderId: existing.id } });
         await tx.externalOrder.delete({ where: { id: existing.id } });
+        return { action: "deleted" as const, orderNumber: existing.orderNumber };
       });
 
-      console.log(
-        `Deleted external order for integration ${integrationId}, externalId ${externalId}`
-      );
+      // Phase 7c.3: all three delete outcomes count as successful webhook
+      // deliveries (signature passed, we processed the event). Record health.
+      await recordWebhookSuccess(integration.id);
 
+      if (deleteResult.action === "not_found") {
+        // Idempotent: if we never had the order, delete is a no-op
+        return NextResponse.json({ success: true, ignored: true });
+      }
+
+      if (deleteResult.action === "protected") {
+        console.warn(
+          `[webhook] REFUSED delete for fulfilled order ${deleteResult.orderNumber} (integration ${integrationId}, externalId ${externalId}). Order retained for audit trail; operator must reconcile manually.`
+        );
+        return NextResponse.json({
+          success: true,
+          protected: true,
+          reason: "Order has fulfillment work; audit trail preserved",
+        });
+      }
+
+      console.log(
+        `Deleted external order ${deleteResult.orderNumber} for integration ${integrationId}, externalId ${externalId}`
+      );
       return NextResponse.json({ success: true, deleted: true });
     }
 
@@ -263,11 +314,9 @@ export const POST = apiHandler(async (
       `Successfully processed webhook for integration ${integrationId}, order ${normalizedOrder.externalOrderNumber}`
     );
 
-    // Update lastSyncAt so the incremental poller can catch up from outages.
-    await prisma.integration.update({
-      where: { id: integration.id },
-      data: { lastSyncAt: new Date() },
-    });
+    // Update lastSyncAt so the incremental poller can catch up from outages,
+    // and record webhook health for operator visibility.
+    await recordWebhookSuccess(integration.id);
 
   // 6. Return 200 OK
   return NextResponse.json({
@@ -460,6 +509,53 @@ function extractExternalOrderId(rawBodyText: string): string | null {
     return String(id);
   } catch {
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7c.3: Webhook delivery health tracking
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a successful webhook delivery on the integration. Also bumps
+ * lastSyncAt so the incremental poller can catch up from outages.
+ */
+async function recordWebhookSuccess(integrationId: string): Promise<void> {
+  try {
+    const now = new Date();
+    await prisma.integration.update({
+      where: { id: integrationId },
+      data: {
+        lastSyncAt: now,
+        lastWebhookReceivedAt: now,
+        lastWebhookError: null,
+        webhookFailureCount: 0,
+      },
+    });
+  } catch (err) {
+    // Never fail the webhook over telemetry — log and continue.
+    console.error(`[webhook health] Failed to record success for ${integrationId}:`, err);
+  }
+}
+
+/**
+ * Record a webhook failure (signature mismatch, parse error, etc.). Bumps the
+ * failure counter and stores the most recent error message for the admin UI.
+ */
+async function recordWebhookFailure(
+  integrationId: string,
+  errorMessage: string
+): Promise<void> {
+  try {
+    await prisma.integration.update({
+      where: { id: integrationId },
+      data: {
+        lastWebhookError: errorMessage.slice(0, 500),
+        webhookFailureCount: { increment: 1 },
+      },
+    });
+  } catch (err) {
+    console.error(`[webhook health] Failed to record failure for ${integrationId}:`, err);
   }
 }
 

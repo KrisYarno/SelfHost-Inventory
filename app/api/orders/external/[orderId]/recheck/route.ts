@@ -64,6 +64,22 @@ export const POST = apiHandler(async (
     return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
   }
 
+  // Optional body: { mode: 'reconcile' | 'compute' }
+  //   'reconcile' (default, safe): smart merge with local state protection
+  //   'compute'  (force resync):   trust WC fully, overwrite local state
+  // Force mode is intended for operators recovering from stuck state where
+  // the local internalStatus no longer reflects reality (e.g., an order was
+  // manually unfulfilled in Rebuild and the user wants to reset from WC).
+  let mode: "reconcile" | "compute" = "reconcile";
+  try {
+    const body = await request.json().catch(() => null);
+    if (body?.mode === "compute") {
+      mode = "compute";
+    }
+  } catch {
+    // no-op; empty body is fine
+  }
+
   const order = await prisma.externalOrder.findUnique({
     where: { id: params.orderId },
     include: {
@@ -108,28 +124,35 @@ export const POST = apiHandler(async (
   const adapter = getPlatformAdapter(platform);
   const normalized = adapter.parseOrderWebhook(JSON.stringify(remoteOrder));
 
-  // Smart reconciliation between local and remote state:
-  //   - WC terminal states (cancelled / refunded / failed) always override
-  //   - Local `fulfilled` is protected from regressing to processing/pending
-  //   - Everything else flows through from the freshly-derived remote status
-  // This fixes the "color badge stuck" bug where recheck updated nativeStatus
-  // (the text) but left internalStatus (the color) frozen via preserve mode.
-  const reconciledInternalStatus = reconcileStatus(
-    platform,
-    order.internalStatus as InternalOrderStatus,
-    normalized
-  );
+  // Status handling depends on mode:
+  //   - reconcile (default): smart merge that protects local `fulfilled` and
+  //     honors terminal cancellation. See reconcileStatus() for rules.
+  //   - compute (force): trust WC fully, run the bare deriveInternalStatus
+  //     via the upsert's compute branch. Used by Force Resync to recover
+  //     from stuck state.
+  const statusHandling =
+    mode === "compute"
+      ? ({ statusMode: "compute", platform } as const)
+      : ({
+          statusMode: "preserve",
+          internalStatus: reconcileStatus(
+            platform,
+            order.internalStatus as InternalOrderStatus,
+            normalized
+          ),
+        } as const);
 
   const result = await upsertOrderWithItems(prisma, {
     integrationId: order.integration.id,
     companyId: order.companyId,
     storeUrl: order.integration.storeUrl,
     normalized,
-    status: { statusMode: "preserve", internalStatus: reconciledInternalStatus },
+    status: statusHandling,
   });
 
   return NextResponse.json({
     success: true,
+    mode,
     orderId: result.orderId,
     itemsProcessed: result.itemsProcessed,
     itemsMapped: result.itemsMapped,

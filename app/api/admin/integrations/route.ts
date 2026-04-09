@@ -28,6 +28,9 @@ export const GET = apiHandler(async (_request: NextRequest) => {
       fulfillmentPushEnabled: true,
       lastStockSyncAt: true,
       lastStockSyncError: true,
+      lastWebhookReceivedAt: true,
+      lastWebhookError: true,
+      webhookFailureCount: true,
       company: {
         select: {
           name: true,

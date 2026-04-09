@@ -55,6 +55,9 @@ interface Integration {
   fulfillmentPushEnabled: boolean;
   lastStockSyncAt: string | null;
   lastStockSyncError: string | null;
+  lastWebhookReceivedAt: string | null;
+  lastWebhookError: string | null;
+  webhookFailureCount: number;
   company: {
     name: string;
   };
@@ -885,6 +888,50 @@ export default function AdminIntegrationsPage() {
                                           }
                                         />
                                       </div>
+                                    </div>
+
+                                    {/* Webhook Delivery Health (Phase 7c.3) */}
+                                    <div className="space-y-3 md:col-span-2 border-t pt-4 mt-2">
+                                      <div>
+                                        <p className="text-sm font-medium">Webhook Delivery</p>
+                                        <p className="text-xs text-muted-foreground">
+                                          Last successful delivery and failure tracking
+                                        </p>
+                                      </div>
+                                      <div className="flex flex-col sm:flex-row sm:items-center sm:gap-6 gap-2 text-xs">
+                                        <div>
+                                          <span className="text-muted-foreground">Last received: </span>
+                                          {integration.lastWebhookReceivedAt ? (
+                                            <span className="text-green-700 dark:text-green-400 font-medium">
+                                              {formatDistanceToNow(
+                                                new Date(integration.lastWebhookReceivedAt),
+                                                { addSuffix: true }
+                                              )}
+                                            </span>
+                                          ) : (
+                                            <span className="text-muted-foreground">Never</span>
+                                          )}
+                                        </div>
+                                        {integration.webhookFailureCount > 0 && (
+                                          <div>
+                                            <span className="text-muted-foreground">Failures since last success: </span>
+                                            <span className="text-red-600 dark:text-red-400 font-medium">
+                                              {integration.webhookFailureCount}
+                                            </span>
+                                          </div>
+                                        )}
+                                      </div>
+                                      {integration.lastWebhookError && (
+                                        <div className="rounded-md border border-red-200 bg-red-50 dark:bg-red-950/30 dark:border-red-900 p-3">
+                                          <div className="flex items-start gap-2">
+                                            <AlertTriangle className="h-4 w-4 text-red-600 flex-shrink-0 mt-0.5" />
+                                            <div className="text-xs text-red-800 dark:text-red-300 break-all">
+                                              <p className="font-medium mb-1">Most recent webhook error</p>
+                                              <p>{integration.lastWebhookError}</p>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
                                 </TableCell>
