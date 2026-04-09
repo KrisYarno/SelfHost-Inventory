@@ -16,9 +16,24 @@ import { cn } from "@/lib/utils";
 // ---------------------------------------------------------------------------
 
 interface UnmappedItemsAlertProps {
-  items: Array<{ name: string; sku?: string; quantity: number; externalProductId?: string; externalVariantId?: string }>;
+  items: Array<{
+    name: string;
+    sku?: string;
+    quantity: number;
+    externalProductId?: string;
+    externalVariantId?: string;
+  }>;
   integrationId?: string;
   onItemMapped?: () => void;
+}
+
+// Shape of the item passed to the map dialog. Carries external IDs so the
+// dialog can open with a real mapping target (P2: was passing empty string).
+interface MapDialogItem {
+  name: string;
+  sku?: string;
+  externalProductId?: string;
+  externalVariantId?: string;
 }
 
 // Threshold for auto-collapsing the item list
@@ -40,14 +55,16 @@ export function UnmappedItemsAlert({
     items.length <= AUTO_COLLAPSE_THRESHOLD
   );
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
-  const [mapDialogItem, setMapDialogItem] = useState<{
-    name: string;
-    sku?: string;
-  } | null>(null);
+  const [mapDialogItem, setMapDialogItem] = useState<MapDialogItem | null>(null);
 
   if (items.length === 0) return null;
 
-  const handleMapClick = (item: { name: string; sku?: string }) => {
+  const handleMapClick = (item: MapDialogItem) => {
+    // P2: only allow mapping when we actually have an external reference,
+    // otherwise the POST would create a broken ProductLink with empty ids.
+    if (!item.externalProductId) {
+      return;
+    }
     setMapDialogItem(item);
     setMapDialogOpen(true);
   };
@@ -136,14 +153,15 @@ export function UnmappedItemsAlert({
         </div>
       </div>
 
-      {/* ProductMapDialog for inline mapping (admin only) */}
-      {isAdmin && integrationId && mapDialogItem && (
+      {/* ProductMapDialog for inline mapping (admin only). Guarded on
+          externalProductId so we never open the dialog with empty IDs. */}
+      {isAdmin && integrationId && mapDialogItem?.externalProductId && (
         <ProductMapDialog
           open={mapDialogOpen}
           onOpenChange={setMapDialogOpen}
           integrationId={integrationId}
           externalProduct={{
-            externalId: mapDialogItem.externalProductId || "",
+            externalId: mapDialogItem.externalProductId,
             externalVariantId: mapDialogItem.externalVariantId,
             title: mapDialogItem.name,
             sku: mapDialogItem.sku,

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { WorkbenchState, OrderItem } from "@/types/workbench";
+import { WorkbenchState, OrderItem, UnmappedExternalItem } from "@/types/workbench";
 import { ProductWithQuantity } from "@/types/product";
 import type { ExternalOrder } from "@/types/external-orders";
 import { toast } from "sonner";
@@ -168,18 +168,27 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   // WC order actions
+  // P1-8: When switching away from a WC order, clear the full WC state so the
+  // manual tab doesn't inherit stale items, a WC order reference, or the
+  // selectedExternalOrder banner.
   setOrderSource: (source: 'manual' | 'wc-order') => {
-    set({ orderSource: source });
+    set((state) => {
+      if (source === 'manual' && state.selectedExternalOrder) {
+        return {
+          orderSource: 'manual',
+          selectedExternalOrder: null,
+          unmappedExternalItems: [],
+          orderItems: [],
+          orderReference: '',
+        };
+      }
+      return { orderSource: source };
+    });
   },
 
   selectExternalOrder: (order: ExternalOrder, products: ProductWithQuantity[]) => {
     const cartItems: OrderItem[] = [];
-    const unmappedItems: Array<{
-      name: string;
-      sku?: string;
-      quantity: number;
-      externalItemId?: string;
-    }> = [];
+    const unmappedItems: UnmappedExternalItem[] = [];
 
     if (order.items) {
       for (const item of order.items) {
@@ -242,6 +251,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         orderNumber: order.orderNumber,
         customerName: order.customerName ?? undefined,
         total: order.total,
+        integrationId: order.integrationId, // P1-10: thread through for Map button
       },
       orderReference: order.orderNumber,
       orderItems: cartItems,

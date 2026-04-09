@@ -15,9 +15,15 @@ export interface SelectedExternalOrder {
   orderNumber: string;
   customerName?: string;
   total?: number;
+  // P1-10: integrationId is needed by workbench to render the Map button in
+  // UnmappedItemsAlert and to wire ProductMapDialog.
+  integrationId?: string;
 }
 
-// Unmapped item from a WC order that couldn't be added to the cart
+// Unmapped item from a WC order that couldn't be added to the cart.
+// Extended with externalProductId/externalVariantId so UnmappedItemsAlert can
+// hand a valid external reference to ProductMapDialog (P2: previously passed
+// empty string which would create broken mappings).
 export interface UnmappedExternalItem {
   name: string;
   sku?: string;

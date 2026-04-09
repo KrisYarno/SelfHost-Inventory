@@ -197,6 +197,29 @@ export default function WorkbenchPage() {
     }
   }, [showInStockOnly, showLowStockOnly, showOutOfStockOnly]);
 
+  // P1-9: After a user maps an unmapped item inline, refetch the external
+  // order and re-select it so the cart picks up the newly mapped item. Mapping
+  // links an EXISTING product, so the current `products` snapshot is sufficient
+  // — we only need fresh order data to pick up the new productLink.
+  const refetchExternalOrder = useCallback(async () => {
+    if (!selectedExternalOrder?.id) return;
+    try {
+      const res = await fetch(
+        `/api/orders/external/${selectedExternalOrder.id}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) {
+        toast.error("Could not refresh order after mapping. Please reselect.");
+        return;
+      }
+      const freshOrder = await res.json();
+      selectExternalOrder(freshOrder, products);
+    } catch (err) {
+      console.error("Refetch external order error:", err);
+      toast.error("Could not refresh order after mapping.");
+    }
+  }, [selectedExternalOrder?.id, selectExternalOrder, products]);
+
   const handleProductClick = (product: ProductWithQuantity) => {
     if (product.currentQuantity > 0) {
       setSelectedProduct(product);
@@ -311,12 +334,8 @@ export default function WorkbenchPage() {
                         <div className="mt-2">
                           <UnmappedItemsAlert
                             items={unmappedExternalItems}
-                            onItemMapped={() => {
-                              // Re-select the same order to re-populate after mapping
-                              if (selectedExternalOrder) {
-                                // The WCOrderSelector handles re-fetch internally
-                              }
-                            }}
+                            integrationId={selectedExternalOrder?.integrationId}
+                            onItemMapped={refetchExternalOrder}
                           />
                         </div>
                       )}
@@ -536,9 +555,8 @@ export default function WorkbenchPage() {
                     <div className="mt-2">
                       <UnmappedItemsAlert
                         items={unmappedExternalItems}
-                        onItemMapped={() => {
-                          // Re-select triggers re-fetch through the selector
-                        }}
+                        integrationId={selectedExternalOrder?.integrationId}
+                        onItemMapped={refetchExternalOrder}
                       />
                     </div>
                   )}

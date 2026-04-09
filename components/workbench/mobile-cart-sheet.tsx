@@ -12,7 +12,8 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { OrderList } from "./order-list";
-import { RotateCcw, ShoppingCart } from "lucide-react";
+import { useWorkbench } from "@/hooks/use-workbench";
+import { Package, RotateCcw, ShoppingCart } from "lucide-react";
 
 interface MobileCartSheetProps {
   open: boolean;
@@ -39,6 +40,12 @@ export function MobileCartSheet({
   canComplete,
   queuePosition,
 }: MobileCartSheetProps) {
+  // P2: hide the editable reference input when a WC order is active, matching
+  // desktop behavior. An editable input would let users overwrite the WC order
+  // number and break the undo/fulfillment trail.
+  const selectedExternalOrder = useWorkbench((s) => s.selectedExternalOrder);
+  const isWCOrder = !!selectedExternalOrder;
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="bottom" className="h-[85vh] flex flex-col">
@@ -57,17 +64,42 @@ export function MobileCartSheet({
           </SheetDescription>
         </SheetHeader>
 
-        {/* Order Reference */}
-        <div className="py-4 space-y-2">
-          <Label htmlFor="mobile-order-reference">Order Reference</Label>
-          <Input
-            id="mobile-order-reference"
-            placeholder="Enter order number..."
-            value={orderReference}
-            onChange={(e) => onOrderReferenceChange(e.target.value)}
-            className="font-mono"
-          />
-        </div>
+        {/* Order Reference — editable for manual orders, read-only WC banner otherwise */}
+        {isWCOrder ? (
+          <div className="py-4">
+            <div className="rounded-lg border border-blue-200 bg-blue-50/50 dark:border-blue-900 dark:bg-blue-950/30 px-3 py-2.5">
+              <div className="flex items-center gap-2">
+                <Package className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-medium text-sm">
+                      #{selectedExternalOrder.orderNumber}
+                    </span>
+                    <Badge variant="info" className="text-[10px] px-1.5 py-0">
+                      WOO
+                    </Badge>
+                  </div>
+                  {selectedExternalOrder.customerName && (
+                    <p className="text-xs text-muted-foreground truncate">
+                      {selectedExternalOrder.customerName}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="py-4 space-y-2">
+            <Label htmlFor="mobile-order-reference">Order Reference</Label>
+            <Input
+              id="mobile-order-reference"
+              placeholder="Enter order number..."
+              value={orderReference}
+              onChange={(e) => onOrderReferenceChange(e.target.value)}
+              className="font-mono"
+            />
+          </div>
+        )}
 
         {/* Order Items */}
         <div className="flex-1 overflow-hidden -mx-6 px-6">

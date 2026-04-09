@@ -84,6 +84,11 @@ export function CompleteOrderDialog({
 
     setIsProcessing(true);
 
+    // P0-2: Track WC fulfillment for rollback. If the subsequent manual deduct
+    // fails, we use this to call unfulfill and restore the WC inventory, so the
+    // user always sees a clean all-or-nothing transaction.
+    let wcFulfilled = false;
+
     try {
       // Amendment 2: Dual API call for mixed carts
       // 1. Fulfill WC items via fulfillment API
@@ -115,6 +120,7 @@ export function CompleteOrderDialog({
         }
 
         await fulfillResponse.json();
+        wcFulfilled = true;
       }
 
       // 2. Deduct manual items via deduct-simple API
@@ -135,6 +141,62 @@ export function CompleteOrderDialog({
         });
 
         if (!deductResponse.ok) {
+          // P0-2: Manual deduct failed AFTER WC fulfill succeeded. Roll back the
+          // WC portion by calling unfulfill, otherwise we leave the user with
+          // deducted WC inventory and no undo path. The rollback is best-effort
+          // but logged prominently if it fails.
+          if (wcFulfilled && selectedExternalOrder) {
+            try {
+              const rollbackResponse = await fetch(
+                `/api/orders/${selectedExternalOrder.id}/unfulfill`,
+                {
+                  method: "POST",
+                  headers: withCSRFHeaders(
+                    { "Content-Type": "application/json" },
+                    csrfToken
+                  ),
+                  body: JSON.stringify({
+                    items: wcItems.map((item) => ({
+                      itemId: item.fulfillmentItemId,
+                      productId: item.product.id,
+                      quantity: item.quantity,
+                      locationId: selectedLocationId,
+                    })),
+                    notes: "Auto-rollback: manual item deduction failed after WC fulfillment",
+                  }),
+                }
+              );
+
+              if (!rollbackResponse.ok) {
+                // Rollback failed — this is a data-integrity incident. Surface it
+                // to the user with the order ID so they can investigate manually.
+                const rollbackError = await rollbackResponse.json().catch(() => ({}));
+                console.error(
+                  `CRITICAL: WC rollback failed for order ${selectedExternalOrder.id}:`,
+                  rollbackError
+                );
+                toast.error(
+                  <div className="space-y-1">
+                    <p className="font-medium">Rollback failed</p>
+                    <p className="text-sm">
+                      WC order #{selectedExternalOrder.orderNumber} was fulfilled but
+                      manual items failed. Rollback also failed. Please check
+                      inventory manually for order {selectedExternalOrder.id}.
+                    </p>
+                  </div>,
+                  { duration: 15000 }
+                );
+              } else {
+                wcFulfilled = false; // rollback succeeded
+              }
+            } catch (rollbackError) {
+              console.error(
+                `CRITICAL: WC rollback threw for order ${selectedExternalOrder.id}:`,
+                rollbackError
+              );
+            }
+          }
+
           const errorData = await deductResponse.json();
           if (errorData.error && typeof errorData.error === "object") {
             const { message, code, context } = errorData.error;
@@ -307,7 +369,13 @@ export function CompleteOrderDialog({
                   <p className="text-sm font-medium">Items to deduct:</p>
                   <ul className="text-sm space-y-1 max-h-32 overflow-y-auto">
                     {orderItems.map((item) => (
-                      <li key={item.product.id} className="flex justify-between">
+                      <li
+                        // P2: use fulfillmentItemId as disambiguator when present,
+                        // since Amendment 5 allows same-product entries with
+                        // different sources to coexist.
+                        key={item.fulfillmentItemId ?? `manual-${item.product.id}`}
+                        className="flex justify-between"
+                      >
                         <span className="text-muted-foreground">
                           {item.product.name}
                         </span>
