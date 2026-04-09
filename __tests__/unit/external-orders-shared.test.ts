@@ -7,6 +7,7 @@ import type { PrismaClient } from '@prisma/client'
 import type { NormalizedOrder } from '@/lib/platforms/core/types'
 import {
   deriveInternalStatus,
+  reconcileStatus,
   decryptOrNull,
   hostFromStoreUrl,
   upsertOrderWithItems,
@@ -169,6 +170,115 @@ describe('deriveInternalStatus', () => {
       fulfillmentStatus: null,
     })
     expect(result).toBe('cancelled')
+  })
+})
+
+// ===========================================================================
+// reconcileStatus — smart merge for recheck (Phase 7a)
+// ===========================================================================
+
+describe('reconcileStatus', () => {
+  const buildOrder = (nativeStatus: string) => ({
+    nativeStatus,
+    financialStatus: null,
+    fulfillmentStatus: null,
+    rawPayload: {},
+  })
+
+  // Terminal cancellation always wins, even over local fulfilled
+  it('WC cancelled → cancelled even when local is fulfilled', () => {
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'fulfilled', buildOrder('cancelled'))
+    ).toBe('cancelled')
+  })
+
+  it('WC refunded → cancelled even when local is fulfilled', () => {
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'fulfilled', buildOrder('refunded'))
+    ).toBe('cancelled')
+  })
+
+  it('WC failed → cancelled even when local is processing', () => {
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'processing', buildOrder('failed'))
+    ).toBe('cancelled')
+  })
+
+  // Local fulfilled is protected against downgrades
+  it('local fulfilled + WC processing → stays fulfilled', () => {
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'fulfilled', buildOrder('processing'))
+    ).toBe('fulfilled')
+  })
+
+  it('local fulfilled + WC pending → stays fulfilled', () => {
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'fulfilled', buildOrder('pending'))
+    ).toBe('fulfilled')
+  })
+
+  it('local fulfilled + WC completed → stays fulfilled (no-op)', () => {
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'fulfilled', buildOrder('completed'))
+    ).toBe('fulfilled')
+  })
+
+  // Everything else flows through from the derived remote status
+  it('local pending + WC processing → processing', () => {
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'pending', buildOrder('processing'))
+    ).toBe('processing')
+  })
+
+  it('local processing + WC completed → fulfilled', () => {
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'processing', buildOrder('completed'))
+    ).toBe('fulfilled')
+  })
+
+  it('local pending + WC completed → fulfilled', () => {
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'pending', buildOrder('completed'))
+    ).toBe('fulfilled')
+  })
+
+  it('local processing + WC on-hold → pending (derived default)', () => {
+    // on-hold is not one of the explicit WC states so it falls through to "pending"
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'processing', buildOrder('on-hold'))
+    ).toBe('pending')
+  })
+
+  // Shopify cases — cancelled via rawPayload.cancelled_at
+  it('Shopify cancelled_at → cancelled even when local is fulfilled', () => {
+    expect(
+      reconcileStatus('SHOPIFY', 'fulfilled', {
+        nativeStatus: 'paid',
+        financialStatus: 'paid',
+        fulfillmentStatus: null,
+        rawPayload: { cancelled_at: '2026-04-09T00:00:00Z' },
+      })
+    ).toBe('cancelled')
+  })
+
+  it('Shopify fulfillment_status=fulfilled + local pending → fulfilled', () => {
+    expect(
+      reconcileStatus('SHOPIFY', 'pending', {
+        nativeStatus: 'open',
+        financialStatus: 'paid',
+        fulfillmentStatus: 'fulfilled',
+        rawPayload: {},
+      })
+    ).toBe('fulfilled')
+  })
+
+  // Cancelled already locally stays cancelled (no way to re-activate via recheck)
+  it('local cancelled + WC processing → processing (trust WC)', () => {
+    // Edge case: if an order was cancelled locally but WC shows it active,
+    // trust WC. The user must explicitly re-cancel if needed.
+    expect(
+      reconcileStatus('WOOCOMMERCE', 'cancelled', buildOrder('processing'))
+    ).toBe('processing')
   })
 })
 

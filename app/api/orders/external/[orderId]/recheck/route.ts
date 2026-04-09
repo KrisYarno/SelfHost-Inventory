@@ -3,7 +3,13 @@ import { requireApproved, apiHandler } from "@/lib/api-utils";
 import { validateCSRFToken } from "@/lib/csrf";
 import prisma from "@/lib/prisma";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
-import { decryptOrNull, hostFromStoreUrl, upsertOrderWithItems } from "@/lib/external-orders/shared";
+import {
+  decryptOrNull,
+  hostFromStoreUrl,
+  reconcileStatus,
+  upsertOrderWithItems,
+  type InternalOrderStatus,
+} from "@/lib/external-orders/shared";
 import type { PlatformType } from "@/lib/platforms/core/types";
 
 export const dynamic = "force-dynamic";
@@ -102,15 +108,24 @@ export const POST = apiHandler(async (
   const adapter = getPlatformAdapter(platform);
   const normalized = adapter.parseOrderWebhook(JSON.stringify(remoteOrder));
 
-  // Use statusMode: 'preserve' to keep the existing internalStatus
-  // (prevents recheck from overriding manual fulfillment state).
-  // Also now processes line items (fixes Bug 1: recheck missing line items).
+  // Smart reconciliation between local and remote state:
+  //   - WC terminal states (cancelled / refunded / failed) always override
+  //   - Local `fulfilled` is protected from regressing to processing/pending
+  //   - Everything else flows through from the freshly-derived remote status
+  // This fixes the "color badge stuck" bug where recheck updated nativeStatus
+  // (the text) but left internalStatus (the color) frozen via preserve mode.
+  const reconciledInternalStatus = reconcileStatus(
+    platform,
+    order.internalStatus as InternalOrderStatus,
+    normalized
+  );
+
   const result = await upsertOrderWithItems(prisma, {
     integrationId: order.integration.id,
     companyId: order.companyId,
     storeUrl: order.integration.storeUrl,
     normalized,
-    status: { statusMode: "preserve", internalStatus: order.internalStatus },
+    status: { statusMode: "preserve", internalStatus: reconciledInternalStatus },
   });
 
   return NextResponse.json({

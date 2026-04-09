@@ -22,7 +22,12 @@ type SyncOptions = {
 
 const DEFAULT_INITIAL_LOOKBACK_DAYS = 7;
 const DEFAULT_MAX_ORDERS = 250;
-const LOOKBACK_SAFETY_MINUTES = 10;
+// Widened from 10 → 60 min after a live-site bug where orders placed within
+// the last hour were being dropped due to timezone interpretation quirks and
+// clock skew. 60 min is still tight enough to be cheap on incremental syncs
+// (typical stores see <100 orders/hour) and robust enough to survive minor
+// outages of the incremental poller.
+const LOOKBACK_SAFETY_MINUTES = 60;
 
 function getEnvInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -143,6 +148,15 @@ async function fetchWooOrders(params: {
     url.searchParams.set("orderby", "modified");
     url.searchParams.set("order", "asc");
     url.searchParams.set("modified_after", params.since.toISOString());
+    // CRITICAL: WC ignores the ISO `Z` suffix and interprets `modified_after`
+    // in the shop's local timezone by default, which caused orders to be
+    // silently dropped when the shop TZ was behind UTC. `dates_are_gmt=true`
+    // forces WC to parse the query as UTC, matching what we actually send.
+    url.searchParams.set("dates_are_gmt", "true");
+    // `status=any` ensures checkout-draft, on-hold, and other non-default
+    // statuses flow through — the default is `any` but we set it explicitly
+    // so a future WC default change can't silently narrow our sync window.
+    url.searchParams.set("status", "any");
 
     const resp = await fetch(url.toString(), {
       method: "GET",
