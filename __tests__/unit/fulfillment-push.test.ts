@@ -58,6 +58,7 @@ jest.mock('@/lib/error-handling', () => ({
 // Now import modules
 import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
 import mockPrismaDefault from '@/lib/prisma';
+import { mockReset } from 'jest-mock-extended';
 
 const mockPrisma = mockPrismaDefault as any;
 
@@ -81,6 +82,7 @@ function makeIntegration(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   jest.restoreAllMocks();
+  mockReset(mockPrisma);
 
   // Reset the mock adapter to default behavior
   mockAdapter.updateOrderStatus = jest.fn().mockResolvedValue({ success: true });
@@ -151,18 +153,12 @@ describe('pushOrderStatusToExternal', () => {
     expect(result.error).toContain('updateOrderStatus');
   });
 
-  // 5. Unfulfill: pushes status revert
-  it('pushes "processing" status on unfulfillment (partial revert)', async () => {
-    (mockAdapter.updateOrderStatus as jest.Mock).mockResolvedValue({ success: true });
+  // 5. Integration not found: getIntegrationClient throws (Prisma returns null)
+  it('returns error when integration is not found', async () => {
+    mockPrisma.integration.findUnique.mockResolvedValue(null);
 
-    const result = await pushOrderStatusToExternal('int-1', 'ext-order-123', 'processing');
-
-    expect(result.success).toBe(true);
-    expect(mockAdapter.updateOrderStatus).toHaveBeenCalledWith(
-      'https://store.test',
-      { key: 'ck_test', secret: 'cs_test' },
-      'ext-order-123',
-      'processing'
-    );
+    await expect(
+      pushOrderStatusToExternal('nonexistent', 'ext-order-123', 'completed')
+    ).rejects.toThrow('Integration not found or inactive');
   });
 });

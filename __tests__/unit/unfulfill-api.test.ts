@@ -35,6 +35,12 @@ jest.mock('@/lib/rateLimit', () => ({
   applyRateLimitHeaders: jest.fn((resp: any) => resp),
 }))
 
+// Mock pushOrderStatusToExternal — best-effort fulfillment push
+const mockPushOrderStatus = jest.fn().mockResolvedValue({ success: true })
+jest.mock('@/lib/external-orders/shared', () => ({
+  pushOrderStatusToExternal: (...args: any[]) => mockPushOrderStatus(...args),
+}))
+
 // Audit service mock
 const _auditCalls: any[] = []
 jest.mock('@/lib/audit', () => ({
@@ -65,6 +71,7 @@ beforeEach(() => {
   _csrfValid = true
   _auditCalls.length = 0
   _inventoryLogImpl = () => Promise.resolve({ id: 100 })
+  mockPushOrderStatus.mockReset().mockResolvedValue({ success: true })
   jest.clearAllMocks()
 })
 
@@ -428,5 +435,120 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
 
     // Audit log should NOT have been called (it's outside the transaction)
     expect(_auditCalls).toHaveLength(0)
+  })
+
+  // -----------------------------------------------------------------------
+  // 10. Fulfillment push: called after successful unfulfill
+  // -----------------------------------------------------------------------
+  it('calls pushOrderStatusToExternal when fulfillmentPushEnabled is true', async () => {
+    const tx = setupTransaction()
+    const order = buildOrder({
+      externalId: 'ext-order-99',
+      integrationId: 'int-push-1',
+      integration: { id: 'int-push-1', fulfillmentPushEnabled: true },
+    })
+
+    tx.externalOrder.findUnique.mockResolvedValue(order as any)
+    tx.product.findUnique.mockResolvedValue({ id: 1, deletedAt: null } as any)
+    tx.product_locations.upsert.mockResolvedValue({} as any)
+    tx.product.update.mockResolvedValue({} as any)
+    tx.externalOrderItem.update.mockResolvedValue({} as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 5, fulfilledQty: 0 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    // Post-transaction: prisma.integration.findUnique returns fulfillmentPushEnabled: true
+    getMockPrisma().integration.findUnique.mockResolvedValue({
+      fulfillmentPushEnabled: true,
+    } as any)
+
+    const req = buildRequest({
+      items: [
+        { itemId: 'item-1', productId: 1, quantity: 5, locationId: 1 },
+      ],
+    })
+
+    const response = await POST(req, { params: { orderId: 'order-1' } })
+    const data = await response.json()
+
+    expect(data.success).toBe(true)
+    expect(mockPushOrderStatus).toHaveBeenCalledWith(
+      'int-push-1',
+      'ext-order-99',
+      'processing'
+    )
+  })
+
+  // -----------------------------------------------------------------------
+  // 11. Fulfillment push failure doesn't block the unfulfill response
+  // -----------------------------------------------------------------------
+  it('returns success even when fulfillment push fails', async () => {
+    const tx = setupTransaction()
+    const order = buildOrder({
+      externalId: 'ext-order-99',
+      integrationId: 'int-push-1',
+      integration: { id: 'int-push-1', fulfillmentPushEnabled: true },
+    })
+
+    tx.externalOrder.findUnique.mockResolvedValue(order as any)
+    tx.product.findUnique.mockResolvedValue({ id: 1, deletedAt: null } as any)
+    tx.product_locations.upsert.mockResolvedValue({} as any)
+    tx.product.update.mockResolvedValue({} as any)
+    tx.externalOrderItem.update.mockResolvedValue({} as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 5, fulfilledQty: 0 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    // Post-transaction: fulfillmentPushEnabled = true, but push throws
+    getMockPrisma().integration.findUnique.mockResolvedValue({
+      fulfillmentPushEnabled: true,
+    } as any)
+    mockPushOrderStatus.mockRejectedValue(new Error('Network timeout'))
+
+    const req = buildRequest({
+      items: [
+        { itemId: 'item-1', productId: 1, quantity: 5, locationId: 1 },
+      ],
+    })
+
+    const response = await POST(req, { params: { orderId: 'order-1' } })
+    const data = await response.json()
+
+    // Unfulfill still succeeds despite push failure
+    expect(data.success).toBe(true)
+    expect(data.restored).toHaveLength(1)
+  })
+
+  // -----------------------------------------------------------------------
+  // 12. Zod validation rejects invalid body
+  // -----------------------------------------------------------------------
+  it('throws ZodError when body is missing required items field', async () => {
+    const req = buildRequest({
+      // missing "items" entirely
+      notes: 'oops',
+    })
+
+    await expect(
+      POST(req, { params: { orderId: 'order-1' } })
+    ).rejects.toThrow() // ZodError from UnfulfillRequestSchema.parse
+
+    // No transaction should have been started
+    expect(getMockPrisma().$transaction).not.toHaveBeenCalled()
+  })
+
+  it('throws ZodError when item has negative quantity', async () => {
+    const req = buildRequest({
+      items: [
+        { itemId: 'item-1', productId: 1, quantity: -1, locationId: 1 },
+      ],
+    })
+
+    await expect(
+      POST(req, { params: { orderId: 'order-1' } })
+    ).rejects.toThrow() // ZodError: quantity must be positive
+
+    expect(getMockPrisma().$transaction).not.toHaveBeenCalled()
   })
 })

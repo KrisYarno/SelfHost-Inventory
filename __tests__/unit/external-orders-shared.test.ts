@@ -134,6 +134,42 @@ describe('deriveInternalStatus', () => {
     })
     expect(result).toBe('cancelled')
   })
+
+  it('Shopify: financialStatus "paid" with no fulfillmentStatus maps to "processing"', () => {
+    const result = deriveInternalStatus('SHOPIFY', {
+      nativeStatus: 'open',
+      financialStatus: 'paid',
+      fulfillmentStatus: null,
+    })
+    expect(result).toBe('processing')
+  })
+
+  it('Shopify: financialStatus "partially_paid" maps to "processing"', () => {
+    const result = deriveInternalStatus('SHOPIFY', {
+      nativeStatus: 'open',
+      financialStatus: 'partially_paid',
+      fulfillmentStatus: null,
+    })
+    expect(result).toBe('processing')
+  })
+
+  it('Shopify: unknown status (no cancelled, no fulfilled, no paid) falls back to "pending"', () => {
+    const result = deriveInternalStatus('SHOPIFY', {
+      nativeStatus: 'open',
+      financialStatus: 'pending',
+      fulfillmentStatus: null,
+    })
+    expect(result).toBe('pending')
+  })
+
+  it('WooCommerce: "refunded" maps to "cancelled"', () => {
+    const result = deriveInternalStatus('WOOCOMMERCE', {
+      nativeStatus: 'refunded',
+      financialStatus: null,
+      fulfillmentStatus: null,
+    })
+    expect(result).toBe('cancelled')
+  })
 })
 
 // ===========================================================================

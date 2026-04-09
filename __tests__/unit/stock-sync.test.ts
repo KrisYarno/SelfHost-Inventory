@@ -337,7 +337,45 @@ describe('syncStockToExternal', () => {
     expect(updates.find((u: any) => u.productId === '20').stockStatus).toBe('outofstock');
   });
 
-  // 10. Updates lastStockSyncError to null on full success
+  // 10. Adapter throws an Error: catch block stores error on integration
+  it('handles adapter.batchUpdateProductStock throwing an Error', async () => {
+    const adapter = makeAdapter();
+    // Make the adapter throw instead of returning gracefully
+    adapter.batchUpdateProductStock.mockRejectedValue(
+      new Error('Connection refused')
+    );
+    setupClient(adapter);
+
+    mockPrisma.productLink.findMany.mockResolvedValue([
+      makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
+      makeProductLink({ externalProductId: '20', locations: [{ locationId: 1, quantity: 3 }] }),
+    ] as any);
+    mockPrisma.integration.update.mockResolvedValue({} as any);
+
+    const result = await syncStockToExternal('int-1');
+
+    // Should return synced: 0, failed: N, errors with the message
+    expect(result.synced).toBe(0);
+    expect(result.failed).toBe(2);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].error).toContain('Connection refused');
+
+    // Verify lastStockSyncError is set on the integration
+    expect(mockPrisma.integration.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          lastStockSyncError: expect.stringContaining('Connection refused'),
+        }),
+      })
+    );
+
+    // Verify lastStockSyncAt is also set (per QA fix)
+    const updateCall = mockPrisma.integration.update.mock.calls[0][0];
+    expect(updateCall.data).toHaveProperty('lastStockSyncAt');
+    expect(updateCall.data.lastStockSyncAt).toBeInstanceOf(Date);
+  });
+
+  // 11. Updates lastStockSyncError to null on full success
   it('clears lastStockSyncError when all products succeed', async () => {
     const adapter = makeAdapter({ succeeded: 1, failed: [] });
     setupClient(adapter, { lastStockSyncError: 'previous error' });
