@@ -83,8 +83,16 @@ export const POST = apiHandler(async (
     console.error('Failed to log audit fulfillment:', auditError);
   }
 
-  // Push fulfillment status to external platform (best-effort, never fails the fulfillment)
-  if (result.integrationId && result.externalId && fulfilledCount > 0) {
+  // Push fulfillment status to external platform (best-effort, never fails the fulfillment).
+  // P1-6: Only push when every requested item succeeded. If any item hit the catch
+  // branch inside fulfillExternalOrder, the internal DB state may not match what we'd
+  // send to WC, so skip the push and log for manual follow-up.
+  if (
+    result.integrationId &&
+    result.externalId &&
+    fulfilledCount > 0 &&
+    result.failed.length === 0
+  ) {
     try {
       const integration = await prisma.integration.findUnique({
         where: { id: result.integrationId },
@@ -117,6 +125,10 @@ export const POST = apiHandler(async (
       );
       // Don't fail the fulfillment. Log for manual follow-up.
     }
+  } else if (result.failed.length > 0) {
+    console.warn(
+      `Skipping external push for order ${params.orderId}: ${result.failed.length} items failed during fulfillment`
+    );
   }
 
   const response = NextResponse.json({

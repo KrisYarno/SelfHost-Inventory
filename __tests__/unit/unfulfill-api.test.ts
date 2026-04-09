@@ -92,9 +92,12 @@ function buildRequest(body: any): any {
 function buildOrder(overrides: any = {}) {
   return {
     id: 'order-1',
+    externalId: 'ext-default',
+    integrationId: 'int-default',
     internalStatus: 'fulfilled',
     fulfilledAt: new Date('2025-06-01'),
     fulfilledBy: 1,
+    integration: { id: 'int-default', fulfillmentPushEnabled: false },
     items: [
       {
         id: 'item-1',
@@ -103,6 +106,8 @@ function buildOrder(overrides: any = {}) {
         fulfilledQty: 5,
         name: 'Widget A',
         sku: 'WA-001',
+        // P1-4: productLink verification requires mapping info
+        productLink: { internalProductId: 1 },
       },
       {
         id: 'item-2',
@@ -111,6 +116,7 @@ function buildOrder(overrides: any = {}) {
         fulfilledQty: 3,
         name: 'Widget B',
         sku: 'WB-001',
+        productLink: { internalProductId: 2 },
       },
     ],
     ...overrides,
@@ -119,6 +125,9 @@ function buildOrder(overrides: any = {}) {
 
 function setupTransaction() {
   const mockTx = mockDeep<PrismaClient>()
+  // Atomic $executeRaw returns affected row count.
+  // Default: 1 row affected (success). Tests override per-case.
+  mockTx.$executeRaw.mockResolvedValue(1 as any)
   getMockPrisma().$transaction.mockImplementation(async (cb: any) => {
     return cb(mockTx)
   })
@@ -218,9 +227,9 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 3. Double-undo: validation rejects (fulfilledQty < quantity)
+  // 3. Double-undo: atomic UPDATE WHERE fulfilledQty >= ? returns 0 → skip
   // -----------------------------------------------------------------------
-  it('rejects unfulfill when fulfilledQty is less than requested quantity', async () => {
+  it('rejects unfulfill when atomic decrement finds insufficient fulfilled quantity', async () => {
     const tx = setupTransaction()
     const order = buildOrder({
       items: [
@@ -229,12 +238,16 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
           orderId: 'order-1',
           quantity: 5,
           fulfilledQty: 2, // Only 2 fulfilled, but trying to unfulfill 5
+          productLink: { internalProductId: 1 },
         },
       ],
     })
 
     tx.externalOrder.findUnique.mockResolvedValue(order as any)
-    // After no items actually unfulfilled, fulfilledQty unchanged
+    tx.product.findUnique.mockResolvedValue({ id: 1, deletedAt: null } as any)
+    // P0-1 fix: the atomic UPDATE returns 0 affected rows when fulfilledQty < quantity.
+    // First call is the fulfilledQty decrement, which should return 0 here.
+    tx.$executeRaw.mockResolvedValueOnce(0 as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 2 },
     ] as any)
@@ -252,7 +265,7 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     expect(data.success).toBe(true)
     expect(data.restored).toHaveLength(0)
     expect(data.skipped).toHaveLength(1)
-    expect(data.skipped[0].reason).toContain('Cannot unfulfill more than was fulfilled')
+    expect(data.skipped[0].reason).toContain('insufficient fulfilled quantity')
   })
 
   // -----------------------------------------------------------------------
@@ -333,17 +346,14 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 7. Concurrent safety: items correct after parallel operations
+  // 7. Concurrent safety: atomic raw SQL UPDATE (P0-1 fix)
   // -----------------------------------------------------------------------
-  it('uses atomic decrement for fulfilledQty (concurrent safety)', async () => {
+  it('uses atomic $executeRaw for fulfilledQty and product_locations (concurrent safety)', async () => {
     const tx = setupTransaction()
     const order = buildOrder()
 
     tx.externalOrder.findUnique.mockResolvedValue(order as any)
     tx.product.findUnique.mockResolvedValue({ id: 1, deletedAt: null } as any)
-    tx.product_locations.upsert.mockResolvedValue({} as any)
-    tx.product.update.mockResolvedValue({} as any)
-    tx.externalOrderItem.update.mockResolvedValue({} as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 2 },
       { quantity: 3, fulfilledQty: 3 },
@@ -358,25 +368,47 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
 
     await POST(req, { params: { orderId: 'order-1' } })
 
-    // Verify atomic decrement (not read-then-set)
-    expect(tx.externalOrderItem.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 'item-1' },
-        data: {
-          fulfilledQty: { decrement: 3 },
-        },
-      })
-    )
+    // Verify atomic UPDATEs were issued. Three $executeRaw calls per item:
+    //   1. fulfilledQty decrement with WHERE fulfilledQty >= ?
+    //   2. product_locations quantity increment
+    //   3. products.quantity legacy mirror (because locationId === 1)
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(3)
 
-    // Verify atomic increment on product_locations
-    expect(tx.product_locations.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        update: expect.objectContaining({
-          quantity: { increment: 3 },
-          version: { increment: 1 },
-        }),
-      })
-    )
+    // Fallback upsert-create should NOT fire when the UPDATE affected a row
+    expect(tx.product_locations.create).not.toHaveBeenCalled()
+  })
+
+  // -----------------------------------------------------------------------
+  // 7b. P1-4: product verification rejects when productId doesn't match mapping
+  // -----------------------------------------------------------------------
+  it('P1-4: rejects unfulfill when client-supplied productId does not match item mapping', async () => {
+    const tx = setupTransaction()
+    const order = buildOrder() // item-1 maps to productId 1, item-2 to 2
+
+    tx.externalOrder.findUnique.mockResolvedValue(order as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 5, fulfilledQty: 5 },
+      { quantity: 3, fulfilledQty: 3 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    // Caller supplies productId 999 which doesn't match item-1's mapping (productId 1)
+    const req = buildRequest({
+      items: [
+        { itemId: 'item-1', productId: 999, quantity: 5, locationId: 1 },
+      ],
+    })
+
+    const response = await POST(req, { params: { orderId: 'order-1' } })
+    const data = await response.json()
+
+    expect(data.success).toBe(true)
+    expect(data.restored).toHaveLength(0)
+    expect(data.skipped).toHaveLength(1)
+    expect(data.skipped[0].reason).toContain('Product mismatch')
+
+    // Atomic decrement must NOT have been attempted for the rejected item
+    expect(tx.$executeRaw).not.toHaveBeenCalled()
   })
 
   // -----------------------------------------------------------------------
@@ -417,9 +449,6 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
       if (callCount === 1) return Promise.resolve({ id: 100 })
       return Promise.reject(new Error('DB write failed'))
     }
-    tx.product_locations.upsert.mockResolvedValue({} as any)
-    tx.product.update.mockResolvedValue({} as any)
-    tx.externalOrderItem.update.mockResolvedValue({} as any)
 
     const req = buildRequest({
       items: [

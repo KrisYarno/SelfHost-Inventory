@@ -1,9 +1,6 @@
 import prisma from '@/lib/prisma';
-import { inventory_logs_logType } from '@prisma/client';
-import {
-  createInventoryLog,
-  validateStockAvailability,
-} from '@/lib/inventory';
+import { Prisma, inventory_logs_logType } from '@prisma/client';
+import { createInventoryLog } from '@/lib/inventory';
 import { ProductNotFoundError } from '@/lib/error-handling';
 
 /**
@@ -329,29 +326,7 @@ export async function fulfillExternalOrder(
             continue;
           }
 
-          // Validate stock availability
-          const validation = await validateStockAvailability(
-            productId,
-            locationId,
-            quantityToFulfill,
-            tx
-          );
-
-          if (!validation.isValid) {
-            const product = await tx.product.findUnique({
-              where: { id: productId },
-              select: { name: true },
-            });
-
-            result.skipped.push({
-              itemId: fulfillmentItem.itemId,
-              reason: 'insufficient_stock',
-              details: `Insufficient stock for ${product?.name || 'product'}. Available: ${validation.currentQuantity}, Requested: ${quantityToFulfill}`,
-            });
-            continue;
-          }
-
-          // Get product info
+          // Get product info first (for error messages and existence check)
           const product = await tx.product.findUnique({
             where: { id: productId },
             select: { name: true },
@@ -361,7 +336,38 @@ export async function fulfillExternalOrder(
             throw new ProductNotFoundError(productId);
           }
 
-          // Create inventory log (deduction)
+          // Atomic decrement with stock check. This single UPDATE both validates
+          // that sufficient stock exists and decrements it in one statement.
+          // Race-safe: two concurrent transactions cannot both succeed because
+          // the WHERE clause is evaluated against the committed row at UPDATE time.
+          const affectedRows = await tx.$executeRaw(Prisma.sql`
+            UPDATE product_locations
+            SET quantity = quantity - ${quantityToFulfill},
+                version = version + 1,
+                updatedAt = NOW()
+            WHERE productId = ${productId}
+              AND locationId = ${locationId}
+              AND quantity >= ${quantityToFulfill}
+          `);
+
+          if (affectedRows === 0) {
+            // Either the row doesn't exist or insufficient stock. Read the current
+            // state for the error message (best-effort — may still race but the
+            // actual deduction already declined).
+            const currentRow = await tx.product_locations.findUnique({
+              where: { productId_locationId: { productId, locationId } },
+              select: { quantity: true },
+            });
+
+            result.skipped.push({
+              itemId: fulfillmentItem.itemId,
+              reason: 'insufficient_stock',
+              details: `Insufficient stock for ${product.name}. Available: ${currentRow?.quantity ?? 0}, Requested: ${quantityToFulfill}`,
+            });
+            continue;
+          }
+
+          // Create inventory log (deduction) — only after the atomic UPDATE succeeded
           const log = await createInventoryLog(
             {
               userId,
@@ -373,36 +379,16 @@ export async function fulfillExternalOrder(
             tx
           );
 
-          // Update product_locations
-          await tx.product_locations.upsert({
-            where: {
-              productId_locationId: {
-                productId,
-                locationId,
-              },
-            },
-            update: {
-              quantity: {
-                decrement: quantityToFulfill,
-              },
-              version: {
-                increment: 1,
-              },
-            },
-            create: {
-              productId,
-              locationId,
-              quantity: -quantityToFulfill,
-              version: 1,
-            },
-          });
-
-          // Update product quantity for location 1 (compatibility)
+          // Legacy product.quantity mirror for location 1 (atomic, matches the
+          // product_locations UPDATE above). Safe because product_locations
+          // decrement already succeeded, so the mirror decrement should too.
           if (locationId === 1) {
-            await tx.product.update({
-              where: { id: productId },
-              data: { quantity: { decrement: quantityToFulfill } },
-            });
+            await tx.$executeRaw(Prisma.sql`
+              UPDATE products
+              SET quantity = quantity - ${quantityToFulfill}
+              WHERE id = ${productId}
+                AND quantity >= ${quantityToFulfill}
+            `);
           }
 
           // Update ExternalOrderItem.fulfilledQty

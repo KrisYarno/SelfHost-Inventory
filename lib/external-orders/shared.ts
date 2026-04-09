@@ -280,7 +280,11 @@ export async function upsertOrderWithItems(
         if (productLink) itemsMapped += 1;
       }
 
-      // Clean up stale items (whose externalItemId is no longer in the order)
+      // Clean up stale items (whose externalItemId is no longer in the order).
+      // P0-3: Run unconditionally. If seenExternalItemIds is empty (every line
+      // item in the payload lacked an externalItemId), delete all rows with a
+      // non-null externalItemId for this order. Prisma's empty `notIn: []` is
+      // ambiguous, so we split into two explicit branches.
       if (seenExternalItemIds.size > 0) {
         await tx.externalOrderItem.deleteMany({
           where: {
@@ -289,6 +293,13 @@ export async function upsertOrderWithItems(
               { externalItemId: { not: null } },
               { externalItemId: { notIn: Array.from(seenExternalItemIds) } },
             ],
+          },
+        });
+      } else {
+        await tx.externalOrderItem.deleteMany({
+          where: {
+            orderId: externalOrder.id,
+            externalItemId: { not: null },
           },
         });
       }

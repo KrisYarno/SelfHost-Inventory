@@ -629,7 +629,56 @@ describe('upsertOrderWithItems', () => {
     expect(tx.externalOrderItem.upsert).not.toHaveBeenCalled()
     expect(tx.externalOrderItem.findFirst).not.toHaveBeenCalled()
     expect(tx.externalOrderItem.create).not.toHaveBeenCalled()
-    // No stale-item cleanup (seenExternalItemIds is empty)
-    expect(tx.externalOrderItem.deleteMany).not.toHaveBeenCalled()
+    // P0-3: Stale-item cleanup runs unconditionally. When seenExternalItemIds
+    // is empty, it deletes all items with a non-null externalItemId for this
+    // order (no notIn clause).
+    expect(tx.externalOrderItem.deleteMany).toHaveBeenCalledTimes(1)
+    expect(tx.externalOrderItem.deleteMany).toHaveBeenCalledWith({
+      where: {
+        orderId: 'order-empty',
+        externalItemId: { not: null },
+      },
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // 26. P0-3: Stale cleanup runs when every line item lacks externalItemId
+  // -----------------------------------------------------------------------
+  it('P0-3: cleans up stale items when all incoming line items lack externalItemId', async () => {
+    const tx = setupTransaction()
+    const normalized = buildNormalizedOrder({
+      lineItems: [
+        {
+          externalId: '', // empty → treated as null branch in upsertOrderWithItems
+          externalProductId: 'prod-1',
+          externalVariantId: null,
+          name: 'Item A',
+          variantName: null,
+          sku: 'SKU-A',
+          quantity: 2,
+          unitPrice: 10,
+        },
+      ],
+    })
+
+    tx.externalOrder.upsert.mockResolvedValue({ id: 'order-stale' } as any)
+    tx.productLink.findFirst.mockResolvedValue(null)
+    tx.externalOrderItem.findFirst.mockResolvedValue(null)
+    tx.externalOrderItem.create.mockResolvedValue({ id: 'item-new' } as any)
+
+    await upsertOrderWithItems(mockPrisma, {
+      ...baseParams,
+      normalized,
+      status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+    })
+
+    // Stale cleanup fires even though seenExternalItemIds is empty
+    expect(tx.externalOrderItem.deleteMany).toHaveBeenCalledTimes(1)
+    expect(tx.externalOrderItem.deleteMany).toHaveBeenCalledWith({
+      where: {
+        orderId: 'order-stale',
+        externalItemId: { not: null },
+      },
+    })
   })
 })

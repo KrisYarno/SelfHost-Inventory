@@ -9,7 +9,7 @@ import {
 import { auditService } from '@/lib/audit';
 import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
-import { inventory_logs_logType } from '@prisma/client';
+import { Prisma, inventory_logs_logType } from '@prisma/client';
 import { createInventoryLog } from '@/lib/inventory';
 import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
 
@@ -52,11 +52,17 @@ export const POST = apiHandler(async (
 
   await prisma.$transaction(
     async (tx) => {
-      // Amendment 2: Load order at top of transaction (include integration for push)
+      // Load order with productLink for productId verification (P1-4)
       const order = await tx.externalOrder.findUnique({
         where: { id: params.orderId },
         include: {
-          items: true,
+          items: {
+            include: {
+              productLink: {
+                select: { internalProductId: true },
+              },
+            },
+          },
           integration: {
             select: {
               id: true,
@@ -93,11 +99,15 @@ export const POST = apiHandler(async (
           continue;
         }
 
-        // Validate fulfilledQty >= requested quantity
-        if (orderItem.fulfilledQty < unfulfillItem.quantity) {
+        // P1-4: Verify productId matches the item's mapping. Rejects client-supplied
+        // productId values that don't correspond to what was actually fulfilled.
+        if (
+          !orderItem.productLink ||
+          orderItem.productLink.internalProductId !== unfulfillItem.productId
+        ) {
           skipped.push({
             itemId: unfulfillItem.itemId,
-            reason: `Cannot unfulfill more than was fulfilled (fulfilled: ${orderItem.fulfilledQty}, requested: ${unfulfillItem.quantity})`,
+            reason: `Product mismatch: item is mapped to product ${orderItem.productLink?.internalProductId ?? 'none'}, not ${unfulfillItem.productId}`,
           });
           continue;
         }
@@ -116,7 +126,25 @@ export const POST = apiHandler(async (
           continue;
         }
 
-        // Amendment 1: Use createInventoryLog (thin wrapper, NOT createInventoryAdjustment)
+        // Atomic fulfilledQty decrement with guard. Race-safe: concurrent unfulfills
+        // for the same item cannot both succeed because the WHERE fulfilledQty >= ?
+        // is evaluated at UPDATE time.
+        const fulfilledAffected = await tx.$executeRaw(Prisma.sql`
+          UPDATE external_order_items
+          SET fulfilledQty = fulfilledQty - ${unfulfillItem.quantity}
+          WHERE id = ${unfulfillItem.itemId}
+            AND fulfilledQty >= ${unfulfillItem.quantity}
+        `);
+
+        if (fulfilledAffected === 0) {
+          skipped.push({
+            itemId: unfulfillItem.itemId,
+            reason: `Cannot unfulfill: insufficient fulfilled quantity (concurrent modification or already reversed)`,
+          });
+          continue;
+        }
+
+        // Create inventory log (restoration) — only after fulfilledQty decrement succeeded
         const log = await createInventoryLog(
           {
             userId: user.id,
@@ -128,47 +156,37 @@ export const POST = apiHandler(async (
           tx
         );
 
-        // Update product_locations (same upsert pattern as fulfillment)
-        await tx.product_locations.upsert({
-          where: {
-            productId_locationId: {
+        // Atomic product_locations increment. No WHERE quantity guard needed because
+        // we're adding stock, but we handle the missing-row case by creating.
+        const plAffected = await tx.$executeRaw(Prisma.sql`
+          UPDATE product_locations
+          SET quantity = quantity + ${unfulfillItem.quantity},
+              version = version + 1,
+              updatedAt = NOW()
+          WHERE productId = ${unfulfillItem.productId}
+            AND locationId = ${unfulfillItem.locationId}
+        `);
+
+        if (plAffected === 0) {
+          // Row doesn't exist — create it with the restored quantity
+          await tx.product_locations.create({
+            data: {
               productId: unfulfillItem.productId,
               locationId: unfulfillItem.locationId,
+              quantity: unfulfillItem.quantity,
+              version: 1,
             },
-          },
-          update: {
-            quantity: {
-              increment: unfulfillItem.quantity,
-            },
-            version: {
-              increment: 1,
-            },
-          },
-          create: {
-            productId: unfulfillItem.productId,
-            locationId: unfulfillItem.locationId,
-            quantity: unfulfillItem.quantity,
-            version: 1,
-          },
-        });
-
-        // Legacy product.quantity for location 1 (compatibility)
-        if (unfulfillItem.locationId === 1) {
-          await tx.product.update({
-            where: { id: unfulfillItem.productId },
-            data: { quantity: { increment: unfulfillItem.quantity } },
           });
         }
 
-        // Amendment 4: Atomic Prisma decrement for fulfilledQty
-        await tx.externalOrderItem.update({
-          where: { id: unfulfillItem.itemId },
-          data: {
-            fulfilledQty: {
-              decrement: unfulfillItem.quantity,
-            },
-          },
-        });
+        // Legacy product.quantity mirror for location 1 (atomic)
+        if (unfulfillItem.locationId === 1) {
+          await tx.$executeRaw(Prisma.sql`
+            UPDATE products
+            SET quantity = quantity + ${unfulfillItem.quantity}
+            WHERE id = ${unfulfillItem.productId}
+          `);
+        }
 
         restored.push({
           itemId: unfulfillItem.itemId,
