@@ -95,10 +95,16 @@ export function deriveExternalOrderMeta(options: {
 }) {
   const { platform, storeUrl, externalId, normalized, rawPayload } = options;
   const platformStatusRaw = buildPlatformStatusRaw(platform, rawPayload, normalized);
+  // Prefer GMT dates from WC (same fix as Phase 7d for date_created).
+  // WC's date_modified is shop-local without TZ suffix; date_modified_gmt is UTC.
   const externalUpdatedAt =
     platform === "SHOPIFY"
       ? safeDate(rawPayload?.updated_at ?? rawPayload?.processed_at)
-      : safeDate(rawPayload?.date_modified ?? rawPayload?.date_modified_gmt);
+      : safeDate(
+          rawPayload?.date_modified_gmt
+            ? rawPayload.date_modified_gmt + (String(rawPayload.date_modified_gmt).endsWith("Z") ? "" : "Z")
+            : rawPayload?.date_modified
+        );
   const externalOrderUrl = buildExternalOrderUrl(platform, storeUrl, rawPayload, externalId);
   const externalStatusHash = computeStatusHash(platform, normalized, platformStatusRaw, externalUpdatedAt);
   const lastSeenAt = new Date();

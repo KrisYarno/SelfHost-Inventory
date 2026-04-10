@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useSession } from "next-auth/react";
+import { useLocation } from "@/contexts/location-context";
 import { Package, Check, AlertTriangle, ExternalLink, ShoppingCart, RefreshCw, Link2, ChevronDown, RotateCcw } from "lucide-react";
 import {
   Sheet,
@@ -57,6 +58,39 @@ export function ExternalOrderDetailsSheet({
     title: string;
     sku?: string;
   } | null>(null);
+  const { selectedLocationId } = useLocation();
+  const [stockByProductId, setStockByProductId] = useState<Record<number, number>>({});
+
+  // Fetch live stock for mapped items at the user's selected location
+  useEffect(() => {
+    if (!open || !order?.items || !selectedLocationId) {
+      setStockByProductId({});
+      return;
+    }
+
+    const mappedProductIds = order.items
+      .filter((item) => item.isMapped && item.productLink?.internalProductId)
+      .map((item) => item.productLink!.internalProductId);
+
+    if (mappedProductIds.length === 0) {
+      setStockByProductId({});
+      return;
+    }
+
+    const uniqueIds = Array.from(new Set(mappedProductIds));
+    // Fetch current stock via the inventory API
+    fetch(`/api/inventory/current-fast?locationId=${selectedLocationId}`)
+      .then((res) => (res.ok ? res.json() : { quantities: {} }))
+      .then((data) => {
+        const map: Record<number, number> = {};
+        const quantities = data.quantities || {};
+        for (const id of uniqueIds) {
+          map[id] = quantities[String(id)] ?? 0;
+        }
+        setStockByProductId(map);
+      })
+      .catch(() => setStockByProductId({}));
+  }, [open, order?.items, selectedLocationId]);
 
   if (!order) return null;
 
@@ -219,9 +253,25 @@ export function ExternalOrderDetailsSheet({
                                 Fulfilled: {item.fulfilledQty}
                               </Badge>
                             )}
-                            {remainingQty > 0 && (
+                            {remainingQty > 0 && !isFullyFulfilled && (
                               <Badge variant="outline" className="text-xs">
-                                Remaining: {remainingQty}
+                                To Fill: {remainingQty}
+                              </Badge>
+                            )}
+                            {/* Show live stock at user's location for mapped items */}
+                            {item.isMapped && item.productLink?.internalProductId && selectedLocationId && (
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "text-xs",
+                                  (stockByProductId[item.productLink.internalProductId] ?? 0) <= 0
+                                    ? "border-red-300 text-red-700 dark:text-red-400"
+                                    : (stockByProductId[item.productLink.internalProductId] ?? 0) < remainingQty
+                                    ? "border-amber-300 text-amber-700 dark:text-amber-400"
+                                    : "border-green-300 text-green-700 dark:text-green-400"
+                                )}
+                              >
+                                In Stock: {stockByProductId[item.productLink.internalProductId] ?? 0}
                               </Badge>
                             )}
                           </div>

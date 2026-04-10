@@ -32,7 +32,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
-import { Plug, Plus, Pencil, Trash2, Copy, Link2, Power, PowerOff, RefreshCw, Loader2, ChevronDown, ChevronRight, AlertTriangle } from "lucide-react";
+import { Plug, Plus, Pencil, Trash2, Copy, Link2, Power, PowerOff, RefreshCw, Loader2, ChevronDown, ChevronRight, AlertTriangle, Eye, EyeOff } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
@@ -93,6 +93,7 @@ export default function AdminIntegrationsPage() {
   });
   const [submitting, setSubmitting] = useState(false);
   const [webhookUrl, setWebhookUrl] = useState("");
+  const [showWebhookSecret, setShowWebhookSecret] = useState(false);
   const [syncDialogOpen, setSyncDialogOpen] = useState(false);
   const [syncTarget, setSyncTarget] = useState<Integration | null>(null);
   const [syncLookbackDays, setSyncLookbackDays] = useState("1");
@@ -488,29 +489,84 @@ export default function AdminIntegrationsPage() {
 
                 {webhookUrl ? (
                   <div className="space-y-4 py-4">
-                    <div className="rounded-lg border border-green-200 bg-green-50 p-4">
-                      <h3 className="font-semibold text-green-900 mb-2">Integration Created!</h3>
-                      <p className="text-sm text-green-800 mb-3">
-                        Configure this webhook URL in your {formData.platform === "SHOPIFY" ? "Shopify" : "WooCommerce"} store:
-                      </p>
-                      <div className="flex gap-2">
-                        <Input
-                          value={webhookUrl}
-                          readOnly
-                          className="font-mono text-sm"
-                        />
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            navigator.clipboard.writeText(webhookUrl);
-                            toast.success("Webhook URL copied!");
-                          }}
-                        >
-                          <Copy className="h-4 w-4" />
-                        </Button>
+                    <div className="rounded-lg border border-green-200 bg-green-50 dark:border-green-900 dark:bg-green-950/30 p-4 space-y-4">
+                      <h3 className="font-semibold text-green-900 dark:text-green-300">Integration Created!</h3>
+
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium uppercase tracking-wider text-green-800 dark:text-green-400">
+                          Webhook Delivery URL
+                        </p>
+                        <p className="text-xs text-green-700 dark:text-green-400">
+                          Paste this into your {formData.platform === "WOOCOMMERCE" ? "WooCommerce → Settings → Advanced → Webhooks" : "Shopify → Settings → Notifications → Webhooks"} setup.
+                        </p>
+                        <div className="flex gap-2">
+                          <Input
+                            value={webhookUrl}
+                            readOnly
+                            className="font-mono text-xs"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              navigator.clipboard.writeText(webhookUrl);
+                              toast.success("Webhook URL copied!");
+                            }}
+                          >
+                            <Copy className="h-4 w-4" />
+                          </Button>
+                        </div>
                       </div>
+
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium uppercase tracking-wider text-green-800 dark:text-green-400">
+                          Webhook Secret
+                        </p>
+                        <p className="text-xs text-green-700 dark:text-green-400">
+                          Use this exact secret in the &quot;Secret&quot; field when creating each webhook.
+                        </p>
+                        <div className="flex gap-2">
+                          <Input
+                            value={formData.webhookSecret}
+                            readOnly
+                            type={showWebhookSecret ? "text" : "password"}
+                            className="font-mono text-xs"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setShowWebhookSecret(!showWebhookSecret)}
+                          >
+                            {showWebhookSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              navigator.clipboard.writeText(formData.webhookSecret);
+                              toast.success("Webhook secret copied!");
+                            }}
+                          >
+                            <Copy className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+
+                      {formData.platform === "WOOCOMMERCE" && (
+                        <div className="rounded-md border border-green-300 dark:border-green-800 bg-green-100/50 dark:bg-green-900/20 p-3 text-xs text-green-800 dark:text-green-300 space-y-1">
+                          <p className="font-medium">WooCommerce Setup Steps:</p>
+                          <ol className="list-decimal list-inside space-y-0.5 text-green-700 dark:text-green-400">
+                            <li>Go to WooCommerce → Settings → Advanced → Webhooks</li>
+                            <li>Click &quot;Add webhook&quot;</li>
+                            <li>Set Topic to &quot;Order created&quot;, paste the Delivery URL and Secret above</li>
+                            <li>Set API Version to &quot;WP REST API Integration v3&quot;</li>
+                            <li>Repeat for &quot;Order updated&quot;, &quot;Order deleted&quot;, and &quot;Order restored&quot;</li>
+                          </ol>
+                        </div>
+                      )}
                     </div>
                   </div>
                 ) : (
