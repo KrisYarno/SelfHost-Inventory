@@ -63,6 +63,7 @@ interface ExternalVariation {
   id: number | string;
   sku?: string;
   price?: number;
+  variantTitle?: string;
   attributes?: Array<{ name: string; option: string }>;
 }
 
@@ -99,6 +100,9 @@ function deduplicateProducts(products: InternalProduct[]): InternalProduct[] {
 }
 
 function formatVariationLabel(variation: ExternalVariation): string {
+  // Prefer the server-computed variantTitle (available from the variations endpoint)
+  if (variation.variantTitle) return variation.variantTitle;
+  // Fall back to raw attribute options
   if (variation.attributes && variation.attributes.length > 0) {
     return variation.attributes.map((a) => a.option).join(" / ");
   }
@@ -252,7 +256,28 @@ export function ProductMapDialog({
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || "Failed to fetch variations");
       }
-      return res.json() as Promise<{ variations: ExternalVariation[] }>;
+      // The endpoint returns ExternalProductSearchResult[], not ExternalVariation[].
+      // Transform to the shape the dialog expects.
+      const data = await res.json() as {
+        variations: Array<{
+          externalId?: string;
+          externalVariantId?: string;
+          title?: string;
+          variantTitle?: string;
+          sku?: string;
+          price?: number;
+          attributes?: Array<{ name: string; option: string }>;
+        }>;
+      };
+      return {
+        variations: data.variations.map((v): ExternalVariation => ({
+          id: v.externalVariantId || v.externalId || "",
+          sku: v.sku,
+          price: v.price,
+          variantTitle: v.variantTitle,
+          attributes: v.attributes,
+        })),
+      };
     },
     enabled: open && showVariationStep && !!effectiveExternal?.externalId,
     staleTime: 60_000,
@@ -497,14 +522,33 @@ export function ProductMapDialog({
                     No products found for &ldquo;{debouncedProactiveSearch}&rdquo;
                   </p>
                 )}
-              {(wcSearchResults?.products || []).map((product) => (
-                <div
+              {/* Filter WC results client-side by title/SKU match.
+                  WC search is full-text (hits descriptions, tags, etc.) which
+                  surfaces irrelevant products. Title filter keeps it useful. */}
+              {(wcSearchResults?.products || [])
+                .filter((product) => {
+                  const q = debouncedProactiveSearch.toLowerCase();
+                  const title = (product.title || "").toLowerCase();
+                  const sku = (product.sku || "").toLowerCase();
+                  return title.includes(q) || sku.includes(q);
+                })
+                .map((product) => (
+                <button
                   key={product.externalId}
-                  className="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 transition-colors hover:bg-muted/30"
+                  onClick={() => {
+                    setProactiveSelected({
+                      externalId: product.externalId,
+                      title: product.title,
+                      sku: product.sku,
+                      hasVariations: product.hasVariations,
+                    });
+                    setShowVariationStep(!!product.hasVariations);
+                  }}
+                  className="flex w-full items-start gap-3 rounded-lg border border-border/60 bg-background px-3 py-2.5 text-left transition-colors hover:bg-muted/30 hover:border-primary/30"
                 >
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium truncate">{product.title}</p>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <p className="text-sm font-medium">{product.title}</p>
+                    <div className="flex items-center gap-2 flex-wrap text-xs text-muted-foreground mt-0.5">
                       {product.sku && <span>SKU: {product.sku}</span>}
                       {product.type && (
                         <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
@@ -518,23 +562,8 @@ export function ProductMapDialog({
                       )}
                     </div>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="shrink-0"
-                    onClick={() => {
-                      setProactiveSelected({
-                        externalId: product.externalId,
-                        title: product.title,
-                        sku: product.sku,
-                        hasVariations: product.hasVariations,
-                      });
-                      setShowVariationStep(!!product.hasVariations);
-                    }}
-                  >
-                    Select
-                  </Button>
-                </div>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0 mt-1" />
+                </button>
               ))}
               {!debouncedProactiveSearch.trim() && !wcSearchFetching && (
                 <p className="py-4 text-center text-sm text-muted-foreground">
@@ -631,17 +660,21 @@ export function ProductMapDialog({
                       className="flex w-full items-center justify-between rounded-lg border border-border/60 bg-background px-3 py-2.5 text-left text-sm transition-colors hover:bg-muted/50 hover:border-primary/30"
                     >
                       <div className="min-w-0 flex-1">
-                        <span className="font-medium">
-                          {formatVariationLabel(v)}
-                        </span>
-                        {v.sku && (
-                          <span className="ml-2 text-xs text-muted-foreground">
-                            SKU: {v.sku}
-                          </span>
-                        )}
+                        <p className="font-medium">
+                          {effectiveExternal?.title}
+                          {formatVariationLabel(v) && (
+                            <span className="text-muted-foreground font-normal">
+                              {" "}— {formatVariationLabel(v)}
+                            </span>
+                          )}
+                        </p>
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5">
+                          <span>ID: {v.id}</span>
+                          {v.sku && <span>SKU: {v.sku}</span>}
+                        </div>
                       </div>
                       {v.price != null && (
-                        <span className="text-xs text-muted-foreground ml-2">
+                        <span className="text-xs text-muted-foreground ml-2 shrink-0">
                           ${Number(v.price).toFixed(2)}
                         </span>
                       )}
