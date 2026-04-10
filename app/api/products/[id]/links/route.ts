@@ -6,6 +6,7 @@ import {
   apiHandler,
 } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
+import type { Prisma } from '@prisma/client';
 import { validateCSRFToken } from '@/lib/csrf';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import {
@@ -115,23 +116,60 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     );
   }
 
-  const productLink = await prisma.productLink.create({
-    data: {
-      integrationId: body.integrationId,
-      internalProductId: productId,
-      externalProductId: body.externalProductId,
-      externalVariantId: body.externalVariantId || null,
-      externalSku: body.externalSku || null,
-      externalTitle: body.externalTitle || null,
-    },
-    include: {
-      integration: {
-        select: { id: true, name: true, platform: true },
-      },
-    },
-  });
+  // Issue 1a fix: create the ProductLink AND retroactively backfill any
+  // existing ExternalOrderItem rows that match the same external product+
+  // variant tuple. Without this, items synced before the mapping was created
+  // remain isMapped=false until their order is re-upserted by a webhook or
+  // sync — leading to "I mapped it but the UI still shows unmapped" bugs.
+  const { productLink, backfilledCount } = await prisma.$transaction(
+    async (tx: Prisma.TransactionClient) => {
+      const link = await tx.productLink.create({
+        data: {
+          integrationId: body.integrationId,
+          internalProductId: productId,
+          externalProductId: body.externalProductId,
+          externalVariantId: body.externalVariantId || null,
+          externalSku: body.externalSku || null,
+          externalTitle: body.externalTitle || null,
+        },
+        include: {
+          integration: {
+            select: { id: true, name: true, platform: true },
+          },
+        },
+      });
 
-  const response = NextResponse.json(productLink, { status: 201 });
+      // Backfill matching unlinked items. The match must include the variant
+      // (NULL-safe) so we don't accidentally link parent-product items to a
+      // variant-specific link (or vice versa).
+      const variantClause =
+        body.externalVariantId
+          ? { externalVariantId: body.externalVariantId }
+          : { externalVariantId: null };
+
+      const backfill = await tx.externalOrderItem.updateMany({
+        where: {
+          productLinkId: null,
+          externalProductId: body.externalProductId,
+          ...variantClause,
+          order: {
+            integrationId: body.integrationId,
+          },
+        },
+        data: {
+          productLinkId: link.id,
+          isMapped: true,
+        },
+      });
+
+      return { productLink: link, backfilledCount: backfill.count };
+    }
+  );
+
+  const response = NextResponse.json(
+    { ...productLink, backfilledCount },
+    { status: 201 }
+  );
   return applyRateLimitHeaders(response, rateLimitHeaders);
 });
 

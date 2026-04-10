@@ -44,8 +44,12 @@ const WooCommerceOrderSchema = z.object({
   order_key: z.string(),
   number: z.string(), // Order number as string
   status: z.string(),
-  date_created: z.string(), // ISO 8601 timestamp
+  // WC returns date_created WITHOUT a TZ suffix, interpreted in shop-local
+  // time. Always prefer date_created_gmt which is true UTC.
+  date_created: z.string(),
   date_created_gmt: z.string().optional(),
+  date_modified: z.string().optional(),
+  date_modified_gmt: z.string().optional(),
   currency: z.string(),
   total: z.string(), // Total as string
   customer_id: z.number(), // 0 for guest orders
@@ -59,6 +63,19 @@ const WooCommerceOrderSchema = z.object({
 
 type WooCommerceOrder = z.infer<typeof WooCommerceOrderSchema>;
 type WooCommerceLineItem = z.infer<typeof WooCommerceLineItemSchema>;
+
+/**
+ * Parse a WooCommerce date field, preferring the GMT variant when available.
+ * WC's non-GMT fields are shop-local without a TZ suffix, which JavaScript
+ * misinterprets as runtime-local. The `_gmt` variants are true UTC and we
+ * append `Z` so Date parses them as UTC explicitly.
+ */
+function parseWooDate(gmt: string | undefined, fallback: string): Date {
+  if (gmt && gmt.length > 0) {
+    return new Date(gmt.endsWith("Z") ? gmt : gmt + "Z");
+  }
+  return new Date(fallback);
+}
 
 /**
  * WooCommerce platform adapter implementation
@@ -112,7 +129,12 @@ export class WooCommerceAdapter implements PlatformAdapter {
       nativeStatus: order.status,
       financialStatus: this.mapFinancialStatus(order),
       fulfillmentStatus: this.mapFulfillmentStatus(order),
-      createdAt: new Date(order.date_created),
+      // Issue 2 fix: WC `date_created` is in shop-local time without a TZ
+      // suffix, so JavaScript's `new Date()` parses it in the runtime's local
+      // TZ which is wrong. `date_created_gmt` is the authoritative UTC value;
+      // we append `Z` so Date parses it correctly. Fall back to date_created
+      // only if the GMT variant is missing (very old WC payloads).
+      createdAt: parseWooDate(order.date_created_gmt, order.date_created),
       customer: this.normalizeCustomer(order),
       lineItems: order.line_items.map(item => this.normalizeLineItem(item)),
       currency: order.currency,

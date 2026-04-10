@@ -30,7 +30,14 @@ export function deriveInternalStatus(
     const status = (order.nativeStatus || "").toLowerCase();
     if (status === "completed") return "fulfilled";
     if (status === "processing") return "processing";
-    if (["cancelled", "refunded", "failed"].includes(status)) return "cancelled";
+    // `trash` and `trashed` are WC's soft-delete states. WC fires order.updated
+    // when an order is moved to trash (NOT order.deleted, which only fires on
+    // permanent/force delete). Treat trash as cancelled so the inventory side
+    // surfaces the change instead of falling through to "pending".
+    if (
+      ["cancelled", "refunded", "failed", "trash", "trashed"].includes(status)
+    )
+      return "cancelled";
     return "pending";
   }
 

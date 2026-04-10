@@ -117,6 +117,25 @@ describe('deriveInternalStatus', () => {
     expect(result).toBe('pending')
   })
 
+  // Phase 7d Issue 4: trash should map to cancelled, not the pending fallback
+  it('WooCommerce: "trash" maps to "cancelled" (Issue 4)', () => {
+    const result = deriveInternalStatus('WOOCOMMERCE', {
+      nativeStatus: 'trash',
+      financialStatus: null,
+      fulfillmentStatus: null,
+    })
+    expect(result).toBe('cancelled')
+  })
+
+  it('WooCommerce: "trashed" maps to "cancelled" (Issue 4)', () => {
+    const result = deriveInternalStatus('WOOCOMMERCE', {
+      nativeStatus: 'trashed',
+      financialStatus: null,
+      fulfillmentStatus: null,
+    })
+    expect(result).toBe('cancelled')
+  })
+
   it('Shopify: fulfillmentStatus "fulfilled" maps to "fulfilled"', () => {
     const result = deriveInternalStatus('SHOPIFY', {
       nativeStatus: 'open',

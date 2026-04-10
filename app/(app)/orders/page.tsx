@@ -64,6 +64,18 @@ export default function OrdersPage() {
     await refetch();
   }, [refetch]);
 
+  // Issue 1b fix: when the orders list refetches, find the currently-selected
+  // order in the new list and rebind selectedOrder to the fresh version.
+  // Without this, the detail sheet keeps rendering stale data after a mapping
+  // / fulfillment / recheck even though the underlying list updated.
+  useEffect(() => {
+    if (!selectedOrder) return;
+    const fresh = orders.find((o) => o.id === selectedOrder.id);
+    if (fresh && fresh !== selectedOrder) {
+      setSelectedOrder(fresh);
+    }
+  }, [orders, selectedOrder]);
+
   // Loading state
   if (companiesLoading) {
     return (
