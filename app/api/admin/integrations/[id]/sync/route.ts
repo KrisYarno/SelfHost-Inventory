@@ -21,7 +21,15 @@ export const POST = apiHandler(async (
   const lookbackDays =
     typeof body.lookbackDays === "number" ? body.lookbackDays : undefined;
   const maxOrders = typeof body.maxOrders === "number" ? body.maxOrders : undefined;
+  // When the user explicitly provides lookbackDays via the dialog, force a
+  // full lookback instead of using the lastSyncAt cursor. Without this, the
+  // user's "14 days" input is silently ignored after the first sync.
+  const forceFullLookback = lookbackDays !== undefined;
 
-  const result = await syncIntegrationOrders(params.id, { lookbackDays, maxOrders });
+  const result = await syncIntegrationOrders(params.id, {
+    lookbackDays,
+    maxOrders,
+    forceFullLookback,
+  });
   return NextResponse.json({ result });
 });

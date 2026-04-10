@@ -18,6 +18,12 @@ type SyncResult = {
 type SyncOptions = {
   lookbackDays?: number;
   maxOrders?: number;
+  // When true, lookbackDays overrides the lastSyncAt cursor. Used by the
+  // manual sync dialog so "14 days lookback" means "re-fetch the last 14 days"
+  // regardless of when we last synced. Without this, lookbackDays only matters
+  // on the very first sync (when lastSyncAt is null) and is silently ignored
+  // on every subsequent sync.
+  forceFullLookback?: boolean;
 };
 
 const DEFAULT_INITIAL_LOOKBACK_DAYS = 7;
@@ -36,11 +42,18 @@ function getEnvInt(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function startDateForSync(lastSyncAt: Date | null, lookbackDays: number): Date {
+function startDateForSync(
+  lastSyncAt: Date | null,
+  lookbackDays: number,
+  forceFullLookback: boolean = false
+): Date {
   const now = new Date();
-  if (!lastSyncAt) {
+  // If no prior sync OR the caller explicitly wants a full lookback (manual
+  // dialog with user-entered days), use the lookbackDays as a window from now.
+  if (!lastSyncAt || forceFullLookback) {
     return new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
   }
+  // Incremental: start from the last sync minus safety margin
   return new Date(lastSyncAt.getTime() - LOOKBACK_SAFETY_MINUTES * 60 * 1000);
 }
 
@@ -244,7 +257,11 @@ export async function syncIntegrationOrders(
     options.maxOrders ?? getEnvInt("EXTERNAL_SYNC_MAX_ORDERS", DEFAULT_MAX_ORDERS)
   );
 
-  const sinceDate = startDateForSync(integration.lastSyncAt, lookbackDays);
+  const sinceDate = startDateForSync(
+    integration.lastSyncAt,
+    lookbackDays,
+    options.forceFullLookback === true
+  );
 
   const apiKey = decryptOrNull(integration.encryptedApiKey);
   const apiSecret = decryptOrNull(integration.encryptedApiSecret);
