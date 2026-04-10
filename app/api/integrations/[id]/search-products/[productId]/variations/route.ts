@@ -196,6 +196,7 @@ export const GET = apiHandler(async (
         variantTitle: formatVariantTitle(v.attributes),
         sku: v.sku || undefined,
         price: v.price ? parseFloat(v.price) : undefined,
+        regularPrice: v.regular_price ? parseFloat(v.regular_price) : undefined,
         imageUrl: v.image?.src ?? undefined,
         type: 'variation',
       }));

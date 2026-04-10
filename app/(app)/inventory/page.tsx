@@ -316,6 +316,7 @@ export default function InventoryPage() {
       // default prices for client-side constructed object
       costPrice: 0 as any,
       retailPrice: 0 as any,
+      priceSourceLinkId: null,
       currentQuantity: product.totalQuantity,
       lastUpdated: new Date(),
       deletedAt: null,

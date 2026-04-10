@@ -60,6 +60,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
             name: true,
             baseName: true,
             variant: true,
+            priceSourceLinkId: true,
+            retailPrice: true,
           },
         },
         integration: {

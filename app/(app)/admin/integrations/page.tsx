@@ -99,6 +99,7 @@ export default function AdminIntegrationsPage() {
   const [syncMaxOrders, setSyncMaxOrders] = useState("250");
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [stockSyncing, setStockSyncing] = useState<Set<string>>(new Set());
+  const [priceSyncing, setPriceSyncing] = useState<Set<string>>(new Set());
   const [togglingField, setTogglingField] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
@@ -401,6 +402,42 @@ export default function AdminIntegrationsPage() {
       toast.error(error instanceof Error ? error.message : "Stock sync failed");
     } finally {
       setStockSyncing((prev) => {
+        const next = new Set(prev);
+        next.delete(integration.id);
+        return next;
+      });
+    }
+  };
+
+  const handlePriceSyncNow = async (integration: Integration) => {
+    setPriceSyncing((prev) => new Set(prev).add(integration.id));
+    try {
+      const response = await fetch(
+        `/api/admin/integrations/${integration.id}/price-sync`,
+        {
+          method: "POST",
+          headers: withCSRFHeaders(
+            { "Content-Type": "application/json" },
+            csrfToken
+          ),
+        }
+      );
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "Price sync failed");
+      }
+
+      const result = data.result || data;
+      toast.success(
+        `Price sync complete: ${result.synced ?? 0} synced, ${result.skipped ?? 0} skipped, ${(result.failed ?? []).length} failed`
+      );
+      await fetchData();
+    } catch (error) {
+      console.error("Error syncing prices:", error);
+      toast.error(error instanceof Error ? error.message : "Price sync failed");
+    } finally {
+      setPriceSyncing((prev) => {
         const next = new Set(prev);
         next.delete(integration.id);
         return next;
@@ -887,6 +924,31 @@ export default function AdminIntegrationsPage() {
                                             handleToggleField(integration, "fulfillmentPushEnabled", checked)
                                           }
                                         />
+                                      </div>
+                                    </div>
+
+                                    {/* Price Sync section */}
+                                    <div className="space-y-3">
+                                      <div className="flex items-center justify-between">
+                                        <div>
+                                          <p className="text-sm font-medium">Price Sync</p>
+                                          <p className="text-xs text-muted-foreground">
+                                            Pull retail prices from {platformLabel} for products with a price source set
+                                          </p>
+                                        </div>
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          disabled={priceSyncing.has(integration.id)}
+                                          onClick={() => handlePriceSyncNow(integration)}
+                                        >
+                                          {priceSyncing.has(integration.id) ? (
+                                            <Loader2 className="h-3 w-3 mr-2 animate-spin" />
+                                          ) : (
+                                            <RefreshCw className="h-3 w-3 mr-2" />
+                                          )}
+                                          Sync All Prices Now
+                                        </Button>
                                       </div>
                                     </div>
 

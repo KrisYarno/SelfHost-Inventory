@@ -21,6 +21,7 @@ export interface ExternalProductSearchResult {
   variantTitle?: string;
   sku?: string;
   price?: number;
+  regularPrice?: number; // WC regular_price (base price before sales)
   imageUrl?: string;
   hasVariations?: boolean;
   type?: string;

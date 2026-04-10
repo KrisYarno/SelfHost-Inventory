@@ -55,6 +55,7 @@ async function searchWooCommerce(
     title: p.name ?? '',
     sku: p.sku || undefined,
     price: p.price ? parseFloat(p.price) : undefined,
+    regularPrice: p.regular_price ? parseFloat(p.regular_price) : undefined,
     imageUrl: p.images?.[0]?.src ?? undefined,
     hasVariations: p.type === 'variable',
     type: p.type ?? undefined,

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Link2, Search, Trash2, Plus, Loader2 } from "lucide-react";
+import { Link2, Search, Trash2, Plus, Loader2, DollarSign, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -45,6 +45,8 @@ interface MappingEntry {
     name: string;
     baseName: string | null;
     variant: string | null;
+    priceSourceLinkId: string | null;
+    retailPrice: number;
   };
   integration: {
     id: string;
@@ -91,6 +93,53 @@ export default function AdminProductMappingsPage() {
   // Add mapping dialog
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [addIntegrationId, setAddIntegrationId] = useState<string | null>(null);
+  const [settingPriceSource, setSettingPriceSource] = useState<string | null>(null);
+
+  const handleSetPriceSource = async (
+    mapping: MappingEntry,
+    clear: boolean = false
+  ) => {
+    if (!csrfToken) return;
+    setSettingPriceSource(mapping.id);
+    try {
+      const response = await fetch(
+        `/api/products/${mapping.internalProductId}/price-source`,
+        {
+          method: "POST",
+          headers: withCSRFHeaders(
+            { "Content-Type": "application/json" },
+            csrfToken
+          ),
+          body: JSON.stringify({
+            linkId: clear ? null : mapping.id,
+            syncNow: !clear,
+          }),
+        }
+      );
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to set price source");
+      }
+
+      if (clear) {
+        toast.success(`Cleared price source for ${mapping.internalProduct.name}`);
+      } else {
+        toast.success(
+          `Price source set for ${mapping.internalProduct.name}${
+            data.retailPrice != null ? ` → $${Number(data.retailPrice).toFixed(2)}` : ""
+          }`
+        );
+      }
+      await fetchMappings();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to update price source"
+      );
+    } finally {
+      setSettingPriceSource(null);
+    }
+  };
 
   const fetchMappings = useCallback(async () => {
     try {
@@ -371,8 +420,45 @@ export default function AdminProductMappingsPage() {
                             )}
                           </div>
 
-                          {/* Delete button */}
-                          <div className="flex items-center justify-end w-10">
+                          {/* Price source + Delete buttons */}
+                          <div className="flex items-center justify-end gap-1">
+                            {mapping.internalProduct.priceSourceLinkId === mapping.id ? (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-8 px-2 text-xs text-green-700 dark:text-green-400"
+                                disabled={settingPriceSource === mapping.id}
+                                onClick={() => handleSetPriceSource(mapping, true)}
+                                title="Clear price source"
+                              >
+                                {settingPriceSource === mapping.id ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <>
+                                    <Check className="h-3 w-3 mr-1" />
+                                    Price Source
+                                  </>
+                                )}
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-8 px-2 text-xs text-muted-foreground"
+                                disabled={settingPriceSource === mapping.id}
+                                onClick={() => handleSetPriceSource(mapping)}
+                                title="Set as price source for retail price"
+                              >
+                                {settingPriceSource === mapping.id ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <>
+                                    <DollarSign className="h-3 w-3 mr-1" />
+                                    Set Price
+                                  </>
+                                )}
+                              </Button>
+                            )}
                             <Button
                               size="sm"
                               variant="ghost"
