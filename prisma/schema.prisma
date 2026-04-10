@@ -319,6 +319,7 @@ model ExternalOrderItem {
   externalVariantId String?     @db.VarChar(255)
 
   name            String        @db.VarChar(500)
+  variantName     String?       @db.VarChar(500)
   sku             String?       @db.VarChar(255)
   quantity        Int
   fulfilledQty    Int           @default(0)

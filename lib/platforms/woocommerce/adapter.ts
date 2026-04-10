@@ -28,6 +28,13 @@ const WooCommerceBillingSchema = z.object({
   email: z.string().optional().nullable(),
 });
 
+const WooCommerceLineItemMetaSchema = z.object({
+  key: z.string(),
+  value: z.unknown(),
+  display_key: z.string().optional(),
+  display_value: z.string().optional(),
+}).passthrough();
+
 const WooCommerceLineItemSchema = z.object({
   id: z.number(),
   product_id: z.number().nullable(),
@@ -37,6 +44,8 @@ const WooCommerceLineItemSchema = z.object({
   quantity: z.number().int().positive(),
   price: z.union([z.number(), z.string()]), // Can be number or string depending on sender/plugin
   total: z.string(), // But total is a string
+  // Variation attributes are in meta_data with keys like "pa_size"
+  meta_data: z.array(WooCommerceLineItemMetaSchema).optional().default([]),
 });
 
 const WooCommerceOrderSchema = z.object({
@@ -481,22 +490,51 @@ export class WooCommerceAdapter implements PlatformAdapter {
    * Normalize WooCommerce line item to common format
    */
   private normalizeLineItem(item: WooCommerceLineItem): NormalizedLineItem {
-    // Extract variant name if it's a variation
+    const isVariation = item.variation_id != null && item.variation_id > 0;
+
+    // Extract variant name. Three sources in order of reliability:
+    //   1. The " - " suffix in item.name (e.g., "Tirz - 5mg")
+    //   2. The display_value fields in meta_data for variation attributes
+    //      (keys starting with "pa_" are product attributes in WC)
+    //   3. The raw value fields in meta_data as a last resort
     let variantName: string | null = null;
-    if (item.variation_id && item.variation_id > 0) {
-      // WooCommerce includes variation attributes in the name
-      // e.g., "Product Name - Color: Blue, Size: Large"
+    let baseName = item.name;
+
+    if (isVariation) {
+      // Try source 1: name split
       const nameParts = item.name.split(' - ');
       if (nameParts.length > 1) {
+        baseName = nameParts[0];
         variantName = nameParts.slice(1).join(' - ');
+      }
+
+      // If that didn't yield a variant name, try source 2: meta_data
+      if (!variantName && item.meta_data && item.meta_data.length > 0) {
+        const attrValues = item.meta_data
+          .filter((m) =>
+            // Variation attributes have keys like "pa_size", "pa_color"
+            m.key.startsWith('pa_') ||
+            // Or use display_key when it's a readable attribute name
+            (m.display_key && m.display_value && !m.key.startsWith('_'))
+          )
+          .map((m) =>
+            typeof m.display_value === 'string' && m.display_value
+              ? m.display_value
+              : typeof m.value === 'string' ? m.value : ''
+          )
+          .filter(Boolean);
+
+        if (attrValues.length > 0) {
+          variantName = attrValues.join(' / ');
+        }
       }
     }
 
     return {
       externalId: item.id.toString(),
       externalProductId: item.product_id?.toString() || null,
-      externalVariantId: item.variation_id && item.variation_id > 0 ? item.variation_id.toString() : null,
-      name: item.name.split(' - ')[0], // Extract base product name
+      externalVariantId: isVariation ? item.variation_id!.toString() : null,
+      name: baseName.trim(),
       variantName,
       sku: item.sku,
       quantity: item.quantity,

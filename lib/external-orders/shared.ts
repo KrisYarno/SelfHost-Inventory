@@ -264,6 +264,7 @@ export async function upsertOrderWithItems(
 
         const itemData = {
           name: lineItem.name,
+          variantName: lineItem.variantName ?? null,
           sku: lineItem.sku,
           quantity: lineItem.quantity,
           price: lineItem.unitPrice,

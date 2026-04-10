@@ -280,7 +280,7 @@ export function FulfillOrderDialog({
                       .map((item) => (
                         <div key={item.id} className="flex items-center gap-2">
                           <span className="text-xs text-muted-foreground truncate max-w-[200px]">
-                            {item.name}
+                            {item.name}{item.variantName ? ` — ${item.variantName}` : ''}
                           </span>
                           {isAdmin && (
                             <Button

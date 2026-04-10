@@ -53,6 +53,7 @@ export interface FulfillmentValidationResult {
   items: Array<{
     itemId: string;
     name: string;
+    variantName: string | null;
     sku: string | null;
     requestedQty: number;
     remainingQty: number;
@@ -171,6 +172,7 @@ export async function validateOrderFulfillment(
     validationItems.push({
       itemId: item.id,
       name: item.name,
+      variantName: (item as any).variantName ?? null,
       sku: item.sku,
       requestedQty: item.quantity,
       remainingQty,

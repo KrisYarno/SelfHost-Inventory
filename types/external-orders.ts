@@ -15,6 +15,7 @@ export interface ExternalOrderItem {
   externalProductId: string;
   externalVariantId: string | null;
   name: string;
+  variantName: string | null;
   sku: string | null;
   quantity: number;
   fulfilledQty: number;
