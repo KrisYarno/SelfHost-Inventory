@@ -299,6 +299,12 @@ model ExternalOrder {
   fulfilledAt     DateTime?
   fulfilledBy     Int?
 
+  // Stocked Out: tracks whether physical inventory has been deducted,
+  // independent of the WC order lifecycle (internalStatus).
+  stockedOut      Boolean     @default(false)
+  stockedOutAt    DateTime?
+  stockedOutBy    Int?
+
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
   externalCreatedAt DateTime?
@@ -314,6 +320,7 @@ model ExternalOrder {
   @@index([companyId, internalStatus])
   @@index([companyId, createdAt])
   @@index([integrationId, externalUpdatedAt])
+  @@index([stockedOut], map: "idx_stocked_out")
   @@map("external_orders")
 }
 

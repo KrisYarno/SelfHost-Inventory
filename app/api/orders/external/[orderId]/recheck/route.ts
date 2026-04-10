@@ -6,9 +6,7 @@ import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import {
   decryptOrNull,
   hostFromStoreUrl,
-  reconcileStatus,
   upsertOrderWithItems,
-  type InternalOrderStatus,
 } from "@/lib/external-orders/shared";
 import type { PlatformType } from "@/lib/platforms/core/types";
 
@@ -64,22 +62,6 @@ export const POST = apiHandler(async (
     return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
   }
 
-  // Optional body: { mode: 'reconcile' | 'compute' }
-  //   'reconcile' (default, safe): smart merge with local state protection
-  //   'compute'  (force resync):   trust WC fully, overwrite local state
-  // Force mode is intended for operators recovering from stuck state where
-  // the local internalStatus no longer reflects reality (e.g., an order was
-  // manually unfulfilled in Rebuild and the user wants to reset from WC).
-  let mode: "reconcile" | "compute" = "reconcile";
-  try {
-    const body = await request.json().catch(() => null);
-    if (body?.mode === "compute") {
-      mode = "compute";
-    }
-  } catch {
-    // no-op; empty body is fine
-  }
-
   const order = await prisma.externalOrder.findUnique({
     where: { id: params.orderId },
     include: {
@@ -124,35 +106,19 @@ export const POST = apiHandler(async (
   const adapter = getPlatformAdapter(platform);
   const normalized = adapter.parseOrderWebhook(JSON.stringify(remoteOrder));
 
-  // Status handling depends on mode:
-  //   - reconcile (default): smart merge that protects local `fulfilled` and
-  //     honors terminal cancellation. See reconcileStatus() for rules.
-  //   - compute (force): trust WC fully, run the bare deriveInternalStatus
-  //     via the upsert's compute branch. Used by Force Resync to recover
-  //     from stuck state.
-  const statusHandling =
-    mode === "compute"
-      ? ({ statusMode: "compute", platform } as const)
-      : ({
-          statusMode: "preserve",
-          internalStatus: reconcileStatus(
-            platform,
-            order.internalStatus as InternalOrderStatus,
-            normalized
-          ),
-        } as const);
-
+  // With stockedOut separation, internalStatus is purely WC-derived.
+  // Recheck always uses compute mode — no need for reconcileStatus since
+  // stockedOut handles the deduction truth independently.
   const result = await upsertOrderWithItems(prisma, {
     integrationId: order.integration.id,
     companyId: order.companyId,
     storeUrl: order.integration.storeUrl,
     normalized,
-    status: statusHandling,
+    status: { statusMode: "compute", platform },
   });
 
   return NextResponse.json({
     success: true,
-    mode,
     orderId: result.orderId,
     itemsProcessed: result.itemsProcessed,
     itemsMapped: result.itemsMapped,

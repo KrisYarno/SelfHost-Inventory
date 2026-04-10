@@ -446,26 +446,21 @@ export async function fulfillExternalOrder(
         0
       );
 
-      let newStatus: string = order.internalStatus;
-      let fulfilledAt: Date | null = order.fulfilledAt;
-      let fulfilledBy: number | null = order.fulfilledBy;
-
-      if (totalFulfilled >= totalQuantity) {
-        // Fully fulfilled
-        newStatus = 'fulfilled';
-        fulfilledAt = new Date();
-        fulfilledBy = userId;
-      } else if (totalFulfilled > 0 && order.internalStatus === 'pending') {
-        // Partial fulfillment - move to processing
-        newStatus = 'processing';
-      }
+      // stockedOut separation: fulfill writes stockedOut (inventory deduction
+      // truth) but NEVER writes internalStatus (that's WC's domain, set only
+      // by webhooks/sync/recheck). Any deduction = stocked out.
+      const isFullyStockedOut = totalFulfilled >= totalQuantity;
+      const now = new Date();
 
       await tx.externalOrder.update({
         where: { id: orderId },
         data: {
-          internalStatus: newStatus,
-          fulfilledAt,
-          fulfilledBy,
+          stockedOut: totalFulfilled > 0,
+          stockedOutAt: totalFulfilled > 0 ? now : null,
+          stockedOutBy: totalFulfilled > 0 ? userId : null,
+          // Keep fulfilledAt/fulfilledBy for audit trail on full deduction
+          fulfilledAt: isFullyStockedOut ? now : order.fulfilledAt,
+          fulfilledBy: isFullyStockedOut ? userId : order.fulfilledBy,
         },
       });
 

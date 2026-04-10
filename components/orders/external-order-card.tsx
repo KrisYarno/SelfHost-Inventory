@@ -68,9 +68,14 @@ export function ExternalOrderCard({ order, onSelect, className }: ExternalOrderC
               <Badge variant="outline" className={cn("text-xs border", statusColor)}>
                 {order.internalStatus.charAt(0).toUpperCase() + order.internalStatus.slice(1)}
               </Badge>
-              {fulfillmentPercent > 0 && fulfillmentPercent < 100 && (
+              {order.stockedOut && (
+                <Badge variant="default" className="text-xs bg-emerald-600">
+                  Stocked Out
+                </Badge>
+              )}
+              {!order.stockedOut && fulfillmentPercent > 0 && fulfillmentPercent < 100 && (
                 <Badge variant="secondary" className="text-xs">
-                  {fulfillmentPercent}% Fulfilled
+                  {fulfillmentPercent}% Deducted
                 </Badge>
               )}
             </div>

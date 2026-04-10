@@ -235,8 +235,7 @@ export const POST = apiHandler(async (
           select: {
             id: true,
             orderNumber: true,
-            internalStatus: true,
-            items: { select: { fulfilledQty: true } },
+            stockedOut: true,
           },
         });
 
@@ -244,12 +243,9 @@ export const POST = apiHandler(async (
           return { action: "not_found" as const };
         }
 
-        const hasFulfilledItems = existing.items.some(
-          (item: { fulfilledQty: number }) => item.fulfilledQty > 0
-        );
-        const isFulfilled = existing.internalStatus === "fulfilled";
-
-        if (hasFulfilledItems || isFulfilled) {
+        // stockedOut separation: one clean boolean check replaces the old
+        // fulfilledQty-arithmetic + internalStatus dual check.
+        if (existing.stockedOut) {
           // Protected — keep the order, keep its items, keep the audit trail.
           return {
             action: "protected" as const,

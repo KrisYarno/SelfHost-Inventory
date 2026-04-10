@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useSession } from "next-auth/react";
 import { useLocation } from "@/contexts/location-context";
-import { Package, Check, AlertTriangle, ExternalLink, ShoppingCart, RefreshCw, Link2, ChevronDown, RotateCcw } from "lucide-react";
+import { Package, Check, AlertTriangle, ExternalLink, ShoppingCart, RefreshCw, Link2 } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -13,14 +13,6 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -109,7 +101,10 @@ export function ExternalOrderDetailsSheet({
   const fulfillmentPercent = totalItems > 0 ? Math.round((fulfilledItems / totalItems) * 100) : 0;
 
   // Check if order can be fulfilled
-  const canFulfill = order.internalStatus !== "fulfilled" && order.internalStatus !== "cancelled";
+  // stockedOut separation: fulfill button visibility is based on whether
+  // inventory has been deducted (stockedOut), not the WC lifecycle status.
+  // Cancelled orders also can't be fulfilled.
+  const canFulfill = !order.stockedOut && order.internalStatus !== "cancelled";
   const hasUnmappedItems = order.items?.some((item) => !item.isMapped) || false;
 
   const statusColors = STATUS_COLORS;
@@ -428,7 +423,7 @@ export function ExternalOrderDetailsSheet({
                     {/* Fulfillment push status indicator */}
                     {order.integration?.fulfillmentPushEnabled && (
                       <div className="mt-2">
-                        {order.internalStatus === "fulfilled" ? (
+                        {order.stockedOut ? (
                           <div className="flex items-center gap-1.5 text-xs text-green-700">
                             <Check className="h-3 w-3" />
                             <span>
@@ -472,100 +467,42 @@ export function ExternalOrderDetailsSheet({
                     Fulfill Order
                   </Button>
                 )}
-                {/* Split button: Recheck Status (safe reconcile) + Force Resync dropdown */}
-                <div className="flex-1 flex">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="lg"
-                    disabled={!csrfToken || isRechecking}
-                    onClick={async () => {
-                      if (!order || !csrfToken) return;
-                      setIsRechecking(true);
-                      try {
-                        const response = await fetch(
-                          `/api/orders/external/${order.id}/recheck`,
-                          {
-                            method: "POST",
-                            headers: {
-                              "Content-Type": "application/json",
-                              "X-CSRF-Token": csrfToken,
-                            },
-                            body: JSON.stringify({ mode: "reconcile" }),
-                          }
-                        );
-                        if (!response.ok) {
-                          const data = await response.json().catch(() => ({}));
-                          throw new Error(data.error || "Recheck failed");
+                {/* Recheck Status — with stockedOut separation, recheck always
+                    does compute mode (no need for Force Resync since internalStatus
+                    is purely WC-derived and can be freely overwritten) */}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  disabled={!csrfToken || isRechecking}
+                  onClick={async () => {
+                    if (!order || !csrfToken) return;
+                    setIsRechecking(true);
+                    try {
+                      const response = await fetch(
+                        `/api/orders/external/${order.id}/recheck`,
+                        {
+                          method: "POST",
+                          headers: {
+                            "Content-Type": "application/json",
+                            "X-CSRF-Token": csrfToken,
+                          },
                         }
-                        if (onRefresh) onRefresh();
-                      } finally {
-                        setIsRechecking(false);
+                      );
+                      if (!response.ok) {
+                        const data = await response.json().catch(() => ({}));
+                        throw new Error(data.error || "Recheck failed");
                       }
-                    }}
-                    className="flex-1 h-12 rounded-r-none border-r-0"
-                  >
-                    <RefreshCw className={cn("w-4 h-4 mr-2", isRechecking && "animate-spin")} />
-                    Recheck Status
-                  </Button>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="lg"
-                        disabled={!csrfToken || isRechecking}
-                        className="h-12 px-2 rounded-l-none"
-                        aria-label="More recheck options"
-                      >
-                        <ChevronDown className="w-4 h-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-72">
-                      <DropdownMenuLabel>Sync options</DropdownMenuLabel>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        onSelect={async () => {
-                          if (!order || !csrfToken) return;
-                          const confirmed = window.confirm(
-                            `Force Resync will OVERWRITE local status with whatever WooCommerce currently shows.\n\nThis bypasses the protection that keeps locally-fulfilled orders fulfilled. Use this when local state is stuck and you want to reset from WC truth.\n\nOrder: #${order.orderNumber}\nCurrent local status: ${order.internalStatus}\nCurrent WC status: ${order.nativeStatus}\n\nProceed?`
-                          );
-                          if (!confirmed) return;
-                          setIsRechecking(true);
-                          try {
-                            const response = await fetch(
-                              `/api/orders/external/${order.id}/recheck`,
-                              {
-                                method: "POST",
-                                headers: {
-                                  "Content-Type": "application/json",
-                                  "X-CSRF-Token": csrfToken,
-                                },
-                                body: JSON.stringify({ mode: "compute" }),
-                              }
-                            );
-                            if (!response.ok) {
-                              const data = await response.json().catch(() => ({}));
-                              throw new Error(data.error || "Force resync failed");
-                            }
-                            if (onRefresh) onRefresh();
-                          } finally {
-                            setIsRechecking(false);
-                          }
-                        }}
-                        className="cursor-pointer"
-                      >
-                        <RotateCcw className="w-4 h-4 mr-2" />
-                        <div className="flex flex-col">
-                          <span className="font-medium">Force Resync</span>
-                          <span className="text-xs text-muted-foreground">
-                            Overwrite local status from WC
-                          </span>
-                        </div>
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
+                      if (onRefresh) onRefresh();
+                    } finally {
+                      setIsRechecking(false);
+                    }
+                  }}
+                  className="flex-1 h-12"
+                >
+                  <RefreshCw className={cn("w-4 h-4 mr-2", isRechecking && "animate-spin")} />
+                  Recheck Status
+                </Button>
               </SheetFooter>
             </>
           ) : null}

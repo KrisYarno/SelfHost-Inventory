@@ -177,12 +177,10 @@ export function WCOrderSelector({
         {/* Order results */}
         {orders
           .filter((order) => order.internalStatus !== "cancelled")
+          // Sort: un-stocked orders first, then stocked-out at the bottom
+          .sort((a, b) => (a.stockedOut === b.stockedOut ? 0 : a.stockedOut ? 1 : -1))
           .map((order) => {
-            // Check if all items are already fulfilled (stocked out)
-            const totalQty = order.items?.reduce((s, i) => s + i.quantity, 0) ?? 0;
-            const fulfilledQty = order.items?.reduce((s, i) => s + i.fulfilledQty, 0) ?? 0;
-            const isFullyStockedOut = totalQty > 0 && fulfilledQty >= totalQty;
-            const isPartiallyStockedOut = fulfilledQty > 0 && fulfilledQty < totalQty;
+            const isStockedOut = order.stockedOut;
 
             return (
               <button
@@ -193,7 +191,7 @@ export function WCOrderSelector({
                   "border border-border/60 bg-background px-3 py-2.5",
                   "text-left text-sm transition-colors",
                   "hover:bg-muted/50 hover:border-primary/30",
-                  isFullyStockedOut && "opacity-60"
+                  isStockedOut && "opacity-60"
                 )}
               >
                 <div className="flex items-center gap-2.5 min-w-0 flex-1">
@@ -204,14 +202,9 @@ export function WCOrderSelector({
                         #{order.orderNumber}
                       </span>
                       {order.integration && getPlatformBadge(order.integration.platform)}
-                      {isFullyStockedOut && (
-                        <span className="text-[10px] px-1.5 py-0 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 font-medium">
+                      {isStockedOut && (
+                        <span className="text-[10px] px-1.5 py-0 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 font-medium">
                           Stocked Out
-                        </span>
-                      )}
-                      {isPartiallyStockedOut && (
-                        <span className="text-[10px] px-1.5 py-0 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 font-medium">
-                          Partial
                         </span>
                       )}
                     </div>

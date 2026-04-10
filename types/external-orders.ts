@@ -57,6 +57,9 @@ export interface ExternalOrder {
   internalStatus: InternalOrderStatus;
   fulfilledAt: Date | null;
   fulfilledBy: number | null;
+  stockedOut: boolean;
+  stockedOutAt: Date | null;
+  stockedOutBy: number | null;
   createdAt: Date;
   updatedAt: Date;
   externalCreatedAt: Date | null;

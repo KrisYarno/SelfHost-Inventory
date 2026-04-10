@@ -217,40 +217,28 @@ export const POST = apiHandler(async (
         },
       });
 
-      const totalQuantity = allItems.reduce(
-        (sum, item) => sum + item.quantity,
-        0
-      );
       const totalFulfilled = allItems.reduce(
         (sum, item) => sum + item.fulfilledQty,
         0
       );
 
-      let status: string;
-      let fulfilledAt: Date | null = order.fulfilledAt;
-      let fulfilledBy: number | null = order.fulfilledBy;
-
-      if (totalFulfilled === 0) {
-        status = 'pending';
-        fulfilledAt = null;
-        fulfilledBy = null;
-      } else if (totalFulfilled < totalQuantity) {
-        status = 'processing';
-      } else {
-        // Shouldn't happen after unfulfill but handle gracefully
-        status = 'fulfilled';
-      }
+      // stockedOut separation: unfulfill writes stockedOut but NEVER writes
+      // internalStatus (that's WC's domain). If all items are restored,
+      // clear stockedOut. If some remain fulfilled, keep it true.
+      const stillStockedOut = totalFulfilled > 0;
 
       await tx.externalOrder.update({
         where: { id: params.orderId },
         data: {
-          internalStatus: status,
-          fulfilledAt,
-          fulfilledBy,
+          stockedOut: stillStockedOut,
+          stockedOutAt: stillStockedOut ? order.stockedOutAt : null,
+          stockedOutBy: stillStockedOut ? order.stockedOutBy : null,
+          fulfilledAt: stillStockedOut ? order.fulfilledAt : null,
+          fulfilledBy: stillStockedOut ? order.fulfilledBy : null,
         },
       });
 
-      newOrderStatus = status;
+      newOrderStatus = order.internalStatus;
     },
     {
       timeout: 30000, // 30 second timeout matching fulfillment

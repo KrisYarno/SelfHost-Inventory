@@ -56,38 +56,10 @@ export function deriveInternalStatus(
   return "pending";
 }
 
-/**
- * Smart reconciliation between the current locally-stored status and the
- * freshly-derived status from a remote order. Use this on manual "recheck"
- * and any flow where local fulfillment work must not regress while still
- * allowing legitimate WC state changes (cancellation, completion) to flow in.
- *
- * Rules (in order):
- *   1. If the remote derives to `cancelled` (cancelled / refunded / failed
- *      on WC, voided on Shopify), the order is cancelled — terminal WC
- *      state always wins, even over local `fulfilled`. The user needs to
- *      decide whether to unfulfill inventory; the status change surfaces it.
- *   2. If the local state is `fulfilled` and remote is NOT cancelled, keep
- *      `fulfilled`. Local fulfillment represents real deducted inventory;
- *      regressing to `processing`/`pending` would misrepresent the work.
- *   3. Otherwise, trust the freshly-derived status from the remote.
- */
-export function reconcileStatus(
-  platform: PlatformType,
-  currentInternalStatus: InternalOrderStatus,
-  remoteOrder: {
-    nativeStatus: string;
-    financialStatus: string | null;
-    fulfillmentStatus: string | null;
-    rawPayload?: any;
-  }
-): InternalOrderStatus {
-  const derived = deriveInternalStatus(platform, remoteOrder);
-
-  if (derived === "cancelled") return "cancelled";
-  if (currentInternalStatus === "fulfilled") return "fulfilled";
-  return derived;
-}
+// reconcileStatus was removed: with the stockedOut separation, internalStatus
+// is WC-only and can be freely overwritten by webhooks/sync/recheck. The old
+// reconcileStatus was a band-aid to protect local fulfilled state from being
+// overwritten. Now stockedOut handles that independently.
 
 // ---------------------------------------------------------------------------
 // decryptOrNull
