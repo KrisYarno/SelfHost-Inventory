@@ -12,6 +12,7 @@ import prisma from '@/lib/prisma';
 import { Prisma, inventory_logs_logType } from '@prisma/client';
 import { createInventoryLog } from '@/lib/inventory';
 import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
+import { pushStockForProducts } from '@/lib/external-orders/stock-sync';
 
 export const dynamic = 'force-dynamic';
 
@@ -310,6 +311,22 @@ export const POST = apiHandler(async (
       );
       // Don't fail the unfulfillment. Log for manual follow-up.
     }
+  }
+
+  // Phase 7f: Best-effort stock status push for products that were restored.
+  // When stock goes from 0 back to positive, WC should reflect instock.
+  if (orderIntegrationId && restored.length > 0) {
+    const uniqueProductIds = Array.from(
+      new Set(restored.map((r) => r.productId))
+    );
+    pushStockForProducts(orderIntegrationId, uniqueProductIds).catch(
+      (err) => {
+        console.error(
+          `Post-unfulfillment stock push failed for order ${params.orderId}:`,
+          err
+        );
+      }
+    );
   }
 
   const response = NextResponse.json({

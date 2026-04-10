@@ -180,3 +180,93 @@ export async function syncStockToExternal(
     };
   }
 }
+
+// ---------------------------------------------------------------------------
+// pushStockForProducts — fire-and-forget after fulfill/unfulfill
+// ---------------------------------------------------------------------------
+
+/**
+ * Push stock status for specific internal productIds to the external platform.
+ * Looks up all ProductLinks for each product on the given integration, computes
+ * the current stock status (instock/outofstock), and calls the adapter's
+ * batchUpdateProductStock. Best-effort — callers fire-and-forget.
+ *
+ * Phase 7f: triggered by the fulfill and unfulfill routes after inventory
+ * changes so WC reflects outofstock immediately instead of waiting for the
+ * periodic stock sync cron.
+ */
+export async function pushStockForProducts(
+  integrationId: string,
+  internalProductIds: number[]
+): Promise<void> {
+  if (internalProductIds.length === 0) return;
+
+  const { adapter, storeUrl, credentials, integration } =
+    await getIntegrationClient(integrationId);
+
+  if (!integration.stockSyncEnabled) return;
+  if (!adapter.batchUpdateProductStock) return;
+
+  // Find all ProductLinks for these products on this integration
+  const links = await prisma.productLink.findMany({
+    where: {
+      integrationId,
+      internalProductId: { in: internalProductIds },
+    },
+    include: {
+      internalProduct: {
+        include: {
+          product_locations: true,
+        },
+      },
+    },
+  });
+
+  if (links.length === 0) return;
+
+  // Compute stock status per link, using the same logic as the full sync
+  const updates: Array<{
+    productId: string;
+    variantId?: string;
+    stockStatus: 'instock' | 'outofstock';
+  }> = [];
+
+  for (const link of links) {
+    const locations = link.internalProduct.product_locations;
+
+    let totalStock: number;
+    if (integration.syncLocationId != null) {
+      const loc = locations.find(
+        (pl) => pl.locationId === integration.syncLocationId
+      );
+      totalStock = loc?.quantity ?? 0;
+    } else {
+      totalStock = locations.reduce((sum, pl) => sum + pl.quantity, 0);
+    }
+
+    updates.push({
+      productId: link.externalProductId,
+      variantId: link.externalVariantId ?? undefined,
+      stockStatus: totalStock > 0 ? 'instock' : 'outofstock',
+    });
+  }
+
+  if (updates.length === 0) return;
+
+  const result = await adapter.batchUpdateProductStock(
+    storeUrl,
+    credentials,
+    updates
+  );
+
+  if (result.failed.length > 0) {
+    console.warn(
+      `[stock push] ${result.failed.length} product(s) failed for integration ${integrationId}:`,
+      result.failed.slice(0, 5)
+    );
+  } else {
+    console.log(
+      `[stock push] Pushed ${result.succeeded} stock status(es) for integration ${integrationId}`
+    );
+  }
+}

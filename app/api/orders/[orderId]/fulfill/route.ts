@@ -9,6 +9,7 @@ import {
 } from '@/lib/rateLimit';
 import { auditService } from '@/lib/audit';
 import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
+import { pushStockForProducts } from '@/lib/external-orders/stock-sync';
 import prisma from '@/lib/prisma';
 
 export const dynamic = 'force-dynamic';
@@ -139,6 +140,25 @@ export const POST = apiHandler(async (
   } else if (result.failed.length > 0) {
     console.warn(
       `Skipping external push for order ${params.orderId}: ${result.failed.length} items failed during fulfillment`
+    );
+  }
+
+  // Phase 7f: Best-effort stock status push for products that were just deducted.
+  // When stock goes to 0 across all locations, the WC side should immediately
+  // reflect outofstock rather than waiting for the periodic sync cron. We push
+  // ALL fulfilled products (not just zero-stock ones) so the WC status is
+  // always fresh after a fulfillment.
+  if (result.integrationId && fulfilledCount > 0) {
+    const uniqueProductIds = Array.from(
+      new Set(result.fulfilled.map((f) => f.productId))
+    );
+    pushStockForProducts(result.integrationId, uniqueProductIds).catch(
+      (err) => {
+        console.error(
+          `Post-fulfillment stock push failed for order ${params.orderId}:`,
+          err
+        );
+      }
     );
   }
 
