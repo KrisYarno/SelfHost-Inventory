@@ -126,42 +126,82 @@ export function ProductMapDialog({
   const inputRef = useRef<HTMLInputElement>(null);
   const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
 
+  // Proactive mode: when no externalProduct is passed, the user first picks
+  // an external (WC) product, then maps it to an internal product.
+  const isProactiveMode = !externalProduct;
+  const [proactiveSearch, setProactiveSearch] = useState("");
+  const debouncedProactiveSearch = useDebounce(proactiveSearch, 300);
+  const [proactiveSelected, setProactiveSelected] =
+    useState<ExternalProductInfo | null>(null);
+
+  // Effective external product: either from props or from proactive selection
+  const effectiveExternal = externalProduct || proactiveSelected;
+
   // Determine if we need the variation selection step
   const needsVariationStep =
-    externalProduct?.hasVariations && !externalProduct?.externalVariantId;
+    effectiveExternal?.hasVariations && !effectiveExternal?.externalVariantId;
 
-  // Reset state when dialog opens/closes
+  // Reset state only when the dialog opens. The needsVariationStep is NOT in
+  // the dependency array because changing it (e.g., by selecting a proactive
+  // product with variations) must not trigger a reset.
   useEffect(() => {
     if (open) {
       setSearchQuery("");
+      setProactiveSearch("");
+      setProactiveSelected(null);
       setMappingProductId(null);
       setMappingError(null);
       setSelectedVariation(null);
       setShowVariationStep(!!needsVariationStep);
       setTimeout(() => inputRef.current?.focus(), 100);
     }
-  }, [open, needsVariationStep]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Proactive mode: search WC products via the integration's search endpoint
+  const { data: wcSearchResults, isFetching: wcSearchFetching } = useQuery({
+    queryKey: ["wc-product-search", integrationId, debouncedProactiveSearch],
+    queryFn: async () => {
+      if (!debouncedProactiveSearch.trim()) return { products: [] };
+      const res = await fetch(
+        `/api/integrations/${integrationId}/search-products?q=${encodeURIComponent(debouncedProactiveSearch)}`
+      );
+      if (!res.ok) throw new Error("Search failed");
+      return res.json() as Promise<{
+        products: Array<{
+          externalId: string;
+          title: string;
+          sku?: string;
+          price?: number;
+          hasVariations?: boolean;
+          type?: string;
+        }>;
+      }>;
+    },
+    enabled: open && isProactiveMode && !proactiveSelected && debouncedProactiveSearch.trim().length > 0,
+    staleTime: 30_000,
+  });
 
   // Resolved external product info (after variation selection if needed)
   const resolvedExternal = useMemo(() => {
-    if (!externalProduct) return null;
+    if (!effectiveExternal) return null;
     if (selectedVariation) {
       return {
-        externalId: externalProduct.externalId,
+        externalId: effectiveExternal.externalId,
         externalVariantId: String(selectedVariation.id),
-        title: externalProduct.title,
+        title: effectiveExternal.title,
         variantTitle: formatVariationLabel(selectedVariation),
-        sku: selectedVariation.sku || externalProduct.sku,
+        sku: selectedVariation.sku || effectiveExternal.sku,
       };
     }
     return {
-      externalId: externalProduct.externalId,
-      externalVariantId: externalProduct.externalVariantId,
-      title: externalProduct.title,
-      variantTitle: externalProduct.variantTitle,
-      sku: externalProduct.sku,
+      externalId: effectiveExternal.externalId,
+      externalVariantId: effectiveExternal.externalVariantId,
+      title: effectiveExternal.title,
+      variantTitle: effectiveExternal.variantTitle,
+      sku: effectiveExternal.sku,
     };
-  }, [externalProduct, selectedVariation]);
+  }, [effectiveExternal, selectedVariation]);
 
   // -----------------------------------------------------------------------
   // P1-12: Load existing mappings for this integration so we can grey out
@@ -200,11 +240,13 @@ export function ProductMapDialog({
     queryKey: [
       "product-variations",
       integrationId,
-      externalProduct?.externalId,
+      effectiveExternal?.externalId,
     ],
     queryFn: async () => {
+      const extId = effectiveExternal?.externalId;
+      if (!extId) throw new Error("No external product ID");
       const res = await fetch(
-        `/api/integrations/${integrationId}/search-products/${externalProduct!.externalId}/variations`
+        `/api/integrations/${integrationId}/search-products/${extId}/variations`
       );
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -212,7 +254,7 @@ export function ProductMapDialog({
       }
       return res.json() as Promise<{ variations: ExternalVariation[] }>;
     },
-    enabled: open && showVariationStep && !!externalProduct?.externalId,
+    enabled: open && showVariationStep && !!effectiveExternal?.externalId,
     staleTime: 60_000,
   });
 
@@ -420,35 +462,133 @@ export function ProductMapDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {/* External product info */}
-        {externalProduct && (
+        {/* Proactive mode: Step 1 — search WC products */}
+        {isProactiveMode && !proactiveSelected && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Search className="h-4 w-4 text-primary" />
+              Step 1: Search WooCommerce Products
+            </div>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                ref={inputRef}
+                value={proactiveSearch}
+                onChange={(e) => setProactiveSearch(e.target.value)}
+                placeholder="Search by product name or SKU..."
+                className="pl-9"
+              />
+              {wcSearchFetching && (
+                <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+              )}
+            </div>
+            <div className="max-h-60 overflow-y-auto space-y-1.5">
+              {wcSearchFetching && !wcSearchResults?.products?.length && (
+                <div className="space-y-2 py-1">
+                  {[1, 2, 3].map((i) => (
+                    <Skeleton key={i} className="h-12 w-full rounded-lg" />
+                  ))}
+                </div>
+              )}
+              {!wcSearchFetching &&
+                debouncedProactiveSearch.trim() &&
+                (!wcSearchResults?.products || wcSearchResults.products.length === 0) && (
+                  <p className="py-4 text-center text-sm text-muted-foreground">
+                    No products found for &ldquo;{debouncedProactiveSearch}&rdquo;
+                  </p>
+                )}
+              {(wcSearchResults?.products || []).map((product) => (
+                <div
+                  key={product.externalId}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 transition-colors hover:bg-muted/30"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium truncate">{product.title}</p>
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      {product.sku && <span>SKU: {product.sku}</span>}
+                      {product.type && (
+                        <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                          {product.type}
+                        </Badge>
+                      )}
+                      {product.hasVariations && (
+                        <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                          Has variations
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    onClick={() => {
+                      setProactiveSelected({
+                        externalId: product.externalId,
+                        title: product.title,
+                        sku: product.sku,
+                        hasVariations: product.hasVariations,
+                      });
+                      setShowVariationStep(!!product.hasVariations);
+                    }}
+                  >
+                    Select
+                  </Button>
+                </div>
+              ))}
+              {!debouncedProactiveSearch.trim() && !wcSearchFetching && (
+                <p className="py-4 text-center text-sm text-muted-foreground">
+                  Search WooCommerce products by name or SKU
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* External product info (from props or proactive selection) */}
+        {effectiveExternal && (
           <Card className="p-4 bg-muted/30 border-border/50">
             <div className="flex items-start gap-3">
               <Package className="h-5 w-5 mt-0.5 text-muted-foreground shrink-0" />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium leading-tight">
-                  {resolvedExternal?.title || externalProduct.title}
+                  {resolvedExternal?.title || effectiveExternal.title}
                 </p>
-                {(resolvedExternal?.sku || externalProduct.sku) && (
+                {(resolvedExternal?.sku || effectiveExternal.sku) && (
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    SKU: {resolvedExternal?.sku || externalProduct.sku}
+                    SKU: {resolvedExternal?.sku || effectiveExternal.sku}
                   </p>
                 )}
                 {(resolvedExternal?.variantTitle ||
-                  externalProduct.variantTitle) && (
+                  effectiveExternal.variantTitle) && (
                   <p className="text-xs text-muted-foreground mt-0.5">
                     Variant:{" "}
                     {resolvedExternal?.variantTitle ||
-                      externalProduct.variantTitle}
+                      effectiveExternal.variantTitle}
                   </p>
                 )}
               </div>
+              {isProactiveMode && proactiveSelected && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-xs h-7"
+                  onClick={() => {
+                    setProactiveSelected(null);
+                    setSelectedVariation(null);
+                    setShowVariationStep(false);
+                    setSearchQuery("");
+                  }}
+                >
+                  Change
+                </Button>
+              )}
             </div>
           </Card>
         )}
 
         {/* Variation selection step */}
-        {showVariationStep && (
+        {showVariationStep && effectiveExternal && (
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-sm font-medium text-foreground">
               <ChevronRight className="h-4 w-4 text-primary" />
@@ -521,7 +661,7 @@ export function ProductMapDialog({
         )}
 
         {/* Suggestions + search (hidden during variation step) */}
-        {!showVariationStep && (
+        {!showVariationStep && effectiveExternal && (
           <div className="space-y-4">
             {/* Suggested matches */}
             {externalProduct &&
