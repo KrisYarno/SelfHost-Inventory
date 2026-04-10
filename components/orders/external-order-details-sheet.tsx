@@ -78,14 +78,17 @@ export function ExternalOrderDetailsSheet({
     }
 
     const uniqueIds = Array.from(new Set(mappedProductIds));
-    // Fetch current stock via the inventory API
+    // Fetch current stock via the inventory API.
+    // The endpoint returns { inventory: Array<{ productId, quantity, ... }> }
     fetch(`/api/inventory/current-fast?locationId=${selectedLocationId}`)
-      .then((res) => (res.ok ? res.json() : { quantities: {} }))
+      .then((res) => (res.ok ? res.json() : { inventory: [] }))
       .then((data) => {
         const map: Record<number, number> = {};
-        const quantities = data.quantities || {};
-        for (const id of uniqueIds) {
-          map[id] = quantities[String(id)] ?? 0;
+        const inventory = data.inventory || [];
+        for (const item of inventory) {
+          if (uniqueIds.includes(item.productId)) {
+            map[item.productId] = item.quantity;
+          }
         }
         setStockByProductId(map);
       })

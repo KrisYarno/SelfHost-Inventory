@@ -67,10 +67,13 @@ export function WCOrderSelector({
   const [search, setSearch] = useState("");
   const debouncedSearch = useDebounce(search, 300);
 
+  // Show all orders except cancelled. The workbench is used by packers who
+  // deduct inventory independently of the WC order lifecycle — orders may
+  // already be "completed" in WC before the packer processes them. Filtering
+  // to pending-only hid those orders and broke the real-world workflow.
   const { data, isFetching, error } = useExternalOrders({
     search: debouncedSearch,
-    status: "pending",
-    pageSize: 5,
+    pageSize: 10,
   });
 
   const orders = data?.orders ?? [];
@@ -157,7 +160,7 @@ export function WCOrderSelector({
           orders.length === 0 &&
           debouncedSearch.length > 0 && (
             <p className="py-4 text-center text-sm text-muted-foreground">
-              No pending orders found
+              No orders found
             </p>
           )}
 
@@ -172,42 +175,63 @@ export function WCOrderSelector({
           )}
 
         {/* Order results */}
-        {orders.map((order) => (
-          <button
-            key={order.id}
-            onClick={() => onOrderSelected(order)}
-            className={cn(
-              "flex w-full items-center justify-between gap-2 rounded-lg",
-              "border border-border/60 bg-background px-3 py-2.5",
-              "text-left text-sm transition-colors",
-              "hover:bg-muted/50 hover:border-primary/30"
-            )}
-          >
-            <div className="flex items-center gap-2.5 min-w-0 flex-1">
-              <Package className="h-4 w-4 text-muted-foreground shrink-0" />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-sm font-medium">
-                    #{order.orderNumber}
-                  </span>
-                  {order.integration && getPlatformBadge(order.integration.platform)}
+        {orders
+          .filter((order) => order.internalStatus !== "cancelled")
+          .map((order) => {
+            // Check if all items are already fulfilled (stocked out)
+            const totalQty = order.items?.reduce((s, i) => s + i.quantity, 0) ?? 0;
+            const fulfilledQty = order.items?.reduce((s, i) => s + i.fulfilledQty, 0) ?? 0;
+            const isFullyStockedOut = totalQty > 0 && fulfilledQty >= totalQty;
+            const isPartiallyStockedOut = fulfilledQty > 0 && fulfilledQty < totalQty;
+
+            return (
+              <button
+                key={order.id}
+                onClick={() => onOrderSelected(order)}
+                className={cn(
+                  "flex w-full items-center justify-between gap-2 rounded-lg",
+                  "border border-border/60 bg-background px-3 py-2.5",
+                  "text-left text-sm transition-colors",
+                  "hover:bg-muted/50 hover:border-primary/30",
+                  isFullyStockedOut && "opacity-60"
+                )}
+              >
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                  <Package className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-mono text-sm font-medium">
+                        #{order.orderNumber}
+                      </span>
+                      {order.integration && getPlatformBadge(order.integration.platform)}
+                      {isFullyStockedOut && (
+                        <span className="text-[10px] px-1.5 py-0 rounded-full bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 font-medium">
+                          Stocked Out
+                        </span>
+                      )}
+                      {isPartiallyStockedOut && (
+                        <span className="text-[10px] px-1.5 py-0 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 font-medium">
+                          Partial
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      {order.customerName && (
+                        <span className="truncate">{order.customerName}</span>
+                      )}
+                      {order.customerName && order.total != null && (
+                        <span aria-hidden="true">&middot;</span>
+                      )}
+                      {order.total != null && (
+                        <span className="shrink-0">{formatCurrency(order.total)}</span>
+                      )}
+                    </div>
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  {order.customerName && (
-                    <span className="truncate">{order.customerName}</span>
-                  )}
-                  {order.customerName && order.total != null && (
-                    <span aria-hidden="true">&middot;</span>
-                  )}
-                  {order.total != null && (
-                    <span className="shrink-0">{formatCurrency(order.total)}</span>
-                  )}
-                </div>
-              </div>
-            </div>
-            <span className="text-xs text-muted-foreground shrink-0">Select</span>
-          </button>
-        ))}
+                <span className="text-xs text-muted-foreground shrink-0">Select</span>
+              </button>
+            );
+          })}
       </div>
     </div>
   );
