@@ -49,6 +49,21 @@ export function MassMapClient({ integrationId }: Props) {
   const currentRows = tab === "unmapped" ? unmapped : mapped;
   const activeKey = activeRow ? rowKey(activeRow) : null;
 
+  // Decorate the matcher index with hasAnyMapping derived from the catalog's
+  // existing mappings, so suggestions for internal products already linked to
+  // some external in THIS integration render greyed but still selectable.
+  const enrichedIndex = useMemo(() => {
+    if (index.length === 0) return index;
+    const mappedIds = new Set<number>();
+    for (const r of rows) {
+      if (r.existingMapping) mappedIds.add(r.existingMapping.internalProductId);
+    }
+    if (mappedIds.size === 0) return index;
+    return index.map((p) =>
+      mappedIds.has(p.id) ? { ...p, hasAnyMapping: true } : p,
+    );
+  }, [index, rows]);
+
   const handleConfirm = async (product: InternalProductIndexEntry) => {
     if (!activeRow) return;
     setError(null);
@@ -185,7 +200,7 @@ export function MassMapClient({ integrationId }: Props) {
             <Card className="flex flex-col p-4 sticky top-4 self-start max-h-[calc(100vh-6rem)] overflow-auto">
               <InternalProductPicker
                 row={activeRow}
-                index={index}
+                index={enrichedIndex}
                 indexLoading={indexLoading}
                 saving={saving}
                 errorMessage={error}
@@ -213,7 +228,7 @@ export function MassMapClient({ integrationId }: Props) {
             <div className="mt-4">
               <InternalProductPicker
                 row={activeRow}
-                index={index}
+                index={enrichedIndex}
                 indexLoading={indexLoading}
                 saving={saving}
                 errorMessage={error}

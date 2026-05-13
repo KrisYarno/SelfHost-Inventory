@@ -143,6 +143,36 @@ describe("useRowActions", () => {
     expect(data.rows[0].existingMapping?.linkId).toBe("newLink123");
   });
 
+  it("undo rolls back the optimistic revert when DELETE fails", async () => {
+    const client = buildClient();
+    const priorMapping = {
+      linkId: "newLink123",
+      internalProductId: 7,
+      internalProductName: "Coffee Beans 1 lb",
+    };
+    client.setQueryData<CatalogResponse>(["bulk-map-catalog", "intA"], (prev) => ({
+      ...prev!,
+      rows: [{ ...row, alreadyMapped: true, existingMapping: priorMapping }],
+    }));
+
+    (global.fetch as jest.Mock).mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) });
+
+    const { result } = renderHook(() => useRowActions(), { wrapper: wrapper(client) });
+
+    await act(async () => {
+      await result.current.undo({
+        integrationId: "intA",
+        row,
+        linkId: "newLink123",
+      });
+    });
+
+    // Server still has the mapping, so the UI should still show it as mapped.
+    const data = client.getQueryData<CatalogResponse>(["bulk-map-catalog", "intA"])!;
+    expect(data.rows[0].alreadyMapped).toBe(true);
+    expect(data.rows[0].existingMapping).toEqual(priorMapping);
+  });
+
   it("undo reverts the row and calls DELETE", async () => {
     const client = buildClient();
     client.setQueryData<CatalogResponse>(["bulk-map-catalog", "intA"], (prev) => ({

@@ -97,18 +97,36 @@ export function useRowActions() {
   const undo = useCallback(
     async ({ integrationId, row, linkId }: UndoArgs) => {
       if (!csrfToken) throw new Error("Missing CSRF token");
+
+      // Capture prior mapping state so we can roll the row back on DELETE
+      // failure — otherwise the UI shows the row as unmapped while the
+      // server still has the mapping, which sets the user up for a 409 the
+      // next time they try to map it.
+      const cached = queryClient.getQueryData<CatalogResponse>([
+        "bulk-map-catalog",
+        integrationId,
+      ]);
+      const priorRow = cached?.rows.find((r) => rowKey(r) === rowKey(row));
+      const priorMapping = priorRow?.existingMapping;
+
       patchRow(integrationId, row, { alreadyMapped: false, existingMapping: undefined });
       const res = await fetch(`/api/admin/product-mappings?linkId=${linkId}`, {
         method: "DELETE",
         headers: withCSRFHeaders({}, csrfToken),
       });
       if (!res.ok) {
-        toast.error("Undo failed — manage from the Mapped tab.");
+        if (priorMapping) {
+          patchRow(integrationId, row, {
+            alreadyMapped: true,
+            existingMapping: priorMapping,
+          });
+        }
+        toast.error("Undo failed — the mapping is still active. Manage from the Mapped tab.");
       } else {
         toast.success("Mapping undone");
       }
     },
-    [csrfToken, patchRow],
+    [csrfToken, patchRow, queryClient],
   );
 
   const confirm = useCallback(

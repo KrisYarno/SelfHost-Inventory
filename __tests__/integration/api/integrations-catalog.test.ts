@@ -106,6 +106,23 @@ describe('GET /api/integrations/[id]/catalog', () => {
     expect([400, 501]).toContain(resp.status);
   });
 
+  it('returns 500 when credentials cannot be decrypted', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: '1', isAdmin: true } });
+    (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
+    (prisma.integration.findUnique as jest.Mock).mockResolvedValue({
+      id: 'x', isActive: true, companyId: 'co', platform: 'WOOCOMMERCE',
+      storeUrl: 'https://s', name: 'Main', encryptedApiKey: 'k', encryptedApiSecret: 's',
+    });
+    const { decryptOrNull } = require('@/lib/external-orders/shared');
+    (decryptOrNull as jest.Mock).mockReturnValue(null);
+
+    const req = new NextRequest('http://t/api/integrations/x/catalog');
+    const resp = await GET(req, { params: { id: 'x' } });
+    expect(resp.status).toBe(500);
+    const body = await resp.json();
+    expect(body.error).toMatch(/credentials could not be decrypted/i);
+  });
+
   it('returns 502 when fetchWooCatalog throws', async () => {
     (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: '1', isAdmin: true } });
     (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
