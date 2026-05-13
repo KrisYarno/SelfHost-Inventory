@@ -38,7 +38,7 @@ export function ExternalProductList({
       grouped.set(r.parentTitle, arr);
     }
     const flat: VirtualItem[] = [];
-    for (const [parentTitle, parentRows] of grouped) {
+    for (const [parentTitle, parentRows] of Array.from(grouped.entries())) {
       flat.push({ kind: "header", parentTitle, key: `h::${parentTitle}` });
       for (const r of parentRows) {
         flat.push({

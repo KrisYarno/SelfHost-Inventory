@@ -181,7 +181,7 @@ export function InternalProductPicker({
           )}
         </div>
         <div className="max-h-48 overflow-y-auto space-y-1">
-          {manualResults.map((p) => (
+          {manualResults.map((p: InternalProductIndexEntry) => (
             <button
               key={p.id}
               onClick={() => setSelected(p)}

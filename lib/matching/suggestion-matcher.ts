@@ -42,7 +42,7 @@ function jaccard(a: string[], b: string[]): number {
   if (a.length === 0 || b.length === 0) return 0;
   const setA = new Set(a);
   const setB = new Set(b);
-  const inter = [...setA].filter((x) => setB.has(x)).length;
+  const inter = Array.from(setA).filter((x) => setB.has(x)).length;
   const union = new Set([...a, ...b]).size;
   return union === 0 ? 0 : inter / union;
 }
