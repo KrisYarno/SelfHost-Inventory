@@ -44,14 +44,18 @@ export const GET = apiHandler(async (
     );
   }
 
+  const apiKey = decryptOrNull(integration.encryptedApiKey);
+  const apiSecret = decryptOrNull(integration.encryptedApiSecret);
+  if (!apiKey || !apiSecret) {
+    return NextResponse.json(
+      { error: 'Integration credentials could not be decrypted' },
+      { status: 500 },
+    );
+  }
+
   let rawRows: CatalogRow[];
   let warnings: CatalogWarning[];
   try {
-    const apiKey = decryptOrNull(integration.encryptedApiKey) ?? integration.encryptedApiKey;
-    const apiSecret = decryptOrNull(integration.encryptedApiSecret) ?? integration.encryptedApiSecret;
-    if (!apiKey || !apiSecret) {
-      throw new Error('Integration credentials could not be decrypted');
-    }
     const result = await fetchWooCatalog(integration.storeUrl, apiKey, apiSecret, {
       deadlineMs: 45_000,
     });
@@ -98,6 +102,5 @@ export const GET = apiHandler(async (
   };
 
   const response = NextResponse.json(body);
-  applyRateLimitHeaders(response, rateLimitHeaders);
-  return response;
+  return applyRateLimitHeaders(response, rateLimitHeaders);
 });

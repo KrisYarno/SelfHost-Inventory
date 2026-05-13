@@ -31,7 +31,16 @@ import prisma from '@/lib/prisma';
 import { fetchWooCatalog } from '@/lib/platforms/woocommerce/fetch-catalog';
 
 describe('GET /api/integrations/[id]/catalog', () => {
-  beforeEach(() => jest.resetAllMocks());
+  beforeEach(() => {
+    jest.resetAllMocks();
+    // Restore the identity implementations that the module-factory set up.
+    // jest.resetAllMocks() clears implementations created in the factory; we
+    // re-install them here so each test starts with a working mock.
+    const { decryptOrNull } = require('@/lib/external-orders/shared');
+    (decryptOrNull as jest.Mock).mockImplementation((v: string) => v);
+    const { applyRateLimitHeaders } = require('@/lib/rateLimit');
+    (applyRateLimitHeaders as jest.Mock).mockImplementation((resp: any) => resp);
+  });
 
   it('returns 404 when the integration does not exist', async () => {
     (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: '1', isAdmin: true } });
