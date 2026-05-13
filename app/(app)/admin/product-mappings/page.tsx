@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Link2, Search, Trash2, Plus, Loader2, DollarSign, Check } from "lucide-react";
+import { Link2, Search, Trash2, Plus, Loader2, DollarSign, Check, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Separator } from "@/components/ui/separator";
 import { ProductMapDialog } from "@/components/products/product-map-dialog";
+import { BulkMapChooserDialog } from "@/components/products/mass-map/bulk-map-chooser-dialog";
 import { PlatformBadge } from "@/components/orders/platform-badge";
 import { toast } from "sonner";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
@@ -89,6 +90,9 @@ export default function AdminProductMappingsPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deletingMapping, setDeletingMapping] = useState<MappingEntry | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+
+  // Bulk map chooser dialog
+  const [chooserOpen, setChooserOpen] = useState(false);
 
   // Add mapping dialog
   const [addDialogOpen, setAddDialogOpen] = useState(false);
@@ -230,6 +234,22 @@ export default function AdminProductMappingsPage() {
     }
   };
 
+  const handleBulkMap = () => {
+    if (integrations.length === 0) {
+      toast.error("No integrations configured. Add an integration first.");
+      return;
+    }
+    if (integrationFilter !== "all") {
+      router.push(`/admin/product-mappings/${integrationFilter}/map`);
+      return;
+    }
+    if (integrations.length === 1) {
+      router.push(`/admin/product-mappings/${integrations[0].id}/map`);
+      return;
+    }
+    setChooserOpen(true);
+  };
+
   const handleAddMapping = () => {
     if (integrations.length === 0) {
       toast.error("No integrations configured. Add an integration first.");
@@ -263,10 +283,16 @@ export default function AdminProductMappingsPage() {
               Map external products to internal inventory products
             </p>
           </div>
-          <Button onClick={handleAddMapping}>
-            <Plus className="h-4 w-4 mr-2" />
-            Add Mapping
-          </Button>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <Button onClick={handleBulkMap} variant="outline">
+              <Layers className="h-4 w-4 mr-2" />
+              Bulk Map
+            </Button>
+            <Button onClick={handleAddMapping}>
+              <Plus className="h-4 w-4 mr-2" />
+              Add Mapping
+            </Button>
+          </div>
         </div>
 
         {/* Filters */}
@@ -505,6 +531,12 @@ export default function AdminProductMappingsPage() {
           </div>
         )}
       </div>
+
+      <BulkMapChooserDialog
+        open={chooserOpen}
+        onOpenChange={setChooserOpen}
+        integrations={integrations}
+      />
 
       {/* Delete Confirmation Dialog */}
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
