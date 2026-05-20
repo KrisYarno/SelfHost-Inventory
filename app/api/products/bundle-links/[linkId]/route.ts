@@ -8,6 +8,7 @@ import prisma from '@/lib/prisma';
 import { validateCSRFToken } from '@/lib/csrf';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { UpdateBundleLinkSchema } from '@/lib/validation/bundle-links';
+import { ZodError } from 'zod';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,7 +28,15 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
   }
 
-  const body = UpdateBundleLinkSchema.parse(await request.json());
+  let body: ReturnType<typeof UpdateBundleLinkSchema.parse>;
+  try {
+    body = UpdateBundleLinkSchema.parse(await request.json());
+  } catch (err) {
+    if (err instanceof ZodError) {
+      return NextResponse.json({ error: err.errors[0]?.message ?? 'Invalid input' }, { status: 400 });
+    }
+    throw err;
+  }
 
   const link = await prisma.productLink.findUnique({
     where: { id: params.linkId },
@@ -94,14 +103,26 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     },
   });
 
+  if (!updated) {
+    return NextResponse.json({ error: 'Bundle link not found after update' }, { status: 404 });
+  }
+
+  // Return clean response matching POST shape — exclude raw bundleComponents relation
   const response = NextResponse.json({
-    ...updated,
-    components: updated?.bundleComponents?.map((c) => ({
+    id: updated.id,
+    integrationId: updated.integrationId,
+    internalProductId: updated.internalProductId,
+    isBundle: updated.isBundle,
+    externalProductId: updated.externalProductId,
+    externalVariantId: updated.externalVariantId,
+    externalSku: updated.externalSku,
+    externalTitle: updated.externalTitle,
+    components: updated.bundleComponents.map((c) => ({
       internalProductId: c.internalProductId,
-      internalProductName: c.internalProduct.name,
+      internalProductName: (c.internalProduct as { name: string }).name,
       quantity: c.quantity,
       sortOrder: c.sortOrder,
-    })) ?? [],
+    })),
   });
   return applyRateLimitHeaders(response, rateLimitHeaders);
 });

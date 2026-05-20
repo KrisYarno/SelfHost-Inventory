@@ -222,10 +222,21 @@ describe('PATCH /api/products/bundle-links/[linkId]', () => {
   it('replaces components atomically', async () => {
     (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
     (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
-    (tx.productLink.findUnique as jest.Mock).mockResolvedValue({
-      id: 'bl1', isBundle: true, integrationId: 'int1',
-      integration: { companyId: 'co' },
-    });
+    // First call: link lookup (before transaction)
+    // Second call: post-transaction read with bundleComponents
+    (tx.productLink.findUnique as jest.Mock)
+      .mockResolvedValueOnce({
+        id: 'bl1', isBundle: true, integrationId: 'int1',
+        integration: { companyId: 'co' },
+      })
+      .mockResolvedValueOnce({
+        id: 'bl1', isBundle: true, integrationId: 'int1',
+        internalProductId: null, externalProductId: '100', externalVariantId: null,
+        externalSku: null, externalTitle: null,
+        bundleComponents: [
+          { internalProductId: 3, quantity: 1, sortOrder: 0, internalProduct: { name: 'New Component' } },
+        ],
+      });
     (tx.bundleComponent.deleteMany as jest.Mock).mockResolvedValue({ count: 2 });
     (tx.bundleComponent.createMany as jest.Mock).mockResolvedValue({ count: 1 });
     (tx.product.findMany as jest.Mock).mockResolvedValue([
@@ -238,6 +249,11 @@ describe('PATCH /api/products/bundle-links/[linkId]', () => {
     );
 
     expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.components).toHaveLength(1);
+    expect(body.components[0].internalProductId).toBe(3);
+    // bundleComponents should NOT appear in the response (raw relation excluded)
+    expect(body.bundleComponents).toBeUndefined();
     expect(tx.bundleComponent.deleteMany).toHaveBeenCalledWith({
       where: { productLinkId: 'bl1' },
     });
@@ -274,9 +290,16 @@ describe('PATCH /api/products/bundle-links/[linkId]', () => {
   it('PATCH does NOT touch existing ExternalOrderItem.bundleComponentSnapshot (D7)', async () => {
     (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
     (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
-    (tx.productLink.findUnique as jest.Mock).mockResolvedValue({
-      id: 'bl1', isBundle: true, integration: { companyId: 'co' },
-    });
+    (tx.productLink.findUnique as jest.Mock)
+      .mockResolvedValueOnce({ id: 'bl1', isBundle: true, integration: { companyId: 'co' } })
+      .mockResolvedValueOnce({
+        id: 'bl1', isBundle: true, integrationId: 'int1',
+        internalProductId: null, externalProductId: '100', externalVariantId: null,
+        externalSku: null, externalTitle: null,
+        bundleComponents: [
+          { internalProductId: 5, quantity: 1, sortOrder: 0, internalProduct: { name: 'X' } },
+        ],
+      });
     (tx.bundleComponent.deleteMany as jest.Mock).mockResolvedValue({ count: 1 });
     (tx.bundleComponent.createMany as jest.Mock).mockResolvedValue({ count: 1 });
     (tx.product.findMany as jest.Mock).mockResolvedValue([
