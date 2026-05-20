@@ -24,6 +24,7 @@ import { ExternalProductList } from "./external-product-list";
 import { InternalProductPicker } from "./internal-product-picker";
 import { RefreshButton } from "./refresh-button";
 import { useIsDesktop } from "./use-viewport";
+import type { BundleBuilderComponent } from "./bundle-builder";
 
 interface Props {
   integrationId: string;
@@ -32,7 +33,7 @@ interface Props {
 export function MassMapClient({ integrationId }: Props) {
   const catalog = useCatalog(integrationId);
   const { index, isLoading: indexLoading } = useInternalProductIndex();
-  const { confirm } = useRowActions();
+  const { confirm, confirmBundle, editBundle } = useRowActions();
   const isDesktop = useIsDesktop();
 
   const [activeRow, setActiveRow] = useState<CatalogRow | null>(null);
@@ -42,6 +43,10 @@ export function MassMapClient({ integrationId }: Props) {
     { row: CatalogRow; internalProductName: string } | null
   >(null);
   const [tab, setTab] = useState<"unmapped" | "mapped">("unmapped");
+  const [bundleMode, setBundleMode] = useState(false);
+  const [initialBundleComponents, setInitialBundleComponents] = useState<
+    BundleBuilderComponent[] | undefined
+  >(undefined);
 
   const rows = catalog.data?.rows ?? [];
   const unmapped = useMemo(() => rows.filter((r) => !r.alreadyMapped), [rows]);
@@ -56,7 +61,7 @@ export function MassMapClient({ integrationId }: Props) {
     if (index.length === 0) return index;
     const mappedIds = new Set<number>();
     for (const r of rows) {
-      if (r.existingMapping) mappedIds.add(r.existingMapping.internalProductId);
+      if (r.existingMapping?.internalProductId != null) mappedIds.add(r.existingMapping.internalProductId);
     }
     if (mappedIds.size === 0) return index;
     return index.map((p) =>
@@ -83,20 +88,80 @@ export function MassMapClient({ integrationId }: Props) {
     }
   };
 
+  const handleConfirmBundle = async (components: BundleBuilderComponent[]) => {
+    if (!activeRow) return;
+    setError(null);
+    setSaving(true);
+    try {
+      const payload = components.map(({ internalProductId, quantity }) => ({ internalProductId, quantity }));
+      if (activeRow.existingMapping?.isBundle && activeRow.existingMapping.linkId) {
+        await editBundle({
+          linkId: activeRow.existingMapping.linkId,
+          components: payload,
+        });
+      } else {
+        await confirmBundle({
+          integrationId,
+          row: activeRow,
+          components: payload,
+        });
+      }
+      setSuccessFor({
+        row: activeRow,
+        internalProductName: `Bundle (${components.length} components)`,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleFinishSuccess = () => {
     setSuccessFor(null);
     setActiveRow(null);
+    setBundleMode(false);
+    setInitialBundleComponents(undefined);
   };
 
   const handleKeepSuccess = () => {
     setSuccessFor(null);
     setActiveRow(null);
+    setBundleMode(false);
+    setInitialBundleComponents(undefined);
   };
 
   const handleSelectRow = (row: CatalogRow) => {
     setError(null);
     setSuccessFor(null);
     setActiveRow(row);
+
+    const isBundle = row.isBundleCandidate || row.existingMapping?.isBundle === true;
+    setBundleMode(isBundle ?? false);
+
+    if (row.existingMapping?.isBundle && row.existingMapping.linkId) {
+      // Editing an existing bundle: fetch its components and seed initialBundleComponents
+      fetch(`/api/admin/product-mappings?integrationId=${integrationId}&pageSize=500`)
+        .then((r) => (r.ok ? r.json() : { mappings: [] }))
+        .then((data: { mappings: Array<{ id: string; bundleComponents?: Array<{ internalProductId: number; quantity: number; sortOrder: number; internalProduct?: { name?: string } }> }> }) => {
+          const found = data.mappings.find((m) => m.id === row.existingMapping?.linkId);
+          if (found?.bundleComponents) {
+            setInitialBundleComponents(
+              found.bundleComponents.map((c) => ({
+                internalProductId: c.internalProductId,
+                internalProductName: c.internalProduct?.name ?? "",
+                quantity: c.quantity,
+                sortOrder: c.sortOrder,
+              })),
+            );
+          } else {
+            setInitialBundleComponents([]);
+          }
+        })
+        .catch(() => setInitialBundleComponents([]));
+    } else {
+      setInitialBundleComponents(undefined);
+    }
   };
 
   if (catalog.isLoading) {
@@ -209,6 +274,11 @@ export function MassMapClient({ integrationId }: Props) {
                 onCancel={() => setActiveRow(null)}
                 onFinishSuccess={handleFinishSuccess}
                 onKeepSuccess={handleKeepSuccess}
+                bundleMode={bundleMode}
+                initialBundleComponents={initialBundleComponents}
+                onConfirmBundle={handleConfirmBundle}
+                onConvertToBundle={() => setBundleMode(true)}
+                onConvertToSingle={() => setBundleMode(false)}
               />
             </Card>
           )}
@@ -237,6 +307,11 @@ export function MassMapClient({ integrationId }: Props) {
                 onCancel={() => setActiveRow(null)}
                 onFinishSuccess={handleFinishSuccess}
                 onKeepSuccess={handleKeepSuccess}
+                bundleMode={bundleMode}
+                initialBundleComponents={initialBundleComponents}
+                onConfirmBundle={handleConfirmBundle}
+                onConvertToBundle={() => setBundleMode(true)}
+                onConvertToSingle={() => setBundleMode(false)}
               />
             </div>
           </SheetContent>
