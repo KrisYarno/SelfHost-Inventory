@@ -35,12 +35,13 @@ import type { PlatformType } from "@/types/external-orders";
 interface MappingEntry {
   id: string;
   integrationId: string;
-  internalProductId: number;
+  internalProductId: number | null;
   externalProductId: string;
   externalVariantId: string | null;
   externalSku: string | null;
   externalTitle: string | null;
   createdAt: string;
+  isBundle: boolean;
   internalProduct: {
     id: number;
     name: string;
@@ -48,7 +49,11 @@ interface MappingEntry {
     variant: string | null;
     priceSourceLinkId: string | null;
     retailPrice: number;
-  };
+  } | null;
+  bundleComponents?: Array<{
+    id: string;
+    internalProduct: { id: number; name: string } | null;
+  }>;
   integration: {
     id: string;
     name: string;
@@ -127,10 +132,10 @@ export default function AdminProductMappingsPage() {
       }
 
       if (clear) {
-        toast.success(`Cleared price source for ${mapping.internalProduct.name}`);
+        toast.success(`Cleared price source for ${mapping.internalProduct?.name ?? "product"}`);
       } else {
         toast.success(
-          `Price source set for ${mapping.internalProduct.name}${
+          `Price source set for ${mapping.internalProduct?.name ?? "product"}${
             data.retailPrice != null ? ` → $${Number(data.retailPrice).toFixed(2)}` : ""
           }`
         );
@@ -411,16 +416,35 @@ export default function AdminProductMappingsPage() {
                         >
                           {/* Internal product */}
                           <div className="min-w-0">
-                            <p className="font-medium text-sm truncate">
-                              {mapping.internalProduct.name}
-                            </p>
-                            {mapping.internalProduct.baseName && (
-                              <p className="text-xs text-muted-foreground">
-                                {mapping.internalProduct.baseName}
-                                {mapping.internalProduct.variant
-                                  ? ` / ${mapping.internalProduct.variant}`
-                                  : ""}
-                              </p>
+                            {mapping.isBundle ? (
+                              <>
+                                <p className="font-medium text-sm truncate">
+                                  Bundle{" "}
+                                  <Badge
+                                    variant="outline"
+                                    className="ml-1 text-[9px] border-purple-500/60 text-purple-700"
+                                  >
+                                    BUNDLE
+                                  </Badge>
+                                </p>
+                                <p className="text-xs text-muted-foreground">
+                                  {mapping.bundleComponents?.length ?? 0} components
+                                </p>
+                              </>
+                            ) : (
+                              <>
+                                <p className="font-medium text-sm truncate">
+                                  {mapping.internalProduct?.name ?? "(unknown)"}
+                                </p>
+                                {mapping.internalProduct?.baseName && (
+                                  <p className="text-xs text-muted-foreground">
+                                    {mapping.internalProduct.baseName}
+                                    {mapping.internalProduct.variant
+                                      ? ` / ${mapping.internalProduct.variant}`
+                                      : ""}
+                                  </p>
+                                )}
+                              </>
                             )}
                           </div>
 
@@ -448,42 +472,44 @@ export default function AdminProductMappingsPage() {
 
                           {/* Price source + Delete buttons */}
                           <div className="flex items-center justify-end gap-1">
-                            {mapping.internalProduct.priceSourceLinkId === mapping.id ? (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-8 px-2 text-xs text-green-700 dark:text-green-400"
-                                disabled={settingPriceSource === mapping.id}
-                                onClick={() => handleSetPriceSource(mapping, true)}
-                                title="Clear price source"
-                              >
-                                {settingPriceSource === mapping.id ? (
-                                  <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : (
-                                  <>
-                                    <Check className="h-3 w-3 mr-1" />
-                                    Price Source
-                                  </>
-                                )}
-                              </Button>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-8 px-2 text-xs text-muted-foreground"
-                                disabled={settingPriceSource === mapping.id}
-                                onClick={() => handleSetPriceSource(mapping)}
-                                title="Set as price source for retail price"
-                              >
-                                {settingPriceSource === mapping.id ? (
-                                  <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : (
-                                  <>
-                                    <DollarSign className="h-3 w-3 mr-1" />
-                                    Set Price
-                                  </>
-                                )}
-                              </Button>
+                            {!mapping.isBundle && (
+                              mapping.internalProduct?.priceSourceLinkId === mapping.id ? (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-8 px-2 text-xs text-green-700 dark:text-green-400"
+                                  disabled={settingPriceSource === mapping.id}
+                                  onClick={() => handleSetPriceSource(mapping, true)}
+                                  title="Clear price source"
+                                >
+                                  {settingPriceSource === mapping.id ? (
+                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                  ) : (
+                                    <>
+                                      <Check className="h-3 w-3 mr-1" />
+                                      Price Source
+                                    </>
+                                  )}
+                                </Button>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-8 px-2 text-xs text-muted-foreground"
+                                  disabled={settingPriceSource === mapping.id}
+                                  onClick={() => handleSetPriceSource(mapping)}
+                                  title="Set as price source for retail price"
+                                >
+                                  {settingPriceSource === mapping.id ? (
+                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                  ) : (
+                                    <>
+                                      <DollarSign className="h-3 w-3 mr-1" />
+                                      Set Price
+                                    </>
+                                  )}
+                                </Button>
+                              )
                             )}
                             <Button
                               size="sm"
@@ -545,18 +571,29 @@ export default function AdminProductMappingsPage() {
             <AlertDialogTitle>Delete Product Mapping</AlertDialogTitle>
             <AlertDialogDescription>
               {deletingMapping && (
-                <>
-                  Are you sure you want to delete the mapping between{" "}
-                  <span className="font-medium">
-                    {deletingMapping.internalProduct.name}
-                  </span>{" "}
-                  and{" "}
-                  <span className="font-medium">
-                    {deletingMapping.externalTitle ||
-                      deletingMapping.externalProductId}
-                  </span>
-                  ? Order items using this mapping will become unmapped.
-                </>
+                deletingMapping.isBundle ? (
+                  <>
+                    Are you sure you want to delete the bundle mapping for{" "}
+                    <span className="font-medium">
+                      {deletingMapping.externalTitle ||
+                        deletingMapping.externalProductId}
+                    </span>
+                    ? Order items using this mapping will become unmapped.
+                  </>
+                ) : (
+                  <>
+                    Are you sure you want to delete the mapping between{" "}
+                    <span className="font-medium">
+                      {deletingMapping.internalProduct?.name ?? "(unknown)"}
+                    </span>{" "}
+                    and{" "}
+                    <span className="font-medium">
+                      {deletingMapping.externalTitle ||
+                        deletingMapping.externalProductId}
+                    </span>
+                    ? Order items using this mapping will become unmapped.
+                  </>
+                )
               )}
             </AlertDialogDescription>
           </AlertDialogHeader>
