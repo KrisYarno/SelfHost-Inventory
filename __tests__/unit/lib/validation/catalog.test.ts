@@ -33,6 +33,8 @@ describe('CatalogRowSchema', () => {
         linkId: 'clp123',
         internalProductId: 7,
         internalProductName: 'Coffee Beans 1 lb',
+        isBundle: false,
+        componentCount: null,
       },
     });
     expect(ok.success).toBe(true);
