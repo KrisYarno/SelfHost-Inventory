@@ -19,7 +19,7 @@ interface RouteParams {
 export const PATCH = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   const { user } = await requireAdmin();
 
-  const rateLimitHeaders = enforceRateLimit(request, 'product-links:POST', {
+  const rateLimitHeaders = enforceRateLimit(request, 'product-links:PATCH', {
     identifier: user.id,
   });
 
@@ -107,16 +107,18 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     return NextResponse.json({ error: 'Bundle link not found after update' }, { status: 404 });
   }
 
-  // Return clean response matching POST shape — exclude raw bundleComponents relation
+  // Return clean response matching POST shape — exclude raw bundleComponents relation.
+  // Field order/keys must match app/api/products/bundle-links/route.ts (POST).
   const response = NextResponse.json({
     id: updated.id,
     integrationId: updated.integrationId,
-    internalProductId: updated.internalProductId,
-    isBundle: updated.isBundle,
     externalProductId: updated.externalProductId,
     externalVariantId: updated.externalVariantId,
     externalSku: updated.externalSku,
     externalTitle: updated.externalTitle,
+    isBundle: updated.isBundle,
+    internalProductId: updated.internalProductId,
+    createdAt: updated.createdAt,
     components: updated.bundleComponents.map((c) => ({
       internalProductId: c.internalProductId,
       internalProductName: (c.internalProduct as { name: string }).name,

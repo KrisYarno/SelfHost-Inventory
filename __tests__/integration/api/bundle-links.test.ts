@@ -202,6 +202,45 @@ describe('POST /api/products/bundle-links', () => {
     expect(updateCall.where.productLinkId).toBeNull();
   });
 
+  it('returns explicit projection (no spread of full ProductLink model) [P1 shape parity]', async () => {
+    // POST and PATCH must return identical field sets. Asserting specific fields
+    // (not deep equality) catches accidental scalar additions to ProductLink leaking
+    // into the response.
+    setupAdminCompany();
+    (tx.productLink.findFirst as jest.Mock).mockResolvedValue(null);
+    const createdAt = new Date('2025-01-01T00:00:00Z');
+    (tx.productLink.create as jest.Mock).mockResolvedValue({
+      id: 'bl-shape', isBundle: true, integrationId: 'int1',
+      externalProductId: '900', externalVariantId: null,
+      internalProductId: null, externalSku: 'SKU-X', externalTitle: 'Title-X',
+      createdAt,
+    });
+    (tx.bundleComponent.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (tx.externalOrderItem.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+
+    const resp = await POST(mkReq({
+      integrationId: 'int1',
+      externalProductId: '900',
+      components: [{ internalProductId: 1, quantity: 1 }],
+    }));
+
+    expect(resp.status).toBe(201);
+    const body = await resp.json();
+    expect(Object.keys(body).sort()).toEqual([
+      'backfilledCount',
+      'components',
+      'createdAt',
+      'externalProductId',
+      'externalSku',
+      'externalTitle',
+      'externalVariantId',
+      'id',
+      'integrationId',
+      'internalProductId',
+      'isBundle',
+    ]);
+  });
+
   it('returns 409 (not 500) when a concurrent create races past the pre-check (P2002)', async () => {
     // Simulate TOCTOU: pre-check finds nothing, but the transaction hits a P2002
     // unique-constraint violation from a concurrent insert.
@@ -311,6 +350,53 @@ describe('PATCH /api/products/bundle-links/[linkId]', () => {
     );
 
     expect(resp.status).toBe(404);
+  });
+
+  it('returns same explicit field set as POST (minus backfilledCount) [P1 shape parity]', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
+    (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
+    const createdAt = new Date('2025-02-02T00:00:00Z');
+    (tx.productLink.findUnique as jest.Mock)
+      .mockResolvedValueOnce({
+        id: 'bl-shape', isBundle: true, integrationId: 'int1',
+        integration: { companyId: 'co' },
+      })
+      .mockResolvedValueOnce({
+        id: 'bl-shape', isBundle: true, integrationId: 'int1',
+        internalProductId: null, externalProductId: '900', externalVariantId: null,
+        externalSku: 'SKU-X', externalTitle: 'Title-X', createdAt,
+        bundleComponents: [
+          { internalProductId: 3, quantity: 1, sortOrder: 0, internalProduct: { name: 'X' } },
+        ],
+      });
+    (tx.bundleComponent.deleteMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (tx.bundleComponent.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (tx.product.findMany as jest.Mock).mockResolvedValue([
+      { id: 3, name: 'X', deletedAt: null },
+    ]);
+
+    const resp = await PATCH(
+      mkPatchReq({ components: [{ internalProductId: 3, quantity: 1 }] }),
+      { params: { linkId: 'bl-shape' } },
+    );
+
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    // Same fields as POST, minus backfilledCount.
+    expect(Object.keys(body).sort()).toEqual([
+      'components',
+      'createdAt',
+      'externalProductId',
+      'externalSku',
+      'externalTitle',
+      'externalVariantId',
+      'id',
+      'integrationId',
+      'internalProductId',
+      'isBundle',
+    ]);
+    // Sanity: no raw bundleComponents relation leaking.
+    expect((body as Record<string, unknown>).bundleComponents).toBeUndefined();
   });
 
   it('PATCH does NOT touch existing ExternalOrderItem.bundleComponentSnapshot (D7)', async () => {

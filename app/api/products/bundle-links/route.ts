@@ -156,9 +156,19 @@ export const POST = apiHandler(async (request: NextRequest) => {
   }
   const { link, backfilledCount } = txResult;
 
+  // Explicit projection (future-safe) — must match PATCH response shape.
+  // See app/api/products/bundle-links/[linkId]/route.ts.
   const response = NextResponse.json(
     {
-      ...link,
+      id: link.id,
+      integrationId: link.integrationId,
+      externalProductId: link.externalProductId,
+      externalVariantId: link.externalVariantId,
+      externalSku: link.externalSku,
+      externalTitle: link.externalTitle,
+      isBundle: link.isBundle,
+      internalProductId: link.internalProductId,
+      createdAt: link.createdAt,
       components: snapshot,
       backfilledCount,
     },
