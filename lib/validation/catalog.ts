@@ -15,8 +15,10 @@ export const CatalogRowSchema = z
         linkId: z.string(),
         internalProductId: z.number().int().nullable(),
         internalProductName: z.string(),
-        isBundle: z.boolean().optional(),
-        componentCount: z.number().int().optional(),
+        // Uniform shape: always present. isBundle defaults false; componentCount
+        // is null for non-bundles. See app/api/integrations/[id]/catalog/route.ts.
+        isBundle: z.boolean(),
+        componentCount: z.number().int().nullable(),
       })
       .optional(),
     isBundleCandidate: z.boolean().optional(),

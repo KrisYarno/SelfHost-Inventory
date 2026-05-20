@@ -27,7 +27,7 @@ import type { CatalogRow } from "@/types/bulk-map";
 
 const rows: CatalogRow[] = [
   { externalProductId: "1", externalVariantId: "11", parentTitle: "Coffee Beans", variantTitle: "1 lb", sku: "CB1", type: "variation", attributes: [], alreadyMapped: false },
-  { externalProductId: "1", externalVariantId: "12", parentTitle: "Coffee Beans", variantTitle: "5 lb", sku: "CB5", type: "variation", attributes: [], alreadyMapped: true, existingMapping: { linkId: "L", internalProductId: 2, internalProductName: "Coffee Beans 5 lb" } },
+  { externalProductId: "1", externalVariantId: "12", parentTitle: "Coffee Beans", variantTitle: "5 lb", sku: "CB5", type: "variation", attributes: [], alreadyMapped: true, existingMapping: { linkId: "L", internalProductId: 2, internalProductName: "Coffee Beans 5 lb", isBundle: false, componentCount: null } },
   { externalProductId: "2", externalVariantId: null, parentTitle: "Mug", variantTitle: null, sku: "MUG", type: "simple", attributes: [], alreadyMapped: false },
 ];
 

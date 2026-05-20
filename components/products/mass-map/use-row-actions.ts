@@ -53,15 +53,16 @@ async function reconcileMappingsOnly(
           const key = `${r.externalProductId}::${r.externalVariantId ?? ""}`;
           const hit = byKey.get(key);
           if (hit) {
+            const isBundle = hit.isBundle === true;
             return {
               ...r,
               alreadyMapped: true,
               existingMapping: {
                 linkId: hit.id,
-                internalProductId: hit.internalProductId,
-                internalProductName: hit.internalProduct?.name ?? "",
-                isBundle: hit.isBundle,
-                componentCount: hit.bundleComponents?.length,
+                internalProductId: isBundle ? null : hit.internalProductId,
+                internalProductName: isBundle ? "" : (hit.internalProduct?.name ?? ""),
+                isBundle,
+                componentCount: isBundle ? (hit.bundleComponents?.length ?? 0) : null,
               },
             };
           }
@@ -143,6 +144,8 @@ export function useRowActions() {
           linkId: "__pending__",
           internalProductId,
           internalProductName,
+          isBundle: false,
+          componentCount: null,
         },
       });
 
@@ -181,6 +184,8 @@ export function useRowActions() {
           linkId: link.id,
           internalProductId,
           internalProductName,
+          isBundle: false,
+          componentCount: null,
         },
       });
 

@@ -11,8 +11,10 @@ export interface CatalogRow {
     linkId: string;
     internalProductId: number | null;
     internalProductName: string;
-    isBundle?: boolean;
-    componentCount?: number;
+    // Uniform shape: always present. isBundle defaults false for single
+    // mappings; componentCount is null for non-bundles.
+    isBundle: boolean;
+    componentCount: number | null;
   };
   isBundleCandidate?: boolean;
   wcBundledItems?: Array<{

@@ -74,17 +74,24 @@ export const GET = apiHandler(async (
     },
   });
 
-  const mapByKey = new Map<string, { linkId: string; internalProductId: number | null; internalProductName: string; isBundle?: boolean; componentCount?: number }>();
+  // Uniform shape: isBundle is always present (defaults false), componentCount
+  // is always present (null for non-bundles). Clients can value-check instead
+  // of presence-check.
+  const mapByKey = new Map<string, {
+    linkId: string;
+    internalProductId: number | null;
+    internalProductName: string;
+    isBundle: boolean;
+    componentCount: number | null;
+  }>();
   for (const link of existing) {
     const key = `${link.externalProductId}::${link.externalVariantId ?? ''}`;
     mapByKey.set(key, {
       linkId: link.id,
-      internalProductId: link.internalProductId,
-      internalProductName: link.internalProduct?.name ?? '',
-      ...(link.isBundle && {
-        isBundle: true,
-        componentCount: link.bundleComponents.length,
-      }),
+      internalProductId: link.isBundle ? null : link.internalProductId,
+      internalProductName: link.isBundle ? '' : (link.internalProduct?.name ?? ''),
+      isBundle: link.isBundle,
+      componentCount: link.isBundle ? link.bundleComponents.length : null,
     });
   }
 

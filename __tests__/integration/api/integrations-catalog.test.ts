@@ -123,6 +123,51 @@ describe('GET /api/integrations/[id]/catalog', () => {
     expect(body.error).toMatch(/credentials could not be decrypted/i);
   });
 
+  it('existingMapping is always uniform — isBundle bool + componentCount nullable [P2]', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: '1', isAdmin: true } });
+    (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
+    (prisma.integration.findUnique as jest.Mock).mockResolvedValue({
+      id: 'x', isActive: true, companyId: 'co', platform: 'WOOCOMMERCE',
+      storeUrl: 'https://s', name: 'Main', encryptedApiKey: 'k', encryptedApiSecret: 's',
+    });
+    (fetchWooCatalog as jest.Mock).mockResolvedValue({
+      rows: [
+        { externalProductId: '1', externalVariantId: null, parentTitle: 'Mug', variantTitle: null, sku: 'MUG', type: 'simple', attributes: [], alreadyMapped: false },
+        { externalProductId: '2', externalVariantId: null, parentTitle: 'Bundle', variantTitle: null, sku: 'B1', type: 'simple', attributes: [], alreadyMapped: false },
+      ],
+      warnings: [],
+    });
+    (prisma.productLink.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'l1', integrationId: 'x', externalProductId: '1', externalVariantId: null,
+        internalProductId: 7, isBundle: false,
+        internalProduct: { name: 'Mug Internal' }, bundleComponents: [],
+      },
+      {
+        id: 'l2', integrationId: 'x', externalProductId: '2', externalVariantId: null,
+        internalProductId: null, isBundle: true,
+        internalProduct: null, bundleComponents: [{ id: 'bc1' }, { id: 'bc2' }],
+      },
+    ]);
+
+    const req = new NextRequest('http://t/api/integrations/x/catalog');
+    const resp = await GET(req, { params: { id: 'x' } });
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    const single = body.rows.find((r: any) => r.externalProductId === '1');
+    expect(single.existingMapping.isBundle).toBe(false);
+    expect(single.existingMapping.componentCount).toBeNull();
+    expect(single.existingMapping.internalProductId).toBe(7);
+    expect(single.existingMapping.internalProductName).toBe('Mug Internal');
+
+    const bundle = body.rows.find((r: any) => r.externalProductId === '2');
+    expect(bundle.existingMapping.isBundle).toBe(true);
+    expect(bundle.existingMapping.componentCount).toBe(2);
+    expect(bundle.existingMapping.internalProductId).toBeNull();
+    expect(bundle.existingMapping.internalProductName).toBe('');
+  });
+
   it('returns 502 when fetchWooCatalog throws', async () => {
     (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: '1', isAdmin: true } });
     (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);

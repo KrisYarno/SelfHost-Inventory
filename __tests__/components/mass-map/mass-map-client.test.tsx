@@ -34,7 +34,7 @@ function seed(client: QueryClient) {
     integration: { id: "i1", name: "Main", platform: "WOOCOMMERCE", storeUrl: "https://s" },
     rows: [
       { externalProductId: "1", externalVariantId: null, parentTitle: "Mug", variantTitle: null, sku: "MUG", type: "simple", attributes: [], alreadyMapped: false },
-      { externalProductId: "2", externalVariantId: null, parentTitle: "Hat", variantTitle: null, sku: "HAT", type: "simple", attributes: [], alreadyMapped: true, existingMapping: { linkId: "L", internalProductId: 7, internalProductName: "Hat Internal" } },
+      { externalProductId: "2", externalVariantId: null, parentTitle: "Hat", variantTitle: null, sku: "HAT", type: "simple", attributes: [], alreadyMapped: true, existingMapping: { linkId: "L", internalProductId: 7, internalProductName: "Hat Internal", isBundle: false, componentCount: null } },
     ],
     fetchedAt: new Date().toISOString(),
     warnings: [],

@@ -84,8 +84,18 @@ export const GET = apiHandler(async (request: NextRequest) => {
     prisma.productLink.count({ where }),
   ]);
 
+  // P2: bundleComponents is always [] for single mappings (isBundle=false).
+  // Project it (and componentCount) to undefined for non-bundle rows so the
+  // payload is consistent and consumers don't have to walk the array just to
+  // know the length.
+  const mappings = productLinks.map((m: any) => ({
+    ...m,
+    bundleComponents: m.isBundle ? m.bundleComponents : undefined,
+    componentCount: m.isBundle ? m.bundleComponents.length : undefined,
+  }));
+
   return NextResponse.json({
-    mappings: productLinks,
+    mappings,
     pagination: {
       page,
       pageSize,

@@ -149,6 +149,8 @@ describe("useRowActions", () => {
       linkId: "newLink123",
       internalProductId: 7,
       internalProductName: "Coffee Beans 1 lb",
+      isBundle: false,
+      componentCount: null,
     };
     client.setQueryData<CatalogResponse>(["bulk-map-catalog", "intA"], (prev) => ({
       ...prev!,
@@ -185,6 +187,8 @@ describe("useRowActions", () => {
             linkId: "newLink123",
             internalProductId: 7,
             internalProductName: "Coffee Beans 1 lb",
+            isBundle: false,
+            componentCount: null,
           },
         },
       ],
