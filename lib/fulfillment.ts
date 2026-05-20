@@ -184,6 +184,27 @@ export async function validateOrderFulfillment(
         }));
       }
 
+      // A bundle with zero components is unfulfillable — mirror the fulfillment loop's
+      // behaviour (which returns 'no components in snapshot or live mapping').
+      if (components.length === 0) {
+        issues.push('Bundle has no components in snapshot or live mapping — cannot fulfill');
+        hasStockIssues = true;
+        validationItems.push({
+          itemId: item.id,
+          name: item.name,
+          variantName: (item as any).variantName ?? null,
+          sku: item.sku,
+          requestedQty: item.quantity,
+          remainingQty,
+          fulfilledQty: item.fulfilledQty,
+          isMapped: item.isMapped,
+          mapping: undefined,
+          issues,
+          bundleShortages: undefined,
+        });
+        continue;
+      }
+
       const shortages: BundleShortage[] = [];
 
       for (const c of components) {

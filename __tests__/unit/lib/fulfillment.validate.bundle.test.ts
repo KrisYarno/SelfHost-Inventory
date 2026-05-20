@@ -207,4 +207,33 @@ describe('validateOrderFulfillment — bundle component shortages', () => {
     const item = result.items[0];
     expect(item.bundleShortages![0].name).toBe('Product 77');
   });
+
+  it('bundle with empty snapshot array reports canFulfill=false (mirrors fulfillment loop)', async () => {
+    // snapshot=[] is rejected by Zod (min(1)) as malformed — treated as unfulfillable.
+    // Either way (malformed or zero components), canFulfill must be false.
+    const mock = getMock();
+    const order = buildBundleOrder({ snapshot: [] });
+    mock.externalOrder.findUnique.mockResolvedValue(order);
+
+    const result = await validateOrderFulfillment('ord-val-1', 1);
+
+    expect(result.canFulfill).toBe(false);
+    expect(result.requiresAttention).toBe(true);
+    const item = result.items[0];
+    // Either malformed_snapshot or no-components issue must appear
+    expect(item.issues.length).toBeGreaterThan(0);
+  });
+
+  it('bundle with null snapshot and empty live components reports canFulfill=false', async () => {
+    // null snapshot → live bundleComponents fallback → empty array → zero components path
+    const mock = getMock();
+    const order = buildBundleOrder({ snapshot: null, liveComponents: [] });
+    mock.externalOrder.findUnique.mockResolvedValue(order);
+
+    const result = await validateOrderFulfillment('ord-val-1', 1);
+
+    expect(result.canFulfill).toBe(false);
+    const item = result.items[0];
+    expect(item.issues.some((i) => /no components/i.test(i))).toBe(true);
+  });
 });
