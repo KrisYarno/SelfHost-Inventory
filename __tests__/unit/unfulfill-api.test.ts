@@ -621,4 +621,123 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
 
     expect(getMockPrisma().$transaction).not.toHaveBeenCalled()
   })
+
+  // -----------------------------------------------------------------------
+  // 13. Bundle reversal: increments each component from snapshot
+  // -----------------------------------------------------------------------
+  it('reverses a bundle by incrementing each component from snapshot', async () => {
+    const tx = setupTransaction()
+    const bundleOrder = buildOrder({
+      items: [
+        {
+          id: 'item-1',
+          orderId: 'order-1',
+          quantity: 1,
+          fulfilledQty: 1,
+          isMapped: true,
+          name: 'Bundle Product',
+          sku: 'BUNDLE-001',
+          bundleComponentSnapshot: [
+            { internalProductId: 10, internalProductName: 'BPC-157', quantity: 1, sortOrder: 0 },
+            { internalProductId: 20, internalProductName: 'TB-500', quantity: 2, sortOrder: 1 },
+          ],
+          productLink: {
+            internalProductId: 99,
+            isBundle: true,
+            bundleComponents: [],
+          },
+        },
+      ],
+    })
+
+    tx.externalOrder.findUnique.mockResolvedValue(bundleOrder as any)
+    // $executeRaw: 1 = fulfilledQty decrement succeeds, then 1 per component product_locations update (×2)
+    tx.$executeRaw.mockResolvedValue(1 as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 1, fulfilledQty: 0 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    const req = buildRequest({
+      items: [
+        // productId is required by Zod schema; bundle path ignores it
+        { itemId: 'item-1', productId: 99, quantity: 1, locationId: 1 },
+      ],
+    })
+
+    const response = await POST(req, { params: { orderId: 'order-1' } })
+    const data = await response.json()
+
+    expect(data.success).toBe(true)
+    expect(data.restored).toHaveLength(1)
+    expect(data.skipped).toHaveLength(0)
+
+    // createInventoryLog should have been called once per component
+    const { createInventoryLog: mockLog } = require('@/lib/inventory')
+    expect(mockLog).toHaveBeenCalledTimes(2)
+
+    const logCalls = (mockLog as jest.Mock).mock.calls
+    // First component: productId 10, qty 1 (1×1), positive delta
+    expect(logCalls[0][0]).toMatchObject({ productId: 10, delta: 1 })
+    // Second component: productId 20, qty 2 (2×1), positive delta
+    expect(logCalls[1][0]).toMatchObject({ productId: 20, delta: 2 })
+
+    // $executeRaw: 1 for fulfilledQty decrement + 2 for product_locations + 2 for legacy mirror (locationId=1)
+    // = 5 total calls
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(5)
+  })
+
+  // -----------------------------------------------------------------------
+  // 14. Bundle reversal: uses live bundleComponents when snapshot is null
+  // -----------------------------------------------------------------------
+  it('falls back to live bundleComponents when snapshot is null', async () => {
+    const tx = setupTransaction()
+    const bundleOrder = buildOrder({
+      items: [
+        {
+          id: 'item-1',
+          orderId: 'order-1',
+          quantity: 1,
+          fulfilledQty: 1,
+          isMapped: true,
+          name: 'Bundle Product',
+          sku: 'BUNDLE-001',
+          bundleComponentSnapshot: null,
+          productLink: {
+            internalProductId: 99,
+            isBundle: true,
+            bundleComponents: [
+              { internalProductId: 10, quantity: 1, sortOrder: 0 },
+              { internalProductId: 20, quantity: 3, sortOrder: 1 },
+            ],
+          },
+        },
+      ],
+    })
+
+    tx.externalOrder.findUnique.mockResolvedValue(bundleOrder as any)
+    tx.$executeRaw.mockResolvedValue(1 as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 1, fulfilledQty: 0 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    const req = buildRequest({
+      items: [
+        { itemId: 'item-1', productId: 99, quantity: 1, locationId: 1 },
+      ],
+    })
+
+    const response = await POST(req, { params: { orderId: 'order-1' } })
+    const data = await response.json()
+
+    expect(data.success).toBe(true)
+    expect(data.restored).toHaveLength(1)
+
+    const { createInventoryLog: mockLog } = require('@/lib/inventory')
+    expect(mockLog).toHaveBeenCalledTimes(2)
+    const logCalls = (mockLog as jest.Mock).mock.calls
+    expect(logCalls[0][0]).toMatchObject({ productId: 10, delta: 1 })
+    expect(logCalls[1][0]).toMatchObject({ productId: 20, delta: 3 })
+  })
 })

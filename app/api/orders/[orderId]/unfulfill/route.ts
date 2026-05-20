@@ -70,7 +70,13 @@ export const POST = apiHandler(async (
           items: {
             include: {
               productLink: {
-                select: { internalProductId: true },
+                select: {
+                  internalProductId: true,
+                  isBundle: true,
+                  bundleComponents: {
+                    orderBy: { sortOrder: 'asc' },
+                  },
+                },
               },
             },
           },
@@ -108,6 +114,103 @@ export const POST = apiHandler(async (
             reason: 'Item not found in order',
           });
           continue;
+        }
+
+        // Bundle reversal path: isBundle=true → expand into per-component restorations
+        if (orderItem.isMapped && orderItem.productLink?.isBundle) {
+          type SnapshotComponent = {
+            internalProductId: number;
+            quantity: number;
+            internalProductName?: string;
+          };
+
+          // D7: prefer frozen snapshot; fall back to live bundleComponents for legacy rows
+          const snapshot = orderItem.bundleComponentSnapshot as
+            | SnapshotComponent[]
+            | null;
+          const components: SnapshotComponent[] =
+            snapshot ?? (orderItem.productLink.bundleComponents as SnapshotComponent[]);
+
+          if (!components || components.length === 0) {
+            skipped.push({
+              itemId: unfulfillItem.itemId,
+              reason: `Bundle item ${orderItem.id} has no components in snapshot or live mapping`,
+            });
+            continue;
+          }
+
+          // Atomic fulfilledQty decrement for the bundle item
+          const bundleFulfilledAffected = await tx.$executeRaw(Prisma.sql`
+            UPDATE external_order_items
+            SET fulfilledQty = fulfilledQty - ${unfulfillItem.quantity}
+            WHERE id = ${unfulfillItem.itemId}
+              AND fulfilledQty >= ${unfulfillItem.quantity}
+          `);
+
+          if (bundleFulfilledAffected === 0) {
+            skipped.push({
+              itemId: unfulfillItem.itemId,
+              reason: `Cannot unfulfill: insufficient fulfilled quantity (concurrent modification or already reversed)`,
+            });
+            continue;
+          }
+
+          // Restore each component inside the same transaction (all-or-nothing)
+          for (const component of components) {
+            const restoreQty = component.quantity * unfulfillItem.quantity;
+
+            await createInventoryLog(
+              {
+                userId: user.id,
+                productId: component.internalProductId,
+                locationId: unfulfillItem.locationId,
+                delta: +restoreQty, // POSITIVE (restoration)
+                logType: inventory_logs_logType.ADJUSTMENT,
+              },
+              tx
+            );
+
+            // Atomic product_locations increment for this component
+            const compPlAffected = await tx.$executeRaw(Prisma.sql`
+              UPDATE product_locations
+              SET quantity = quantity + ${restoreQty},
+                  version = version + 1,
+                  updatedAt = NOW()
+              WHERE productId = ${component.internalProductId}
+                AND locationId = ${unfulfillItem.locationId}
+            `);
+
+            if (compPlAffected === 0) {
+              // Row doesn't exist — create it with the restored quantity
+              await tx.product_locations.create({
+                data: {
+                  productId: component.internalProductId,
+                  locationId: unfulfillItem.locationId,
+                  quantity: restoreQty,
+                  version: 1,
+                },
+              });
+            }
+
+            // Legacy product.quantity mirror for location 1 (atomic)
+            if (unfulfillItem.locationId === 1) {
+              await tx.$executeRaw(Prisma.sql`
+                UPDATE products
+                SET quantity = quantity + ${restoreQty}
+                WHERE id = ${component.internalProductId}
+              `);
+            }
+          }
+
+          restored.push({
+            itemId: unfulfillItem.itemId,
+            productId: -1, // Bundle — no single productId
+            quantity: unfulfillItem.quantity,
+            locationId: unfulfillItem.locationId,
+            inventoryLogId: -1, // Multiple logs created; use sentinel
+          });
+
+          continue; // Skip the single-mapping path below
         }
 
         // P1-4: Verify productId matches the item's mapping. Rejects client-supplied
