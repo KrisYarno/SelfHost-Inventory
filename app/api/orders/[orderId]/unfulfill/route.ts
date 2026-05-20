@@ -3,6 +3,7 @@ import { requireApproved, requireCompanyMembership, apiHandler } from '@/lib/api
 import { validateCSRFToken } from '@/lib/csrf';
 import { UnfulfillRequestSchema } from '@/lib/validation/unfulfill';
 import { BundleComponentSnapshotArraySchema } from '@/lib/validation/bundle-links';
+import type { BundleComponentSnapshot } from '@/types/bulk-map';
 import {
   applyRateLimitHeaders,
   enforceRateLimit,
@@ -122,16 +123,10 @@ export const POST = apiHandler(async (
 
         // Bundle reversal path: isBundle=true → expand into per-component restorations
         if (orderItem.isMapped && orderItem.productLink?.isBundle) {
-          type SnapshotComponent = {
-            internalProductId: number;
-            quantity: number;
-            internalProductName?: string;
-          };
-
           // D7: prefer frozen snapshot; fall back to live bundleComponents for legacy rows.
           // Zod-validate the snapshot when present to fail-closed on DB corruption.
           const rawSnapshot = orderItem.bundleComponentSnapshot;
-          let components: SnapshotComponent[];
+          let components: BundleComponentSnapshot[];
 
           if (rawSnapshot !== null && rawSnapshot !== undefined) {
             const parsed = BundleComponentSnapshotArraySchema.safeParse(rawSnapshot);
@@ -142,10 +137,25 @@ export const POST = apiHandler(async (
               });
               continue;
             }
-            components = parsed.data;
+            // Normalize optional fields to match BundleComponentSnapshot's required shape
+            components = parsed.data.map((c) => ({
+              internalProductId: c.internalProductId,
+              internalProductName: c.internalProductName ?? `Product ${c.internalProductId}`,
+              quantity: c.quantity,
+              sortOrder: c.sortOrder ?? 0,
+            }));
           } else {
             // null snapshot → fall back to live bundleComponents (Prisma-typed, no Zod needed)
-            components = orderItem.productLink.bundleComponents as SnapshotComponent[];
+            components = (orderItem.productLink.bundleComponents as Array<{
+              internalProductId: number;
+              quantity: number;
+              sortOrder: number;
+            }>).map((c) => ({
+              internalProductId: c.internalProductId,
+              internalProductName: `Product ${c.internalProductId}`,
+              quantity: c.quantity,
+              sortOrder: c.sortOrder,
+            }));
           }
 
           if (!components || components.length === 0) {

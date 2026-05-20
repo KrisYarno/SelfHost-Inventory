@@ -3,6 +3,7 @@ import { Prisma, inventory_logs_logType } from '@prisma/client';
 import { createInventoryLog } from '@/lib/inventory';
 import { ProductNotFoundError } from '@/lib/error-handling';
 import { BundleComponentSnapshotArraySchema } from '@/lib/validation/bundle-links';
+import type { BundleComponentSnapshot } from '@/types/bulk-map';
 
 /**
  * Fulfillment Item Interface
@@ -138,14 +139,8 @@ export async function validateOrderFulfillment(
 
     if (item.isMapped && item.productLink?.isBundle) {
       // --- Bundle path: check each component for stock ---
-      type SnapshotComponent = {
-        internalProductId: number;
-        quantity: number;
-        internalProductName?: string;
-      };
-
       const rawSnapshot = (item as any).bundleComponentSnapshot;
-      let components: SnapshotComponent[];
+      let components: BundleComponentSnapshot[];
 
       if (rawSnapshot !== null && rawSnapshot !== undefined) {
         const parsed = BundleComponentSnapshotArraySchema.safeParse(rawSnapshot);
@@ -168,14 +163,21 @@ export async function validateOrderFulfillment(
           });
           continue;
         }
-        components = parsed.data;
+        // Normalize optional fields to match BundleComponentSnapshot's required shape
+        components = parsed.data.map((c) => ({
+          internalProductId: c.internalProductId,
+          internalProductName: c.internalProductName ?? `Product ${c.internalProductId}`,
+          quantity: c.quantity,
+          sortOrder: c.sortOrder ?? 0,
+        }));
       } else {
         // null snapshot → fall back to live bundleComponents (Prisma-typed, no Zod needed)
-        components = (item.productLink as any).bundleComponents?.map((c: any) => ({
+        components = ((item.productLink as any).bundleComponents ?? []).map((c: any): BundleComponentSnapshot => ({
           internalProductId: c.internalProductId,
+          internalProductName: c.internalProduct?.name ?? `Product ${c.internalProductId}`,
           quantity: c.quantity,
-          internalProductName: c.internalProduct?.name,
-        })) ?? [];
+          sortOrder: c.sortOrder ?? 0,
+        }));
       }
 
       const shortages: BundleShortage[] = [];
@@ -414,16 +416,10 @@ export async function fulfillExternalOrder(
 
           // Bundle path: isBundle=true → expand into per-component deductions (D7)
           if (orderItem.isMapped && orderItem.productLink?.isBundle) {
-            type SnapshotComponent = {
-              internalProductId: number;
-              quantity: number;
-              internalProductName?: string;
-            };
-
             // D7: prefer frozen snapshot; fall back to live bundleComponents for legacy rows.
             // Zod-validate the snapshot when present to fail-closed on DB corruption.
             const rawSnapshot = orderItem.bundleComponentSnapshot;
-            let components: SnapshotComponent[];
+            let components: BundleComponentSnapshot[];
 
             if (rawSnapshot !== null && rawSnapshot !== undefined) {
               const parsed = BundleComponentSnapshotArraySchema.safeParse(rawSnapshot);
@@ -435,10 +431,25 @@ export async function fulfillExternalOrder(
                 });
                 continue;
               }
-              components = parsed.data;
+              // Normalize optional fields to match BundleComponentSnapshot's required shape
+              components = parsed.data.map((c) => ({
+                internalProductId: c.internalProductId,
+                internalProductName: c.internalProductName ?? `Product ${c.internalProductId}`,
+                quantity: c.quantity,
+                sortOrder: c.sortOrder ?? 0,
+              }));
             } else {
               // null snapshot → fall back to live bundleComponents (Prisma-typed, no Zod needed)
-              components = orderItem.productLink.bundleComponents as SnapshotComponent[];
+              components = (orderItem.productLink.bundleComponents as Array<{
+                internalProductId: number;
+                quantity: number;
+                sortOrder: number;
+              }>).map((c) => ({
+                internalProductId: c.internalProductId,
+                internalProductName: `Product ${c.internalProductId}`,
+                quantity: c.quantity,
+                sortOrder: c.sortOrder,
+              }));
             }
 
             if (!components || components.length === 0) {
