@@ -68,16 +68,23 @@ export const GET = apiHandler(async (
 
   const existing = await prisma.productLink.findMany({
     where: { integrationId },
-    include: { internalProduct: { select: { name: true } } },
+    include: {
+      internalProduct: { select: { name: true } },
+      bundleComponents: { select: { id: true } },
+    },
   });
 
-  const mapByKey = new Map<string, { linkId: string; internalProductId: number; internalProductName: string }>();
+  const mapByKey = new Map<string, { linkId: string; internalProductId: number | null; internalProductName: string; isBundle?: boolean; componentCount?: number }>();
   for (const link of existing) {
     const key = `${link.externalProductId}::${link.externalVariantId ?? ''}`;
     mapByKey.set(key, {
       linkId: link.id,
       internalProductId: link.internalProductId,
       internalProductName: link.internalProduct?.name ?? '',
+      ...(link.isBundle && {
+        isBundle: true,
+        componentCount: link.bundleComponents.length,
+      }),
     });
   }
 

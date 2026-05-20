@@ -72,6 +72,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
             storeUrl: true,
           },
         },
+        bundleComponents: {
+          include: { internalProduct: { select: { id: true, name: true } } },
+          orderBy: { sortOrder: 'asc' },
+        },
       },
       orderBy: [{ integration: { name: "asc" } }, { createdAt: "desc" }],
       skip,
