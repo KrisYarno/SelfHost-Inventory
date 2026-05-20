@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import type { CatalogRow } from "@/types/bulk-map";
 import { rowKey } from "@/types/bulk-map";
 import { RowStatusBadge, type RowStatus } from "./row-status-badge";
+import { Badge } from "@/components/ui/badge";
 
 interface Props {
   rows: CatalogRow[];
@@ -132,13 +133,25 @@ function RowButton({
     >
       <RowStatusBadge status={status} />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium truncate">
-          {row.variantTitle ?? row.parentTitle}
+        <p className="text-sm font-medium truncate flex items-center gap-1.5">
+          <span className="truncate">{row.variantTitle ?? row.parentTitle}</span>
+          {(row.isBundleCandidate || row.existingMapping?.isBundle) && (
+            <Badge
+              variant="outline"
+              className="text-[9px] px-1 py-0 border-purple-500/60 text-purple-700 dark:text-purple-300 shrink-0"
+            >
+              BUNDLE
+            </Badge>
+          )}
         </p>
         <p className="text-[11px] text-muted-foreground truncate">
           {row.sku ? `SKU: ${row.sku}` : `ID: ${row.externalVariantId ?? row.externalProductId}`}
           {row.alreadyMapped && row.existingMapping && (
-            <span className="ml-2">→ {row.existingMapping.internalProductName}</span>
+            <span className="ml-2">
+              {row.existingMapping.isBundle
+                ? `→ Bundle (${row.existingMapping.componentCount ?? 0} components)`
+                : `→ ${row.existingMapping.internalProductName}`}
+            </span>
           )}
         </p>
       </div>
