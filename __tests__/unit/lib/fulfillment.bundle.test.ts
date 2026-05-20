@@ -388,4 +388,59 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     expect(unsafeCalls.some((s) => /^RELEASE SAVEPOINT /.test(s))).toBe(true);
     expect(unsafeCalls.some((s) => /^ROLLBACK TO SAVEPOINT /.test(s))).toBe(false);
   });
+
+  // FIX B (P0): snapshot frozen at first-fulfill for legacy items
+  it('freezes snapshot at fulfill for legacy items (snapshot=null + live fallback)', async () => {
+    const tx = getTx();
+    const order = buildBundleOrder({
+      snapshot: null,
+      liveComponents: [
+        { internalProductId: 7, quantity: 2, sortOrder: 0 },
+        { internalProductId: 8, quantity: 1, sortOrder: 1 },
+      ],
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+    setupSuccessfulMocks(1);
+
+    await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
+
+    // tx.externalOrderItem.update must have been called TWICE:
+    //   1. bundleComponentSnapshot write (the Fix B freeze)
+    //   2. fulfilledQty increment (the normal end-of-bundle update)
+    const updateCalls = (tx.externalOrderItem.update as jest.Mock).mock.calls;
+    expect(updateCalls.length).toBeGreaterThanOrEqual(2);
+
+    // First call writes the snapshot derived from live components.
+    const snapshotCall = updateCalls.find(
+      (c: any[]) => c[0]?.data?.bundleComponentSnapshot !== undefined
+    );
+    expect(snapshotCall).toBeDefined();
+    const writtenSnapshot = snapshotCall[0].data.bundleComponentSnapshot;
+    expect(Array.isArray(writtenSnapshot)).toBe(true);
+    expect(writtenSnapshot).toEqual([
+      expect.objectContaining({ internalProductId: 7, quantity: 2 }),
+      expect.objectContaining({ internalProductId: 8, quantity: 1 }),
+    ]);
+  });
+
+  it('does NOT re-write the snapshot when one already exists (idempotency)', async () => {
+    const tx = getTx();
+    const order = buildBundleOrder({
+      snapshot: [
+        { internalProductId: 1, internalProductName: 'A', quantity: 1, sortOrder: 0 },
+      ],
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+    setupSuccessfulMocks(1);
+
+    await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
+
+    // tx.externalOrderItem.update should NOT have been called with a snapshot write
+    const snapshotWriteCalls = (tx.externalOrderItem.update as jest.Mock).mock.calls.filter(
+      (c: any[]) => c[0]?.data?.bundleComponentSnapshot !== undefined
+    );
+    expect(snapshotWriteCalls).toHaveLength(0);
+  });
 });

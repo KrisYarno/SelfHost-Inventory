@@ -739,9 +739,12 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
   })
 
   // -----------------------------------------------------------------------
-  // 14. Bundle reversal: uses live bundleComponents when snapshot is null
+  // 14. Bundle reversal: refuses to restore on snapshot=null + fulfilledQty>0
+  // (FIX B P0): symmetric unfulfill — never reads live when fulfill should
+  // have frozen the snapshot. Snapshot=null with fulfilledQty>0 is a data
+  // integrity bug post-Fix-B; refuse rather than risk phantom restoration.
   // -----------------------------------------------------------------------
-  it('falls back to live bundleComponents when snapshot is null', async () => {
+  it('FIX B: refuses to restore when snapshot=null and fulfilledQty>0 (data integrity)', async () => {
     const tx = setupTransaction()
     const bundleOrder = buildOrder({
       items: [
@@ -749,7 +752,7 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
           id: 'item-1',
           orderId: 'order-1',
           quantity: 1,
-          fulfilledQty: 1,
+          fulfilledQty: 1, // > 0 — refuse defensively
           isMapped: true,
           name: 'Bundle Product',
           sku: 'BUNDLE-001',
@@ -760,6 +763,67 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
             bundleComponents: [
               { internalProductId: 10, quantity: 1, sortOrder: 0 },
               { internalProductId: 20, quantity: 3, sortOrder: 1 },
+            ],
+          },
+        },
+      ],
+    })
+
+    tx.externalOrder.findUnique.mockResolvedValue(bundleOrder as any)
+    tx.$executeRaw.mockResolvedValue(1 as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 1, fulfilledQty: 1 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    const req = buildRequest({
+      items: [
+        { itemId: 'item-1', productId: 99, quantity: 1, locationId: 1 },
+      ],
+    })
+
+    const response = await POST(req, { params: { orderId: 'order-1' } })
+    const data = await response.json()
+
+    expect(data.success).toBe(true)
+    expect(data.restored).toHaveLength(0)
+    expect(data.skipped).toHaveLength(1)
+    expect(data.skipped[0].reason).toMatch(/data integrity/i)
+
+    // No inventory restoration must have happened
+    const { createInventoryLog: mockLog } = require('@/lib/inventory')
+    expect(mockLog).not.toHaveBeenCalled()
+  })
+
+  // -----------------------------------------------------------------------
+  // 14b. Bundle reversal: ignores live components when snapshot exists,
+  // even if PATCH has changed the live composition. This is the core
+  // anti-phantom-inventory guarantee of Fix B.
+  // -----------------------------------------------------------------------
+  it('FIX B: reads frozen snapshot for reversal, not live bundleComponents (PATCH symmetry)', async () => {
+    const tx = setupTransaction()
+    // Snapshot says [10:1, 20:2] but live composition is [50:5] (PATCHed after fulfill).
+    // Unfulfill MUST restore 10 and 20 — not 50.
+    const bundleOrder = buildOrder({
+      items: [
+        {
+          id: 'item-1',
+          orderId: 'order-1',
+          quantity: 1,
+          fulfilledQty: 1,
+          isMapped: true,
+          name: 'Bundle Product',
+          sku: 'BUNDLE-001',
+          bundleComponentSnapshot: [
+            { internalProductId: 10, internalProductName: 'X', quantity: 1, sortOrder: 0 },
+            { internalProductId: 20, internalProductName: 'Y', quantity: 2, sortOrder: 1 },
+          ],
+          productLink: {
+            internalProductId: 99,
+            isBundle: true,
+            bundleComponents: [
+              // Composition was PATCHed after fulfill — completely different!
+              { internalProductId: 50, quantity: 5, sortOrder: 0 },
             ],
           },
         },
@@ -786,9 +850,9 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     expect(data.restored).toHaveLength(1)
 
     const { createInventoryLog: mockLog } = require('@/lib/inventory')
-    expect(mockLog).toHaveBeenCalledTimes(2)
-    const logCalls = (mockLog as jest.Mock).mock.calls
-    expect(logCalls[0][0]).toMatchObject({ productId: 10, delta: 1 })
-    expect(logCalls[1][0]).toMatchObject({ productId: 20, delta: 3 })
+    expect(mockLog).toHaveBeenCalledTimes(2) // 2 snapshot components, not 1 live
+    const productIds = (mockLog as jest.Mock).mock.calls.map((c: any[]) => c[0].productId)
+    expect(productIds).toEqual(expect.arrayContaining([10, 20]))
+    expect(productIds).not.toContain(50) // live composition must be ignored
   })
 })

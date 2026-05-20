@@ -127,8 +127,15 @@ export const POST = apiHandler(async (
 
         // Bundle reversal path: isBundle=true → expand into per-component restorations
         if (orderItem.isMapped && orderItem.productLink?.isBundle) {
-          // D7: prefer frozen snapshot; fall back to live bundleComponents for legacy rows.
-          // Zod-validate the snapshot when present to fail-closed on DB corruption.
+          // FIX B (P0): D7 invariant — fulfill now freezes the snapshot at first
+          // fulfill (for both legacy and new items). Unfulfill MUST read from the
+          // frozen snapshot, never the live composition — otherwise a PATCH to
+          // the bundle between fulfill and unfulfill would restore stock for
+          // components that were never deducted (phantom inventory).
+          //
+          // Post-Fix-B, any item with fulfilledQty > 0 must have a snapshot. If
+          // we see snapshot=null with fulfilledQty>0, it's a data-integrity bug;
+          // refuse to restore so we don't compound the issue.
           const rawSnapshot = orderItem.bundleComponentSnapshot;
           let components: BundleComponentSnapshot[];
 
@@ -148,8 +155,20 @@ export const POST = apiHandler(async (
               quantity: c.quantity,
               sortOrder: c.sortOrder ?? 0,
             }));
+          } else if (orderItem.fulfilledQty > 0) {
+            // FIX B: snapshot=null + fulfilledQty>0 is a data integrity error
+            // (post-Fix-B, fulfill always writes the snapshot before deducting).
+            // Refuse to restore — operator must investigate.
+            skipped.push({
+              itemId: unfulfillItem.itemId,
+              reason: `Bundle item ${orderItem.id} has fulfilledQty=${orderItem.fulfilledQty} but no bundleComponentSnapshot — refusing to restore (data integrity error, please investigate)`,
+            });
+            continue;
           } else {
-            // null snapshot → fall back to live bundleComponents (Prisma-typed, no Zod needed)
+            // snapshot=null AND fulfilledQty=0 — nothing was deducted, nothing to restore.
+            // Fall back to live components purely so the downstream empty-components
+            // check fires consistently. (In practice the fulfilledQty decrement
+            // below would return 0 affected rows and skip anyway.)
             components = (orderItem.productLink.bundleComponents as Array<{
               internalProductId: number;
               quantity: number;

@@ -451,6 +451,7 @@ export async function fulfillExternalOrder(
             // Zod-validate the snapshot when present to fail-closed on DB corruption.
             const rawSnapshot = orderItem.bundleComponentSnapshot;
             let components: BundleComponentSnapshot[];
+            let snapshotSource: 'snapshot' | 'live' = 'snapshot';
 
             if (rawSnapshot !== null && rawSnapshot !== undefined) {
               const parsed = BundleComponentSnapshotArraySchema.safeParse(rawSnapshot);
@@ -471,6 +472,7 @@ export async function fulfillExternalOrder(
               }));
             } else {
               // null snapshot → fall back to live bundleComponents (Prisma-typed, no Zod needed)
+              snapshotSource = 'live';
               components = (orderItem.productLink.bundleComponents as Array<{
                 internalProductId: number;
                 quantity: number;
@@ -489,6 +491,20 @@ export async function fulfillExternalOrder(
                 error: `Bundle item ${orderItem.id} has no components in snapshot or live mapping`,
               });
               continue;
+            }
+
+            // FIX B (P0): D7 invariant — every fulfilled bundle item must have a
+            // frozen snapshot so unfulfill reads a stable composition. For legacy
+            // items where the snapshot is null and we're falling back to the live
+            // join rows, freeze the current composition NOW (before pre-flight, so
+            // it persists even on retry). Without this, a bundle's components could
+            // be PATCHed between fulfill and unfulfill — unfulfill would restore
+            // stock for components that were never deducted.
+            if (snapshotSource === 'live') {
+              await tx.externalOrderItem.update({
+                where: { id: orderItem.id },
+                data: { bundleComponentSnapshot: components as unknown as Prisma.InputJsonValue },
+              });
             }
 
             // Pre-flight stock check: verify ALL components have sufficient stock
