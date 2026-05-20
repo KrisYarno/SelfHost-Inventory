@@ -33,8 +33,10 @@ async function reconcileMappingsOnly(
       id: string;
       externalProductId: string;
       externalVariantId: string | null;
-      internalProductId: number;
+      internalProductId: number | null;
+      isBundle?: boolean;
       internalProduct?: { name?: string };
+      bundleComponents?: Array<{ internalProductId: number }>;
     }>;
   };
   const byKey = new Map<string, (typeof data.mappings)[number]>();
@@ -58,6 +60,8 @@ async function reconcileMappingsOnly(
                 linkId: hit.id,
                 internalProductId: hit.internalProductId,
                 internalProductName: hit.internalProduct?.name ?? "",
+                isBundle: hit.isBundle,
+                componentCount: hit.bundleComponents?.length,
               },
             };
           }
