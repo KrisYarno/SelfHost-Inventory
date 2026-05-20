@@ -35,6 +35,12 @@ jest.mock('@/lib/external-orders/shared', () => {
   };
 });
 
+const mockComputeBundleStockStatus = jest.fn();
+jest.mock('@/lib/stock-sync/compute-bundle-status', () => ({
+  computeBundleStockStatus: (...args: unknown[]) =>
+    mockComputeBundleStockStatus(...args),
+}));
+
 // Now import the module under test + the prisma mock
 import { syncStockToExternal } from '@/lib/external-orders/stock-sync';
 import mockPrismaDefault from '@/lib/prisma';
@@ -50,6 +56,7 @@ const mockPrisma = mockPrismaDefault as any;
 beforeEach(() => {
   mockReset(mockPrisma);
   mockGetIntegrationClient.mockReset();
+  mockComputeBundleStockStatus.mockReset();
 });
 
 /** Build a mock integration record */
@@ -125,10 +132,13 @@ describe('syncStockToExternal', () => {
     const adapter = makeAdapter({ succeeded: 2, failed: [] });
     setupClient(adapter);
 
-    mockPrisma.productLink.findMany.mockResolvedValue([
-      makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
-      makeProductLink({ externalProductId: '20', locations: [{ locationId: 1, quantity: 0 }] }),
-    ] as any);
+    // First call: single-product links (isBundle:false). Second call: bundle links (isBundle:true).
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
+        makeProductLink({ externalProductId: '20', locations: [{ locationId: 1, quantity: 0 }] }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     const result = await syncStockToExternal('int-1');
@@ -172,10 +182,12 @@ describe('syncStockToExternal', () => {
     });
     setupClient(adapter);
 
-    mockPrisma.productLink.findMany.mockResolvedValue([
-      makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
-      makeProductLink({ externalProductId: '20', locations: [{ locationId: 1, quantity: 3 }] }),
-    ] as any);
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
+        makeProductLink({ externalProductId: '20', locations: [{ locationId: 1, quantity: 3 }] }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     const result = await syncStockToExternal('int-1');
@@ -199,7 +211,10 @@ describe('syncStockToExternal', () => {
     const adapter = makeAdapter();
     setupClient(adapter);
 
-    mockPrisma.productLink.findMany.mockResolvedValue([]);
+    // Both single and bundle queries return empty
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     const result = await syncStockToExternal('int-1');
@@ -225,19 +240,21 @@ describe('syncStockToExternal', () => {
     const adapter = makeAdapter({ succeeded: 3, failed: [] });
     setupClient(adapter);
 
-    mockPrisma.productLink.findMany.mockResolvedValue([
-      makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
-      makeProductLink({
-        externalProductId: '50',
-        externalVariantId: '101',
-        locations: [{ locationId: 1, quantity: 3 }],
-      }),
-      makeProductLink({
-        externalProductId: '50',
-        externalVariantId: '102',
-        locations: [{ locationId: 1, quantity: 0 }],
-      }),
-    ] as any);
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
+        makeProductLink({
+          externalProductId: '50',
+          externalVariantId: '101',
+          locations: [{ locationId: 1, quantity: 3 }],
+        }),
+        makeProductLink({
+          externalProductId: '50',
+          externalVariantId: '102',
+          locations: [{ locationId: 1, quantity: 0 }],
+        }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     const result = await syncStockToExternal('int-1');
@@ -271,16 +288,18 @@ describe('syncStockToExternal', () => {
     const adapter = makeAdapter({ succeeded: 1, failed: [] });
     setupClient(adapter, { syncLocationId: 2 });
 
-    mockPrisma.productLink.findMany.mockResolvedValue([
-      makeProductLink({
-        externalProductId: '10',
-        locations: [
-          { locationId: 1, quantity: 100 },
-          { locationId: 2, quantity: 5 },
-          { locationId: 3, quantity: 50 },
-        ],
-      }),
-    ] as any);
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({
+          externalProductId: '10',
+          locations: [
+            { locationId: 1, quantity: 100 },
+            { locationId: 2, quantity: 5 },
+            { locationId: 3, quantity: 50 },
+          ],
+        }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     await syncStockToExternal('int-1');
@@ -299,16 +318,18 @@ describe('syncStockToExternal', () => {
     const adapter = makeAdapter({ succeeded: 1, failed: [] });
     setupClient(adapter, { syncLocationId: 2 });
 
-    mockPrisma.productLink.findMany.mockResolvedValue([
-      makeProductLink({
-        externalProductId: '10',
-        locations: [
-          { locationId: 1, quantity: 100 }, // big stock elsewhere
-          { locationId: 2, quantity: 0 },   // zero at the sync location
-          { locationId: 3, quantity: 50 },
-        ],
-      }),
-    ] as any);
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({
+          externalProductId: '10',
+          locations: [
+            { locationId: 1, quantity: 100 }, // big stock elsewhere
+            { locationId: 2, quantity: 0 },   // zero at the sync location
+            { locationId: 3, quantity: 50 },
+          ],
+        }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     await syncStockToExternal('int-1');
@@ -323,15 +344,17 @@ describe('syncStockToExternal', () => {
     const adapter = makeAdapter({ succeeded: 1, failed: [] });
     setupClient(adapter, { syncLocationId: 99 }); // non-existent location
 
-    mockPrisma.productLink.findMany.mockResolvedValue([
-      makeProductLink({
-        externalProductId: '10',
-        locations: [
-          { locationId: 1, quantity: 100 },
-          { locationId: 2, quantity: 50 },
-        ],
-      }),
-    ] as any);
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({
+          externalProductId: '10',
+          locations: [
+            { locationId: 1, quantity: 100 },
+            { locationId: 2, quantity: 50 },
+          ],
+        }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     await syncStockToExternal('int-1');
@@ -346,16 +369,18 @@ describe('syncStockToExternal', () => {
     const adapter = makeAdapter({ succeeded: 1, failed: [] });
     setupClient(adapter, { syncLocationId: null });
 
-    mockPrisma.productLink.findMany.mockResolvedValue([
-      makeProductLink({
-        externalProductId: '10',
-        locations: [
-          { locationId: 1, quantity: 10 },
-          { locationId: 2, quantity: 20 },
-          { locationId: 3, quantity: 30 },
-        ],
-      }),
-    ] as any);
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({
+          externalProductId: '10',
+          locations: [
+            { locationId: 1, quantity: 10 },
+            { locationId: 2, quantity: 20 },
+            { locationId: 3, quantity: 30 },
+          ],
+        }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     await syncStockToExternal('int-1');
@@ -372,10 +397,12 @@ describe('syncStockToExternal', () => {
     const adapter = makeAdapter({ succeeded: 2, failed: [] });
     setupClient(adapter);
 
-    mockPrisma.productLink.findMany.mockResolvedValue([
-      makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 290 }] }),
-      makeProductLink({ externalProductId: '20', locations: [{ locationId: 1, quantity: 0 }] }),
-    ] as any);
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 290 }] }),
+        makeProductLink({ externalProductId: '20', locations: [{ locationId: 1, quantity: 0 }] }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     await syncStockToExternal('int-1');
@@ -396,10 +423,12 @@ describe('syncStockToExternal', () => {
     );
     setupClient(adapter);
 
-    mockPrisma.productLink.findMany.mockResolvedValue([
-      makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
-      makeProductLink({ externalProductId: '20', locations: [{ locationId: 1, quantity: 3 }] }),
-    ] as any);
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
+        makeProductLink({ externalProductId: '20', locations: [{ locationId: 1, quantity: 3 }] }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     const result = await syncStockToExternal('int-1');
@@ -430,9 +459,11 @@ describe('syncStockToExternal', () => {
     const adapter = makeAdapter({ succeeded: 1, failed: [] });
     setupClient(adapter, { lastStockSyncError: 'previous error' });
 
-    mockPrisma.productLink.findMany.mockResolvedValue([
-      makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
-    ] as any);
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
     mockPrisma.integration.update.mockResolvedValue({} as any);
 
     const result = await syncStockToExternal('int-1');
@@ -444,5 +475,76 @@ describe('syncStockToExternal', () => {
     const updateCall = mockPrisma.integration.update.mock.calls[0][0];
     expect(updateCall.data).toHaveProperty('lastStockSyncError', null);
     expect(updateCall.data).toHaveProperty('lastStockSyncAt');
+  });
+
+  // 12. Bundle statuses are included in the push updates alongside single-product links
+  it('includes bundle statuses in the push updates', async () => {
+    const adapter = makeAdapter({ succeeded: 2, failed: [] });
+    setupClient(adapter);
+
+    // Single-product link
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeProductLink({ externalProductId: '10', locations: [{ locationId: 1, quantity: 5 }] }),
+      ] as any)
+      // Bundle link
+      .mockResolvedValueOnce([
+        { id: 'bl-1', externalProductId: '99', externalVariantId: null, isBundle: true },
+      ] as any);
+
+    mockComputeBundleStockStatus.mockResolvedValue({ status: 'outofstock' });
+    mockPrisma.integration.update.mockResolvedValue({} as any);
+
+    const result = await syncStockToExternal('int-1');
+
+    expect(result.synced).toBe(2);
+
+    // Adapter should receive both the single-product update AND the bundle update
+    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    expect(updates).toHaveLength(2);
+
+    const singleUpdate = updates.find((u: any) => u.productId === '10');
+    expect(singleUpdate?.stockStatus).toBe('instock');
+
+    const bundleUpdate = updates.find((u: any) => u.productId === '99');
+    expect(bundleUpdate?.stockStatus).toBe('outofstock');
+
+    // computeBundleStockStatus was called with the correct productLinkId and syncLocationId
+    expect(mockComputeBundleStockStatus).toHaveBeenCalledWith('bl-1', null);
+  });
+
+  // 13. Bundle orphan warnings are logged but do not block the push
+  it('logs orphan warnings for bundles with deleted components but still pushes', async () => {
+    const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    setupClient(adapter);
+
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([] as any)
+      .mockResolvedValueOnce([
+        { id: 'bl-orphan', externalProductId: '200', externalVariantId: null, isBundle: true },
+      ] as any);
+
+    mockComputeBundleStockStatus.mockResolvedValue({
+      status: 'outofstock',
+      warning: { kind: 'orphan-component', internalProductId: 42 },
+    });
+    mockPrisma.integration.update.mockResolvedValue({} as any);
+
+    await syncStockToExternal('int-1');
+
+    // Bundle is still pushed as outofstock
+    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    expect(updates).toHaveLength(1);
+    expect(updates[0].productId).toBe('200');
+    expect(updates[0].stockStatus).toBe('outofstock');
+
+    // Orphan warning is emitted to console
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('orphan'),
+      expect.any(String)
+    );
+
+    consoleSpy.mockRestore();
   });
 });

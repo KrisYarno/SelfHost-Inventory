@@ -1,5 +1,6 @@
 import prisma from "@/lib/prisma";
 import { getIntegrationClient } from "@/lib/external-orders/shared";
+import { computeBundleStockStatus } from "@/lib/stock-sync/compute-bundle-status";
 import type { PlatformType } from "@/lib/platforms/core/types";
 
 // ---------------------------------------------------------------------------
@@ -46,19 +47,26 @@ export async function syncStockToExternal(
     };
   }
 
-  // 3. Single query: all ProductLinks with internal product + product_locations (Amendment 3)
-  const productLinks = await prisma.productLink.findMany({
-    where: { integrationId },
-    include: {
-      internalProduct: {
-        include: {
-          product_locations: true,
+  // 3. Fetch single-product links and bundle links in parallel.
+  //    Single links: include product_locations for stock computation.
+  //    Bundle links: no internalProduct needed — status comes from components.
+  const [productLinks, bundleLinks] = await Promise.all([
+    prisma.productLink.findMany({
+      where: { integrationId, isBundle: false },
+      include: {
+        internalProduct: {
+          include: {
+            product_locations: true,
+          },
         },
       },
-    },
-  });
+    }),
+    prisma.productLink.findMany({
+      where: { integrationId, isBundle: true },
+    }),
+  ]);
 
-  if (productLinks.length === 0) {
+  if (productLinks.length === 0 && bundleLinks.length === 0) {
     // Nothing to sync — update timestamp and return
     await prisma.integration.update({
       where: { id: integrationId },
@@ -71,7 +79,7 @@ export async function syncStockToExternal(
     return { integrationId, platform, synced: 0, failed: 0, errors: [] };
   }
 
-  // 4. Compute stock per ProductLink
+  // 4. Compute stock per single-product ProductLink
   //    Amendment 8: if syncLocationId is set, only count stock from that location.
   //    Amendment 11: map to stock_status string (instock / outofstock).
   const updates: Array<{
@@ -96,6 +104,30 @@ export async function syncStockToExternal(
       variantId: link.externalVariantId ?? undefined,
       stockStatus: totalStock > 0 ? 'instock' : 'outofstock',
     });
+  }
+
+  const bundleHealthWarnings: Array<{
+    productLinkId: string;
+    warning: { kind: string; internalProductId: number };
+  }> = [];
+
+  for (const bl of bundleLinks) {
+    const result = await computeBundleStockStatus(bl.id, integration.syncLocationId ?? null);
+    updates.push({
+      productId: bl.externalProductId,
+      variantId: bl.externalVariantId ?? undefined,
+      stockStatus: result.status,
+    });
+    if (result.warning) {
+      bundleHealthWarnings.push({ productLinkId: bl.id, warning: result.warning });
+    }
+  }
+
+  if (bundleHealthWarnings.length > 0) {
+    console.warn(
+      `[stock-sync] ${bundleHealthWarnings.length} bundle(s) have orphan components:`,
+      JSON.stringify(bundleHealthWarnings)
+    );
   }
 
   // 5. Call adapter.batchUpdateProductStock (handles simple/variant split per Amendment 6)
