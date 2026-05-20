@@ -18,6 +18,7 @@ import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { PlatformBadge } from "@/components/orders/platform-badge";
 import { FulfillOrderDialog } from "@/components/orders/fulfill-order-dialog";
+import { BundleLineItemRow } from "@/components/orders/bundle-line-item-row";
 import { ProductMapDialog } from "@/components/products/product-map-dialog";
 import { cn } from "@/lib/utils";
 import type { ExternalOrder } from "@/types/external-orders";
@@ -210,6 +211,26 @@ export function ExternalOrderDetailsSheet({
                   {order.items?.map((item) => {
                     const remainingQty = item.quantity - item.fulfilledQty;
                     const isFullyFulfilled = remainingQty <= 0;
+
+                    // Bundle items: render the expandable BundleLineItemRow instead of the
+                    // standard single-product row.
+                    if (item.productLink?.isBundle && item.bundleComponentSnapshot?.length) {
+                      return (
+                        <BundleLineItemRow
+                          key={item.id}
+                          itemName={item.name}
+                          externalSku={item.sku}
+                          quantity={item.quantity}
+                          price={item.price}
+                          snapshot={item.bundleComponentSnapshot as Array<{
+                            internalProductId: number;
+                            internalProductName: string;
+                            quantity: number;
+                            sortOrder: number;
+                          }>}
+                        />
+                      );
+                    }
 
                     return (
                       <div

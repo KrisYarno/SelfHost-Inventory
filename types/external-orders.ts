@@ -22,12 +22,21 @@ export interface ExternalOrderItem {
   price: number;
   productLinkId: string | null;
   isMapped: boolean;
+  /** Populated when the item is a bundle (productLink.isBundle === true). */
+  bundleComponentSnapshot?: Array<{
+    internalProductId: number;
+    internalProductName: string;
+    quantity: number;
+    sortOrder: number;
+  }> | null;
   // Populated relations
   productLink?: {
     id: string;
     internalProductId: number;
     externalSku: string | null;
     externalTitle: string | null;
+    /** True when this link maps to a bundle product. */
+    isBundle?: boolean;
     internalProduct?: {
       id: number;
       name: string;
