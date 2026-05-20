@@ -195,5 +195,113 @@ export function useRowActions() {
     [csrfToken, patchRow, queryClient, undo],
   );
 
-  return { confirm, undo };
+  const confirmBundle = useCallback(
+    async ({
+      integrationId,
+      row,
+      components,
+    }: {
+      integrationId: string;
+      row: CatalogRow;
+      components: Array<{ internalProductId: number; quantity: number }>;
+    }) => {
+      if (!csrfToken) throw new Error("Missing CSRF token");
+
+      patchRow(integrationId, row, {
+        alreadyMapped: true,
+        existingMapping: {
+          linkId: "__pending__",
+          internalProductId: null,
+          internalProductName: "",
+          isBundle: true,
+          componentCount: components.length,
+        },
+      });
+
+      const res = await fetch(`/api/products/bundle-links`, {
+        method: "POST",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+        body: JSON.stringify({
+          integrationId,
+          externalProductId: row.externalProductId,
+          externalVariantId: row.externalVariantId ?? undefined,
+          externalSku: row.sku ?? undefined,
+          externalTitle: row.variantTitle
+            ? `${row.parentTitle} — ${row.variantTitle}`
+            : row.parentTitle,
+          components,
+        }),
+      });
+
+      if (!res.ok) {
+        patchRow(integrationId, row, { alreadyMapped: false, existingMapping: undefined });
+        const body = await res.json().catch(() => ({}));
+        const msg = body.error || `Save failed (${res.status})`;
+        if (res.status === 409) {
+          await reconcileMappingsOnly(queryClient, integrationId);
+          throw new Error(
+            "This external product is already mapped by another session — list refreshed.",
+          );
+        }
+        throw new Error(msg);
+      }
+
+      const link = await res.json();
+      patchRow(integrationId, row, {
+        alreadyMapped: true,
+        existingMapping: {
+          linkId: link.id,
+          internalProductId: null,
+          internalProductName: "",
+          isBundle: true,
+          componentCount: components.length,
+        },
+      });
+
+      toast.success(
+        `Mapped ${row.parentTitle} as a bundle (${components.length} components)`,
+        {
+          action: {
+            label: "Undo",
+            onClick: () => {
+              void undo({ integrationId, row, linkId: link.id });
+            },
+          },
+          duration: 5000,
+        },
+      );
+
+      return link.id as string;
+    },
+    [csrfToken, patchRow, queryClient, undo],
+  );
+
+  const editBundle = useCallback(
+    async ({
+      linkId,
+      components,
+    }: {
+      linkId: string;
+      components: Array<{ internalProductId: number; quantity: number }>;
+    }) => {
+      if (!csrfToken) throw new Error("Missing CSRF token");
+
+      const res = await fetch(`/api/products/bundle-links/${linkId}`, {
+        method: "PATCH",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+        body: JSON.stringify({ components }),
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Update failed (${res.status})`);
+      }
+
+      toast.success(`Bundle updated (${components.length} components)`);
+      return res.json();
+    },
+    [csrfToken],
+  );
+
+  return { confirm, undo, confirmBundle, editBundle };
 }
