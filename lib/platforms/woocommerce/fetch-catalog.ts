@@ -1,4 +1,6 @@
 import type { CatalogRow, CatalogWarning } from '@/types/bulk-map';
+import { isBundleType } from './bundle-detection';
+import { parseWoosbIds } from './parse-woosb-ids';
 
 const PER_PAGE = 100;
 const CONCURRENCY = 10;
@@ -10,6 +12,7 @@ interface RawProduct {
   name: string;
   sku: string | null;
   type: 'simple' | 'variable' | string;
+  meta_data?: Array<{ key: string; value: string | unknown }>;
 }
 
 interface RawVariation {
@@ -143,6 +146,21 @@ export async function fetchWooCatalog(
     if (p.type === 'variable') {
       variableProducts.push(p);
     } else {
+      const isBundle = isBundleType(p.type);
+      let wcBundledItems: CatalogRow['wcBundledItems'] | undefined;
+      if (isBundle && p.meta_data) {
+        const woosbMeta = p.meta_data.find((m) => m.key === '_woosb_ids');
+        if (woosbMeta && typeof woosbMeta.value === 'string') {
+          const parsed = parseWoosbIds(woosbMeta.value);
+          if (parsed.length > 0) {
+            wcBundledItems = parsed.map((item) => ({
+              productId: item.productId,
+              variantId: item.variantId,
+              defaultQuantity: item.quantity,
+            }));
+          }
+        }
+      }
       simpleRows.push({
         externalProductId: String(p.id),
         externalVariantId: null,
@@ -152,6 +170,8 @@ export async function fetchWooCatalog(
         type: 'simple',
         attributes: [],
         alreadyMapped: false,
+        ...(isBundle && { isBundleCandidate: true }),
+        ...(wcBundledItems && { wcBundledItems }),
       });
     }
   }

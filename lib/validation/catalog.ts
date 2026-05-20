@@ -8,24 +8,31 @@ export const CatalogRowSchema = z
     variantTitle: z.string().nullable(),
     sku: z.string().nullable(),
     type: z.enum(['simple', 'variation']),
-    attributes: z.array(
-      z.object({ name: z.string(), option: z.string() }),
-    ),
+    attributes: z.array(z.object({ name: z.string(), option: z.string() })),
     alreadyMapped: z.boolean(),
     existingMapping: z
       .object({
         linkId: z.string(),
-        internalProductId: z.number().int(),
+        internalProductId: z.number().int().nullable(),
         internalProductName: z.string(),
+        isBundle: z.boolean().optional(),
+        componentCount: z.number().int().optional(),
       })
+      .optional(),
+    isBundleCandidate: z.boolean().optional(),
+    wcBundledItems: z
+      .array(
+        z.object({
+          productId: z.string(),
+          variantId: z.string().nullable(),
+          defaultQuantity: z.number().int().positive(),
+        }),
+      )
       .optional(),
   })
   .refine(
     (r) => r.type === 'simple' || r.externalVariantId !== null,
-    {
-      message: 'variation rows require externalVariantId',
-      path: ['externalVariantId'],
-    },
+    { message: 'variation rows require externalVariantId', path: ['externalVariantId'] },
   );
 
 export const CatalogWarningSchema = z.discriminatedUnion('kind', [

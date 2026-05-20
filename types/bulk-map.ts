@@ -9,9 +9,17 @@ export interface CatalogRow {
   alreadyMapped: boolean;
   existingMapping?: {
     linkId: string;
-    internalProductId: number;
+    internalProductId: number | null;
     internalProductName: string;
+    isBundle?: boolean;
+    componentCount?: number;
   };
+  isBundleCandidate?: boolean;
+  wcBundledItems?: Array<{
+    productId: string;
+    variantId: string | null;
+    defaultQuantity: number;
+  }>;
 }
 
 export type CatalogWarning =
@@ -82,4 +90,11 @@ export interface Suggestion {
 
 export function rowKey(row: Pick<CatalogRow, 'externalProductId' | 'externalVariantId'>): string {
   return `${row.externalProductId}::${row.externalVariantId ?? ''}`;
+}
+
+export interface BundleComponentSnapshot {
+  internalProductId: number;
+  internalProductName: string;
+  quantity: number;
+  sortOrder: number;
 }

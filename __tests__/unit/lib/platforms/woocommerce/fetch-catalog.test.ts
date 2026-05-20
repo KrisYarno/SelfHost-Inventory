@@ -132,4 +132,47 @@ describe('fetchWooCatalog', () => {
     const timeoutWarnings = out.warnings.filter((w) => w.kind === 'timeout-skipped');
     expect(timeoutWarnings.length).toBeGreaterThan(0);
   });
+
+  it('flags WPC bundles as isBundleCandidate + parses wcBundledItems', async () => {
+    mockResponseQueue([
+      {
+        status: 200,
+        body: [
+          {
+            id: 100,
+            name: 'Recovery Bundle',
+            sku: 'REC-BUNDLE',
+            type: 'woosb',
+            meta_data: [
+              { key: '_woosb_ids', value: '10/1,20/1,30/2' },
+              { key: 'other_meta', value: 'ignored' },
+            ],
+          },
+        ],
+      },
+      { status: 200, body: [] },
+    ]);
+    const out = await fetchWooCatalog(STORE, KEY, SECRET);
+    expect(out.rows).toHaveLength(1);
+    const row = out.rows[0];
+    expect(row.isBundleCandidate).toBe(true);
+    expect(row.wcBundledItems).toEqual([
+      { productId: '10', variantId: null, defaultQuantity: 1 },
+      { productId: '20', variantId: null, defaultQuantity: 1 },
+      { productId: '30', variantId: null, defaultQuantity: 2 },
+    ]);
+  });
+
+  it('does not populate wcBundledItems when _woosb_ids is missing (D8)', async () => {
+    mockResponseQueue([
+      {
+        status: 200,
+        body: [{ id: 100, name: 'Bundle Without Meta', sku: null, type: 'woosb', meta_data: [] }],
+      },
+      { status: 200, body: [] },
+    ]);
+    const out = await fetchWooCatalog(STORE, KEY, SECRET);
+    expect(out.rows[0].isBundleCandidate).toBe(true);
+    expect(out.rows[0].wcBundledItems).toBeUndefined();
+  });
 });
