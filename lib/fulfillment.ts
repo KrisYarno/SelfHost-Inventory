@@ -29,6 +29,12 @@ export interface FulfillmentResult {
     productName: string;
     quantity: number;
     inventoryLogId: number;
+    /** P0 #6: For bundle items, the component productIds deducted for THIS item.
+     * Routes use this to expose a clean public shape without leaking the
+     * BUNDLE_SENTINEL_PRODUCT_ID (-1) into client responses. */
+    componentIds?: number[];
+    /** True when this entry represents a bundle (productId is the sentinel). */
+    isBundle?: boolean;
   }>;
   skipped: Array<{
     itemId: string;
@@ -625,12 +631,17 @@ export async function fulfillExternalOrder(
               data: { fulfilledQty: { increment: quantityToFulfill } },
             });
 
+            // Per-item component IDs for clean public response (Fix C P0 #6)
+            const itemComponentIds = components.map((c) => c.internalProductId);
+
             result.fulfilled.push({
               itemId: fulfillmentItem.itemId,
               productId: BUNDLE_SENTINEL_PRODUCT_ID,
               productName: orderItem.name,
               quantity: quantityToFulfill,
               inventoryLogId: BUNDLE_SENTINEL_INVENTORY_LOG_ID,
+              isBundle: true,
+              componentIds: itemComponentIds,
             });
 
             // P0-3: Accumulate component IDs so the route can push bundle WC stock

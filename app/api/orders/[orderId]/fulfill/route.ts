@@ -82,11 +82,22 @@ export const POST = apiHandler(async (
           fulfilled: result.fulfilled.length,
           skipped: result.skipped.length,
           failed: result.failed.length,
-          items: result.fulfilled.map((f) => ({
-            productId: f.productId,
-            productName: f.productName,
-            quantity: f.quantity,
-          })),
+          // FIX C: never expose the bundle sentinel productId in audit details.
+          items: result.fulfilled.map((f) => {
+            if (f.productId === BUNDLE_SENTINEL_PRODUCT_ID) {
+              return {
+                productName: f.productName,
+                quantity: f.quantity,
+                isBundle: true,
+                componentIds: f.componentIds ?? [],
+              };
+            }
+            return {
+              productId: f.productId,
+              productName: f.productName,
+              quantity: f.quantity,
+            };
+          }),
           notes: body.notes,
         },
         affectedCount: result.fulfilled.length,
@@ -169,15 +180,38 @@ export const POST = apiHandler(async (
     }
   }
 
+  // FIX C (P0 #6): Hide internal sentinels from public API. Bundle entries
+  // have productId=-1 and inventoryLogId=-1 internally; transform them into
+  // a clean shape with {isBundle, componentIds} so clients don't mistake the
+  // sentinel for a real productId. Single-product entries pass through.
+  const publicFulfilled = result.fulfilled.map((f) => {
+    if (f.productId === BUNDLE_SENTINEL_PRODUCT_ID) {
+      const { productId: _pid, inventoryLogId: _lid, ...rest } = f;
+      void _pid;
+      void _lid;
+      return {
+        ...rest,
+        isBundle: true,
+        componentIds: f.componentIds ?? [],
+      };
+    }
+    return f;
+  });
+
+  // Inventory logs list excludes bundle sentinel rows for consistency.
+  const publicInventoryLogs = result.inventoryLogIds.filter(
+    (id) => id !== BUNDLE_SENTINEL_PRODUCT_ID
+  );
+
   const response = NextResponse.json({
     success: true,
     fulfillmentStatus,
     results: {
-      fulfilled: result.fulfilled,
+      fulfilled: publicFulfilled,
       skipped: result.skipped,
       failed: result.failed,
     },
-    inventoryLogs: result.inventoryLogIds,
+    inventoryLogs: publicInventoryLogs,
     summary: {
       total: totalItems,
       fulfilled: result.fulfilled.length,

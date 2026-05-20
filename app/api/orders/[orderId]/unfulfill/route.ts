@@ -56,6 +56,9 @@ export const POST = apiHandler(async (
     quantity: number;
     locationId: number;
     inventoryLogId: number;
+    /** P0 #6: For bundle items, the per-item component productIds restored. */
+    componentIds?: number[];
+    isBundle?: boolean;
   }> = [];
 
   const skipped: Array<{
@@ -252,12 +255,17 @@ export const POST = apiHandler(async (
             }
           }
 
+          // Per-item component IDs for clean public response (Fix C P0 #6)
+          const itemComponentIds = components.map((c) => c.internalProductId);
+
           restored.push({
             itemId: unfulfillItem.itemId,
             productId: BUNDLE_SENTINEL_PRODUCT_ID,
             quantity: unfulfillItem.quantity,
             locationId: unfulfillItem.locationId,
             inventoryLogId: BUNDLE_SENTINEL_INVENTORY_LOG_ID,
+            isBundle: true,
+            componentIds: itemComponentIds,
           });
 
           // P0-3: Accumulate component IDs so the route can push bundle WC stock
@@ -405,6 +413,23 @@ export const POST = apiHandler(async (
     }
   );
 
+  // FIX C (P0 #6): Sanitize restored entries — bundle items carry the
+  // BUNDLE_SENTINEL_PRODUCT_ID (-1) internally; replace with {isBundle,
+  // componentIds} so audit logs and API consumers never see the sentinel.
+  const publicRestored = restored.map((r) => {
+    if (r.productId === BUNDLE_SENTINEL_PRODUCT_ID) {
+      const { productId: _pid, inventoryLogId: _lid, ...rest } = r;
+      void _pid;
+      void _lid;
+      return {
+        ...rest,
+        isBundle: true,
+        componentIds: r.componentIds ?? [],
+      };
+    }
+    return r;
+  });
+
   // Audit log (outside transaction)
   try {
     if (restored.length > 0) {
@@ -415,7 +440,7 @@ export const POST = apiHandler(async (
         action: `Unfulfilled external order ${params.orderId}`,
         details: {
           orderId: params.orderId,
-          items: restored,
+          items: publicRestored,
           skipped,
           notes: body.notes,
         },
@@ -487,7 +512,7 @@ export const POST = apiHandler(async (
 
   const response = NextResponse.json({
     success: true,
-    restored,
+    restored: publicRestored,
     skipped,
     newOrderStatus,
   });

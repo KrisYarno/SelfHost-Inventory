@@ -672,6 +672,19 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     expect(data.restored).toHaveLength(1)
     expect(data.skipped).toHaveLength(0)
 
+    // FIX C (P0 #6): Public API response must NOT leak the bundle sentinel.
+    // Bundle entries get {isBundle: true, componentIds: [...]} — productId
+    // and inventoryLogId are omitted (they are sentinel -1 values).
+    const entry = data.restored[0]
+    expect(entry.isBundle).toBe(true)
+    expect(entry.componentIds).toEqual([10, 20])
+    expect(entry.productId).toBeUndefined()
+    expect(entry.inventoryLogId).toBeUndefined()
+    // Per-item fields are preserved
+    expect(entry.itemId).toBe('item-1')
+    expect(entry.quantity).toBe(1)
+    expect(entry.locationId).toBe(1)
+
     // createInventoryLog should have been called once per component
     const { createInventoryLog: mockLog } = require('@/lib/inventory')
     expect(mockLog).toHaveBeenCalledTimes(2)

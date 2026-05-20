@@ -140,13 +140,44 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     tx.externalOrder.findUnique.mockResolvedValue(order);
     setupSuccessfulMocks(1);
 
-    await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
+    const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
 
     // 3 components, each gets a $executeRaw deduction + legacy mirror at locationId=1
     // 3 product_locations + 3 products.quantity mirror = 6 total
     expect(tx.$executeRaw).toHaveBeenCalledTimes(6);
     // createInventoryLog called once per component
     expect(createInventoryLog).toHaveBeenCalledTimes(3);
+
+    // Bundle result has affectedComponentIds populated with all 3 deducted products
+    expect(result.affectedComponentIds).toEqual(expect.arrayContaining([1, 2, 3]));
+    // No negative IDs leak into affectedComponentIds
+    expect(result.affectedComponentIds!.every((id) => id > 0)).toBe(true);
+
+    // Fix C: fulfilled entry carries per-item componentIds for clean route response
+    expect(result.fulfilled).toHaveLength(1);
+    expect(result.fulfilled[0].isBundle).toBe(true);
+    expect(result.fulfilled[0].componentIds).toEqual([1, 2, 3]);
+  });
+
+  // FIX C (P0 #6): empty-components bundle should land in failed, not skipped.
+  it('puts empty-components bundle in result.failed (not skipped)', async () => {
+    const tx = getTx();
+    // snapshot=null AND liveComponents=[] → no components at all
+    const order = buildBundleOrder({
+      snapshot: null,
+      liveComponents: [],
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+    setupSuccessfulMocks(1);
+
+    const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
+
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].itemId).toBe('oi1');
+    expect(result.failed[0].error).toMatch(/no components/i);
+    expect(result.skipped).toHaveLength(0);
+    expect(result.fulfilled).toHaveLength(0);
   });
 
   it('multiplies component deductions by order item quantity', async () => {
