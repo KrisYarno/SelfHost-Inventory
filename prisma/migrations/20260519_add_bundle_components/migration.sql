@@ -3,8 +3,19 @@
 -- The isBundle/internalProductId invariant is enforced at the application layer instead.
 -- Note: Some statements are wrapped in procedures to handle partial-apply idempotency.
 
+-- ALGORITHM=INSTANT: MySQL 8.0.28+ supports metadata-only NOT NULL removal (no table
+-- rebuild, no exclusive lock for the duration). If the deploy target doesn't support
+-- INSTANT for this op, the statement fails fast rather than silently choosing COPY
+-- and taking a long lock — the desired behavior.
 ALTER TABLE `product_links`
-  MODIFY COLUMN `internalProductId` INT NULL;
+  MODIFY COLUMN `internalProductId` INT NULL, ALGORITHM=INSTANT;
+
+-- DROP IF EXISTS before CREATE: MySQL DDL is non-transactional. If this migration fails
+-- mid-flight between CREATE PROCEDURE and DROP PROCEDURE, a retry would otherwise hit
+-- ERROR 1304 "PROCEDURE already exists" and the migration would be permanently stuck.
+-- This pattern is universally supported across MySQL versions (CREATE OR REPLACE
+-- PROCEDURE requires 8.0.13+, but explicit drop+create works everywhere).
+DROP PROCEDURE IF EXISTS _add_bundle_cols;
 
 CREATE PROCEDURE _add_bundle_cols()
 BEGIN
@@ -25,7 +36,7 @@ END;
 
 CALL _add_bundle_cols();
 
-DROP PROCEDURE _add_bundle_cols;
+DROP PROCEDURE IF EXISTS _add_bundle_cols;
 
 CREATE TABLE IF NOT EXISTS `bundle_components` (
   `id` VARCHAR(191) NOT NULL,
