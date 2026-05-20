@@ -44,6 +44,16 @@ export interface FulfillmentResult {
 }
 
 /**
+ * Per-component shortage detail for a bundle item.
+ */
+export interface BundleShortage {
+  internalProductId: number;
+  name: string;
+  required: number;
+  available: number;
+}
+
+/**
  * Validation Result Interface for pre-fulfillment checks
  */
 export interface FulfillmentValidationResult {
@@ -69,6 +79,8 @@ export interface FulfillmentValidationResult {
       }>;
     };
     issues: string[];
+    /** Populated for bundle items when one or more components have insufficient stock. */
+    bundleShortages?: BundleShortage[];
   }>;
   suggestedLocationId?: number;
 }
@@ -80,7 +92,7 @@ export async function validateOrderFulfillment(
   orderId: string,
   locationId?: number
 ): Promise<FulfillmentValidationResult> {
-  // Get order with items and product mappings
+  // Get order with items and product mappings (including bundle data for shortage detection)
   const order = await prisma.externalOrder.findUnique({
     where: { id: orderId },
     include: {
@@ -89,6 +101,14 @@ export async function validateOrderFulfillment(
           productLink: {
             include: {
               internalProduct: true,
+              bundleComponents: {
+                orderBy: { sortOrder: 'asc' },
+                include: {
+                  internalProduct: {
+                    select: { id: true, name: true },
+                  },
+                },
+              },
             },
           },
         },
@@ -111,7 +131,65 @@ export async function validateOrderFulfillment(
 
     let mapping: FulfillmentValidationResult['items'][0]['mapping'] | undefined;
 
-    if (item.isMapped && item.productLink?.internalProduct) {
+    let bundleShortages: BundleShortage[] | undefined;
+
+    if (item.isMapped && item.productLink?.isBundle) {
+      // --- Bundle path: check each component for stock ---
+      type SnapshotComponent = {
+        internalProductId: number;
+        quantity: number;
+        internalProductName?: string;
+      };
+
+      const snapshot = (item as any).bundleComponentSnapshot as SnapshotComponent[] | null;
+      const components: SnapshotComponent[] =
+        snapshot ??
+        ((item.productLink as any).bundleComponents?.map((c: any) => ({
+          internalProductId: c.internalProductId,
+          quantity: c.quantity,
+          internalProductName: c.internalProduct?.name,
+        })) ?? []);
+
+      const shortages: BundleShortage[] = [];
+
+      for (const c of components) {
+        const required = c.quantity * remainingQty;
+        if (locationId) {
+          const loc = await prisma.product_locations.findFirst({
+            where: { productId: c.internalProductId, locationId },
+          });
+          const available = loc?.quantity ?? 0;
+          if (available < required) {
+            shortages.push({
+              internalProductId: c.internalProductId,
+              name: c.internalProductName ?? `Product ${c.internalProductId}`,
+              required,
+              available,
+            });
+          }
+        } else {
+          // No location specified: check total stock across all locations
+          const allLocs = await prisma.product_locations.findMany({
+            where: { productId: c.internalProductId },
+          });
+          const totalAvailable = allLocs.reduce((sum: number, l: { quantity: number }) => sum + l.quantity, 0);
+          if (totalAvailable < required) {
+            shortages.push({
+              internalProductId: c.internalProductId,
+              name: c.internalProductName ?? `Product ${c.internalProductId}`,
+              required,
+              available: totalAvailable,
+            });
+          }
+        }
+      }
+
+      if (shortages.length > 0) {
+        issues.push('insufficient_stock');
+        bundleShortages = shortages;
+        hasStockIssues = true;
+      }
+    } else if (item.isMapped && item.productLink?.internalProduct) {
       const product = item.productLink.internalProduct;
 
       // Get availability across all locations
@@ -180,6 +258,7 @@ export async function validateOrderFulfillment(
       isMapped: item.isMapped,
       mapping,
       issues,
+      bundleShortages,
     });
   }
 
