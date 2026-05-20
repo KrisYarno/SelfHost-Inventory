@@ -176,3 +176,96 @@ describe('POST /api/products/bundle-links', () => {
     expect(updateCall.data.bundleComponentSnapshot).toBeDefined();
   });
 });
+
+import { PATCH } from '@/app/api/products/bundle-links/[linkId]/route';
+
+describe('PATCH /api/products/bundle-links/[linkId]', () => {
+  beforeEach(() => {
+    jest.resetAllMocks();
+    (require('@/lib/csrf').validateCSRFToken as jest.Mock).mockResolvedValue(true);
+    (require('@/lib/rateLimit').applyRateLimitHeaders as jest.Mock).mockImplementation((r: any) => r);
+    (prisma as any).$transaction = jest.fn(async (fn: any) => fn(tx));
+  });
+
+  function mkPatchReq(body: any) {
+    return new NextRequest('http://t/api/products/bundle-links/bl1', {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/json', 'x-csrf-token': 'x' },
+    });
+  }
+
+  it('replaces components atomically', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
+    (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
+    (tx.productLink.findUnique as jest.Mock).mockResolvedValue({
+      id: 'bl1', isBundle: true, integrationId: 'int1',
+      integration: { companyId: 'co' },
+    });
+    (tx.bundleComponent.deleteMany as jest.Mock).mockResolvedValue({ count: 2 });
+    (tx.bundleComponent.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (tx.product.findMany as jest.Mock).mockResolvedValue([
+      { id: 3, name: 'New Component', deletedAt: null },
+    ]);
+
+    const resp = await PATCH(
+      mkPatchReq({ components: [{ internalProductId: 3, quantity: 1 }] }),
+      { params: { linkId: 'bl1' } },
+    );
+
+    expect(resp.status).toBe(200);
+    expect(tx.bundleComponent.deleteMany).toHaveBeenCalledWith({
+      where: { productLinkId: 'bl1' },
+    });
+    expect(tx.bundleComponent.createMany).toHaveBeenCalled();
+  });
+
+  it('rejects with 400 when link is not a bundle', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
+    (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
+    (tx.productLink.findUnique as jest.Mock).mockResolvedValue({
+      id: 'bl1', isBundle: false, integration: { companyId: 'co' },
+    });
+
+    const resp = await PATCH(
+      mkPatchReq({ components: [{ internalProductId: 3, quantity: 1 }] }),
+      { params: { linkId: 'bl1' } },
+    );
+
+    expect(resp.status).toBe(400);
+  });
+
+  it('returns 404 when link does not exist', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
+    (tx.productLink.findUnique as jest.Mock).mockResolvedValue(null);
+
+    const resp = await PATCH(
+      mkPatchReq({ components: [{ internalProductId: 3, quantity: 1 }] }),
+      { params: { linkId: 'missing' } },
+    );
+
+    expect(resp.status).toBe(404);
+  });
+
+  it('PATCH does NOT touch existing ExternalOrderItem.bundleComponentSnapshot (D7)', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
+    (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
+    (tx.productLink.findUnique as jest.Mock).mockResolvedValue({
+      id: 'bl1', isBundle: true, integration: { companyId: 'co' },
+    });
+    (tx.bundleComponent.deleteMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (tx.bundleComponent.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (tx.product.findMany as jest.Mock).mockResolvedValue([
+      { id: 5, name: 'X', deletedAt: null },
+    ]);
+    (tx.externalOrderItem.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+
+    await PATCH(
+      mkPatchReq({ components: [{ internalProductId: 5, quantity: 1 }] }),
+      { params: { linkId: 'bl1' } },
+    );
+
+    // PATCH must NOT call externalOrderItem.updateMany — only POST does on create
+    expect(tx.externalOrderItem.updateMany).not.toHaveBeenCalled();
+  });
+});
