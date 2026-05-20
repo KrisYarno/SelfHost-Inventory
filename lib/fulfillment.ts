@@ -252,6 +252,9 @@ export async function fulfillExternalOrder(
               productLink: {
                 include: {
                   internalProduct: true,
+                  bundleComponents: {
+                    orderBy: { sortOrder: 'asc' },
+                  },
                 },
               },
             },
@@ -301,6 +304,103 @@ export async function fulfillExternalOrder(
             remainingQty
           );
 
+          // Bundle path: isBundle=true → expand into per-component deductions (D7)
+          if (orderItem.isMapped && orderItem.productLink?.isBundle) {
+            type SnapshotComponent = {
+              internalProductId: number;
+              quantity: number;
+              internalProductName?: string;
+            };
+
+            // D7: prefer frozen snapshot; fall back to live bundleComponents for legacy rows
+            const snapshot = orderItem.bundleComponentSnapshot as
+              | SnapshotComponent[]
+              | null;
+            const components: SnapshotComponent[] =
+              snapshot ?? (orderItem.productLink.bundleComponents as SnapshotComponent[]);
+
+            if (!components || components.length === 0) {
+              result.failed.push({
+                itemId: fulfillmentItem.itemId,
+                error: `Bundle item ${orderItem.id} has no components in snapshot or live mapping`,
+              });
+              continue;
+            }
+
+            // Deduct each component inside the same transaction (all-or-nothing)
+            let anyComponentFailed = false;
+            for (const component of components) {
+              const deductQty = component.quantity * quantityToFulfill;
+
+              const affectedRows = await tx.$executeRaw(Prisma.sql`
+                UPDATE product_locations
+                SET quantity = quantity - ${deductQty},
+                    version = version + 1,
+                    updatedAt = NOW()
+                WHERE productId = ${component.internalProductId}
+                  AND locationId = ${locationId}
+                  AND quantity >= ${deductQty}
+              `);
+
+              if (affectedRows === 0) {
+                const currentRow = await tx.product_locations.findUnique({
+                  where: {
+                    productId_locationId: {
+                      productId: component.internalProductId,
+                      locationId,
+                    },
+                  },
+                  select: { quantity: true },
+                });
+                result.skipped.push({
+                  itemId: fulfillmentItem.itemId,
+                  reason: 'insufficient_stock',
+                  details: `Insufficient stock for bundle component (productId: ${component.internalProductId}). Available: ${currentRow?.quantity ?? 0}, Requested: ${deductQty}`,
+                });
+                anyComponentFailed = true;
+                break;
+              }
+
+              await createInventoryLog(
+                {
+                  userId,
+                  productId: component.internalProductId,
+                  locationId,
+                  delta: -deductQty,
+                  logType: inventory_logs_logType.ADJUSTMENT,
+                },
+                tx
+              );
+
+              // Legacy products.quantity mirror for location 1
+              if (locationId === 1) {
+                await tx.$executeRaw(Prisma.sql`
+                  UPDATE products
+                  SET quantity = quantity - ${deductQty}
+                  WHERE id = ${component.internalProductId}
+                `);
+              }
+            }
+
+            if (anyComponentFailed) continue;
+
+            // Update ExternalOrderItem.fulfilledQty
+            await tx.externalOrderItem.update({
+              where: { id: fulfillmentItem.itemId },
+              data: { fulfilledQty: { increment: quantityToFulfill } },
+            });
+
+            result.fulfilled.push({
+              itemId: fulfillmentItem.itemId,
+              productId: -1, // Bundle — no single productId
+              productName: orderItem.name,
+              quantity: quantityToFulfill,
+              inventoryLogId: -1, // Multiple logs created; use sentinel
+            });
+
+            continue; // Skip the single-mapping path below
+          }
+
           // Determine which product to use
           let productId: number | undefined;
 
@@ -308,8 +408,8 @@ export async function fulfillExternalOrder(
             // Manual override provided
             productId = fulfillmentItem.productId;
           } else if (orderItem.isMapped && orderItem.productLink?.internalProduct) {
-            // Use mapped product
-            productId = orderItem.productLink.internalProduct.id;
+            // Use mapped product — internalProduct is non-null in this (non-bundle) branch
+            productId = orderItem.productLink.internalProduct!.id;
           } else if (fulfillmentItem.skipUnmapped) {
             // User chose to skip this unmapped item
             result.skipped.push({
