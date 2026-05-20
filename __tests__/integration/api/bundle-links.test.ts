@@ -175,6 +175,30 @@ describe('POST /api/products/bundle-links', () => {
     expect(updateCall.data.isMapped).toBe(true);
     expect(updateCall.data.bundleComponentSnapshot).toBeDefined();
   });
+
+  it('returns 409 (not 500) when a concurrent create races past the pre-check (P2002)', async () => {
+    // Simulate TOCTOU: pre-check finds nothing, but the transaction hits a P2002
+    // unique-constraint violation from a concurrent insert.
+    setupAdminCompany();
+    (tx.productLink.findFirst as jest.Mock).mockResolvedValue(null); // pre-check passes
+
+    const { Prisma: PrismaNamespace } = require('@prisma/client');
+    const p2002 = new PrismaNamespace.PrismaClientKnownRequestError(
+      'Unique constraint failed on the fields: (`integrationId`,`externalProductId`,`externalVariantId`)',
+      { code: 'P2002', clientVersion: '5.0.0' },
+    );
+    (prisma as any).$transaction = jest.fn().mockRejectedValue(p2002);
+
+    const resp = await POST(mkReq({
+      integrationId: 'int1',
+      externalProductId: '300',
+      components: [{ internalProductId: 1, quantity: 1 }],
+    }));
+
+    expect(resp.status).toBe(409);
+    const body = await resp.json();
+    expect(body.error).toMatch(/already exists/i);
+  });
 });
 
 import { PATCH } from '@/app/api/products/bundle-links/[linkId]/route';

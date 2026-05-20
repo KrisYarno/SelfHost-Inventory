@@ -5,6 +5,7 @@ import {
   apiHandler,
 } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
+import { Prisma } from '@prisma/client';
 import { validateCSRFToken } from '@/lib/csrf';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { CreateBundleLinkSchema } from '@/lib/validation/bundle-links';
@@ -94,50 +95,62 @@ export const POST = apiHandler(async (request: NextRequest) => {
     sortOrder: i,
   }));
 
-  const { link, backfilledCount } = await prisma.$transaction(async (tx) => {
-    const link = await tx.productLink.create({
-      data: {
-        integrationId: body.integrationId,
-        internalProductId: null,
-        isBundle: true,
-        externalProductId: body.externalProductId,
-        externalVariantId: body.externalVariantId ?? null,
-        externalSku: body.externalSku ?? null,
-        externalTitle: body.externalTitle ?? null,
-      },
+  let txResult: { link: Awaited<ReturnType<typeof prisma.productLink.create>>; backfilledCount: number };
+  try {
+    txResult = await prisma.$transaction(async (tx) => {
+      const link = await tx.productLink.create({
+        data: {
+          integrationId: body.integrationId,
+          internalProductId: null,
+          isBundle: true,
+          externalProductId: body.externalProductId,
+          externalVariantId: body.externalVariantId ?? null,
+          externalSku: body.externalSku ?? null,
+          externalTitle: body.externalTitle ?? null,
+        },
+      });
+
+      await tx.bundleComponent.createMany({
+        data: body.components.map((c, i) => ({
+          productLinkId: link.id,
+          internalProductId: c.internalProductId,
+          quantity: c.quantity,
+          sortOrder: i,
+        })),
+      });
+
+      // D5 + D7: backfill pre-existing unmapped order items with snapshot
+      const variantClause =
+        body.externalVariantId
+          ? { externalVariantId: body.externalVariantId }
+          : { externalVariantId: null };
+
+      const backfill = await tx.externalOrderItem.updateMany({
+        where: {
+          productLinkId: null,
+          externalProductId: body.externalProductId,
+          ...variantClause,
+          order: { integrationId: body.integrationId },
+        },
+        data: {
+          productLinkId: link.id,
+          isMapped: true,
+          bundleComponentSnapshot: snapshot as unknown as object,
+        },
+      });
+
+      return { link, backfilledCount: backfill.count };
     });
-
-    await tx.bundleComponent.createMany({
-      data: body.components.map((c, i) => ({
-        productLinkId: link.id,
-        internalProductId: c.internalProductId,
-        quantity: c.quantity,
-        sortOrder: i,
-      })),
-    });
-
-    // D5 + D7: backfill pre-existing unmapped order items with snapshot
-    const variantClause =
-      body.externalVariantId
-        ? { externalVariantId: body.externalVariantId }
-        : { externalVariantId: null };
-
-    const backfill = await tx.externalOrderItem.updateMany({
-      where: {
-        productLinkId: null,
-        externalProductId: body.externalProductId,
-        ...variantClause,
-        order: { integrationId: body.integrationId },
-      },
-      data: {
-        productLinkId: link.id,
-        isMapped: true,
-        bundleComponentSnapshot: snapshot as unknown as object,
-      },
-    });
-
-    return { link, backfilledCount: backfill.count };
-  });
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      return NextResponse.json(
+        { error: 'A product link already exists for this integration and external product/variant' },
+        { status: 409 },
+      );
+    }
+    throw err;
+  }
+  const { link, backfilledCount } = txResult;
 
   const response = NextResponse.json(
     {
