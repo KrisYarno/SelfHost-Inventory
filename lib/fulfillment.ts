@@ -4,6 +4,10 @@ import { createInventoryLog } from '@/lib/inventory';
 import { ProductNotFoundError } from '@/lib/error-handling';
 import { BundleComponentSnapshotArraySchema } from '@/lib/validation/bundle-links';
 import type { BundleComponentSnapshot } from '@/types/bulk-map';
+import {
+  BUNDLE_SENTINEL_PRODUCT_ID,
+  BUNDLE_SENTINEL_INVENTORY_LOG_ID,
+} from '@/lib/external-orders/constants';
 
 /**
  * Fulfillment Item Interface
@@ -534,10 +538,10 @@ export async function fulfillExternalOrder(
 
             result.fulfilled.push({
               itemId: fulfillmentItem.itemId,
-              productId: -1, // Bundle — no single productId
+              productId: BUNDLE_SENTINEL_PRODUCT_ID,
               productName: orderItem.name,
               quantity: quantityToFulfill,
-              inventoryLogId: -1, // Multiple logs created; use sentinel
+              inventoryLogId: BUNDLE_SENTINEL_INVENTORY_LOG_ID,
             });
 
             // P0-3: Accumulate component IDs so the route can push bundle WC stock

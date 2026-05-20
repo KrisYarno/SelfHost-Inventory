@@ -11,6 +11,7 @@ import { auditService } from '@/lib/audit';
 import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
 import { pushStockForProducts } from '@/lib/external-orders/stock-sync';
 import prisma from '@/lib/prisma';
+import { BUNDLE_SENTINEL_PRODUCT_ID } from '@/lib/external-orders/constants';
 
 export const dynamic = 'force-dynamic';
 
@@ -147,11 +148,11 @@ export const POST = apiHandler(async (
   // For single-product items, pass their productId directly.
   // For bundle items, pass the component IDs (result.affectedComponentIds) so that
   // pushStockForProducts can also find and push the bundle's WC stock_status.
-  // The -1 sentinel is filtered out — only positive productIds are meaningful here.
+  // The BUNDLE_SENTINEL_PRODUCT_ID (-1) is filtered out — only positive productIds are meaningful here.
   if (result.integrationId && fulfilledCount > 0) {
     const singleProductIds = result.fulfilled
       .map((f) => f.productId)
-      .filter((id) => id > 0);
+      .filter((id) => id !== BUNDLE_SENTINEL_PRODUCT_ID);
     const componentIds = result.affectedComponentIds ?? [];
     const uniqueProductIds = Array.from(
       new Set([...singleProductIds, ...componentIds])

@@ -5,6 +5,10 @@ import { UnfulfillRequestSchema } from '@/lib/validation/unfulfill';
 import { BundleComponentSnapshotArraySchema } from '@/lib/validation/bundle-links';
 import type { BundleComponentSnapshot } from '@/types/bulk-map';
 import {
+  BUNDLE_SENTINEL_PRODUCT_ID,
+  BUNDLE_SENTINEL_INVENTORY_LOG_ID,
+} from '@/lib/external-orders/constants';
+import {
   applyRateLimitHeaders,
   enforceRateLimit,
 } from '@/lib/rateLimit';
@@ -231,10 +235,10 @@ export const POST = apiHandler(async (
 
           restored.push({
             itemId: unfulfillItem.itemId,
-            productId: -1, // Bundle — no single productId
+            productId: BUNDLE_SENTINEL_PRODUCT_ID,
             quantity: unfulfillItem.quantity,
             locationId: unfulfillItem.locationId,
-            inventoryLogId: -1, // Multiple logs created; use sentinel
+            inventoryLogId: BUNDLE_SENTINEL_INVENTORY_LOG_ID,
           });
 
           // P0-3: Accumulate component IDs so the route can push bundle WC stock
@@ -442,11 +446,11 @@ export const POST = apiHandler(async (
   // For single-product items, pass their productId directly.
   // For bundle items, pass the component IDs (restoredComponentIds) so that
   // pushStockForProducts can also find and push the bundle's WC stock_status.
-  // The -1 sentinel is filtered out — only positive productIds are meaningful here.
+  // The BUNDLE_SENTINEL_PRODUCT_ID (-1) is filtered out — only positive productIds are meaningful here.
   if (orderIntegrationId && restored.length > 0) {
     const singleProductIds = restored
       .map((r) => r.productId)
-      .filter((id) => id > 0);
+      .filter((id) => id !== BUNDLE_SENTINEL_PRODUCT_ID);
     const uniqueProductIds = Array.from(
       new Set([...singleProductIds, ...restoredComponentIds])
     );
