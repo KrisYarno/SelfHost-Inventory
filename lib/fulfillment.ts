@@ -41,6 +41,8 @@ export interface FulfillmentResult {
   // Amendment 7: Full order totals for completed vs processing determination
   totalQuantity?: number;
   totalFulfilled?: number;
+  // P0-3: Component productIds deducted for bundle items (used to push bundle WC stock)
+  affectedComponentIds?: number[];
 }
 
 /**
@@ -311,6 +313,7 @@ export async function fulfillExternalOrder(
     skipped: [],
     failed: [],
     inventoryLogIds: [],
+    affectedComponentIds: [],
   };
 
   return await prisma.$transaction(
@@ -485,6 +488,13 @@ export async function fulfillExternalOrder(
               quantity: quantityToFulfill,
               inventoryLogId: -1, // Multiple logs created; use sentinel
             });
+
+            // P0-3: Accumulate component IDs so the route can push bundle WC stock
+            for (const component of components) {
+              if (!result.affectedComponentIds!.includes(component.internalProductId)) {
+                result.affectedComponentIds!.push(component.internalProductId);
+              }
+            }
 
             continue; // Skip the single-mapping path below
           }

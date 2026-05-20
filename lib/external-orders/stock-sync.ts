@@ -3,6 +3,7 @@ import { getIntegrationClient } from "@/lib/external-orders/shared";
 import { computeBundleStockStatus } from "@/lib/stock-sync/compute-bundle-status";
 import type { PlatformType } from "@/lib/platforms/core/types";
 
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -254,8 +255,6 @@ export async function pushStockForProducts(
     },
   });
 
-  if (links.length === 0) return;
-
   // Compute stock status per link, using the same logic as the full sync
   const updates: Array<{
     productId: string;
@@ -281,6 +280,51 @@ export async function pushStockForProducts(
       variantId: link.externalVariantId ?? undefined,
       stockStatus: totalStock > 0 ? 'instock' : 'outofstock',
     });
+  }
+
+  // P0-3: Also push bundle stock for any bundles that contain the deducted components.
+  // Single-product links are covered above; this handles the bundle case where the
+  // WC bundle product's stock_status must be updated immediately after fulfillment.
+  const positiveIds = internalProductIds.filter((id) => id > 0);
+  if (positiveIds.length > 0) {
+    const bundleLinks = await prisma.productLink.findMany({
+      where: {
+        integrationId,
+        isBundle: true,
+        bundleComponents: {
+          some: {
+            internalProductId: { in: positiveIds },
+          },
+        },
+      },
+      select: {
+        id: true,
+        externalProductId: true,
+        externalVariantId: true,
+      },
+    });
+
+    for (const bundleLink of bundleLinks) {
+      // Reuse computeBundleStockStatus — identical semantics to the full periodic sync.
+      // It checks each component's on-hand ≥ component.quantity (at syncLocationId if
+      // set, else sum across all locations), and returns outofstock if any component
+      // is short or soft-deleted.
+      const bundleStatus = await computeBundleStockStatus(
+        bundleLink.id,
+        integration.syncLocationId ?? null
+      );
+      updates.push({
+        productId: bundleLink.externalProductId,
+        variantId: bundleLink.externalVariantId ?? undefined,
+        stockStatus: bundleStatus.status,
+      });
+      if (bundleStatus.warning) {
+        console.warn(
+          `[stock push] Bundle ${bundleLink.id} has orphan component:`,
+          bundleStatus.warning
+        );
+      }
+    }
   }
 
   if (updates.length === 0) return;

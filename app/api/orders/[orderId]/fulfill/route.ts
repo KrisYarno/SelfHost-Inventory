@@ -143,23 +143,29 @@ export const POST = apiHandler(async (
     );
   }
 
-  // Phase 7f: Best-effort stock status push for products that were just deducted.
-  // When stock goes to 0 across all locations, the WC side should immediately
-  // reflect outofstock rather than waiting for the periodic sync cron. We push
-  // ALL fulfilled products (not just zero-stock ones) so the WC status is
-  // always fresh after a fulfillment.
+  // Phase 7f / P0-3: Best-effort stock status push for products that were just deducted.
+  // For single-product items, pass their productId directly.
+  // For bundle items, pass the component IDs (result.affectedComponentIds) so that
+  // pushStockForProducts can also find and push the bundle's WC stock_status.
+  // The -1 sentinel is filtered out — only positive productIds are meaningful here.
   if (result.integrationId && fulfilledCount > 0) {
+    const singleProductIds = result.fulfilled
+      .map((f) => f.productId)
+      .filter((id) => id > 0);
+    const componentIds = result.affectedComponentIds ?? [];
     const uniqueProductIds = Array.from(
-      new Set(result.fulfilled.map((f) => f.productId))
+      new Set([...singleProductIds, ...componentIds])
     );
-    pushStockForProducts(result.integrationId, uniqueProductIds).catch(
-      (err) => {
-        console.error(
-          `Post-fulfillment stock push failed for order ${params.orderId}:`,
-          err
-        );
-      }
-    );
+    if (uniqueProductIds.length > 0) {
+      pushStockForProducts(result.integrationId, uniqueProductIds).catch(
+        (err) => {
+          console.error(
+            `Post-fulfillment stock push failed for order ${params.orderId}:`,
+            err
+          );
+        }
+      );
+    }
   }
 
   const response = NextResponse.json({

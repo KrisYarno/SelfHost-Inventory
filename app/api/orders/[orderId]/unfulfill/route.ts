@@ -57,6 +57,9 @@ export const POST = apiHandler(async (
     reason: string;
   }> = [];
 
+  // P0-3: Component productIds restored for bundle items (used to push bundle WC stock)
+  const restoredComponentIds: number[] = [];
+
   let newOrderStatus: string = '';
   let orderExternalId: string = '';
   let orderIntegrationId: string = '';
@@ -209,6 +212,13 @@ export const POST = apiHandler(async (
             locationId: unfulfillItem.locationId,
             inventoryLogId: -1, // Multiple logs created; use sentinel
           });
+
+          // P0-3: Accumulate component IDs so the route can push bundle WC stock
+          for (const component of components) {
+            if (!restoredComponentIds.includes(component.internalProductId)) {
+              restoredComponentIds.push(component.internalProductId);
+            }
+          }
 
           continue; // Skip the single-mapping path below
         }
@@ -404,20 +414,28 @@ export const POST = apiHandler(async (
     }
   }
 
-  // Phase 7f: Best-effort stock status push for products that were restored.
-  // When stock goes from 0 back to positive, WC should reflect instock.
+  // Phase 7f / P0-3: Best-effort stock status push for products that were restored.
+  // For single-product items, pass their productId directly.
+  // For bundle items, pass the component IDs (restoredComponentIds) so that
+  // pushStockForProducts can also find and push the bundle's WC stock_status.
+  // The -1 sentinel is filtered out — only positive productIds are meaningful here.
   if (orderIntegrationId && restored.length > 0) {
+    const singleProductIds = restored
+      .map((r) => r.productId)
+      .filter((id) => id > 0);
     const uniqueProductIds = Array.from(
-      new Set(restored.map((r) => r.productId))
+      new Set([...singleProductIds, ...restoredComponentIds])
     );
-    pushStockForProducts(orderIntegrationId, uniqueProductIds).catch(
-      (err) => {
-        console.error(
-          `Post-unfulfillment stock push failed for order ${params.orderId}:`,
-          err
-        );
-      }
-    );
+    if (uniqueProductIds.length > 0) {
+      pushStockForProducts(orderIntegrationId, uniqueProductIds).catch(
+        (err) => {
+          console.error(
+            `Post-unfulfillment stock push failed for order ${params.orderId}:`,
+            err
+          );
+        }
+      );
+    }
   }
 
   const response = NextResponse.json({
