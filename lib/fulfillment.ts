@@ -406,12 +406,42 @@ export async function fulfillExternalOrder(
               continue;
             }
 
-            // Deduct each component inside the same transaction (all-or-nothing)
-            let anyComponentFailed = false;
+            // Pre-flight stock check: verify ALL components have sufficient stock
+            // before making any deductions. This prevents partial deductions where
+            // the first N-1 components succeed and component N fails, leaving
+            // inventory permanently decremented with no way to recover without a
+            // manual correction.
+            let preflightFailed = false;
+            for (const component of components) {
+              const deductQty = component.quantity * quantityToFulfill;
+              const stockRow = await tx.product_locations.findUnique({
+                where: {
+                  productId_locationId: {
+                    productId: component.internalProductId,
+                    locationId,
+                  },
+                },
+                select: { quantity: true },
+              });
+              const available = stockRow?.quantity ?? 0;
+              if (available < deductQty) {
+                result.skipped.push({
+                  itemId: fulfillmentItem.itemId,
+                  reason: 'insufficient_stock',
+                  details: `Insufficient stock for bundle component (productId: ${component.internalProductId}). Available: ${available}, Requested: ${deductQty}`,
+                });
+                preflightFailed = true;
+                break;
+              }
+            }
+
+            if (preflightFailed) continue;
+
+            // All components have sufficient stock — now deduct each one.
             for (const component of components) {
               const deductQty = component.quantity * quantityToFulfill;
 
-              const affectedRows = await tx.$executeRaw(Prisma.sql`
+              await tx.$executeRaw(Prisma.sql`
                 UPDATE product_locations
                 SET quantity = quantity - ${deductQty},
                     version = version + 1,
@@ -420,25 +450,6 @@ export async function fulfillExternalOrder(
                   AND locationId = ${locationId}
                   AND quantity >= ${deductQty}
               `);
-
-              if (affectedRows === 0) {
-                const currentRow = await tx.product_locations.findUnique({
-                  where: {
-                    productId_locationId: {
-                      productId: component.internalProductId,
-                      locationId,
-                    },
-                  },
-                  select: { quantity: true },
-                });
-                result.skipped.push({
-                  itemId: fulfillmentItem.itemId,
-                  reason: 'insufficient_stock',
-                  details: `Insufficient stock for bundle component (productId: ${component.internalProductId}). Available: ${currentRow?.quantity ?? 0}, Requested: ${deductQty}`,
-                });
-                anyComponentFailed = true;
-                break;
-              }
 
               await createInventoryLog(
                 {
@@ -460,8 +471,6 @@ export async function fulfillExternalOrder(
                 `);
               }
             }
-
-            if (anyComponentFailed) continue;
 
             // Update ExternalOrderItem.fulfilledQty
             await tx.externalOrderItem.update({

@@ -108,6 +108,8 @@ function setupSuccessfulMocks(orderQty: number) {
     { quantity: orderQty, fulfilledQty: orderQty },
   ]);
   tx.externalOrder.update.mockResolvedValue({});
+  // Pre-flight stock check: return ample stock for every component by default
+  tx.product_locations.findUnique.mockResolvedValue({ quantity: 9999 });
 }
 
 beforeEach(() => {
@@ -209,5 +211,53 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     expect(logCall.productId).toBe(7);
     // delta: -(2 component qty * 1 item qty) = -2
     expect(logCall.delta).toBe(-2);
+  });
+
+  it('rolls back partial deductions when a later component is short (P0)', async () => {
+    // 3-component bundle. Components 1 and 2 have ample stock; component 3 has 0.
+    // The pre-flight check must catch this and skip the item BEFORE making any
+    // deduction — so $executeRaw (deduct) and createInventoryLog are never called,
+    // and the result reflects the failure.
+    const tx = getTx();
+    const order = buildBundleOrder({
+      snapshot: [
+        { internalProductId: 10, internalProductName: 'Alpha', quantity: 1, sortOrder: 0 },
+        { internalProductId: 11, internalProductName: 'Beta',  quantity: 1, sortOrder: 1 },
+        { internalProductId: 12, internalProductName: 'Gamma', quantity: 1, sortOrder: 2 },
+      ],
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+
+    // Base fulfillment mocks (status update at end)
+    tx.$executeRaw.mockResolvedValue(1);
+    tx.externalOrderItem.update.mockResolvedValue({});
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 1, fulfilledQty: 0 },
+    ]);
+    tx.externalOrder.update.mockResolvedValue({});
+
+    // Pre-flight stock reads: first two components have stock, third has 0
+    tx.product_locations.findUnique
+      .mockResolvedValueOnce({ quantity: 10 })  // productId 10 — ample
+      .mockResolvedValueOnce({ quantity: 10 })  // productId 11 — ample
+      .mockResolvedValueOnce({ quantity: 0 });  // productId 12 — SHORT
+
+    const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
+
+    // Item must appear in skipped (insufficient_stock) and NOT in fulfilled
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0].itemId).toBe('oi1');
+    expect(result.skipped[0].reason).toBe('insufficient_stock');
+    expect(result.fulfilled).toHaveLength(0);
+
+    // No deduction SQL must have been executed (pre-flight aborted before any UPDATE)
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+
+    // No inventory logs must have been created
+    expect(createInventoryLog).not.toHaveBeenCalled();
+
+    // fulfilledQty must NOT have been incremented on the order item
+    expect(tx.externalOrderItem.update).not.toHaveBeenCalled();
   });
 });
