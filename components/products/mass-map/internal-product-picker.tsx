@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import type { CatalogRow, InternalProductIndexEntry, Suggestion } from "@/types/bulk-map";
 import { suggest } from "@/lib/matching/suggestion-matcher";
 import { PickerSuccessPanel } from "./picker-success-panel";
+import { BundleBuilder, type BundleBuilderComponent } from "./bundle-builder";
 
 interface Props {
   row: CatalogRow | null;
@@ -22,6 +23,12 @@ interface Props {
   onCancel: () => void;
   onFinishSuccess: () => void;
   onKeepSuccess: () => void;
+  // Bundle mode
+  bundleMode?: boolean;
+  initialBundleComponents?: BundleBuilderComponent[];
+  onConfirmBundle?: (components: BundleBuilderComponent[]) => void;
+  onConvertToBundle?: () => void;
+  onConvertToSingle?: () => void;
 }
 
 function useManualSearch(query: string) {
@@ -66,6 +73,11 @@ export function InternalProductPicker({
   onCancel,
   onFinishSuccess,
   onKeepSuccess,
+  bundleMode = false,
+  initialBundleComponents,
+  onConfirmBundle,
+  onConvertToBundle,
+  onConvertToSingle,
 }: Props) {
   const [selected, setSelected] = useState<InternalProductIndexEntry | null>(null);
   const [search, setSearch] = useState("");
@@ -91,6 +103,21 @@ export function InternalProductPicker({
         internalProductName={successFor.internalProductName}
         onFinish={onFinishSuccess}
         onKeep={onKeepSuccess}
+      />
+    );
+  }
+
+  if (row && bundleMode && onConfirmBundle) {
+    return (
+      <BundleBuilder
+        row={row}
+        index={index}
+        initialComponents={initialBundleComponents}
+        saving={saving}
+        errorMessage={errorMessage}
+        onConfirm={onConfirmBundle}
+        onCancel={onCancel}
+        onConvertToSingle={onConvertToSingle ?? onCancel}
       />
     );
   }
@@ -215,6 +242,16 @@ export function InternalProductPicker({
           Cancel
         </Button>
       </div>
+
+      {onConvertToBundle && (
+        <button
+          onClick={onConvertToBundle}
+          disabled={saving}
+          className="w-full text-center text-xs text-muted-foreground hover:text-foreground py-1"
+        >
+          Convert to bundle mapping →
+        </button>
+      )}
     </div>
   );
 }
