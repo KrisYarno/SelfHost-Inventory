@@ -90,14 +90,11 @@ describe('validateOrderFulfillment — bundle component shortages', () => {
     });
     mock.externalOrder.findUnique.mockResolvedValue(order);
 
-    // findFirst returns stock per component at locationId=1
-    mock.product_locations.findFirst.mockImplementation(
-      ({ where }: { where: { productId: number; locationId: number } }) => {
-        if (where.productId === 10) return Promise.resolve({ quantity: 5 });
-        if (where.productId === 20) return Promise.resolve({ quantity: 4 });
-        return Promise.resolve(null);
-      }
-    );
+    // FIX D: batched findMany returns one row per component
+    mock.product_locations.findMany.mockResolvedValue([
+      { productId: 10, quantity: 5 },
+      { productId: 20, quantity: 4 },
+    ]);
 
     const result = await validateOrderFulfillment('ord-val-1', 1);
 
@@ -114,6 +111,9 @@ describe('validateOrderFulfillment — bundle component shortages', () => {
       required: 6,   // 3 per bundle × 2 remaining
       available: 4,
     });
+
+    // FIX D: only ONE findMany call per item (was N findFirst calls)
+    expect(mock.product_locations.findMany).toHaveBeenCalledTimes(1);
   });
 
   it('does NOT flag a shortage when all bundle components have sufficient stock', async () => {
@@ -126,7 +126,11 @@ describe('validateOrderFulfillment — bundle component shortages', () => {
     });
     mock.externalOrder.findUnique.mockResolvedValue(order);
 
-    mock.product_locations.findFirst.mockResolvedValue({ quantity: 100 });
+    // FIX D: batched findMany returns ample stock for both components
+    mock.product_locations.findMany.mockResolvedValue([
+      { productId: 10, quantity: 100 },
+      { productId: 20, quantity: 100 },
+    ]);
 
     const result = await validateOrderFulfillment('ord-val-1', 1);
 
@@ -151,7 +155,9 @@ describe('validateOrderFulfillment — bundle component shortages', () => {
     mock.externalOrder.findUnique.mockResolvedValue(order);
 
     // 55 is short: needs 4 (2 per bundle × 2 remaining), has 1
-    mock.product_locations.findFirst.mockResolvedValue({ quantity: 1 });
+    mock.product_locations.findMany.mockResolvedValue([
+      { productId: 55, quantity: 1 },
+    ]);
 
     const result = await validateOrderFulfillment('ord-val-1', 1);
 
@@ -175,10 +181,11 @@ describe('validateOrderFulfillment — bundle component shortages', () => {
     });
     mock.externalOrder.findUnique.mockResolvedValue(order);
 
-    // No locationId: uses findMany — total stock across locs = 2, needs 4
+    // No locationId: uses findMany — total stock across locs = 2 (sum of two rows), needs 4
+    // FIX D: batched findMany returns one row per (productId, locationId).
     mock.product_locations.findMany.mockResolvedValue([
-      { quantity: 1 },
-      { quantity: 1 },
+      { productId: 30, quantity: 1 },
+      { productId: 30, quantity: 1 },
     ]);
 
     const result = await validateOrderFulfillment('ord-val-1', undefined);
@@ -201,7 +208,8 @@ describe('validateOrderFulfillment — bundle component shortages', () => {
       ],
     });
     mock.externalOrder.findUnique.mockResolvedValue(order);
-    mock.product_locations.findFirst.mockResolvedValue({ quantity: 0 });
+    // FIX D: batched findMany — empty result means stock=0 (uses ?? 0 default)
+    mock.product_locations.findMany.mockResolvedValue([]);
 
     const result = await validateOrderFulfillment('ord-val-1', 1);
     const item = result.items[0];

@@ -114,6 +114,13 @@ function setupSuccessfulMocks(orderQty: number) {
   tx.externalOrder.update.mockResolvedValue({});
   // Pre-flight stock check: return ample stock for every component by default
   tx.product_locations.findUnique.mockResolvedValue({ quantity: 9999 });
+  // FIX D: batched pre-flight uses findMany — default to "no row" (treated as 0)
+  // and tests can override per case. For default "ample" mock, return a very-high
+  // quantity by intercepting the where.productId.in list.
+  tx.product_locations.findMany.mockImplementation((args: any) => {
+    const ids: number[] = args?.where?.productId?.in ?? [];
+    return Promise.resolve(ids.map((id) => ({ productId: id, quantity: 9999 })));
+  });
 }
 
 beforeEach(() => {
@@ -264,6 +271,7 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 1, fulfilledQty: 0 }]);
     tx.externalOrder.update.mockResolvedValue({});
     tx.product_locations.findUnique.mockResolvedValue({ quantity: 9999 });
+    tx.product_locations.findMany.mockResolvedValue([]);
 
     const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
 
@@ -306,11 +314,12 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     ]);
     tx.externalOrder.update.mockResolvedValue({});
 
-    // Pre-flight stock reads: first two components have stock, third has 0
-    tx.product_locations.findUnique
-      .mockResolvedValueOnce({ quantity: 10 })  // productId 10 — ample
-      .mockResolvedValueOnce({ quantity: 10 })  // productId 11 — ample
-      .mockResolvedValueOnce({ quantity: 0 });  // productId 12 — SHORT
+    // FIX D: batched findMany returns one row per component — last one is SHORT
+    tx.product_locations.findMany.mockResolvedValue([
+      { productId: 10, quantity: 10 },
+      { productId: 11, quantity: 10 },
+      { productId: 12, quantity: 0 },
+    ]);
 
     const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
 
@@ -352,8 +361,12 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     });
     tx.externalOrder.findUnique.mockResolvedValue(order);
 
-    // Pre-flight passes for all 3
-    tx.product_locations.findUnique.mockResolvedValue({ quantity: 9999 });
+    // FIX D: pre-flight passes for all 3 via batched findMany
+    tx.product_locations.findMany.mockResolvedValue([
+      { productId: 10, quantity: 9999 },
+      { productId: 11, quantity: 9999 },
+      { productId: 12, quantity: 9999 },
+    ]);
 
     // Deduction sequence: 1, 1, 0  (third one — concurrent race lost)
     // Note: when locationId === 1 the loop also does a products.quantity mirror

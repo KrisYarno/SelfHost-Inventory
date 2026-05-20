@@ -219,35 +219,43 @@ export async function validateOrderFulfillment(
 
       const shortages: BundleShortage[] = [];
 
+      // FIX D (P1 #4): Batch component stock reads into a single query per item.
+      // Previously this loop did N round-trips (findFirst/findMany per component).
+      const itemComponentIds = components.map((c) => c.internalProductId);
+      const stockByProductId = new Map<number, number>();
+
+      if (locationId) {
+        const rows = await prisma.product_locations.findMany({
+          where: { productId: { in: itemComponentIds }, locationId },
+          select: { productId: true, quantity: true },
+        });
+        for (const r of rows) {
+          stockByProductId.set(r.productId, r.quantity);
+        }
+      } else {
+        // Sum across all locations per product.
+        const rows = await prisma.product_locations.findMany({
+          where: { productId: { in: itemComponentIds } },
+          select: { productId: true, quantity: true },
+        });
+        for (const r of rows) {
+          stockByProductId.set(
+            r.productId,
+            (stockByProductId.get(r.productId) ?? 0) + r.quantity
+          );
+        }
+      }
+
       for (const c of components) {
         const required = c.quantity * remainingQty;
-        if (locationId) {
-          const loc = await prisma.product_locations.findFirst({
-            where: { productId: c.internalProductId, locationId },
+        const available = stockByProductId.get(c.internalProductId) ?? 0;
+        if (available < required) {
+          shortages.push({
+            internalProductId: c.internalProductId,
+            name: c.internalProductName ?? `Product ${c.internalProductId}`,
+            required,
+            available,
           });
-          const available = loc?.quantity ?? 0;
-          if (available < required) {
-            shortages.push({
-              internalProductId: c.internalProductId,
-              name: c.internalProductName ?? `Product ${c.internalProductId}`,
-              required,
-              available,
-            });
-          }
-        } else {
-          // No location specified: check total stock across all locations
-          const allLocs = await prisma.product_locations.findMany({
-            where: { productId: c.internalProductId },
-          });
-          const totalAvailable = allLocs.reduce((sum: number, l: { quantity: number }) => sum + l.quantity, 0);
-          if (totalAvailable < required) {
-            shortages.push({
-              internalProductId: c.internalProductId,
-              name: c.internalProductName ?? `Product ${c.internalProductId}`,
-              required,
-              available: totalAvailable,
-            });
-          }
         }
       }
 
@@ -518,19 +526,23 @@ export async function fulfillExternalOrder(
             // the first N-1 components succeed and component N fails, leaving
             // inventory permanently decremented with no way to recover without a
             // manual correction.
+            //
+            // FIX D (P1 #4): Batch the per-component stock reads into a single
+            // findMany. Previously this was N round-trips (findUnique per
+            // component). Now: 1 query for the whole bundle.
+            const componentIds = components.map((c) => c.internalProductId);
+            const stockRows = await tx.product_locations.findMany({
+              where: { productId: { in: componentIds }, locationId },
+              select: { productId: true, quantity: true },
+            });
+            const stockByProductId = new Map<number, number>(
+              stockRows.map((r) => [r.productId, r.quantity] as [number, number])
+            );
+
             let preflightFailed = false;
             for (const component of components) {
               const deductQty = component.quantity * quantityToFulfill;
-              const stockRow = await tx.product_locations.findUnique({
-                where: {
-                  productId_locationId: {
-                    productId: component.internalProductId,
-                    locationId,
-                  },
-                },
-                select: { quantity: true },
-              });
-              const available = stockRow?.quantity ?? 0;
+              const available = stockByProductId.get(component.internalProductId) ?? 0;
               if (available < deductQty) {
                 result.skipped.push({
                   itemId: fulfillmentItem.itemId,
