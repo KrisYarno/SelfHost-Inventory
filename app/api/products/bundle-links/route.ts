@@ -119,7 +119,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
         })),
       });
 
-      // D5 + D7: backfill pre-existing unmapped order items with snapshot
+      // D5 + D7: backfill pre-existing unmapped order items with snapshot.
+      // Skip already-fulfilled items — they were deducted before the bundle link
+      // existed and have no snapshot to restore from. A future unfulfill on these
+      // would credit phantom stock for components that were never deducted.
       const variantClause =
         body.externalVariantId
           ? { externalVariantId: body.externalVariantId }
@@ -128,6 +131,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
       const backfill = await tx.externalOrderItem.updateMany({
         where: {
           productLinkId: null,
+          fulfilledQty: 0,
           externalProductId: body.externalProductId,
           ...variantClause,
           order: { integrationId: body.integrationId },

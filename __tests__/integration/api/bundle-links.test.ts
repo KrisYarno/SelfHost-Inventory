@@ -176,6 +176,32 @@ describe('POST /api/products/bundle-links', () => {
     expect(updateCall.data.bundleComponentSnapshot).toBeDefined();
   });
 
+  it('backfill skips already-fulfilled items (P0 #3 — ghost snapshot guard)', async () => {
+    // Items with fulfilledQty > 0 were deducted before the bundle existed and
+    // have no snapshot to restore from. A later unfulfill would credit phantom
+    // stock for components that were never deducted. The WHERE clause must
+    // require fulfilledQty: 0.
+    setupAdminCompany();
+    (tx.productLink.findFirst as jest.Mock).mockResolvedValue(null);
+    (tx.productLink.create as jest.Mock).mockResolvedValue({
+      id: 'bl3', isBundle: true, integrationId: 'int1',
+      externalProductId: '300', externalVariantId: null,
+      internalProductId: null, externalSku: null, externalTitle: null, createdAt: new Date(),
+    });
+    (tx.bundleComponent.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (tx.externalOrderItem.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+
+    await POST(mkReq({
+      integrationId: 'int1',
+      externalProductId: '300',
+      components: [{ internalProductId: 1, quantity: 1 }],
+    }));
+
+    const updateCall = (tx.externalOrderItem.updateMany as jest.Mock).mock.calls[0][0];
+    expect(updateCall.where.fulfilledQty).toBe(0);
+    expect(updateCall.where.productLinkId).toBeNull();
+  });
+
   it('returns 409 (not 500) when a concurrent create races past the pre-check (P2002)', async () => {
     // Simulate TOCTOU: pre-check finds nothing, but the transaction hits a P2002
     // unique-constraint violation from a concurrent insert.
