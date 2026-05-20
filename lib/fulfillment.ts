@@ -32,7 +32,13 @@ export interface FulfillmentResult {
   }>;
   skipped: Array<{
     itemId: string;
-    reason: 'unmapped' | 'insufficient_stock' | 'user_skipped' | 'already_fulfilled';
+    reason:
+      | 'unmapped'
+      | 'insufficient_stock'
+      | 'user_skipped'
+      | 'already_fulfilled'
+      | 'concurrent_modification'
+      | 'malformed_snapshot';
     details?: string;
   }>;
   failed: Array<{
@@ -516,11 +522,32 @@ export async function fulfillExternalOrder(
 
             if (preflightFailed) continue;
 
-            // All components have sufficient stock — now deduct each one.
+            // FIX A (P0): Per-bundle SAVEPOINT for concurrent-deduct safety.
+            // Pre-flight read passes lock-free, so under concurrency two fulfills
+            // can both pass pre-flight yet only ONE can win the atomic UPDATE
+            // (the WHERE quantity >= deductQty clause is evaluated at UPDATE
+            // time against the committed row). The loser's $executeRaw returns
+            // 0 — silently, until now. Without savepoint protection, prior
+            // component deductions for THIS item have already mutated the
+            // transaction state and would be committed when the outer tx
+            // commits, while fulfilledQty would not be incremented (we'd skip
+            // and continue), leaving inventory deducted with no order tracking
+            // its consumption.
+            //
+            // The savepoint surrounds JUST this bundle item's deductions. If
+            // any component's $executeRaw returns 0, we ROLLBACK TO the
+            // savepoint — undoing this item's partial work — push to
+            // result.skipped, and continue with the next item. The outer
+            // transaction continues for other items unaffected.
+            const savepoint = `bundle_${orderItem.id.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+            await tx.$executeRawUnsafe(`SAVEPOINT ${savepoint}`);
+
+            let concurrentRace: { productId: number; deductQty: number } | null = null;
+
             for (const component of components) {
               const deductQty = component.quantity * quantityToFulfill;
 
-              await tx.$executeRaw(Prisma.sql`
+              const compAffected = await tx.$executeRaw(Prisma.sql`
                 UPDATE product_locations
                 SET quantity = quantity - ${deductQty},
                     version = version + 1,
@@ -529,6 +556,17 @@ export async function fulfillExternalOrder(
                   AND locationId = ${locationId}
                   AND quantity >= ${deductQty}
               `);
+
+              if (compAffected === 0) {
+                // Pre-flight passed but the atomic guard failed — another
+                // transaction deducted between the two reads. Roll back this
+                // bundle item's partial deductions and mark as skipped.
+                concurrentRace = {
+                  productId: component.internalProductId,
+                  deductQty,
+                };
+                break;
+              }
 
               await createInventoryLog(
                 {
@@ -550,6 +588,20 @@ export async function fulfillExternalOrder(
                 `);
               }
             }
+
+            if (concurrentRace) {
+              await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+              result.skipped.push({
+                itemId: fulfillmentItem.itemId,
+                reason: 'concurrent_modification',
+                details: `Bundle component ${concurrentRace.productId} stock changed during fulfillment (concurrent deduction). Item rolled back — please retry.`,
+              });
+              continue;
+            }
+
+            // All components deducted successfully — release the savepoint so
+            // the outer transaction can commit this item's work.
+            await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${savepoint}`);
 
             // Update ExternalOrderItem.fulfilledQty
             await tx.externalOrderItem.update({

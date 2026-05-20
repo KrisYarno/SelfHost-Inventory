@@ -22,9 +22,11 @@ jest.mock('@/lib/prisma', () => {
     product_locations: {
       findUnique: jest.fn(),
       findFirst: jest.fn(),
+      findMany: jest.fn(),
     },
     inventory_logs: { create: jest.fn() },
     $executeRaw: jest.fn(),
+    $executeRawUnsafe: jest.fn(),
   };
   (globalThis as any).__txMockBundle = txMock;
   return {
@@ -103,6 +105,8 @@ function setupSuccessfulMocks(orderQty: number) {
   const tx = getTx();
   // $executeRaw returns 1 (row updated) for all calls
   tx.$executeRaw.mockResolvedValue(1);
+  // SAVEPOINT / ROLLBACK / RELEASE — Prisma returns 0 for DDL, harmless for tests
+  tx.$executeRawUnsafe.mockResolvedValue(0);
   tx.externalOrderItem.update.mockResolvedValue({});
   tx.externalOrderItem.findMany.mockResolvedValue([
     { quantity: orderQty, fulfilledQty: orderQty },
@@ -224,6 +228,7 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     tx.externalOrder.findUnique.mockResolvedValue(order);
 
     tx.$executeRaw.mockResolvedValue(1);
+    tx.$executeRawUnsafe.mockResolvedValue(0);
     tx.externalOrderItem.update.mockResolvedValue({});
     tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 1, fulfilledQty: 0 }]);
     tx.externalOrder.update.mockResolvedValue({});
@@ -239,6 +244,8 @@ describe('fulfillExternalOrder — bundle expansion', () => {
 
     // No deduction SQL must have been executed
     expect(tx.$executeRaw).not.toHaveBeenCalled();
+    // No SAVEPOINT was needed (we never entered the deduction block)
+    expect(tx.$executeRawUnsafe).not.toHaveBeenCalled();
     // No inventory logs must have been created
     expect(createInventoryLog).not.toHaveBeenCalled();
   });
@@ -261,6 +268,7 @@ describe('fulfillExternalOrder — bundle expansion', () => {
 
     // Base fulfillment mocks (status update at end)
     tx.$executeRaw.mockResolvedValue(1);
+    tx.$executeRawUnsafe.mockResolvedValue(0);
     tx.externalOrderItem.update.mockResolvedValue({});
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 1, fulfilledQty: 0 },
@@ -283,11 +291,101 @@ describe('fulfillExternalOrder — bundle expansion', () => {
 
     // No deduction SQL must have been executed (pre-flight aborted before any UPDATE)
     expect(tx.$executeRaw).not.toHaveBeenCalled();
+    // No SAVEPOINT was needed (pre-flight short-circuits before the savepoint block)
+    expect(tx.$executeRawUnsafe).not.toHaveBeenCalled();
 
     // No inventory logs must have been created
     expect(createInventoryLog).not.toHaveBeenCalled();
 
     // fulfilledQty must NOT have been incremented on the order item
     expect(tx.externalOrderItem.update).not.toHaveBeenCalled();
+  });
+
+  // FIX A (P0): concurrent-deduct race detection via savepoint
+  it('treats $executeRaw=0 mid-bundle as concurrent_modification and rolls back the item', async () => {
+    // 3-component bundle. Pre-flight passes (ample stock for all 3).
+    // First two component deductions succeed ($executeRaw returns 1 each).
+    // Third deduction returns 0 — simulating a concurrent fulfill that beat us
+    // to the atomic UPDATE between pre-flight and our own UPDATE.
+    // Expect: SAVEPOINT was opened, then ROLLBACK TO SAVEPOINT was issued,
+    // item is in skipped with reason='concurrent_modification',
+    // and fulfilledQty was NOT incremented.
+    const tx = getTx();
+    const order = buildBundleOrder({
+      snapshot: [
+        { internalProductId: 10, internalProductName: 'Alpha', quantity: 1, sortOrder: 0 },
+        { internalProductId: 11, internalProductName: 'Beta',  quantity: 1, sortOrder: 1 },
+        { internalProductId: 12, internalProductName: 'Gamma', quantity: 1, sortOrder: 2 },
+      ],
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+
+    // Pre-flight passes for all 3
+    tx.product_locations.findUnique.mockResolvedValue({ quantity: 9999 });
+
+    // Deduction sequence: 1, 1, 0  (third one — concurrent race lost)
+    // Note: when locationId === 1 the loop also does a products.quantity mirror
+    // UPDATE per component, so the actual $executeRaw call interleaving for
+    // 3 components is: [deduct1, mirror1, deduct2, mirror2, deduct3] — break
+    // happens before mirror3 fires.
+    tx.$executeRaw
+      .mockResolvedValueOnce(1)  // component 10 deduct — success
+      .mockResolvedValueOnce(1)  // component 10 legacy mirror — success
+      .mockResolvedValueOnce(1)  // component 11 deduct — success
+      .mockResolvedValueOnce(1)  // component 11 legacy mirror — success
+      .mockResolvedValueOnce(0); // component 12 deduct — RACE LOST
+
+    tx.$executeRawUnsafe.mockResolvedValue(0);
+    tx.externalOrderItem.update.mockResolvedValue({});
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 1, fulfilledQty: 0 },
+    ]);
+    tx.externalOrder.update.mockResolvedValue({});
+
+    const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
+
+    // Item is in skipped with the right reason
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0].itemId).toBe('oi1');
+    expect(result.skipped[0].reason).toBe('concurrent_modification');
+    expect(result.skipped[0].details).toMatch(/concurrent/i);
+    expect(result.fulfilled).toHaveLength(0);
+
+    // SAVEPOINT was opened AND rolled back (RELEASE never fires on the loser path)
+    const unsafeCalls = (tx.$executeRawUnsafe as jest.Mock).mock.calls.map(
+      (c: any[]) => c[0] as string
+    );
+    expect(unsafeCalls.some((s) => /^SAVEPOINT /.test(s))).toBe(true);
+    expect(unsafeCalls.some((s) => /^ROLLBACK TO SAVEPOINT /.test(s))).toBe(true);
+    expect(unsafeCalls.some((s) => /^RELEASE SAVEPOINT /.test(s))).toBe(false);
+
+    // fulfilledQty must NOT have been incremented
+    expect(tx.externalOrderItem.update).not.toHaveBeenCalled();
+
+    // affectedComponentIds must NOT contain the bundle's components
+    expect(result.affectedComponentIds ?? []).toEqual([]);
+  });
+
+  it('releases the savepoint on the happy path (no rollback)', async () => {
+    const tx = getTx();
+    const order = buildBundleOrder({
+      snapshot: [
+        { internalProductId: 1, internalProductName: 'A', quantity: 1, sortOrder: 0 },
+        { internalProductId: 2, internalProductName: 'B', quantity: 1, sortOrder: 1 },
+      ],
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+    setupSuccessfulMocks(1);
+
+    await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
+
+    const unsafeCalls = (tx.$executeRawUnsafe as jest.Mock).mock.calls.map(
+      (c: any[]) => c[0] as string
+    );
+    expect(unsafeCalls.some((s) => /^SAVEPOINT /.test(s))).toBe(true);
+    expect(unsafeCalls.some((s) => /^RELEASE SAVEPOINT /.test(s))).toBe(true);
+    expect(unsafeCalls.some((s) => /^ROLLBACK TO SAVEPOINT /.test(s))).toBe(false);
   });
 });
