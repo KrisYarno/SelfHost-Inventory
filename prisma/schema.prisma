@@ -63,6 +63,7 @@ model Product {
   product_locations   product_locations[]
   deletedByUser       User?                  @relation("DeletedProducts", fields: [deletedBy], references: [id])
   productLinks        ProductLink[]
+  bundleComponents    BundleComponent[]
 
   @@index([priceSourceLinkId], map: "idx_price_source")
   @@index([baseName, numericValue, variant], map: "idx_product_sorting")
@@ -251,23 +252,39 @@ model Integration {
 model ProductLink {
   id                 String      @id @default(cuid())
   integrationId      String
-  internalProductId  Int
-
+  internalProductId  Int?
   externalProductId  String      @db.VarChar(255)
   externalVariantId  String?     @db.VarChar(255)
   externalSku        String?     @db.VarChar(255)
   externalTitle      String?     @db.VarChar(500)
-
+  isBundle           Boolean     @default(false)
   createdAt          DateTime    @default(now())
 
-  integration        Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
-  internalProduct    Product     @relation(fields: [internalProductId], references: [id])
+  integration        Integration       @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  internalProduct    Product?          @relation(fields: [internalProductId], references: [id])
+  bundleComponents   BundleComponent[]
   orderItems         ExternalOrderItem[]
-  priceSourceFor     Product[]   @relation("PriceSource")
+  priceSourceFor     Product[]         @relation("PriceSource")
 
   @@unique([integrationId, externalProductId, externalVariantId])
   @@index([internalProductId])
+  @@index([isBundle])
   @@map("product_links")
+}
+
+model BundleComponent {
+  id                String      @id @default(cuid())
+  productLinkId     String
+  internalProductId Int
+  quantity          Int         @default(1)
+  sortOrder         Int         @default(0)
+
+  productLink       ProductLink @relation(fields: [productLinkId], references: [id], onDelete: Cascade)
+  internalProduct   Product     @relation(fields: [internalProductId], references: [id])
+
+  @@unique([productLinkId, internalProductId])
+  @@index([internalProductId])
+  @@map("bundle_components")
 }
 
 // Order Storage Layer
@@ -342,6 +359,7 @@ model ExternalOrderItem {
 
   productLinkId   String?
   isMapped        Boolean       @default(false)
+  bundleComponentSnapshot Json?
 
   order           ExternalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
   productLink     ProductLink?  @relation(fields: [productLinkId], references: [id], onDelete: SetNull)
