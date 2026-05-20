@@ -264,6 +264,25 @@ describe('POST /api/products/bundle-links', () => {
     const body = await resp.json();
     expect(body.error).toMatch(/already exists/i);
   });
+
+  it('returns 403 when CSRF token is invalid', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
+    (require('@/lib/csrf').validateCSRFToken as jest.Mock).mockResolvedValue(false);
+
+    const resp = await POST(mkReq({
+      integrationId: 'int1',
+      externalProductId: '100',
+      components: [{ internalProductId: 1, quantity: 1 }],
+    }));
+
+    expect(resp.status).toBe(403);
+    const body = await resp.json();
+    expect(body.error).toMatch(/CSRF/i);
+
+    // No transaction or DB writes should have happened
+    expect((prisma as any).$transaction).not.toHaveBeenCalled();
+    expect(tx.productLink.create).not.toHaveBeenCalled();
+  });
 });
 
 import { PATCH } from '@/app/api/products/bundle-links/[linkId]/route';
@@ -426,5 +445,85 @@ describe('PATCH /api/products/bundle-links/[linkId]', () => {
 
     // PATCH must NOT call externalOrderItem.updateMany — only POST does on create
     expect(tx.externalOrderItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 when CSRF token is invalid', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
+    (require('@/lib/csrf').validateCSRFToken as jest.Mock).mockResolvedValue(false);
+
+    const resp = await PATCH(
+      mkPatchReq({ components: [{ internalProductId: 3, quantity: 1 }] }),
+      { params: { linkId: 'bl1' } },
+    );
+
+    expect(resp.status).toBe(403);
+    const body = await resp.json();
+    expect(body.error).toMatch(/CSRF/i);
+
+    // CSRF check must fail before any link lookup or DB write
+    expect(tx.productLink.findUnique).not.toHaveBeenCalled();
+    expect((prisma as any).$transaction).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when a component references a soft-deleted internal product', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
+    (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
+    (tx.productLink.findUnique as jest.Mock).mockResolvedValue({
+      id: 'bl1', isBundle: true, integrationId: 'int1',
+      integration: { companyId: 'co' },
+    });
+    (tx.product.findMany as jest.Mock).mockResolvedValue([
+      { id: 3, name: 'Soft Deleted', deletedAt: new Date() },
+    ]);
+
+    const resp = await PATCH(
+      mkPatchReq({ components: [{ internalProductId: 3, quantity: 1 }] }),
+      { params: { linkId: 'bl1' } },
+    );
+
+    expect(resp.status).toBe(400);
+    const body = await resp.json();
+    expect(body.error).toMatch(/deleted/i);
+
+    // No write should occur on validation failure
+    expect(tx.bundleComponent.deleteMany).not.toHaveBeenCalled();
+    expect(tx.bundleComponent.createMany).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when a component references a non-existent internal product', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
+    (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
+    (tx.productLink.findUnique as jest.Mock).mockResolvedValue({
+      id: 'bl1', isBundle: true, integrationId: 'int1',
+      integration: { companyId: 'co' },
+    });
+    (tx.product.findMany as jest.Mock).mockResolvedValue([]);
+
+    const resp = await PATCH(
+      mkPatchReq({ components: [{ internalProductId: 999, quantity: 1 }] }),
+      { params: { linkId: 'bl1' } },
+    );
+
+    expect(resp.status).toBe(400);
+    const body = await resp.json();
+    expect(body.error).toMatch(/not found/i);
+
+    // No write should occur on validation failure
+    expect(tx.bundleComponent.deleteMany).not.toHaveBeenCalled();
+    expect(tx.bundleComponent.createMany).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when components array is empty (Zod min(1))', async () => {
+    (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: 'u1', isAdmin: true } });
+
+    const resp = await PATCH(
+      mkPatchReq({ components: [] }),
+      { params: { linkId: 'bl1' } },
+    );
+
+    expect(resp.status).toBe(400);
+
+    // Zod rejection happens before link lookup
+    expect(tx.productLink.findUnique).not.toHaveBeenCalled();
   });
 });
