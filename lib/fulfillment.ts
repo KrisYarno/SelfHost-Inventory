@@ -2,6 +2,7 @@ import prisma from '@/lib/prisma';
 import { Prisma, inventory_logs_logType } from '@prisma/client';
 import { createInventoryLog } from '@/lib/inventory';
 import { ProductNotFoundError } from '@/lib/error-handling';
+import { BundleComponentSnapshotArraySchema } from '@/lib/validation/bundle-links';
 
 /**
  * Fulfillment Item Interface
@@ -143,14 +144,39 @@ export async function validateOrderFulfillment(
         internalProductName?: string;
       };
 
-      const snapshot = (item as any).bundleComponentSnapshot as SnapshotComponent[] | null;
-      const components: SnapshotComponent[] =
-        snapshot ??
-        ((item.productLink as any).bundleComponents?.map((c: any) => ({
+      const rawSnapshot = (item as any).bundleComponentSnapshot;
+      let components: SnapshotComponent[];
+
+      if (rawSnapshot !== null && rawSnapshot !== undefined) {
+        const parsed = BundleComponentSnapshotArraySchema.safeParse(rawSnapshot);
+        if (!parsed.success) {
+          // Malformed snapshot — treat as unfulfillable (no valid components)
+          issues.push('malformed_snapshot');
+          hasStockIssues = true;
+          validationItems.push({
+            itemId: item.id,
+            name: item.name,
+            variantName: (item as any).variantName ?? null,
+            sku: item.sku,
+            requestedQty: item.quantity,
+            remainingQty,
+            fulfilledQty: item.fulfilledQty,
+            isMapped: item.isMapped,
+            mapping: undefined,
+            issues,
+            bundleShortages: undefined,
+          });
+          continue;
+        }
+        components = parsed.data;
+      } else {
+        // null snapshot → fall back to live bundleComponents (Prisma-typed, no Zod needed)
+        components = (item.productLink as any).bundleComponents?.map((c: any) => ({
           internalProductId: c.internalProductId,
           quantity: c.quantity,
           internalProductName: c.internalProduct?.name,
-        })) ?? []);
+        })) ?? [];
+      }
 
       const shortages: BundleShortage[] = [];
 
@@ -394,12 +420,26 @@ export async function fulfillExternalOrder(
               internalProductName?: string;
             };
 
-            // D7: prefer frozen snapshot; fall back to live bundleComponents for legacy rows
-            const snapshot = orderItem.bundleComponentSnapshot as
-              | SnapshotComponent[]
-              | null;
-            const components: SnapshotComponent[] =
-              snapshot ?? (orderItem.productLink.bundleComponents as SnapshotComponent[]);
+            // D7: prefer frozen snapshot; fall back to live bundleComponents for legacy rows.
+            // Zod-validate the snapshot when present to fail-closed on DB corruption.
+            const rawSnapshot = orderItem.bundleComponentSnapshot;
+            let components: SnapshotComponent[];
+
+            if (rawSnapshot !== null && rawSnapshot !== undefined) {
+              const parsed = BundleComponentSnapshotArraySchema.safeParse(rawSnapshot);
+              if (!parsed.success) {
+                result.skipped.push({
+                  itemId: fulfillmentItem.itemId,
+                  reason: 'unmapped',
+                  details: `Bundle item ${orderItem.id} has malformed bundleComponentSnapshot: ${parsed.error.errors[0]?.message ?? 'invalid format'}`,
+                });
+                continue;
+              }
+              components = parsed.data;
+            } else {
+              // null snapshot → fall back to live bundleComponents (Prisma-typed, no Zod needed)
+              components = orderItem.productLink.bundleComponents as SnapshotComponent[];
+            }
 
             if (!components || components.length === 0) {
               result.failed.push({

@@ -1,5 +1,16 @@
 import { z } from 'zod';
 
+export const BundleComponentSnapshotSchema = z.object({
+  internalProductId: z.number().int().positive(),
+  // internalProductName optional for backward compat with older snapshots
+  internalProductName: z.string().optional(),
+  quantity: z.number().int().positive(),
+  // sortOrder is optional for backward compat with snapshots created before it was added
+  sortOrder: z.number().int().nonnegative().optional(),
+});
+
+export const BundleComponentSnapshotArraySchema = z.array(BundleComponentSnapshotSchema).min(1);
+
 export const BundleComponentInputSchema = z.object({
   internalProductId: z.number().int().positive(),
   quantity: z.number().int().positive().default(1),

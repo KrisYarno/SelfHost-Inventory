@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, requireCompanyMembership, apiHandler } from '@/lib/api-utils';
 import { validateCSRFToken } from '@/lib/csrf';
 import { UnfulfillRequestSchema } from '@/lib/validation/unfulfill';
+import { BundleComponentSnapshotArraySchema } from '@/lib/validation/bundle-links';
 import {
   applyRateLimitHeaders,
   enforceRateLimit,
@@ -127,12 +128,25 @@ export const POST = apiHandler(async (
             internalProductName?: string;
           };
 
-          // D7: prefer frozen snapshot; fall back to live bundleComponents for legacy rows
-          const snapshot = orderItem.bundleComponentSnapshot as
-            | SnapshotComponent[]
-            | null;
-          const components: SnapshotComponent[] =
-            snapshot ?? (orderItem.productLink.bundleComponents as SnapshotComponent[]);
+          // D7: prefer frozen snapshot; fall back to live bundleComponents for legacy rows.
+          // Zod-validate the snapshot when present to fail-closed on DB corruption.
+          const rawSnapshot = orderItem.bundleComponentSnapshot;
+          let components: SnapshotComponent[];
+
+          if (rawSnapshot !== null && rawSnapshot !== undefined) {
+            const parsed = BundleComponentSnapshotArraySchema.safeParse(rawSnapshot);
+            if (!parsed.success) {
+              skipped.push({
+                itemId: unfulfillItem.itemId,
+                reason: `Bundle item ${orderItem.id} has malformed bundleComponentSnapshot: ${parsed.error.errors[0]?.message ?? 'invalid format'}`,
+              });
+              continue;
+            }
+            components = parsed.data;
+          } else {
+            // null snapshot → fall back to live bundleComponents (Prisma-typed, no Zod needed)
+            components = orderItem.productLink.bundleComponents as SnapshotComponent[];
+          }
 
           if (!components || components.length === 0) {
             skipped.push({

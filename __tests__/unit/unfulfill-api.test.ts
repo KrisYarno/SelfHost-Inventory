@@ -688,6 +688,57 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
   })
 
   // -----------------------------------------------------------------------
+  // 13b. Bundle reversal: malformed snapshot skipped (fail-closed, P1)
+  // -----------------------------------------------------------------------
+  it('skips bundle item with malformed bundleComponentSnapshot instead of restoring NaN', async () => {
+    const tx = setupTransaction()
+    const bundleOrder = buildOrder({
+      items: [
+        {
+          id: 'item-1',
+          orderId: 'order-1',
+          quantity: 1,
+          fulfilledQty: 1,
+          isMapped: true,
+          name: 'Bundle Product',
+          sku: 'BUNDLE-001',
+          bundleComponentSnapshot: [{ bogus: 'data' }], // malformed
+          productLink: {
+            internalProductId: null,
+            isBundle: true,
+            bundleComponents: [],
+          },
+        },
+      ],
+    })
+
+    tx.externalOrder.findUnique.mockResolvedValue(bundleOrder as any)
+    tx.$executeRaw.mockResolvedValue(1 as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 1, fulfilledQty: 1 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    const req = buildRequest({
+      items: [
+        { itemId: 'item-1', productId: 99, quantity: 1, locationId: 1 },
+      ],
+    })
+
+    const response = await POST(req, { params: { orderId: 'order-1' } })
+    const data = await response.json()
+
+    expect(data.success).toBe(true)
+    expect(data.restored).toHaveLength(0)
+    expect(data.skipped).toHaveLength(1)
+    expect(data.skipped[0].reason).toMatch(/malformed/i)
+
+    // No inventory log should have been created — no NaN deduction
+    const { createInventoryLog: mockLog } = require('@/lib/inventory')
+    expect(mockLog).not.toHaveBeenCalled()
+  })
+
+  // -----------------------------------------------------------------------
   // 14. Bundle reversal: uses live bundleComponents when snapshot is null
   // -----------------------------------------------------------------------
   it('falls back to live bundleComponents when snapshot is null', async () => {

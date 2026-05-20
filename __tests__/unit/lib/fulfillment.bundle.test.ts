@@ -213,6 +213,36 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     expect(logCall.delta).toBe(-2);
   });
 
+  it('skips bundle items with malformed snapshot instead of deducting NaN (P1)', async () => {
+    // Snapshot is present but has bogus shape — Zod should reject it.
+    // Expect: result.skipped contains the item, zero $executeRaw deduction calls.
+    const tx = getTx();
+    const order = buildBundleOrder({
+      snapshot: [{ bogus: 'data' }] as any,
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+
+    tx.$executeRaw.mockResolvedValue(1);
+    tx.externalOrderItem.update.mockResolvedValue({});
+    tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 1, fulfilledQty: 0 }]);
+    tx.externalOrder.update.mockResolvedValue({});
+    tx.product_locations.findUnique.mockResolvedValue({ quantity: 9999 });
+
+    const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
+
+    // Must be in skipped, not fulfilled
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0].itemId).toBe('oi1');
+    expect(result.skipped[0].details).toMatch(/malformed/i);
+    expect(result.fulfilled).toHaveLength(0);
+
+    // No deduction SQL must have been executed
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+    // No inventory logs must have been created
+    expect(createInventoryLog).not.toHaveBeenCalled();
+  });
+
   it('rolls back partial deductions when a later component is short (P0)', async () => {
     // 3-component bundle. Components 1 and 2 have ample stock; component 3 has 0.
     // The pre-flight check must catch this and skip the item BEFORE making any
