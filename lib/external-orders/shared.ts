@@ -234,6 +234,23 @@ export async function upsertOrderWithItems(
           });
         }
 
+        // D7: Build a point-in-time snapshot of bundle components at intake.
+        // Only set on CREATE (never overwrite on UPDATE) to preserve immutability.
+        let bundleComponentSnapshot: object | null = null;
+        if (productLink?.isBundle) {
+          const components = await tx.bundleComponent.findMany({
+            where: { productLinkId: productLink.id },
+            include: { internalProduct: { select: { name: true } } },
+            orderBy: { sortOrder: "asc" },
+          });
+          bundleComponentSnapshot = components.map((c) => ({
+            internalProductId: c.internalProductId,
+            internalProductName: c.internalProduct.name,
+            quantity: c.quantity,
+            sortOrder: c.sortOrder,
+          }));
+        }
+
         const itemData = {
           name: lineItem.name,
           variantName: lineItem.variantName ?? null,
@@ -259,8 +276,12 @@ export async function upsertOrderWithItems(
               externalProductId: lineItem.externalProductId || "",
               externalVariantId: lineItem.externalVariantId,
               ...itemData,
+              // D7: snapshot set once at first intake, never overwritten
+              bundleComponentSnapshot,
             },
             update: itemData,
+            // NOTE: bundleComponentSnapshot intentionally excluded from update
+            // to preserve the D7 immutability guarantee.
           });
         } else {
           // Amendment 7: null externalItemId — fall back to findFirst + create/update
@@ -277,6 +298,8 @@ export async function upsertOrderWithItems(
             await tx.externalOrderItem.update({
               where: { id: existingItem.id },
               data: itemData,
+              // NOTE: bundleComponentSnapshot intentionally excluded from update
+              // to preserve the D7 immutability guarantee.
             });
           } else {
             await tx.externalOrderItem.create({
@@ -286,6 +309,8 @@ export async function upsertOrderWithItems(
                 externalProductId: lineItem.externalProductId || "",
                 externalVariantId: lineItem.externalVariantId,
                 ...itemData,
+                // D7: snapshot set once at first intake, never overwritten
+                bundleComponentSnapshot,
               },
             });
           }

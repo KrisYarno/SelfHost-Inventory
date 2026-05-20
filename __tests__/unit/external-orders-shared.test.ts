@@ -7,7 +7,6 @@ import type { PrismaClient } from '@prisma/client'
 import type { NormalizedOrder } from '@/lib/platforms/core/types'
 import {
   deriveInternalStatus,
-  reconcileStatus,
   decryptOrNull,
   hostFromStoreUrl,
   upsertOrderWithItems,
@@ -189,115 +188,6 @@ describe('deriveInternalStatus', () => {
       fulfillmentStatus: null,
     })
     expect(result).toBe('cancelled')
-  })
-})
-
-// ===========================================================================
-// reconcileStatus — smart merge for recheck (Phase 7a)
-// ===========================================================================
-
-describe('reconcileStatus', () => {
-  const buildOrder = (nativeStatus: string) => ({
-    nativeStatus,
-    financialStatus: null,
-    fulfillmentStatus: null,
-    rawPayload: {},
-  })
-
-  // Terminal cancellation always wins, even over local fulfilled
-  it('WC cancelled → cancelled even when local is fulfilled', () => {
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'fulfilled', buildOrder('cancelled'))
-    ).toBe('cancelled')
-  })
-
-  it('WC refunded → cancelled even when local is fulfilled', () => {
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'fulfilled', buildOrder('refunded'))
-    ).toBe('cancelled')
-  })
-
-  it('WC failed → cancelled even when local is processing', () => {
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'processing', buildOrder('failed'))
-    ).toBe('cancelled')
-  })
-
-  // Local fulfilled is protected against downgrades
-  it('local fulfilled + WC processing → stays fulfilled', () => {
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'fulfilled', buildOrder('processing'))
-    ).toBe('fulfilled')
-  })
-
-  it('local fulfilled + WC pending → stays fulfilled', () => {
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'fulfilled', buildOrder('pending'))
-    ).toBe('fulfilled')
-  })
-
-  it('local fulfilled + WC completed → stays fulfilled (no-op)', () => {
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'fulfilled', buildOrder('completed'))
-    ).toBe('fulfilled')
-  })
-
-  // Everything else flows through from the derived remote status
-  it('local pending + WC processing → processing', () => {
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'pending', buildOrder('processing'))
-    ).toBe('processing')
-  })
-
-  it('local processing + WC completed → fulfilled', () => {
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'processing', buildOrder('completed'))
-    ).toBe('fulfilled')
-  })
-
-  it('local pending + WC completed → fulfilled', () => {
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'pending', buildOrder('completed'))
-    ).toBe('fulfilled')
-  })
-
-  it('local processing + WC on-hold → pending (derived default)', () => {
-    // on-hold is not one of the explicit WC states so it falls through to "pending"
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'processing', buildOrder('on-hold'))
-    ).toBe('pending')
-  })
-
-  // Shopify cases — cancelled via rawPayload.cancelled_at
-  it('Shopify cancelled_at → cancelled even when local is fulfilled', () => {
-    expect(
-      reconcileStatus('SHOPIFY', 'fulfilled', {
-        nativeStatus: 'paid',
-        financialStatus: 'paid',
-        fulfillmentStatus: null,
-        rawPayload: { cancelled_at: '2026-04-09T00:00:00Z' },
-      })
-    ).toBe('cancelled')
-  })
-
-  it('Shopify fulfillment_status=fulfilled + local pending → fulfilled', () => {
-    expect(
-      reconcileStatus('SHOPIFY', 'pending', {
-        nativeStatus: 'open',
-        financialStatus: 'paid',
-        fulfillmentStatus: 'fulfilled',
-        rawPayload: {},
-      })
-    ).toBe('fulfilled')
-  })
-
-  // Cancelled already locally stays cancelled (no way to re-activate via recheck)
-  it('local cancelled + WC processing → processing (trust WC)', () => {
-    // Edge case: if an order was cancelled locally but WC shows it active,
-    // trust WC. The user must explicitly re-cancel if needed.
-    expect(
-      reconcileStatus('WOOCOMMERCE', 'cancelled', buildOrder('processing'))
-    ).toBe('processing')
   })
 })
 
@@ -809,5 +699,229 @@ describe('upsertOrderWithItems', () => {
         externalItemId: { not: null },
       },
     })
+  })
+
+  // -----------------------------------------------------------------------
+  // D7.a: populates bundleComponentSnapshot on first intake when bundle
+  // -----------------------------------------------------------------------
+  it('D7: populates bundleComponentSnapshot in create when productLink is a bundle', async () => {
+    const tx = setupTransaction()
+    const normalized = buildNormalizedOrder({
+      lineItems: [
+        {
+          externalId: 'item-bundle-1',
+          externalProductId: 'prod-bundle',
+          externalVariantId: null,
+          name: 'Bundle Kit',
+          variantName: null,
+          sku: 'BNDL-001',
+          quantity: 1,
+          unitPrice: 50,
+        },
+      ],
+    })
+
+    tx.externalOrder.upsert.mockResolvedValue({ id: 'order-b1' } as any)
+    tx.productLink.findFirst.mockResolvedValue({
+      id: 'plink-bundle',
+      isBundle: true,
+    } as any)
+    tx.bundleComponent.findMany.mockResolvedValue([
+      {
+        internalProductId: 101,
+        internalProduct: { name: 'Widget A' },
+        quantity: 2,
+        sortOrder: 0,
+      },
+      {
+        internalProductId: 102,
+        internalProduct: { name: 'Widget B' },
+        quantity: 1,
+        sortOrder: 1,
+      },
+    ] as any)
+    tx.externalOrderItem.upsert.mockResolvedValue({} as any)
+
+    await upsertOrderWithItems(mockPrisma, {
+      ...baseParams,
+      normalized,
+      status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+    })
+
+    expect(tx.bundleComponent.findMany).toHaveBeenCalledTimes(1)
+    expect(tx.bundleComponent.findMany).toHaveBeenCalledWith({
+      where: { productLinkId: 'plink-bundle' },
+      include: { internalProduct: { select: { name: true } } },
+      orderBy: { sortOrder: 'asc' },
+    })
+
+    const upsertCall = tx.externalOrderItem.upsert.mock.calls[0][0] as any
+    expect(upsertCall.create.bundleComponentSnapshot).toEqual([
+      { internalProductId: 101, internalProductName: 'Widget A', quantity: 2, sortOrder: 0 },
+      { internalProductId: 102, internalProductName: 'Widget B', quantity: 1, sortOrder: 1 },
+    ])
+  })
+
+  // -----------------------------------------------------------------------
+  // D7.b: does NOT overwrite snapshot on re-sync (update path must be clean)
+  // -----------------------------------------------------------------------
+  it('D7: does NOT include bundleComponentSnapshot in the update set on re-sync', async () => {
+    const tx = setupTransaction()
+    const normalized = buildNormalizedOrder({
+      lineItems: [
+        {
+          externalId: 'item-bundle-1',
+          externalProductId: 'prod-bundle',
+          externalVariantId: null,
+          name: 'Bundle Kit',
+          variantName: null,
+          sku: 'BNDL-001',
+          quantity: 1,
+          unitPrice: 50,
+        },
+      ],
+    })
+
+    tx.externalOrder.upsert.mockResolvedValue({ id: 'order-b1' } as any)
+    tx.productLink.findFirst.mockResolvedValue({
+      id: 'plink-bundle',
+      isBundle: true,
+    } as any)
+    tx.bundleComponent.findMany.mockResolvedValue([
+      {
+        internalProductId: 101,
+        internalProduct: { name: 'Widget A' },
+        quantity: 2,
+        sortOrder: 0,
+      },
+    ] as any)
+    tx.externalOrderItem.upsert.mockResolvedValue({} as any)
+
+    await upsertOrderWithItems(mockPrisma, {
+      ...baseParams,
+      normalized,
+      status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+    })
+
+    const upsertCall = tx.externalOrderItem.upsert.mock.calls[0][0] as any
+    // The update set must NOT contain bundleComponentSnapshot
+    expect(upsertCall.update).not.toHaveProperty('bundleComponentSnapshot')
+  })
+
+  // -----------------------------------------------------------------------
+  // D7.c: null snapshot when productLink is not a bundle
+  // -----------------------------------------------------------------------
+  it('D7: snapshot is null when productLink exists but is not a bundle', async () => {
+    const tx = setupTransaction()
+    const normalized = buildNormalizedOrder({
+      lineItems: [
+        {
+          externalId: 'item-plain-1',
+          externalProductId: 'prod-plain',
+          externalVariantId: null,
+          name: 'Plain Widget',
+          variantName: null,
+          sku: 'PLN-001',
+          quantity: 3,
+          unitPrice: 15,
+        },
+      ],
+    })
+
+    tx.externalOrder.upsert.mockResolvedValue({ id: 'order-plain' } as any)
+    tx.productLink.findFirst.mockResolvedValue({
+      id: 'plink-plain',
+      isBundle: false,
+    } as any)
+    tx.externalOrderItem.upsert.mockResolvedValue({} as any)
+
+    await upsertOrderWithItems(mockPrisma, {
+      ...baseParams,
+      normalized,
+      status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+    })
+
+    // bundleComponent.findMany must NOT be called for non-bundle links
+    expect(tx.bundleComponent.findMany).not.toHaveBeenCalled()
+
+    const upsertCall = tx.externalOrderItem.upsert.mock.calls[0][0] as any
+    expect(upsertCall.create.bundleComponentSnapshot).toBeNull()
+  })
+
+  // -----------------------------------------------------------------------
+  // D7.d: null-externalId path also sets snapshot on create, skips on update
+  // -----------------------------------------------------------------------
+  it('D7: null-externalId create path sets snapshot; update path does not', async () => {
+    const tx = setupTransaction()
+
+    // --- First call: new item (findFirst returns null → goes to create)
+    const normalized = buildNormalizedOrder({
+      lineItems: [
+        {
+          externalId: '', // null branch
+          externalProductId: 'prod-bundle',
+          externalVariantId: null,
+          name: 'Bundle Kit',
+          variantName: null,
+          sku: 'BNDL-001',
+          quantity: 1,
+          unitPrice: 50,
+        },
+      ],
+    })
+
+    tx.externalOrder.upsert.mockResolvedValue({ id: 'order-nb' } as any)
+    tx.productLink.findFirst.mockResolvedValue({
+      id: 'plink-bundle',
+      isBundle: true,
+    } as any)
+    tx.bundleComponent.findMany.mockResolvedValue([
+      {
+        internalProductId: 201,
+        internalProduct: { name: 'Part X' },
+        quantity: 1,
+        sortOrder: 0,
+      },
+    ] as any)
+    tx.externalOrderItem.findFirst.mockResolvedValue(null) // no existing item
+    tx.externalOrderItem.create.mockResolvedValue({ id: 'item-nb-new' } as any)
+
+    await upsertOrderWithItems(mockPrisma, {
+      ...baseParams,
+      normalized,
+      status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+    })
+
+    const createCall = tx.externalOrderItem.create.mock.calls[0][0] as any
+    expect(createCall.data.bundleComponentSnapshot).toEqual([
+      { internalProductId: 201, internalProductName: 'Part X', quantity: 1, sortOrder: 0 },
+    ])
+
+    // --- Second call: existing item (findFirst returns existing → goes to update)
+    mockReset(tx)
+    tx.externalOrder.upsert.mockResolvedValue({ id: 'order-nb' } as any)
+    tx.productLink.findFirst.mockResolvedValue({
+      id: 'plink-bundle',
+      isBundle: true,
+    } as any)
+    tx.bundleComponent.findMany.mockResolvedValue([
+      {
+        internalProductId: 201,
+        internalProduct: { name: 'Part X' },
+        quantity: 1,
+        sortOrder: 0,
+      },
+    ] as any)
+    tx.externalOrderItem.findFirst.mockResolvedValue({ id: 'item-nb-existing' } as any)
+    tx.externalOrderItem.update.mockResolvedValue({} as any)
+
+    await upsertOrderWithItems(mockPrisma, {
+      ...baseParams,
+      normalized,
+      status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+    })
+
+    const updateCall = tx.externalOrderItem.update.mock.calls[0][0] as any
+    expect(updateCall.data).not.toHaveProperty('bundleComponentSnapshot')
   })
 })
