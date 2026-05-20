@@ -305,4 +305,39 @@ describe('pushStockForProducts — bundles', () => {
 
     consoleSpy.mockRestore();
   });
+
+  // FIX I (P2): dedup updates by (externalProductId, externalVariantId) before
+  // calling batchUpdateProductStock. A single-product link AND a bundle link
+  // pointing at the same WC product, OR two components mapping to the same
+  // bundle, would otherwise produce duplicate updates and redundant API calls.
+  it('dedups duplicate (externalProductId, externalVariantId) updates before sending', async () => {
+    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    setupClient(adapter);
+
+    // Two single-product links pointing at the SAME externalProductId '999'
+    // (e.g., two internal products both linked to the same WC product — rare
+    // but legal). Without Fix I, both would produce updates.
+    mockPrisma.productLink.findMany
+      .mockResolvedValueOnce([
+        makeSingleLink({
+          externalProductId: '999',
+          internalProductId: 1,
+          locations: [{ locationId: 1, quantity: 5 }],
+        }),
+        makeSingleLink({
+          externalProductId: '999',
+          internalProductId: 2,
+          locations: [{ locationId: 1, quantity: 5 }],
+        }),
+      ] as any)
+      .mockResolvedValueOnce([] as any);
+
+    await pushStockForProducts('int-1', [1, 2]);
+
+    // Without dedup the adapter would receive 2 updates for productId 999;
+    // with dedup it should receive only 1.
+    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    expect(updates).toHaveLength(1);
+    expect(updates[0].productId).toBe('999');
+  });
 });

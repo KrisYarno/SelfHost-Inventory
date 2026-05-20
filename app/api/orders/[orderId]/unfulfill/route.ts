@@ -2,12 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, requireCompanyMembership, apiHandler } from '@/lib/api-utils';
 import { validateCSRFToken } from '@/lib/csrf';
 import { UnfulfillRequestSchema } from '@/lib/validation/unfulfill';
-import { BundleComponentSnapshotArraySchema } from '@/lib/validation/bundle-links';
-import type { BundleComponentSnapshot } from '@/types/bulk-map';
 import {
   BUNDLE_SENTINEL_PRODUCT_ID,
   BUNDLE_SENTINEL_INVENTORY_LOG_ID,
 } from '@/lib/external-orders/constants';
+import { resolveBundleComponents } from '@/lib/external-orders/bundle-snapshot';
 import {
   applyRateLimitHeaders,
   enforceRateLimit,
@@ -139,58 +138,46 @@ export const POST = apiHandler(async (
           // Post-Fix-B, any item with fulfilledQty > 0 must have a snapshot. If
           // we see snapshot=null with fulfilledQty>0, it's a data-integrity bug;
           // refuse to restore so we don't compound the issue.
-          const rawSnapshot = orderItem.bundleComponentSnapshot;
-          let components: BundleComponentSnapshot[];
-
-          if (rawSnapshot !== null && rawSnapshot !== undefined) {
-            const parsed = BundleComponentSnapshotArraySchema.safeParse(rawSnapshot);
-            if (!parsed.success) {
+          if (
+            orderItem.bundleComponentSnapshot === null ||
+            orderItem.bundleComponentSnapshot === undefined
+          ) {
+            if (orderItem.fulfilledQty > 0) {
               skipped.push({
                 itemId: unfulfillItem.itemId,
-                reason: `Bundle item ${orderItem.id} has malformed bundleComponentSnapshot: ${parsed.error.errors[0]?.message ?? 'invalid format'}`,
+                reason: `Bundle item ${orderItem.id} has fulfilledQty=${orderItem.fulfilledQty} but no bundleComponentSnapshot — refusing to restore (data integrity error, please investigate)`,
               });
               continue;
             }
-            // Normalize optional fields to match BundleComponentSnapshot's required shape
-            components = parsed.data.map((c) => ({
-              internalProductId: c.internalProductId,
-              internalProductName: c.internalProductName ?? `Product ${c.internalProductId}`,
-              quantity: c.quantity,
-              sortOrder: c.sortOrder ?? 0,
-            }));
-          } else if (orderItem.fulfilledQty > 0) {
-            // FIX B: snapshot=null + fulfilledQty>0 is a data integrity error
-            // (post-Fix-B, fulfill always writes the snapshot before deducting).
-            // Refuse to restore — operator must investigate.
-            skipped.push({
-              itemId: unfulfillItem.itemId,
-              reason: `Bundle item ${orderItem.id} has fulfilledQty=${orderItem.fulfilledQty} but no bundleComponentSnapshot — refusing to restore (data integrity error, please investigate)`,
-            });
-            continue;
-          } else {
-            // snapshot=null AND fulfilledQty=0 — nothing was deducted, nothing to restore.
-            // Fall back to live components purely so the downstream empty-components
-            // check fires consistently. (In practice the fulfilledQty decrement
-            // below would return 0 affected rows and skip anyway.)
-            components = (orderItem.productLink.bundleComponents as Array<{
-              internalProductId: number;
-              quantity: number;
-              sortOrder: number;
-            }>).map((c) => ({
-              internalProductId: c.internalProductId,
-              internalProductName: `Product ${c.internalProductId}`,
-              quantity: c.quantity,
-              sortOrder: c.sortOrder,
-            }));
+            // snapshot=null AND fulfilledQty=0 — the fulfilledQty decrement
+            // below will return 0 affected rows and skip naturally; we still
+            // resolve from live so the downstream empty-components check
+            // fires consistently for legacy rows.
           }
 
-          if (!components || components.length === 0) {
-            skipped.push({
-              itemId: unfulfillItem.itemId,
-              reason: `Bundle item ${orderItem.id} has no components in snapshot or live mapping`,
-            });
+          // FIX G: shared helper handles snapshot Zod parse + normalize + fallback.
+          const resolved = resolveBundleComponents(
+            orderItem.bundleComponentSnapshot,
+            orderItem.productLink.bundleComponents,
+          );
+
+          if (!resolved.ok) {
+            if (resolved.reason === 'malformed_snapshot') {
+              skipped.push({
+                itemId: unfulfillItem.itemId,
+                reason: `Bundle item ${orderItem.id} has malformed bundleComponentSnapshot: ${resolved.detail}`,
+              });
+            } else {
+              // 'empty' — no components in snapshot OR live mapping
+              skipped.push({
+                itemId: unfulfillItem.itemId,
+                reason: `Bundle item ${orderItem.id} has no components in snapshot or live mapping`,
+              });
+            }
             continue;
           }
+
+          const components = resolved.components;
 
           // Atomic fulfilledQty decrement for the bundle item
           const bundleFulfilledAffected = await tx.$executeRaw(Prisma.sql`

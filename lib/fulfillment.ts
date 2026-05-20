@@ -2,12 +2,12 @@ import prisma from '@/lib/prisma';
 import { Prisma, inventory_logs_logType } from '@prisma/client';
 import { createInventoryLog } from '@/lib/inventory';
 import { ProductNotFoundError } from '@/lib/error-handling';
-import { BundleComponentSnapshotArraySchema } from '@/lib/validation/bundle-links';
 import type { BundleComponentSnapshot } from '@/types/bulk-map';
 import {
   BUNDLE_SENTINEL_PRODUCT_ID,
   BUNDLE_SENTINEL_INVENTORY_LOG_ID,
 } from '@/lib/external-orders/constants';
+import { resolveBundleComponents } from '@/lib/external-orders/bundle-snapshot';
 
 /**
  * Fulfillment Item Interface
@@ -155,56 +155,25 @@ export async function validateOrderFulfillment(
 
     if (item.isMapped && item.productLink?.isBundle) {
       // --- Bundle path: check each component for stock ---
-      const rawSnapshot = (item as any).bundleComponentSnapshot;
+      // FIX G: use the shared resolver — Zod parse + normalize + fallback.
+      const resolved = resolveBundleComponents(
+        item.bundleComponentSnapshot,
+        item.productLink.bundleComponents,
+      );
       let components: BundleComponentSnapshot[];
 
-      if (rawSnapshot !== null && rawSnapshot !== undefined) {
-        const parsed = BundleComponentSnapshotArraySchema.safeParse(rawSnapshot);
-        if (!parsed.success) {
-          // Malformed snapshot — treat as unfulfillable (no valid components)
+      if (!resolved.ok) {
+        if (resolved.reason === 'malformed_snapshot') {
           issues.push('malformed_snapshot');
-          hasStockIssues = true;
-          validationItems.push({
-            itemId: item.id,
-            name: item.name,
-            variantName: (item as any).variantName ?? null,
-            sku: item.sku,
-            requestedQty: item.quantity,
-            remainingQty,
-            fulfilledQty: item.fulfilledQty,
-            isMapped: item.isMapped,
-            mapping: undefined,
-            issues,
-            bundleShortages: undefined,
-          });
-          continue;
+        } else {
+          // resolved.reason === 'empty'
+          issues.push('Bundle has no components in snapshot or live mapping — cannot fulfill');
         }
-        // Normalize optional fields to match BundleComponentSnapshot's required shape
-        components = parsed.data.map((c) => ({
-          internalProductId: c.internalProductId,
-          internalProductName: c.internalProductName ?? `Product ${c.internalProductId}`,
-          quantity: c.quantity,
-          sortOrder: c.sortOrder ?? 0,
-        }));
-      } else {
-        // null snapshot → fall back to live bundleComponents (Prisma-typed, no Zod needed)
-        components = ((item.productLink as any).bundleComponents ?? []).map((c: any): BundleComponentSnapshot => ({
-          internalProductId: c.internalProductId,
-          internalProductName: c.internalProduct?.name ?? `Product ${c.internalProductId}`,
-          quantity: c.quantity,
-          sortOrder: c.sortOrder ?? 0,
-        }));
-      }
-
-      // A bundle with zero components is unfulfillable — mirror the fulfillment loop's
-      // behaviour (which returns 'no components in snapshot or live mapping').
-      if (components.length === 0) {
-        issues.push('Bundle has no components in snapshot or live mapping — cannot fulfill');
         hasStockIssues = true;
         validationItems.push({
           itemId: item.id,
           name: item.name,
-          variantName: (item as any).variantName ?? null,
+          variantName: item.variantName ?? null,
           sku: item.sku,
           requestedQty: item.quantity,
           remainingQty,
@@ -216,6 +185,8 @@ export async function validateOrderFulfillment(
         });
         continue;
       }
+
+      components = resolved.components;
 
       const shortages: BundleShortage[] = [];
 
@@ -325,7 +296,7 @@ export async function validateOrderFulfillment(
     validationItems.push({
       itemId: item.id,
       name: item.name,
-      variantName: (item as any).variantName ?? null,
+      variantName: item.variantName ?? null,
       sku: item.sku,
       requestedQty: item.quantity,
       remainingQty,
@@ -388,6 +359,11 @@ export async function fulfillExternalOrder(
     inventoryLogIds: [],
     affectedComponentIds: [],
   };
+
+  // FIX H (P2): O(N) dedup for affectedComponentIds via Set scoped to this call.
+  // Previously the loop did `if (!arr.includes(id)) arr.push(id)` per component,
+  // which is O(M*C^2) overall (M items × C components × O(C) includes scan).
+  const affectedComponentIdSet = new Set<number>();
 
   return await prisma.$transaction(
     async (tx) => {
@@ -461,51 +437,34 @@ export async function fulfillExternalOrder(
 
           // Bundle path: isBundle=true → expand into per-component deductions (D7)
           if (orderItem.isMapped && orderItem.productLink?.isBundle) {
-            // D7: prefer frozen snapshot; fall back to live bundleComponents for legacy rows.
-            // Zod-validate the snapshot when present to fail-closed on DB corruption.
-            const rawSnapshot = orderItem.bundleComponentSnapshot;
-            let components: BundleComponentSnapshot[];
-            let snapshotSource: 'snapshot' | 'live' = 'snapshot';
+            // FIX G: shared helper handles snapshot Zod parse + normalize + fallback.
+            const resolved = resolveBundleComponents(
+              orderItem.bundleComponentSnapshot,
+              orderItem.productLink.bundleComponents,
+            );
 
-            if (rawSnapshot !== null && rawSnapshot !== undefined) {
-              const parsed = BundleComponentSnapshotArraySchema.safeParse(rawSnapshot);
-              if (!parsed.success) {
+            if (!resolved.ok) {
+              if (resolved.reason === 'malformed_snapshot') {
                 result.skipped.push({
                   itemId: fulfillmentItem.itemId,
-                  reason: 'unmapped',
-                  details: `Bundle item ${orderItem.id} has malformed bundleComponentSnapshot: ${parsed.error.errors[0]?.message ?? 'invalid format'}`,
+                  reason: 'malformed_snapshot',
+                  details: `Bundle item ${orderItem.id} has malformed bundleComponentSnapshot: ${resolved.detail}`,
                 });
-                continue;
+              } else {
+                // 'empty' — no components in snapshot OR live mapping
+                result.failed.push({
+                  itemId: fulfillmentItem.itemId,
+                  error: `Bundle item ${orderItem.id} has no components in snapshot or live mapping`,
+                });
               }
-              // Normalize optional fields to match BundleComponentSnapshot's required shape
-              components = parsed.data.map((c) => ({
-                internalProductId: c.internalProductId,
-                internalProductName: c.internalProductName ?? `Product ${c.internalProductId}`,
-                quantity: c.quantity,
-                sortOrder: c.sortOrder ?? 0,
-              }));
-            } else {
-              // null snapshot → fall back to live bundleComponents (Prisma-typed, no Zod needed)
-              snapshotSource = 'live';
-              components = (orderItem.productLink.bundleComponents as Array<{
-                internalProductId: number;
-                quantity: number;
-                sortOrder: number;
-              }>).map((c) => ({
-                internalProductId: c.internalProductId,
-                internalProductName: `Product ${c.internalProductId}`,
-                quantity: c.quantity,
-                sortOrder: c.sortOrder,
-              }));
-            }
-
-            if (!components || components.length === 0) {
-              result.failed.push({
-                itemId: fulfillmentItem.itemId,
-                error: `Bundle item ${orderItem.id} has no components in snapshot or live mapping`,
-              });
               continue;
             }
+
+            // FIX F: dead `!components` guard removed — resolved.components is
+            // a non-null array by construction when resolved.ok is true, and
+            // the empty case is handled by the !resolved.ok branch above.
+            const components = resolved.components;
+            const snapshotSource = resolved.source;
 
             // FIX B (P0): D7 invariant — every fulfilled bundle item must have a
             // frozen snapshot so unfulfill reads a stable composition. For legacy
@@ -536,7 +495,9 @@ export async function fulfillExternalOrder(
               select: { productId: true, quantity: true },
             });
             const stockByProductId = new Map<number, number>(
-              stockRows.map((r) => [r.productId, r.quantity] as [number, number])
+              stockRows.map((r: { productId: number; quantity: number }) =>
+                [r.productId, r.quantity] as [number, number]
+              )
             );
 
             let preflightFailed = false;
@@ -656,11 +617,11 @@ export async function fulfillExternalOrder(
               componentIds: itemComponentIds,
             });
 
-            // P0-3: Accumulate component IDs so the route can push bundle WC stock
+            // P0-3 + FIX H: Accumulate component IDs into a Set scoped to this
+            // call so the route can push bundle WC stock — O(1) per id, O(N)
+            // total instead of O(N^2) includes scans.
             for (const component of components) {
-              if (!result.affectedComponentIds!.includes(component.internalProductId)) {
-                result.affectedComponentIds!.push(component.internalProductId);
-              }
+              affectedComponentIdSet.add(component.internalProductId);
             }
 
             continue; // Skip the single-mapping path below
@@ -832,6 +793,9 @@ export async function fulfillExternalOrder(
       // Amendment 7: Include full order totals for completed vs processing check
       result.totalQuantity = totalQuantity;
       result.totalFulfilled = totalFulfilled;
+
+      // FIX H: materialize the deduplicated component-id Set into the result.
+      result.affectedComponentIds = Array.from(affectedComponentIdSet);
 
       return result;
     },

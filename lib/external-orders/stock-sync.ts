@@ -329,10 +329,24 @@ export async function pushStockForProducts(
 
   if (updates.length === 0) return;
 
+  // FIX I (P2): Dedup updates by (externalProductId, externalVariantId). If
+  // two component IDs map to the same external product (rare but possible —
+  // e.g., two ProductLinks pointing at the same WC product, or a bundle
+  // referencing a component that is also externally linked), we'd otherwise
+  // make redundant WC API calls.
+  const seenUpdates = new Set<string>();
+  const deduped: typeof updates = [];
+  for (const u of updates) {
+    const key = `${u.productId}::${u.variantId ?? ''}`;
+    if (seenUpdates.has(key)) continue;
+    seenUpdates.add(key);
+    deduped.push(u);
+  }
+
   const result = await adapter.batchUpdateProductStock(
     storeUrl,
     credentials,
-    updates
+    deduped
   );
 
   if (result.failed.length > 0) {
