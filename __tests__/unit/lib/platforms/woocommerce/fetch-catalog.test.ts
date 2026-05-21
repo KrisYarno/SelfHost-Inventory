@@ -128,7 +128,11 @@ describe('fetchWooCatalog', () => {
       },
       { status: 200, body: [] },
     ]);
-    const out = await fetchWooCatalog(STORE, KEY, SECRET, { deadlineMs: 0 });
+    // deadlineMs: -1 ensures Date.now() > deadline is true on the first
+    // worker tick. With deadlineMs: 0, deadline = Date.now() and the worker's
+    // Date.now() > deadline check is flaky inside a single ms tick — mocked
+    // fetch can resolve before the clock advances. -1 is unambiguously past.
+    const out = await fetchWooCatalog(STORE, KEY, SECRET, { deadlineMs: -1 });
     const timeoutWarnings = out.warnings.filter((w) => w.kind === 'timeout-skipped');
     expect(timeoutWarnings.length).toBeGreaterThan(0);
   });
