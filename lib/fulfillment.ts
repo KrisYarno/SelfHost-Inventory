@@ -2,7 +2,6 @@ import prisma from '@/lib/prisma';
 import { Prisma, inventory_logs_logType } from '@prisma/client';
 import { createInventoryLog } from '@/lib/inventory';
 import { ProductNotFoundError } from '@/lib/error-handling';
-import type { BundleComponentSnapshot } from '@/types/bulk-map';
 import {
   BUNDLE_SENTINEL_PRODUCT_ID,
   BUNDLE_SENTINEL_INVENTORY_LOG_ID,
