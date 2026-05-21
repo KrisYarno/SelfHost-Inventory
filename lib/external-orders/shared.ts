@@ -236,7 +236,9 @@ export async function upsertOrderWithItems(
 
         // D7: Build a point-in-time snapshot of bundle components at intake.
         // Only set on CREATE (never overwrite on UPDATE) to preserve immutability.
-        let bundleComponentSnapshot: object | null = null;
+        // Prisma typed-input shape: omit the field (undefined) for non-bundles
+        // so the column defaults to NULL; assign the array when this is a bundle.
+        let bundleComponentSnapshot: Prisma.InputJsonValue | undefined = undefined;
         if (productLink?.isBundle) {
           const components = await tx.bundleComponent.findMany({
             where: { productLinkId: productLink.id },
@@ -248,7 +250,7 @@ export async function upsertOrderWithItems(
             internalProductName: c.internalProduct.name,
             quantity: c.quantity,
             sortOrder: c.sortOrder,
-          }));
+          })) as unknown as Prisma.InputJsonValue;
         }
 
         const itemData = {

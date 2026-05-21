@@ -58,11 +58,12 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
 
   // Validate component internal products
   const internalIds = body.components.map((c) => c.internalProductId);
-  const products = await prisma.product.findMany({
+  type ProductInfo = { id: number; name: string; deletedAt: Date | null };
+  const products: ProductInfo[] = await prisma.product.findMany({
     where: { id: { in: internalIds } },
     select: { id: true, name: true, deletedAt: true },
   });
-  const productMap = new Map(products.map((p) => [p.id, p]));
+  const productMap = new Map<number, ProductInfo>(products.map((p) => [p.id, p]));
 
   for (const c of body.components) {
     const p = productMap.get(c.internalProductId);
