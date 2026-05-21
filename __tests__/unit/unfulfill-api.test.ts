@@ -181,13 +181,18 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     expect(data.success).toBe(true)
     expect(data.restored).toHaveLength(2)
     expect(data.skipped).toHaveLength(0)
-    expect(data.newOrderStatus).toBe('pending')
+    // stockedOut separation (commit efae981): unfulfill no longer mutates
+    // internalStatus (that's WC's domain). newOrderStatus echoes the existing
+    // WC status. The meaningful state change is on stockedOut/fulfilledAt/etc,
+    // asserted below on the update payload.
 
-    // Verify fulfilledAt/fulfilledBy are cleared
+    // All items restored → stockedOut cleared and audit fields cleared
     expect(tx.externalOrder.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          internalStatus: 'pending',
+          stockedOut: false,
+          stockedOutAt: null,
+          stockedOutBy: null,
           fulfilledAt: null,
           fulfilledBy: null,
         }),
@@ -233,7 +238,15 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
 
     expect(data.success).toBe(true)
     expect(data.restored).toHaveLength(1)
-    expect(data.newOrderStatus).toBe('processing')
+    // stockedOut separation (commit efae981): unfulfill no longer mutates
+    // internalStatus. With one item still fulfilled, stockedOut stays true.
+    expect(tx.externalOrder.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          stockedOut: true,
+        }),
+      })
+    )
   })
 
   // -----------------------------------------------------------------------
