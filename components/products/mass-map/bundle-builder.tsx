@@ -29,7 +29,6 @@ interface Props {
 
 export function BundleBuilder({
   row,
-  index,
   initialComponents = [],
   saving,
   errorMessage,

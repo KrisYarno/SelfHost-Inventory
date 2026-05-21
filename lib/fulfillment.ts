@@ -160,7 +160,6 @@ export async function validateOrderFulfillment(
         item.bundleComponentSnapshot,
         item.productLink.bundleComponents,
       );
-      let components: BundleComponentSnapshot[];
 
       if (!resolved.ok) {
         if (resolved.reason === 'malformed_snapshot') {
@@ -186,7 +185,7 @@ export async function validateOrderFulfillment(
         continue;
       }
 
-      components = resolved.components;
+      const components = resolved.components;
 
       const shortages: BundleShortage[] = [];
 
