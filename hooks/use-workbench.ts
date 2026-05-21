@@ -196,7 +196,23 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         const remainingQty = item.quantity - item.fulfilledQty;
         if (remainingQty <= 0) continue;
 
-        if (item.isMapped && item.productLink?.internalProduct) {
+        // Bundle items can't be added to the workbench cart (cart entries are
+        // 1:1 with a single internal product). Surface them with isBundle=true
+        // so the alert can render the right message — operators fulfill bundles
+        // via the Order Details sheet, not the workbench. They are still mapped
+        // (isMapped=true with productLink.isBundle=true), so don't treat as
+        // "unmapped" — the message is different.
+        if (item.isMapped && item.productLink?.isBundle) {
+          unmappedItems.push({
+            name: item.name,
+            sku: item.sku ?? undefined,
+            quantity: remainingQty,
+            externalItemId: item.id,
+            externalProductId: item.externalProductId ?? undefined,
+            externalVariantId: item.externalVariantId ?? undefined,
+            isBundle: true,
+          });
+        } else if (item.isMapped && item.productLink?.internalProduct) {
           // Find matching product in the loaded products array
           const matchingProduct = products.find(
             (p) => p.id === item.productLink!.internalProductId

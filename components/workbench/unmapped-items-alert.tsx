@@ -22,6 +22,7 @@ interface UnmappedItemsAlertProps {
     quantity: number;
     externalProductId?: string;
     externalVariantId?: string;
+    isBundle?: boolean;
   }>;
   integrationId?: string;
   onItemMapped?: () => void;
@@ -59,6 +60,12 @@ export function UnmappedItemsAlert({
 
   if (items.length === 0) return null;
 
+  // Split items by kind: bundles are surfaced separately because they ARE
+  // mapped (just not addable to the workbench cart, which is 1:1 with a
+  // single internal product). The label and Map button differ.
+  const bundleItems = items.filter((i) => i.isBundle);
+  const unmappedItems = items.filter((i) => !i.isBundle);
+
   const handleMapClick = (item: MapDialogItem) => {
     // P2: only allow mapping when we actually have an external reference,
     // otherwise the POST would create a broken ProductLink with empty ids.
@@ -94,8 +101,20 @@ export function UnmappedItemsAlert({
           <div className="flex items-center gap-2 min-w-0">
             <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
             <span className="font-medium text-amber-700 dark:text-amber-400">
-              {items.length} unmapped {items.length === 1 ? "item" : "items"} will
-              be skipped
+              {unmappedItems.length > 0 && (
+                <>
+                  {unmappedItems.length} unmapped{" "}
+                  {unmappedItems.length === 1 ? "item" : "items"}
+                </>
+              )}
+              {unmappedItems.length > 0 && bundleItems.length > 0 && " + "}
+              {bundleItems.length > 0 && (
+                <>
+                  {bundleItems.length} bundle{" "}
+                  {bundleItems.length === 1 ? "item" : "items"}
+                </>
+              )}
+              {" "}will be skipped
             </span>
           </div>
           <ChevronDown
@@ -125,15 +144,26 @@ export function UnmappedItemsAlert({
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium truncate text-foreground">
                     {item.name}
+                    {item.isBundle && (
+                      <span className="ml-2 text-[10px] font-medium uppercase tracking-wider rounded-sm px-1 py-0.5 bg-purple-500/15 text-purple-700 dark:text-purple-300 border border-purple-500/40">
+                        Bundle
+                      </span>
+                    )}
                   </p>
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     {item.sku && <span>SKU: {item.sku}</span>}
                     <span>Qty: {item.quantity}</span>
+                    {item.isBundle && (
+                      <span className="italic">
+                        Fulfill via Order Details
+                      </span>
+                    )}
                   </div>
                 </div>
 
-                {/* Admin-only Map button */}
-                {isAdmin && integrationId && (
+                {/* Admin-only Map button — hidden for bundle items (already
+                    mapped; can be edited from the bulk-map page if needed). */}
+                {!item.isBundle && isAdmin && integrationId && (
                   <Button
                     variant="outline"
                     size="sm"

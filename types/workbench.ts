@@ -24,6 +24,11 @@ export interface SelectedExternalOrder {
 // Extended with externalProductId/externalVariantId so UnmappedItemsAlert can
 // hand a valid external reference to ProductMapDialog (P2: previously passed
 // empty string which would create broken mappings).
+//
+// isBundle: bundle items can't be added to the workbench cart (cart items are
+// 1:1 with a single internal product). They are surfaced as a separate row so
+// operators see "Bundle — fulfill via Order Details" instead of an unmapped
+// warning that suggests no mapping exists.
 export interface UnmappedExternalItem {
   name: string;
   sku?: string;
@@ -31,6 +36,7 @@ export interface UnmappedExternalItem {
   externalItemId?: string;
   externalProductId?: string;
   externalVariantId?: string;
+  isBundle?: boolean;
 }
 
 // Workbench state interface
