@@ -845,7 +845,11 @@ describe('upsertOrderWithItems', () => {
     expect(tx.bundleComponent.findMany).not.toHaveBeenCalled()
 
     const upsertCall = tx.externalOrderItem.upsert.mock.calls[0][0] as any
-    expect(upsertCall.create.bundleComponentSnapshot).toBeNull()
+    // For non-bundle links, the field is omitted from the create payload
+    // entirely (undefined). Prisma defaults the nullable Json column to SQL NULL.
+    // Either undefined-omitted or explicit null is semantically equivalent at the
+    // DB level; we use undefined to satisfy Prisma's typed-input contract.
+    expect(upsertCall.create.bundleComponentSnapshot).toBeUndefined()
   })
 
   // -----------------------------------------------------------------------
