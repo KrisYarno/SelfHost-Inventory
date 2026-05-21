@@ -386,28 +386,41 @@ export function CompleteOrderDialog({
                 </div>
               )}
 
-              {/* Unmapped items warning. Bundles are surfaced separately
+              {/* Skipped-items warning. Bundles are surfaced separately
                   because they ARE mapped — operators just need to fulfill them
-                  via the Order Details sheet, not the workbench cart. */}
-              {isWCOrder && unmappedExternalItems.length > 0 && (
-                <div className="rounded-lg border border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/30 p-3 space-y-1">
-                  <div className="flex items-center gap-1.5">
-                    <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
-                    <span className="text-sm font-medium text-amber-700 dark:text-amber-300">
-                      {unmappedExternalItems.length} {unmappedExternalItems.some((i) => i.isBundle) && unmappedExternalItems.some((i) => !i.isBundle) ? "item" : unmappedExternalItems.every((i) => i.isBundle) ? "bundle item" : "unmapped item"}{unmappedExternalItems.length !== 1 ? "s" : ""} will be skipped
-                    </span>
+                  via the Order Details sheet, not the workbench cart. The
+                  noun chosen is "items" when both bundle + unmapped exist,
+                  "bundle items" when only bundles, "unmapped items" otherwise. */}
+              {isWCOrder && unmappedExternalItems.length > 0 && (() => {
+                const allBundles = unmappedExternalItems.every((i) => i.isBundle);
+                const someBundles = unmappedExternalItems.some((i) => i.isBundle);
+                const someUnmapped = unmappedExternalItems.some((i) => !i.isBundle);
+                const noun = allBundles
+                  ? "bundle item"
+                  : someBundles && someUnmapped
+                  ? "item"
+                  : "unmapped item";
+                const plural = unmappedExternalItems.length !== 1 ? "s" : "";
+                return (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/30 p-3 space-y-1">
+                    <div className="flex items-center gap-1.5">
+                      <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+                      <span className="text-sm font-medium text-amber-700 dark:text-amber-300">
+                        {unmappedExternalItems.length} {noun}{plural} will be skipped
+                      </span>
+                    </div>
+                    <ul className="text-xs text-amber-600 dark:text-amber-400 space-y-0.5 ml-5">
+                      {unmappedExternalItems.map((item, idx) => (
+                        <li key={idx}>
+                          {item.name} x{item.quantity}
+                          {item.sku && <span className="ml-1 opacity-70">({item.sku})</span>}
+                          {item.isBundle && <span className="ml-1 italic opacity-70">(bundle — fulfill via Order Details)</span>}
+                        </li>
+                      ))}
+                    </ul>
                   </div>
-                  <ul className="text-xs text-amber-600 dark:text-amber-400 space-y-0.5 ml-5">
-                    {unmappedExternalItems.map((item, idx) => (
-                      <li key={idx}>
-                        {item.name} x{item.quantity}
-                        {item.sku && <span className="ml-1 opacity-70">({item.sku})</span>}
-                        {item.isBundle && <span className="ml-1 italic opacity-70">(bundle — fulfill via Order Details)</span>}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+                );
+              })()}
 
               {/* Summary text */}
               {isWCOrder ? (
