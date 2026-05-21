@@ -90,6 +90,9 @@ export async function syncStockToExternal(
   }> = [];
 
   for (const link of productLinks) {
+    // Query filters on isBundle: false so internalProduct is always set in
+    // practice, but TypeScript can't narrow through the schema-level nullability.
+    if (!link.internalProduct) continue;
     const locations = link.internalProduct.product_locations;
 
     let totalStock: number;
@@ -263,6 +266,8 @@ export async function pushStockForProducts(
   }> = [];
 
   for (const link of links) {
+    // Same isBundle: false guarantee as above; defensive null narrowing.
+    if (!link.internalProduct) continue;
     const locations = link.internalProduct.product_locations;
 
     let totalStock: number;

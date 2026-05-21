@@ -40,7 +40,9 @@ export async function computeBundleStockStatus(
   }
 
   for (const c of components) {
-    if (c.internalProduct.deletedAt !== null) {
+    // Orphan component: relation FK should always be set, but defensive null
+    // check covers hard-delete cascade edge cases. Treat as orphan → outofstock.
+    if (!c.internalProduct || c.internalProduct.deletedAt !== null) {
       return {
         status: 'outofstock',
         warning: { kind: 'orphan-component', internalProductId: c.internalProductId },

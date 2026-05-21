@@ -438,9 +438,9 @@ export default function AdminProductMappingsPage() {
                                 </p>
                                 {mapping.internalProduct?.baseName && (
                                   <p className="text-xs text-muted-foreground">
-                                    {mapping.internalProduct.baseName}
-                                    {mapping.internalProduct.variant
-                                      ? ` / ${mapping.internalProduct.variant}`
+                                    {mapping.internalProduct?.baseName}
+                                    {mapping.internalProduct?.variant
+                                      ? ` / ${mapping.internalProduct?.variant}`
                                       : ""}
                                   </p>
                                 )}
