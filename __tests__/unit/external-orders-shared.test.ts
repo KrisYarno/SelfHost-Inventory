@@ -928,4 +928,115 @@ describe('upsertOrderWithItems', () => {
     const updateCall = tx.externalOrderItem.update.mock.calls[0][0] as any
     expect(updateCall.data).not.toHaveProperty('bundleComponentSnapshot')
   })
+
+  // -----------------------------------------------------------------------
+  // Auto-update externalTitle on order intake when WC renames a product
+  // -----------------------------------------------------------------------
+  it('auto-updates ProductLink.externalTitle when WC sends a new name', async () => {
+    const tx = setupTransaction()
+    const normalized = buildNormalizedOrder({
+      lineItems: [
+        {
+          externalId: 'item-renamed-1',
+          externalProductId: 'prod-renamed',
+          externalVariantId: null,
+          name: 'Coffee Beans (Updated)',
+          variantName: null,
+          sku: 'CB-001',
+          quantity: 2,
+          unitPrice: 12,
+        },
+      ],
+    })
+
+    tx.externalOrder.upsert.mockResolvedValue({ id: 'order-renamed' } as any)
+    tx.productLink.findFirst.mockResolvedValue({
+      id: 'plink-renamed',
+      isBundle: false,
+      externalTitle: 'Coffee Beans',
+    } as any)
+    tx.externalOrderItem.upsert.mockResolvedValue({} as any)
+
+    await upsertOrderWithItems(mockPrisma, {
+      ...baseParams,
+      normalized,
+      status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+    })
+
+    expect(tx.productLink.update).toHaveBeenCalledWith({
+      where: { id: 'plink-renamed' },
+      data: { externalTitle: 'Coffee Beans (Updated)' },
+    })
+  })
+
+  it('does NOT update externalTitle when WC name matches the current title', async () => {
+    const tx = setupTransaction()
+    const normalized = buildNormalizedOrder({
+      lineItems: [
+        {
+          externalId: 'item-same-1',
+          externalProductId: 'prod-same',
+          externalVariantId: null,
+          name: 'Coffee Beans',
+          variantName: null,
+          sku: 'CB-002',
+          quantity: 1,
+          unitPrice: 10,
+        },
+      ],
+    })
+
+    tx.externalOrder.upsert.mockResolvedValue({ id: 'order-same' } as any)
+    tx.productLink.findFirst.mockResolvedValue({
+      id: 'plink-same',
+      isBundle: false,
+      externalTitle: 'Coffee Beans',
+    } as any)
+    tx.externalOrderItem.upsert.mockResolvedValue({} as any)
+
+    await upsertOrderWithItems(mockPrisma, {
+      ...baseParams,
+      normalized,
+      status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+    })
+
+    expect(tx.productLink.update).not.toHaveBeenCalled()
+  })
+
+  it('combines name + variantName when both present', async () => {
+    const tx = setupTransaction()
+    const normalized = buildNormalizedOrder({
+      lineItems: [
+        {
+          externalId: 'item-variant-1',
+          externalProductId: 'prod-variant',
+          externalVariantId: 'var-1lb',
+          name: 'Coffee Beans',
+          variantName: '1 lb',
+          sku: 'CB-1LB',
+          quantity: 1,
+          unitPrice: 18,
+        },
+      ],
+    })
+
+    tx.externalOrder.upsert.mockResolvedValue({ id: 'order-variant' } as any)
+    tx.productLink.findFirst.mockResolvedValue({
+      id: 'plink-variant',
+      isBundle: false,
+      externalTitle: 'Coffee Beans',
+    } as any)
+    tx.externalOrderItem.upsert.mockResolvedValue({} as any)
+
+    await upsertOrderWithItems(mockPrisma, {
+      ...baseParams,
+      normalized,
+      status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+    })
+
+    expect(tx.productLink.update).toHaveBeenCalledWith({
+      where: { id: 'plink-variant' },
+      data: { externalTitle: 'Coffee Beans — 1 lb' },
+    })
+  })
 })

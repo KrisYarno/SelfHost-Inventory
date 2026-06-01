@@ -232,6 +232,24 @@ export async function upsertOrderWithItems(
               externalVariantId: lineItem.externalVariantId ?? null,
             },
           });
+
+          // Auto-update externalTitle to track WC name changes. The mapping is
+          // identified by IDs, but the displayed title stays current so admin
+          // pages show the WC product's current name without manual re-mapping.
+          // Per-item ExternalOrderItem.name remains frozen at the value WC sent
+          // for THIS order (historical accuracy).
+          if (productLink && lineItem.name) {
+            const computedTitle = lineItem.variantName
+              ? `${lineItem.name} — ${lineItem.variantName}`
+              : lineItem.name;
+            if (productLink.externalTitle !== computedTitle) {
+              await tx.productLink.update({
+                where: { id: productLink.id },
+                data: { externalTitle: computedTitle },
+              });
+              productLink.externalTitle = computedTitle;
+            }
+          }
         }
 
         // D7: Build a point-in-time snapshot of bundle components at intake.
