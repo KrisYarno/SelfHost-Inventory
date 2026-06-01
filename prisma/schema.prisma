@@ -31,6 +31,10 @@ model User {
   auditLogs           AuditLog[]
   companies           UserCompany[]
   fulfilledOrders     ExternalOrder[]
+  stagingReceived     StagingItem[]  @relation("StagingReceivedBy")
+  stagingGraduated    StagingItem[]  @relation("StagingGraduatedBy")
+  createdProducts     Product[]      @relation("ProductCreatedBy")
+  reviewedProducts    Product[]      @relation("ProductReviewedBy")
   locations           Location              @relation(fields: [defaultLocationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_default_location")
 
   @@index([defaultLocationId], map: "fk_user_default_location")
@@ -52,6 +56,13 @@ model Product {
   retailPrice         Decimal                @default(0.00) @db.Decimal(10, 2)
   deletedAt           DateTime?              @db.DateTime(0)
   deletedBy           Int?
+  approvalStatus      ProductApprovalStatus  @default(APPROVED)
+  createdBy           Int?
+  reviewedBy          Int?
+  reviewedAt          DateTime?
+  createdByUser       User?                  @relation("ProductCreatedBy", fields: [createdBy], references: [id])
+  reviewedByUser      User?                  @relation("ProductReviewedBy", fields: [reviewedBy], references: [id])
+  stagingResolved     StagingItem[]          @relation("StagingResolvedProduct")
 
   // Retail Price Sync: points at the ONE ProductLink whose WC regular_price
   // should be pulled into retailPrice on manual sync. NULL = manual pricing.
@@ -73,7 +84,37 @@ model Product {
   @@index([variant], map: "idx_products_variant_fulltext")
   @@index([baseName, variant, name], map: "idx_products_search_composite")
   @@index([deletedBy], map: "products_deletedBy_fkey")
+  @@index([approvalStatus], map: "idx_product_approval_status")
   @@map("products")
+}
+
+model StagingItem {
+  id                Int               @id @default(autoincrement())
+  description       String            @db.VarChar(255)
+  status            StagingItemStatus @default(RECEIVED)
+  expectedQuantity  Int?
+  countedQuantity   Int?
+  resolvedProductId Int?
+  vendor            String?           @db.VarChar(255)
+  reference         String?           @db.VarChar(255)
+  notes             String?           @db.Text
+  locationId        Int
+  receivedBy        Int
+  receivedAt        DateTime          @default(now()) @db.DateTime(0)
+  graduatedBy       Int?
+  graduatedAt       DateTime?         @db.DateTime(0)
+  createdAt         DateTime          @default(now()) @db.DateTime(0)
+  updatedAt         DateTime          @updatedAt @db.DateTime(0)
+
+  receivedByUser    User              @relation("StagingReceivedBy", fields: [receivedBy], references: [id])
+  graduatedByUser   User?             @relation("StagingGraduatedBy", fields: [graduatedBy], references: [id])
+  resolvedProduct   Product?          @relation("StagingResolvedProduct", fields: [resolvedProductId], references: [id])
+  location          Location          @relation(fields: [locationId], references: [id])
+
+  @@index([status, locationId, receivedAt], map: "idx_staging_status_loc_time")
+  @@index([receivedBy], map: "idx_staging_received_by")
+  @@index([resolvedProductId], map: "idx_staging_resolved_product")
+  @@map("staging_items")
 }
 
 model Location {
@@ -83,6 +124,7 @@ model Location {
   product_locations product_locations[]
   notificationHistory NotificationHistory[]
   users             User[]
+  stagingItems      StagingItem[]
 
   @@map("locations")
 }
@@ -177,6 +219,17 @@ model SystemSetting {
 enum inventory_logs_logType {
   ADJUSTMENT
   TRANSFER
+}
+
+enum ProductApprovalStatus {
+  APPROVED
+  PENDING_REVIEW
+}
+
+enum StagingItemStatus {
+  RECEIVED
+  GRADUATED
+  DISCARDED
 }
 
 // Organizational Layer
