@@ -31,9 +31,15 @@ export const GET = apiHandler(async (request: NextRequest) => {
   }
 
   if (locationFilter && locationFilter !== "all") {
-    whereClause.locations = {
-      name: locationFilter,
-    };
+    // Pillar 1: filter by locationId so renames don't hide historical rows.
+    // Backwards-compatible: bookmarked URLs with ?location=Name still work via
+    // the else-branch name lookup.
+    const asId = parseInt(locationFilter, 10);
+    if (Number.isFinite(asId) && String(asId) === locationFilter) {
+      whereClause.locationId = asId;
+    } else {
+      whereClause.locations = { name: locationFilter };
+    }
   }
 
   if (typeFilter && typeFilter !== "all") {

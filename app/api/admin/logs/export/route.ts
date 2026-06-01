@@ -29,9 +29,13 @@ export const GET = apiHandler(async (request: NextRequest) => {
   }
 
   if (locationFilter && locationFilter !== "all") {
-    whereClause.locations = {
-      name: locationFilter,
-    };
+    // Pillar 1: filter by locationId. Backwards-compatible with name URLs.
+    const asId = parseInt(locationFilter, 10);
+    if (Number.isFinite(asId) && String(asId) === locationFilter) {
+      whereClause.locationId = asId;
+    } else {
+      whereClause.locations = { name: locationFilter };
+    }
   }
 
   if (typeFilter && typeFilter !== "all") {

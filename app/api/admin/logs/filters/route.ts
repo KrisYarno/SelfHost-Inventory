@@ -18,7 +18,7 @@ export const GET = apiHandler(async () => {
       orderBy: { username: "asc" },
     }),
     prisma.location.findMany({
-      select: { name: true },
+      select: { id: true, name: true },
       orderBy: { name: "asc" },
     }),
   ]);
@@ -28,6 +28,7 @@ export const GET = apiHandler(async () => {
       id: u.id,
       email: u.email || u.username,
     })),
-    locations: locations.map((l) => l.name),
+    // Pillar 1: filter by location ID, render name. Survives location rename.
+    locations: locations.map((l) => ({ id: l.id, name: l.name })),
   });
 });

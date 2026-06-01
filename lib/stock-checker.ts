@@ -16,9 +16,12 @@ export class StockChecker {
    * Check all products for low stock and return those below threshold
    */
   async checkLowStock(): Promise<LowStockProduct[]> {
-    // Get all products with their thresholds and current quantities
+    // Get all products with their thresholds and current quantities.
+    // Exclude soft-deleted products so deleted products don't trigger alerts
+    // (matches checkMinimums behavior — current-state reports skip deleted).
     const products = await prisma.product.findMany({
       where: {
+        deletedAt: null,
         lowStockThreshold: {
           gt: 0, // Only check products with a threshold set
         },

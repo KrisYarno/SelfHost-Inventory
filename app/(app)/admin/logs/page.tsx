@@ -114,7 +114,7 @@ function ChangeLogTab({ active }: { active: boolean }) {
   const [dateTo, setDateTo] = useState<Date | undefined>(undefined);
   const [filters, setFilters] = useState<{
     users: Array<{ id: number; email: string }>;
-    locations?: Array<string>;
+    locations?: Array<{ id: number; name: string }>;
   } | null>(null);
 
   const [isInitialLoading, setIsInitialLoading] = useState(true);
@@ -316,8 +316,8 @@ function ChangeLogTab({ active }: { active: boolean }) {
                 <SelectContent>
                   <SelectItem value="all">All Locations</SelectItem>
                   {filters?.locations?.map((location) => (
-                    <SelectItem key={location} value={location}>
-                      {location}
+                    <SelectItem key={location.id} value={location.id.toString()}>
+                      {location.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
