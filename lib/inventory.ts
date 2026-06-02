@@ -98,6 +98,123 @@ export async function getCurrentQuantity(
 }
 
 /**
+ * Applies a single stock delta inside an existing transaction.
+ *
+ * Performs, in this exact order, the write block shared by every stock route:
+ *   1. createInventoryLog(..., tx)
+ *   2. tx.product_locations.upsert (increment quantity + version, or create at version 1)
+ *   3. if locationId === 1, tx.product.update to mirror the legacy Product.quantity field
+ *
+ * Extracted verbatim from createInventoryAdjustment so the same write path can be
+ * reused (e.g. by pre-staging graduation/decline) without duplicating logic.
+ *
+ * Note: although future callers (graduation/decline) only need fire-and-forget
+ * semantics (Promise<void>), createInventoryAdjustment relies on the created log row
+ * and the resulting version. Returning them here lets the delegating caller preserve
+ * its exact `{ log, newVersion }` contract WITHOUT issuing any extra Prisma reads —
+ * behavior preservation is the priority. Callers that don't need the result simply
+ * `await applyStockDelta(...)` and ignore the return.
+ */
+export async function applyStockDelta(
+  tx: Prisma.TransactionClient,
+  args: {
+    userId: number;
+    productId: number;
+    locationId: number;
+    delta: number;
+    logType?: inventory_logs_logType;
+  }
+): Promise<{
+  log: Awaited<ReturnType<typeof createInventoryLog>>;
+  newVersion: number;
+}> {
+  const {
+    userId,
+    productId,
+    locationId,
+    delta,
+    logType = inventory_logs_logType.ADJUSTMENT,
+  } = args;
+
+  // Create the log entry
+  const log = await createInventoryLog(
+    {
+      userId,
+      productId,
+      locationId,
+      delta,
+      logType,
+    },
+    tx
+  );
+
+  // Update or create product_locations entry with version increment
+  const updatedProductLocation = await tx.product_locations.upsert({
+    where: {
+      productId_locationId: {
+        productId,
+        locationId,
+      },
+    },
+    update: {
+      quantity: {
+        increment: delta,
+      },
+      version: {
+        increment: 1,
+      },
+    },
+    create: {
+      productId,
+      locationId,
+      quantity: delta,
+      version: 1,
+    },
+  });
+
+  // Update the product's quantity field for location 1 (for compatibility)
+  if (locationId === 1) {
+    await tx.product.update({
+      where: { id: productId },
+      data: { quantity: { increment: delta } },
+    });
+  }
+
+  return {
+    log,
+    newVersion: updatedProductLocation.version,
+  };
+}
+
+/**
+ * Retries `fn` when the underlying transaction fails with a deadlock /
+ * lock-wait-timeout, using a small linear backoff. Used by the pre-staging
+ * graduation/decline flows that contend on the same product_locations rows.
+ */
+const DEADLOCK_CODES = new Set(['P2034']);
+export async function withDeadlockRetry<T>(
+  fn: () => Promise<T>,
+  attempts = 3
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e: any) {
+      lastErr = e;
+      const code = e?.code ?? '';
+      const msg = String(e?.message ?? '');
+      if (DEADLOCK_CODES.has(code) || /deadlock|lock wait timeout/i.test(msg)) {
+        await new Promise((r) => setTimeout(r, 50 * (i + 1)));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * Creates an inventory adjustment and updates product_locations with optimistic locking
  */
 export async function createInventoryAdjustment(
@@ -163,50 +280,20 @@ export async function createInventoryAdjustment(
           }
         }
 
-        // Create the log entry
-        const log = await createInventoryLog({
+        // Apply the stock delta: log + product_locations upsert + loc-1 mirror.
+        // Extracted to applyStockDelta; preserves the exact same Prisma call
+        // sequence (createInventoryLog -> upsert -> conditional product.update).
+        const { log, newVersion } = await applyStockDelta(tx, {
           userId,
           productId,
           locationId,
           delta,
           logType,
-        }, tx);
-
-        // Update or create product_locations entry with version increment
-        const updatedProductLocation = await tx.product_locations.upsert({
-          where: {
-            productId_locationId: {
-              productId,
-              locationId,
-            },
-          },
-          update: {
-            quantity: {
-              increment: delta,
-            },
-            version: {
-              increment: 1,
-            },
-          },
-          create: {
-            productId,
-            locationId,
-            quantity: delta,
-            version: 1,
-          },
         });
-
-        // Update the product's quantity field for location 1 (for compatibility)
-        if (locationId === 1) {
-          await tx.product.update({
-            where: { id: productId },
-            data: { quantity: { increment: delta } },
-          });
-        }
 
         return {
           log,
-          newVersion: updatedProductLocation.version,
+          newVersion,
         };
       });
     } catch (error) {
