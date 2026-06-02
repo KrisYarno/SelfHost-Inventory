@@ -75,10 +75,12 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
 
   const target = await prisma.product.findUnique({
     where: { id: productId },
-    select: { createdBy: true, approvalStatus: true },
+    select: { createdBy: true, approvalStatus: true, deletedAt: true },
   });
   const isOwnPending =
-    target?.createdBy === user.id && target?.approvalStatus === "PENDING_REVIEW";
+    target?.deletedAt === null &&
+    target?.createdBy === user.id &&
+    target?.approvalStatus === "PENDING_REVIEW";
   if (!user.isAdmin && !isOwnPending) {
     throw new AppError("Forbidden", "FORBIDDEN", 403);
   }

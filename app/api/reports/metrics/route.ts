@@ -43,8 +43,9 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const activeProducts = totalProducts;
 
   // Get current inventory levels and calculate total stock
+  // (exclude soft-deleted + provisional products from the current-state stock total, per E4)
   const productLocations = await prisma.product_locations.findMany({
-    where: locationFilter,
+    where: { ...locationFilter, products: { is: { deletedAt: null, approvalStatus: "APPROVED" } } },
     select: {
       productId: true,
       quantity: true,

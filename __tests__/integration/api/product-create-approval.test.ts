@@ -161,7 +161,7 @@ describe('PUT /api/products/[id] (creator-edit-own-pending guard)', () => {
     setUser(APPROVED_USER);
     // First findUnique = guard check (narrow select); second = existingProduct fetch.
     db.product.findUnique
-      .mockResolvedValueOnce({ createdBy: APPROVED_USER.id, approvalStatus: 'PENDING_REVIEW' })
+      .mockResolvedValueOnce({ createdBy: APPROVED_USER.id, approvalStatus: 'PENDING_REVIEW', deletedAt: null })
       .mockResolvedValueOnce({
         id: 5,
         baseName: 'BPC',
@@ -179,6 +179,24 @@ describe('PUT /api/products/[id] (creator-edit-own-pending guard)', () => {
 
     expect(resp.status).toBe(200);
     expect(db.product.update).toHaveBeenCalled();
+  });
+
+  it('returns 403 when the creator edits their own product after it is DECLINED/soft-deleted (P2-1)', async () => {
+    setUser(APPROVED_USER);
+    // Decline keeps approvalStatus PENDING_REVIEW but sets deletedAt; the guard must reject.
+    db.product.findUnique.mockResolvedValueOnce({
+      createdBy: APPROVED_USER.id,
+      approvalStatus: 'PENDING_REVIEW',
+      deletedAt: new Date(),
+    });
+
+    const resp = await updatePUT(
+      mkReq('http://t/api/products/5', 'PUT', { variant: '10mg' }),
+      { params: { id: '5' } }
+    );
+
+    expect(resp.status).toBe(403);
+    expect(db.product.update).not.toHaveBeenCalled();
   });
 
   it('returns 403 when a different non-admin edits a product they did not create', async () => {
