@@ -7,8 +7,13 @@ export const dynamic = "force-dynamic";
 export const GET = apiHandler(async () => {
   await requireAdmin();
 
-  // Get all products with their location quantities
+  // Get all products with their location quantities (excluding soft-deleted +
+  // provisional products, which are held out of decision exports).
   const products = await prisma.product.findMany({
+    where: {
+      deletedAt: null,
+      approvalStatus: "APPROVED",
+    },
     include: {
       product_locations: {
         include: {

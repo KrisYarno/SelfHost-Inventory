@@ -16,8 +16,10 @@ export const GET = apiHandler(async () => {
     topMovingProducts,
     recentActivity,
   ] = await Promise.all([
-    // Total unique products
-    prisma.product.count(),
+    // Total unique products (exclude soft-deleted + provisional)
+    prisma.product.count({
+      where: { deletedAt: null, approvalStatus: "APPROVED" },
+    }),
 
     // User statistics
     prisma.user.groupBy({
@@ -67,6 +69,7 @@ export const GET = apiHandler(async () => {
       FROM inventory_logs il
       INNER JOIN products p ON il.productId = p.id
       WHERE il.changeTime >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+        AND p.approvalStatus = 'APPROVED'
       GROUP BY p.id, p.name
       ORDER BY movement DESC
       LIMIT 10

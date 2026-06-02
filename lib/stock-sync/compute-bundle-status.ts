@@ -14,8 +14,10 @@ export interface BundleStatusResult {
  *   sync location (or summed across all locations if syncLocationId is null).
  * - `outofstock` if any component is short.
  * - `outofstock` (with orphan warning, per eng-review D3) if any component
- *   points at a soft-deleted Product. Caller propagates the warning to the
- *   operator UI; this function never throws.
+ *   points at a soft-deleted OR provisional (PENDING_REVIEW) Product. A
+ *   provisional component is real but unvetted stock, so the bundle must not
+ *   be advertised as in-stock outward until the component is approved. Caller
+ *   propagates the warning to the operator UI; this function never throws.
  * - Defensive: an empty components list is treated as `outofstock`.
  */
 export async function computeBundleStockStatus(
@@ -42,7 +44,13 @@ export async function computeBundleStockStatus(
   for (const c of components) {
     // Orphan component: relation FK should always be set, but defensive null
     // check covers hard-delete cascade edge cases. Treat as orphan → outofstock.
-    if (!c.internalProduct || c.internalProduct.deletedAt !== null) {
+    // A provisional (PENDING_REVIEW) component is held out of the outward stock
+    // signal the same way as a soft-deleted orphan until it is approved.
+    if (
+      !c.internalProduct ||
+      c.internalProduct.deletedAt !== null ||
+      c.internalProduct.approvalStatus === 'PENDING_REVIEW'
+    ) {
       return {
         status: 'outofstock',
         warning: { kind: 'orphan-component', internalProductId: c.internalProductId },

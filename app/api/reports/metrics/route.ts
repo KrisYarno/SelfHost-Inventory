@@ -36,8 +36,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   const locationFilter = locationId ? { locationId: parseInt(locationId) } : undefined;
 
-  // Get total products count (exclude soft-deleted from current-state metrics)
-  const totalProducts = await prisma.product.count({ where: { deletedAt: null } });
+  // Get total products count (exclude soft-deleted + provisional from current-state metrics)
+  const totalProducts = await prisma.product.count({
+    where: { deletedAt: null, approvalStatus: "APPROVED" },
+  });
   const activeProducts = totalProducts;
 
   // Get current inventory levels and calculate total stock
@@ -59,7 +61,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   const lowStockThreshold = 10;
   const products = await prisma.product.findMany({
-    where: { deletedAt: null },
+    where: { deletedAt: null, approvalStatus: "APPROVED" },
     select: {
       id: true,
       costPrice: true,

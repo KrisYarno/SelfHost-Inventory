@@ -105,6 +105,8 @@ export async function syncPricesForIntegration(
         integrationId,
       },
       deletedAt: null,
+      // Provisional products are never pushed outward to external platforms.
+      approvalStatus: "APPROVED",
     },
     include: {
       priceSourceLink: {

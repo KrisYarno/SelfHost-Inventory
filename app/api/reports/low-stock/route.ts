@@ -15,6 +15,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const products = await prisma.product.findMany({
     where: {
       deletedAt: null,
+      approvalStatus: "APPROVED",
     },
     include: {
       product_locations: {

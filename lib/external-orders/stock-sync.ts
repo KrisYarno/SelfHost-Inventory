@@ -53,7 +53,13 @@ export async function syncStockToExternal(
   //    Bundle links: no internalProduct needed — status comes from components.
   const [productLinks, bundleLinks] = await Promise.all([
     prisma.productLink.findMany({
-      where: { integrationId, isBundle: false },
+      where: {
+        integrationId,
+        isBundle: false,
+        // Provisional (PENDING_REVIEW) internal products are never pushed
+        // outward to external platforms.
+        internalProduct: { is: { approvalStatus: 'APPROVED' } },
+      },
       include: {
         internalProduct: {
           include: {
@@ -243,11 +249,13 @@ export async function pushStockForProducts(
   if (!integration.stockSyncEnabled) return;
   if (!adapter.batchUpdateProductStock) return;
 
-  // Find all ProductLinks for these products on this integration
+  // Find all ProductLinks for these products on this integration.
+  // Provisional (PENDING_REVIEW) internal products are never pushed outward.
   const links = await prisma.productLink.findMany({
     where: {
       integrationId,
       internalProductId: { in: internalProductIds },
+      internalProduct: { is: { approvalStatus: 'APPROVED' } },
     },
     include: {
       internalProduct: {
@@ -292,6 +300,11 @@ export async function pushStockForProducts(
   // WC bundle product's stock_status must be updated immediately after fulfillment.
   const positiveIds = internalProductIds.filter((id) => id > 0);
   if (positiveIds.length > 0) {
+    // A bundle ProductLink has internalProductId = null, so the APPROVED
+    // relation filter applies at the COMPONENT level: only re-push a bundle on
+    // account of an APPROVED deducted component. (computeBundleStockStatus
+    // independently forces outofstock for any bundle that contains a
+    // PENDING_REVIEW component — see compute-bundle-status.ts.)
     const bundleLinks = await prisma.productLink.findMany({
       where: {
         integrationId,
@@ -299,6 +312,7 @@ export async function pushStockForProducts(
         bundleComponents: {
           some: {
             internalProductId: { in: positiveIds },
+            internalProduct: { is: { approvalStatus: 'APPROVED' } },
           },
         },
       },

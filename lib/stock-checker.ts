@@ -22,6 +22,9 @@ export class StockChecker {
     const products = await prisma.product.findMany({
       where: {
         deletedAt: null,
+        // Provisional (PENDING_REVIEW) products are excluded from operational
+        // alerts until an admin approves them.
+        approvalStatus: 'APPROVED',
         lowStockThreshold: {
           gt: 0, // Only check products with a threshold set
         },
@@ -77,7 +80,7 @@ export class StockChecker {
     combinedBreaches: CombinedMinBreach[];
   }> {
     const products = await prisma.product.findMany({
-      where: { deletedAt: null },
+      where: { deletedAt: null, approvalStatus: 'APPROVED' },
       include: {
         product_locations: {
           include: { locations: true },

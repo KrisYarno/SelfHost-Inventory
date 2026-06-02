@@ -40,7 +40,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   // Total active products
   const totalProducts = await prisma.product.count({
-    where: { deletedAt: null },
+    where: { deletedAt: null, approvalStatus: "APPROVED" },
   });
 
   // Total stock across all locations
@@ -51,7 +51,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   // Products below their minimum / low-stock threshold
   const products = await prisma.product.findMany({
-    where: { deletedAt: null },
+    where: { deletedAt: null, approvalStatus: "APPROVED" },
     include: { product_locations: true },
   });
 

@@ -22,9 +22,14 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
     return NextResponse.json({ error: "Location not found" }, { status: 404 });
   }
 
-  // Get all product_locations for this location with product details
+  // Get all product_locations for this location with product details.
+  // Exclude soft-deleted AND provisional (PENDING_REVIEW) products via the
+  // relation filter so they never surface in this current-state report.
   const productLocations = await prisma.product_locations.findMany({
-    where: { locationId },
+    where: {
+      locationId,
+      products: { is: { deletedAt: null, approvalStatus: "APPROVED" } },
+    },
     include: {
       products: {
         select: {
@@ -37,7 +42,8 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
     },
   });
 
-  // Filter out soft-deleted products
+  // Defensive: keep the JS soft-delete filter (the relation filter above is the
+  // authoritative exclusion).
   const activeProductLocations = productLocations.filter(
     (pl) => pl.products.deletedAt === null
   );

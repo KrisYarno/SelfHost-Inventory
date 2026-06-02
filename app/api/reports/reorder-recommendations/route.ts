@@ -76,7 +76,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
   // Query 1: Get all products with minimums
   // ============================================
   const products = await prisma.product.findMany({
-    where: { deletedAt: null },
+    where: { deletedAt: null, approvalStatus: "APPROVED" },
     select: {
       id: true,
       name: true,
