@@ -71,6 +71,11 @@ export function EditProductDialog({
           <DialogDescription>
             Update the product details
           </DialogDescription>
+          {product?.approvalStatus === "PENDING_REVIEW" && (
+            <p className="text-sm font-medium text-amber-600 dark:text-amber-400">
+              Pending review — this product is awaiting admin approval.
+            </p>
+          )}
         </DialogHeader>
         
         {product && (

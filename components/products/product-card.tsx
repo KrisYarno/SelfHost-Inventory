@@ -36,6 +36,7 @@ export function ProductCard({
   showInventoryActions = false,
   className,
 }: ProductCardProps) {
+  const isPendingReview = product.approvalStatus === "PENDING_REVIEW";
   return (
     <Card
       className={cn(
@@ -44,6 +45,14 @@ export function ProductCard({
         "min-h-[180px]",
         className
       )}
+      // Soft amber glow for provisional (PENDING_REVIEW) products — zero layout shift.
+      style={
+        isPendingReview
+          ? { boxShadow: "0 0 0 1.5px rgba(245,158,11,0.55), 0 0 14px -1px rgba(245,158,11,0.35)" }
+          : undefined
+      }
+      aria-label={isPendingReview ? "Pending review" : undefined}
+      title={isPendingReview ? "Pending review" : undefined}
     >
       <div className="p-4">
         {/* Actions menu */}

@@ -12,7 +12,8 @@ import {
   BarChart3,
   Building2,
   Plug,
-  Link2
+  Link2,
+  ClipboardCheck
 } from "lucide-react";
 
 const adminNavItems = [
@@ -25,6 +26,11 @@ const adminNavItems = [
     title: "Mass Update",
     href: "/admin/inventory/mass-update",
     icon: Package,
+  },
+  {
+    title: "Product Review",
+    href: "/admin/product-review",
+    icon: ClipboardCheck,
   },
   {
     title: "Reports",

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, BookOpen, ShoppingCart, Truck } from "lucide-react";
+import { Home, Package, Settings, Warehouse, BookOpen, ShoppingCart, Truck, PackageOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -36,6 +36,12 @@ const navigation = [
     href: "/stocker",
     icon: Truck,
     description: "Refill tasks for on-site stockers",
+  },
+  {
+    name: "Pre-Staging",
+    href: "/pre-staging",
+    icon: PackageOpen,
+    description: "Unpack, label, count, and stock intake items",
   },
   // Reports moved under Admin menu (see below)
 ];

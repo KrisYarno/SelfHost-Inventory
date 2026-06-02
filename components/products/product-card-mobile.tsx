@@ -19,6 +19,7 @@ export function ProductCardMobile({
 }: ProductCardMobileProps) {
   const isOutOfStock = product.currentQuantity === 0;
   const isLowStock = product.currentQuantity > 0 && product.currentQuantity <= 10;
+  const isPendingReview = product.approvalStatus === "PENDING_REVIEW";
 
   return (
     <Card
@@ -30,6 +31,14 @@ export function ProductCardMobile({
         isOutOfStock && "opacity-75",
         className
       )}
+      // Soft amber glow for provisional (PENDING_REVIEW) products — zero layout shift.
+      style={
+        isPendingReview
+          ? { boxShadow: "0 0 0 1.5px rgba(245,158,11,0.55), 0 0 14px -1px rgba(245,158,11,0.35)" }
+          : undefined
+      }
+      aria-label={isPendingReview ? "Pending review" : undefined}
+      title={isPendingReview ? "Pending review" : undefined}
       onClick={() => onClick?.(product)}
     >
       {/* Out of Stock Ribbon */}
