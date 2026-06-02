@@ -13,6 +13,11 @@ export type AuditActionType =
   | 'PRODUCT_UPDATE'
   | 'PRODUCT_DELETE'
   | 'PRODUCT_BULK_DELETE'
+  | 'PRODUCT_APPROVE'
+  | 'PRODUCT_DECLINE'
+  | 'STAGING_CREATE'
+  | 'STAGING_GRADUATE'
+  | 'STAGING_DISCARD'
   | 'INVENTORY_ADJUSTMENT'
   | 'INVENTORY_STOCK_IN'
   | 'INVENTORY_DEDUCTION'
@@ -30,7 +35,7 @@ export type AuditActionType =
   | 'DATA_EXPORT'
   | 'SYSTEM_MAINTENANCE'
 
-export type EntityType = 'USER' | 'PRODUCT' | 'INVENTORY' | 'LOCATION' | 'SETTINGS' | 'SYSTEM'
+export type EntityType = 'USER' | 'PRODUCT' | 'INVENTORY' | 'LOCATION' | 'SETTINGS' | 'SYSTEM' | 'STAGING'
 
 interface AuditLogEntry {
   userId: number
