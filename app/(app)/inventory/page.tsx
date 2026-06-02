@@ -321,6 +321,10 @@ export default function InventoryPage() {
       lastUpdated: new Date(),
       deletedAt: null,
       deletedBy: null,
+      approvalStatus: "APPROVED",
+      createdBy: null,
+      reviewedBy: null,
+      reviewedAt: null,
     };
 
     setSelectedProduct(productWithQuantity);

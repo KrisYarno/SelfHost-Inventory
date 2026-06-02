@@ -27,6 +27,11 @@ const createMockProduct = (
   deletedBy: null,
   costPrice: 0 as any,
   retailPrice: 0 as any,
+  priceSourceLinkId: null,
+  approvalStatus: "APPROVED",
+  createdBy: null,
+  reviewedBy: null,
+  reviewedAt: null,
   currentQuantity,
 });
 
