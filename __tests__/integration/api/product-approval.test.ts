@@ -1,0 +1,201 @@
+// @jest-environment node
+import { NextRequest } from 'next/server';
+
+// Keep the REAL apiHandler (so AppError -> its status gets mapped centrally), but
+// stub the auth guards.
+jest.mock('@/lib/api-utils', () => {
+  const actual = jest.requireActual('@/lib/api-utils');
+  return {
+    __esModule: true,
+    ...actual,
+    requireAdmin: jest.fn(),
+  };
+});
+
+jest.mock('@/lib/prisma', () => {
+  const tx = {
+    product: {
+      update: jest.fn(),
+    },
+  };
+  return {
+    __esModule: true,
+    default: {
+      ...tx,
+      $transaction: jest.fn(async (fn: any) => fn(tx)),
+    },
+  };
+});
+
+jest.mock('@/lib/csrf', () => ({
+  validateCSRFToken: jest.fn(async () => true),
+}));
+
+jest.mock('@/lib/rateLimit', () => ({
+  __esModule: true,
+  RateLimitError: jest.requireActual('@/lib/rateLimit').RateLimitError,
+  enforceRateLimit: jest.fn(() => ({})),
+  applyRateLimitHeaders: jest.fn((resp: any) => resp),
+}));
+
+jest.mock('@/lib/audit', () => ({
+  auditService: { log: jest.fn(async () => undefined) },
+}));
+
+// The decline reversal is unit-tested separately; here we mock it so the route
+// test focuses on the HTTP layer (auth, CSRF, lib invocation, status mapping).
+jest.mock('@/lib/products/decline', () => ({
+  declineProduct: jest.fn(),
+}));
+
+import { POST as approvePOST } from '@/app/api/admin/products/[id]/approve/route';
+import { POST as declinePOST } from '@/app/api/admin/products/[id]/decline/route';
+import { requireAdmin } from '@/lib/api-utils';
+import { declineProduct } from '@/lib/products/decline';
+import { validateCSRFToken } from '@/lib/csrf';
+import { auditService } from '@/lib/audit';
+import prisma from '@/lib/prisma';
+
+const db: any = prisma as any;
+const mockValidateCSRF = validateCSRFToken as jest.Mock;
+
+const ADMIN_USER = { id: 9, isAdmin: true, isApproved: true };
+
+function setAdmin(user: any = ADMIN_USER) {
+  (requireAdmin as jest.Mock).mockResolvedValue({ user });
+}
+
+function mkReq(url: string, method: string, body?: any) {
+  return new NextRequest(url, {
+    method,
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    headers: { 'Content-Type': 'application/json', 'x-csrf-token': 'x' },
+  });
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockValidateCSRF.mockResolvedValue(true);
+});
+
+describe('POST /api/admin/products/[id]/approve', () => {
+  it('flips approvalStatus to APPROVED and records the reviewer (200)', async () => {
+    setAdmin();
+    db.product.update.mockResolvedValue({ id: 5, approvalStatus: 'APPROVED' });
+
+    const resp = await approvePOST(
+      mkReq('http://t/api/admin/products/5/approve', 'POST'),
+      { params: { id: '5' } }
+    );
+
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body).toEqual({ id: 5, approvalStatus: 'APPROVED' });
+
+    const updateArgs = db.product.update.mock.calls[0][0];
+    expect(updateArgs.where).toEqual({ id: 5 });
+    expect(updateArgs.data.approvalStatus).toBe('APPROVED');
+    expect(updateArgs.data.reviewedBy).toBe(ADMIN_USER.id);
+    expect(updateArgs.data.reviewedAt).toBeInstanceOf(Date);
+
+    expect((auditService.log as jest.Mock)).toHaveBeenCalledWith(
+      expect.objectContaining({ actionType: 'PRODUCT_APPROVE', entityId: 5, userId: ADMIN_USER.id })
+    );
+  });
+
+  it('returns 403 for a non-admin (requireAdmin throws)', async () => {
+    const { AppError } = jest.requireActual('@/lib/error-handling');
+    (requireAdmin as jest.Mock).mockRejectedValue(
+      new AppError('Admin access required', 'FORBIDDEN', 403)
+    );
+
+    const resp = await approvePOST(
+      mkReq('http://t/api/admin/products/5/approve', 'POST'),
+      { params: { id: '5' } }
+    );
+
+    expect(resp.status).toBe(403);
+    expect(db.product.update).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 when CSRF token is invalid (no DB write)', async () => {
+    setAdmin();
+    mockValidateCSRF.mockResolvedValue(false);
+
+    const resp = await approvePOST(
+      mkReq('http://t/api/admin/products/5/approve', 'POST'),
+      { params: { id: '5' } }
+    );
+
+    expect(resp.status).toBe(403);
+    const body = await resp.json();
+    expect(body.error).toMatch(/CSRF/i);
+    expect(db.product.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/admin/products/[id]/decline', () => {
+  it('calls declineProduct with the id + admin and returns its result (200)', async () => {
+    setAdmin();
+    (declineProduct as jest.Mock).mockResolvedValue({ reversed: true, alreadyDeclined: false });
+
+    const resp = await declinePOST(
+      mkReq('http://t/api/admin/products/7/decline', 'POST'),
+      { params: { id: '7' } }
+    );
+
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body).toEqual({ reversed: true, alreadyDeclined: false });
+
+    expect(declineProduct as jest.Mock).toHaveBeenCalledWith(7, { id: ADMIN_USER.id });
+    expect((auditService.log as jest.Mock)).toHaveBeenCalledWith(
+      expect.objectContaining({ actionType: 'PRODUCT_DECLINE', entityId: 7, userId: ADMIN_USER.id })
+    );
+  });
+
+  it('returns the idempotent lib result when already declined (200)', async () => {
+    setAdmin();
+    (declineProduct as jest.Mock).mockResolvedValue({ reversed: false, alreadyDeclined: true });
+
+    const resp = await declinePOST(
+      mkReq('http://t/api/admin/products/7/decline', 'POST'),
+      { params: { id: '7' } }
+    );
+
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body).toEqual({ reversed: false, alreadyDeclined: true });
+    expect(declineProduct as jest.Mock).toHaveBeenCalledWith(7, { id: ADMIN_USER.id });
+  });
+
+  it('returns 403 for a non-admin (requireAdmin throws, lib not called)', async () => {
+    const { AppError } = jest.requireActual('@/lib/error-handling');
+    (requireAdmin as jest.Mock).mockRejectedValue(
+      new AppError('Admin access required', 'FORBIDDEN', 403)
+    );
+
+    const resp = await declinePOST(
+      mkReq('http://t/api/admin/products/7/decline', 'POST'),
+      { params: { id: '7' } }
+    );
+
+    expect(resp.status).toBe(403);
+    expect(declineProduct).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 when CSRF token is invalid (lib not called)', async () => {
+    setAdmin();
+    mockValidateCSRF.mockResolvedValue(false);
+
+    const resp = await declinePOST(
+      mkReq('http://t/api/admin/products/7/decline', 'POST'),
+      { params: { id: '7' } }
+    );
+
+    expect(resp.status).toBe(403);
+    const body = await resp.json();
+    expect(body.error).toMatch(/CSRF/i);
+    expect(declineProduct).not.toHaveBeenCalled();
+  });
+});

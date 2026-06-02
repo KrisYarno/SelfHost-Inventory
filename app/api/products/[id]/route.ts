@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, requireAdmin, apiHandler } from "@/lib/api-utils";
+import { AppError } from "@/lib/error-handling";
 import prisma from "@/lib/prisma";
 import { isProductUnique, formatProductName } from "@/lib/products";
 import { getCurrentQuantity } from "@/lib/inventory";
@@ -52,9 +53,11 @@ export const GET = apiHandler(async (request: NextRequest, { params }: RoutePara
   });
 });
 
-// PUT /api/products/[id] - Update product (Admin only)
+// PUT /api/products/[id] - Update product.
+// Admins may edit any product. Non-admin approved users may edit only their own
+// product while it is still PENDING_REVIEW (creator-edit-own-pending).
 export const PUT = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
-  const { user } = await requireAdmin();
+  const { user } = await requireApproved();
 
   const rateLimitHeaders = enforceRateLimit(request, "products:PUT", {
     identifier: user.id,
@@ -68,6 +71,16 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
   const productId = parseInt(params.id);
   if (isNaN(productId)) {
     return NextResponse.json({ error: "Invalid product ID" }, { status: 400 });
+  }
+
+  const target = await prisma.product.findUnique({
+    where: { id: productId },
+    select: { createdBy: true, approvalStatus: true },
+  });
+  const isOwnPending =
+    target?.createdBy === user.id && target?.approvalStatus === "PENDING_REVIEW";
+  if (!user.isAdmin && !isOwnPending) {
+    throw new AppError("Forbidden", "FORBIDDEN", 403);
   }
 
   const body = ProductUpdateSchema.parse(await request.json());

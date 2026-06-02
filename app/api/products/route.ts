@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { ProductFilters } from "@/types/product";
 import { getProductsWithQuantities, isProductUnique, formatProductName } from "@/lib/products";
@@ -51,9 +51,11 @@ export const GET = apiHandler(async (request: NextRequest) => {
   });
 });
 
-// POST /api/products - Create new product (Admin only)
+// POST /api/products - Create new product.
+// Approved users may create; non-admin creations are provisional (PENDING_REVIEW)
+// until an admin approves them. Admin creations are auto-approved.
 export const POST = apiHandler(async (request: NextRequest) => {
-  const { user } = await requireAdmin();
+  const { user } = await requireApproved();
 
   const rateLimitHeaders = enforceRateLimit(request, "products:POST", {
     identifier: user.id,
@@ -107,6 +109,8 @@ export const POST = apiHandler(async (request: NextRequest) => {
       lowStockThreshold: body.lowStockThreshold ?? 10,
       costPrice: costPrice >= 0 ? costPrice : 0,
       retailPrice: retailPrice >= 0 ? retailPrice : 0,
+      approvalStatus: user.isAdmin ? "APPROVED" : "PENDING_REVIEW",
+      createdBy: user.id,
     },
   });
 
