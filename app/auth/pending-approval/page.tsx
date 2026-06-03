@@ -36,7 +36,7 @@ export default function PendingApprovalPage() {
           <h2 className="mt-6 text-3xl font-extrabold text-foreground">
             Account Pending Approval
           </h2>
-          <p className="mt-2 text-sm text-gray-600">
+          <p className="mt-2 text-sm text-muted-foreground">
             Your account has been created successfully!
           </p>
         </div>
@@ -62,7 +62,7 @@ export default function PendingApprovalPage() {
               <h3 className="text-sm font-medium text-warning">
                 Awaiting Administrator Approval
               </h3>
-              <div className="mt-2 text-sm text-gray-700">
+              <div className="mt-2 text-sm text-foreground/80">
                 <p>
                   Your account is currently pending approval from an administrator.
                   You will receive an email notification once your account has been approved.

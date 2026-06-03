@@ -3,12 +3,12 @@
 -- The isBundle/internalProductId invariant is enforced at the application layer instead.
 -- Note: Some statements are wrapped in procedures to handle partial-apply idempotency.
 
--- ALGORITHM=INSTANT: MySQL 8.0.28+ supports metadata-only NOT NULL removal (no table
--- rebuild, no exclusive lock for the duration). If the deploy target doesn't support
--- INSTANT for this op, the statement fails fast rather than silently choosing COPY
--- and taking a long lock — the desired behavior.
+-- ALGORITHM=INPLACE, LOCK=NONE: online schema change (no exclusive lock) without
+-- requiring INSTANT support. NOT NULL → NULL is INSTANT-eligible on MySQL 8.0.32+
+-- but not on earlier 8.x versions (including some 8.4 builds), so we use INPLACE
+-- which is universally supported in 8.x and still online for this operation.
 ALTER TABLE `product_links`
-  MODIFY COLUMN `internalProductId` INT NULL, ALGORITHM=INSTANT;
+  MODIFY COLUMN `internalProductId` INT NULL, ALGORITHM=INPLACE, LOCK=NONE;
 
 -- DROP IF EXISTS before CREATE: MySQL DDL is non-transactional. If this migration fails
 -- mid-flight between CREATE PROCEDURE and DROP PROCEDURE, a retry would otherwise hit

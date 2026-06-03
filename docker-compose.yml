@@ -27,16 +27,20 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: mysql://inventory:${MYSQL_PASSWORD}@db:3306/inventory?connection_limit=20
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      SHOPIFY_WEBHOOK_SECRET: ${SHOPIFY_WEBHOOK_SECRET}
+      WOOCOMMERCE_WEBHOOK_SECRET: ${WOOCOMMERCE_WEBHOOK_SECRET}
       NEXTAUTH_URL: http://localhost:3000
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
-      ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-advancedresearchpep.com}
+      ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-@advancedresearchpep.com}
+      INTERNAL_SYNC_TOKEN: ${INTERNAL_SYNC_TOKEN}
     depends_on:
       db:
         condition: service_healthy
     command: >-
-      sh -lc "npm ci --ignore-scripts && npx prisma generate && (npx prisma migrate deploy || npx prisma db push) && node scripts/seed-default-location.js"
+      sh -lc "npm ci --ignore-scripts && ./node_modules/.bin/prisma generate && ./node_modules/.bin/prisma migrate deploy && node scripts/migrate-to-multitenant.js && node scripts/seed-default-location.js"
     networks:
       - internal
 
@@ -51,11 +55,16 @@ services:
       HOSTNAME: 0.0.0.0
       HOST: 0.0.0.0
       DATABASE_URL: mysql://inventory:${MYSQL_PASSWORD}@db:3306/inventory?connection_limit=20
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      SHOPIFY_WEBHOOK_SECRET: ${SHOPIFY_WEBHOOK_SECRET}
+      WOOCOMMERCE_WEBHOOK_SECRET: ${WOOCOMMERCE_WEBHOOK_SECRET}
+      WEBHOOK_DEBUG_HEADERS: ${WEBHOOK_DEBUG_HEADERS:-0}
       NEXTAUTH_URL: http://localhost:3000
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
       ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-advancedresearchpep.com}
+      INTERNAL_SYNC_TOKEN: ${INTERNAL_SYNC_TOKEN}
     expose:
       - "3000"
     depends_on:
@@ -84,6 +93,27 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - internal
+
+  sync:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      NODE_ENV: production
+      ENABLE_EXTERNAL_SYNC: ${ENABLE_EXTERNAL_SYNC:-0}
+      EXTERNAL_SYNC_INTERVAL_MINUTES: ${EXTERNAL_SYNC_INTERVAL_MINUTES:-15}
+      EXTERNAL_SYNC_LOOKBACK_DAYS: ${EXTERNAL_SYNC_LOOKBACK_DAYS:-1}
+      EXTERNAL_SYNC_MAX_ORDERS: ${EXTERNAL_SYNC_MAX_ORDERS:-250}
+      INTERNAL_SYNC_URL: ${INTERNAL_SYNC_URL:-http://app:3000/api/cron/external-sync}
+      INTERNAL_SYNC_TOKEN: ${INTERNAL_SYNC_TOKEN}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >-
+      sh -lc "node scripts/scheduled-external-sync.js"
     networks:
       - internal
 

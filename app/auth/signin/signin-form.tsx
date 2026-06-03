@@ -3,14 +3,17 @@
 import { signIn } from 'next-auth/react';
 import { useState } from 'react';
 import { useSearchParams } from 'next/navigation';
+import Link from 'next/link';
 
 export function SignInForm() {
   const searchParams = useSearchParams();
   const callbackUrl = searchParams.get('callbackUrl') || '/workbench';
+  const errorParam = searchParams.get('error');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(errorParam === 'CredentialsSignin' ? 'Invalid email or password' : '');
   const [isLoading, setIsLoading] = useState(false);
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
 
   const handleCredentialsSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -19,14 +22,19 @@ export function SignInForm() {
 
     try {
       const result = await signIn('credentials', {
-        email,
+        email: email.toLowerCase().trim(),
         password,
         redirect: false,
         callbackUrl,
       });
 
       if (result?.error) {
-        setError(result.error);
+        // Map common errors to user-friendly messages
+        if (result.error === 'CredentialsSignin') {
+          setError('Invalid email or password');
+        } else {
+          setError(result.error);
+        }
       } else if (result?.url) {
         window.location.href = result.url;
       }
@@ -38,14 +46,15 @@ export function SignInForm() {
   };
 
   const handleGoogleSignIn = () => {
+    setIsGoogleLoading(true);
     signIn('google', { callbackUrl });
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen flex items-center justify-center bg-background py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-md w-full space-y-8">
         <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
+          <h2 className="mt-6 text-center text-3xl font-extrabold text-foreground">
             Sign in to your account
           </h2>
         </div>
@@ -62,7 +71,7 @@ export function SignInForm() {
                 type="email"
                 autoComplete="email"
                 required
-                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
+                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-border placeholder-muted-foreground text-foreground bg-background rounded-t-md focus:outline-none focus:ring-primary focus:border-primary focus:z-10 sm:text-sm"
                 placeholder="Email address"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -78,7 +87,7 @@ export function SignInForm() {
                 type="password"
                 autoComplete="current-password"
                 required
-                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-b-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
+                className="appearance-none rounded-none relative block w-full px-3 py-2 border border-border placeholder-muted-foreground text-foreground bg-background rounded-b-md focus:outline-none focus:ring-primary focus:border-primary focus:z-10 sm:text-sm"
                 placeholder="Password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -87,10 +96,10 @@ export function SignInForm() {
           </div>
 
           {error && (
-            <div className="rounded-md bg-red-50 p-4">
+            <div className="rounded-md bg-red-100 dark:bg-red-900/30 p-4">
               <div className="flex">
                 <div className="ml-3">
-                  <h3 className="text-sm font-medium text-red-800">{error}</h3>
+                  <h3 className="text-sm font-medium text-negative-foreground">{error}</h3>
                 </div>
               </div>
             </div>
@@ -100,7 +109,7 @@ export function SignInForm() {
             <button
               type="submit"
               disabled={isLoading}
-              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-primary-foreground bg-primary hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isLoading ? 'Signing in...' : 'Sign in'}
             </button>
@@ -108,10 +117,10 @@ export function SignInForm() {
 
           <div className="relative">
             <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-300" />
+              <div className="w-full border-t border-border" />
             </div>
             <div className="relative flex justify-center text-sm">
-              <span className="px-2 bg-gray-50 text-gray-500">Or continue with</span>
+              <span className="px-2 bg-background text-muted-foreground">Or continue with</span>
             </div>
           </div>
 
@@ -119,7 +128,8 @@ export function SignInForm() {
             <button
               type="button"
               onClick={handleGoogleSignIn}
-              className="group relative w-full flex justify-center py-2 px-4 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+              disabled={isGoogleLoading}
+              className="group relative w-full flex justify-center py-2 px-4 border border-border text-sm font-medium rounded-md text-foreground bg-surface hover:bg-muted focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <svg className="w-5 h-5 mr-2" viewBox="0 0 24 24">
                 <path
@@ -139,8 +149,15 @@ export function SignInForm() {
                   d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
                 />
               </svg>
-              Sign in with Google
+              {isGoogleLoading ? 'Redirecting...' : 'Sign in with Google'}
             </button>
+          </div>
+
+          <div className="text-center text-sm text-muted-foreground">
+            Don&apos;t have an account?{' '}
+            <Link href="/auth/signup" className="font-medium text-primary hover:text-primary/90">
+              Sign up
+            </Link>
           </div>
         </form>
       </div>
