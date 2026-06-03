@@ -67,3 +67,17 @@ Thumbs.db
 .gstack/
 .claude/
 .superpowers/
+
+### Local scratch, notes, and temp files (not part of the codebase)
+/Claude Plan.md
+/startcommand.txt
+/temp_view.txt
+scratch/
+*.scratch
+*.tmp
+*.bak
+*.orig
+*~
+
+### Local-only compose/staging overlays (e.g. the deleted staging test env)
+compose.staging-local.yml
