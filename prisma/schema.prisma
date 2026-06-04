@@ -8,36 +8,36 @@ datasource db {
 }
 
 model User {
-  id                  Int                   @id @default(autoincrement())
-  username            String                @db.VarChar(255)
-  passwordHash        String?               @db.VarChar(255)
-  isAdmin             Boolean               @default(false)
-  email               String                @unique(map: "email") @db.VarChar(255)
-  isApproved          Boolean               @default(false)
-  deletedAt           DateTime?             @db.DateTime(0)
-  defaultLocationId   Int                   @default(1)
-  emailAlerts         Boolean?              @default(false)
-  phoneNumber         String?               @db.VarChar(20)
-  smsVerified         Boolean               @default(false)
-  minLocationEmailAlerts Boolean            @default(false)
-  minLocationSmsAlerts   Boolean            @default(false)
-  minCombinedEmailAlerts Boolean            @default(false)
-  minCombinedSmsAlerts   Boolean            @default(false)
-  failedLoginAttempts Int                   @default(0)
-  lockedUntil         DateTime?             @db.DateTime(0)
-  inventory_logs      inventory_logs[]
-  notificationHistory NotificationHistory[]
-  deletedProducts     Product[]             @relation("DeletedProducts")
-  auditLogs           AuditLog[]
-  companies           UserCompany[]
-  fulfilledOrders     ExternalOrder[]
-  stagingReceived     StagingItem[]  @relation("StagingReceivedBy")
-  stagingGraduated    StagingItem[]  @relation("StagingGraduatedBy")
-  createdProducts     Product[]      @relation("ProductCreatedBy")
-  reviewedProducts    Product[]      @relation("ProductReviewedBy")
-  scratchpadCreated   ProductScratchpadPrice[] @relation("ScratchpadCreatedBy")
-  scratchpadUpdated   ProductScratchpadPrice[] @relation("ScratchpadUpdatedBy")
-  locations           Location              @relation(fields: [defaultLocationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_default_location")
+  id                     Int                      @id @default(autoincrement())
+  username               String                   @db.VarChar(255)
+  passwordHash           String?                  @db.VarChar(255)
+  isAdmin                Boolean                  @default(false)
+  email                  String                   @unique(map: "email") @db.VarChar(255)
+  isApproved             Boolean                  @default(false)
+  deletedAt              DateTime?                @db.DateTime(0)
+  defaultLocationId      Int                      @default(1)
+  emailAlerts            Boolean?                 @default(false)
+  phoneNumber            String?                  @db.VarChar(20)
+  smsVerified            Boolean                  @default(false)
+  minLocationEmailAlerts Boolean                  @default(false)
+  minLocationSmsAlerts   Boolean                  @default(false)
+  minCombinedEmailAlerts Boolean                  @default(false)
+  minCombinedSmsAlerts   Boolean                  @default(false)
+  failedLoginAttempts    Int                      @default(0)
+  lockedUntil            DateTime?                @db.DateTime(0)
+  inventory_logs         inventory_logs[]
+  notificationHistory    NotificationHistory[]
+  deletedProducts        Product[]                @relation("DeletedProducts")
+  auditLogs              AuditLog[]
+  companies              UserCompany[]
+  fulfilledOrders        ExternalOrder[]
+  stagingReceived        StagingItem[]            @relation("StagingReceivedBy")
+  stagingGraduated       StagingItem[]            @relation("StagingGraduatedBy")
+  createdProducts        Product[]                @relation("ProductCreatedBy")
+  reviewedProducts       Product[]                @relation("ProductReviewedBy")
+  scratchpadCreated      ProductScratchpadPrice[] @relation("ScratchpadCreatedBy")
+  scratchpadUpdated      ProductScratchpadPrice[] @relation("ScratchpadUpdatedBy")
+  locations              Location                 @relation(fields: [defaultLocationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_default_location")
 
   @@index([defaultLocationId], map: "fk_user_default_location")
   @@index([deletedAt], map: "idx_user_deleted")
@@ -45,39 +45,41 @@ model User {
 }
 
 model Product {
-  id                  Int                    @id @default(autoincrement())
-  name                String                 @db.VarChar(255)
-  baseName            String?                @db.VarChar(150)
-  variant             String?                @db.VarChar(100)
-  unit                String?                @db.VarChar(20)
-  numericValue        Decimal?               @db.Decimal(10, 2)
-  quantity            Int                    @default(0)
-  location            Int                    @default(1)
-  lowStockThreshold   Int?                   @default(1)
-  costPrice           Decimal                @default(0.00) @db.Decimal(10, 2)
-  retailPrice         Decimal                @default(0.00) @db.Decimal(10, 2)
-  deletedAt           DateTime?              @db.DateTime(0)
-  deletedBy           Int?
-  approvalStatus      ProductApprovalStatus  @default(APPROVED)
-  createdBy           Int?
-  reviewedBy          Int?
-  reviewedAt          DateTime?
-  createdByUser       User?                  @relation("ProductCreatedBy", fields: [createdBy], references: [id])
-  reviewedByUser      User?                  @relation("ProductReviewedBy", fields: [reviewedBy], references: [id])
-  stagingResolved     StagingItem[]          @relation("StagingResolvedProduct")
+  id                Int                   @id @default(autoincrement())
+  name              String                @db.VarChar(255)
+  baseName          String?               @db.VarChar(150)
+  variant           String?               @db.VarChar(100)
+  unit              String?               @db.VarChar(20)
+  numericValue      Decimal?              @db.Decimal(10, 2)
+  quantity          Int                   @default(0)
+  location          Int                   @default(1)
+  lowStockThreshold Int?                  @default(1)
+  costPrice         Decimal               @default(0.00) @db.Decimal(10, 2)
+  retailPrice       Decimal               @default(0.00) @db.Decimal(10, 2)
+  deletedAt         DateTime?             @db.DateTime(0)
+  deletedBy         Int?
+  approvalStatus    ProductApprovalStatus @default(APPROVED)
+  createdBy         Int?
+  reviewedBy        Int?
+  reviewedAt        DateTime?
+  createdByUser     User?                 @relation("ProductCreatedBy", fields: [createdBy], references: [id])
+  reviewedByUser    User?                 @relation("ProductReviewedBy", fields: [reviewedBy], references: [id])
+  stagingResolved   StagingItem[]         @relation("StagingResolvedProduct")
 
   // Retail Price Sync: points at the ONE ProductLink whose WC regular_price
   // should be pulled into retailPrice on manual sync. NULL = manual pricing.
-  priceSourceLinkId   String?
-  priceSourceLink     ProductLink?           @relation("PriceSource", fields: [priceSourceLinkId], references: [id], onDelete: SetNull)
+  priceSourceLinkId String?
+  priceSourceLink   ProductLink? @relation("PriceSource", fields: [priceSourceLinkId], references: [id], onDelete: SetNull)
 
   inventory_logs      inventory_logs[]
   notificationHistory NotificationHistory[]
   product_locations   product_locations[]
-  deletedByUser       User?                  @relation("DeletedProducts", fields: [deletedBy], references: [id])
+  deletedByUser       User?                    @relation("DeletedProducts", fields: [deletedBy], references: [id])
   productLinks        ProductLink[]
   bundleComponents    BundleComponent[]
   scratchpadPrices    ProductScratchpadPrice[]
+  stockSnapshots      ProductStockSnapshot[]
+  salesFacts          ProductSalesFact[]
 
   @@index([priceSourceLinkId], map: "idx_price_source")
   @@index([baseName, numericValue, variant], map: "idx_product_sorting")
@@ -92,17 +94,17 @@ model Product {
 }
 
 model ProductScratchpadPrice {
-  id          Int       @id @default(autoincrement())
-  productId   Int
-  label       String    @db.VarChar(120)
-  value       String?   @db.VarChar(255)
-  note        String?   @db.Text
-  sortOrder   Int       @default(0)
-  version     Int       @default(0)
-  createdBy   Int?
-  updatedBy   Int?
-  createdAt   DateTime  @default(now()) @db.DateTime(0)
-  updatedAt   DateTime  @default(now()) @updatedAt @db.DateTime(0)
+  id        Int      @id @default(autoincrement())
+  productId Int
+  label     String   @db.VarChar(120)
+  value     String?  @db.VarChar(255)
+  note      String?  @db.Text
+  sortOrder Int      @default(0)
+  version   Int      @default(0)
+  createdBy Int?
+  updatedBy Int?
+  createdAt DateTime @default(now()) @db.DateTime(0)
+  updatedAt DateTime @default(now()) @updatedAt @db.DateTime(0)
 
   product       Product @relation(fields: [productId], references: [id], onDelete: Cascade)
   createdByUser User?   @relation("ScratchpadCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
@@ -131,10 +133,10 @@ model StagingItem {
   createdAt         DateTime          @default(now()) @db.DateTime(0)
   updatedAt         DateTime          @updatedAt @db.DateTime(0)
 
-  receivedByUser    User              @relation("StagingReceivedBy", fields: [receivedBy], references: [id])
-  graduatedByUser   User?             @relation("StagingGraduatedBy", fields: [graduatedBy], references: [id])
-  resolvedProduct   Product?          @relation("StagingResolvedProduct", fields: [resolvedProductId], references: [id])
-  location          Location          @relation(fields: [locationId], references: [id])
+  receivedByUser  User     @relation("StagingReceivedBy", fields: [receivedBy], references: [id])
+  graduatedByUser User?    @relation("StagingGraduatedBy", fields: [graduatedBy], references: [id])
+  resolvedProduct Product? @relation("StagingResolvedProduct", fields: [resolvedProductId], references: [id])
+  location        Location @relation(fields: [locationId], references: [id])
 
   @@index([status, locationId, receivedAt], map: "idx_staging_status_loc_time")
   @@index([receivedBy], map: "idx_staging_received_by")
@@ -143,13 +145,14 @@ model StagingItem {
 }
 
 model Location {
-  id                Int                 @id
-  name              String              @db.VarChar(100)
-  inventory_logs    inventory_logs[]
-  product_locations product_locations[]
+  id                  Int                    @id
+  name                String                 @db.VarChar(100)
+  inventory_logs      inventory_logs[]
+  product_locations   product_locations[]
   notificationHistory NotificationHistory[]
-  users             User[]
-  stagingItems      StagingItem[]
+  users               User[]
+  stagingItems        StagingItem[]
+  stockSnapshots      ProductStockSnapshot[]
 
   @@map("locations")
 }
@@ -176,16 +179,16 @@ model inventory_logs {
 }
 
 model product_locations {
-  id         Int      @id @default(autoincrement())
-  productId  Int
-  locationId Int
-  quantity   Int      @default(0)
+  id          Int      @id @default(autoincrement())
+  productId   Int
+  locationId  Int
+  quantity    Int      @default(0)
   /// Per-location minimum on hand; 0 disables the trigger
-  minQuantity Int     @default(0)
-  version    Int      @default(0)
-  updatedAt  DateTime @default(now()) @updatedAt @db.DateTime(0)
-  locations  Location @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_pl_location")
-  products   Product  @relation(fields: [productId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_pl_product")
+  minQuantity Int      @default(0)
+  version     Int      @default(0)
+  updatedAt   DateTime @default(now()) @updatedAt @db.DateTime(0)
+  locations   Location @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_pl_location")
+  products    Product  @relation(fields: [productId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_pl_product")
 
   @@unique([productId, locationId], map: "unique_product_location")
   @@index([locationId], map: "fk_pl_location")
@@ -259,15 +262,16 @@ enum StagingItemStatus {
 
 // Organizational Layer
 model Company {
-  id           String        @id @default(cuid())
-  name         String
-  slug         String        @unique
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   users        UserCompany[]
   integrations Integration[]
   orders       ExternalOrder[]
+  salesFacts   ProductSalesFact[]
   // Products are GLOBAL (shared inventory) - accessed via ProductLink through integrations
 
   @@map("companies")
@@ -276,8 +280,8 @@ model Company {
 model UserCompany {
   userId    Int
   companyId String
-  user      User     @relation(fields: [userId], references: [id])
-  company   Company  @relation(fields: [companyId], references: [id])
+  user      User    @relation(fields: [userId], references: [id])
+  company   Company @relation(fields: [companyId], references: [id])
 
   @@id([userId, companyId])
   @@map("user_companies")
@@ -285,41 +289,42 @@ model UserCompany {
 
 // Integration Layer
 model Integration {
-  id            String   @id @default(cuid())
-  companyId     String
-  platform      String   @db.VarChar(50) // "SHOPIFY", "WOOCOMMERCE"
-  name          String   @db.VarChar(255)
-  storeUrl      String   @db.VarChar(500)
+  id        String @id @default(cuid())
+  companyId String
+  platform  String @db.VarChar(50) // "SHOPIFY", "WOOCOMMERCE"
+  name      String @db.VarChar(255)
+  storeUrl  String @db.VarChar(500)
 
-  encryptedApiKey    String?  @db.Text
-  encryptedApiSecret String?  @db.Text
-  webhookSecret      String?  @db.Text
+  encryptedApiKey    String? @db.Text
+  encryptedApiSecret String? @db.Text
+  webhookSecret      String? @db.Text
 
-  isActive      Boolean  @default(true)
-  lastSyncAt    DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  isActive   Boolean   @default(true)
+  lastSyncAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
   // Stock sync & fulfillment push configuration (Phase D)
-  stockSyncEnabled       Boolean  @default(false)
-  fulfillmentPushEnabled Boolean  @default(false)
+  stockSyncEnabled       Boolean   @default(false)
+  fulfillmentPushEnabled Boolean   @default(false)
   lastStockSyncAt        DateTime?
-  lastStockSyncError     String?  @db.Text
-  syncLocationId         Int?     // Which location to sync stock from (null = all locations)
+  lastStockSyncError     String?   @db.Text
+  syncLocationId         Int? // Which location to sync stock from (null = all locations)
 
   // P1-3 hardening: timestamp-based sync lock. Replaces the GET_LOCK approach
   // which was unreliable under Prisma connection pooling. Stale locks (older
   // than 5 minutes) are treated as expired by the acquire query.
-  syncLockedAt           DateTime?
+  syncLockedAt DateTime?
 
   // Phase 7c: webhook delivery health visibility
-  lastWebhookReceivedAt  DateTime?
-  lastWebhookError       String?   @db.Text
-  webhookFailureCount    Int       @default(0)
+  lastWebhookReceivedAt DateTime?
+  lastWebhookError      String?   @db.Text
+  webhookFailureCount   Int       @default(0)
 
-  company       Company  @relation(fields: [companyId], references: [id])
-  orders        ExternalOrder[]
-  productLinks  ProductLink[]
+  company      Company            @relation(fields: [companyId], references: [id])
+  orders       ExternalOrder[]
+  productLinks ProductLink[]
+  salesFacts   ProductSalesFact[]
 
   @@index([companyId])
   @@index([platform])
@@ -328,21 +333,21 @@ model Integration {
 
 // Product Linking Layer
 model ProductLink {
-  id                 String      @id @default(cuid())
-  integrationId      String
-  internalProductId  Int?
-  externalProductId  String      @db.VarChar(255)
-  externalVariantId  String?     @db.VarChar(255)
-  externalSku        String?     @db.VarChar(255)
-  externalTitle      String?     @db.VarChar(500)
-  isBundle           Boolean     @default(false)
-  createdAt          DateTime    @default(now())
+  id                String   @id @default(cuid())
+  integrationId     String
+  internalProductId Int?
+  externalProductId String   @db.VarChar(255)
+  externalVariantId String?  @db.VarChar(255)
+  externalSku       String?  @db.VarChar(255)
+  externalTitle     String?  @db.VarChar(500)
+  isBundle          Boolean  @default(false)
+  createdAt         DateTime @default(now())
 
-  integration        Integration       @relation(fields: [integrationId], references: [id], onDelete: Cascade)
-  internalProduct    Product?          @relation(fields: [internalProductId], references: [id])
-  bundleComponents   BundleComponent[]
-  orderItems         ExternalOrderItem[]
-  priceSourceFor     Product[]         @relation("PriceSource")
+  integration      Integration         @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  internalProduct  Product?            @relation(fields: [internalProductId], references: [id])
+  bundleComponents BundleComponent[]
+  orderItems       ExternalOrderItem[]
+  priceSourceFor   Product[]           @relation("PriceSource")
 
   @@unique([integrationId, externalProductId, externalVariantId])
   @@index([internalProductId])
@@ -351,14 +356,14 @@ model ProductLink {
 }
 
 model BundleComponent {
-  id                String      @id @default(cuid())
+  id                String @id @default(cuid())
   productLinkId     String
   internalProductId Int
-  quantity          Int         @default(1)
-  sortOrder         Int         @default(0)
+  quantity          Int    @default(1)
+  sortOrder         Int    @default(0)
 
-  productLink       ProductLink @relation(fields: [productLinkId], references: [id], onDelete: Cascade)
-  internalProduct   Product     @relation(fields: [internalProductId], references: [id])
+  productLink     ProductLink @relation(fields: [productLinkId], references: [id], onDelete: Cascade)
+  internalProduct Product     @relation(fields: [internalProductId], references: [id])
 
   @@unique([productLinkId, internalProductId])
   @@index([internalProductId])
@@ -367,49 +372,49 @@ model BundleComponent {
 
 // Order Storage Layer
 model ExternalOrder {
-  id              String      @id @default(cuid())
-  companyId       String
-  integrationId   String
+  id            String @id @default(cuid())
+  companyId     String
+  integrationId String
 
-  externalId      String      @db.VarChar(255)
-  orderNumber     String      @db.VarChar(100)
+  externalId  String @db.VarChar(255)
+  orderNumber String @db.VarChar(100)
 
-  nativeStatus    String      @db.VarChar(100)
-  financialStatus String?     @db.VarChar(100)
-  fulfillmentStatus String?   @db.VarChar(100)
+  nativeStatus      String  @db.VarChar(100)
+  financialStatus   String? @db.VarChar(100)
+  fulfillmentStatus String? @db.VarChar(100)
 
   // Source-of-truth status info (platform-specific, verbatim)
-  platformStatusRaw Json?
-  externalStatusHash String?  @db.VarChar(64)
-  externalOrderUrl  String?   @db.VarChar(500)
+  platformStatusRaw  Json?
+  externalStatusHash String? @db.VarChar(64)
+  externalOrderUrl   String? @db.VarChar(500)
 
-  total           Decimal     @db.Decimal(10, 2)
-  currency        String      @default("USD") @db.VarChar(10)
-  customerEmail   String?     @db.VarChar(255)
-  customerName    String?     @db.VarChar(255)
+  total         Decimal @db.Decimal(10, 2)
+  currency      String  @default("USD") @db.VarChar(10)
+  customerEmail String? @db.VarChar(255)
+  customerName  String? @db.VarChar(255)
 
-  rawPayload      Json
+  rawPayload Json
 
-  internalStatus  String      @default("pending") @db.VarChar(50)
-  fulfilledAt     DateTime?
-  fulfilledBy     Int?
+  internalStatus String    @default("pending") @db.VarChar(50)
+  fulfilledAt    DateTime?
+  fulfilledBy    Int?
 
   // Stocked Out: tracks whether physical inventory has been deducted,
   // independent of the WC order lifecycle (internalStatus).
-  stockedOut      Boolean     @default(false)
-  stockedOutAt    DateTime?
-  stockedOutBy    Int?
+  stockedOut   Boolean   @default(false)
+  stockedOutAt DateTime?
+  stockedOutBy Int?
 
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
   externalCreatedAt DateTime?
   externalUpdatedAt DateTime?
-  lastSeenAt       DateTime?
+  lastSeenAt        DateTime?
 
-  company         Company     @relation(fields: [companyId], references: [id])
-  integration     Integration @relation(fields: [integrationId], references: [id])
+  company         Company             @relation(fields: [companyId], references: [id])
+  integration     Integration         @relation(fields: [integrationId], references: [id])
   items           ExternalOrderItem[]
-  fulfilledByUser User?       @relation(fields: [fulfilledBy], references: [id])
+  fulfilledByUser User?               @relation(fields: [fulfilledBy], references: [id])
 
   @@unique([integrationId, externalId])
   @@index([companyId, internalStatus])
@@ -421,29 +426,87 @@ model ExternalOrder {
 
 // Order Items Layer
 model ExternalOrderItem {
-  id              String        @id @default(cuid())
-  orderId         String
+  id      String @id @default(cuid())
+  orderId String
 
-  externalItemId  String?       @db.VarChar(255)
-  externalProductId String      @db.VarChar(255)
-  externalVariantId String?     @db.VarChar(255)
+  externalItemId    String? @db.VarChar(255)
+  externalProductId String  @db.VarChar(255)
+  externalVariantId String? @db.VarChar(255)
 
-  name            String        @db.VarChar(500)
-  variantName     String?       @db.VarChar(500)
-  sku             String?       @db.VarChar(255)
-  quantity        Int
-  fulfilledQty    Int           @default(0)
-  price           Decimal       @db.Decimal(10, 2)
+  name         String  @db.VarChar(500)
+  variantName  String? @db.VarChar(500)
+  sku          String? @db.VarChar(255)
+  quantity     Int
+  fulfilledQty Int     @default(0)
+  price        Decimal @db.Decimal(10, 2)
 
-  productLinkId   String?
-  isMapped        Boolean       @default(false)
+  productLinkId           String?
+  isMapped                Boolean @default(false)
   bundleComponentSnapshot Json?
 
-  order           ExternalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  productLink     ProductLink?  @relation(fields: [productLinkId], references: [id], onDelete: SetNull)
+  order       ExternalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productLink ProductLink?  @relation(fields: [productLinkId], references: [id], onDelete: SetNull)
 
   @@unique([orderId, externalItemId], map: "idx_order_item_unique")
   @@index([orderId])
   @@index([externalVariantId])
   @@map("external_order_items")
+}
+
+model ProductStockSnapshot {
+  id         Int      @id @default(autoincrement())
+  productId  Int
+  locationId Int
+  dayKey     String   @db.Char(10)
+  quantity   Int
+  createdAt  DateTime @default(now()) @db.DateTime(0)
+
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  location Location @relation(fields: [locationId], references: [id])
+
+  @@unique([productId, locationId, dayKey], map: "uq_snapshot_grain")
+  @@index([dayKey], map: "idx_snapshot_day")
+  @@index([productId, dayKey], map: "idx_snapshot_product_day")
+  @@map("product_stock_snapshots")
+}
+
+model ProductSalesFact {
+  id            Int      @id @default(autoincrement())
+  productId     Int
+  companyId     String
+  integrationId String
+  dayKey        String   @db.Char(10)
+  orderedQty    Int      @default(0)
+  fulfilledQty  Int      @default(0)
+  revenue       Decimal  @default(0.00) @db.Decimal(12, 2)
+  orderCount    Int      @default(0)
+  createdAt     DateTime @default(now()) @db.DateTime(0)
+  updatedAt     DateTime @default(now()) @updatedAt @db.DateTime(0)
+
+  product     Product     @relation(fields: [productId], references: [id])
+  company     Company     @relation(fields: [companyId], references: [id])
+  integration Integration @relation(fields: [integrationId], references: [id])
+
+  @@unique([productId, companyId, integrationId, dayKey], map: "uq_sales_fact_grain")
+  @@index([companyId, dayKey], map: "idx_sales_fact_company_day")
+  @@index([productId, dayKey], map: "idx_sales_fact_product_day")
+  @@map("product_sales_facts")
+}
+
+model AnalyticsRebuildState {
+  job             String    @id @db.VarChar(32)
+  lockedAt        DateTime?
+  heartbeatAt     DateTime?
+  lastRunAt       DateTime?
+  lastWindowFrom  String?   @db.Char(10)
+  lastWindowTo    String?   @db.Char(10)
+  rowsDeleted     Int       @default(0)
+  rowsInserted    Int       @default(0)
+  unattributed    Int       @default(0)
+  flaggedPairs    Int       @default(0)
+  sourceWatermark DateTime?
+  lastError       String?   @db.Text
+  updatedAt       DateTime  @default(now()) @updatedAt @db.DateTime(0)
+
+  @@map("analytics_rebuild_state")
 }
