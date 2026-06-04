@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
-import prisma from "@/lib/prisma";
+import { getStockSeries } from "@/lib/analytics/queries";
 
 export const dynamic = "force-dynamic";
 
@@ -14,14 +14,6 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const from = sp.get("from") ?? undefined;
   const to = sp.get("to") ?? undefined;
 
-  const where: any = {};
-  if (productId) where.productId = productId;
-  if (locationId) where.locationId = locationId;
-  if (from || to) where.dayKey = { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) };
-
-  const rows = await prisma.productStockSnapshot.findMany({
-    where, orderBy: [{ dayKey: "asc" }, { locationId: "asc" }],
-    select: { dayKey: true, locationId: true, quantity: true },
-  });
+  const rows = await getStockSeries({ productId, locationId, from, to });
   return NextResponse.json({ series: rows, mode: "historical" });
 });
