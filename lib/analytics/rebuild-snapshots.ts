@@ -23,18 +23,22 @@ export function reconstructLevels({ current, deltas, fromDayKey, toDayKey: to }:
 
 /** Backfill + nightly. Iterates current product_locations pairs; reconstructs; flags negative pairs; dense-upserts.
  *  `from` defaults to the earliest log day for the pair (>= seed date); `to` defaults to the last COMPLETED UTC day. Idempotent + locked. */
-export async function rebuildStockSnapshots(opts: { from?: string; to?: string } = {}): Promise<{ rowsInserted: number; flaggedPairs: number }> {
+export async function rebuildStockSnapshots(opts: { from?: string; to?: string } = {}): Promise<{ rowsInserted: number; flaggedPairs: number; nullLocationCutoff: string | null }> {
   const token = await acquireRebuildLock("snapshots");
-  if (!token) return { rowsInserted: 0, flaggedPairs: 0 };
+  if (!token) return { rowsInserted: 0, flaggedPairs: 0, nullLocationCutoff: null };
   let rowsInserted = 0, flaggedPairs = 0;
   let aborted = false;
   try {
     // Snapshots cover end-of-COMPLETED-day only; default `to` is yesterday so a nightly run never stamps today's
     // mid-run live level as that day's verified end-of-day row. Explicit opts.to overrides (e.g. backfill any day).
     const to = opts.to ?? lastCompletedDayKey();
-    // Tripwire: no nonzero null-location deltas may exist (verified none today; a future one would be unattributable).
-    const badNull = await prisma.inventory_logs.count({ where: { locationId: null, delta: { not: 0 } } });
-    if (badNull > 0) throw new Error(`reconcile: ${badNull} nonzero null-location inventory_logs exist — investigate before trusting snapshots`);
+    // Date-bound past legacy null-location movements: any inventory_logs row with locationId=null and a nonzero
+    // delta is unattributable to a per-location grain. Reconstruction is only trustworthy for days strictly AFTER
+    // the last such log, so we floor the backfill at (max null-location-log day + 1). Days at/before that are a
+    // documented gap (legacy pre-per-location-logging data). The current code never creates null-location logs.
+    const maxNull = await prisma.inventory_logs.aggregate({ _max: { changeTime: true }, where: { locationId: null, delta: { not: 0 } } });
+    const nullLocationCutoff = maxNull._max.changeTime ? toDayKey(nextDayStart(toDayKey(maxNull._max.changeTime))) : null;
+    if (nullLocationCutoff) console.warn(`[snapshots] null-location legacy logs present — flooring backfill at ${nullLocationCutoff} (pre-cutoff is a documented gap)`);
 
     const pairs = await prisma.product_locations.findMany({ select: { productId: true, locationId: true, quantity: true } });
     let i = 0;
@@ -47,7 +51,10 @@ export async function rebuildStockSnapshots(opts: { from?: string; to?: string }
         where: { productId: pair.productId, locationId: pair.locationId },
         select: { changeTime: true, delta: true },
       });
-      const from = opts.from ?? (logs.length ? toDayKey(logs.reduce((a, b) => (a.changeTime < b.changeTime ? a : b)).changeTime) : to);
+      const baseFrom = opts.from ?? (logs.length ? toDayKey(logs.reduce((a, b) => (a.changeTime < b.changeTime ? a : b)).changeTime) : to);
+      // String comparison of 'YYYY-MM-DD' dayKeys is chronological. If the cutoff is later than baseFrom, floor at it.
+      // If from > to (cutoff in the future), dayKeyRange yields [] and this pair contributes 0 rows (no crash).
+      const from = nullLocationCutoff && nullLocationCutoff > baseFrom ? nullLocationCutoff : baseFrom;
       const r = reconstructLevels({ current: pair.quantity, deltas: logs, fromDayKey: from, toDayKey: to });
       if (!r.ok) { flaggedPairs++; console.warn(`[snapshots] flagged pair product=${pair.productId} loc=${pair.locationId}: negative reconstruction`); continue; }
       for (const lvl of r.levels) {
@@ -59,8 +66,9 @@ export async function rebuildStockSnapshots(opts: { from?: string; to?: string }
         rowsInserted++; // counts rows upserted (touched), including updates of existing rows — not strictly net-new
       }
     }
-    await recordRebuildRun("snapshots", { lastWindowFrom: opts.from ?? null, lastWindowTo: to, rowsInserted, flaggedPairs, lastError: aborted ? "aborted: lease lost mid-run" : null });
-    return { rowsInserted, flaggedPairs };
+    // Record the EFFECTIVE floor (the applied cutoff) so the run record reflects the actual backfill start.
+    await recordRebuildRun("snapshots", { lastWindowFrom: nullLocationCutoff ?? opts.from ?? null, lastWindowTo: to, rowsInserted, flaggedPairs, lastError: aborted ? "aborted: lease lost mid-run" : null });
+    return { rowsInserted, flaggedPairs, nullLocationCutoff };
   } catch (e) {
     await recordRebuildRun("snapshots", { lastError: String((e as Error).message) });
     throw e;

@@ -1,7 +1,7 @@
 jest.mock("@/lib/analytics/rebuild-lock", () => ({
   acquireRebuildLock: jest.fn(), heartbeatRebuildLock: jest.fn(), releaseRebuildLock: jest.fn(), recordRebuildRun: jest.fn(),
 }));
-jest.mock("@/lib/prisma", () => ({ __esModule: true, default: { inventory_logs: { count: jest.fn(), findMany: jest.fn() }, product_locations: { findMany: jest.fn() }, productStockSnapshot: { upsert: jest.fn() } } }));
+jest.mock("@/lib/prisma", () => ({ __esModule: true, default: { inventory_logs: { aggregate: jest.fn(), findMany: jest.fn() }, product_locations: { findMany: jest.fn() }, productStockSnapshot: { upsert: jest.fn() } } }));
 
 import { reconstructLevels, rebuildStockSnapshots } from "@/lib/analytics/rebuild-snapshots";
 import { acquireRebuildLock, heartbeatRebuildLock, releaseRebuildLock, recordRebuildRun } from "@/lib/analytics/rebuild-lock";
@@ -34,23 +34,49 @@ describe("reconstructLevels (backfill, baseline-free guard)", () => {
 });
 
 describe("rebuildStockSnapshots (orchestrator)", () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Default: no null-location legacy logs => no cutoff => unchanged behavior. Tests that exercise the
+    // floor override this with an explicit _max.changeTime.
+    (prisma as any).inventory_logs.aggregate.mockResolvedValue({ _max: { changeTime: null } });
+  });
   test("short-circuits when the lock is held (acquire returns null) and never queries product_locations", async () => {
     (acquireRebuildLock as jest.Mock).mockResolvedValue(null);
     const res = await rebuildStockSnapshots();
-    expect(res).toEqual({ rowsInserted: 0, flaggedPairs: 0 });
+    expect(res).toEqual({ rowsInserted: 0, flaggedPairs: 0, nullLocationCutoff: null });
     expect((prisma as any).product_locations.findMany).not.toHaveBeenCalled();
-    expect((prisma as any).inventory_logs.count).not.toHaveBeenCalled();
+    expect((prisma as any).inventory_logs.aggregate).not.toHaveBeenCalled();
   });
 
-  test("reconcile tripwire: nonzero null-location log => throws, records null-location error, still releases", async () => {
+  // Replaces the old global tripwire (which threw on any null-location log). The code now DATE-BOUNDS instead:
+  // it floors the backfill at (max null-location-log day + 1), so the emitted range is unambiguously trustworthy
+  // and pre-cutoff days (legacy gap) are simply not emitted.
+  test("floors backfill at (max null-location day + 1) when legacy null-location logs exist", async () => {
     (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
-    (prisma as any).inventory_logs.count.mockResolvedValueOnce(1);
-    await expect(rebuildStockSnapshots()).rejects.toThrow();
-    expect((prisma as any).product_locations.findMany).not.toHaveBeenCalled();
+    (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
+    // Last legacy null-location log is 2025-05-01 => cutoff floors at 2025-05-02.
+    (prisma as any).inventory_logs.aggregate.mockResolvedValue({ _max: { changeTime: new Date("2025-05-01T21:52:12Z") } });
+    (prisma as any).product_locations.findMany.mockResolvedValueOnce([{ productId: 1, locationId: 1, quantity: 10 }]);
+    // Pair has located logs spanning before AND after the cutoff.
+    (prisma as any).inventory_logs.findMany.mockResolvedValueOnce([
+      { changeTime: new Date("2025-04-15T10:00:00Z"), delta: 2 },
+      { changeTime: new Date("2025-05-03T10:00:00Z"), delta: 1 },
+    ]);
+    const upsert = (prisma as any).productStockSnapshot.upsert as jest.Mock;
+    // baseFrom would be 2025-04-15 (earliest log), but the cutoff floors emission at 2025-05-02.
+    const res = await rebuildStockSnapshots({ to: "2025-05-04" });
+    expect(res.nullLocationCutoff).toBe("2025-05-02");
+    const dayKeysWritten = upsert.mock.calls.map((c) => c[0].where.productId_locationId_dayKey.dayKey);
+    expect(dayKeysWritten.length).toBeGreaterThan(0);
+    // Every emitted day is >= the cutoff; the pre-cutoff legacy era is excluded.
+    expect(dayKeysWritten.every((k: string) => k >= "2025-05-02")).toBe(true);
+    expect(dayKeysWritten.some((k: string) => k < "2025-05-02")).toBe(false);
+    expect(dayKeysWritten).not.toContain("2025-04-15"); // a concrete pre-cutoff day, excluded
+    expect(dayKeysWritten).toContain("2025-05-02"); // first post-cutoff day, emitted
+    // Run record reflects the EFFECTIVE floor (the applied cutoff), not opts.from.
     expect(recordRebuildRun as jest.Mock).toHaveBeenCalledWith(
       "snapshots",
-      expect.objectContaining({ lastError: expect.stringContaining("null-location") }),
+      expect.objectContaining({ lastWindowFrom: "2025-05-02", lastError: null }),
     );
     expect(releaseRebuildLock as jest.Mock).toHaveBeenCalledTimes(1);
   });
@@ -59,22 +85,20 @@ describe("rebuildStockSnapshots (orchestrator)", () => {
   // An explicit window (vs. the clock-dependent default `from`=earliest-log-day / `to`=today) makes the negative deterministic.
   test("negative reconstruction flags the pair, never upserts, and releases the lock", async () => {
     (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
-    (prisma as any).inventory_logs.count.mockResolvedValueOnce(0);
     (prisma as any).product_locations.findMany.mockResolvedValueOnce([{ productId: 1, locationId: 1, quantity: 1 }]);
     (prisma as any).inventory_logs.findMany.mockResolvedValueOnce([{ changeTime: new Date("2026-06-04T10:00:00Z"), delta: 5 }]);
     const res = await rebuildStockSnapshots({ from: "2026-06-03", to: "2026-06-04" });
-    expect(res).toEqual({ rowsInserted: 0, flaggedPairs: 1 });
+    expect(res).toEqual({ rowsInserted: 0, flaggedPairs: 1, nullLocationCutoff: null });
     expect((prisma as any).productStockSnapshot.upsert).not.toHaveBeenCalled();
     expect(releaseRebuildLock as jest.Mock).toHaveBeenCalledTimes(1);
   });
 
   test("happy path upserts one snapshot row with the composite key and records a clean run", async () => {
     (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
-    (prisma as any).inventory_logs.count.mockResolvedValueOnce(0);
     (prisma as any).product_locations.findMany.mockResolvedValueOnce([{ productId: 1, locationId: 1, quantity: 10 }]);
     (prisma as any).inventory_logs.findMany.mockResolvedValueOnce([{ changeTime: new Date("2026-06-04T10:00:00Z"), delta: 5 }]);
     const res = await rebuildStockSnapshots({ from: "2026-06-04", to: "2026-06-04" });
-    expect(res).toEqual({ rowsInserted: 1, flaggedPairs: 0 });
+    expect(res).toEqual({ rowsInserted: 1, flaggedPairs: 0, nullLocationCutoff: null });
     expect((prisma as any).productStockSnapshot.upsert).toHaveBeenCalledTimes(1);
     expect((prisma as any).productStockSnapshot.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -91,10 +115,9 @@ describe("rebuildStockSnapshots (orchestrator)", () => {
 
   test("default 'to' is the last COMPLETED day (yesterday), never today's partial level", async () => {
     jest.useFakeTimers().setSystemTime(new Date("2026-06-05T03:10:00Z")); // nightly cron time
-    // acquire token, count 0 null-loc, one pair, one same-day delta on 2026-06-04 (last completed day)
+    // acquire token, no null-loc legacy logs (aggregate default from beforeEach), one pair, one same-day delta on 2026-06-04 (last completed day)
     (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-05T03:10:00Z"));
     (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
-    (prisma as any).inventory_logs.count.mockResolvedValue(0);
     (prisma as any).product_locations.findMany.mockResolvedValue([{ productId: 1, locationId: 1, quantity: 10 }]);
     (prisma as any).inventory_logs.findMany.mockResolvedValue([{ changeTime: new Date("2026-06-04T10:00:00Z"), delta: 4 }]);
     const upsert = (prisma as any).productStockSnapshot.upsert as jest.Mock;
@@ -107,7 +130,6 @@ describe("rebuildStockSnapshots (orchestrator)", () => {
 
   test("a query throw mid-run records a non-null error and still releases the lock (finally)", async () => {
     (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
-    (prisma as any).inventory_logs.count.mockResolvedValueOnce(0);
     (prisma as any).product_locations.findMany.mockRejectedValueOnce(new Error("db exploded"));
     await expect(rebuildStockSnapshots()).rejects.toThrow();
     expect(recordRebuildRun as jest.Mock).toHaveBeenCalledWith(
