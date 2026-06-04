@@ -98,14 +98,14 @@ export default function ProductScratchCard({
         {adding ? (
           <div className="flex flex-col gap-2 pt-2">
             <input
-              list="scratch-labels"
+              list={`scratch-labels-new-${product.id}`}
               value={newLabel}
               autoFocus
               onChange={(e) => setNewLabel(e.target.value)}
               placeholder="Label (e.g. Awake Price)"
               className="border rounded px-2 py-1 text-sm"
             />
-            <datalist id="scratch-labels">
+            <datalist id={`scratch-labels-new-${product.id}`}>
               {(labels ?? []).map((l) => (
                 <option key={l} value={l} />
               ))}

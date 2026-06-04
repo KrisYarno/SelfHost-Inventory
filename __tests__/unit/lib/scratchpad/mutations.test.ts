@@ -53,6 +53,15 @@ describe("createScratchpadRow", () => {
       expect.objectContaining({ data: expect.objectContaining({ createdBy: 9, updatedBy: 9, sortOrder: 3 }) }),
     );
   });
+  it("starts sortOrder at 0 for the first row in an empty table", async () => {
+    m().product.findFirst.mockResolvedValue({ id: 1 } as any);
+    m().productScratchpadPrice.aggregate.mockResolvedValue({ _max: { sortOrder: null } } as any);
+    m().productScratchpadPrice.create.mockResolvedValue({ id: 11, sortOrder: 0 } as any);
+    await createScratchpadRow({ productId: 1, label: "x" }, { id: 9 });
+    expect(m().productScratchpadPrice.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ sortOrder: 0 }) }),
+    );
+  });
 });
 
 describe("deleteScratchpadRow", () => {

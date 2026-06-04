@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, ClipboardList, Truck, ShoppingCart, PackageOpen } from "lucide-react";
+import { Home, Package, Settings, Warehouse, ClipboardList, Truck, ShoppingCart, PackageOpen, NotebookPen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -46,7 +46,7 @@ const navigation = [
   {
     name: "Price Board",
     href: "/scratchpad",
-    icon: ClipboardList,
+    icon: NotebookPen,
     label: "Prices",
   },
 ];

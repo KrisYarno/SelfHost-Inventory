@@ -92,13 +92,13 @@ export default function ScratchRow({
         {editing === "label" ? (
           <>
             <input
-              list="scratch-labels"
+              list={`scratch-labels-${row.id}`}
               value={draft}
               autoFocus
               onChange={(e) => setDraft(e.target.value)}
               className="border rounded px-1 text-sm"
             />
-            <datalist id="scratch-labels">
+            <datalist id={`scratch-labels-${row.id}`}>
               {(labels ?? []).map((l) => (
                 <option key={l} value={l} />
               ))}

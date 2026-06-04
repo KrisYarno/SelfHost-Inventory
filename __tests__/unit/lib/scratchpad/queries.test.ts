@@ -36,4 +36,11 @@ describe("getLabelSuggestions", () => {
     expect(where).toMatchObject({ product: { deletedAt: null }, label: { contains: "Aw" } });
     expect(labels).toEqual(["Awake Price"]);
   });
+  it("omits the label contains filter when called without q", async () => {
+    m().productScratchpadPrice.findMany.mockResolvedValue([] as any);
+    await getLabelSuggestions();
+    const where = (m().productScratchpadPrice.findMany.mock.calls[0][0] as any).where;
+    expect(where).toMatchObject({ product: { deletedAt: null } });
+    expect(where).not.toHaveProperty("label");
+  });
 });
