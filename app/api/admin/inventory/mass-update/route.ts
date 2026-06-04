@@ -266,13 +266,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
           // Process each change individually within the transaction
           for (const change of batch) {
             try {
-              const { productId, locationId, newQuantity, delta } = change;
-
-              // Skip if no actual change
-              if (delta === 0) {
-                successCount++;
-                continue;
-              }
+              const { productId, locationId, newQuantity } = change;
 
               // Verify product exists
               const product = await tx.product.findUnique({
@@ -310,13 +304,32 @@ export const POST = apiHandler(async (request: NextRequest) => {
                 throw new Error("Location not found");
               }
 
+              // Truthful delta: recompute from the in-tx current quantity, never trust the client-supplied delta (backfill reconciliation depends on logged delta == actual change). Client-version optimistic locking (reject stale overwrites) is a separate follow-up.
+              const existing = await tx.product_locations.findUnique({
+                where: {
+                  productId_locationId: {
+                    productId,
+                    locationId,
+                  },
+                },
+                select: { quantity: true },
+              });
+              const currentQuantity = existing?.quantity ?? 0;
+              const serverDelta = newQuantity - currentQuantity;
+
+              // Skip if no actual change (based on the REAL delta, not the client's)
+              if (serverDelta === 0) {
+                successCount++;
+                continue;
+              }
+
               // Create inventory log entry
               const log = await tx.inventory_logs.create({
                 data: {
                   userId: user.id,
                   productId,
                   locationId,
-                  delta,
+                  delta: serverDelta,
                   changeTime: new Date(),
                   logType: "ADJUSTMENT",
                 },
@@ -343,6 +356,9 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
               processedChanges.push({
                 ...change,
+                // Carry the truthful (server-recomputed) delta forward so the
+                // bulk audit entry also reflects the real change, not the client's.
+                delta: serverDelta,
                 logId: log.id,
                 productName: product.name,
                 locationName: location.name,
