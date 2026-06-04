@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, BookOpen, ShoppingCart, Truck, PackageOpen } from "lucide-react";
+import { Home, Package, Settings, Warehouse, BookOpen, ShoppingCart, Truck, PackageOpen, ClipboardList } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -42,6 +42,12 @@ const navigation = [
     href: "/pre-staging",
     icon: PackageOpen,
     description: "Unpack, label, count, and stock intake items",
+  },
+  {
+    name: "Price Board",
+    href: "/scratchpad",
+    icon: ClipboardList,
+    description: "Rough-pricing scratchpad",
   },
   // Reports moved under Admin menu (see below)
 ];

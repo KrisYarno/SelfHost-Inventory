@@ -43,6 +43,12 @@ const navigation = [
     icon: PackageOpen,
     label: "Pre-Staging",
   },
+  {
+    name: "Price Board",
+    href: "/scratchpad",
+    icon: ClipboardList,
+    label: "Prices",
+  },
 ];
 
 const adminNavigation = [
