@@ -25,10 +25,14 @@ export const GET = apiHandler(async () => {
   const weeklyReportsSetting = await prisma.systemSetting.findUnique({
     where: { key: "weeklyReportsEnabled" },
   });
+  const analyticsRebuildSetting = await prisma.systemSetting.findUnique({
+    where: { key: "analyticsRebuildEnabled" },
+  });
 
   return NextResponse.json({
     locations,
     weeklyReportsEnabled: weeklyReportsSetting?.value === "true",
+    analyticsRebuildEnabled: analyticsRebuildSetting?.value === "true",
   });
 });
 
@@ -41,13 +45,21 @@ export const POST = apiHandler(async (request: NextRequest) => {
   }
 
   const body = await request.json();
-  const { weeklyReportsEnabled } = body;
+  const { weeklyReportsEnabled, analyticsRebuildEnabled } = body;
 
   if (typeof weeklyReportsEnabled === "boolean") {
     await prisma.systemSetting.upsert({
       where: { key: "weeklyReportsEnabled" },
       update: { value: String(weeklyReportsEnabled) },
       create: { key: "weeklyReportsEnabled", value: String(weeklyReportsEnabled) },
+    });
+  }
+
+  if (typeof analyticsRebuildEnabled === "boolean") {
+    await prisma.systemSetting.upsert({
+      where: { key: "analyticsRebuildEnabled" },
+      update: { value: String(analyticsRebuildEnabled) },
+      create: { key: "analyticsRebuildEnabled", value: String(analyticsRebuildEnabled) },
     });
   }
 

@@ -65,6 +65,7 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
       ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-advancedresearchpep.com}
       INTERNAL_SYNC_TOKEN: ${INTERNAL_SYNC_TOKEN}
+      CRON_SECRET: ${CRON_SECRET}
     expose:
       - "3000"
     depends_on:
@@ -114,6 +115,29 @@ services:
         condition: service_healthy
     command: >-
       sh -lc "node scripts/scheduled-external-sync.js"
+    networks:
+      - internal
+
+  analytics-rebuild:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      NODE_ENV: production
+      ENABLE_ANALYTICS_REBUILD: ${ENABLE_ANALYTICS_REBUILD:-0}
+      ANALYTICS_REBUILD_URL: ${ANALYTICS_REBUILD_URL:-http://app:3000/api/cron/analytics-rebuild}
+      CRON_SECRET: ${CRON_SECRET}
+      ANALYTICS_REBUILD_TICK_MINUTES: ${ANALYTICS_REBUILD_TICK_MINUTES:-30}
+      ANALYTICS_NIGHTLY_HOUR_UTC: ${ANALYTICS_NIGHTLY_HOUR_UTC:-3}
+      ANALYTICS_FULL_DOW: ${ANALYTICS_FULL_DOW:-0}
+      ANALYTICS_FULL_HOUR_UTC: ${ANALYTICS_FULL_HOUR_UTC:-4}
+      ANALYTICS_SNAPSHOT_NIGHTLY_DAYS: ${ANALYTICS_SNAPSHOT_NIGHTLY_DAYS:-3}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >-
+      sh -lc "node scripts/scheduled-analytics-rebuild.js"
     networks:
       - internal
 

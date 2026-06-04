@@ -1,10 +1,11 @@
 // @jest-environment node
 //
-// Thin CRON_SECRET-gated route that triggers NIGHTLY-SIZE analytics rebuilds.
+// CRON_SECRET-gated route that triggers analytics rebuilds (nightly AND full).
 // Auth mirrors app/api/cron/weekly-report/route.ts EXACTLY: a Bearer CRON_SECRET
 // header check, no session / CSRF. Flag-gated via SystemSetting
-// `analyticsRebuildEnabled`. The weekly TRUE-FULL rebuild is the standalone
-// script (scripts/analytics-rebuild.ts), NOT this route — avoids HTTP timeouts.
+// `analyticsRebuildEnabled`. mode=full is safe over this route because the
+// scheduled caller is a Docker sidecar curling the INTERNAL app URL (no proxy =>
+// no HTTP timeout). Covers all 4 job/mode combos below.
 jest.mock("@/lib/api-utils", () => ({
   apiHandler: (fn: any) => fn,
 }));
@@ -78,7 +79,7 @@ test("valid Bearer but analyticsRebuildEnabled != 'true' => 200 skipped, no rebu
   expect(salesMock).not.toHaveBeenCalled();
 });
 
-test("valid Bearer + enabled + job=snapshots&mode=nightly => calls rebuildStockSnapshots, returns its result", async () => {
+test("valid Bearer + enabled + job=snapshots&mode=nightly => snapshots called with a recent-window `from` (NOT a full backfill)", async () => {
   m.systemSetting.findUnique.mockResolvedValue({ value: "true" });
   snapshotsMock.mockResolvedValue({ rowsInserted: 12, flaggedPairs: 1 });
 
@@ -88,15 +89,34 @@ test("valid Bearer + enabled + job=snapshots&mode=nightly => calls rebuildStockS
 
   expect(res.status).toBe(200);
   expect(snapshotsMock).toHaveBeenCalledTimes(1);
-  // nightly-size: default window (today + per-pair backfill), no full reconcile here
+  // CHEAP nightly: a recent-window `from` (YYYY-MM-DD), NOT a full {} backfill.
+  const arg = snapshotsMock.mock.calls[0][0];
+  expect(arg).toHaveProperty("from");
+  expect(arg.from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  expect(salesMock).not.toHaveBeenCalled();
+  const body = await res.json();
+  expect(body.job).toBe("snapshots");
+  expect(body.mode).toBe("nightly");
+  expect(body.result).toEqual({ rowsInserted: 12, flaggedPairs: 1 });
+});
+
+test("valid Bearer + enabled + job=snapshots&mode=full => snapshots called with {} (full history backfill)", async () => {
+  m.systemSetting.findUnique.mockResolvedValue({ value: "true" });
+  snapshotsMock.mockResolvedValue({ rowsInserted: 9000, flaggedPairs: 0 });
+
+  const res = await GET(req("?job=snapshots&mode=full", `Bearer ${SECRET}`));
+
+  expect(res.status).toBe(200);
+  expect(snapshotsMock).toHaveBeenCalledTimes(1);
+  // full: no `from` => per-pair earliest = FULL history backfill.
   expect(snapshotsMock).toHaveBeenCalledWith({});
   expect(salesMock).not.toHaveBeenCalled();
   const body = await res.json();
   expect(body.job).toBe("snapshots");
-  expect(body.result).toEqual({ rowsInserted: 12, flaggedPairs: 1 });
+  expect(body.mode).toBe("full");
 });
 
-test("valid Bearer + enabled + job=sales&mode=nightly => calls rebuildSalesFacts (nightly window), returns its result", async () => {
+test("valid Bearer + enabled + job=sales&mode=nightly => rebuildSalesFacts called with {} (nightly ~36h window)", async () => {
   m.systemSetting.findUnique.mockResolvedValue({ value: "true" });
   salesMock.mockResolvedValue({
     rowsDeleted: 4,
@@ -113,9 +133,30 @@ test("valid Bearer + enabled + job=sales&mode=nightly => calls rebuildSalesFacts
   expect(snapshotsMock).not.toHaveBeenCalled();
   const body = await res.json();
   expect(body.job).toBe("sales");
+  expect(body.mode).toBe("nightly");
   expect(body.result).toEqual({
     rowsDeleted: 4,
     rowsInserted: 9,
     unattributed: 0,
   });
+});
+
+test("valid Bearer + enabled + job=sales&mode=full => rebuildSalesFacts called with { full: true }", async () => {
+  m.systemSetting.findUnique.mockResolvedValue({ value: "true" });
+  salesMock.mockResolvedValue({
+    rowsDeleted: 100,
+    rowsInserted: 500,
+    unattributed: 2,
+  });
+
+  const res = await GET(req("?job=sales&mode=full", `Bearer ${SECRET}`));
+
+  expect(res.status).toBe(200);
+  expect(salesMock).toHaveBeenCalledTimes(1);
+  // full: re-scan every dayKey to reconcile late reversals.
+  expect(salesMock).toHaveBeenCalledWith({ full: true });
+  expect(snapshotsMock).not.toHaveBeenCalled();
+  const body = await res.json();
+  expect(body.job).toBe("sales");
+  expect(body.mode).toBe("full");
 });

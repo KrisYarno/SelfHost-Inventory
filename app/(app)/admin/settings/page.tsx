@@ -16,6 +16,7 @@ import {
   Building2,
   AlertTriangle,
   Mail,
+  BarChart3,
 } from "lucide-react";
 import Link from "next/link";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
@@ -32,6 +33,7 @@ interface Location {
 interface SystemSettings {
   locations: Location[];
   weeklyReportsEnabled: boolean;
+  analyticsRebuildEnabled: boolean;
 }
 
 export default function AdminSettingsPage() {
@@ -41,6 +43,7 @@ export default function AdminSettingsPage() {
   const [isAddingLocation, setIsAddingLocation] = useState(false);
   const [isDeletingLocation, setIsDeletingLocation] = useState(false);
   const [isTogglingWeekly, setIsTogglingWeekly] = useState(false);
+  const [isTogglingAnalytics, setIsTogglingAnalytics] = useState(false);
   const { token: csrfToken } = useCSRF();
 
   const fetchSettings = async () => {
@@ -151,6 +154,35 @@ export default function AdminSettingsPage() {
     }
   };
 
+  const handleToggleAnalyticsRebuild = async (enabled: boolean) => {
+    try {
+      setIsTogglingAnalytics(true);
+      const response = await fetch("/api/admin/settings", {
+        method: "POST",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+        body: JSON.stringify({ analyticsRebuildEnabled: enabled }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Failed to update setting");
+      }
+
+      setData((prev) =>
+        prev ? { ...prev, analyticsRebuildEnabled: enabled } : prev
+      );
+      toast.success(
+        enabled
+          ? "Product analytics rebuilds enabled"
+          : "Product analytics rebuilds disabled"
+      );
+    } catch (error: any) {
+      toast.error(error.message || "Failed to update setting");
+    } finally {
+      setIsTogglingAnalytics(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="container mx-auto p-4 sm:p-6 space-y-6 overflow-x-hidden">
@@ -211,6 +243,37 @@ export default function AdminSettingsPage() {
               checked={data?.weeklyReportsEnabled ?? false}
               onCheckedChange={handleToggleWeeklyReports}
               disabled={isTogglingWeekly}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Product Analytics Rebuild Toggle */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <BarChart3 className="h-5 w-5" />
+            Product Analytics Rebuilds
+          </CardTitle>
+          <CardDescription>
+            Master switch for the scheduled analytics rebuilds (nightly stock
+            snapshots + sales facts, plus the weekly full reconcile). When off,
+            the scheduled trigger is a no-op and the materialized analytics layer
+            stops refreshing.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-between">
+            <Label htmlFor="analytics-rebuild-toggle" className="cursor-pointer">
+              {data?.analyticsRebuildEnabled
+                ? "Analytics rebuilds are enabled"
+                : "Analytics rebuilds are disabled"}
+            </Label>
+            <Switch
+              id="analytics-rebuild-toggle"
+              checked={data?.analyticsRebuildEnabled ?? false}
+              onCheckedChange={handleToggleAnalyticsRebuild}
+              disabled={isTogglingAnalytics}
             />
           </div>
         </CardContent>
