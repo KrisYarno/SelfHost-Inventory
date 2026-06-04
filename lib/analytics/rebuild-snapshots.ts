@@ -27,6 +27,7 @@ export async function rebuildStockSnapshots(opts: { from?: string; to?: string }
   const token = await acquireRebuildLock("snapshots");
   if (!token) return { rowsInserted: 0, flaggedPairs: 0 };
   let rowsInserted = 0, flaggedPairs = 0;
+  let aborted = false;
   try {
     const to = opts.to ?? toDayKey(new Date());
     // Tripwire: no nonzero null-location deltas may exist (verified none today; a future one would be unattributable).
@@ -38,7 +39,7 @@ export async function rebuildStockSnapshots(opts: { from?: string; to?: string }
     for (const pair of pairs) {
       if (++i % 100 === 0) {
         const alive = await heartbeatRebuildLock("snapshots", token);
-        if (!alive) { console.warn("[snapshots] lease lost mid-run — aborting"); break; }
+        if (!alive) { console.warn("[snapshots] lease lost mid-run — aborting"); aborted = true; break; }
       }
       const logs = await prisma.inventory_logs.findMany({
         where: { productId: pair.productId, locationId: pair.locationId },
@@ -53,10 +54,10 @@ export async function rebuildStockSnapshots(opts: { from?: string; to?: string }
           update: { quantity: lvl.quantity },
           create: { productId: pair.productId, locationId: pair.locationId, dayKey: lvl.dayKey, quantity: lvl.quantity },
         });
-        rowsInserted++;
+        rowsInserted++; // counts rows upserted (touched), including updates of existing rows — not strictly net-new
       }
     }
-    await recordRebuildRun("snapshots", { lastWindowFrom: opts.from ?? null, lastWindowTo: to, rowsInserted, flaggedPairs, lastError: null });
+    await recordRebuildRun("snapshots", { lastWindowFrom: opts.from ?? null, lastWindowTo: to, rowsInserted, flaggedPairs, lastError: aborted ? "aborted: lease lost mid-run" : null });
     return { rowsInserted, flaggedPairs };
   } catch (e) {
     await recordRebuildRun("snapshots", { lastError: String((e as Error).message) });
