@@ -495,8 +495,8 @@ model ProductSalesFact {
 
 model AnalyticsRebuildState {
   job             String    @id @db.VarChar(32)
-  lockedAt        DateTime?
-  heartbeatAt     DateTime?
+  lockedAt        DateTime? @db.DateTime(3)
+  heartbeatAt     DateTime? @db.DateTime(3)
   lastRunAt       DateTime?
   lastWindowFrom  String?   @db.Char(10)
   lastWindowTo    String?   @db.Char(10)

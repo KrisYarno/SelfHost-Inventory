@@ -17,9 +17,12 @@ export async function acquireRebuildLock(job: RebuildJob): Promise<Date | null> 
   return res.count === 1 ? now : null;
 }
 
-/** Extend the lease. No-op if superseded (token mismatch). Call periodically during long runs. */
-export async function heartbeatRebuildLock(job: RebuildJob, token: Date): Promise<void> {
-  await prisma.analyticsRebuildState.updateMany({ where: { job, lockedAt: token }, data: { heartbeatAt: new Date() } });
+/** Extend the lease; returns false if superseded (lease lost) — the caller should stop. Call comfortably under
+ *  LEASE_MS (e.g. every 30-60s and around any long operation); if the gap between heartbeats exceeds the 15-min
+ *  lease, a second runner can steal the lock. */
+export async function heartbeatRebuildLock(job: RebuildJob, token: Date): Promise<boolean> {
+  const res = await prisma.analyticsRebuildState.updateMany({ where: { job, lockedAt: token }, data: { heartbeatAt: new Date() } });
+  return res.count === 1;
 }
 
 /** Fencing release: only clears the lock if we still own it (token match); no-op if superseded. */

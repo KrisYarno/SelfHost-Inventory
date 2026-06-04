@@ -14,7 +14,11 @@ test("acquire returns a token when the row is free (count===1)", async () => {
   expect(token).toBeInstanceOf(Date);
   const where = m.analyticsRebuildState.updateMany.mock.calls[0][0].where;
   expect(where.job).toBe("sales");
-  expect(where.OR).toEqual(expect.arrayContaining([{ lockedAt: null }]));
+  expect(where.OR).toEqual([
+    { lockedAt: null },
+    { heartbeatAt: { lt: expect.any(Date) } },
+    { heartbeatAt: null, lockedAt: { lt: expect.any(Date) } },
+  ]);
 });
 
 test("acquire returns null when another run holds a live lease (count===0)", async () => {
@@ -31,13 +35,18 @@ test("release only clears the lock when the token still matches (fencing)", asyn
   expect(call.data).toEqual({ lockedAt: null, heartbeatAt: null });
 });
 
-test("heartbeat refreshes heartbeatAt for the current token holder", async () => {
+test("heartbeat refreshes heartbeatAt and returns true for the current token holder (count===1)", async () => {
   m.analyticsRebuildState.updateMany.mockResolvedValue({ count: 1 });
   const token = new Date("2026-06-04T00:00:00Z");
-  await heartbeatRebuildLock("sales", token);
+  expect(await heartbeatRebuildLock("sales", token)).toBe(true);
   const call = m.analyticsRebuildState.updateMany.mock.calls[0][0];
   expect(call.where).toEqual({ job: "sales", lockedAt: token });
   expect(call.data.heartbeatAt).toBeInstanceOf(Date);
+});
+
+test("heartbeat returns false when the lease was lost / superseded (count===0)", async () => {
+  m.analyticsRebuildState.updateMany.mockResolvedValue({ count: 0 });
+  expect(await heartbeatRebuildLock("sales", new Date("2026-06-04T00:00:00Z"))).toBe(false);
 });
 
 test("recordRebuildRun writes run fields + stamps lastRunAt", async () => {

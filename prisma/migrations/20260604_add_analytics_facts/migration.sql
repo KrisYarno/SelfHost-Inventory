@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS `product_sales_facts` (
 
 CREATE TABLE IF NOT EXISTS `analytics_rebuild_state` (
   `job`             VARCHAR(32) NOT NULL,
-  `lockedAt`        DATETIME NULL,
-  `heartbeatAt`     DATETIME NULL,
+  `lockedAt`        DATETIME(3) NULL,
+  `heartbeatAt`     DATETIME(3) NULL,
   `lastRunAt`       DATETIME NULL,
   `lastWindowFrom`  CHAR(10) NULL,
   `lastWindowTo`    CHAR(10) NULL,
