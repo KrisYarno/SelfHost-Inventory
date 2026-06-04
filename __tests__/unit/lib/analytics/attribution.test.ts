@@ -60,3 +60,27 @@ test("two items same grain accumulate; orderCount is distinct orders", () => {
   expect(f.orderedQty).toBe(10);
   expect(f.orderIds.size).toBe(2);
 });
+
+test("bundle with EMPTY [] snapshot => unattributed (no fact)", () => {
+  const r = attributeOrderItems([{ quantity: 1, fulfilledQty: 0, price: "5.00",
+    productLink: { internalProductId: null, isBundle: true }, bundleComponentSnapshot: [], order: order() }]);
+  expect(r.facts.size).toBe(0);
+  expect(r.unattributed).toBe(1);
+});
+
+test("bundle with malformed component (missing quantity) => unattributed, no NaN fact", () => {
+  const r = attributeOrderItems([{ quantity: 2, fulfilledQty: 0, price: "5.00",
+    productLink: { internalProductId: null, isBundle: true },
+    bundleComponentSnapshot: [{ internalProductId: 7 }] as any, order: order() }]);
+  expect(r.facts.size).toBe(0);
+  expect(r.unattributed).toBe(1);
+});
+
+test("bundle with malformed component (missing internalProductId) => unattributed, no undefined-keyed fact", () => {
+  const r = attributeOrderItems([{ quantity: 2, fulfilledQty: 0, price: "5.00",
+    productLink: { internalProductId: null, isBundle: true },
+    bundleComponentSnapshot: [{ quantity: 3 }] as any, order: order() }]);
+  expect(r.facts.size).toBe(0);
+  expect(Array.from(r.facts.keys()).some(k => k.startsWith("undefined"))).toBe(false);
+  expect(r.unattributed).toBe(1);
+});

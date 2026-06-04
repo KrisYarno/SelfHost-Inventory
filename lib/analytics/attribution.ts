@@ -15,6 +15,21 @@ function priceCents(price: unknown): number {
   return Math.round(Number(price) * 100); // integer cents — truthful to the cent, no float drift
 }
 
+/** Validate a frozen bundle snapshot at the analytics read boundary. Returns the component list only if EVERY
+ *  entry has a positive-int internalProductId and quantity (matches the canonical write-time contract); otherwise
+ *  null. A null/empty/malformed snapshot must fail closed to `unattributed` — never produce a NaN/garbage fact. */
+function validBundleComponents(snap: unknown): { internalProductId: number; quantity: number }[] | null {
+  if (!Array.isArray(snap) || snap.length === 0) return null;
+  const out: { internalProductId: number; quantity: number }[] = [];
+  for (const c of snap) {
+    const ip = (c as { internalProductId?: unknown })?.internalProductId;
+    const q = (c as { quantity?: unknown })?.quantity;
+    if (!Number.isInteger(ip) || (ip as number) <= 0 || !Number.isInteger(q) || (q as number) <= 0) return null;
+    out.push({ internalProductId: ip as number, quantity: q as number });
+  }
+  return out;
+}
+
 export function attributeOrderItems(items: AttributableItem[]): AttributionResult {
   const facts = new Map<string, SalesFactAccum>();
   let unattributed = 0;
@@ -36,14 +51,14 @@ export function attributeOrderItems(items: AttributableItem[]): AttributionResul
       continue;
     }
     if (link && link.isBundle) {
-      const snap = it.bundleComponentSnapshot;
-      if (Array.isArray(snap) && snap.length > 0) {
-        for (const c of snap as { internalProductId: number; quantity: number }[]) {
+      const components = validBundleComponents(it.bundleComponentSnapshot);
+      if (components) {
+        for (const c of components) {
           bump(c.internalProductId, it.order, c.quantity * it.quantity, c.quantity * it.fulfilledQty, 0); // UNITS only — ER2
         }
         continue;
       }
-      unattributed++; continue; // null/empty frozen snapshot: never live-fallback (Pillar-2)
+      unattributed++; continue; // null/empty/MALFORMED frozen snapshot: never live-fallback (Pillar-2), never NaN/garbage
     }
     unattributed++; // unmapped, or mapped with null internalProductId and not a bundle: never silently drop
   }
