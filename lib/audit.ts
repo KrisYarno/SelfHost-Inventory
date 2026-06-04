@@ -18,6 +18,9 @@ export type AuditActionType =
   | 'STAGING_CREATE'
   | 'STAGING_GRADUATE'
   | 'STAGING_DISCARD'
+  | 'SCRATCHPAD_CREATE'
+  | 'SCRATCHPAD_UPDATE'
+  | 'SCRATCHPAD_DELETE'
   | 'INVENTORY_ADJUSTMENT'
   | 'INVENTORY_STOCK_IN'
   | 'INVENTORY_DEDUCTION'
@@ -35,7 +38,7 @@ export type AuditActionType =
   | 'DATA_EXPORT'
   | 'SYSTEM_MAINTENANCE'
 
-export type EntityType = 'USER' | 'PRODUCT' | 'INVENTORY' | 'LOCATION' | 'SETTINGS' | 'SYSTEM' | 'STAGING'
+export type EntityType = 'USER' | 'PRODUCT' | 'INVENTORY' | 'LOCATION' | 'SETTINGS' | 'SYSTEM' | 'STAGING' | 'SCRATCHPAD'
 
 interface AuditLogEntry {
   userId: number
