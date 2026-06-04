@@ -4,7 +4,7 @@ jest.mock("@/lib/analytics/rebuild-lock", () => ({
 jest.mock("@/lib/prisma", () => ({ __esModule: true, default: { inventory_logs: { count: jest.fn(), findMany: jest.fn() }, product_locations: { findMany: jest.fn() }, productStockSnapshot: { upsert: jest.fn() } } }));
 
 import { reconstructLevels, rebuildStockSnapshots } from "@/lib/analytics/rebuild-snapshots";
-import { acquireRebuildLock, releaseRebuildLock, recordRebuildRun } from "@/lib/analytics/rebuild-lock";
+import { acquireRebuildLock, heartbeatRebuildLock, releaseRebuildLock, recordRebuildRun } from "@/lib/analytics/rebuild-lock";
 import prisma from "@/lib/prisma";
 
 // reconstructLevels is pure (only depends on the real dates helpers, not the mocks above), so these pass regardless of the mocks.
@@ -87,6 +87,22 @@ describe("rebuildStockSnapshots (orchestrator)", () => {
       expect.objectContaining({ lastError: null }),
     );
     expect(releaseRebuildLock as jest.Mock).toHaveBeenCalledTimes(1);
+  });
+
+  test("default 'to' is the last COMPLETED day (yesterday), never today's partial level", async () => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-06-05T03:10:00Z")); // nightly cron time
+    // acquire token, count 0 null-loc, one pair, one same-day delta on 2026-06-04 (last completed day)
+    (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-05T03:10:00Z"));
+    (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
+    (prisma as any).inventory_logs.count.mockResolvedValue(0);
+    (prisma as any).product_locations.findMany.mockResolvedValue([{ productId: 1, locationId: 1, quantity: 10 }]);
+    (prisma as any).inventory_logs.findMany.mockResolvedValue([{ changeTime: new Date("2026-06-04T10:00:00Z"), delta: 4 }]);
+    const upsert = (prisma as any).productStockSnapshot.upsert as jest.Mock;
+    await rebuildStockSnapshots();
+    const dayKeysWritten = upsert.mock.calls.map((c) => c[0].where.productId_locationId_dayKey.dayKey);
+    expect(dayKeysWritten).not.toContain("2026-06-05"); // never writes today's partial
+    expect(dayKeysWritten[dayKeysWritten.length - 1]).toBe("2026-06-04"); // last completed day is the latest row
+    jest.useRealTimers();
   });
 
   test("a query throw mid-run records a non-null error and still releases the lock (finally)", async () => {

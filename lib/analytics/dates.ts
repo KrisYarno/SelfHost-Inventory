@@ -28,3 +28,9 @@ export function dayKeyRange(from: string, to: string): string[] {
 export function saleDayKey(o: { externalCreatedAt: Date | null; createdAt: Date }): string {
   return toDayKey(o.externalCreatedAt ?? o.createdAt);
 }
+
+/** The last COMPLETED UTC day (yesterday) relative to `now` (defaults to current time). Snapshots only
+ *  cover completed days; today's live level comes from product_locations, not a snapshot. */
+export function lastCompletedDayKey(now: Date = new Date()): string {
+  return toDayKey(new Date(now.getTime() - DAY_MS));
+}

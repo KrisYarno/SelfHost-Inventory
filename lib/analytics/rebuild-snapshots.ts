@@ -1,5 +1,5 @@
 import prisma from "@/lib/prisma";
-import { dayKeyRange, nextDayStart, toDayKey } from "./dates";
+import { dayKeyRange, lastCompletedDayKey, nextDayStart, toDayKey } from "./dates";
 import { acquireRebuildLock, heartbeatRebuildLock, releaseRebuildLock, recordRebuildRun } from "./rebuild-lock";
 
 export interface LevelPoint { dayKey: string; quantity: number; }
@@ -22,14 +22,16 @@ export function reconstructLevels({ current, deltas, fromDayKey, toDayKey: to }:
 }
 
 /** Backfill + nightly. Iterates current product_locations pairs; reconstructs; flags negative pairs; dense-upserts.
- *  `from` defaults to the earliest log day for the pair (>= seed date); `to` defaults to today (UTC). Idempotent + locked. */
+ *  `from` defaults to the earliest log day for the pair (>= seed date); `to` defaults to the last COMPLETED UTC day. Idempotent + locked. */
 export async function rebuildStockSnapshots(opts: { from?: string; to?: string } = {}): Promise<{ rowsInserted: number; flaggedPairs: number }> {
   const token = await acquireRebuildLock("snapshots");
   if (!token) return { rowsInserted: 0, flaggedPairs: 0 };
   let rowsInserted = 0, flaggedPairs = 0;
   let aborted = false;
   try {
-    const to = opts.to ?? toDayKey(new Date());
+    // Snapshots cover end-of-COMPLETED-day only; default `to` is yesterday so a nightly run never stamps today's
+    // mid-run live level as that day's verified end-of-day row. Explicit opts.to overrides (e.g. backfill any day).
+    const to = opts.to ?? lastCompletedDayKey();
     // Tripwire: no nonzero null-location deltas may exist (verified none today; a future one would be unattributable).
     const badNull = await prisma.inventory_logs.count({ where: { locationId: null, delta: { not: 0 } } });
     if (badNull > 0) throw new Error(`reconcile: ${badNull} nonzero null-location inventory_logs exist — investigate before trusting snapshots`);

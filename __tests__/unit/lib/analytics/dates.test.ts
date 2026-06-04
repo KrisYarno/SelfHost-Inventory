@@ -1,4 +1,4 @@
-import { toDayKey, dayKeyStart, nextDayStart, dayKeyRange, saleDayKey } from "@/lib/analytics/dates";
+import { toDayKey, dayKeyStart, nextDayStart, dayKeyRange, saleDayKey, lastCompletedDayKey } from "@/lib/analytics/dates";
 
 describe("analytics/dates (UTC)", () => {
   test("toDayKey returns the UTC calendar day", () => {
@@ -18,5 +18,9 @@ describe("analytics/dates (UTC)", () => {
   test("saleDayKey prefers externalCreatedAt, falls back to createdAt", () => {
     expect(saleDayKey({ externalCreatedAt: new Date("2026-01-02T00:00:00Z"), createdAt: new Date("2026-09-09T00:00:00Z") })).toBe("2026-01-02");
     expect(saleDayKey({ externalCreatedAt: null, createdAt: new Date("2026-09-09T12:00:00Z") })).toBe("2026-09-09");
+  });
+  test("lastCompletedDayKey returns the previous UTC day", () => {
+    expect(lastCompletedDayKey(new Date("2026-06-05T00:30:00Z"))).toBe("2026-06-04");
+    expect(lastCompletedDayKey(new Date("2026-06-05T23:59:59Z"))).toBe("2026-06-04");
   });
 });
