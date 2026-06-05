@@ -490,6 +490,7 @@ model ProductSalesFact {
   @@unique([productId, companyId, integrationId, dayKey], map: "uq_sales_fact_grain")
   @@index([companyId, dayKey], map: "idx_sales_fact_company_day")
   @@index([productId, dayKey], map: "idx_sales_fact_product_day")
+  @@index([companyId, productId, dayKey], map: "idx_sales_fact_company_product_day")
   @@map("product_sales_facts")
 }
 
