@@ -7,6 +7,8 @@ const {
   decideJobs,
   dayKey,
   weekKey,
+  allOk,
+  runJob,
 } = require("../../../scripts/scheduled-analytics-rebuild");
 
 // Cadence used across cases: nightly at 03:00 UTC, weekly full on Sunday (DOW 0)
@@ -100,4 +102,171 @@ test("full day BEFORE full hour but AFTER nightly hour, full done this week => f
     { job: "snapshots", mode: "nightly" },
   ]);
   expect(out.state.lastNightlyDay).toBe("2026-06-07");
+});
+
+// ---------------------------------------------------------------------------
+// allOk — the pure gate that decides whether a tick advances its dedup marker.
+// State advances ONLY when every job returned "ok"; any "skipped"/"error" (or an
+// empty set) blocks the advance so the same decision re-fires next tick.
+// ---------------------------------------------------------------------------
+describe("allOk (dedup-advance gate)", () => {
+  test("exported as a function", () => {
+    expect(typeof allOk).toBe("function");
+  });
+  test("all jobs ok => true (advance)", () => {
+    expect(allOk(["ok", "ok"])).toBe(true);
+    expect(allOk(["ok"])).toBe(true);
+  });
+  test("any skipped (lock held / flag off) => false (do NOT advance)", () => {
+    expect(allOk(["ok", "skipped"])).toBe(false);
+    expect(allOk(["skipped", "ok"])).toBe(false);
+    expect(allOk(["skipped", "skipped"])).toBe(false);
+  });
+  test("any error (fetch threw / non-2xx) => false (do NOT advance)", () => {
+    expect(allOk(["ok", "error"])).toBe(false);
+    expect(allOk(["error"])).toBe(false);
+    expect(allOk(["skipped", "error"])).toBe(false);
+  });
+  test("empty (no jobs fired) => false (nothing to record)", () => {
+    expect(allOk([])).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tick gate composition: decideJobs + allOk together must (a) advance the dedup
+// marker when all jobs are "ok", and (b) leave state UNADVANCED on any
+// "skipped"/"error" so the SAME decision re-fires on the next tick. This mirrors
+// `tick`'s body: `if (allOk(statuses)) Object.assign(state, decision.state)`.
+// ---------------------------------------------------------------------------
+describe("tick dedup-advance gate (decideJobs + allOk)", () => {
+  // Faithful re-implementation of tick's advance rule (tick is a closure inside main()).
+  function simulateTick(now, state, statusesFor) {
+    const decision = decideJobs(now, state, cfg);
+    if (decision.jobs.length === 0) return { fired: false, advanced: false, state };
+    const statuses = decision.jobs.map(() => statusesFor);
+    const advanced = allOk(statuses);
+    if (advanced) Object.assign(state, decision.state);
+    return { fired: true, advanced, state };
+  }
+
+  test("all jobs ok => marker advances; the next tick at the same time is a no-op", () => {
+    const state = { lastNightlyDay: undefined, lastFullWeek: undefined };
+    const first = simulateTick(WED_0300, state, "ok");
+    expect(first.fired).toBe(true);
+    expect(first.advanced).toBe(true);
+    expect(state.lastNightlyDay).toBe("2026-06-03");
+    // Same time again: nightly already recorded => nothing due.
+    const second = decideJobs(WED_0300, state, cfg);
+    expect(second.jobs).toEqual([]);
+  });
+
+  test("a 'skipped' (lock held) job => marker does NOT advance; the SAME nightly re-fires next tick", () => {
+    const state = { lastNightlyDay: undefined, lastFullWeek: undefined };
+    const first = simulateTick(WED_0300, state, "skipped");
+    expect(first.fired).toBe(true);
+    expect(first.advanced).toBe(false);
+    expect(state.lastNightlyDay).toBeUndefined(); // unadvanced
+    // Next tick (still after nightly hour, marker untouched): the nightly fires AGAIN.
+    const retry = decideJobs(WED_0530, state, cfg);
+    expect(retry.jobs).toEqual([
+      { job: "sales", mode: "nightly" },
+      { job: "snapshots", mode: "nightly" },
+    ]);
+  });
+
+  test("an 'error' job => marker does NOT advance; the SAME weekly full re-fires next tick", () => {
+    const state = { lastNightlyDay: undefined, lastFullWeek: undefined };
+    const first = simulateTick(SUN_0400, state, "error");
+    expect(first.fired).toBe(true);
+    expect(first.advanced).toBe(false);
+    expect(state.lastFullWeek).toBeUndefined();
+    expect(state.lastNightlyDay).toBeUndefined();
+    // Next tick on the same full day/hour: the FULL jobs fire again (not downgraded to nightly).
+    const retry = decideJobs(SUN_0600, state, cfg);
+    expect(retry.jobs).toEqual([
+      { job: "sales", mode: "full" },
+      { job: "snapshots", mode: "full" },
+    ]);
+  });
+
+  test("mixed ok+error => marker does NOT advance (partial success is not success)", () => {
+    const state = { lastNightlyDay: undefined, lastFullWeek: undefined };
+    const decision = decideJobs(WED_0300, state, cfg);
+    const statuses = ["ok", "error"]; // sales ok, snapshots failed
+    expect(allOk(statuses)).toBe(false);
+    if (allOk(statuses)) Object.assign(state, decision.state);
+    expect(state.lastNightlyDay).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runJob — HTTP-outcome classification. The status it returns is what the tick
+// loop feeds into allOk, so these three outcomes are the contract:
+//   2xx + body.skipped !== true => "ok"
+//   2xx + body.skipped === true => "skipped"
+//   fetch throws / non-2xx      => "error"
+// ---------------------------------------------------------------------------
+describe("runJob (HTTP outcome -> status)", () => {
+  const URL = "http://app:3000/api/cron/analytics-rebuild";
+  let origFetch;
+  let logSpy;
+  let errSpy;
+  beforeEach(() => {
+    origFetch = global.fetch;
+    logSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+    errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    global.fetch = origFetch;
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  function mockFetch(impl) {
+    global.fetch = jest.fn(impl);
+  }
+
+  test("2xx with a real result (skipped absent/false) => 'ok' and curls the right job/mode URL", async () => {
+    mockFetch(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ success: true, skipped: false, result: { rowsInserted: 3 } }),
+    }));
+    const status = await runJob(URL, "sek", "sales", "nightly");
+    expect(status).toBe("ok");
+    expect(global.fetch).toHaveBeenCalledWith(
+      `${URL}?job=sales&mode=nightly`,
+      expect.objectContaining({ method: "GET", headers: { authorization: "Bearer sek" } })
+    );
+  });
+
+  test("2xx with skipped:true (lock held) => 'skipped'", async () => {
+    mockFetch(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ success: true, skipped: true, result: { rowsInserted: 0 } }),
+    }));
+    expect(await runJob(URL, "sek", "snapshots", "full")).toBe("skipped");
+  });
+
+  test("2xx with skipped:true and flag-off reason => 'skipped'", async () => {
+    mockFetch(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ success: true, skipped: true, reason: "analyticsRebuildEnabled is off" }),
+    }));
+    expect(await runJob(URL, "sek", "sales", "nightly")).toBe("skipped");
+  });
+
+  test("non-2xx => 'error'", async () => {
+    mockFetch(async () => ({ ok: false, status: 500, text: async () => "boom" }));
+    expect(await runJob(URL, "sek", "sales", "nightly")).toBe("error");
+  });
+
+  test("fetch throws => 'error' (transient, retried next tick)", async () => {
+    mockFetch(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+    expect(await runJob(URL, "sek", "sales", "full")).toBe("error");
+  });
 });

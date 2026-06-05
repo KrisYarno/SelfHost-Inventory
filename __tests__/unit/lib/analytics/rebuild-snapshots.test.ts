@@ -40,10 +40,10 @@ describe("rebuildStockSnapshots (orchestrator)", () => {
     // floor override this with an explicit _max.changeTime.
     (prisma as any).inventory_logs.aggregate.mockResolvedValue({ _max: { changeTime: null } });
   });
-  test("short-circuits when the lock is held (acquire returns null) and never queries product_locations", async () => {
+  test("short-circuits when the lock is held (acquire returns null) -> skipped:true, never queries product_locations", async () => {
     (acquireRebuildLock as jest.Mock).mockResolvedValue(null);
     const res = await rebuildStockSnapshots();
-    expect(res).toEqual({ rowsInserted: 0, flaggedPairs: 0, nullLocationCutoff: null });
+    expect(res).toEqual({ rowsInserted: 0, flaggedPairs: 0, nullLocationCutoff: null, skipped: true });
     expect((prisma as any).product_locations.findMany).not.toHaveBeenCalled();
     expect((prisma as any).inventory_logs.aggregate).not.toHaveBeenCalled();
   });
@@ -66,6 +66,7 @@ describe("rebuildStockSnapshots (orchestrator)", () => {
     // baseFrom would be 2025-04-15 (earliest log), but the cutoff floors emission at 2025-05-02.
     const res = await rebuildStockSnapshots({ to: "2025-05-04" });
     expect(res.nullLocationCutoff).toBe("2025-05-02");
+    expect(res.skipped).toBe(false); // a real completed run (lock held only short-circuits)
     const dayKeysWritten = upsert.mock.calls.map((c) => c[0].where.productId_locationId_dayKey.dayKey);
     expect(dayKeysWritten.length).toBeGreaterThan(0);
     // Every emitted day is >= the cutoff; the pre-cutoff legacy era is excluded.
@@ -88,7 +89,7 @@ describe("rebuildStockSnapshots (orchestrator)", () => {
     (prisma as any).product_locations.findMany.mockResolvedValueOnce([{ productId: 1, locationId: 1, quantity: 1 }]);
     (prisma as any).inventory_logs.findMany.mockResolvedValueOnce([{ changeTime: new Date("2026-06-04T10:00:00Z"), delta: 5 }]);
     const res = await rebuildStockSnapshots({ from: "2026-06-03", to: "2026-06-04" });
-    expect(res).toEqual({ rowsInserted: 0, flaggedPairs: 1, nullLocationCutoff: null });
+    expect(res).toEqual({ rowsInserted: 0, flaggedPairs: 1, nullLocationCutoff: null, skipped: false });
     expect((prisma as any).productStockSnapshot.upsert).not.toHaveBeenCalled();
     expect(releaseRebuildLock as jest.Mock).toHaveBeenCalledTimes(1);
   });
@@ -98,7 +99,7 @@ describe("rebuildStockSnapshots (orchestrator)", () => {
     (prisma as any).product_locations.findMany.mockResolvedValueOnce([{ productId: 1, locationId: 1, quantity: 10 }]);
     (prisma as any).inventory_logs.findMany.mockResolvedValueOnce([{ changeTime: new Date("2026-06-04T10:00:00Z"), delta: 5 }]);
     const res = await rebuildStockSnapshots({ from: "2026-06-04", to: "2026-06-04" });
-    expect(res).toEqual({ rowsInserted: 1, flaggedPairs: 0, nullLocationCutoff: null });
+    expect(res).toEqual({ rowsInserted: 1, flaggedPairs: 0, nullLocationCutoff: null, skipped: false });
     expect((prisma as any).productStockSnapshot.upsert).toHaveBeenCalledTimes(1);
     expect((prisma as any).productStockSnapshot.upsert).toHaveBeenCalledWith(
       expect.objectContaining({

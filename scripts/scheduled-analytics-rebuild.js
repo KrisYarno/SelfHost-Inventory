@@ -86,6 +86,21 @@ function decideJobs(now, state, cfg) {
   return { jobs: [], state };
 }
 
+/** Pure: did EVERY job in this tick truly do its work? Used to gate the dedup-marker advance.
+ *  Empty => false (no work fired => nothing to record). A single "skipped"/"error" blocks the advance
+ *  so the same decision re-fires next tick (re-running an already-done job is idempotent + lock-protected). */
+function allOk(statuses) {
+  return statuses.length > 0 && statuses.every((s) => s === "ok");
+}
+
+/**
+ * Fire one job against the route and classify the outcome:
+ *   "ok"      — HTTP 2xx AND body.skipped !== true (the rebuild actually did work)
+ *   "skipped" — HTTP 2xx AND body.skipped === true (flag off, or lock held => no work done)
+ *   "error"   — fetch threw, or a non-2xx response
+ * The caller advances the dedup marker only when ALL jobs returned "ok".
+ * @returns {Promise<"ok"|"skipped"|"error">}
+ */
 async function runJob(url, secret, job, mode) {
   const target = `${url}?job=${job}&mode=${mode}`;
   let resp;
@@ -98,7 +113,7 @@ async function runJob(url, secret, job, mode) {
     const message = err instanceof Error ? err.message : String(err);
     // Tolerate transient fetch errors — log and let the next tick retry.
     console.error(`[analytics-rebuild] ${job}/${mode} request failed: ${message}`);
-    return;
+    return "error";
   }
 
   const bodyText = await resp.text();
@@ -106,22 +121,25 @@ async function runJob(url, secret, job, mode) {
     console.error(
       `[analytics-rebuild] ${job}/${mode} HTTP ${resp.status}: ${bodyText.slice(0, 500)}`
     );
-    return;
+    return "error";
   }
 
-  // Summarize the JSON body for the log (route returns { success, job, mode, result, ... }).
+  // Summarize the JSON body for the log (route returns { success, skipped, job, mode, result, ... }).
+  let skipped = false;
   let summary = bodyText.slice(0, 500);
   try {
     const payload = bodyText ? JSON.parse(bodyText) : null;
     if (payload && payload.skipped) {
-      summary = `skipped (${payload.reason || "flag off"})`;
+      skipped = true;
+      summary = `skipped (${payload.reason || "lock held"})`;
     } else if (payload && payload.result) {
       summary = JSON.stringify(payload.result);
     }
   } catch {
     /* keep raw slice */
   }
-  console.log(`[analytics-rebuild] ${job}/${mode} ok: ${summary}`);
+  console.log(`[analytics-rebuild] ${job}/${mode} ${skipped ? "skipped" : "ok"}: ${summary}`);
+  return skipped ? "skipped" : "ok";
 }
 
 async function main() {
@@ -164,10 +182,20 @@ async function main() {
       return;
     }
     const decision = decideJobs(new Date(), state, cfg);
-    Object.assign(state, decision.state);
     if (decision.jobs.length === 0) return;
+    // Run every due job and collect outcomes. Do NOT advance the dedup marker up front: if a job is
+    // a no-op (lock held => "skipped") or fails ("error"), we must leave state unadvanced so the next
+    // tick retries. Only when EVERY job truly did its work do we record the period as done.
+    const statuses = [];
     for (const { job, mode } of decision.jobs) {
-      await runJob(url, secret, job, mode);
+      statuses.push(await runJob(url, secret, job, mode));
+    }
+    if (allOk(statuses)) {
+      Object.assign(state, decision.state);
+    } else {
+      console.warn(
+        `[analytics-rebuild] not advancing dedup state — statuses: ${statuses.join(", ")} (will retry next tick)`
+      );
     }
   }
 
@@ -175,9 +203,10 @@ async function main() {
   setInterval(tick, tickMinutes * 60 * 1000);
 }
 
-// Exports for unit tests (decideJobs is pure). Importing this file must NOT start
-// the loop — only direct execution does (mirrors scripts/analytics-rebuild.ts).
-module.exports = { decideJobs, dayKey, weekKey };
+// Exports for unit tests. decideJobs + allOk are pure; runJob is exported so its HTTP-outcome
+// classification ("ok"/"skipped"/"error") can be tested with a mocked fetch. Importing this file
+// must NOT start the loop — only direct execution does (mirrors scripts/analytics-rebuild.ts).
+module.exports = { decideJobs, dayKey, weekKey, allOk, runJob };
 
 if (require.main === module) {
   main().catch((err) => {

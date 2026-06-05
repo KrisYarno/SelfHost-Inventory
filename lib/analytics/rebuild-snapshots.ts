@@ -22,10 +22,12 @@ export function reconstructLevels({ current, deltas, fromDayKey, toDayKey: to }:
 }
 
 /** Backfill + nightly. Iterates current product_locations pairs; reconstructs; flags negative pairs; dense-upserts.
- *  `from` defaults to the earliest log day for the pair (>= seed date); `to` defaults to the last COMPLETED UTC day. Idempotent + locked. */
-export async function rebuildStockSnapshots(opts: { from?: string; to?: string } = {}): Promise<{ rowsInserted: number; flaggedPairs: number; nullLocationCutoff: string | null }> {
+ *  `from` defaults to the earliest log day for the pair (>= seed date); `to` defaults to the last COMPLETED UTC day. Idempotent + locked.
+ *  Returns `skipped: true` (with a zero result) ONLY when the cross-process lock is already held — so a contended
+ *  run is distinguishable from a real completed run that happened to touch zero rows. */
+export async function rebuildStockSnapshots(opts: { from?: string; to?: string } = {}): Promise<{ rowsInserted: number; flaggedPairs: number; nullLocationCutoff: string | null; skipped: boolean }> {
   const token = await acquireRebuildLock("snapshots");
-  if (!token) return { rowsInserted: 0, flaggedPairs: 0, nullLocationCutoff: null };
+  if (!token) return { rowsInserted: 0, flaggedPairs: 0, nullLocationCutoff: null, skipped: true };
   let rowsInserted = 0, flaggedPairs = 0;
   let aborted = false;
   try {
@@ -68,7 +70,7 @@ export async function rebuildStockSnapshots(opts: { from?: string; to?: string }
     }
     // Record the EFFECTIVE floor (the applied cutoff) so the run record reflects the actual backfill start.
     await recordRebuildRun("snapshots", { lastWindowFrom: nullLocationCutoff ?? opts.from ?? null, lastWindowTo: to, rowsInserted, flaggedPairs, lastError: aborted ? "aborted: lease lost mid-run" : null });
-    return { rowsInserted, flaggedPairs, nullLocationCutoff };
+    return { rowsInserted, flaggedPairs, nullLocationCutoff, skipped: false };
   } catch (e) {
     await recordRebuildRun("snapshots", { lastError: String((e as Error).message) });
     throw e;

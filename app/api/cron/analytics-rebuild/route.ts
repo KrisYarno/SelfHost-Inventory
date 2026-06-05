@@ -94,8 +94,13 @@ export const GET = apiHandler(async (request: NextRequest) => {
     `[analytics-rebuild] job=${job} done in ${duration}ms: ${JSON.stringify(result)}`
   );
 
+  // Top-level `skipped` mirrors the flag-off path so the response ALWAYS carries a boolean meaning
+  // "did NOT do work". Here it is true when the rebuild lib short-circuited because the cross-process
+  // lock was already held (another run in flight). The scheduler keys its dedup-advance on this: a
+  // skipped (lock-held) run must NOT burn the dedup marker, so the next tick retries.
   return NextResponse.json({
     success: true,
+    skipped: result.skipped === true,
     timestamp: new Date().toISOString(),
     duration,
     job,
