@@ -75,13 +75,21 @@ export function useExternalOrder(orderId: string | null) {
 }
 
 /**
- * Hook to get user's companies for filtering
+ * Hook to get user's companies for filtering.
+ *
+ * @param membershipsOnly When true, requests `?membershipsOnly=1` so the route returns ONLY the
+ *   caller's actual memberships (skipping the zero-membership admin-sees-all convenience). The
+ *   analytics company-scope selector passes `true` so the picker equals the rollup source (ER-D3);
+ *   the orders page omits the arg, leaving the default (admin-sees-all) behavior unchanged.
  */
-export function useUserCompanies() {
+export function useUserCompanies(membershipsOnly = false) {
   return useQuery({
-    queryKey: ["user-companies"],
+    queryKey: ["user-companies", { membershipsOnly }],
     queryFn: async () => {
-      const response = await fetch("/api/companies/user");
+      const url = membershipsOnly
+        ? "/api/companies/user?membershipsOnly=1"
+        : "/api/companies/user";
+      const response = await fetch(url);
       if (!response.ok) {
         throw new Error("Failed to fetch user companies");
       }
