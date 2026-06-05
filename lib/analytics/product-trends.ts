@@ -1,11 +1,6 @@
 import prisma from "@/lib/prisma";
 import { calculateTrend } from "@/lib/metrics/warehouse-metrics";
-
-// StockTrend is owned by lib/analytics/hub.ts (T1). It is inlined here so this helper
-// builds standalone when T2 lands before T1 (see the plan's T2 sequencing note). The
-// shape is identical to hub.ts's export, so the two stay structurally compatible; swap
-// to `import type { StockTrend } from "@/lib/analytics/hub"` once hub.ts exists.
-export type StockTrend = { value: number; direction: "up" | "down" | "stable" };
+import type { StockTrend } from "@/lib/analytics/hub";
 
 // Batched per-product stock-trend for the hub. ONE groupBy over product_stock_snapshots,
 // SUMMING all location snapshots per (productId, dayKey) to a per-day GLOBAL level, then
