@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
+import { TrendingUp, TrendingDown, Minus } from "lucide-react";
 import {
   Card,
   CardHeader,
@@ -9,14 +10,13 @@ import {
   CardDescription,
   CardContent,
 } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Sparkline } from "@/components/ui/sparkline";
+import { CompanyScopeSelect } from "@/components/analytics/company-scope-select";
 import {
-  Table,
-  TableHeader,
-  TableBody,
-  TableHead,
-  TableRow,
-  TableCell,
-} from "@/components/ui/table";
+  LineChartComponent,
+  BarChartComponent,
+} from "@/components/reports/inventory-chart";
 
 // Shape of GET /api/analytics/product/[id]. revenue is serialized to a string
 // per-row by the API (Prisma Decimal -> string); other _sum fields are numbers.
@@ -36,6 +36,13 @@ type ProductAnalytics = {
   sales: { series: SalesRow[]; mode: string; note: string };
 };
 
+// Shape of GET /api/analytics/sales?groupBy=day (one row per dayKey).
+type SalesDayRow = {
+  dayKey: string;
+  _sum?: { orderedQty?: number | null; revenue?: string | null };
+};
+type SalesByDay = { series: SalesDayRow[]; mode: string; note: string };
+
 const numberFormatter = new Intl.NumberFormat("en-US");
 const formatUnits = (value?: number | null) => numberFormatter.format(value ?? 0);
 
@@ -46,51 +53,168 @@ function formatRevenue(value?: string | null) {
   return value;
 }
 
+// UTC-safe YYYY-MM-DD for the date-range default (never date-fns format(); dayKey is TZ-safe).
+function toDayKey(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+function daysAgoDayKey(n: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - n);
+  return toDayKey(d);
+}
+
+// Sum the per-location snapshot rows into ONE GLOBAL total per dayKey, day-ascending.
+// The recharts LineChartComponent wrapper expects x-key `date` + series key `quantity`.
+function toStockChartData(series: StockPoint[]): Array<{ date: string; quantity: number }> {
+  const byDay = new Map<string, number>();
+  for (const p of series) byDay.set(p.dayKey, (byDay.get(p.dayKey) ?? 0) + p.quantity);
+  return Array.from(byDay.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, quantity]) => ({ date, quantity }));
+}
+
 export default function ProductAnalyticsPage() {
   const params = useParams<{ id: string }>();
   const id = params?.id;
 
   const [data, setData] = useState<ProductAnalytics | null>(null);
+  const [salesByDay, setSalesByDay] = useState<SalesByDay | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Sales scope (memberships sum by default) + date-range (last 90 days, UTC YYYY-MM-DD).
+  const [companyId, setCompanyId] = useState<string | undefined>(undefined);
+  const [from, setFrom] = useState<string>(() => daysAgoDayKey(90));
+  const [to, setTo] = useState<string>(() => toDayKey(new Date()));
 
   const fetchAnalytics = useCallback(async () => {
     if (!id) return;
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/analytics/product/${id}`);
-      if (!response.ok) throw new Error("Failed to load analytics");
-      const json = (await response.json()) as ProductAnalytics;
-      setData(json);
+      // Thread the selected company + date range into BOTH reads (T5 route accepts them).
+      const qp = new URLSearchParams();
+      if (from) qp.set("from", from);
+      if (to) qp.set("to", to);
+      if (companyId) qp.set("companyId", companyId);
+
+      // Sales as a time series for the chart (per-product payload's sales.series is a single
+      // groupBy=product aggregate, not a day grain). groupBy=day gives one row per dayKey.
+      const salesQp = new URLSearchParams(qp);
+      salesQp.set("productId", id);
+      salesQp.set("groupBy", "day");
+
+      const [productRes, salesRes] = await Promise.all([
+        fetch(`/api/analytics/product/${id}?${qp.toString()}`),
+        fetch(`/api/analytics/sales?${salesQp.toString()}`),
+      ]);
+
+      if (!productRes.ok) throw new Error("Failed to load analytics");
+      const productJson = (await productRes.json()) as ProductAnalytics;
+      setData(productJson);
+
+      // The sales-by-day chart is best-effort: a failure here must not blank the page.
+      if (salesRes.ok) {
+        setSalesByDay((await salesRes.json()) as SalesByDay);
+      } else {
+        setSalesByDay(null);
+      }
     } catch (err) {
       console.error("Error fetching product analytics:", err);
       setError("Could not load analytics for this product.");
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, from, to, companyId]);
 
   useEffect(() => {
     fetchAnalytics();
   }, [fetchAnalytics]);
 
-  const stockSeries = data?.stock.series ?? [];
-  const salesSeries = data?.sales.series ?? [];
+  const stockSeries = useMemo(() => data?.stock.series ?? [], [data]);
+  const salesSeries = useMemo(() => data?.sales.series ?? [], [data]);
   const hasData = stockSeries.length > 0 || salesSeries.length > 0;
+
+  // Per-day GLOBAL stock totals -> chart data + trend (computed from the real series).
+  const stockChartData = useMemo(() => toStockChartData(stockSeries), [stockSeries]);
+  const stockTrend = useMemo(() => {
+    if (stockChartData.length < 2) return null;
+    const earliest = stockChartData[0].quantity;
+    const latest = stockChartData[stockChartData.length - 1].quantity;
+    const direction: "up" | "down" | "stable" =
+      latest > earliest ? "up" : latest < earliest ? "down" : "stable";
+    // Percent change vs the earliest day; guard divide-by-zero.
+    const value =
+      earliest === 0 ? 0 : Math.round((Math.abs(latest - earliest) / earliest) * 100);
+    return { value, direction, levels: stockChartData.map((d) => d.quantity) };
+  }, [stockChartData]);
+
+  // Sales units-over-time for the bar chart (day grain). The wrapper's series keys are
+  // stockIn/stockOut; relabel by mapping units onto stockIn so a single bar renders.
+  const salesChartData = useMemo(
+    () =>
+      (salesByDay?.series ?? [])
+        .slice()
+        .sort((a, b) => a.dayKey.localeCompare(b.dayKey))
+        .map((r) => ({ date: r.dayKey, stockIn: r._sum?.orderedQty ?? 0 })),
+    [salesByDay],
+  );
 
   return (
     <div className="flex flex-col h-full overflow-x-hidden">
       <div className="container mx-auto p-4 sm:p-6 space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Product Analytics</h1>
-          <p className="text-sm text-muted-foreground">
-            Stock and sales history for product #{id}.
-          </p>
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">Product Analytics</h1>
+            <p className="text-sm text-muted-foreground">
+              Stock and sales history for product #{id}.
+            </p>
+          </div>
+
+          {/* Scope controls: company (sales only) + date range (both reads). */}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-medium text-muted-foreground">Company</label>
+              <CompanyScopeSelect
+                value={companyId}
+                onChange={setCompanyId}
+                className="w-full sm:w-56"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="from" className="text-xs font-medium text-muted-foreground">
+                From
+              </label>
+              <input
+                id="from"
+                type="date"
+                value={from}
+                max={to || undefined}
+                onChange={(e) => setFrom(e.target.value)}
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="to" className="text-xs font-medium text-muted-foreground">
+                To
+              </label>
+              <input
+                id="to"
+                type="date"
+                value={to}
+                min={from || undefined}
+                onChange={(e) => setTo(e.target.value)}
+                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+              />
+            </div>
+          </div>
         </div>
 
         {loading && (
-          <p className="text-sm text-muted-foreground">Loading analytics…</p>
+          <div className="space-y-6">
+            <Skeleton className="h-[380px] w-full rounded-2xl" />
+            <Skeleton className="h-[380px] w-full rounded-2xl" />
+          </div>
         )}
 
         {!loading && error && (
@@ -107,98 +231,124 @@ export default function ProductAnalyticsPage() {
 
         {!loading && !error && hasData && data && (
           <>
-            {/* Stock level over time */}
-            <Card>
-              <CardHeader>
-                <CardTitle>Stock level over time</CardTitle>
-                <CardDescription>{data.stock.mode}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                {stockSeries.length === 0 ? (
+            {/* Stock level over time (per-day GLOBAL total) + trend indicator. */}
+            {stockChartData.length === 0 ? (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Stock level over time</CardTitle>
+                  <CardDescription>{data.stock.mode}</CardDescription>
+                </CardHeader>
+                <CardContent>
                   <p className="text-sm text-muted-foreground">
-                    No stock snapshots recorded yet.
+                    No stock snapshots recorded in this range.
                   </p>
-                ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Day</TableHead>
-                        <TableHead>Location</TableHead>
-                        <TableHead className="text-right">Quantity</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {stockSeries.map((point, i) => (
-                        <TableRow key={`${point.dayKey}-${point.locationId}-${i}`}>
-                          <TableCell>{point.dayKey}</TableCell>
-                          <TableCell>{point.locationId}</TableCell>
-                          <TableCell className="text-right">
-                            {formatUnits(point.quantity)}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                )}
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center gap-3">
+                  <span className="text-sm font-medium text-muted-foreground">
+                    Stock trend
+                  </span>
+                  {stockTrend ? (
+                    <span
+                      className="inline-flex items-center gap-1 text-sm font-medium"
+                      aria-label={`Stock trend ${stockTrend.direction} ${stockTrend.value} percent`}
+                    >
+                      {stockTrend.direction === "up" && (
+                        <TrendingUp className="h-4 w-4 text-emerald-600" />
+                      )}
+                      {stockTrend.direction === "down" && (
+                        <TrendingDown className="h-4 w-4 text-red-600" />
+                      )}
+                      {stockTrend.direction === "stable" && (
+                        <Minus className="h-4 w-4 text-muted-foreground" />
+                      )}
+                      <span>{stockTrend.value}%</span>
+                      <Sparkline data={stockTrend.levels} className="ml-1" />
+                    </span>
+                  ) : (
+                    <span className="text-sm text-muted-foreground" aria-label="Stock trend unavailable">
+                      —
+                    </span>
+                  )}
+                </div>
+                <LineChartComponent
+                  data={stockChartData}
+                  title="Stock level over time"
+                  description={data.stock.mode}
+                />
+              </div>
+            )}
 
-            {/* Units in/out + net — not in this payload yet. Do not fabricate. */}
+            {/* Sales over time (day grain). Units only; revenue is direct-only (see note). */}
+            <div className="space-y-2">
+              {salesChartData.length === 0 ? (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Sales over time</CardTitle>
+                    <CardDescription>{data.sales.mode}</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    <p className="text-sm text-muted-foreground">{data.sales.note}</p>
+                    <p className="text-sm text-muted-foreground">
+                      No sales recorded for your companies in this range.
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : (
+                <>
+                  <BarChartComponent
+                    data={salesChartData}
+                    title="Sales over time (ordered units)"
+                    description={data.sales.mode}
+                  />
+                  <p className="px-1 text-sm text-muted-foreground">{data.sales.note}</p>
+                </>
+              )}
+            </div>
+
+            {/* Sales totals for the selected scope/range. Fulfilled is structurally 0 and is
+                omitted entirely (truthful-data); we surface a one-line note instead. */}
             <Card>
               <CardHeader>
-                <CardTitle>Units in / out + net</CardTitle>
-                <CardDescription>Movement flows</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Movement flows: coming in a later pass. The current analytics payload
-                  reports stock snapshots and sales totals only.
-                </p>
-              </CardContent>
-            </Card>
-
-            {/* Sales */}
-            <Card>
-              <CardHeader>
-                <CardTitle>Sales</CardTitle>
+                <CardTitle>Sales totals</CardTitle>
                 <CardDescription>{data.sales.mode}</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
-                <p className="text-sm text-muted-foreground">{data.sales.note}</p>
+              <CardContent className="space-y-3">
                 {salesSeries.length === 0 ? (
                   <p className="text-sm text-muted-foreground">
-                    No sales recorded for your companies yet.
+                    No sales recorded for your companies in this range.
                   </p>
                 ) : (
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="text-right">Ordered units</TableHead>
-                        <TableHead className="text-right">Fulfilled units</TableHead>
-                        <TableHead className="text-right">Orders</TableHead>
-                        <TableHead className="text-right">Revenue (direct)</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {salesSeries.map((row, i) => (
-                        <TableRow key={`${row.productId ?? "row"}-${i}`}>
-                          <TableCell className="text-right">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    {salesSeries.map((row, i) => (
+                      <div key={`${row.productId ?? "row"}-${i}`} className="contents">
+                        <div className="rounded-lg border border-border/70 p-4">
+                          <p className="text-xs text-muted-foreground">Ordered units</p>
+                          <p className="text-lg font-semibold">
                             {formatUnits(row._sum?.orderedQty)}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {formatUnits(row._sum?.fulfilledQty)}
-                          </TableCell>
-                          <TableCell className="text-right">
+                          </p>
+                        </div>
+                        <div className="rounded-lg border border-border/70 p-4">
+                          <p className="text-xs text-muted-foreground">Orders</p>
+                          <p className="text-lg font-semibold">
                             {formatUnits(row._sum?.orderCount)}
-                          </TableCell>
-                          <TableCell className="text-right">
+                          </p>
+                        </div>
+                        <div className="rounded-lg border border-border/70 p-4">
+                          <p className="text-xs text-muted-foreground">Revenue (direct)</p>
+                          <p className="text-lg font-semibold">
                             {formatRevenue(row._sum?.revenue)}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 )}
+                <p className="text-xs text-muted-foreground">
+                  Fulfilled units are not yet populated in source data and are omitted.
+                </p>
               </CardContent>
             </Card>
           </>
