@@ -10,6 +10,7 @@ jest.mock("@/lib/prisma", () => ({
   },
 }));
 
+import { NextRequest } from "next/server";
 import { GET } from "@/app/api/analytics/rebuild-state/route";
 import { requireApproved } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
@@ -25,14 +26,14 @@ beforeEach(() => {
 
 test("requireApproved gates the route", async () => {
   m.analyticsRebuildState.findUnique.mockResolvedValue(null);
-  await GET();
+  await GET(new NextRequest("http://localhost/api/analytics/rebuild-state"));
   expect(requireApproved).toHaveBeenCalled();
 });
 
 test("reads the GLOBAL 'sales' rebuild row and returns { unattributed, lastRunAt }", async () => {
   const lastRunAt = new Date("2026-06-05T00:00:00.000Z");
   m.analyticsRebuildState.findUnique.mockResolvedValue({ unattributed: 7, lastRunAt });
-  const res = await GET();
+  const res = await GET(new NextRequest("http://localhost/api/analytics/rebuild-state"));
   const body = await res.json();
   expect(m.analyticsRebuildState.findUnique).toHaveBeenCalledWith({
     where: { job: "sales" },
@@ -44,7 +45,7 @@ test("reads the GLOBAL 'sales' rebuild row and returns { unattributed, lastRunAt
 
 test("no rebuild row yet => defaults to { unattributed: 0, lastRunAt: null } (pre-backfill safe)", async () => {
   m.analyticsRebuildState.findUnique.mockResolvedValue(null);
-  const res = await GET();
+  const res = await GET(new NextRequest("http://localhost/api/analytics/rebuild-state"));
   const body = await res.json();
   expect(body).toEqual({ unattributed: 0, lastRunAt: null });
 });
