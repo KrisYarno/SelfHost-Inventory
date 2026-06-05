@@ -9,10 +9,18 @@ import {
   calculateMonthlyCarryingCost,
   isDeadStock,
   isStockoutRisk,
+  calculateTrend,
   DEAD_STOCK_DAYS,
 } from "@/lib/metrics/warehouse-metrics";
 
 export const dynamic = "force-dynamic";
+
+// Subtract N days from a 'YYYY-MM-DD' dayKey using UTC math (dayKey is TZ-safe; never date-fns format()).
+function subtractDays(dayKey: string, n: number): string {
+  const d = new Date(`${dayKey}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
 
 export const GET = apiHandler(async (request: NextRequest) => {
   await requireApproved();
@@ -189,20 +197,58 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const daysOfSupplyAvg =
     productsWithMovement > 0 ? Math.round(daysOfSupplySum / productsWithMovement) : 0;
 
-  // Calculate trend (compare to previous period if we have dates)
-  let lowStockTrend: { value: number; direction: "up" | "down" | "stable" } | undefined;
-  if (startDate) {
-    const periodStart = new Date(startDate);
-    const periodEnd = endDate ? new Date(endDate) : new Date();
-    const periodDays = Math.ceil(
-      (periodEnd.getTime() - periodStart.getTime()) / (1000 * 60 * 60 * 24)
-    );
+  // B8: honest low-stock %-trend (proxy) backed by product_stock_snapshots.
+  // calculateTrend returns a PERCENTAGE (the card renders {value}%); this is the % change in
+  // the COUNT of low-stock products between the latest snapshot day and the snapshot 7 days
+  // earlier, reusing the EXISTING lowStockProducts predicate. Respects selectedLocationId.
+  // <2 distinct snapshot days => {value:0, direction:"stable"} so the card never breaks pre-backfill.
+  let lowStockTrend: { value: number; direction: "up" | "down" | "stable" } = {
+    value: 0,
+    direction: "stable",
+  };
 
-    if (periodDays > 0) {
-      // For trend, we compare current low stock count to what it was at period start
-      // This is an approximation - a more accurate approach would track historical snapshots
-      // For now, we just show stable if we can't determine trend
-      lowStockTrend = { value: 0, direction: "stable" };
+  // Per (productId, dayKey) SUM of location snapshots (respecting the selected location).
+  const snapshotRows = await prisma.productStockSnapshot.groupBy({
+    by: ["productId", "dayKey"],
+    where: { ...(locationId ? { locationId: parseInt(locationId) } : {}) },
+    _sum: { quantity: true },
+    orderBy: { dayKey: "asc" },
+  });
+
+  if (snapshotRows.length > 0) {
+    // Threshold per product (reuse the predicate's source: product.lowStockThreshold ?? 10).
+    const thresholdByProduct = new Map<number, number>();
+    products.forEach((p) =>
+      thresholdByProduct.set(p.id, p.lowStockThreshold ?? lowStockThreshold)
+    );
+    // Only count APPROVED + non-deleted products (the `products` set above already is).
+    const approvedIds = new Set(products.map((p) => p.id));
+
+    // Distinct days, ascending.
+    const days = Array.from(new Set(snapshotRows.map((r) => r.dayKey))).sort();
+    if (days.length >= 2) {
+      const latestDay = days[days.length - 1];
+      // The snapshot day closest to (latest - 7) without going past it; fall back to earliest.
+      const target = days
+        .filter((d) => d <= subtractDays(latestDay, 7))
+        .pop() ?? days[0];
+
+      const countLowOn = (day: string): number => {
+        let count = 0;
+        // per-product daily level on `day` = SUM of its location snapshots (already SUMmed in groupBy by (productId,dayKey)).
+        for (const r of snapshotRows) {
+          if (r.dayKey !== day) continue;
+          if (!approvedIds.has(r.productId)) continue;
+          const qty = r._sum.quantity ?? 0;
+          const threshold = thresholdByProduct.get(r.productId) ?? lowStockThreshold;
+          if (qty > 0 && qty < threshold) count++;
+        }
+        return count;
+      };
+
+      if (target !== latestDay) {
+        lowStockTrend = calculateTrend(countLowOn(latestDay), countLowOn(target));
+      }
     }
   }
 
