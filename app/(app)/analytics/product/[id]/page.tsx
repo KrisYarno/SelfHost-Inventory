@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams } from "next/navigation";
-import { TrendingUp, TrendingDown, Minus } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, Download, ImageIcon } from "lucide-react";
 import {
   Card,
   CardHeader,
@@ -10,6 +10,7 @@ import {
   CardDescription,
   CardContent,
 } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Sparkline } from "@/components/ui/sparkline";
 import { CompanyScopeSelect } from "@/components/analytics/company-scope-select";
@@ -17,6 +18,11 @@ import {
   LineChartComponent,
   BarChartComponent,
 } from "@/components/reports/inventory-chart";
+import {
+  exportToCSV,
+  exportChartAsImage,
+  generateExportFilename,
+} from "@/lib/export-utils";
 
 // Shape of GET /api/analytics/product/[id]. revenue is serialized to a string
 // per-row by the API (Prisma Decimal -> string); other _sum fields are numbers.
@@ -162,6 +168,46 @@ export default function ProductAnalyticsPage() {
     [salesByDay],
   );
 
+  // T9 export surface. The chart-PNG export needs a real DOM element: attach a ref to
+  // the wrapping div around the stock line chart (mirrors the Reports page's chartRefs
+  // pattern) and hand ref.current to exportChartAsImage (which runs html2canvas).
+  const stockChartRef = useRef<HTMLDivElement | null>(null);
+
+  const handleExportChart = useCallback(async () => {
+    const el = stockChartRef.current;
+    if (!el) return;
+    await exportChartAsImage(el, generateExportFilename("product-analytics", "png"));
+  }, []);
+
+  // CSV of the per-day stock level joined with that day's ordered units (the two real
+  // series on this page). Honest columns only: stock level (GLOBAL) + ordered units
+  // (companies-scoped). Bundle revenue is deliberately NOT emitted (see the page note).
+  const handleExportCsv = useCallback(() => {
+    const ordersByDay = new Map<string, number>();
+    for (const d of salesChartData) ordersByDay.set(d.date, d.stockIn);
+    const days = new Set<string>([
+      ...stockChartData.map((d) => d.date),
+      ...salesChartData.map((d) => d.date),
+    ]);
+    const rows = Array.from(days)
+      .sort((a, b) => a.localeCompare(b))
+      .map((date) => ({
+        date,
+        stockQuantity: stockChartData.find((d) => d.date === date)?.quantity ?? "",
+        orderedUnits: ordersByDay.get(date) ?? "",
+      }));
+    if (rows.length === 0) return;
+    exportToCSV(
+      rows,
+      [
+        { key: "date", label: "Date" },
+        { key: "stockQuantity", label: "Stock Quantity" },
+        { key: "orderedUnits", label: "Ordered Units" },
+      ],
+      generateExportFilename("product-analytics", "csv"),
+    );
+  }, [stockChartData, salesChartData]);
+
   return (
     <div className="flex flex-col h-full overflow-x-hidden">
       <div className="container mx-auto p-4 sm:p-6 space-y-6">
@@ -233,6 +279,24 @@ export default function ProductAnalyticsPage() {
 
         {!loading && !error && hasData && data && (
           <>
+            {/* Export toolbar: chart PNG (of the stock chart) + series CSV. Only shown
+                when there is real data to export (this whole block is hasData-gated). */}
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleExportChart}
+                disabled={stockChartData.length === 0}
+              >
+                <ImageIcon className="h-4 w-4" aria-hidden="true" />
+                <span className="ml-1">Export chart (PNG)</span>
+              </Button>
+              <Button variant="outline" size="sm" onClick={handleExportCsv}>
+                <Download className="h-4 w-4" aria-hidden="true" />
+                <span className="ml-1">Export CSV</span>
+              </Button>
+            </div>
+
             {/* Stock level over time (per-day GLOBAL total) + trend indicator. */}
             {stockChartData.length === 0 ? (
               <Card>
@@ -275,11 +339,13 @@ export default function ProductAnalyticsPage() {
                     </span>
                   )}
                 </div>
-                <LineChartComponent
-                  data={stockChartData}
-                  title="Stock level over time"
-                  description={data.stock.mode}
-                />
+                <div ref={stockChartRef}>
+                  <LineChartComponent
+                    data={stockChartData}
+                    title="Stock level over time"
+                    description={data.stock.mode}
+                  />
+                </div>
               </div>
             )}
 

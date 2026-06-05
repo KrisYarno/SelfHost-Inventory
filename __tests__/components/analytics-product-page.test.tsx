@@ -1,5 +1,5 @@
 /** @jest-environment jsdom */
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import ProductAnalyticsPage from "@/app/(app)/analytics/product/[id]/page";
 
 // The page reads the product id from the route via useParams().
@@ -29,6 +29,22 @@ jest.mock("@/components/reports/inventory-chart", () => ({
 jest.mock("@/components/ui/sparkline", () => ({
   Sparkline: () => <div data-testid="sparkline" />,
 }));
+
+// T9: export surface. Mock the export utils so we assert the page WIRES them
+// (chart PNG via exportChartAsImage, series CSV via exportToCSV) without invoking
+// html2canvas / triggering a real browser download in jsdom.
+jest.mock("@/lib/export-utils", () => ({
+  exportToCSV: jest.fn(),
+  exportChartAsImage: jest.fn(),
+  generateExportFilename: jest.fn(
+    (prefix: string, ext: string) => `${prefix}.${ext}`,
+  ),
+}));
+import {
+  exportToCSV,
+  exportChartAsImage,
+  generateExportFilename,
+} from "@/lib/export-utils";
 
 const NOTE =
   "revenue = direct (non-bundle) sales only; bundle units are included, bundle revenue is not represented";
@@ -169,6 +185,75 @@ it("renders the stock-trend sparkline when the stock series has >= 2 days", asyn
   render(<ProductAnalyticsPage />);
 
   await waitFor(() => expect(screen.getByTestId("sparkline")).toBeInTheDocument());
+});
+
+it("exports the stock chart as a PNG via exportChartAsImage when data is present", async () => {
+  installFetch({
+    product: {
+      productId: 42,
+      stock: {
+        series: [
+          { dayKey: "2026-06-01", locationId: 3, quantity: 120 },
+          { dayKey: "2026-06-02", locationId: 3, quantity: 100 },
+        ],
+        mode: "historical (GLOBAL inventory)",
+      },
+      sales: { series: [], mode: "historical (your companies)", note: NOTE },
+    },
+  });
+
+  render(<ProductAnalyticsPage />);
+
+  await waitFor(() => expect(screen.getByTestId("line-chart")).toBeInTheDocument());
+
+  const pngButton = screen.getByRole("button", { name: /export chart/i });
+  await act(async () => {
+    fireEvent.click(pngButton);
+  });
+
+  expect(generateExportFilename).toHaveBeenCalledWith("product-analytics", "png");
+  expect(exportChartAsImage).toHaveBeenCalledTimes(1);
+  // First arg must be the chart DOM element (the wrapping div the ref is attached to).
+  const el = (exportChartAsImage as jest.Mock).mock.calls[0][0];
+  expect(el).toBeInstanceOf(HTMLElement);
+});
+
+it("exports the stock + sales series as a CSV via exportToCSV when data is present", async () => {
+  installFetch({
+    product: {
+      productId: 42,
+      stock: {
+        series: [
+          { dayKey: "2026-06-01", locationId: 3, quantity: 120 },
+          { dayKey: "2026-06-02", locationId: 3, quantity: 100 },
+        ],
+        mode: "historical (GLOBAL inventory)",
+      },
+      sales: { series: [], mode: "historical (your companies)", note: NOTE },
+    },
+    sales: {
+      series: [{ dayKey: "2026-06-01", _sum: { orderedQty: 4, revenue: "10.00" } }],
+      groupBy: "day",
+      mode: "historical",
+      note: NOTE,
+    },
+  });
+
+  render(<ProductAnalyticsPage />);
+
+  await waitFor(() => expect(screen.getByTestId("line-chart")).toBeInTheDocument());
+
+  const csvButton = screen.getByRole("button", { name: /export csv/i });
+  await act(async () => {
+    fireEvent.click(csvButton);
+  });
+
+  expect(generateExportFilename).toHaveBeenCalledWith("product-analytics", "csv");
+  expect(exportToCSV).toHaveBeenCalledTimes(1);
+  // The exported rows must include the per-day stock series (date + quantity).
+  const rows = (exportToCSV as jest.Mock).mock.calls[0][0] as Array<Record<string, unknown>>;
+  expect(Array.isArray(rows)).toBe(true);
+  expect(rows.length).toBeGreaterThan(0);
 });
 
 it("renders the empty state when both series are empty", async () => {

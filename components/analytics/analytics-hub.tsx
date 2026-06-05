@@ -77,15 +77,19 @@ const FILTER_LABELS: Record<HubFilter, string> = {
   out: "Out of stock",
 };
 
-// CSV columns mirror the visible table (trend serialized as direction + value).
-const CSV_COLUMNS = [
-  { key: "name", label: "Product" },
-  { key: "currentStock", label: "Current Stock" },
-  { key: "units", label: "Units Sold" },
-  { key: "orderCount", label: "Orders" },
-  { key: "revenue", label: "Revenue (direct)" },
-  { key: "trendLabel", label: "Stock Trend" },
-];
+// The hub CSV column contract (T9), kept as an exported pure helper so the column
+// set is unit-testable without rendering the hub. Mirrors the visible table's core
+// metrics; the stock-trend (a {direction,value} object, not a scalar) is appended
+// as a serialized label in the export handler below, not part of this contract.
+export function buildHubCsvColumns(): { key: string; label: string }[] {
+  return [
+    { key: "name", label: "Product" },
+    { key: "currentStock", label: "Current Stock" },
+    { key: "units", label: "Units Sold" },
+    { key: "orderCount", label: "Orders" },
+    { key: "revenue", label: "Revenue (direct)" },
+  ];
+}
 
 export function AnalyticsHub() {
   const initial = useMemo(() => defaultRange(), []);
@@ -148,7 +152,9 @@ export function AnalyticsHub() {
         ? `${p.productStockTrend.direction} ${p.productStockTrend.value}%`
         : "n/a",
     }));
-    exportToCSV(rowsForCsv, CSV_COLUMNS, generateExportFilename("analytics-products", "csv"));
+    // Core columns are the testable T9 contract; the serialized stock-trend is appended.
+    const columns = [...buildHubCsvColumns(), { key: "trendLabel", label: "Stock Trend" }];
+    exportToCSV(rowsForCsv, columns, generateExportFilename("analytics-products", "csv"));
   };
 
   const toggleDir = () => {
