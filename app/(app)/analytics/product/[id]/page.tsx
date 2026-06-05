@@ -106,15 +106,17 @@ export default function ProductAnalyticsPage() {
 
       const [productRes, salesRes] = await Promise.all([
         fetch(`/api/analytics/product/${id}?${qp.toString()}`),
-        fetch(`/api/analytics/sales?${salesQp.toString()}`),
+        // Best-effort: swallow a network rejection so a sales failure never blanks the page.
+        fetch(`/api/analytics/sales?${salesQp.toString()}`).catch(() => null),
       ]);
 
       if (!productRes.ok) throw new Error("Failed to load analytics");
       const productJson = (await productRes.json()) as ProductAnalytics;
       setData(productJson);
 
-      // The sales-by-day chart is best-effort: a failure here must not blank the page.
-      if (salesRes.ok) {
+      // The sales-by-day chart is best-effort: a rejected fetch (null) OR a non-2xx must
+      // not blank the page (the stock chart does not depend on it).
+      if (salesRes && salesRes.ok) {
         setSalesByDay((await salesRes.json()) as SalesByDay);
       } else {
         setSalesByDay(null);
