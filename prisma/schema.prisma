@@ -462,7 +462,7 @@ model ProductStockSnapshot {
   createdAt  DateTime @default(now()) @db.DateTime(0)
 
   product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  location Location @relation(fields: [locationId], references: [id])
+  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
 
   @@unique([productId, locationId, dayKey], map: "uq_snapshot_grain")
   @@index([dayKey], map: "idx_snapshot_day")
@@ -484,8 +484,8 @@ model ProductSalesFact {
   updatedAt     DateTime @default(now()) @updatedAt @db.DateTime(0)
 
   product     Product     @relation(fields: [productId], references: [id])
-  company     Company     @relation(fields: [companyId], references: [id])
-  integration Integration @relation(fields: [integrationId], references: [id])
+  company     Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
 
   @@unique([productId, companyId, integrationId, dayKey], map: "uq_sales_fact_grain")
   @@index([companyId, dayKey], map: "idx_sales_fact_company_day")
@@ -497,14 +497,14 @@ model AnalyticsRebuildState {
   job             String    @id @db.VarChar(32)
   lockedAt        DateTime? @db.DateTime(3)
   heartbeatAt     DateTime? @db.DateTime(3)
-  lastRunAt       DateTime?
+  lastRunAt       DateTime? @db.DateTime(0)
   lastWindowFrom  String?   @db.Char(10)
   lastWindowTo    String?   @db.Char(10)
   rowsDeleted     Int       @default(0)
   rowsInserted    Int       @default(0)
   unattributed    Int       @default(0)
   flaggedPairs    Int       @default(0)
-  sourceWatermark DateTime?
+  sourceWatermark DateTime? @db.DateTime(0)
   lastError       String?   @db.Text
   updatedAt       DateTime  @default(now()) @updatedAt @db.DateTime(0)
 

@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS `product_stock_snapshots` (
   KEY `idx_snapshot_day` (`dayKey`),
   KEY `idx_snapshot_product_day` (`productId`, `dayKey`),
   CONSTRAINT `snapshot_product_fkey`  FOREIGN KEY (`productId`)  REFERENCES `products`(`id`)  ON DELETE CASCADE   ON UPDATE NO ACTION,
-  CONSTRAINT `snapshot_location_fkey` FOREIGN KEY (`locationId`) REFERENCES `locations`(`id`) ON DELETE NO ACTION ON UPDATE NO ACTION
+  CONSTRAINT `snapshot_location_fkey` FOREIGN KEY (`locationId`) REFERENCES `locations`(`id`) ON DELETE CASCADE   ON UPDATE NO ACTION
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `product_sales_facts` (
@@ -31,8 +31,8 @@ CREATE TABLE IF NOT EXISTS `product_sales_facts` (
   KEY `idx_sales_fact_company_day` (`companyId`, `dayKey`),
   KEY `idx_sales_fact_product_day` (`productId`, `dayKey`),
   CONSTRAINT `sales_fact_product_fkey`     FOREIGN KEY (`productId`)     REFERENCES `products`(`id`)     ON DELETE NO ACTION ON UPDATE NO ACTION,
-  CONSTRAINT `sales_fact_company_fkey`     FOREIGN KEY (`companyId`)     REFERENCES `companies`(`id`)    ON DELETE NO ACTION ON UPDATE NO ACTION,
-  CONSTRAINT `sales_fact_integration_fkey` FOREIGN KEY (`integrationId`) REFERENCES `integrations`(`id`) ON DELETE NO ACTION ON UPDATE NO ACTION
+  CONSTRAINT `sales_fact_company_fkey`     FOREIGN KEY (`companyId`)     REFERENCES `companies`(`id`)    ON DELETE CASCADE   ON UPDATE NO ACTION,
+  CONSTRAINT `sales_fact_integration_fkey` FOREIGN KEY (`integrationId`) REFERENCES `integrations`(`id`) ON DELETE CASCADE   ON UPDATE NO ACTION
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS `analytics_rebuild_state` (

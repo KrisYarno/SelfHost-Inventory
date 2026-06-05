@@ -114,6 +114,37 @@ test("groupBy=company is passed through to getSales", async () => {
   expect(body.groupBy).toBe("company");
 });
 
+test("groupBy=bogus is rejected: defaults to 'product', getSales gets 'product', no 500", async () => {
+  (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isAdmin: false } });
+  m.userCompany.findMany.mockResolvedValue([{ companyId: "c1" }]);
+  getSalesMock.mockResolvedValue([]);
+
+  const res = await GET(
+    new NextRequest("http://x/api/analytics/sales?groupBy=bogus")
+  );
+
+  expect(res.status).toBe(200);
+  // an invalid groupBy must NOT reach getSales (it would 500 in prisma.groupBy({by:undefined}))
+  expect(getSalesMock).toHaveBeenCalledWith(
+    expect.objectContaining({ groupBy: "product" })
+  );
+  const body = await res.json();
+  expect(body.groupBy).toBe("product");
+});
+
+test("missing groupBy defaults to 'product'", async () => {
+  (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isAdmin: false } });
+  m.userCompany.findMany.mockResolvedValue([{ companyId: "c1" }]);
+  getSalesMock.mockResolvedValue([]);
+
+  const res = await GET(new NextRequest("http://x/api/analytics/sales"));
+
+  expect(res.status).toBe(200);
+  expect(getSalesMock).toHaveBeenCalledWith(
+    expect.objectContaining({ groupBy: "product" })
+  );
+});
+
 test("serializes the Decimal revenue sum cleanly (no raw Prisma Decimal object)", async () => {
   (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isAdmin: false } });
   m.userCompany.findMany.mockResolvedValue([{ companyId: "c1" }]);

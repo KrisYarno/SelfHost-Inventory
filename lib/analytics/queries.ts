@@ -8,13 +8,24 @@ export async function getSales(opts: { companyIds: string[]; productId?: number;
   const where: any = { companyId: { in: opts.companyIds } };
   if (opts.productId) where.productId = opts.productId;
   if (opts.from || opts.to) where.dayKey = { ...(opts.from ? { gte: opts.from } : {}), ...(opts.to ? { lte: opts.to } : {}) };
-  const by: Record<SalesGroupBy, string[]> = {
+  const BY: Record<SalesGroupBy, string[]> = {
     product: ["productId"], day: ["dayKey"], integration: ["integrationId"], company: ["companyId", "dayKey"],
   };
+  const groupBy = opts.groupBy ?? "product";
+  const by = BY[groupBy] ?? BY.product;
+  // orderCount per fact row = distinct orders for ONE (product,company,integration,day) grain.
+  // Summing it across PRODUCTS (day/integration/company) double-counts a multi-product order,
+  // and the correct value can't be recomputed from the fact (no distinct order IDs). So only
+  // sum orderCount when grouping BY product (where every summed row shares the same product =
+  // "orders containing this product"); OMIT it otherwise so we never emit a wrong number.
+  const _sum: { orderedQty: true; fulfilledQty: true; revenue: true; orderCount?: true } = {
+    orderedQty: true, fulfilledQty: true, revenue: true,
+  };
+  if (groupBy === "product") _sum.orderCount = true;
   return prisma.productSalesFact.groupBy({
-    by: by[opts.groupBy ?? "product"] as any,
+    by: by as any,
     where,
-    _sum: { orderedQty: true, fulfilledQty: true, revenue: true, orderCount: true },
+    _sum,
   });
 }
 

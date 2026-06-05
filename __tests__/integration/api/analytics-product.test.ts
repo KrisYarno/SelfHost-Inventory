@@ -82,6 +82,20 @@ test("sales is scoped to the caller's OWN companies (ownership view)", async () 
   );
 });
 
+test("invalid product id => 400, neither getStockSeries nor getSales is called", async () => {
+  (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isAdmin: false } });
+
+  const res = await GET(req(), ctx("abc"));
+
+  expect(res.status).toBe(400);
+  const body = await res.json();
+  expect(body.error).toBe("Invalid product ID");
+  // a bad id must short-circuit before any data access
+  expect(getStockSeriesMock).not.toHaveBeenCalled();
+  expect(getSalesMock).not.toHaveBeenCalled();
+  expect(m.userCompany.findMany).not.toHaveBeenCalled();
+});
+
 test("caller with no companies => GLOBAL stock present, sales empty, no error", async () => {
   (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isAdmin: false } });
   m.userCompany.findMany.mockResolvedValue([]);

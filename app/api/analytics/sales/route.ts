@@ -20,7 +20,13 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const productId = sp.get("productId") ? parseInt(sp.get("productId")!, 10) : undefined;
   const from = sp.get("from") ?? undefined;
   const to = sp.get("to") ?? undefined;
-  const groupBy = (sp.get("groupBy") as SalesGroupBy | null) ?? undefined;
+  // Whitelist groupBy: an unknown value would map to by[undefined] in getSales and 500
+  // inside prisma.groupBy({ by: undefined }). Default to "product" on missing/invalid.
+  const rawGroupBy = sp.get("groupBy");
+  const groupBy: SalesGroupBy =
+    rawGroupBy && ["product", "day", "integration", "company"].includes(rawGroupBy)
+      ? (rawGroupBy as SalesGroupBy)
+      : "product";
 
   let companyIds: string[];
   if (companyId) {
@@ -50,7 +56,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   return NextResponse.json({
     series,
-    groupBy: groupBy ?? "product",
+    groupBy,
     mode: "historical",
     note: "revenue = direct (non-bundle) sales only; bundle units are included, bundle revenue is not represented",
   });
