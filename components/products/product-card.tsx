@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { ProductWithQuantity } from "@/types/product";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -70,6 +71,16 @@ export function ProductCard({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                {/* Analytics (available to anyone who can open the menu) */}
+                <DropdownMenuItem asChild>
+                  <Link href={`/analytics/product/${product.id}`}>
+                    <TrendingUp className="mr-2 h-4 w-4" />
+                    View analytics
+                  </Link>
+                </DropdownMenuItem>
+                {((showInventoryActions && (onQuickAdjust || onStockIn)) ||
+                  (isAdmin && (onEdit || onDelete))) && <DropdownMenuSeparator />}
+
                 {/* Inventory Actions */}
                 {showInventoryActions && (onQuickAdjust || onStockIn) && (
                   <>
