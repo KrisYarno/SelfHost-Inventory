@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, BookOpen, ShoppingCart, Truck, PackageOpen, NotebookPen } from "lucide-react";
+import { Home, Package, Settings, Warehouse, BookOpen, ShoppingCart, Truck, PackageOpen, NotebookPen, BarChart3 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
 
@@ -48,6 +48,12 @@ const navigation = [
     href: "/scratchpad",
     icon: NotebookPen,
     description: "Rough-pricing scratchpad",
+  },
+  {
+    name: "Analytics",
+    href: "/analytics",
+    icon: BarChart3,
+    description: "Product sales and stock analytics",
   },
   // Reports moved under Admin menu (see below)
 ];
