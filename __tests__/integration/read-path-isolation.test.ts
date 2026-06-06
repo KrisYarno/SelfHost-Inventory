@@ -144,6 +144,8 @@ describe('EXCLUDE route: GET /api/reports/metrics', () => {
     db.product_locations.findMany.mockResolvedValue([] as any);
     db.inventory_logs.groupBy.mockResolvedValue([] as any);
     db.inventory_logs.count.mockResolvedValue(0 as any);
+    // B8 (T4): the metrics route now reads stock snapshots for lowStockTrend; stub the new query.
+    db.productStockSnapshot.groupBy.mockResolvedValue([] as any);
 
     const resp = await metricsGET(mkReq('http://t/api/reports/metrics'));
     expect(resp.status).toBe(200);
