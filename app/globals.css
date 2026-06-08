@@ -17,7 +17,9 @@
     --primary-foreground: 25 70% 12%; /* deep brown for contrast */
     --accent: 35 65% 70%; /* lighter creamy accent */
     --accent-foreground: 25 70% 12%;
-    
+    /* semantic nav-affordance accent (chevron cue + glow ring ONLY; not a text-fill color) */
+    --nav-accent: 32 95% 42%; /* ~#cc7a00 warm amber, >=3:1 on cream for AA */
+
     /* Semantic Colors - Light Mode */
     --success: 142 60% 40%; /* #1ea555 */
     --success-foreground: 0 0% 100%;
@@ -129,7 +131,9 @@
     --primary-foreground: 210 40% 98%;
     --accent: 199 89% 48%; /* #0ea5e9 - Sky Blue Accent */
     --accent-foreground: 222 47% 11%;
-    
+    /* semantic nav-affordance accent (chevron cue + glow ring ONLY; not a text-fill color) */
+    --nav-accent: 262 83% 64%; /* violet, the theme's dark "pop" family */
+
     /* Semantic Colors - Dark Mode */
     --success: 142 71% 52%;
     --success-foreground: 142 71% 90%;
