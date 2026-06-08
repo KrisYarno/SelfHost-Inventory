@@ -1,94 +1,38 @@
 "use client";
 
+/**
+ * Desktop sidebar: a FLAT vertical list of every visible leaf link, in workflow
+ * order, via {@link flattenNav} over the shared {@link navConfig}. Grouping and
+ * the speed-dial are mobile-only; the desktop stays flat by design.
+ *
+ * Consuming the shared config ungates Orders (now a Fulfill child, present for
+ * all users) and reorders the list to the workflow IA:
+ *   Workbench, Orders, Inventory, Stocker, Pre-Staging, Journal, Products,
+ *   Price Board, Analytics, [Admin].
+ */
+
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Package, Settings, Warehouse, BookOpen, ShoppingCart, Truck, PackageOpen, NotebookPen, BarChart3 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useSession } from "next-auth/react";
-
-const navigation = [
-  {
-    name: "Workbench",
-    href: "/workbench",
-    icon: Home,
-    description: "Main inventory management",
-  },
-  {
-    name: "Products",
-    href: "/products",
-    icon: Package,
-    description: "Product catalog",
-  },
-  {
-    name: "Inventory",
-    href: "/inventory",
-    icon: Warehouse,
-    description: "Inventory ledger and tracking",
-  },
-  {
-    name: "Journal",
-    href: "/journal",
-    icon: BookOpen,
-    description: "Bulk inventory adjustments",
-  },
-  {
-    name: "Stocker",
-    href: "/stocker",
-    icon: Truck,
-    description: "Refill tasks for on-site stockers",
-  },
-  {
-    name: "Pre-Staging",
-    href: "/pre-staging",
-    icon: PackageOpen,
-    description: "Unpack, label, count, and stock intake items",
-  },
-  {
-    name: "Price Board",
-    href: "/scratchpad",
-    icon: NotebookPen,
-    description: "Rough-pricing scratchpad",
-  },
-  {
-    name: "Analytics",
-    href: "/analytics",
-    icon: BarChart3,
-    description: "Product sales and stock analytics",
-  },
-  // Reports moved under Admin menu (see below)
-];
-
-const adminNavigation = [
-  {
-    name: "Orders",
-    href: "/orders",
-    icon: ShoppingCart,
-    description: "External orders from integrations",
-  },
-  {
-    name: "Admin",
-    href: "/admin",
-    icon: Settings,
-    description: "Administration panel",
-  },
-];
+import { flattenNav, navConfig } from "@/lib/nav-config";
 
 export function SidebarNav() {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
   const { data: session } = useSession();
-  const isAdmin = session?.user?.isAdmin;
+  const isAdmin = !!session?.user?.isAdmin;
 
-  const allNavigation = [...navigation, ...(isAdmin ? adminNavigation : [])];
+  const links = flattenNav(navConfig, isAdmin);
 
   return (
     <nav className="space-y-1 px-3 py-4">
-      {allNavigation.map((item) => {
-        const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`);
-        
+      {links.map((link) => {
+        const isActive = pathname === link.href || pathname.startsWith(`${link.href}/`);
+
         return (
           <Link
-            key={item.name}
-            href={item.href}
+            key={link.href}
+            href={link.href}
             className={cn(
               "group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors min-h-[44px]",
               "hover:bg-surface-hover hover:text-foreground",
@@ -97,10 +41,10 @@ export function SidebarNav() {
                 ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground"
             )}
-            aria-label={item.description}
+            aria-label={link.label}
             aria-current={isActive ? "page" : undefined}
           >
-            <item.icon
+            <link.icon
               className={cn(
                 "h-5 w-5 flex-shrink-0",
                 isActive
@@ -109,7 +53,7 @@ export function SidebarNav() {
               )}
               aria-hidden="true"
             />
-            <span>{item.name}</span>
+            <span>{link.name}</span>
           </Link>
         );
       })}
