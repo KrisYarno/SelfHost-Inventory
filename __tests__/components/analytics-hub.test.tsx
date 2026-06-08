@@ -1,5 +1,5 @@
 /** @jest-environment jsdom */
-import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act, within } from "@testing-library/react";
 import { AnalyticsHub } from "@/components/analytics/analytics-hub";
 import type { HubResponse } from "@/lib/analytics/hub";
 
@@ -87,9 +87,11 @@ test("renders a row per product with stock/units/revenue", async () => {
   // Names appear in both the Top-movers card and the table, so match all occurrences.
   expect(screen.getAllByText("Widget Alpha").length).toBeGreaterThan(0);
   expect(screen.getAllByText("Gadget Bravo").length).toBeGreaterThan(0);
-  // Revenue is rendered verbatim from the serialized string (table-only at the default
-  // units sort, so it is unique here).
-  expect(screen.getByText("199.50")).toBeInTheDocument();
+  // Revenue is rendered verbatim from the serialized string. Under jsdom there is no real
+  // viewport, so BOTH the `hidden md:block` table AND the `md:hidden` mobile card render into
+  // the DOM (T4) — so "199.50" appears in the table cell and again in the card. Match all
+  // occurrences rather than asserting a single match.
+  expect(screen.getAllByText("199.50").length).toBeGreaterThanOrEqual(1);
 });
 
 test("typing in search feeds the hook's filters (debounced search arg)", async () => {
@@ -164,4 +166,60 @@ test("does NOT render the unattributed note when unattributed === 0", async () =
   // Give the rebuild-state fetch a tick to resolve.
   await waitFor(() => expect(global.fetch).toHaveBeenCalled());
   expect(screen.queryByText(/orders unattributed/i)).not.toBeInTheDocument();
+});
+
+// --- T4: mobile card list (md-breakpoint swap) -------------------------------
+// Under jsdom both presentations render (no viewport); scope to the cards container via
+// the `analytics-hub-cards` testid so these assert on the mobile card presentation only.
+
+test("mobile cards render a whole-card link per product to /analytics/product/<id>", async () => {
+  mockHook.mockReturnValue(hookState({ data: rows }));
+  await act(async () => {
+    render(<AnalyticsHub />);
+  });
+  const cards = screen.getByTestId("analytics-hub-cards");
+  const links = within(cards).getAllByRole("link");
+  expect(links).toHaveLength(2);
+  // The whole card is the link, targeting the per-product page.
+  const alpha = within(cards).getByText("Widget Alpha").closest("a");
+  expect(alpha).toHaveAttribute("href", "/analytics/product/1");
+  const bravo = within(cards).getByText("Gadget Bravo").closest("a");
+  expect(bravo).toHaveAttribute("href", "/analytics/product/2");
+});
+
+test("mobile cards show a LABELED stock trend (not a bare arrow)", async () => {
+  mockHook.mockReturnValue(hookState({ data: rows }));
+  await act(async () => {
+    render(<AnalyticsHub />);
+  });
+  const cards = screen.getByTestId("analytics-hub-cards");
+  // One "Stock trend" label per card, so the % is unambiguously the trend.
+  expect(within(cards).getAllByText(/stock trend/i)).toHaveLength(2);
+});
+
+test("mobile cards render revenue verbatim with a matching title attribute", async () => {
+  mockHook.mockReturnValue(hookState({ data: rows }));
+  await act(async () => {
+    render(<AnalyticsHub />);
+  });
+  const cards = screen.getByTestId("analytics-hub-cards");
+  // Revenue is shown as-is (never reformatted) and carries title={revenue} for the
+  // truncated long-string case.
+  const revenue = within(cards).getByText("199.50");
+  const dd = revenue.closest("dd");
+  expect(dd).toHaveAttribute("title", "199.50");
+});
+
+test("mobile cards expose the four metric labels", async () => {
+  mockHook.mockReturnValue(hookState({ data: rows }));
+  await act(async () => {
+    render(<AnalyticsHub />);
+  });
+  const cards = screen.getByTestId("analytics-hub-cards");
+  const firstCard = within(cards).getByText("Widget Alpha").closest("a") as HTMLElement;
+  const card = within(firstCard);
+  expect(card.getByText("Current stock")).toBeInTheDocument();
+  expect(card.getByText("Units sold")).toBeInTheDocument();
+  expect(card.getByText("Orders")).toBeInTheDocument();
+  expect(card.getByText("Revenue")).toBeInTheDocument();
 });

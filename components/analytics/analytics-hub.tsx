@@ -18,6 +18,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { exportToCSV, generateExportFilename } from "@/lib/export-utils";
+import { cn } from "@/lib/utils";
 import { Search, X, Download, ArrowUp, ArrowDown, Minus, ArrowUpDown } from "lucide-react";
 
 const PAGE_SIZE = 25;
@@ -60,6 +61,56 @@ function TrendCell({ trend }: { trend: StockTrend | null }) {
       <span className="sr-only">{up ? "up" : "down"}</span>
       {value}%
     </span>
+  );
+}
+
+// One labeled metric inside a mobile card's 2-col grid. `min-w-0` lets the revenue value
+// truncate inside the grid track; counts use `fmt`, revenue is passed through verbatim.
+function Metric({
+  label,
+  value,
+  isRevenue,
+}: {
+  label: string;
+  value: string;
+  isRevenue?: boolean;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd
+        className={cn("tabular-nums text-foreground", isRevenue && "truncate")}
+        title={isRevenue ? value : undefined}
+      >
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+// Mobile presentation of a hub row (shown md:hidden; the table is the md+ presentation).
+// The WHOLE card is the link to the same per-product page the table/movers use, so it is a
+// single 44px+ focus target. Trend reuses TrendCell and is explicitly labeled "Stock trend"
+// so the % is not mis-attributed to a metric. Revenue is rendered verbatim (never reformat).
+function MobileProductCard({ product }: { product: HubProductRow }) {
+  return (
+    <Link
+      href={`/analytics/product/${product.productId}`}
+      className="block rounded-lg border border-border bg-card p-4 transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <span className="font-medium text-primary">{product.name}</span>
+        <span className="shrink-0 inline-flex items-center gap-1 text-xs text-muted-foreground">
+          Stock trend <TrendCell trend={product.productStockTrend} />
+        </span>
+      </div>
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+        <Metric label="Current stock" value={fmt(product.currentStock)} />
+        <Metric label="Units sold" value={fmt(product.units)} />
+        <Metric label="Orders" value={fmt(product.orderCount)} />
+        <Metric label="Revenue" value={product.revenue} isRevenue />
+      </dl>
+    </Link>
   );
 }
 
@@ -417,13 +468,29 @@ export function AnalyticsHub() {
         </div>
       ) : (
         <>
-          <DataTable
-            data={products as unknown as Record<string, unknown>[]}
-            columns={columns as never}
-            emptyMessage={
-              hasActiveQuery ? "No products match your filters." : "No products yet."
-            }
-          />
+          {/* md+: the table. */}
+          <div className="hidden md:block">
+            <DataTable
+              data={products as unknown as Record<string, unknown>[]}
+              columns={columns as never}
+              emptyMessage={
+                hasActiveQuery ? "No products match your filters." : "No products yet."
+              }
+            />
+          </div>
+
+          {/* mobile: stacked cards (same data/links/values, swapped at the md breakpoint).
+              Mirrors the DataTable emptyMessage so a no-match filter shows the same copy
+              on mobile. Under jsdom both presentations render — that is expected. */}
+          <div data-testid="analytics-hub-cards" className="space-y-3 md:hidden">
+            {products.length === 0 ? (
+              <div className="rounded-lg border border-border/70 bg-muted/30 px-4 py-12 text-center text-sm text-muted-foreground">
+                {hasActiveQuery ? "No products match your filters." : "No products yet."}
+              </div>
+            ) : (
+              products.map((p) => <MobileProductCard key={p.productId} product={p} />)
+            )}
+          </div>
 
           {/* Pagination */}
           {total > PAGE_SIZE && (
