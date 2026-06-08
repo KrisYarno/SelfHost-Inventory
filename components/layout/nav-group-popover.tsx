@@ -14,8 +14,8 @@
  *   - Pills: the group's gated children rise vertically ABOVE the trigger as
  *     rounded-full <Link>s; each pill carries a solid shadow (`--dropdown-shadow`)
  *     as its separating edge + a faint `--nav-accent` glow ring on top.
- *   - Backdrop: a full-screen TRANSPARENT tap-away layer (no scrim) + a faint
- *     `backdrop-blur` scoped to JUST behind the pill column (the tunable knob).
+ *   - Backdrop: a full-screen tap-away layer with a faint dim (~6%, tunable) + a
+ *     `backdrop-blur` scoped to JUST behind the pill column (also tunable).
  *   - Edge-anchoring: align="left" left-edge-aligns, align="right" right-edge-aligns;
  *     clamped with `max-w-[calc(100vw-1rem)]` + label truncation so pills never clip.
  *   - Motion: opacity + ~8px translateY only, staggered (<=150ms total); chevron
@@ -168,14 +168,15 @@ export function NavGroupPopover({
     <div className="relative flex items-center justify-center">
       {isOpen && (
         <>
-          {/* Full-screen TRANSPARENT tap-away layer (no dark scrim). */}
+          {/* Full-screen tap-away layer with a faint dim (~6%) so the pills read
+              against busy content. Tunable: nudge bg-black/[0.06] up or down. */}
           <button
             type="button"
             aria-label="Dismiss menu"
             data-testid="nav-popover-backdrop"
             tabIndex={-1}
             onClick={closeAndReturnFocus}
-            className="fixed inset-0 z-40 cursor-default bg-transparent"
+            className="fixed inset-0 z-40 cursor-default bg-black/[0.06]"
           />
 
           {/* Rising pill column, anchored above the trigger. The faint
@@ -218,16 +219,16 @@ export function NavGroupPopover({
                     "group/pill flex min-h-[44px] items-center gap-2 self-end",
                     "rounded-full bg-popover px-3 py-2 pr-4",
                     "text-sm font-medium text-foreground",
-                    // Solid shadow = the separating edge; --nav-accent glow ring
-                    // on top (alpha <=0.25, decorative).
-                    "shadow-[var(--dropdown-shadow)]",
-                    "ring-1 ring-[hsl(var(--nav-accent)/0.25)]",
+                    // Solid drop shadow = the separating edge; soft --nav-accent
+                    // glow on top, plus a thicker accent ring as the pill border.
+                    "shadow-[var(--dropdown-shadow),0_0_16px_2px_hsl(var(--nav-accent)/0.4)]",
+                    "ring-2 ring-[hsl(var(--nav-accent)/0.4)]",
                     "transition-[opacity,transform] duration-150 ease-out",
                     // Entrance: opacity + ~8px translateY only (no scale/bounce).
                     entered ? "translate-y-0 opacity-100" : "translate-y-2 opacity-0",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                     "hover:bg-surface-hover",
-                    isPillActive && "text-primary ring-2 ring-[hsl(var(--nav-accent)/0.45)]",
+                    isPillActive && "text-primary ring-[hsl(var(--nav-accent)/0.6)]",
                   )}
                 >
                   <span
