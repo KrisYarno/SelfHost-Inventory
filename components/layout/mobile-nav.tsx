@@ -43,7 +43,9 @@ function DirectNavLink({ link, isActive }: { link: NavLink; isActive: boolean })
     <Link
       href={link.href}
       className={cn(
-        "relative flex flex-col items-center justify-center p-2 transition-colors rounded-lg",
+        // z-50 keeps direct links ABOVE an open group's dismiss-backdrop (z-40)
+        // so they navigate on the first tap instead of just dismissing the dial.
+        "relative z-50 flex flex-col items-center justify-center p-2 transition-colors rounded-lg",
         "hover:bg-muted/50",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
         "min-w-[44px] min-h-[44px]",
@@ -74,6 +76,13 @@ export function MobileNav() {
 
   // Single-open state: the key of the currently-open group, or null.
   const [openKey, setOpenKey] = React.useState<string | null>(null);
+
+  // Close any open speed-dial when the route changes. Direct dock links (and
+  // pills) now sit above the dismiss-backdrop, so a navigation can happen while
+  // a group is open; this guarantees the dial never lingers over the new page.
+  React.useEffect(() => {
+    setOpenKey(null);
+  }, [pathname]);
 
   return (
     <nav className="fixed bottom-0 z-50 w-full border-t border-border bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/60 md:hidden pb-[env(safe-area-inset-bottom)]">

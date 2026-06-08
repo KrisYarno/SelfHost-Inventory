@@ -258,7 +258,10 @@ export function NavGroupPopover({
         aria-label={group.label}
         title={group.label}
         className={cn(
-          "relative flex min-h-[44px] min-w-[44px] flex-col items-center justify-center rounded-lg p-2",
+          // z-50 keeps the trigger ABOVE the open dismiss-backdrop (z-40) so a
+          // tap on another group's trigger switches groups instead of being
+          // eaten by the backdrop; page taps still fall through to dismiss.
+          "relative z-50 flex min-h-[44px] min-w-[44px] flex-col items-center justify-center rounded-lg p-2",
           "transition-colors",
           "hover:bg-muted/50 active:bg-muted",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",

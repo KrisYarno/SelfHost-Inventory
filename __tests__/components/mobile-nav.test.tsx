@@ -91,3 +91,18 @@ test("group-active: on /stocker the Stock Ops trigger gets aria-current", () => 
   render(<MobileNav />);
   expect(screen.getByRole("button", { name: /stock ops/i })).toHaveAttribute("aria-current", "true");
 });
+
+test("a route change closes an open group (navigating via a direct link/pill)", async () => {
+  const user = userEvent.setup();
+  const { rerender } = render(<MobileNav />);
+
+  await user.click(screen.getByRole("button", { name: /fulfill/i }));
+  expect(screen.getByRole("button", { name: /fulfill/i })).toHaveAttribute("aria-expanded", "true");
+
+  // Simulate a client navigation (the dial sits above the dismiss backdrop, so a
+  // direct-link tap navigates without first closing the dial — the pathname
+  // effect must close it so it never lingers over the new page).
+  mockPathname = "/inventory";
+  rerender(<MobileNav />);
+  expect(screen.getByRole("button", { name: /fulfill/i })).toHaveAttribute("aria-expanded", "false");
+});
