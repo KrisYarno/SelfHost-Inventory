@@ -161,7 +161,7 @@ export function NavGroupPopover({
         first.focus();
       }
     },
-    [closeAndReturnFocus],
+    [],
   );
 
   return (

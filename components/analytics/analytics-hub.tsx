@@ -96,7 +96,7 @@ function MobileProductCard({ product }: { product: HubProductRow }) {
   return (
     <Link
       href={`/analytics/product/${product.productId}`}
-      className="block rounded-lg border border-border bg-card p-4 transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      className="block rounded-lg border border-border bg-surface p-4 shadow-sm transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
     >
       <div className="flex items-start justify-between gap-3">
         <span className="font-medium text-primary">{product.name}</span>
