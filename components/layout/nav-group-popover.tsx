@@ -216,14 +216,15 @@ export function NavGroupPopover({
                   }
                   className={cn(
                     "group/pill flex min-h-[44px] items-center gap-2 self-end",
-                    // iOS glass pill: near-solid fill + a top-lit white veil (gradient)
-                    // + heavy backdrop blur with a saturation boost behind it (the iOS
-                    // signature; plain blur reads milky). NB: `popover` is NOT a
-                    // registered Tailwind color in this repo, so `bg-popover` /
-                    // `bg-popover/N` render NOTHING -- arbitrary values only.
+                    // iOS glass pill. Fill + top-lit white veil as ONE layered
+                    // background-image (a veil gradient over a solid-color gradient).
+                    // MUST stay a single bg-[...] class: cn() runs tailwind-merge,
+                    // which cannot classify a var()-based arbitrary bg color and
+                    // DELETES it when any bg-gradient-* class is also present (this
+                    // shipped fully transparent pills to prod). `popover` is also NOT
+                    // a registered Tailwind color here -- arbitrary values only.
                     "rounded-full px-3 py-2 pr-4",
-                    "bg-[hsl(var(--popover)/0.92)]",
-                    "bg-gradient-to-b from-[hsl(0_0%_100%/0.14)] to-[hsl(0_0%_100%/0.03)]",
+                    "bg-[linear-gradient(to_bottom,hsl(0_0%_100%/0.14),hsl(0_0%_100%/0.03)),linear-gradient(hsl(var(--popover)/0.92),hsl(var(--popover)/0.92))]",
                     "backdrop-blur-xl backdrop-saturate-150",
                     "text-sm font-medium text-foreground",
                     // 3D bubble: floating drop shadow (depth) + soft --nav-accent glow
@@ -231,11 +232,12 @@ export function NavGroupPopover({
                     // (curvature -- makes the pill read as a convex bubble).
                     "shadow-[0_8px_24px_-6px_hsl(0_0%_0%/0.45),0_0_16px_2px_hsl(var(--nav-accent)/0.4),inset_0_1.5px_0_0_hsl(0_0%_100%/0.35),inset_0_-1px_1px_0_hsl(0_0%_0%/0.12)]",
                     "ring-2 ring-[hsl(var(--nav-accent)/0.4)]",
-                    "transition-[opacity,transform] duration-150 ease-out",
-                    // Entrance: opacity + ~8px translateY only (no scale/bounce).
+                    // Spring entrance: overshoot bezier on the rise + a touch more
+                    // duration so the settle reads; press gives iOS-style shrink.
+                    "transition-[opacity,transform] duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]",
                     entered ? "translate-y-0 opacity-100" : "translate-y-2 opacity-0",
+                    "active:scale-[0.97]",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                    "hover:bg-[hsl(var(--popover)/0.98)]",
                     isPillActive && "text-primary ring-[hsl(var(--nav-accent)/0.6)]",
                   )}
                 >
@@ -243,6 +245,9 @@ export function NavGroupPopover({
                     className={cn(
                       "flex h-7 w-7 shrink-0 items-center justify-center rounded-full",
                       "bg-surface-hover text-foreground",
+                      // Tiny convex highlight/shade so the chip reads as a bead
+                      // sitting inside the glass pill.
+                      "shadow-[inset_0_1px_1px_0_hsl(0_0%_100%/0.3),inset_0_-1px_1px_0_hsl(0_0%_0%/0.12)]",
                       isPillActive && "bg-primary/15 text-primary",
                     )}
                   >

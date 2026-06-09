@@ -85,7 +85,7 @@ export function MobileNav() {
   }, [pathname]);
 
   return (
-    <nav className="fixed bottom-0 z-50 w-full border-t border-border bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/60 md:hidden pb-[env(safe-area-inset-bottom)]">
+    <nav className="fixed bottom-0 z-50 w-full border-t border-border/60 bg-background/85 backdrop-blur-xl backdrop-saturate-150 supports-[backdrop-filter]:bg-background/65 shadow-[0_-8px_24px_-12px_hsl(0_0%_0%/0.35),inset_0_1px_0_0_hsl(0_0%_100%/0.07)] md:hidden pb-[env(safe-area-inset-bottom)]">
       <div className="flex h-14 items-center justify-around px-2">
         {slots.map((slot, index) => {
           if (slot.kind === "link") {
