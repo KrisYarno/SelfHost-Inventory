@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { format } from 'date-fns';
+import { formatDateTime, formatShortDateTime, formatDelta } from '@/lib/utils';
 import {
   Table,
   TableBody,
@@ -132,7 +132,7 @@ export function SimpleInventoryLogTable({
                         <div className="space-y-1">
                           {showProduct && <p className="font-medium text-sm">{from.products.name}</p>}
                           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                            {from.changeTime && <span>{format(new Date(from.changeTime), 'MMM dd, HH:mm')}</span>}
+                            {from.changeTime && <span className="tabular-nums">{formatShortDateTime(from.changeTime)}</span>}
                             {showLocation && (
                               <span className="flex items-center gap-1">
                                 <span className="text-negative">{from.locations?.name || '-'}</span>
@@ -162,7 +162,7 @@ export function SimpleInventoryLogTable({
                       <div className="space-y-1">
                         {showProduct && <p className="font-medium text-sm">{log.products.name}</p>}
                         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                          {log.changeTime && <span>{format(new Date(log.changeTime), 'MMM dd, HH:mm')}</span>}
+                          {log.changeTime && <span className="tabular-nums">{formatShortDateTime(log.changeTime)}</span>}
                           {showLocation && log.locations && (
                             <span className="flex items-center gap-1">
                               <span className="text-muted-foreground">@</span>
@@ -175,7 +175,7 @@ export function SimpleInventoryLogTable({
                         <ValueChip
                           tone={log.delta > 0 ? 'positive' : log.delta < 0 ? 'negative' : 'neutral'}
                         >
-                          {log.delta > 0 ? '+' : ''}{log.delta}
+                          {formatDelta(log.delta)}
                         </ValueChip>
                         <StatusBadge tone={getLogTone(log.logType)}>{log.logType}</StatusBadge>
                       </div>
@@ -218,8 +218,8 @@ export function SimpleInventoryLogTable({
                     const qty = Math.abs(from.delta);
                     return (
                       <TableRow key={`transfer-${from.id}-${to.id}`}>
-                        <TableCell className="whitespace-nowrap">
-                          {from.changeTime ? format(new Date(from.changeTime), 'MMM dd, yyyy HH:mm') : '-'}
+                        <TableCell className="whitespace-nowrap tabular-nums">
+                          {from.changeTime ? formatDateTime(from.changeTime) : '-'}
                         </TableCell>
                         {showProduct && (
                           <TableCell className="font-medium">{from.products.name}</TableCell>
@@ -247,8 +247,8 @@ export function SimpleInventoryLogTable({
                   const log = row.log;
                   return (
                     <TableRow key={log.id}>
-                      <TableCell className="whitespace-nowrap">
-                        {log.changeTime ? format(new Date(log.changeTime), 'MMM dd, yyyy HH:mm') : '-'}
+                      <TableCell className="whitespace-nowrap tabular-nums">
+                        {log.changeTime ? formatDateTime(log.changeTime) : '-'}
                       </TableCell>
                       {showProduct && <TableCell className="font-medium">{log.products.name}</TableCell>}
                       {showLocation && <TableCell>{log.locations?.name || '-'}</TableCell>}
@@ -257,7 +257,7 @@ export function SimpleInventoryLogTable({
                       </TableCell>
                       <TableCell className="text-right">
                         <ValueChip tone={log.delta > 0 ? 'positive' : log.delta < 0 ? 'negative' : 'neutral'}>
-                          {log.delta > 0 ? '+' : ''}{log.delta}
+                          {formatDelta(log.delta)}
                         </ValueChip>
                       </TableCell>
                       {showUser && <TableCell>{log.users.username}</TableCell>}

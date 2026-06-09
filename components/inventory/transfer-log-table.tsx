@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from 'react';
-import { format } from 'date-fns';
+import { formatDateTime, formatShortDateTime } from '@/lib/utils';
 import {
   Table,
   TableBody,
@@ -63,8 +63,8 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
               >
                 <div className="flex items-center justify-between gap-3">
                   <div className="font-medium leading-tight line-clamp-1">{log.productName}</div>
-                  <span className="text-xs text-muted-foreground">
-                    {format(new Date(log.createdAt), 'MMM dd, HH:mm')}
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {formatShortDateTime(log.createdAt)}
                   </span>
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -107,14 +107,14 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
                 const qty = log.quantity ?? 0;
                 return (
                   <TableRow key={log.id}>
-                    <TableCell>{format(new Date(log.createdAt), 'MMM dd, yyyy HH:mm')}</TableCell>
+                    <TableCell className="tabular-nums">{formatDateTime(log.createdAt)}</TableCell>
                     <TableCell>
-                      <span className="block max-w-[28ch] truncate">{log.productName}</span>
+                      <span className="block max-w-[28ch] truncate" title={log.productName}>{log.productName}</span>
                     </TableCell>
                     <TableCell className="text-negative">{log.fromLocationName}</TableCell>
                     <TableCell className="text-positive">{log.toLocationName}</TableCell>
                     <TableCell className="text-right">
-                      <span className="font-medium">{qty}</span>
+                      <span className="font-medium tabular-nums">{qty}</span>
                     </TableCell>
                     <TableCell>{log.userName}</TableCell>
                   </TableRow>
