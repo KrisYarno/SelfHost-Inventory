@@ -33,6 +33,7 @@ import { toast } from "sonner";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
 import { useDebounce } from "@/hooks/use-debounce";
 import { fetchWithErrorHandling } from "@/lib/rate-limited-fetch";
+import { getJSON, setJSON } from "@/lib/safe-storage";
 import type { InventoryLogWithRelations } from "@/types/inventory";
 import type { ProductWithQuantity } from "@/types/product";
 
@@ -121,23 +122,22 @@ export default function InventoryPage() {
       return;
     }
 
-    try {
-      const saved = localStorage.getItem("inventory-expanded-categories");
-      const parsed: string[] = saved ? JSON.parse(saved) : [];
-      // Keep only categories that still exist; do NOT auto-expand new ones
-      const next = parsed.filter((cat) => allCategories.includes(cat));
-      setExpandedCategories(next);
-    } catch {
-      // On parse error, default to collapsed
-      setExpandedCategories([]);
-    }
+    const parsed = getJSON<string[]>("inventory-expanded-categories", []);
+    // Keep only categories that still exist; do NOT auto-expand new ones
+    const next = parsed.filter((cat) => allCategories.includes(cat));
+    setExpandedCategories(next);
   }, [allCategories]);
+
+  // Single guarded path: update state + persist expanded categories
+  const persistExpanded = (next: string[]) => {
+    setExpandedCategories(next);
+    setJSON("inventory-expanded-categories", next);
+  };
 
   // Save expanded categories to localStorage when they change
   const handleAccordionChange = (value: string | string[]) => {
     const newValue = Array.isArray(value) ? value : [value];
-    setExpandedCategories(newValue);
-    localStorage.setItem("inventory-expanded-categories", JSON.stringify(newValue));
+    persistExpanded(newValue);
   };
 
   // Fetch products with variants and pagination
@@ -438,13 +438,7 @@ export default function InventoryPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => {
-                      setExpandedCategories(allCategories);
-                      localStorage.setItem(
-                        "inventory-expanded-categories",
-                        JSON.stringify(allCategories)
-                      );
-                    }}
+                    onClick={() => persistExpanded(allCategories)}
                     className="whitespace-nowrap"
                   >
                     Expand All
@@ -452,10 +446,7 @@ export default function InventoryPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => {
-                      setExpandedCategories([]);
-                      localStorage.setItem("inventory-expanded-categories", JSON.stringify([]));
-                    }}
+                    onClick={() => persistExpanded([])}
                     className="whitespace-nowrap"
                   >
                     Collapse All
