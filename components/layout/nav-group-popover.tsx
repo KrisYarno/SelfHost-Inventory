@@ -179,16 +179,15 @@ export function NavGroupPopover({
             className="fixed inset-0 z-40 cursor-default bg-black/[0.08]"
           />
 
-          {/* Rising pill column, anchored above the trigger. The faint
-              backdrop-blur is scoped to JUST this column (the tunable knob),
-              never a full-screen scrim. */}
+          {/* Rising pill column, anchored above the trigger. Each pill carries
+              its own backdrop-blur (iOS glass), so the column is just layout. */}
           <div
             ref={popoverRef}
             onKeyDown={onKeyDown}
             aria-label={`${group.label} options`}
             className={cn(
               "absolute bottom-full z-50 mb-3 flex flex-col-reverse items-stretch gap-2",
-              "rounded-2xl p-1 backdrop-blur-sm",
+              "rounded-2xl p-1",
               "max-w-[calc(100vw-1rem)]",
               // Edge-anchor to the trigger; clamp keeps the column on-screen.
               align === "left" ? "left-0" : "right-0",
@@ -217,19 +216,21 @@ export function NavGroupPopover({
                   }
                   className={cn(
                     "group/pill flex min-h-[44px] items-center gap-2 self-end",
-                    // 75% pill fill; the column's backdrop-blur frosts what shows
-                    // through so labels stay legible over busy content.
-                    "rounded-full bg-popover/75 px-3 py-2 pr-4",
+                    // iOS-style glass pill: 80% popover fill + per-pill backdrop blur.
+                    // NB: `popover` is NOT a registered Tailwind color in this repo, so
+                    // `bg-popover` / `bg-popover/N` render NOTHING (the pill stayed fully
+                    // transparent in prod). Use an arbitrary value so the fill paints.
+                    "rounded-full bg-[hsl(var(--popover)/0.8)] backdrop-blur-md px-3 py-2 pr-4",
                     "text-sm font-medium text-foreground",
-                    // Solid drop shadow = the separating edge; soft --nav-accent
-                    // glow on top, plus a thicker accent ring as the pill border.
-                    "shadow-[var(--dropdown-shadow),0_0_16px_2px_hsl(var(--nav-accent)/0.4)]",
+                    // 3D glass bubble: floating drop shadow (depth) + soft --nav-accent
+                    // glow + an inset top sheen (the glassy highlight).
+                    "shadow-[0_8px_24px_-6px_hsl(0_0%_0%/0.45),0_0_16px_2px_hsl(var(--nav-accent)/0.4),inset_0_1px_0_0_hsl(0_0%_100%/0.3)]",
                     "ring-2 ring-[hsl(var(--nav-accent)/0.4)]",
                     "transition-[opacity,transform] duration-150 ease-out",
                     // Entrance: opacity + ~8px translateY only (no scale/bounce).
                     entered ? "translate-y-0 opacity-100" : "translate-y-2 opacity-0",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                    "hover:bg-surface-hover",
+                    "hover:bg-[hsl(var(--popover)/0.92)]",
                     isPillActive && "text-primary ring-[hsl(var(--nav-accent)/0.6)]",
                   )}
                 >
