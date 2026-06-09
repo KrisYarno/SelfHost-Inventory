@@ -4,7 +4,12 @@ import * as React from 'react';
 import { toast } from 'sonner';
 import { ArrowLeftRight, MapPin, AlertCircle, Package } from 'lucide-react';
 import { useLocation } from '@/contexts/location-context';
-import { useCSRF, withCSRFHeaders } from '@/hooks/use-csrf';
+import { useProductLocationQuantity } from '@/hooks/use-product-location-quantity';
+import {
+  useAdjustInventory,
+  useTransferInventory,
+  type ApiMutationError,
+} from '@/hooks/use-inventory-mutations';
 import {
   Dialog,
   DialogContent,
@@ -33,7 +38,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import type { ProductWithQuantity } from '@/types/product';
+import type { DialogProduct } from '@/types/inventory';
 import { ContextTag } from '@/components/ui/context-tag';
 import { ValueChip } from '@/components/ui/value-chip';
 import { InlineHighlight } from '@/components/ui/inline-highlight';
@@ -41,7 +46,7 @@ import { InlineHighlight } from '@/components/ui/inline-highlight';
 type TransferDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  product: ProductWithQuantity | null;
+  product: DialogProduct;
   onSuccess?: () => void;
 };
 
@@ -61,19 +66,27 @@ type InsufficientState = {
 
 export function TransferDialog({ open, onOpenChange, product, onSuccess }: TransferDialogProps) {
   const { locations, selectedLocationId } = useLocation();
-  const { token: csrfToken } = useCSRF();
 
   const [fromLocationId, setFromLocationId] = React.useState<number | null>(null);
   const [toLocationId, setToLocationId] = React.useState<number | null>(null);
-  const [fromQuantity, setFromQuantity] = React.useState<number | null>(null);
-  const [loadingFromQuantity, setLoadingFromQuantity] = React.useState(false);
-  const [toQuantity, setToQuantity] = React.useState<number | null>(null);
-  const [loadingToQuantity, setLoadingToQuantity] = React.useState(false);
   const [quantity, setQuantity] = React.useState<string>('');
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
   const [insufficient, setInsufficient] = React.useState<InsufficientState | null>(null);
   const [pendingTransfer, setPendingTransfer] = React.useState<PendingTransferPayload | null>(null);
+
+  const fromQuantityQuery = useProductLocationQuantity(product.id, fromLocationId, {
+    enabled: open,
+  });
+  const toQuantityQuery = useProductLocationQuantity(product.id, toLocationId, {
+    enabled: open,
+  });
+  const transferMutation = useTransferInventory();
+  const adjustMutation = useAdjustInventory();
+
+  const fromQuantity = fromQuantityQuery.data ?? null;
+  const loadingFromQuantity = fromQuantityQuery.isLoading;
+  const loadingToQuantity = toQuantityQuery.isLoading;
 
   // Seed defaults on open
   React.useEffect(() => {
@@ -87,59 +100,10 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
     setToLocationId(initialTo);
   }, [open, locations, selectedLocationId]);
 
-  // Fetch current quantity at source
-  React.useEffect(() => {
-    if (!open || !product || !fromLocationId) {
-      setFromQuantity(null);
-      return;
-    }
-    setLoadingFromQuantity(true);
-    fetch(`/api/inventory/product/${product.id}?locationId=${fromLocationId}`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (typeof data.currentQuantity === 'number') {
-          setFromQuantity(data.currentQuantity);
-        } else {
-          setFromQuantity(0);
-        }
-      })
-      .catch((err) => {
-        console.error('Failed to fetch location quantity:', err);
-        toast.error('Failed to fetch current quantity');
-        setFromQuantity(null);
-      })
-      .finally(() => setLoadingFromQuantity(false));
-  }, [open, product, fromLocationId]);
-
-  React.useEffect(() => {
-    if (!open || !product || !toLocationId) {
-      setToQuantity(null);
-      return;
-    }
-    setLoadingToQuantity(true);
-    fetch(`/api/inventory/product/${product.id}?locationId=${toLocationId}`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (typeof data.currentQuantity === 'number') {
-          setToQuantity(data.currentQuantity);
-        } else {
-          setToQuantity(0);
-        }
-      })
-      .catch((err) => {
-        console.error('Failed to fetch destination quantity:', err);
-        toast.error('Failed to fetch destination quantity');
-        setToQuantity(null);
-      })
-      .finally(() => setLoadingToQuantity(false));
-  }, [open, product, toLocationId]);
-
-  if (!product) return null;
-
   const qtyNum = Number.parseInt(quantity || '0', 10) > 0 ? Number.parseInt(quantity || '0', 10) : 0;
   const canSubmit = !!fromLocationId && !!toLocationId && fromLocationId !== toLocationId && qtyNum > 0;
-  const sourceDisplayQty = fromQuantity ?? product.currentQuantity ?? 0;
-  const destinationDisplayQty = toQuantity ?? 0;
+  const sourceDisplayQty = fromQuantity ?? 0;
+  const destinationDisplayQty = toQuantityQuery.data ?? 0;
   const projectedSource = qtyNum > 0 ? sourceDisplayQty - qtyNum : sourceDisplayQty;
   const projectedDestination = qtyNum > 0 ? destinationDisplayQty + qtyNum : destinationDisplayQty;
   const hasSameLocation = Boolean(fromLocationId && toLocationId && fromLocationId === toLocationId);
@@ -164,43 +128,34 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
   };
 
   const submitTransfer = async (payload: PendingTransferPayload) => {
-    const response = await fetch('/api/inventory/transfer', {
-      method: 'POST',
-      headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
-      body: JSON.stringify(payload),
-    });
-
-    if (response.ok) {
-      toast.success(`Moved ${payload.quantity} units of ${product.name}`);
-      onOpenChange(false);
-      setQuantity('');
-      setFromQuantity(null);
-      setPendingTransfer(null);
-      setInsufficient(null);
-      onSuccess?.();
-      return;
+    try {
+      await transferMutation.mutateAsync(payload);
+    } catch (err) {
+      const apiError = err as ApiMutationError;
+      if (apiError.code === 'INVENTORY_INSUFFICIENT_STOCK') {
+        const d = apiError.data ?? {};
+        setInsufficient({
+          visible: true,
+          message: apiError.message || 'Insufficient stock at source',
+          available: typeof d.currentQuantity === 'number' ? d.currentQuantity : 0,
+          shortfall: typeof d.shortfall === 'number' ? d.shortfall : 0,
+        });
+        setPendingTransfer(payload);
+        return;
+      }
+      throw err;
     }
 
-    const data = await response.json().catch(() => undefined);
-    const errorCode = data?.error?.code;
-    if (errorCode === 'INVENTORY_INSUFFICIENT_STOCK') {
-      const context = data.error.context ?? {};
-      setInsufficient({
-        visible: true,
-        message: data.error.message ?? 'Insufficient stock at source',
-        available: context.currentQuantity ?? 0,
-        shortfall: context.shortfall ?? 0,
-      });
-      setPendingTransfer(payload);
-      return;
-    }
-
-    const message = data?.error?.message ?? data?.error ?? 'Failed to transfer inventory';
-    throw new Error(message);
+    toast.success(`Moved ${payload.quantity} units of ${product.name}`);
+    onOpenChange(false);
+    setQuantity('');
+    setPendingTransfer(null);
+    setInsufficient(null);
+    onSuccess?.();
   };
 
   const handleSubmit = async () => {
-    if (!canSubmit || !product) {
+    if (!canSubmit) {
       toast.error('Please complete the transfer form');
       return;
     }
@@ -226,7 +181,7 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
   };
 
   const handleConfirmAutoAdd = async () => {
-    if (!pendingTransfer || !insufficient || !product) {
+    if (!pendingTransfer || !insufficient) {
       setInsufficient(null);
       setPendingTransfer(null);
       return;
@@ -240,21 +195,12 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
 
     setIsSubmitting(true);
     try {
-      const adjustResponse = await fetch('/api/inventory/adjust', {
-        method: 'POST',
-        headers: withCSRFHeaders({ 'Content-Type': 'application/json' }, csrfToken),
-        body: JSON.stringify({
-          productId: pendingTransfer.productId,
-          locationId: pendingTransfer.fromLocationId,
-          delta: shortfall,
-          autoAddForTransfer: true,
-        }),
+      await adjustMutation.mutateAsync({
+        productId: pendingTransfer.productId,
+        locationId: pendingTransfer.fromLocationId,
+        delta: shortfall,
+        autoAddForTransfer: true,
       });
-      if (!adjustResponse.ok) {
-        const data = await adjustResponse.json().catch(() => undefined);
-        const message = data?.error?.message ?? data?.error ?? 'Failed to add stock before transfer';
-        throw new Error(message);
-      }
 
       await submitTransfer(pendingTransfer);
     } catch (error) {
@@ -300,12 +246,16 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                   <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
                     {fromLoc?.name ?? 'Select a source'}
                   </ContextTag>
-                  <ValueChip
-                    tone={sourceDisplayQty > 0 ? 'positive' : sourceDisplayQty < 0 ? 'negative' : 'neutral'}
-                    className="uppercase tracking-wide"
-                  >
-                    {loadingFromQuantity ? 'Loading...' : `${sourceDisplayQty} units`}
-                  </ValueChip>
+                  {fromQuantityQuery.isError ? (
+                    <span className="text-destructive">Could not load current stock</span>
+                  ) : (
+                    <ValueChip
+                      tone={sourceDisplayQty > 0 ? 'positive' : sourceDisplayQty < 0 ? 'negative' : 'neutral'}
+                      className="uppercase tracking-wide"
+                    >
+                      {loadingFromQuantity ? 'Loading...' : `${sourceDisplayQty} units`}
+                    </ValueChip>
+                  )}
                 </div>
               </div>
             </DialogHeader>
@@ -341,12 +291,16 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                 </Select>
                 <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>Current stock:</span>
-                  <ValueChip
-                    tone={sourceDisplayQty > 0 ? 'positive' : sourceDisplayQty < 0 ? 'negative' : 'neutral'}
-                    className="text-[10px]"
-                  >
-                    {loadingFromQuantity ? '...' : `${sourceDisplayQty} units`}
-                  </ValueChip>
+                  {fromQuantityQuery.isError ? (
+                    <span className="text-destructive">Could not load current stock</span>
+                  ) : (
+                    <ValueChip
+                      tone={sourceDisplayQty > 0 ? 'positive' : sourceDisplayQty < 0 ? 'negative' : 'neutral'}
+                      className="text-[10px]"
+                    >
+                      {loadingFromQuantity ? '...' : `${sourceDisplayQty} units`}
+                    </ValueChip>
+                  )}
                 </div>
               </div>
 
@@ -372,12 +326,16 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                 </Select>
                 <div className="flex items-center justify-between text-[11px] text-muted-foreground">
                   <span>Current stock:</span>
-                  <ValueChip
-                    tone={destinationDisplayQty > 0 ? 'positive' : destinationDisplayQty < 0 ? 'negative' : 'neutral'}
-                    className="text-[10px]"
-                  >
-                    {loadingToQuantity ? '...' : `${destinationDisplayQty} units`}
-                  </ValueChip>
+                  {toQuantityQuery.isError ? (
+                    <span className="text-destructive">Could not load current stock</span>
+                  ) : (
+                    <ValueChip
+                      tone={destinationDisplayQty > 0 ? 'positive' : destinationDisplayQty < 0 ? 'negative' : 'neutral'}
+                      className="text-[10px]"
+                    >
+                      {loadingToQuantity ? '...' : `${destinationDisplayQty} units`}
+                    </ValueChip>
+                  )}
                 </div>
                 {hasSameLocation && (
                   <p className="mt-1 flex items-center gap-1 text-xs text-destructive">

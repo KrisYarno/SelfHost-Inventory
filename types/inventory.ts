@@ -175,3 +175,9 @@ export interface ProductLocationQuantity {
   quantity: number;
   version: number;
 }
+
+/** Minimal product surface the inventory dialogs actually consume. */
+export interface DialogProduct {
+  id: number;
+  name: string;
+}

@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { Plus, Minus, Package, MapPin } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { useProductLocationQuantity } from "@/hooks/use-product-location-quantity";
+import { useAdjustInventory } from "@/hooks/use-inventory-mutations";
 import {
   Dialog,
   DialogContent,
@@ -21,12 +22,12 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { ValueChip } from "@/components/ui/value-chip";
 import { ContextTag } from "@/components/ui/context-tag";
 import { InlineHighlight } from "@/components/ui/inline-highlight";
-import type { ProductWithQuantity } from "@/types/product";
+import type { DialogProduct } from "@/types/inventory";
 
 interface QuickAdjustDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  product: ProductWithQuantity;
+  product: DialogProduct;
   onSuccess?: () => void;
 }
 
@@ -37,46 +38,25 @@ export function QuickAdjustDialog({
   onSuccess,
 }: QuickAdjustDialogProps) {
   const { selectedLocationId, locations } = useLocation();
-  const { token: csrfToken } = useCSRF();
   const [adjustmentType, setAdjustmentType] = useState<"add" | "remove">("add");
   const [quantity, setQuantity] = useState("");
   const [reason, setReason] = useState("");
   const [notes, setNotes] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [locationQuantity, setLocationQuantity] = useState<number | null>(null);
-  const [loadingQuantity, setLoadingQuantity] = useState(false);
 
-  // Fetch location-specific quantity when dialog opens
-  useEffect(() => {
-    if (open && product && selectedLocationId) {
-      setLoadingQuantity(true);
-      fetch(`/api/inventory/product/${product.id}?locationId=${selectedLocationId}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data.currentQuantity !== undefined) {
-            setLocationQuantity(data.currentQuantity);
-          }
-        })
-        .catch(err => {
-          console.error("Failed to fetch location quantity:", err);
-          toast.error("Failed to fetch current quantity");
-        })
-        .finally(() => setLoadingQuantity(false));
-    }
-  }, [open, product, selectedLocationId]);
+  const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
+    enabled: open,
+  });
+  const adjustMutation = useAdjustInventory();
+  const isSubmitting = adjustMutation.isPending;
 
-  if (!product) {
-    return null;
-  }
-
-  const currentQuantity = locationQuantity !== null ? locationQuantity : (product.currentQuantity || 0);
+  const currentQuantity = quantityQuery.data ?? 0;
   const quantityNum = parseInt(quantity, 10) || 0;
-  const adjustedQuantity = adjustmentType === "add" 
-    ? currentQuantity + quantityNum 
+  const adjustedQuantity = adjustmentType === "add"
+    ? currentQuantity + quantityNum
     : currentQuantity - quantityNum;
   const selectedLocationName =
     locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Selected location";
-  
+
   const isValid = quantityNum > 0 && reason.trim() && adjustedQuantity >= 0;
 
   const handleIncrement = () => {
@@ -106,25 +86,14 @@ export function QuickAdjustDialog({
       return;
     }
 
-    setIsSubmitting(true);
-
     try {
-      const response = await fetch("/api/inventory/adjust", {
-        method: "POST",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({
-          productId: product.id,
-          locationId: selectedLocationId,
-          delta: adjustmentType === "add" ? quantityNum : -quantityNum,
-          reason,
-          notes: notes || undefined,
-        }),
+      await adjustMutation.mutateAsync({
+        productId: product.id,
+        locationId: selectedLocationId,
+        delta: adjustmentType === "add" ? quantityNum : -quantityNum,
+        reason,
+        notes: notes || undefined,
       });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to adjust inventory");
-      }
 
       toast.success(
         adjustmentType === "add"
@@ -134,18 +103,15 @@ export function QuickAdjustDialog({
 
       onOpenChange(false);
       onSuccess?.();
-      
+
       // Reset form
       setQuantity("");
       setReason("");
       setNotes("");
-      setLocationQuantity(null);
       setAdjustmentType("add");
     } catch (error) {
       console.error("Error adjusting inventory:", error);
       toast.error(error instanceof Error ? error.message : "Failed to adjust inventory");
-    } finally {
-      setIsSubmitting(false);
     }
   };
 
@@ -170,11 +136,15 @@ export function QuickAdjustDialog({
             <ContextTag icon={<MapPin className="h-3 w-3 text-muted-foreground" />}>
               {selectedLocationName}
             </ContextTag>
-            <ValueChip
-              tone={currentQuantity > 0 ? "positive" : currentQuantity < 0 ? "negative" : "neutral"}
-            >
-              {loadingQuantity ? "Loading..." : `${currentQuantity} units`}
-            </ValueChip>
+            {quantityQuery.isError ? (
+              <span className="text-destructive">Could not load current stock</span>
+            ) : (
+              <ValueChip
+                tone={currentQuantity > 0 ? "positive" : currentQuantity < 0 ? "negative" : "neutral"}
+              >
+                {quantityQuery.isLoading ? "Loading..." : `${currentQuantity} units`}
+              </ValueChip>
+            )}
           </div>
         </div>
 

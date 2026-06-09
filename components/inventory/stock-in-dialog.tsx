@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { Package, Calendar, FileText, AlertCircle } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
 import { getUserFriendlyMessage } from "@/lib/error-handling";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { useProductLocationQuantity } from "@/hooks/use-product-location-quantity";
+import { useStockIn } from "@/hooks/use-inventory-mutations";
 import {
   Dialog,
   DialogContent,
@@ -19,12 +20,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import type { ProductWithQuantity } from "@/types/product";
+import type { DialogProduct } from "@/types/inventory";
 
 interface StockInDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  product: ProductWithQuantity;
+  product: DialogProduct;
   onSuccess?: () => void;
 }
 
@@ -35,41 +36,20 @@ export function StockInDialog({
   onSuccess,
 }: StockInDialogProps) {
   const { selectedLocationId } = useLocation();
-  const { token: csrfToken } = useCSRF();
   const [quantity, setQuantity] = useState("");
   const [orderNumber, setOrderNumber] = useState("");
   const [notes, setNotes] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [locationQuantity, setLocationQuantity] = useState<number | null>(null);
-  const [loadingQuantity, setLoadingQuantity] = useState(false);
 
-  // Fetch location-specific quantity when dialog opens
-  useEffect(() => {
-    if (open && product && selectedLocationId) {
-      setLoadingQuantity(true);
-      fetch(`/api/inventory/product/${product.id}?locationId=${selectedLocationId}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data.currentQuantity !== undefined) {
-            setLocationQuantity(data.currentQuantity);
-          }
-        })
-        .catch(err => {
-          console.error("Failed to fetch location quantity:", err);
-          toast.error("Failed to fetch current quantity");
-        })
-        .finally(() => setLoadingQuantity(false));
-    }
-  }, [open, product, selectedLocationId]);
+  const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
+    enabled: open,
+  });
+  const stockInMutation = useStockIn();
+  const isSubmitting = stockInMutation.isPending;
 
-  if (!product) {
-    return null;
-  }
-
-  const currentQuantity = locationQuantity !== null ? locationQuantity : (product.currentQuantity || 0);
+  const currentQuantity = quantityQuery.data ?? 0;
   const quantityNum = parseInt(quantity, 10) || 0;
   const newQuantity = currentQuantity + quantityNum;
-  
+
   const isValid = quantityNum > 0;
 
   const handleSubmit = async () => {
@@ -83,54 +63,29 @@ export function StockInDialog({
       return;
     }
 
-    setIsSubmitting(true);
-
     try {
-      const response = await fetch("/api/inventory/stock-in", {
-        method: "POST",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({
-          productId: product.id,
-          locationId: selectedLocationId,
-          quantity: quantityNum,
-          orderNumber: orderNumber || undefined,
-          notes: notes || undefined,
-        }),
+      await stockInMutation.mutateAsync({
+        productId: product.id,
+        locationId: selectedLocationId,
+        quantity: quantityNum,
+        orderNumber: orderNumber || undefined,
+        notes: notes || undefined,
       });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        
-        // Handle structured error response
-        if (errorData.error && typeof errorData.error === 'object') {
-          const { message, code, context } = errorData.error;
-          
-          // Create a proper error object
-          const error = new Error(message);
-          (error as any).code = code;
-          (error as any).context = context;
-          
-          throw error;
-        } else {
-          throw new Error(errorData.error || "Failed to add stock");
-        }
-      }
 
       toast.success(`Added ${quantityNum} units to ${product.name}`);
       onOpenChange(false);
       onSuccess?.();
-      
+
       // Reset form
       setQuantity("");
       setOrderNumber("");
       setNotes("");
-      setLocationQuantity(null);
     } catch (error) {
       console.error("Error adding stock:", error);
-      
+
       // Generate user-friendly error message
       const friendlyError = getUserFriendlyMessage(error as Error);
-      
+
       toast.error(
         <div className="space-y-2">
           <div className="flex items-start gap-2">
@@ -148,8 +103,6 @@ export function StockInDialog({
           duration: 5000,
         }
       );
-    } finally {
-      setIsSubmitting(false);
     }
   };
 
@@ -170,9 +123,13 @@ export function StockInDialog({
             <div role="status" aria-live="polite" className="flex items-center gap-4 mt-1">
               <div className="flex items-center gap-1">
                 <Package className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm text-muted-foreground">
-                  Current: {loadingQuantity ? "Loading..." : currentQuantity}
-                </span>
+                {quantityQuery.isError ? (
+                  <span className="text-sm text-destructive">Could not load current stock</span>
+                ) : (
+                  <span className="text-sm text-muted-foreground">
+                    Current: {quantityQuery.isLoading ? "Loading..." : currentQuantity}
+                  </span>
+                )}
               </div>
               {quantityNum > 0 ? (
                 <>
