@@ -167,21 +167,21 @@ export function StockInDialog({
         <div className="p-4 rounded-lg bg-muted/50">
           <div>
             <h4 className="font-medium">{product.name}</h4>
-            <div className="flex items-center gap-4 mt-1">
+            <div role="status" aria-live="polite" className="flex items-center gap-4 mt-1">
               <div className="flex items-center gap-1">
                 <Package className="h-4 w-4 text-muted-foreground" />
                 <span className="text-sm text-muted-foreground">
                   Current: {loadingQuantity ? "Loading..." : currentQuantity}
                 </span>
               </div>
-              {quantityNum > 0 && (
+              {quantityNum > 0 ? (
                 <>
                   <span className="text-muted-foreground">→</span>
                   <Badge variant="default" className="text-xs">
                     New: {newQuantity}
                   </Badge>
                 </>
-              )}
+              ) : null}
             </div>
           </div>
         </div>
@@ -196,6 +196,8 @@ export function StockInDialog({
               id="quantity"
               type="number"
               min="1"
+              inputMode="numeric"
+              pattern="[0-9]*"
               value={quantity}
               onChange={(e) => setQuantity(e.target.value)}
               placeholder="Enter quantity"

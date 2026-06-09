@@ -140,7 +140,7 @@ export function OrderQueue() {
                     </div>
                     <button
                       onClick={() => removeFromQueue(index)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
                     >
                       <X className="h-3.5 w-3.5" />
                     </button>

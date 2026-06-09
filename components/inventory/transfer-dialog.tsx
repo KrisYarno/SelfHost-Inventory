@@ -397,6 +397,7 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                   variant="outline"
                   size="icon"
                   className="h-10 w-10 rounded-md border-border bg-surface text-xl text-foreground"
+                  aria-label="Decrease quantity"
                   onClick={handleDecrement}
                   disabled={isSubmitting}
                 >
@@ -416,32 +417,35 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
                   variant="outline"
                   size="icon"
                   className="h-10 w-10 rounded-md border-border bg-surface text-xl text-foreground"
+                  aria-label="Increase quantity"
                   onClick={handleIncrement}
                   disabled={isSubmitting}
                 >
                   +
                 </Button>
               </div>
-              {qtyNum > 0 && (
-                <p className="text-xs text-muted-foreground">
-                  After transfer:{' '}
-                  <InlineHighlight className="text-foreground">
-                    {fromLoc?.name ?? 'Source'}
-                  </InlineHighlight>{' '}
-                  -&gt;{' '}
-                  <span className={projectedSource < 0 ? 'text-destructive font-semibold' : 'text-foreground font-semibold'}>
-                    {projectedSource} units
-                  </span>{' '}
-                  |{' '}
-                  <InlineHighlight className="text-foreground">
-                    {toLoc?.name ?? 'Destination'}
-                  </InlineHighlight>{' '}
-                  -&gt;{' '}
-                  <span className="text-success font-semibold">
-                    {projectedDestination} units
-                  </span>
-                </p>
-              )}
+              <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
+                {qtyNum > 0 ? (
+                  <>
+                    After transfer:{' '}
+                    <InlineHighlight className="text-foreground">
+                      {fromLoc?.name ?? 'Source'}
+                    </InlineHighlight>{' '}
+                    -&gt;{' '}
+                    <span className={projectedSource < 0 ? 'text-destructive font-semibold' : 'text-foreground font-semibold'}>
+                      {projectedSource} units
+                    </span>{' '}
+                    |{' '}
+                    <InlineHighlight className="text-foreground">
+                      {toLoc?.name ?? 'Destination'}
+                    </InlineHighlight>{' '}
+                    -&gt;{' '}
+                    <span className="text-success font-semibold">
+                      {projectedDestination} units
+                    </span>
+                  </>
+                ) : null}
+              </p>
             </div>
 
             <DialogFooter className="mt-2 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
@@ -483,7 +487,7 @@ export function TransferDialog({ open, onOpenChange, product, onSuccess }: Trans
             const afterAdd = available + shortfall;
             const afterTransfer = afterAdd - requested;
             return (
-              <div className="mt-2 space-y-1 text-sm">
+              <div role="status" className="mt-2 space-y-1 text-sm">
                 <p>
                   Available now: <span className="font-semibold">{available}</span>
                 </p>

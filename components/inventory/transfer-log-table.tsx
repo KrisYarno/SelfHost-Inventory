@@ -108,7 +108,9 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
                 return (
                   <TableRow key={log.id}>
                     <TableCell>{format(new Date(log.createdAt), 'MMM dd, yyyy HH:mm')}</TableCell>
-                    <TableCell>{log.productName}</TableCell>
+                    <TableCell>
+                      <span className="block max-w-[28ch] truncate">{log.productName}</span>
+                    </TableCell>
                     <TableCell className="text-negative">{log.fromLocationName}</TableCell>
                     <TableCell className="text-positive">{log.toLocationName}</TableCell>
                     <TableCell className="text-right">

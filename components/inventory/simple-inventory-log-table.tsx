@@ -113,9 +113,9 @@ export function SimpleInventoryLogTable({
       <CardHeader>
         <CardTitle>{title}</CardTitle>
       </CardHeader>
-      <CardContent className="px-0 sm:px-6">
+      <CardContent className="px-0 md:px-6">
         {/* Mobile View */}
-        <div className="sm:hidden">
+        <div className="md:hidden">
           {groupedRows.length === 0 ? (
             <p className="text-center text-muted-foreground py-8 px-6">
               No inventory logs found
@@ -189,7 +189,7 @@ export function SimpleInventoryLogTable({
         </div>
 
         {/* Desktop View */}
-        <div className="hidden sm:block overflow-x-auto">
+        <div className="hidden md:block overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow>

@@ -48,8 +48,8 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
     <Card className="overflow-hidden group">
       <div className="p-4 md:p-6 space-y-4">
         <div className="flex items-start justify-between mb-3">
-          <div className="flex-1">
-            <h3 className="font-semibold text-base md:text-lg">
+          <div className="flex-1 min-w-0">
+            <h3 className="font-semibold text-base md:text-lg truncate">
               {product.baseName}
               {product.variant && (
                 <span className="font-semibold ml-2">
@@ -82,7 +82,7 @@ export function VariantProductCard({ product, onStockIn, onAdjust, onTransfer }:
         </div>
 
         {/* Quick actions - always visible on mobile, hover on desktop */}
-        <div className="flex gap-2 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+        <div className="flex gap-2 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 transition-opacity">
           <Button
             size="sm"
             variant="outline"

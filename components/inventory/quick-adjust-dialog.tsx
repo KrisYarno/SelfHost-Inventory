@@ -220,6 +220,7 @@ export function QuickAdjustDialog({
                 variant="outline"
                 size="icon"
                 className="h-10 w-10 rounded-md border-border"
+                aria-label="Decrease quantity"
                 onClick={handleDecrement}
                 disabled={quantityNum <= 1}
               >
@@ -241,28 +242,31 @@ export function QuickAdjustDialog({
                 variant="outline"
                 size="icon"
                 className="h-10 w-10 rounded-md border-border"
+                aria-label="Increase quantity"
                 onClick={handleIncrement}
               >
                 <Plus className="h-4 w-4" />
               </Button>
             </div>
-            {quantityNum > 0 && (
-              <p className="text-[11px] text-muted-foreground">
-                After adjustment,{" "}
-                <InlineHighlight>{selectedLocationName}</InlineHighlight>{" "}
-                would have{" "}
-                <span
-                  className={
-                    adjustedQuantity < 0
-                      ? "text-destructive font-semibold"
-                      : "text-positive font-semibold"
-                  }
-                >
-                  {adjustedQuantity} units
-                </span>
-                .
-              </p>
-            )}
+            <p role="status" aria-live="polite" className="text-[11px] text-muted-foreground">
+              {quantityNum > 0 ? (
+                <>
+                  After adjustment,{" "}
+                  <InlineHighlight>{selectedLocationName}</InlineHighlight>{" "}
+                  would have{" "}
+                  <span
+                    className={
+                      adjustedQuantity < 0
+                        ? "text-destructive font-semibold"
+                        : "text-positive font-semibold"
+                    }
+                  >
+                    {adjustedQuantity} units
+                  </span>
+                  .
+                </>
+              ) : null}
+            </p>
           </div>
 
           {/* Reason */}
