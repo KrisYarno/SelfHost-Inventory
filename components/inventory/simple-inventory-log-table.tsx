@@ -205,7 +205,7 @@ export function SimpleInventoryLogTable({
               {groupedRows.length === 0 ? (
                 <TableRow>
                   <TableCell 
-                    colSpan={5 + (showProduct ? 1 : 0) + (showLocation ? 1 : 0) + (showUser ? 1 : 0)} 
+                    colSpan={3 + (showProduct ? 1 : 0) + (showLocation ? 1 : 0) + (showUser ? 1 : 0)}
                     className="text-center text-muted-foreground py-8"
                   >
                     No inventory logs found
