@@ -168,15 +168,15 @@ export function NavGroupPopover({
     <div className="relative flex items-center justify-center">
       {isOpen && (
         <>
-          {/* Full-screen tap-away layer with a faint dim (~6%) so the pills read
-              against busy content. Tunable: nudge bg-black/[0.06] up or down. */}
+          {/* Full-screen tap-away layer with a faint dim (~8%) so the pills read
+              against busy content. Tunable: nudge bg-black/[0.08] up or down. */}
           <button
             type="button"
             aria-label="Dismiss menu"
             data-testid="nav-popover-backdrop"
             tabIndex={-1}
             onClick={closeAndReturnFocus}
-            className="fixed inset-0 z-40 cursor-default bg-black/[0.06]"
+            className="fixed inset-0 z-40 cursor-default bg-black/[0.08]"
           />
 
           {/* Rising pill column, anchored above the trigger. The faint
@@ -217,7 +217,9 @@ export function NavGroupPopover({
                   }
                   className={cn(
                     "group/pill flex min-h-[44px] items-center gap-2 self-end",
-                    "rounded-full bg-popover px-3 py-2 pr-4",
+                    // 60% pill fill; the column's backdrop-blur frosts what shows
+                    // through so labels stay legible over busy content.
+                    "rounded-full bg-popover/60 px-3 py-2 pr-4",
                     "text-sm font-medium text-foreground",
                     // Solid drop shadow = the separating edge; soft --nav-accent
                     // glow on top, plus a thicker accent ring as the pill border.
