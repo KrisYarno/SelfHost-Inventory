@@ -484,20 +484,6 @@
     }
   }
   
-  /* Pull to Refresh Indicator */
-  .pull-to-refresh {
-    position: fixed;
-    top: -60px;
-    left: 50%;
-    transform: translateX(-50%);
-    transition: top 0.3s ease-out;
-    z-index: 100;
-  }
-  
-  .pull-to-refresh.active {
-    top: 20px;
-  }
-  
   /* Mobile Touch Targets */
   @media (max-width: 768px) {
     .touch-target {

@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
+import { useQueryClient } from "@tanstack/react-query";
 import { SimpleInventoryLogTable } from "@/components/inventory/simple-inventory-log-table";
 import { TransferDialog } from "@/components/inventory/transfer-dialog";
 import { TransferLogTable } from "@/components/inventory/transfer-log-table";
@@ -12,14 +13,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -31,102 +24,49 @@ import {
 import { BookOpen, Loader2, RefreshCw, Download, Package } from "lucide-react";
 import { toast } from "sonner";
 import { useInfiniteScroll } from "@/hooks/use-infinite-scroll";
-import { useDebounce } from "@/hooks/use-debounce";
-import { fetchWithErrorHandling } from "@/lib/rate-limited-fetch";
+import { useInventoryVariants, groupByBaseName } from "@/hooks/use-inventory-variants";
+import { useInventoryLogs, useInventoryTransfers } from "@/hooks/use-inventory-activity";
 import { getJSON, setJSON } from "@/lib/safe-storage";
-import type { InventoryLogWithRelations } from "@/types/inventory";
-import type { ProductWithQuantity } from "@/types/product";
+import { shouldAutoLoad, AUTO_LOAD_PAGE_LIMIT } from "@/lib/inventory-page-utils";
+import type { DialogProduct } from "@/types/inventory";
 
-interface ProductWithLocations {
-  id: number;
-  name: string;
-  baseName: string;
-  variant: string | null;
-  combinedMinimum: number;
-  locations: {
-    locationId: number;
-    locationName: string;
-    quantity: number;
-    minQuantity: number;
-  }[];
-  totalQuantity: number;
+// Lazy-mounted tab panes (design A5): each fetches only once its tab mounts.
+function LogsTabContent() {
+  const logsQuery = useInventoryLogs();
+  return <SimpleInventoryLogTable logs={logsQuery.data ?? []} />;
 }
 
-interface PaginationInfo {
-  page: number;
-  pageSize: number;
-  total: number;
-  totalPages: number;
-  hasMore: boolean;
+function TransfersTabContent() {
+  const transfersQuery = useInventoryTransfers();
+  return <TransferLogTable logs={transfersQuery.data ?? []} />;
 }
 
 export default function InventoryPage() {
-  const [logs, setLogs] = useState<InventoryLogWithRelations[]>([]);
-  const [products, setProducts] = useState<ProductWithLocations[]>([]);
-  const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
+  const queryClient = useQueryClient();
+
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedProduct, setSelectedProduct] = useState<DialogProduct | null>(null);
   const [showQuickAdjust, setShowQuickAdjust] = useState(false);
   const [showStockIn, setShowStockIn] = useState(false);
   const [showTransfer, setShowTransfer] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [isLoading, setIsLoading] = useState(true);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [pagination, setPagination] = useState<PaginationInfo>({
-    page: 1,
-    pageSize: 12,
-    total: 0,
-    totalPages: 0,
-    hasMore: false,
-  });
+  const [autoLoadLimit, setAutoLoadLimit] = useState(AUTO_LOAD_PAGE_LIMIT);
+  // Init empty for hydration safety; restored from localStorage after mount.
   const [expandedCategories, setExpandedCategories] = useState<string[]>([]);
-  const [transferLogs, setTransferLogs] = useState<any[]>([]);
 
-  const debouncedSearch = useDebounce(searchQuery, 300);
-
-  // Group products by baseName (category)
-  const groupedProducts = useMemo(() => {
-    const groups: Record<string, ProductWithLocations[]> = {};
-
-    products.forEach((product) => {
-      const category = product.baseName || "Uncategorized";
-      if (!groups[category]) {
-        groups[category] = [];
-      }
-      groups[category].push(product);
-    });
-
-    // Sort categories alphabetically and sort products within each category
-    const sortedGroups: Record<string, ProductWithLocations[]> = {};
-    Object.keys(groups)
-      .sort((a, b) => a.localeCompare(b))
-      .forEach((key) => {
-        sortedGroups[key] = groups[key].sort((a, b) => {
-          // Sort by variant name if they exist
-          if (a.variant && b.variant) {
-            return a.variant.localeCompare(b.variant);
-          }
-          return 0;
-        });
-      });
-
-    return sortedGroups;
-  }, [products]);
-
-  // Get all category keys for accordion default value
-  const allCategories = useMemo(() => Object.keys(groupedProducts), [groupedProducts]);
-
-  // Load/maintain expanded categories (stable, no auto-expand on new data)
   useEffect(() => {
-    if (allCategories.length === 0) {
-      setExpandedCategories([]);
-      return;
-    }
+    const saved = getJSON<string[]>("inventory-expanded-categories", []);
+    setExpandedCategories(Array.isArray(saved) ? saved : []);
+  }, []);
 
-    const parsed = getJSON<string[]>("inventory-expanded-categories", []);
-    // Keep only categories that still exist; do NOT auto-expand new ones
-    const next = parsed.filter((cat) => allCategories.includes(cat));
-    setExpandedCategories(next);
-  }, [allCategories]);
+  const variants = useInventoryVariants(searchQuery);
+  const variantsData = variants.data;
+  const products = useMemo(() => variantsData?.products ?? [], [variantsData]);
+  const total = variants.data?.total ?? 0;
+  const pagesLoaded = variants.data?.pagesLoaded ?? 0;
+  const remaining = Math.max(0, total - products.length);
+
+  const groupedProducts = useMemo(() => groupByBaseName(products), [products]);
+  const allCategories = useMemo(() => Object.keys(groupedProducts), [groupedProducts]);
 
   // Single guarded path: update state + persist expanded categories
   const persistExpanded = (next: string[]) => {
@@ -134,200 +74,38 @@ export default function InventoryPage() {
     setJSON("inventory-expanded-categories", next);
   };
 
-  // Save expanded categories to localStorage when they change
   const handleAccordionChange = (value: string | string[]) => {
-    const newValue = Array.isArray(value) ? value : [value];
-    persistExpanded(newValue);
+    persistExpanded(Array.isArray(value) ? value : [value]);
   };
 
-  // Fetch products with variants and pagination
-  const fetchProducts = useCallback(
-    async (page: number = 1, append: boolean = false) => {
-      if (append) {
-        setIsLoadingMore(true);
-      } else {
-        setIsLoading(true);
-      }
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value);
+    setAutoLoadLimit(AUTO_LOAD_PAGE_LIMIT);
+  };
 
-      try {
-        const params = new URLSearchParams({
-          page: page.toString(),
-          pageSize: "12",
-          ...(debouncedSearch && { search: debouncedSearch }),
-          // Don't filter by location - show all locations for each product
-        });
-
-        const data = await fetchWithErrorHandling(`/api/inventory/variants?${params}`);
-
-        if (append) {
-          setProducts((prev) => [...prev, ...data.products]);
-        } else {
-          setProducts(data.products);
-        }
-
-        setPagination(data.pagination);
-      } catch (error) {
-        console.error("Error fetching inventory:", error);
-        const errorMessage = error instanceof Error ? error.message : "Failed to load inventory";
-        toast.error(errorMessage);
-      } finally {
-        setIsLoading(false);
-        setIsLoadingMore(false);
-      }
-    },
-    [debouncedSearch]
-  );
-
-  // Fetch inventory logs
-  const fetchLogs = useCallback(async () => {
-    try {
-      const data = await fetchWithErrorHandling("/api/inventory/logs?pageSize=20");
-      setLogs(data.logs);
-    } catch {
-      toast.error("Failed to load inventory logs");
-    }
-  }, []);
-
-  const fetchTransfers = useCallback(async () => {
-    try {
-      const data = await fetchWithErrorHandling("/api/inventory/transfers?pageSize=20");
-      setTransferLogs(data.transfers ?? []);
-    } catch {
-      toast.error("Failed to load transfer history");
-    }
-  }, []);
-
-  // Load more items
-  const loadMore = useCallback(() => {
-    if (!isLoadingMore && pagination.hasMore) {
-      fetchProducts(pagination.page + 1, true);
-    }
-  }, [fetchProducts, isLoadingMore, pagination]);
-
-  // Pull to refresh handler
-  const handleRefresh = useCallback(async () => {
-    setIsRefreshing(true);
-    try {
-      await Promise.all([fetchProducts(1, false), fetchLogs(), fetchTransfers()]);
-      toast.success("Inventory refreshed");
-    } catch {
-      toast.error("Failed to refresh inventory");
-    } finally {
-      setIsRefreshing(false);
-    }
-  }, [fetchProducts, fetchLogs, fetchTransfers]);
-
-  // Setup infinite scroll
   const { loadMoreRef } = useInfiniteScroll({
-    loading: isLoadingMore,
-    hasMore: pagination.hasMore,
-    onLoadMore: loadMore,
+    loading: variants.isFetchingNextPage,
+    hasMore: shouldAutoLoad(pagesLoaded, !!variants.hasNextPage, autoLoadLimit),
+    onLoadMore: () => variants.fetchNextPage(),
   });
 
-  // Initial load
-  useEffect(() => {
-    fetchProducts();
-    fetchLogs();
-    fetchTransfers();
-  }, [fetchProducts, fetchLogs, fetchTransfers]);
+  const handleLoadMore = () => {
+    setAutoLoadLimit((l) => l + AUTO_LOAD_PAGE_LIMIT);
+    variants.fetchNextPage();
+  };
 
-  // Search effect
-  useEffect(() => {
-    if (debouncedSearch !== undefined) {
-      fetchProducts(1, false);
-    }
-  }, [debouncedSearch, fetchProducts]);
-
-  // Touch/Pull to refresh setup for mobile
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    let startY = 0;
-    let currentY = 0;
-    let pulling = false;
-    const pullIndicator = document.createElement("div");
-    pullIndicator.className =
-      "fixed top-0 left-0 right-0 h-16 bg-background/80 backdrop-blur-sm flex items-center justify-center transition-transform duration-300 z-40";
-    pullIndicator.style.transform = "translateY(-100%)";
-    pullIndicator.innerHTML =
-      '<div class="flex items-center gap-2"><svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span class="text-sm">Pull to refresh</span></div>';
-    document.body.appendChild(pullIndicator);
-
-    const handleTouchStart = (e: TouchEvent) => {
-      if (window.scrollY === 0) {
-        startY = e.touches[0].clientY;
-        pulling = true;
-      }
-    };
-
-    const handleTouchMove = (e: TouchEvent) => {
-      if (!pulling) return;
-      currentY = e.touches[0].clientY;
-      const pullDistance = currentY - startY;
-
-      if (pullDistance > 0 && window.scrollY === 0) {
-        e.preventDefault();
-        const progress = Math.min(pullDistance / 120, 1);
-        pullIndicator.style.transform = `translateY(${-100 + progress * 100}%)`;
-      }
-    };
-
-    const handleTouchEnd = () => {
-      if (!pulling) return;
-      pulling = false;
-      const pullDistance = currentY - startY;
-
-      if (pullDistance > 80 && !isRefreshing) {
-        handleRefresh();
-      }
-
-      pullIndicator.style.transform = "translateY(-100%)";
-    };
-
-    document.addEventListener("touchstart", handleTouchStart, { passive: true });
-    document.addEventListener("touchmove", handleTouchMove, { passive: false });
-    document.addEventListener("touchend", handleTouchEnd);
-
-    return () => {
-      document.removeEventListener("touchstart", handleTouchStart);
-      document.removeEventListener("touchmove", handleTouchMove);
-      document.removeEventListener("touchend", handleTouchEnd);
-      if (pullIndicator.parentNode) {
-        pullIndicator.parentNode.removeChild(pullIndicator);
-      }
-    };
-  }, [handleRefresh, isRefreshing]);
+  const isRefreshing = variants.isRefetching;
+  const handleRefresh = () => {
+    queryClient.invalidateQueries({ queryKey: ["inventory-variants"] });
+    queryClient.invalidateQueries({ queryKey: ["inventory-logs"] });
+    queryClient.invalidateQueries({ queryKey: ["inventory-transfers"] });
+  };
 
   const handleProductAction = (productId: number, action: "adjust" | "stockIn" | "transfer") => {
-    // Find the product and convert to ProductWithQuantity format
     const product = products.find((p) => p.id === productId);
     if (!product) return;
 
-    const productWithQuantity: ProductWithQuantity = {
-      id: product.id,
-      name: product.name,
-      baseName: product.baseName || "",
-      variant: product.variant,
-      unit: null,
-      numericValue: null,
-      quantity: product.totalQuantity,
-      location: 1,
-      lowStockThreshold: 1,
-      // default prices for client-side constructed object
-      costPrice: 0 as any,
-      retailPrice: 0 as any,
-      priceSourceLinkId: null,
-      currentQuantity: product.totalQuantity,
-      lastUpdated: new Date(),
-      deletedAt: null,
-      deletedBy: null,
-      approvalStatus: "APPROVED",
-      createdBy: null,
-      reviewedBy: null,
-      reviewedAt: null,
-    };
-
-    setSelectedProduct(productWithQuantity);
+    setSelectedProduct({ id: product.id, name: product.name });
     if (action === "adjust") {
       setShowQuickAdjust(true);
     } else if (action === "stockIn") {
@@ -335,12 +113,6 @@ export default function InventoryPage() {
     } else if (action === "transfer") {
       setShowTransfer(true);
     }
-  };
-
-  const refreshData = () => {
-    fetchProducts();
-    fetchLogs();
-    fetchTransfers();
   };
 
   const handleExportCSV = async () => {
@@ -370,16 +142,6 @@ export default function InventoryPage() {
 
   return (
     <div className="space-y-6">
-      {/* Pull to refresh indicator */}
-      {isRefreshing && (
-        <div className="fixed top-0 left-0 right-0 z-50 flex justify-center p-4 bg-background/80 backdrop-blur-sm">
-          <div className="flex items-center gap-2">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            <span className="text-sm">Refreshing...</span>
-          </div>
-        </div>
-      )}
-
       <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Inventory Management</h1>
@@ -430,7 +192,7 @@ export default function InventoryPage() {
                 type="search"
                 placeholder="Search products..."
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                onChange={(e) => handleSearchChange(e.target.value)}
                 className="max-w-sm"
               />
               {products.length > 0 && (
@@ -457,7 +219,7 @@ export default function InventoryPage() {
           </div>
 
           {/* Loading State */}
-          {isLoading && products.length === 0 ? (
+          {variants.isLoading ? (
             <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
               {[...Array(6)].map((_, i) => (
                 <Card key={i}>
@@ -474,6 +236,18 @@ export default function InventoryPage() {
                   </CardContent>
                 </Card>
               ))}
+            </div>
+          ) : variants.isError ? (
+            <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-8 text-center">
+              <p className="text-sm text-destructive">Could not load inventory.</p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => variants.refetch()}
+                className="mt-3"
+              >
+                Retry
+              </Button>
             </div>
           ) : products.length === 0 ? (
             <div className="text-center py-12">
@@ -536,18 +310,20 @@ export default function InventoryPage() {
 
               {/* Load More Trigger */}
               <div ref={loadMoreRef} className="h-20 flex items-center justify-center">
-                {isLoadingMore && (
+                {variants.isFetchingNextPage ? (
                   <div className="flex items-center gap-2">
                     <Loader2 className="h-4 w-4 animate-spin" />
                     <span className="text-sm text-muted-foreground">Loading more...</span>
                   </div>
-                )}
-                {!pagination.hasMore && products.length > 0 && (
+                ) : variants.hasNextPage && !shouldAutoLoad(pagesLoaded, true, autoLoadLimit) ? (
+                  <Button variant="outline" size="sm" onClick={handleLoadMore}>
+                    Load more ({remaining} remaining)
+                  </Button>
+                ) : products.length > 0 && !variants.isPlaceholderData ? (
                   <p className="text-sm text-muted-foreground">
-                    Showing all {pagination.total} products in {Object.keys(groupedProducts).length}{" "}
-                    categories
+                    Showing all {total} products in {allCategories.length} categories
                   </p>
-                )}
+                ) : null}
               </div>
             </>
           )}
@@ -559,61 +335,14 @@ export default function InventoryPage() {
         <TabsList className="w-full sm:w-auto overflow-x-auto">
           <TabsTrigger value="logs">Recent Activity</TabsTrigger>
           <TabsTrigger value="transfers">Transfers</TabsTrigger>
-          <TabsTrigger value="adjustments">Adjustments</TabsTrigger>
         </TabsList>
 
         <TabsContent value="logs" className="space-y-4">
-          <SimpleInventoryLogTable logs={logs} />
+          <LogsTabContent />
         </TabsContent>
 
         <TabsContent value="transfers" className="space-y-4">
-          <TransferLogTable logs={transferLogs} />
-        </TabsContent>
-
-        <TabsContent value="adjustments" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Stock Adjustment</CardTitle>
-              <CardDescription>Manually adjust inventory levels</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="space-y-4">
-                <div className="grid gap-4 md:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="product">Product</Label>
-                    <Select>
-                      <SelectTrigger id="product">
-                        <SelectValue placeholder="Select product" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {products.map((product) => (
-                          <SelectItem key={product.id} value={product.id.toString()}>
-                            {product.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="quantity">Quantity Change</Label>
-                    <Input
-                      id="quantity"
-                      type="number"
-                      placeholder="Enter positive or negative number"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="reason">Reason</Label>
-                  <Input id="reason" placeholder="e.g., Damaged goods, Stock count correction" />
-                </div>
-
-                <Button type="submit">Submit Adjustment</Button>
-              </form>
-            </CardContent>
-          </Card>
+          <TransfersTabContent />
         </TabsContent>
       </Tabs>
 
@@ -623,18 +352,12 @@ export default function InventoryPage() {
           open={showQuickAdjust}
           onOpenChange={setShowQuickAdjust}
           product={selectedProduct}
-          onSuccess={refreshData}
         />
       )}
 
       {/* Stock In Dialog */}
       {selectedProduct && (
-        <StockInDialog
-          open={showStockIn}
-          onOpenChange={setShowStockIn}
-          product={selectedProduct}
-          onSuccess={refreshData}
-        />
+        <StockInDialog open={showStockIn} onOpenChange={setShowStockIn} product={selectedProduct} />
       )}
 
       {/* Transfer Dialog */}
@@ -643,7 +366,6 @@ export default function InventoryPage() {
           open={showTransfer}
           onOpenChange={setShowTransfer}
           product={selectedProduct}
-          onSuccess={refreshData}
         />
       )}
     </div>
