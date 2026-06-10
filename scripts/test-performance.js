@@ -15,13 +15,8 @@ const AUTH_TOKEN = process.env.AUTH_TOKEN || ''; // Set this to a valid session 
 // Test scenarios
 const tests = [
   {
-    name: 'Get Current Inventory (Original)',
-    endpoint: '/api/inventory/current',
-    method: 'GET',
-  },
-  {
-    name: 'Get Current Inventory (Optimized)',
-    endpoint: '/api/inventory/current-optimized',
+    name: 'Get Current Inventory (Fast)',
+    endpoint: '/api/inventory/current-fast',
     method: 'GET',
   },
   {
@@ -126,36 +121,23 @@ function makeRequest(endpoint, method = 'GET') {
   });
 }
 
-// Comparison test
+// Baseline test for the single current-stock endpoint
+// (the legacy /api/inventory/current and /api/inventory/current-optimized
+// routes were consolidated onto /api/inventory/current-fast).
 async function comparePerformance() {
-  console.log('Performance Comparison Test');
-  console.log('==========================');
-  
-  // Run original implementation
-  const originalTimes = await runTest({
-    name: 'Original Implementation',
-    endpoint: '/api/inventory/current?locationId=1',
+  console.log('Current Inventory Baseline Test');
+  console.log('===============================');
+
+  const fastTimes = await runTest({
+    name: 'Current Inventory (Fast)',
+    endpoint: '/api/inventory/current-fast?locationId=1',
     method: 'GET',
   }, 10);
-  
-  // Run optimized implementation
-  const optimizedTimes = await runTest({
-    name: 'Optimized Implementation',
-    endpoint: '/api/inventory/current-optimized?locationId=1',
-    method: 'GET',
-  }, 10);
-  
-  // Calculate improvement
-  if (originalTimes.length > 0 && optimizedTimes.length > 0) {
-    const avgOriginal = originalTimes.reduce((a, b) => a + b, 0) / originalTimes.length;
-    const avgOptimized = optimizedTimes.reduce((a, b) => a + b, 0) / optimizedTimes.length;
-    const improvement = ((avgOriginal - avgOptimized) / avgOriginal) * 100;
-    
-    console.log('\nPerformance Improvement:');
-    console.log(`  Original avg: ${avgOriginal.toFixed(2)}ms`);
-    console.log(`  Optimized avg: ${avgOptimized.toFixed(2)}ms`);
-    console.log(`  Improvement: ${improvement.toFixed(1)}%`);
-    console.log(`  Speed increase: ${(avgOriginal / avgOptimized).toFixed(1)}x faster`);
+
+  if (fastTimes.length > 0) {
+    const avgFast = fastTimes.reduce((a, b) => a + b, 0) / fastTimes.length;
+    console.log('\nBaseline:');
+    console.log(`  current-fast avg: ${avgFast.toFixed(2)}ms`);
   }
 }
 
@@ -216,7 +198,7 @@ async function main() {
     await comparePerformance();
     
     // Run load test on critical endpoint
-    await loadTest('/api/inventory/current-optimized', 5, 5000);
+    await loadTest('/api/inventory/current-fast', 5, 5000);
     
   } catch (error) {
     console.error('Test failed:', error);

@@ -35,7 +35,7 @@ console.log(`${colors.blue}Base URL: ${baseUrl}${colors.reset}\n`);
 // Test endpoints
 const endpoints = [
   { path: '/api/products', method: 'GET', name: 'Products List' },
-  { path: '/api/inventory/current', method: 'GET', name: 'Current Inventory' },
+  { path: '/api/inventory/current-fast', method: 'GET', name: 'Current Inventory' },
   { path: '/api/inventory/deduct', method: 'POST', name: 'Mass Update (Deduct)', body: { updates: [] } },
   { path: '/api/auth/session', method: 'GET', name: 'Auth Session' },
   { path: '/api/diagnostics', method: 'GET', name: 'Diagnostics' },
