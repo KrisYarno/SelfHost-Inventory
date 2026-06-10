@@ -319,7 +319,7 @@ export default function InventoryPage() {
                   <Button variant="outline" size="sm" onClick={handleLoadMore}>
                     Load more ({remaining} remaining)
                   </Button>
-                ) : products.length > 0 && !variants.isPlaceholderData ? (
+                ) : products.length > 0 && !variants.hasNextPage && !variants.isPlaceholderData ? (
                   <p className="text-sm text-muted-foreground">
                     Showing all {total} products in {allCategories.length} categories
                   </p>
