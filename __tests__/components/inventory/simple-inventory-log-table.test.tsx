@@ -15,3 +15,60 @@ test("mobile card list swaps at md (no sm: swap classes remain)", () => {
   expect(container.querySelector(".md\\:hidden")).not.toBeNull();
   expect(container.querySelector(".sm\\:hidden")).toBeNull();
 });
+
+// --- transferId exact pairing ---
+// Minimal fixtures matching the component's log type (inventory_logs & users/products/locations).
+const BASE_TIME = new Date("2026-06-09T12:00:00Z");
+function transferLog(
+  id: number,
+  delta: number,
+  transferId: string | null,
+  secondsOffset = 0
+) {
+  return {
+    id,
+    userId: 1,
+    productId: 7,
+    delta,
+    changeTime: new Date(BASE_TIME.getTime() + secondsOffset * 1000),
+    locationId: delta < 0 ? 2 : 3,
+    logType: "TRANSFER",
+    transferId,
+    users: { id: 1, username: "kris" },
+    products: { id: 7, name: "Widget" },
+    locations:
+      delta < 0 ? { id: 2, name: "Shelf A" } : { id: 3, name: "Shelf B" },
+  } as any;
+}
+
+test("two TRANSFER rows with the SAME transferId render as ONE paired entry", () => {
+  const { container } = render(
+    <SimpleInventoryLogTable
+      logs={[
+        transferLog(1, -5, "11111111-1111-4111-8111-111111111111"),
+        transferLog(2, 5, "11111111-1111-4111-8111-111111111111", 2),
+      ]}
+    />
+  );
+  const rows = container.querySelectorAll("tbody tr");
+  expect(rows).toHaveLength(1);
+  // The paired row carries both sides of the transfer
+  expect(rows[0].textContent).toContain("-5");
+  expect(rows[0].textContent).toContain("+5");
+  expect(rows[0].textContent).toContain("Transfer");
+});
+
+test("two TRANSFER rows with DIFFERENT transferIds stay SEPARATE even when the heuristic would pair them", () => {
+  // Same product/user, within 5s, opposite deltas: the legacy heuristic alone
+  // would mis-pair these; distinct transferIds must prevent it.
+  const { container } = render(
+    <SimpleInventoryLogTable
+      logs={[
+        transferLog(1, -5, "11111111-1111-4111-8111-111111111111"),
+        transferLog(2, 5, "22222222-2222-4222-8222-222222222222", 2),
+      ]}
+    />
+  );
+  const rows = container.querySelectorAll("tbody tr");
+  expect(rows).toHaveLength(2);
+});

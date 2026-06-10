@@ -6,10 +6,11 @@ import {
 import type {
   StockValidation
 } from '@/types/inventory';
-import { 
-  InsufficientStockError, 
+import {
+  InsufficientStockError,
   ProductNotFoundError
 } from '@/lib/error-handling';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Creates an inventory log entry
@@ -21,11 +22,12 @@ export async function createInventoryLog(
     locationId: number;
     delta: number;
     logType?: inventory_logs_logType;
+    transferId?: string;
   },
   tx?: Prisma.TransactionClient
 ) {
   const db = tx || prisma;
-  
+
   // Create the log entry
   return await db.inventory_logs.create({
     data: {
@@ -35,6 +37,7 @@ export async function createInventoryLog(
       delta: data.delta,
       changeTime: new Date(),
       logType: data.logType || inventory_logs_logType.ADJUSTMENT,
+      transferId: data.transferId ?? null,
     },
     include: {
       users: true,
@@ -339,6 +342,9 @@ export async function createInventoryTransfer(options: {
     throw new Error('Transfer quantity must be greater than zero.');
   }
 
+  // One id per transfer: stamped on BOTH log rows so they pair exactly.
+  const transferId = uuidv4();
+
   const maxRetries = 3;
   let retryCount = 0;
 
@@ -403,6 +409,7 @@ export async function createInventoryTransfer(options: {
               locationId: fromLocationId,
               delta: -quantity,
               logType: inventory_logs_logType.TRANSFER,
+              transferId,
             },
             tx
           ),
@@ -413,6 +420,7 @@ export async function createInventoryTransfer(options: {
               locationId: toLocationId,
               delta: quantity,
               logType: inventory_logs_logType.TRANSFER,
+              transferId,
             },
             tx
           ),

@@ -165,6 +165,7 @@ model inventory_logs {
   changeTime DateTime               @db.DateTime(0)
   locationId Int?
   logType    inventory_logs_logType @default(ADJUSTMENT)
+  transferId String?                @db.VarChar(36)
   locations  Location?              @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_log_location")
   users      User                   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_1")
   products   Product                @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_2")

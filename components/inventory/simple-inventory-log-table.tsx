@@ -57,6 +57,22 @@ export function SimpleInventoryLogTable({
           if (used.has(j)) continue;
           const other = input[j];
           if (other.logType !== 'TRANSFER') continue;
+
+          // Exact pairing: when either row carries a transferId, it is
+          // authoritative — pair ONLY on equal non-null ids, never by heuristic.
+          if (log.transferId || other.transferId) {
+            if (
+              log.transferId &&
+              other.transferId &&
+              log.transferId === other.transferId
+            ) {
+              pairedIndex = j;
+              break;
+            }
+            continue;
+          }
+
+          // Legacy rows (no transferId): time/delta heuristic
           if (other.productId !== log.productId) continue;
           if (other.userId !== log.userId) continue;
 
