@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { Product, product_locations, Location } from "@prisma/client";
+import { Prisma, Product, product_locations, Location } from "@prisma/client";
 
 export const dynamic = "force-dynamic";
 
@@ -25,12 +25,15 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   const searchParams = request.nextUrl.searchParams;
   const _locationId = searchParams.get("locationId");
-  const page = parseInt(searchParams.get("page") || "1");
-  const pageSize = parseInt(searchParams.get("pageSize") || "12");
+  // Clamp pagination: NaN-safe via the `|| fallback`, pageSize capped at 100.
+  const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(searchParams.get("pageSize") || "12", 10) || 12));
   const search = searchParams.get("search") || "";
 
-  // Build where clause for search - exclude soft deleted products
-  const whereClause: any = {
+  // Build where clause for search - exclude soft deleted products.
+  // SHOW contract: provisional (PENDING_REVIEW) products stay visible here -- do NOT
+  // add an approvalStatus filter. Locked by __tests__/integration/read-path-isolation.test.ts.
+  const whereClause: Prisma.ProductWhereInput = {
     deletedAt: null,
   };
   if (search) {

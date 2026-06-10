@@ -1,49 +1,46 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import type { InventoryLogFilters } from "@/types/inventory";
-import { Prisma } from "@prisma/client";
+import { Prisma, inventory_logs_logType } from "@prisma/client";
+import { z } from "zod";
 
 export const dynamic = "force-dynamic";
+
+// Query-string validation: bad values surface as 400 via apiHandler's ZodError map.
+const LogsQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+  productId: z.coerce.number().int().optional(),
+  locationId: z.coerce.number().int().optional(),
+  userId: z.coerce.number().int().optional(),
+  logType: z.nativeEnum(inventory_logs_logType).optional(),
+  startDate: z.coerce.date().optional(),
+  endDate: z.coerce.date().optional(),
+});
 
 export const GET = apiHandler(async (request: NextRequest) => {
   await requireApproved();
 
-  const searchParams = request.nextUrl.searchParams;
-
-  // Parse filters
-  const filters: InventoryLogFilters = {
-    productId: searchParams.get("productId")
-      ? parseInt(searchParams.get("productId")!)
-      : undefined,
-    locationId: searchParams.get("locationId")
-      ? parseInt(searchParams.get("locationId")!)
-      : undefined,
-    userId: searchParams.get("userId") ? parseInt(searchParams.get("userId")!) : undefined,
-    logType: searchParams.get("logType") as any,
-    startDate: searchParams.get("startDate")
-      ? new Date(searchParams.get("startDate")!)
-      : undefined,
-    endDate: searchParams.get("endDate") ? new Date(searchParams.get("endDate")!) : undefined,
-  };
+  const query = LogsQuerySchema.parse(
+    Object.fromEntries(request.nextUrl.searchParams)
+  );
 
   // Pagination
-  const page = Math.max(1, parseInt(searchParams.get("page") || "1"));
-  const pageSize = Math.min(100, Math.max(1, parseInt(searchParams.get("pageSize") || "50")));
+  const { page, pageSize } = query;
   const skip = (page - 1) * pageSize;
 
   // Build where clause
   const where: Prisma.inventory_logsWhereInput = {};
 
-  if (filters.productId) where.productId = filters.productId;
-  if (filters.locationId) where.locationId = filters.locationId;
-  if (filters.userId) where.userId = filters.userId;
-  if (filters.logType) where.logType = filters.logType;
+  if (query.productId) where.productId = query.productId;
+  if (query.locationId) where.locationId = query.locationId;
+  if (query.userId) where.userId = query.userId;
+  if (query.logType) where.logType = query.logType;
 
-  if (filters.startDate || filters.endDate) {
+  if (query.startDate || query.endDate) {
     where.changeTime = {};
-    if (filters.startDate) where.changeTime.gte = filters.startDate;
-    if (filters.endDate) where.changeTime.lte = filters.endDate;
+    if (query.startDate) where.changeTime.gte = query.startDate;
+    if (query.endDate) where.changeTime.lte = query.endDate;
   }
 
   // Run count and data queries in parallel
@@ -83,7 +80,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
   ]);
 
   const response = {
-    logs: logs as any[],
+    logs,
     pagination: {
       page,
       pageSize,

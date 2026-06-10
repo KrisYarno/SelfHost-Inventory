@@ -1,11 +1,17 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 
 export const dynamic = "force-dynamic";
 
-export const GET = apiHandler(async () => {
-  await requireApproved();
+export const GET = apiHandler(async (request: NextRequest) => {
+  const { user } = await requireApproved();
+
+  const rateLimitHeaders = enforceRateLimit(request, "inventory:export", {
+    identifier: String(user.id),
+    limit: 10,
+  });
 
   // Get all products with their location quantities (excluding soft deleted +
   // provisional products, which are held out of decision exports).
@@ -65,11 +71,12 @@ export const GET = apiHandler(async () => {
     .join("\n");
 
   // Return as downloadable file
-  return new NextResponse(csvContent, {
+  const response = new NextResponse(csvContent, {
     status: 200,
     headers: {
       "Content-Type": "text/csv",
       "Content-Disposition": `attachment; filename="inventory-${new Date().toISOString().split("T")[0]}.csv"`,
     },
   });
+  return applyRateLimitHeaders(response, rateLimitHeaders);
 });
