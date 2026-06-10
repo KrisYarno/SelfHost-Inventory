@@ -6,11 +6,14 @@ import {
   User
 } from '@prisma/client';
 
-// Base inventory log type with relations
+// Base inventory log type with relations.
+// Relations are deliberately NARROWED to the fields the API actually selects
+// (see lib/inventory.ts createInventoryLog and /api/inventory/logs): full
+// User would imply passwordHash crosses the wire, which it must never do.
 export type InventoryLogWithRelations = inventory_logs & {
-  users: User;
-  products: Product;
-  locations: Location | null;
+  users: Pick<User, 'id' | 'username' | 'email'>;
+  products: Pick<Product, 'id' | 'name' | 'baseName' | 'variant'>;
+  locations: Pick<Location, 'id' | 'name'> | null;
 };
 
 // For compatibility - transactions are handled differently in actual schema

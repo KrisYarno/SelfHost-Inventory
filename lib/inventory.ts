@@ -39,10 +39,14 @@ export async function createInventoryLog(
       logType: data.logType || inventory_logs_logType.ADJUSTMENT,
       transferId: data.transferId ?? null,
     },
+    // SECURITY: never `users: true` here — these rows are returned verbatim by
+    // adjust/stock-in/transfer/batch-adjust responses, so a full User include
+    // would ship passwordHash to the client. Field set mirrors
+    // app/api/inventory/logs/route.ts (the proven table-rendering contract).
     include: {
-      users: true,
-      products: true,
-      locations: true,
+      users: { select: { id: true, username: true, email: true } },
+      products: { select: { id: true, name: true, baseName: true, variant: true } },
+      locations: { select: { id: true, name: true } },
     }
   });
 }

@@ -59,6 +59,10 @@ import { enforceRateLimit } from '@/lib/rateLimit';
 import { GET as variantsGET } from '@/app/api/inventory/variants/route';
 import { GET as logsGET } from '@/app/api/inventory/logs/route';
 import { GET as exportGET } from '@/app/api/inventory/export/route';
+import { GET as productHistoryGET } from '@/app/api/inventory/product/[id]/route';
+
+// Lib under test (uses the same deep-mocked prisma default export)
+import { createInventoryLog } from '@/lib/inventory';
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 const mockRequireApproved = requireApproved as jest.Mock;
@@ -195,5 +199,50 @@ describe('GET /api/inventory/export rate limiting', () => {
       'inventory:export',
       expect.objectContaining({ limit: 10 })
     );
+  });
+});
+
+// ===========================================================================
+// 5. passwordHash never leaves the server (MAJOR-2 capstone fix)
+//    createInventoryLog is the single source for every mutation-path log row
+//    (adjust, stock-in, transfer, batch-adjust all flow through it), so the
+//    include shape it sends to prisma IS the leak surface. Pin it to selects.
+// ===========================================================================
+
+describe('inventory log relation hygiene (no passwordHash)', () => {
+  it('createInventoryLog uses field selects on users/products/locations — no full User row', async () => {
+    db.inventory_logs.create.mockResolvedValue({} as any);
+
+    await createInventoryLog({ userId: 7, productId: 2, locationId: 3, delta: 5 });
+
+    expect(db.inventory_logs.create).toHaveBeenCalledTimes(1);
+    const args = db.inventory_logs.create.mock.calls[0][0] as any;
+
+    // users must be a select (never `true`) and must not name passwordHash
+    expect(args.include.users).not.toBe(true);
+    expect(args.include.users.select).toMatchObject({ id: true, username: true, email: true });
+    expect(JSON.stringify(args.include)).not.toContain('passwordHash');
+
+    // products/locations narrowed the same way (mirrors /api/inventory/logs)
+    expect(args.include.products.select).toMatchObject({ id: true, name: true });
+    expect(args.include.locations.select).toMatchObject({ id: true, name: true });
+  });
+
+  it('GET /api/inventory/product/[id] history query selects relation fields — no users: true', async () => {
+    db.product.findFirst.mockResolvedValue({ id: 2, name: 'Widget', deletedAt: null } as any);
+    db.location.findUnique.mockResolvedValue({ id: 3, name: 'Main' } as any);
+    db.product_locations.findUnique.mockResolvedValue({ quantity: 5 } as any);
+    db.inventory_logs.findMany.mockResolvedValue([] as any);
+
+    const resp = await productHistoryGET(
+      mkReq('http://t/api/inventory/product/2?locationId=3&limit=1'),
+      { params: { id: '2' } } as any
+    );
+    expect(resp.status).toBe(200);
+
+    const args = db.inventory_logs.findMany.mock.calls[0][0] as any;
+    expect(args.include.users).not.toBe(true);
+    expect(args.include.users.select).toMatchObject({ id: true, username: true, email: true });
+    expect(JSON.stringify(args.include)).not.toContain('passwordHash');
   });
 });

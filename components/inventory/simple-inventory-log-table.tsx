@@ -15,10 +15,12 @@ import { ValueChip } from '@/components/ui/value-chip';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { inventory_logs, Product, Location, User } from '@prisma/client';
 
+// Narrowed to the relation fields the API selects (and this table renders):
+// users.username, products.name, locations.name. Full rows remain assignable.
 type SimpleInventoryLog = inventory_logs & {
-  users: User;
-  products: Product;
-  locations: Location | null;
+  users: Pick<User, 'id' | 'username' | 'email'>;
+  products: Pick<Product, 'id' | 'name' | 'baseName' | 'variant'>;
+  locations: Pick<Location, 'id' | 'name'> | null;
 };
 
 interface SimpleInventoryLogTableProps {

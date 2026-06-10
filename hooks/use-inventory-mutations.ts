@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 export interface ApiMutationError extends Error {
@@ -9,20 +9,30 @@ export interface ApiMutationError extends Error {
 }
 
 /** Cross-page coherence contract: every inventory mutation invalidates these.
- *  Deliberately EXCLUDED: admin ['paginated-logs'] (forensic view; own refresh). */
+ *  Deliberately EXCLUDED: admin ['paginated-logs'] (forensic view; own refresh).
+ *  productId optional: omit -> invalidate ALL product-location-quantity entries
+ *  (for batch/multi-product mutations like journal submit and workbench deduct). */
+export function invalidateInventoryCaches(queryClient: QueryClient, productId?: number) {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["inventory-variants"] }),
+    queryClient.invalidateQueries({
+      queryKey:
+        productId !== undefined
+          ? ["product-location-quantity", productId]
+          : ["product-location-quantity"],
+    }),
+    queryClient.invalidateQueries({ queryKey: ["inventory-products"] }),
+    queryClient.invalidateQueries({ queryKey: ["inventory-logs"] }),
+    queryClient.invalidateQueries({ queryKey: ["inventory-transfers"] }),
+    queryClient.invalidateQueries({ queryKey: ["products"] }),
+    queryClient.invalidateQueries({ queryKey: ["dashboard-metrics"] }),
+    queryClient.invalidateQueries({ queryKey: ["dashboard-location-stock"] }),
+  ]);
+}
+
 function useInvalidateInventory() {
   const queryClient = useQueryClient();
-  return (productId: number) =>
-    Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["inventory-variants"] }),
-      queryClient.invalidateQueries({ queryKey: ["product-location-quantity", productId] }),
-      queryClient.invalidateQueries({ queryKey: ["inventory-products"] }),
-      queryClient.invalidateQueries({ queryKey: ["inventory-logs"] }),
-      queryClient.invalidateQueries({ queryKey: ["inventory-transfers"] }),
-      queryClient.invalidateQueries({ queryKey: ["products"] }),
-      queryClient.invalidateQueries({ queryKey: ["dashboard-metrics"] }),
-      queryClient.invalidateQueries({ queryKey: ["dashboard-location-stock"] }),
-    ]);
+  return (productId: number) => invalidateInventoryCaches(queryClient, productId);
 }
 
 async function postJSON(url: string, body: unknown, csrfToken: string | null) {

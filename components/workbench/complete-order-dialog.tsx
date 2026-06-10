@@ -2,8 +2,10 @@
 
 import { useMemo } from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { useWorkbench } from "@/hooks/use-workbench";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -56,6 +58,7 @@ export function CompleteOrderDialog({
   } = useWorkbench();
   const { selectedLocationId } = useLocation();
   const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
+  const queryClient = useQueryClient();
 
   const isWCOrder = !!selectedExternalOrder;
 
@@ -228,6 +231,10 @@ export function CompleteOrderDialog({
 
       // Refresh the page to update product quantities
       router.refresh();
+
+      // Cross-page coherence: the deduct/fulfill above went through raw fetch,
+      // so react-query caches (/inventory, dashboard, journal) must be told.
+      invalidateInventoryCaches(queryClient);
 
       // Call the onSuccess callback with deduction details for undo support
       if (onSuccess) {

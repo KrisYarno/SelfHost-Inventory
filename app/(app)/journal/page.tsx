@@ -25,8 +25,10 @@ import { JournalProductRow } from "@/components/journal/journal-product-row";
 import { ReviewChangesDialog } from "@/components/journal/review-changes-dialog";
 import { JournalFilters } from "@/components/journal/journal-filters";
 import { BatchOperationsDialog } from "@/components/journal/batch-operations-dialog";
+import { useQueryClient } from "@tanstack/react-query";
 import { useJournalStore } from "@/hooks/use-journal";
 import { useInventoryProducts } from "@/hooks/use-inventory-products";
+import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import { useLocation } from "@/contexts/location-context";
 import { getUserFriendlyMessage, handleBatchOperationErrors } from "@/lib/error-handling";
 import { useInventoryChangeAnnouncer } from "@/hooks/use-accessibility-announcer";
@@ -39,6 +41,7 @@ export default function JournalPage() {
   const router = useRouter();
   const { selectedLocationId, locations } = useLocation();
   const { token: csrfToken } = useCSRF();
+  const queryClient = useQueryClient();
   const [searchTerm, setSearchTerm] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [showReviewDialog, setShowReviewDialog] = useState(false);
@@ -212,6 +215,8 @@ export default function JournalPage() {
             if (successful.length > 0) {
               clearAllAdjustments();
               refetchProducts();
+              // Partial success still mutated inventory; keep other pages coherent.
+              invalidateInventoryCaches(queryClient);
               setShowReviewDialog(false);
             }
             return;
@@ -237,6 +242,9 @@ export default function JournalPage() {
       );
       clearAllAdjustments();
       refetchProducts(); // Refresh quantities and versions
+      // Cross-page coherence: /inventory + dashboard read different query keys
+      // than this page; without this they serve up-to-5-min-stale quantities.
+      invalidateInventoryCaches(queryClient);
       setShowReviewDialog(false);
     } catch (error) {
       console.error("Error submitting adjustments:", error);

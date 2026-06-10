@@ -10,7 +10,7 @@ jest.mock("@/hooks/use-csrf", () => ({
   withCSRFHeaders: (h: HeadersInit, token: string | null) => ({ ...(h as Record<string, string>), "x-csrf-token": token ?? "" }),
 }));
 
-import { useAdjustInventory } from "@/hooks/use-inventory-mutations";
+import { useAdjustInventory, invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 
 const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
 const wrapper = ({ children }: { children: React.ReactNode }) => (
@@ -39,6 +39,31 @@ test("adjust POSTs to /api/inventory/adjust with CSRF header and invalidates the
     expect(keys).toContain(JSON.stringify(expected));
   }
   spy.mockRestore();
+});
+
+test("invalidateInventoryCaches without productId hits all 8 roots, including the bare product-location-quantity root", async () => {
+  const qc2 = new QueryClient();
+  const spy = jest.spyOn(qc2, "invalidateQueries");
+  await invalidateInventoryCaches(qc2);
+  const keys = spy.mock.calls.map((c) => JSON.stringify((c[0] as { queryKey: unknown }).queryKey));
+  for (const expected of [
+    ["inventory-variants"], ["product-location-quantity"], ["inventory-products"],
+    ["inventory-logs"], ["inventory-transfers"], ["products"],
+    ["dashboard-metrics"], ["dashboard-location-stock"],
+  ]) {
+    expect(keys).toContain(JSON.stringify(expected));
+  }
+  expect(spy).toHaveBeenCalledTimes(8);
+});
+
+test("invalidateInventoryCaches with productId scopes the product-location-quantity key to that product", async () => {
+  const qc2 = new QueryClient();
+  const spy = jest.spyOn(qc2, "invalidateQueries");
+  await invalidateInventoryCaches(qc2, 42);
+  const keys = spy.mock.calls.map((c) => JSON.stringify((c[0] as { queryKey: unknown }).queryKey));
+  expect(keys).toContain(JSON.stringify(["product-location-quantity", 42]));
+  expect(keys).not.toContain(JSON.stringify(["product-location-quantity"]));
+  expect(spy).toHaveBeenCalledTimes(8);
 });
 
 test("thrown error carries code and data from the response body", async () => {

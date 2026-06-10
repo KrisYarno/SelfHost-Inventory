@@ -55,10 +55,12 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
       productId: product.id,
       locationId: location.id,
     },
+    // SECURITY: select only safe relation fields — `users: true` would ship
+    // passwordHash to any approved client (mirrors /api/inventory/logs).
     include: {
-      users: true,
-      products: true,
-      locations: true,
+      users: { select: { id: true, username: true, email: true } },
+      products: { select: { id: true, name: true, baseName: true, variant: true } },
+      locations: { select: { id: true, name: true } },
     },
     orderBy: {
       changeTime: "desc",
