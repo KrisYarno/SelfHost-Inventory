@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireApproved, requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { AppError } from "@/lib/error-handling";
 import prisma from "@/lib/prisma";
 import { isProductUnique, formatProductName } from "@/lib/products";
 import { getCurrentQuantity } from "@/lib/inventory";
 import { auditService } from "@/lib/audit";
-import { validateCSRFToken } from "@/lib/csrf";
 import { ProductUpdateSchema } from "@/lib/validation/product";
 import { enforceRateLimit, applyRateLimitHeaders } from "@/lib/rateLimit";
 
@@ -63,10 +62,7 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
     identifier: user.id,
   });
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const productId = parseInt(params.id);
   if (isNaN(productId)) {
@@ -170,10 +166,7 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: RouteP
     identifier: user.id,
   });
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const productId = parseInt(params.id);
   if (isNaN(productId)) {

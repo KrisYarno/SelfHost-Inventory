@@ -5,7 +5,10 @@
 // targets ONLY the GET read-back and the POST upsert behavior for the two
 // boolean SystemSettings (weeklyReportsEnabled + analyticsRebuildEnabled).
 jest.mock("@/lib/api-utils", () => ({
-  apiHandler: (fn: any) => fn,
+  // Real module first: requireCSRF (driven by the mocked validateCSRFToken)
+  // and the REAL apiHandler, so the invalid-CSRF test still observes the
+  // mapped 403 response.
+  ...jest.requireActual("@/lib/api-utils"),
   requireAdmin: jest.fn(() => Promise.resolve()),
 }));
 jest.mock("@/lib/csrf", () => ({

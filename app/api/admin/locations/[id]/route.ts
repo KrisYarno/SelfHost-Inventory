@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { validateCSRFToken } from "@/lib/csrf";
 import { UpdateLocationSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
@@ -9,11 +8,7 @@ export const dynamic = "force-dynamic";
 export const DELETE = apiHandler(async (request: NextRequest, { params }: { params: { id: string } }) => {
   await requireAdmin();
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const locationId = parseInt(params.id);
 
@@ -75,11 +70,7 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: { para
 export const PATCH = apiHandler(async (request: NextRequest, { params }: { params: { id: string } }) => {
   await requireAdmin();
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const locationId = parseInt(params.id);
   if (isNaN(locationId)) {

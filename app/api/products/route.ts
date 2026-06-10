@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, apiHandler } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { ProductFilters } from "@/types/product";
 import { getProductsWithQuantities, isProductUnique, formatProductName } from "@/lib/products";
 import { auditService } from "@/lib/audit";
-import { validateCSRFToken } from "@/lib/csrf";
 import { ProductCreateUISchema } from "@/lib/validation/product";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 
@@ -61,10 +60,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
     identifier: user.id,
   });
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const body = ProductCreateUISchema.parse(await request.json());
 

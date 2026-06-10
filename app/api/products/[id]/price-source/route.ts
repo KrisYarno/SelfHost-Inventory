@@ -3,9 +3,9 @@ import {
   requireAdmin,
   requireCompanyMembership,
   apiHandler,
+  requireCSRF,
 } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { validateCSRFToken } from "@/lib/csrf";
 import { auditService } from "@/lib/audit";
 import { fetchExternalProductPrice } from "@/lib/external-orders/price-sync";
 
@@ -27,13 +27,7 @@ export const POST = apiHandler(
   ) => {
     const { user } = await requireAdmin();
 
-    const isValidCSRF = await validateCSRFToken(request);
-    if (!isValidCSRF) {
-      return NextResponse.json(
-        { error: "Invalid CSRF token" },
-        { status: 403 }
-      );
-    }
+    await requireCSRF(request);
 
     const productId = parseInt(params.id);
     if (isNaN(productId)) {

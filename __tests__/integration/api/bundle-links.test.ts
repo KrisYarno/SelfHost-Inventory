@@ -2,7 +2,10 @@
 import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/api-utils', () => ({
-  apiHandler: (fn: unknown) => fn,
+  // Real module first: requireCSRF (driven by the mocked validateCSRFToken)
+  // and the REAL apiHandler, so the invalid-CSRF tests still observe the
+  // mapped 403 responses.
+  ...jest.requireActual('@/lib/api-utils'),
   requireAdmin: jest.fn(),
   requireCompanyMembership: jest.fn(),
 }));
@@ -26,6 +29,9 @@ jest.mock('@/lib/csrf', () => ({
   validateCSRFToken: jest.fn(async () => true),
 }));
 jest.mock('@/lib/rateLimit', () => ({
+  // Real module first so RateLimitError (referenced by the real apiHandler's
+  // error mapping) stays a real class.
+  ...jest.requireActual('@/lib/rateLimit'),
   enforceRateLimit: jest.fn(() => ({})),
   applyRateLimitHeaders: jest.fn((resp: any) => resp),
 }));

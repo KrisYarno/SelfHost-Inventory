@@ -1,19 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
-import { validateCSRFToken } from "@/lib/csrf";
 
 export const dynamic = "force-dynamic";
 
 export const POST = apiHandler(async (request: NextRequest, { params }: { params: { userId: string } }) => {
   const { user: adminUser } = await requireAdmin();
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const userId = parseInt(params.userId);
   if (isNaN(userId)) {

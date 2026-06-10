@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { apiHandler, requireApproved } from "@/lib/api-utils";
+import { apiHandler, requireApproved, requireCSRF } from "@/lib/api-utils";
 import { enforceRateLimit, applyRateLimitHeaders } from "@/lib/rateLimit";
-import { validateCSRFToken } from "@/lib/csrf";
 import { CreateScratchpadRowSchema } from "@/lib/validation/scratchpad";
 import { createScratchpadRow } from "@/lib/scratchpad/mutations";
 import { getScratchpadBoard } from "@/lib/scratchpad/queries";
@@ -18,8 +17,7 @@ export const GET = apiHandler(async () => {
 export const POST = apiHandler(async (request: NextRequest) => {
   const { user } = await requireApproved();
   const headers = enforceRateLimit(request, "scratchpad:POST", { identifier: user.id });
-  if (!(await validateCSRFToken(request)))
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
+  await requireCSRF(request);
   const body = CreateScratchpadRowSchema.parse(await request.json());
   const row = await createScratchpadRow(body, { id: user.id });
   await auditService.log({

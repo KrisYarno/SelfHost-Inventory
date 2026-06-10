@@ -1,6 +1,7 @@
 import { getSession } from '@/lib/auth';
 import { NextRequest, NextResponse } from 'next/server';
 import { AppError, errorLogger } from '@/lib/error-handling';
+import { validateCSRFToken } from '@/lib/csrf';
 import { ZodError } from 'zod';
 import { RateLimitError } from '@/lib/rateLimit';
 import { OptimisticLockError } from '@/lib/inventory';
@@ -44,6 +45,17 @@ export async function requireAdmin(): Promise<AuthResult> {
     throw new AppError('Admin access required', 'FORBIDDEN', 403);
   }
   return { user };
+}
+
+/**
+ * Throws (-> apiHandler 403 { error, code: 'CSRF_INVALID' }) when the request
+ * lacks a valid CSRF token.
+ */
+export async function requireCSRF(request: NextRequest): Promise<void> {
+  const valid = await validateCSRFToken(request);
+  if (!valid) {
+    throw new AppError('Invalid CSRF token', 'CSRF_INVALID', 403);
+  }
 }
 
 // --- Multi-tenant company membership guard (P0-4) ---

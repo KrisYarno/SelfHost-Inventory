@@ -3,9 +3,9 @@ import {
   requireAdmin,
   requireCompanyMembership,
   apiHandler,
+  requireCSRF,
 } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
-import { validateCSRFToken } from '@/lib/csrf';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { UpdateBundleLinkSchema } from '@/lib/validation/bundle-links';
 import { ZodError } from 'zod';
@@ -23,10 +23,7 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     identifier: user.id,
   });
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   let body: ReturnType<typeof UpdateBundleLinkSchema.parse>;
   try {

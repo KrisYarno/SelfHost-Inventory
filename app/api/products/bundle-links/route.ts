@@ -3,10 +3,10 @@ import {
   requireAdmin,
   requireCompanyMembership,
   apiHandler,
+  requireCSRF,
 } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
-import { validateCSRFToken } from '@/lib/csrf';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { CreateBundleLinkSchema } from '@/lib/validation/bundle-links';
 import type { BundleComponentSnapshot } from '@/types/bulk-map';
@@ -21,10 +21,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
     identifier: user.id,
   });
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   let body: ReturnType<typeof CreateBundleLinkSchema.parse>;
   try {

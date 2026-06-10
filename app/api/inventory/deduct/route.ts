@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, apiHandler } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { DeductInventoryResponse } from "@/types/workbench";
 import { createInventoryTransaction } from "@/lib/inventory";
 import { AppError } from "@/lib/error-handling";
-import { validateCSRFToken } from "@/lib/csrf";
 import { DeductInventorySchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import { auditService } from "@/lib/audit";
@@ -20,11 +19,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
     identifier: user.id,
   });
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const body = DeductInventorySchema.parse(await request.json());
 

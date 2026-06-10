@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Prisma, type inventory_logs } from "@prisma/client";
-import { requireApproved, apiHandler } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
-import { validateCSRFToken } from "@/lib/csrf";
 import { applyStockDelta, OptimisticLockError } from "@/lib/inventory";
 import { BatchInventoryAdjustmentSchema } from "@/lib/validation/inventory";
 import { enforceRateLimit, applyRateLimitHeaders } from "@/lib/rateLimit";
@@ -15,10 +14,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
     identifier: user.id,
   });
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const { adjustments } = BatchInventoryAdjustmentSchema.parse(await request.json());
 

@@ -4,10 +4,10 @@ import {
   requireAdmin,
   requireCompanyMembership,
   apiHandler,
+  requireCSRF,
 } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import type { Prisma } from '@prisma/client';
-import { validateCSRFToken } from '@/lib/csrf';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import {
   CreateProductLinkSchema,
@@ -58,10 +58,7 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     identifier: user.id,
   });
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const productId = parseInt(params.id);
   if (isNaN(productId)) {
@@ -180,10 +177,7 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: RouteP
     identifier: user.id,
   });
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const productId = parseInt(params.id);
   if (isNaN(productId)) {

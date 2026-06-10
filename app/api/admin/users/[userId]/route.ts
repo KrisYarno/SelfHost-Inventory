@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { validateCSRFToken } from "@/lib/csrf";
 import { auditService } from "@/lib/audit";
 import { UpdateUserSchema } from "@/lib/validation/admin";
 
@@ -42,11 +41,7 @@ export const PATCH = apiHandler(async (
 ) => {
   const { user: adminUser } = await requireAdmin();
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const userId = parseInt(params.userId);
   if (isNaN(userId) || userId === 0) {
@@ -296,11 +291,7 @@ export const PATCH = apiHandler(async (
 export const DELETE = apiHandler(async (request: NextRequest, { params }: { params: { userId: string } }) => {
   const { user: adminUser } = await requireAdmin();
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const userId = parseInt(params.userId);
   if (isNaN(userId) || userId === 0) {

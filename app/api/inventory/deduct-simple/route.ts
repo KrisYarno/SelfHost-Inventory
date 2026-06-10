@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, apiHandler } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { createInventoryTransaction } from "@/lib/inventory";
-import { validateCSRFToken } from "@/lib/csrf";
 import { SimpleDeductSchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import { auditService } from "@/lib/audit";
@@ -16,11 +15,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
     identifier: user.id,
   });
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const body = SimpleDeductSchema.parse(await request.json());
 

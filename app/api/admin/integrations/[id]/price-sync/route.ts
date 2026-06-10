@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
-import { validateCSRFToken } from "@/lib/csrf";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { syncPricesForIntegration } from "@/lib/external-orders/price-sync";
 
 export const dynamic = "force-dynamic";
@@ -19,13 +18,7 @@ export const POST = apiHandler(
   ) => {
     await requireAdmin();
 
-    const isValidCSRF = await validateCSRFToken(request);
-    if (!isValidCSRF) {
-      return NextResponse.json(
-        { error: "Invalid CSRF token" },
-        { status: 403 }
-      );
-    }
+    await requireCSRF(request);
 
     const integrationId = params.id;
     const result = await syncPricesForIntegration(integrationId);

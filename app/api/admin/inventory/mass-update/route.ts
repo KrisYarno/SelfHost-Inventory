@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { validateCSRFToken } from "@/lib/csrf";
 import {
   BatchUpdateResult,
   FailedUpdate,
@@ -156,16 +155,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
     { userId: user.id, isAdmin: user.isAdmin }
   );
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    console.error("CSRF validation failed", {
-      headers: Object.fromEntries(request.headers.entries()),
-      method: request.method,
-      url: request.url,
-    });
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   let body;
   try {

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireApproved, requireCompanyMembership, apiHandler } from '@/lib/api-utils';
-import { validateCSRFToken } from '@/lib/csrf';
+import { requireApproved, requireCompanyMembership, apiHandler, requireCSRF } from '@/lib/api-utils';
 import { UnfulfillRequestSchema } from '@/lib/validation/unfulfill';
 import {
   BUNDLE_SENTINEL_PRODUCT_ID,
@@ -31,11 +30,7 @@ export const POST = apiHandler(async (
     identifier: user.id,
   });
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const body = UnfulfillRequestSchema.parse(await request.json());
 

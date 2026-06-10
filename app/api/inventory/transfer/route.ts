@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, apiHandler } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import {
   createInventoryTransfer,
@@ -7,7 +7,6 @@ import {
 } from "@/lib/inventory";
 import { TransferSchema } from "@/lib/validation/inventory";
 import { auditService } from "@/lib/audit";
-import { validateCSRFToken } from "@/lib/csrf";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 
 export const dynamic = "force-dynamic";
@@ -22,10 +21,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
       identifier: user.id,
     });
 
-    const csrfOk = await validateCSRFToken(request);
-    if (!csrfOk) {
-      return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-    }
+    await requireCSRF(request);
 
     const body = TransferSchema.parse(await request.json());
 

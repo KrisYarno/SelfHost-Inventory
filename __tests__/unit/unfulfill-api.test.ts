@@ -21,6 +21,10 @@ jest.mock('@/lib/prisma', () => {
 // want to simulate cross-company rejection use mockRequireCompanyMembership.
 const mockRequireCompanyMembership = jest.fn().mockResolvedValue(undefined)
 jest.mock('@/lib/api-utils', () => ({
+  // Spread the real module first so requireCSRF (and friends) exist; the
+  // real requireCSRF calls the mocked validateCSRFToken below, so the
+  // _csrfValid closure keeps driving CSRF behavior.
+  ...jest.requireActual('@/lib/api-utils'),
   requireApproved: jest.fn().mockResolvedValue({
     user: { id: 1, email: 'test@test.com', name: 'Test', isAdmin: false, isApproved: true, defaultLocationId: 1 },
   }),
@@ -64,6 +68,7 @@ jest.mock('@/lib/inventory', () => ({
 
 // Import after mocks
 import { POST } from '@/app/api/orders/[orderId]/unfulfill/route'
+import { AppError } from '@/lib/error-handling'
 
 // Convenience getter — always points at the live mock stored on globalThis
 function getMockPrisma(): DeepMockProxy<PrismaClient> {
@@ -477,11 +482,15 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
       ],
     })
 
-    const response = await POST(req, { params: { orderId: 'order-1' } })
-    const data = await response.json()
+    // apiHandler is a passthrough in this suite, so the AppError thrown by
+    // requireCSRF surfaces as a rejection (the real apiHandler maps it to a
+    // 403 { error, code: 'CSRF_INVALID' } response).
+    const err = await POST(req, { params: { orderId: 'order-1' } }).catch((e: unknown) => e)
 
-    expect(response.status).toBe(403)
-    expect(data.error).toBe('Invalid CSRF token')
+    expect(err).toBeInstanceOf(AppError)
+    expect((err as AppError).statusCode).toBe(403)
+    expect((err as AppError).code).toBe('CSRF_INVALID')
+    expect((err as AppError).message).toBe('Invalid CSRF token')
 
     // Ensure no transaction was started
     expect(getMockPrisma().$transaction).not.toHaveBeenCalled()

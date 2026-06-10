@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireApproved, apiHandler } from '@/lib/api-utils';
+import { requireApproved, apiHandler, requireCSRF } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import type { Prisma } from '@prisma/client';
-import { validateCSRFToken } from '@/lib/csrf';
 import { PatchStagingSchema } from '@/lib/validation/staging';
 import { getStagingItem } from '@/lib/staging/queries';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
@@ -40,10 +39,7 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     identifier: user.id,
   });
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const id = parseInt(params.id, 10);
   if (isNaN(id)) {

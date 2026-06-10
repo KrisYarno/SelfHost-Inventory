@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, apiHandler } from "@/lib/api-utils";
+import { requireAuth, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { verifyPassword, hashPassword } from "@/lib/auth-helpers";
 import prisma from "@/lib/prisma";
-import { validateCSRFToken } from "@/lib/csrf";
 import { CreatePasswordSchema, ChangePasswordSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
@@ -14,11 +13,7 @@ export const dynamic = "force-dynamic";
 export const POST = apiHandler(async (request: NextRequest) => {
   const { user: sessionUser } = await requireAuth();
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const body = await request.json();
   const { newPassword } = CreatePasswordSchema.parse(body);
@@ -59,11 +54,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
 export const PATCH = apiHandler(async (request: NextRequest) => {
   const { user: sessionUser } = await requireAuth();
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const body = await request.json();
   const parsed = ChangePasswordSchema.parse(body);

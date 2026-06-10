@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, requireCompanyMembership, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, requireCompanyMembership, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { validateCSRFToken } from "@/lib/csrf";
 
 export const dynamic = "force-dynamic";
 
@@ -108,10 +107,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
 export const DELETE = apiHandler(async (request: NextRequest) => {
   const { user } = await requireAdmin();
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const { searchParams } = new URL(request.url);
   const linkId = searchParams.get("linkId");

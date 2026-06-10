@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireApproved, requireCompanyMembership, apiHandler } from '@/lib/api-utils';
+import { requireApproved, requireCompanyMembership, apiHandler, requireCSRF } from '@/lib/api-utils';
 import { fulfillExternalOrder } from '@/lib/fulfillment';
-import { validateCSRFToken } from '@/lib/csrf';
 import { FulfillmentRequestSchema } from '@/lib/validation/fulfillment';
 import {
   applyRateLimitHeaders,
@@ -25,11 +24,7 @@ export const POST = apiHandler(async (
     identifier: user.id,
   });
 
-  // Validate CSRF token
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const body = FulfillmentRequestSchema.parse(await request.json());
 

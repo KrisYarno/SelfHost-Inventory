@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAdmin, apiHandler } from '@/lib/api-utils';
-import { validateCSRFToken } from '@/lib/csrf';
+import { requireAdmin, apiHandler, requireCSRF } from '@/lib/api-utils';
 import { declineProduct } from '@/lib/products/decline';
 import { auditService } from '@/lib/audit';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
@@ -23,10 +22,7 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     identifier: user.id,
   });
 
-  const isValidCSRF = await validateCSRFToken(request);
-  if (!isValidCSRF) {
-    return NextResponse.json({ error: 'Invalid CSRF token' }, { status: 403 });
-  }
+  await requireCSRF(request);
 
   const id = parseInt(params.id, 10);
   if (isNaN(id)) {

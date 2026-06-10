@@ -7,6 +7,9 @@
 // poison that math. This test drives a change with a deliberately wrong client
 // delta and asserts the logged delta is the server-computed value.
 jest.mock("@/lib/api-utils", () => ({
+  // Real module first so requireCSRF exists (it calls the mocked
+  // validateCSRFToken below, which beforeEach resolves to true).
+  ...jest.requireActual("@/lib/api-utils"),
   apiHandler: (fn: any) => fn,
   requireAdmin: jest.fn(),
 }));
