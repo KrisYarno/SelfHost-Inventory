@@ -142,7 +142,7 @@ export function DeletedProductsList() {
             <Card
               key={product.id}
               className={cn(
-                "flex flex-col border border-border/70 bg-gradient-to-br from-card to-muted/40",
+                "flex flex-col border border-border/70 bg-gradient-to-br from-surface to-muted/40",
                 "shadow-sm rounded-xl opacity-75 hover:opacity-100 transition-opacity duration-200"
               )}
             >

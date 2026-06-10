@@ -10,7 +10,11 @@ const Card = React.forwardRef<
     ref={ref}
     className={cn(
       "rounded-2xl border border-border/70",
-      "bg-card text-card-foreground shadow-md transition-colors",
+      // bg-card/text-card-foreground are unregistered no-op classes in this repo
+      // (colors.card is not in tailwind.config.ts). --card === --surface and
+      // --card-foreground === --foreground in both themes, so bg-surface paints
+      // the fill the design always intended (cards were transparent before).
+      "bg-surface text-foreground shadow-md transition-colors",
       className
     )}
     {...props}

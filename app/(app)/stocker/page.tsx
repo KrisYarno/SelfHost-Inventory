@@ -554,7 +554,7 @@ export default function StockerPage() {
               <Card
                 key={item.productId}
                 className={cn(
-                  "flex flex-col border border-border/70 bg-gradient-to-br from-card to-muted/40",
+                  "flex flex-col border border-border/70 bg-gradient-to-br from-surface to-muted/40",
                   "shadow-sm hover:shadow-md",
                   "transition-all duration-200 hover:-translate-y-[2px]",
                   "rounded-xl"
