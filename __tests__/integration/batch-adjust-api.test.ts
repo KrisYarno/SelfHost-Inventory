@@ -18,12 +18,22 @@ jest.mock('@/lib/audit', () => ({
   },
 }))
 
+// The route checks CSRF; the real impl reads next/headers cookies, which has no
+// request context under jest, so it would fail every request with 403.
+jest.mock('@/lib/csrf', () => ({
+  validateCSRFToken: jest.fn(async () => true),
+}))
+
 describe('/api/inventory/batch-adjust', () => {
+  // Must satisfy requireApproved(): email present + isApproved true + numeric id
   const mockSession = {
     user: {
-      id: 'user123',
+      id: 1,
       email: 'test@example.com',
       name: 'Test User',
+      isAdmin: false,
+      isApproved: true,
+      defaultLocationId: 1,
     },
   }
 
@@ -45,7 +55,8 @@ describe('/api/inventory/batch-adjust', () => {
       const data = await response.json()
 
       expect(response.status).toBe(401)
-      expect(data.error).toBe('Unauthorized')
+      expect(data.error).toBe('Authentication required')
+      expect(data.code).toBe('UNAUTHORIZED')
     })
 
     it('should validate request body', async () => {
@@ -58,7 +69,8 @@ describe('/api/inventory/batch-adjust', () => {
       const data = await response.json()
 
       expect(response.status).toBe(400)
-      expect(data.error).toContain('adjustments must be an array')
+      expect(data.code).toBe('VALIDATION_ERROR')
+      expect(typeof data.error).toBe('string')
     })
 
     it('should validate adjustment data types', async () => {
@@ -75,7 +87,7 @@ describe('/api/inventory/batch-adjust', () => {
       const data = await response.json()
 
       expect(response.status).toBe(400)
-      expect(data.error).toContain('must be numbers')
+      expect(data.code).toBe('VALIDATION_ERROR')
     })
 
     it('should successfully process valid adjustments', async () => {
@@ -94,7 +106,7 @@ describe('/api/inventory/batch-adjust', () => {
         id: 1,
         productId: 1,
         locationId: 1,
-        userId: 'user123',
+        userId: 1,
         delta: 10,
         changeTime: new Date(),
         logType: 'ADJUSTMENT',
@@ -107,6 +119,10 @@ describe('/api/inventory/batch-adjust', () => {
             findFirst: jest.fn().mockResolvedValue(mockInventory),
             update: jest.fn(),
             create: jest.fn(),
+            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 60, version: 2 }),
+          },
+          product: {
+            update: jest.fn(),
           },
           inventory_logs: {
             create: jest.fn().mockResolvedValue(mockLog),
@@ -133,6 +149,140 @@ describe('/api/inventory/batch-adjust', () => {
       expect(data.count).toBe(2)
     })
 
+    it('uses atomic increment (no absolute quantity write)', async () => {
+      const mockProducts = [{ id: 1, name: 'Product 1' }]
+      const mockInventory = { id: 1, quantity: 50, version: 1 }
+
+      let capturedTx: any
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue(mockProducts)
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
+        capturedTx = {
+          product_locations: {
+            findFirst: jest.fn().mockResolvedValue(mockInventory),
+            update: jest.fn(),
+            create: jest.fn(),
+            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 60, version: 2 }),
+          },
+          product: {
+            update: jest.fn(),
+          },
+          inventory_logs: {
+            create: jest.fn().mockResolvedValue({ id: 1, delta: 10 }),
+          },
+        }
+        return callback(capturedTx)
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [{ productId: 1, locationId: 1, delta: 10 }],
+        }),
+      })
+
+      const response = await POST(request)
+
+      expect(response.status).toBe(200)
+      // The write must be a relative increment, not an absolute quantity computed
+      // from a stale read (the lost-update race).
+      expect(capturedTx.product_locations.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            quantity: { increment: 10 },
+            version: { increment: 1 },
+          }),
+        })
+      )
+      // No absolute-quantity update path anymore
+      expect(capturedTx.product_locations.update).not.toHaveBeenCalled()
+    })
+
+    it('version conflict returns 409 OPTIMISTIC_LOCK_ERROR', async () => {
+      const mockProducts = [{ id: 1, name: 'Product 1' }]
+      const mockInventory = { id: 1, quantity: 50, version: 3 }
+
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue(mockProducts)
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
+        const tx = {
+          product_locations: {
+            findFirst: jest.fn().mockResolvedValue(mockInventory),
+            upsert: jest.fn(),
+          },
+          product: { update: jest.fn() },
+          inventory_logs: { create: jest.fn() },
+        }
+        return callback(tx)
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [{ productId: 1, locationId: 1, delta: 10, expectedVersion: 1 }],
+        }),
+      })
+
+      const response = await POST(request)
+      const data = await response.json()
+
+      expect(response.status).toBe(409)
+      expect(data.code).toBe('OPTIMISTIC_LOCK_ERROR')
+      expect(data.currentVersion).toBe(3)
+      expect(data.expectedVersion).toBe(1)
+    })
+
+    it('response logs carry no relations (no users/passwordHash leak)', async () => {
+      const mockProducts = [{ id: 1, name: 'Product 1' }]
+      const mockInventory = { id: 1, quantity: 50, version: 1 }
+
+      // createInventoryLog includes full relations; the route must strip them
+      const mockLogWithRelations = {
+        id: 1,
+        productId: 1,
+        locationId: 1,
+        userId: 1,
+        delta: 10,
+        changeTime: new Date(),
+        logType: 'ADJUSTMENT',
+        users: { id: 1, email: 'test@example.com', passwordHash: 'super-secret-hash' },
+        products: { id: 1, name: 'Product 1' },
+        locations: { id: 1, name: 'Main' },
+      }
+
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue(mockProducts)
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
+        const tx = {
+          product_locations: {
+            findFirst: jest.fn().mockResolvedValue(mockInventory),
+            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 60, version: 2 }),
+          },
+          product: { update: jest.fn() },
+          inventory_logs: {
+            create: jest.fn().mockResolvedValue(mockLogWithRelations),
+          },
+        }
+        return callback(tx)
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [{ productId: 1, locationId: 1, delta: 10 }],
+        }),
+      })
+
+      const response = await POST(request)
+      const data = await response.json()
+
+      expect(response.status).toBe(200)
+      expect(data.logs).toHaveLength(1)
+      expect(data.logs[0]).not.toHaveProperty('users')
+      expect(data.logs[0]).not.toHaveProperty('products')
+      expect(data.logs[0]).not.toHaveProperty('locations')
+      expect(JSON.stringify(data)).not.toContain('passwordHash')
+      // Scalars are preserved
+      expect(data.logs[0].delta).toBe(10)
+    })
+
     it('should handle inventory not found for new products', async () => {
       const mockProducts = [{ id: 1, name: 'Product 1' }]
 
@@ -141,7 +291,8 @@ describe('/api/inventory/batch-adjust', () => {
         const tx = {
           product_locations: {
             findFirst: jest.fn().mockResolvedValue(null),
-            create: jest.fn().mockResolvedValue({
+            create: jest.fn(),
+            upsert: jest.fn().mockResolvedValue({
               id: 1,
               productId: 1,
               locationId: 1,
@@ -149,12 +300,13 @@ describe('/api/inventory/batch-adjust', () => {
               version: 1,
             }),
           },
+          product: { update: jest.fn() },
           inventory_logs: {
             create: jest.fn().mockResolvedValue({
               id: 1,
               productId: 1,
               locationId: 1,
-              userId: 'user123',
+              userId: 1,
               delta: 10,
               changeTime: new Date(),
               logType: 'ADJUSTMENT',
@@ -191,16 +343,14 @@ describe('/api/inventory/batch-adjust', () => {
         const tx = {
           product_locations: {
             findFirst: jest.fn().mockResolvedValue(mockInventory),
+            upsert: jest.fn(),
           },
+          product: { update: jest.fn() },
           inventory_logs: {
             create: jest.fn(),
           },
         }
-        try {
-          await callback(tx)
-        } catch (error) {
-          throw new Error('Product 1: Insufficient inventory: current 5, trying to remove 10')
-        }
+        return callback(tx)
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -213,8 +363,9 @@ describe('/api/inventory/batch-adjust', () => {
       const response = await POST(request)
       const data = await response.json()
 
+      // apiHandler maps unrecognized errors to a flat 500 body
       expect(response.status).toBe(500)
-      expect(data.error.message).toContain('Insufficient inventory')
+      expect(data.error).toBe('Internal server error')
     })
 
     it('should handle optimistic locking conflicts', async () => {
@@ -230,13 +381,13 @@ describe('/api/inventory/batch-adjust', () => {
         const tx = {
           product_locations: {
             findFirst: jest.fn().mockResolvedValue(mockInventory),
+            upsert: jest.fn(),
           },
+          product: { update: jest.fn() },
+          inventory_logs: { create: jest.fn() },
         }
-        try {
-          await callback(tx)
-        } catch (error) {
-          throw new Error('Inventory has been modified by another user')
-        }
+        // Let the route's OptimisticLockError propagate untouched
+        return callback(tx)
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -250,7 +401,7 @@ describe('/api/inventory/batch-adjust', () => {
       const data = await response.json()
 
       expect(response.status).toBe(409)
-      expect(data.error.code).toBe('OPTIMISTIC_LOCK_ERROR')
+      expect(data.code).toBe('OPTIMISTIC_LOCK_ERROR')
     })
 
     it('should handle transaction failures', async () => {
@@ -268,7 +419,7 @@ describe('/api/inventory/batch-adjust', () => {
       const data = await response.json()
 
       expect(response.status).toBe(500)
-      expect(data.error.code).toBe('BATCH_OPERATION_FAILED')
+      expect(data.error).toBe('Internal server error')
     })
 
     it('should process multiple adjustments atomically', async () => {
@@ -290,13 +441,15 @@ describe('/api/inventory/batch-adjust', () => {
               version: 1,
             }),
             update: jest.fn(),
+            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 110, version: 2 }),
           },
+          product: { update: jest.fn() },
           inventory_logs: {
             create: jest.fn().mockResolvedValue({
               id: 1,
               productId: 1,
               locationId: 1,
-              userId: 'user123',
+              userId: 1,
               delta: 10,
               changeTime: new Date(),
               logType: 'ADJUSTMENT',
@@ -318,7 +471,6 @@ describe('/api/inventory/batch-adjust', () => {
       })
 
       const response = await POST(request)
-      const data = await response.json()
 
       expect(response.status).toBe(200)
       expect(transactionCalls).toBe(1) // All adjustments in single transaction

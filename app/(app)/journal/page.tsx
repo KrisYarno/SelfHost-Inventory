@@ -140,6 +140,12 @@ export default function JournalPage() {
       if (!response.ok) {
         const errorData = await response.json();
 
+        // apiHandler returns flat 409 bodies ({ error: string, code: "OPTIMISTIC_LOCK_ERROR" });
+        // normalize to the nested shape so the conflict toast + auto-refresh below fire.
+        if (errorData.code === "OPTIMISTIC_LOCK_ERROR" && typeof errorData.error === "string") {
+          errorData.error = { message: errorData.error, code: errorData.code };
+        }
+
         // Handle structured error response
         if (errorData.error && typeof errorData.error === "object") {
           const { message, code, context } = errorData.error;
