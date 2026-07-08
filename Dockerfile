@@ -19,6 +19,10 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
+# Day bucketing (reports date-fns + analytics dayKey) assumes UTC; today that is
+# only true by omission (no tzdata in alpine). Pin it so a base-image or host
+# change can never silently shift report day boundaries.
+ENV TZ=UTC
 
 # Install curl for healthcheck and mariadb-client for on-demand backups
 RUN apk add --no-cache curl mariadb-client
