@@ -1,75 +1,88 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { subDays } from "date-fns";
 import { UserActivityResponse, UserActivitySummary } from "@/types/reports";
 
 export const dynamic = "force-dynamic";
 
-export const GET = apiHandler(async () => {
+// Default trailing window applied when the client sends no explicit range.
+// The reports "User Activity" panel (components/reports/user-activity.tsx) fetches this
+// endpoint with NO query params, so without a bound this route used to read the ENTIRE
+// inventory_logs table into memory every request. A 1-year trailing window bounds the
+// scan while preserving the panel's semantics in practice: for an active inventory
+// virtually all meaningful activity (and the >100/>50 activity-level buckets the card
+// renders) falls inside the last year. Explicit startDate/endDate override the default.
+const USER_ACTIVITY_WINDOW_DAYS = 365;
+
+export const GET = apiHandler(async (request: NextRequest) => {
   await requireApproved();
+
+  const searchParams = request.nextUrl.searchParams;
+  const startDateParam = searchParams.get("startDate");
+  const endDateParam = searchParams.get("endDate");
+
+  // Bound the query: explicit range if supplied, otherwise a trailing default window.
+  const rangeStart = startDateParam ? new Date(startDateParam) : subDays(new Date(), USER_ACTIVITY_WINDOW_DAYS);
+  const rangeEnd = endDateParam ? new Date(endDateParam) : null; // open-ended to "now"
 
   // Get all users
   const users = await prisma.user.findMany({
     where: { isApproved: true },
   });
+  const userIds = users.map((u) => u.id);
 
-  // Fetch all logs in a single query instead of 5 queries per user
-  const allLogs = await prisma.inventory_logs.findMany({
-    where: {
-      userId: { in: users.map((u) => u.id) },
-    },
-    select: {
-      userId: true,
-      delta: true,
-      logType: true,
-      changeTime: true,
-    },
-  });
+  // Shared changeTime window + approved-user filter reused by every aggregate below.
+  const changeTime: { gte: Date; lte?: Date } = { gte: rangeStart };
+  if (rangeEnd) changeTime.lte = rangeEnd;
+  const baseWhere = { userId: { in: userIds }, changeTime };
 
-  // Aggregate in JS
-  const statsMap = new Map<
-    number,
-    {
-      totalTransactions: number;
-      stockInCount: number;
-      stockOutCount: number;
-      adjustmentCount: number;
-      lastActivity: Date | null;
-    }
-  >();
+  // Aggregate in the DB via groupBy instead of streaming the whole table into JS.
+  // Each grouped query returns at most one row per user, so nothing unbounded is
+  // materialized in memory (a hard row cap is unnecessary once aggregation is pushed
+  // down). Conditional counts (in/out/adjustment) cannot share a single groupBy, so
+  // they run as four cheap parallel aggregates over the covering index
+  // idx_inventory_logs_user_covering(userId, changeTime, ..., delta).
+  const [totals, stockIn, stockOut, adjustments] = await Promise.all([
+    prisma.inventory_logs.groupBy({
+      by: ["userId"],
+      where: baseWhere,
+      _count: { _all: true },
+      _max: { changeTime: true },
+    }),
+    prisma.inventory_logs.groupBy({
+      by: ["userId"],
+      where: { ...baseWhere, delta: { gt: 0 } },
+      _count: { _all: true },
+    }),
+    prisma.inventory_logs.groupBy({
+      by: ["userId"],
+      where: { ...baseWhere, delta: { lt: 0 } },
+      _count: { _all: true },
+    }),
+    prisma.inventory_logs.groupBy({
+      by: ["userId"],
+      where: { ...baseWhere, logType: "ADJUSTMENT" },
+      _count: { _all: true },
+    }),
+  ]);
 
-  for (const log of allLogs) {
-    let stats = statsMap.get(log.userId);
-    if (!stats) {
-      stats = {
-        totalTransactions: 0,
-        stockInCount: 0,
-        stockOutCount: 0,
-        adjustmentCount: 0,
-        lastActivity: null,
-      };
-      statsMap.set(log.userId, stats);
-    }
-
-    stats.totalTransactions++;
-    if (log.delta > 0) stats.stockInCount++;
-    if (log.delta < 0) stats.stockOutCount++;
-    if (log.logType === "ADJUSTMENT") stats.adjustmentCount++;
-    if (!stats.lastActivity || log.changeTime > stats.lastActivity) {
-      stats.lastActivity = log.changeTime;
-    }
-  }
+  const totalMap = new Map<number, { count: number; last: Date | null }>();
+  totals.forEach((t) => totalMap.set(t.userId, { count: t._count._all, last: t._max.changeTime }));
+  const stockInMap = new Map<number, number>(stockIn.map((s) => [s.userId, s._count._all]));
+  const stockOutMap = new Map<number, number>(stockOut.map((s) => [s.userId, s._count._all]));
+  const adjustmentMap = new Map<number, number>(adjustments.map((s) => [s.userId, s._count._all]));
 
   const userActivities: UserActivitySummary[] = users.map((user) => {
-    const stats = statsMap.get(user.id);
+    const total = totalMap.get(user.id);
     return {
       userId: user.id,
       username: user.username,
-      totalTransactions: stats?.totalTransactions || 0,
-      stockInCount: stats?.stockInCount || 0,
-      stockOutCount: stats?.stockOutCount || 0,
-      adjustmentCount: stats?.adjustmentCount || 0,
-      lastActivity: stats?.lastActivity || null,
+      totalTransactions: total?.count ?? 0,
+      stockInCount: stockInMap.get(user.id) ?? 0,
+      stockOutCount: stockOutMap.get(user.id) ?? 0,
+      adjustmentCount: adjustmentMap.get(user.id) ?? 0,
+      lastActivity: total?.last ?? null,
     };
   });
 

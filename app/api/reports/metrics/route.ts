@@ -15,6 +15,13 @@ import {
 
 export const dynamic = "force-dynamic";
 
+// The low-stock trend compares the latest snapshot day against the snapshot day ~7 days
+// earlier. Bounding the heavy per-(product,day) groupBy to this window (plus generous slack
+// for snapshot/backfill gaps) avoids scanning ALL of product_stock_snapshots history for a
+// short trailing trend. The floor is anchored on the latest snapshot day (not "today") so a
+// lagging snapshot feed can never shrink the window and change the computed trend.
+const LOW_STOCK_TREND_WINDOW_DAYS = 30;
+
 // Subtract N days from a 'YYYY-MM-DD' dayKey using UTC math (dayKey is TZ-safe; never date-fns format()).
 function subtractDays(dayKey: string, n: number): string {
   const d = new Date(`${dayKey}T00:00:00.000Z`);
@@ -207,13 +214,28 @@ export const GET = apiHandler(async (request: NextRequest) => {
     direction: "stable",
   };
 
-  // Per (productId, dayKey) SUM of location snapshots (respecting the selected location).
-  const snapshotRows = await prisma.productStockSnapshot.groupBy({
-    by: ["productId", "dayKey"],
-    where: { ...(locationId ? { locationId: parseInt(locationId) } : {}) },
-    _sum: { quantity: true },
-    orderBy: { dayKey: "asc" },
+  // Find the latest snapshot day first (cheap, indexed on dayKey), then bound the heavy
+  // per-(product,day) groupBy to just the trend window instead of ALL snapshot history.
+  const snapshotLocationFilter = locationId ? { locationId: parseInt(locationId) } : {};
+  const latestSnapshot = await prisma.productStockSnapshot.aggregate({
+    where: snapshotLocationFilter,
+    _max: { dayKey: true },
   });
+  const latestSnapshotDay = latestSnapshot._max.dayKey;
+
+  // Per (productId, dayKey) SUM of location snapshots (respecting the selected location),
+  // limited to [latestDay - window, latestDay]. Empty when there are no snapshots at all.
+  const snapshotRows = latestSnapshotDay
+    ? await prisma.productStockSnapshot.groupBy({
+        by: ["productId", "dayKey"],
+        where: {
+          ...snapshotLocationFilter,
+          dayKey: { gte: subtractDays(latestSnapshotDay, LOW_STOCK_TREND_WINDOW_DAYS) },
+        },
+        _sum: { quantity: true },
+        orderBy: { dayKey: "asc" },
+      })
+    : [];
 
   if (snapshotRows.length > 0) {
     // Threshold per product (reuse the predicate's source: product.lowStockThreshold ?? 10).

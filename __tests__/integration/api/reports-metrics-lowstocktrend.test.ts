@@ -9,7 +9,7 @@ jest.mock("@/lib/prisma", () => ({
     product: { count: jest.fn(), findMany: jest.fn() },
     product_locations: { findMany: jest.fn() },
     inventory_logs: { groupBy: jest.fn(), count: jest.fn() },
-    productStockSnapshot: { groupBy: jest.fn() },
+    productStockSnapshot: { groupBy: jest.fn(), aggregate: jest.fn() },
   },
 }));
 
@@ -22,7 +22,7 @@ const m = prisma as unknown as {
   product: { count: jest.Mock; findMany: jest.Mock };
   product_locations: { findMany: jest.Mock };
   inventory_logs: { groupBy: jest.Mock; count: jest.Mock };
-  productStockSnapshot: { groupBy: jest.Mock };
+  productStockSnapshot: { groupBy: jest.Mock; aggregate: jest.Mock };
 };
 
 beforeEach(() => {
@@ -37,13 +37,19 @@ beforeEach(() => {
   m.product_locations.findMany.mockResolvedValue([]);
   m.inventory_logs.groupBy.mockResolvedValue([]);
   m.inventory_logs.count.mockResolvedValue(0);
+  // Latest snapshot day drives the trend-window floor; default to a fixed day so the
+  // bounded groupBy runs. The "no snapshots" case overrides this to a null max.
+  m.productStockSnapshot.aggregate.mockResolvedValue({ _max: { dayKey: "2026-06-08" } });
   m.productStockSnapshot.groupBy.mockResolvedValue([]);
 });
 
 test("no snapshots => lowStockTrend defaults to {value:0, direction:'stable'} (card never breaks)", async () => {
+  // No snapshot rows at all => aggregate max dayKey is null => the heavy groupBy is skipped.
+  m.productStockSnapshot.aggregate.mockResolvedValue({ _max: { dayKey: null } });
   const res = await GET(new NextRequest("http://x/api/reports/metrics"));
   const body = await res.json();
   expect(body.metrics.lowStockTrend).toEqual({ value: 0, direction: "stable" });
+  expect(m.productStockSnapshot.groupBy).not.toHaveBeenCalled();
 });
 
 test("<2 distinct snapshot days => stable", async () => {
@@ -90,4 +96,13 @@ test("no locationId => snapshot groupBy is GLOBAL (no locationId in where)", asy
   await GET(new NextRequest("http://x/api/reports/metrics"));
   const arg = m.productStockSnapshot.groupBy.mock.calls[0][0];
   expect(arg.where).not.toHaveProperty("locationId");
+});
+
+test("snapshot groupBy is bounded to a trailing window floored on the latest snapshot day", async () => {
+  // Latest snapshot day 2026-06-08 => floor = 2026-06-08 minus the 30-day window = 2026-05-09.
+  m.productStockSnapshot.aggregate.mockResolvedValue({ _max: { dayKey: "2026-06-08" } });
+  m.productStockSnapshot.groupBy.mockResolvedValue([]);
+  await GET(new NextRequest("http://x/api/reports/metrics"));
+  const arg = m.productStockSnapshot.groupBy.mock.calls[0][0];
+  expect(arg.where.dayKey).toEqual({ gte: "2026-05-09" });
 });
