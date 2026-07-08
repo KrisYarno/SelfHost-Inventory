@@ -147,7 +147,6 @@ export const POST = apiHandler(async (request: NextRequest) => {
   console.log("=== MASS UPDATE POST START ===");
   console.log("Request method:", request.method);
   console.log("Request URL:", request.url);
-  console.log("Request headers:", Object.fromEntries(request.headers.entries()));
 
   const { user } = await requireAdmin();
   console.log(

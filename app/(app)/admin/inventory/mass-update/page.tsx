@@ -183,7 +183,7 @@ export default function AdminMassInventoryUpdatePage() {
 
     // Check for CSRF token
     if (!csrfToken && !csrfLoading) {
-      console.error("CSRF token not available", { csrfToken, csrfLoading, csrfError });
+      console.error("CSRF token not available", { hasToken: Boolean(csrfToken), csrfLoading, csrfError });
       toast.error("Security token not available. Please refresh the page.");
       return;
     }
