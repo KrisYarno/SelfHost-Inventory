@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
 import { BulkUserIdsSchema } from "@/lib/validation/admin";
@@ -8,6 +8,8 @@ export const dynamic = "force-dynamic";
 
 export const POST = apiHandler(async (request: NextRequest) => {
   const { user } = await requireAdmin();
+
+  await requireCSRF(request);
 
   const body = await request.json();
   const { userIds } = BulkUserIdsSchema.parse(body);

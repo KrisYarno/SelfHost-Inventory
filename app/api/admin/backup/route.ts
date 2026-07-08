@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
+import { enforceRateLimit } from "@/lib/rateLimit";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -67,8 +68,17 @@ export const GET = apiHandler(async (req: NextRequest) => {
   return new Response(JSON.stringify({ error: "Bad request" }), { status: 400 });
 });
 
-export const POST = apiHandler(async () => {
-  await requireAdmin();
+export const POST = apiHandler(async (req: NextRequest) => {
+  const { user } = await requireAdmin();
+
+  // Tight limit: full-DB mysqldump spawns a shell process and is expensive.
+  const rateLimitHeaders = enforceRateLimit(req, "admin-backup:POST", {
+    identifier: user.id,
+    limit: 3,
+    ttl: 60 * 60 * 1000, // 1 hour
+  });
+
+  await requireCSRF(req);
 
   const dir = getBackupDir();
   const ts = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19);
@@ -142,6 +152,7 @@ export const POST = apiHandler(async () => {
   const ab = new Uint8Array(res.out).buffer;
   return new Response(ab, {
     headers: {
+      ...rateLimitHeaders,
       "content-type": "application/sql",
       "content-disposition": `attachment; filename=\"${filename}\"`,
     },

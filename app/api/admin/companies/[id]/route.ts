@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -43,6 +43,8 @@ export const PUT = apiHandler(async (
   { params }: { params: { id: string } }
 ) => {
   await requireAdmin();
+
+  await requireCSRF(request);
 
   const body = await request.json();
   const { name, slug } = body;
@@ -96,6 +98,8 @@ export const DELETE = apiHandler(async (
   { params }: { params: { id: string } }
 ) => {
   await requireAdmin();
+
+  await requireCSRF(request);
 
   // Check if company exists and whether it is safe to delete
   const company = await prisma.company.findUnique({

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { encryptValue } from "@/lib/encryption";
 
@@ -50,6 +50,8 @@ export const GET = apiHandler(async (_request: NextRequest) => {
  */
 export const POST = apiHandler(async (request: NextRequest) => {
   await requireAdmin();
+
+  await requireCSRF(request);
 
   const body = await request.json();
   const {

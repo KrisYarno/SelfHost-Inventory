@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -13,6 +13,8 @@ interface RouteParams {
 // POST /api/admin/products/[id]/restore - Restore a soft deleted product (Admin only)
 export const POST = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   await requireAdmin();
+
+  await requireCSRF(request);
 
   const productId = parseInt(params.id);
   if (isNaN(productId)) {

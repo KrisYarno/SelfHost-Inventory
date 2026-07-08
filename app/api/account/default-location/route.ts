@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth, apiHandler } from "@/lib/api-utils";
+import { requireAuth, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
 export const PATCH = apiHandler(async (request: NextRequest) => {
   const { user } = await requireAuth();
+
+  await requireCSRF(request);
 
   const body = await request.json();
   const { locationId } = body;

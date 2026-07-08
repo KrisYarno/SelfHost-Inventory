@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Download, HardDrive, RefreshCw } from "lucide-react";
+import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 interface ListedFile {
   name: string;
@@ -11,6 +12,7 @@ interface ListedFile {
 }
 
 export default function AdminBackupPage() {
+  const { token: csrfToken } = useCSRF();
   const [files, setFiles] = useState<ListedFile[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -30,7 +32,10 @@ export default function AdminBackupPage() {
   const createBackup = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/admin/backup", { method: "POST" });
+      const res = await fetch("/api/admin/backup", {
+        method: "POST",
+        headers: withCSRFHeaders({}, csrfToken),
+      });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         alert(j.error || "Backup failed");

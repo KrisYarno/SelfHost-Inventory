@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { headers } from "next/headers";
+import { validateCSRFToken } from "@/lib/csrf";
 
 export async function GET(request: NextRequest) {
   try {
@@ -93,6 +94,15 @@ export async function POST(request: NextRequest) {
     const session = await getServerSession(authOptions);
     if (!session?.user?.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    // This route does not use apiHandler, so validate CSRF inline. Mirrors the
+    // requireCSRF helper's 403 { error, code: 'CSRF_INVALID' } response shape.
+    if (!(await validateCSRFToken(request))) {
+      return NextResponse.json(
+        { error: "Invalid CSRF token", code: "CSRF_INVALID" },
+        { status: 403 }
+      );
     }
 
     const body = await request.json();

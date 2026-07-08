@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
 
@@ -7,6 +7,8 @@ export const dynamic = "force-dynamic";
 
 export const DELETE = apiHandler(async (request: NextRequest, { params }: { params: { userId: string } }) => {
   const { user: adminUser } = await requireAdmin();
+
+  await requireCSRF(request);
 
   const userId = parseInt(params.userId);
   if (isNaN(userId)) {

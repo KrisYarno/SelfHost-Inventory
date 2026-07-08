@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
 export const POST = apiHandler(async (request: NextRequest, { params }: { params: { id: string } }) => {
   const { user } = await requireAdmin();
+
+  await requireCSRF(request);
 
   const productId = parseInt(params.id);
   if (isNaN(productId)) {

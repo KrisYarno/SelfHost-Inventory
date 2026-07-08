@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { auditService } from "@/lib/audit";
 import type { AuditActionType, EntityType } from "@/lib/audit";
 import { z } from "zod";
@@ -58,6 +58,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
 // GET specific batch logs
 export const POST = apiHandler(async (request: NextRequest) => {
   await requireAdmin();
+
+  await requireCSRF(request);
 
   const body = await request.json();
   const { batchId } = body;

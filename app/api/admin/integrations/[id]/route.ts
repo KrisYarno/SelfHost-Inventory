@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdmin, apiHandler } from "@/lib/api-utils";
+import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { encryptValue } from "@/lib/encryption";
 
@@ -56,6 +56,8 @@ export const PUT = apiHandler(async (
   { params }: { params: { id: string } }
 ) => {
   await requireAdmin();
+
+  await requireCSRF(request);
 
   const body = await request.json();
   const {
@@ -139,6 +141,8 @@ export const DELETE = apiHandler(async (
   { params }: { params: { id: string } }
 ) => {
   await requireAdmin();
+
+  await requireCSRF(request);
 
   // Check if integration exists
   const integration = await prisma.integration.findUnique({
