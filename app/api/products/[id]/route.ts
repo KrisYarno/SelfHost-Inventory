@@ -116,6 +116,11 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
     });
   }
 
+  // Size fields are safe to pass through: formatProductName derives name from
+  // baseName+variant only, so unit/numericValue never affect the derived name.
+  if (body.unit !== undefined) updateData.unit = body.unit;
+  if (body.numericValue !== undefined) updateData.numericValue = body.numericValue;
+
   if (body.lowStockThreshold !== undefined) {
     updateData.lowStockThreshold = Math.max(0, body.lowStockThreshold);
   }
@@ -141,6 +146,18 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
   }
   if (body.variant !== undefined && body.variant !== existingProduct.variant) {
     changes.variant = { from: existingProduct.variant, to: body.variant };
+  }
+  if (body.unit !== undefined && body.unit !== existingProduct.unit) {
+    changes.unit = { from: existingProduct.unit, to: body.unit };
+  }
+  if (
+    body.numericValue !== undefined &&
+    Number(body.numericValue) !== Number(existingProduct.numericValue)
+  ) {
+    changes.numericValue = {
+      from: existingProduct.numericValue === null ? null : Number(existingProduct.numericValue),
+      to: body.numericValue,
+    };
   }
   if (body.lowStockThreshold !== undefined && body.lowStockThreshold !== existingProduct.lowStockThreshold) {
     changes.lowStockThreshold = { from: existingProduct.lowStockThreshold, to: body.lowStockThreshold };
