@@ -145,6 +145,8 @@ describe('EXCLUDE route: GET /api/reports/metrics', () => {
     db.inventory_logs.groupBy.mockResolvedValue([] as any);
     db.inventory_logs.count.mockResolvedValue(0 as any);
     // B8 (T4): the metrics route now reads stock snapshots for lowStockTrend; stub the new query.
+    // aggregate resolves the latest snapshot day first; null skips the trend groupBy entirely.
+    db.productStockSnapshot.aggregate.mockResolvedValue({ _max: { dayKey: null } } as any);
     db.productStockSnapshot.groupBy.mockResolvedValue([] as any);
 
     const resp = await metricsGET(mkReq('http://t/api/reports/metrics'));
