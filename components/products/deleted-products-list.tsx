@@ -1,6 +1,5 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -8,7 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { RotateCcw, Trash2, Package } from "lucide-react";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
 
 interface DeletedProduct {
@@ -26,62 +25,57 @@ interface DeletedProduct {
 }
 
 export function DeletedProductsList() {
-  const [products, setProducts] = useState<DeletedProduct[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [restoringId, setRestoringId] = useState<number | null>(null);
   const { token: csrfToken } = useCSRF();
   const queryClient = useQueryClient();
 
-  const loadDeletedProducts = async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
+  const {
+    data: products = [],
+    isLoading,
+    isError,
+    refetch,
+  } = useQuery<DeletedProduct[]>({
+    queryKey: ["deleted-products"],
+    queryFn: async () => {
       const res = await fetch("/api/admin/products/deleted");
       if (!res.ok) throw new Error("Failed to load deleted products");
       const data = await res.json();
-      setProducts(data.products ?? []);
-    } catch (err) {
-      console.error("Error loading deleted products:", err);
-      setError("Unable to load deleted products. Please try again.");
-    } finally {
-      setIsLoading(false);
-    }
-  };
+      return (data.products ?? []) as DeletedProduct[];
+    },
+  });
 
-  useEffect(() => {
-    loadDeletedProducts();
-  }, []);
-
-  const handleRestore = async (product: DeletedProduct) => {
-    if (!csrfToken) {
-      toast.error("Security token not ready. Please wait a moment and try again.");
-      return;
-    }
-
-    setRestoringId(product.id);
-    try {
+  const restoreMutation = useMutation({
+    mutationFn: async (product: DeletedProduct) => {
       const res = await fetch(`/api/admin/products/${product.id}/restore`, {
         method: "POST",
         headers: withCSRFHeaders({}, csrfToken),
       });
-
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || "Failed to restore product");
       }
-
+      return res.json().catch(() => ({}));
+    },
+    onSuccess: (_data, product) => {
       toast.success(`"${product.name}" has been restored`);
-      // Remove from local list
-      setProducts((prev) => prev.filter((p) => p.id !== product.id));
-      // Invalidate product queries so the main list refreshes
+      // Refresh the deleted list (this component) and the main product list.
+      queryClient.invalidateQueries({ queryKey: ["deleted-products"] });
       queryClient.invalidateQueries({ queryKey: ["products"] });
-    } catch (err) {
+    },
+    onError: (err) => {
       console.error("Error restoring product:", err);
       toast.error(err instanceof Error ? err.message : "Failed to restore product");
-    } finally {
-      setRestoringId(null);
+    },
+  });
+  const restoringId = restoreMutation.isPending
+    ? restoreMutation.variables?.id ?? null
+    : null;
+
+  const handleRestore = (product: DeletedProduct) => {
+    if (!csrfToken) {
+      toast.error("Security token not ready. Please wait a moment and try again.");
+      return;
     }
+    restoreMutation.mutate(product);
   };
 
   if (isLoading) {
@@ -94,11 +88,13 @@ export function DeletedProductsList() {
     );
   }
 
-  if (error) {
+  if (isError) {
     return (
       <div className="text-center py-8">
-        <p className="text-destructive mb-2">{error}</p>
-        <Button variant="outline" onClick={loadDeletedProducts}>
+        <p className="text-destructive mb-2">
+          Unable to load deleted products. Please try again.
+        </p>
+        <Button variant="outline" onClick={() => refetch()}>
           Retry
         </Button>
       </div>

@@ -13,6 +13,8 @@ import {
 import { ProductForm } from "./product-form";
 import { toast } from "sonner";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { useLocations } from "@/hooks/use-staging";
+import { useQueryClient } from "@tanstack/react-query";
 
 interface CreateProductDialogProps {
   open: boolean;
@@ -24,48 +26,37 @@ export function CreateProductDialog({
   onOpenChange,
 }: CreateProductDialogProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [locations, setLocations] = useState<Array<{ id: number; name: string }>>([]);
-  const [locationsLoading, setLocationsLoading] = useState(false);
   const [defaultLocationId, setDefaultLocationId] = useState<number | undefined>(undefined);
   const [formError, setFormError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string> | null>(null);
-  const [locationError, setLocationError] = useState<string | null>(null);
   const router = useRouter();
   const { data: session } = useSession();
   const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
+  const queryClient = useQueryClient();
 
+  // Locations are fetched (and cached) the moment the dialog opens.
+  const {
+    data: locations = [],
+    isFetching: locationsLoading,
+    isError: locationsIsError,
+    error: locationsError,
+  } = useLocations(open);
+  const locationError = locationsIsError
+    ? locationsError instanceof Error
+      ? locationsError.message
+      : "Failed to fetch locations"
+    : null;
+
+  // Resolve the default location once the catalog is available.
   useEffect(() => {
-    if (open && csrfToken && !csrfLoading) {
-      // Fetch locations when dialog opens
-      setLocationsLoading(true);
-      setLocationError(null);
-      fetch("/api/locations", {
-        headers: withCSRFHeaders({}, csrfToken),
-      })
-        .then(async (res) => {
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.error || "Failed to fetch locations");
-          }
-          return res.json();
-        })
-        .then(data => {
-          if (data.locations) {
-            setLocations(data.locations);
-            const userDefault = session?.user?.defaultLocationId;
-            const firstLocation = data.locations[0]?.id;
-            const resolvedDefault = data.locations.find((l: any) => l.id === userDefault)?.id || firstLocation;
-            setDefaultLocationId(resolvedDefault);
-          }
-        })
-        .catch(err => {
-          console.error("Failed to fetch locations:", err);
-          setLocationError(err instanceof Error ? err.message : "Failed to fetch locations");
-          setFormError(err instanceof Error ? err.message : "Failed to fetch locations");
-        })
-        .finally(() => setLocationsLoading(false));
+    if (open && locations.length > 0) {
+      const userDefault = session?.user?.defaultLocationId;
+      const firstLocation = locations[0]?.id;
+      const resolvedDefault =
+        locations.find((l) => l.id === userDefault)?.id || firstLocation;
+      setDefaultLocationId(resolvedDefault);
     }
-  }, [open, csrfToken, csrfLoading, session?.user?.defaultLocationId]);
+  }, [open, locations, session?.user?.defaultLocationId]);
 
   const handleSubmit = async (data: any) => {
     try {
@@ -112,10 +103,12 @@ export function CreateProductDialog({
       }
 
       const product = await response.json();
-      
+
       toast.success(`Product "${product.name}" created successfully`);
       onOpenChange(false);
-      router.refresh(); // Refresh the page to show the new product
+      // Refresh the react-query product list (ProductListOptimized) + server tree.
+      queryClient.invalidateQueries({ queryKey: ["products"] });
+      router.refresh();
     } catch (error) {
       console.error("Error creating product:", error);
       const message = error instanceof Error ? error.message : "Failed to create product";
@@ -142,7 +135,7 @@ export function CreateProductDialog({
           isSubmitting={isSubmitting || csrfLoading || locationsLoading}
           disableSubmit={csrfLoading || locationsLoading || !!locationError || !csrfToken}
           locations={locations}
-          externalError={formError}
+          externalError={formError ?? locationError}
           defaultLocationId={defaultLocationId}
           externalFieldErrors={fieldErrors || undefined}
         />

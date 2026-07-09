@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Search, Loader2, AlertCircle, Package } from "lucide-react";
 import { toast } from "sonner";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { useCSRF } from "@/hooks/use-csrf";
+import { useDebounce } from "@/hooks/use-debounce";
+import { useGraduateStagingItem } from "@/hooks/use-staging";
 import {
   Dialog,
   DialogContent,
@@ -61,23 +64,22 @@ export function GraduateDialog({
   onSuccess,
 }: GraduateDialogProps) {
   const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
+  const graduateMutation = useGraduateStagingItem();
+  const isSubmitting = graduateMutation.isPending;
 
   const [mode, setMode] = useState<Mode>("existing");
   const [countedQuantity, setCountedQuantity] = useState("");
   const [locationId, setLocationId] = useState<number | undefined>(undefined);
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Existing-branch product search
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [results, setResults] = useState<ProductSearchResult[]>([]);
-  const [searching, setSearching] = useState(false);
   const [selectedProduct, setSelectedProduct] =
     useState<ProductSearchResult | null>(null);
 
   // New-branch: best-effort "name already exists" soft warning
   const [newBaseName, setNewBaseName] = useState("");
-  const [duplicateName, setDuplicateName] = useState<string | null>(null);
+  const debouncedNewName = useDebounce(newBaseName.trim(), 350);
 
   // Reset everything when the dialog opens for a (new) item.
   useEffect(() => {
@@ -89,89 +91,68 @@ export function GraduateDialog({
       setLocationId(item.locationId);
       setSearch("");
       setDebouncedSearch("");
-      setResults([]);
       setSelectedProduct(null);
       setNewBaseName("");
-      setDuplicateName(null);
     }
   }, [open, item]);
 
-  // Debounce the search input.
+  // Debounce the search input (client state; keys the query below).
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
     return () => clearTimeout(t);
   }, [search]);
 
-  // Existing-branch search against the product catalog.
-  useEffect(() => {
-    if (!open || mode !== "existing" || debouncedSearch.length === 0) {
-      setResults([]);
-      return;
-    }
-    let cancelled = false;
-    setSearching(true);
-    fetch(
-      `/api/products?search=${encodeURIComponent(debouncedSearch)}&pageSize=20`
-    )
-      .then((res) => {
-        if (!res.ok) throw new Error("search failed");
-        return res.json();
-      })
-      .then((data) => {
-        if (cancelled) return;
-        const list: ProductSearchResult[] = (data.products ?? []).map(
-          (p: { id: number; name: string; approvalStatus?: string }) => ({
-            id: p.id,
-            name: p.name,
-            approvalStatus: p.approvalStatus,
-          })
-        );
-        setResults(list);
-      })
-      .catch(() => {
-        if (!cancelled) setResults([]);
-      })
-      .finally(() => {
-        if (!cancelled) setSearching(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, mode, debouncedSearch]);
+  // Existing-branch search against the product catalog. placeholderData keeps
+  // the prior results on screen while the next term loads.
+  const searchEnabled =
+    open && mode === "existing" && debouncedSearch.length > 0;
+  const { data: searchData, isFetching: searching } = useQuery({
+    queryKey: ["product-search", debouncedSearch],
+    queryFn: async ({ signal }) => {
+      const res = await fetch(
+        `/api/products?search=${encodeURIComponent(debouncedSearch)}&pageSize=20`,
+        { signal }
+      );
+      if (!res.ok) throw new Error("search failed");
+      return res.json();
+    },
+    enabled: searchEnabled,
+    placeholderData: (prev) => prev,
+    staleTime: 30_000,
+  });
+  const results: ProductSearchResult[] = searchEnabled
+    ? (searchData?.products ?? []).map(
+        (p: { id: number; name: string; approvalStatus?: string }) => ({
+          id: p.id,
+          name: p.name,
+          approvalStatus: p.approvalStatus,
+        })
+      )
+    : [];
 
   // Best-effort duplicate-name check for the New branch (non-blocking).
-  useEffect(() => {
-    if (!open || mode !== "new") {
-      setDuplicateName(null);
-      return;
-    }
-    const name = newBaseName.trim();
-    if (name.length < 2) {
-      setDuplicateName(null);
-      return;
-    }
-    let cancelled = false;
-    const t = setTimeout(() => {
-      fetch(`/api/products?search=${encodeURIComponent(name)}&pageSize=5`)
-        .then((res) => (res.ok ? res.json() : { products: [] }))
-        .then((data) => {
-          if (cancelled) return;
-          const match = (data.products ?? []).find(
-            (p: { name: string; baseName?: string | null }) =>
-              p.name?.toLowerCase() === name.toLowerCase() ||
-              p.baseName?.toLowerCase() === name.toLowerCase()
-          );
-          setDuplicateName(match ? match.name : null);
-        })
-        .catch(() => {
-          if (!cancelled) setDuplicateName(null);
-        });
-    }, 350);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [open, mode, newBaseName]);
+  const dupEnabled = open && mode === "new" && debouncedNewName.length >= 2;
+  const { data: dupData } = useQuery({
+    queryKey: ["product-name-check", debouncedNewName],
+    queryFn: async ({ signal }) => {
+      const res = await fetch(
+        `/api/products?search=${encodeURIComponent(debouncedNewName)}&pageSize=5`,
+        { signal }
+      );
+      return res.ok ? res.json() : { products: [] };
+    },
+    enabled: dupEnabled,
+    staleTime: 30_000,
+  });
+  const duplicateName: string | null = useMemo(() => {
+    if (!dupEnabled) return null;
+    const match = (dupData?.products ?? []).find(
+      (p: { name: string; baseName?: string | null }) =>
+        p.name?.toLowerCase() === debouncedNewName.toLowerCase() ||
+        p.baseName?.toLowerCase() === debouncedNewName.toLowerCase()
+    );
+    return match ? match.name : null;
+  }, [dupEnabled, dupData, debouncedNewName]);
 
   const countedNum = parseInt(countedQuantity, 10);
   const countedValid = Number.isInteger(countedNum) && countedNum >= 1;
@@ -182,28 +163,16 @@ export function GraduateDialog({
 
   const handleGraduateExisting = async () => {
     if (!item || !existingValid || !selectedProduct || !locationId) return;
-    setIsSubmitting(true);
     try {
-      const response = await fetch(
-        `/api/staging-items/${item.id}/graduate`,
-        {
-          method: "POST",
-          headers: withCSRFHeaders(
-            { "Content-Type": "application/json" },
-            csrfToken
-          ),
-          body: JSON.stringify({
-            mode: "existing",
-            productId: selectedProduct.id,
-            countedQuantity: countedNum,
-            locationId,
-          }),
-        }
-      );
-      if (!response.ok) {
-        const json = await response.json().catch(() => ({}));
-        throw new Error(json.error || "Failed to graduate item");
-      }
+      await graduateMutation.mutateAsync({
+        id: item.id,
+        body: {
+          mode: "existing",
+          productId: selectedProduct.id,
+          countedQuantity: countedNum,
+          locationId,
+        },
+      });
       toast.success(`Added ${countedNum} to ${selectedProduct.name}`);
       onOpenChange(false);
       onSuccess?.();
@@ -212,8 +181,6 @@ export function GraduateDialog({
       toast.error(
         error instanceof Error ? error.message : "Failed to graduate item"
       );
-    } finally {
-      setIsSubmitting(false);
     }
   };
 
@@ -228,37 +195,25 @@ export function GraduateDialog({
     retailPrice?: number;
   }) => {
     if (!item || !countedValid || !locationId) return;
-    setIsSubmitting(true);
     try {
-      const response = await fetch(
-        `/api/staging-items/${item.id}/graduate`,
-        {
-          method: "POST",
-          headers: withCSRFHeaders(
-            { "Content-Type": "application/json" },
-            csrfToken
-          ),
-          body: JSON.stringify({
-            mode: "new",
-            countedQuantity: countedNum,
+      await graduateMutation.mutateAsync({
+        id: item.id,
+        body: {
+          mode: "new",
+          countedQuantity: countedNum,
+          locationId,
+          productFields: {
+            baseName: productData.baseName,
+            variant: productData.variant,
+            unit: productData.unit,
+            numericValue: productData.numericValue,
+            lowStockThreshold: productData.lowStockThreshold,
+            costPrice: productData.costPrice,
+            retailPrice: productData.retailPrice,
             locationId,
-            productFields: {
-              baseName: productData.baseName,
-              variant: productData.variant,
-              unit: productData.unit,
-              numericValue: productData.numericValue,
-              lowStockThreshold: productData.lowStockThreshold,
-              costPrice: productData.costPrice,
-              retailPrice: productData.retailPrice,
-              locationId,
-            },
-          }),
-        }
-      );
-      if (!response.ok) {
-        const json = await response.json().catch(() => ({}));
-        throw new Error(json.error || "Failed to graduate item");
-      }
+          },
+        },
+      });
       toast.success(`Created product and added ${countedNum} units`);
       onOpenChange(false);
       onSuccess?.();
@@ -267,8 +222,6 @@ export function GraduateDialog({
       toast.error(
         error instanceof Error ? error.message : "Failed to graduate item"
       );
-    } finally {
-      setIsSubmitting(false);
     }
   };
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Loader2, Package } from "lucide-react";
 import { SearchInput } from "@/components/ui/search-input";
 import { cn } from "@/lib/utils";
@@ -22,31 +23,33 @@ export default function AddProductSearch({
 }) {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [results, setResults] = useState<ScratchProduct[]>([]);
-  const [searching, setSearching] = useState(false);
 
-  // Debounce the search input.
+  // Debounce the search input (client state; the debounced term keys the query).
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
     return () => clearTimeout(t);
   }, [search]);
 
-  // Search against the product catalog.
-  useEffect(() => {
-    if (debouncedSearch.length === 0) {
-      setResults([]);
-      return;
-    }
-    let cancelled = false;
-    setSearching(true);
-    fetch(`/api/products?search=${encodeURIComponent(debouncedSearch)}&pageSize=20`)
-      .then((res) => {
-        if (!res.ok) throw new Error("search failed");
-        return res.json();
-      })
-      .then((data) => {
-        if (cancelled) return;
-        const list: ScratchProduct[] = (data.products ?? []).map(
+  // Search against the product catalog. placeholderData keeps the prior results
+  // on screen while the next term loads (matches the old no-clear-first effect).
+  const { data, isFetching } = useQuery({
+    queryKey: ["product-search", debouncedSearch],
+    queryFn: async ({ signal }) => {
+      const res = await fetch(
+        `/api/products?search=${encodeURIComponent(debouncedSearch)}&pageSize=20`,
+        { signal },
+      );
+      if (!res.ok) throw new Error("search failed");
+      return res.json();
+    },
+    enabled: debouncedSearch.length > 0,
+    placeholderData: (prev) => prev,
+    staleTime: 30_000,
+  });
+
+  const results: ScratchProduct[] =
+    debouncedSearch.length > 0
+      ? (data?.products ?? []).map(
           (p: {
             id: number;
             name: string;
@@ -60,26 +63,15 @@ export default function AddProductSearch({
             variant: p.variant,
             approvalStatus: p.approvalStatus,
           }),
-        );
-        setResults(list);
-      })
-      .catch(() => {
-        if (!cancelled) setResults([]);
-      })
-      .finally(() => {
-        if (!cancelled) setSearching(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [debouncedSearch]);
+        )
+      : [];
+  const searching = isFetching;
 
   const handleSelect = (product: ScratchProduct) => {
     if (existingIds.has(product.id)) return;
     onAdd(product);
     setSearch("");
     setDebouncedSearch("");
-    setResults([]);
   };
 
   return (

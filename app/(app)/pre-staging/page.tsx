@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { PackageOpen, Plus } from "lucide-react";
 import { toast } from "sonner";
@@ -11,7 +11,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import {
   StagingQueue,
   type StagingItem,
@@ -22,11 +21,11 @@ import {
   GraduateDialog,
   type GraduateStagingItem,
 } from "@/components/staging/graduate-dialog";
-
-interface Location {
-  id: number;
-  name: string;
-}
+import {
+  useDiscardStagingItem,
+  useLocations,
+  useStagingItems,
+} from "@/hooks/use-staging";
 
 const STATUS_TABS: { value: StagingStatus; label: string }[] = [
   { value: "RECEIVED", label: "Received" },
@@ -36,13 +35,20 @@ const STATUS_TABS: { value: StagingStatus; label: string }[] = [
 
 export default function PreStagingPage() {
   const router = useRouter();
-  const { token: csrfToken } = useCSRF();
 
   const [status, setStatus] = useState<StagingStatus>("RECEIVED");
-  const [items, setItems] = useState<StagingItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [locations, setLocations] = useState<Location[]>([]);
-  const [pendingId, setPendingId] = useState<number | null>(null);
+
+  const {
+    data: items = [],
+    isFetching: loading,
+    isError,
+    error,
+  } = useStagingItems(status);
+  const { data: locations = [] } = useLocations();
+  const discardMutation = useDiscardStagingItem();
+  const pendingId = discardMutation.isPending
+    ? discardMutation.variables ?? null
+    : null;
 
   const [createOpen, setCreateOpen] = useState(false);
   const [graduateOpen, setGraduateOpen] = useState(false);
@@ -50,46 +56,16 @@ export default function PreStagingPage() {
     null
   );
 
-  const fetchItems = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await fetch(`/api/staging-items?status=${status}`);
-      if (!response.ok) {
-        if (response.status === 401) {
-          router.push("/auth/signin");
-          return;
-        }
-        throw new Error("Failed to fetch staging items");
-      }
-      const data = await response.json();
-      setItems(data.items ?? []);
-    } catch (error) {
-      console.error("Error fetching staging items:", error);
-      toast.error("Failed to load items");
-    } finally {
-      setLoading(false);
-    }
-  }, [status, router]);
-
-  const fetchLocations = useCallback(async () => {
-    try {
-      const response = await fetch("/api/locations");
-      if (!response.ok) return;
-      const data = await response.json();
-      // /api/locations returns a bare array; tolerate { locations } too.
-      setLocations(data?.locations ?? data ?? []);
-    } catch (error) {
-      console.error("Error fetching locations:", error);
-    }
-  }, []);
-
+  // Preserve the pre-migration 401 -> sign-in redirect; toast other failures.
   useEffect(() => {
-    fetchItems();
-  }, [fetchItems]);
-
-  useEffect(() => {
-    fetchLocations();
-  }, [fetchLocations]);
+    if (!isError) return;
+    if ((error as { status?: number } | null)?.status === 401) {
+      router.push("/auth/signin");
+      return;
+    }
+    console.error("Error fetching staging items:", error);
+    toast.error("Failed to load items");
+  }, [isError, error, router]);
 
   const handleGraduate = (item: StagingItem) => {
     setGraduateItem({
@@ -101,7 +77,7 @@ export default function PreStagingPage() {
     setGraduateOpen(true);
   };
 
-  const handleDiscard = async (item: StagingItem) => {
+  const handleDiscard = (item: StagingItem) => {
     if (
       !confirm(
         `Discard "${item.description}"? This marks the box as discarded and removes it from the active queue.`
@@ -109,29 +85,15 @@ export default function PreStagingPage() {
     ) {
       return;
     }
-    setPendingId(item.id);
-    try {
-      const response = await fetch(
-        `/api/staging-items/${item.id}/discard`,
-        {
-          method: "POST",
-          headers: withCSRFHeaders({}, csrfToken),
-        }
-      );
-      if (!response.ok) {
-        const json = await response.json().catch(() => ({}));
-        throw new Error(json.error || "Failed to discard item");
-      }
-      toast.success("Item discarded");
-      await fetchItems();
-    } catch (error) {
-      console.error("Error discarding staging item:", error);
-      toast.error(
-        error instanceof Error ? error.message : "Failed to discard item"
-      );
-    } finally {
-      setPendingId(null);
-    }
+    discardMutation.mutate(item.id, {
+      onSuccess: () => toast.success("Item discarded"),
+      onError: (err) => {
+        console.error("Error discarding staging item:", err);
+        toast.error(
+          err instanceof Error ? err.message : "Failed to discard item"
+        );
+      },
+    });
   };
 
   return (
@@ -183,18 +145,15 @@ export default function PreStagingPage() {
         </Card>
       </div>
 
-      {/* Dialogs */}
-      <CreateStagingDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        onSuccess={fetchItems}
-      />
+      {/* Dialogs. The create/graduate mutations invalidate the staging queue
+          (and, for graduation, the product/inventory caches), so the list
+          refreshes without an explicit onSuccess refetch. */}
+      <CreateStagingDialog open={createOpen} onOpenChange={setCreateOpen} />
       <GraduateDialog
         open={graduateOpen}
         onOpenChange={setGraduateOpen}
         item={graduateItem}
         locations={locations}
-        onSuccess={fetchItems}
       />
     </div>
   );

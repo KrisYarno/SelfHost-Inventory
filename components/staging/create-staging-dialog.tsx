@@ -3,7 +3,8 @@
 import { useState, useEffect } from "react";
 import { useSession } from "next-auth/react";
 import { toast } from "sonner";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { useCSRF } from "@/hooks/use-csrf";
+import { useCreateStagingItem, useLocations } from "@/hooks/use-staging";
 import {
   Dialog,
   DialogContent,
@@ -24,11 +25,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-interface Location {
-  id: number;
-  name: string;
-}
-
 interface CreateStagingDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -41,11 +37,22 @@ export function CreateStagingDialog({
   onSuccess,
 }: CreateStagingDialogProps) {
   const { data: session } = useSession();
-  const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
+  const { token: csrfToken } = useCSRF();
 
-  const [locations, setLocations] = useState<Location[]>([]);
-  const [locationsLoading, setLocationsLoading] = useState(false);
-  const [locationError, setLocationError] = useState<string | null>(null);
+  // Locations are fetched (and cached) the moment the dialog opens.
+  const {
+    data: locations = [],
+    isFetching: locationsLoading,
+    isError: locationsIsError,
+    error: locationsError,
+  } = useLocations(open);
+  const locationErrorMsg = locationsIsError
+    ? locationsError instanceof Error
+      ? locationsError.message
+      : "Failed to fetch locations"
+    : null;
+
+  const createMutation = useCreateStagingItem();
 
   const [description, setDescription] = useState("");
   const [expectedQuantity, setExpectedQuantity] = useState("");
@@ -54,41 +61,17 @@ export function CreateStagingDialog({
   const [notes, setNotes] = useState("");
   const [locationId, setLocationId] = useState<number | undefined>(undefined);
 
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmitting = createMutation.isPending;
 
-  // Fetch locations when the dialog opens (mirrors create-product-dialog).
+  // Resolve the default location once the catalog is available.
   useEffect(() => {
-    if (open && csrfToken && !csrfLoading) {
-      setLocationsLoading(true);
-      setLocationError(null);
-      fetch("/api/locations", {
-        headers: withCSRFHeaders({}, csrfToken),
-      })
-        .then(async (res) => {
-          if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.error || "Failed to fetch locations");
-          }
-          return res.json();
-        })
-        .then((data) => {
-          // /api/locations returns a bare array; tolerate { locations } too.
-          const list: Location[] = data?.locations ?? data ?? [];
-          setLocations(list);
-          const userDefault = session?.user?.defaultLocationId;
-          const resolved =
-            list.find((l) => l.id === userDefault)?.id ?? list[0]?.id;
-          setLocationId(resolved);
-        })
-        .catch((err) => {
-          console.error("Failed to fetch locations:", err);
-          setLocationError(
-            err instanceof Error ? err.message : "Failed to fetch locations"
-          );
-        })
-        .finally(() => setLocationsLoading(false));
+    if (open && locations.length > 0) {
+      const userDefault = session?.user?.defaultLocationId;
+      const resolved =
+        locations.find((l) => l.id === userDefault)?.id ?? locations[0]?.id;
+      setLocationId(resolved);
     }
-  }, [open, csrfToken, csrfLoading, session?.user?.defaultLocationId]);
+  }, [open, locations, session?.user?.defaultLocationId]);
 
   const resetForm = () => {
     setDescription("");
@@ -115,25 +98,15 @@ export function CreateStagingDialog({
       return;
     }
 
-    setIsSubmitting(true);
     try {
-      const response = await fetch("/api/staging-items", {
-        method: "POST",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({
-          description: trimmedDescription,
-          expectedQuantity: expectedNum,
-          vendor: vendor.trim() || undefined,
-          reference: reference.trim() || undefined,
-          notes: notes.trim() || undefined,
-          locationId,
-        }),
+      await createMutation.mutateAsync({
+        description: trimmedDescription,
+        expectedQuantity: expectedNum,
+        vendor: vendor.trim() || undefined,
+        reference: reference.trim() || undefined,
+        notes: notes.trim() || undefined,
+        locationId,
       });
-
-      if (!response.ok) {
-        const json = await response.json().catch(() => ({}));
-        throw new Error(json.error || "Failed to log item");
-      }
 
       toast.success(`Logged "${trimmedDescription}"`);
       resetForm();
@@ -144,8 +117,6 @@ export function CreateStagingDialog({
       toast.error(
         error instanceof Error ? error.message : "Failed to log item"
       );
-    } finally {
-      setIsSubmitting(false);
     }
   };
 
@@ -214,8 +185,8 @@ export function CreateStagingDialog({
                   ))}
                 </SelectContent>
               </Select>
-              {locationError && (
-                <p className="text-sm text-destructive">{locationError}</p>
+              {locationErrorMsg && (
+                <p className="text-sm text-destructive">{locationErrorMsg}</p>
               )}
             </div>
           </div>

@@ -1,7 +1,22 @@
 /** @jest-environment jsdom */
 import { render, screen, waitFor, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import ScratchpadBoard from "@/components/scratchpad/scratchpad-board";
+
+// The board's AddProductSearch child now reads the product catalog via TanStack
+// Query, so renders need a client. The board itself still uses raw fetch + its
+// editing-guarded poll (unchanged), so the no-silent-loss test still applies.
+function renderBoard() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <ScratchpadBoard />
+    </QueryClientProvider>,
+  );
+}
 
 jest.mock("@/hooks/use-csrf", () => ({
   useCSRF: () => ({ token: "test-csrf", isLoading: false }),
@@ -36,7 +51,7 @@ afterEach(() => {
 
 it("renders the empty-board state when no products have rows", async () => {
   installFetch();
-  render(<ScratchpadBoard />);
+  renderBoard();
   await waitFor(() =>
     expect(screen.getByText(/no rough prices yet/i)).toBeInTheDocument(),
   );
@@ -45,7 +60,7 @@ it("renders the empty-board state when no products have rows", async () => {
 it("a poll/refetch does NOT drop an open local (unsaved) card", async () => {
   installFetch();
   const user = userEvent.setup();
-  render(<ScratchpadBoard />);
+  renderBoard();
 
   // Wait for the initial empty board.
   await waitFor(() =>

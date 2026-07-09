@@ -2,6 +2,7 @@
 import React from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // CSRF token present so the dialog's csrf gate passes.
 jest.mock("@/hooks/use-csrf", () => ({
@@ -37,15 +38,23 @@ function mockFetchEmpty() {
 }
 
 function renderDialog(overrides: Partial<React.ComponentProps<typeof GraduateDialog>> = {}) {
+  // GraduateDialog now reads product search + graduate mutation via TanStack
+  // Query, so a client must be present. A fresh, retry-free client per render
+  // keeps tests isolated and fast.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   return render(
-    <GraduateDialog
-      open
-      onOpenChange={jest.fn()}
-      item={ITEM}
-      locations={LOCATIONS}
-      onSuccess={jest.fn()}
-      {...overrides}
-    />
+    <QueryClientProvider client={queryClient}>
+      <GraduateDialog
+        open
+        onOpenChange={jest.fn()}
+        item={ITEM}
+        locations={LOCATIONS}
+        onSuccess={jest.fn()}
+        {...overrides}
+      />
+    </QueryClientProvider>
   );
 }
 
