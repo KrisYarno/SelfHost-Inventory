@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { UserApprovalCard } from "@/components/admin/user-approval-card";
 import { UserTable, User } from "@/components/admin/user-table";
@@ -11,139 +11,66 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import { CheckCircle2, XCircle, Trash2, Download } from "lucide-react";
 import { exportToCSV } from "@/lib/export-utils";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
-
-interface Location {
-  id: number;
-  name: string;
-}
-
-interface Company {
-  id: string;
-  name: string;
-  slug: string;
-}
-
-interface UsersResponse {
-  users: User[];
-  pagination: {
-    page: number;
-    limit: number;
-    total: number;
-    totalPages: number;
-  };
-}
+import {
+  useAdminPendingUsers,
+  useAdminUsers,
+  useAdminCompanies,
+  useLocationOptions,
+  useApproveUser,
+  useRejectUser,
+  useDeleteUser,
+  useBulkApproveUsers,
+  useBulkRejectUsers,
+  useBulkDeleteUsers,
+} from "@/hooks/use-admin";
 
 export default function AdminUsersPage() {
   const router = useRouter();
-  const { token: csrfToken } = useCSRF();
-  const [pendingUsers, setPendingUsers] = useState<User[]>([]);
-  const [allUsers, setAllUsers] = useState<User[]>([]);
-  const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | "approved" | "pending">("all");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
   const [selectedUsers, setSelectedUsers] = useState<Set<number>>(new Set());
-  const [bulkLoading, setBulkLoading] = useState(false);
 
   // Edit dialog state
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editingUser, setEditingUser] = useState<User | null>(null);
-  const [locations, setLocations] = useState<Location[]>([]);
-  const [companies, setCompanies] = useState<Company[]>([]);
 
-  const fetchUsers = useCallback(async () => {
-    try {
-      setLoading(true);
+  const pendingQuery = useAdminPendingUsers();
+  const usersQuery = useAdminUsers({ filter, search, page });
+  const { data: locations = [] } = useLocationOptions();
+  const { data: companies = [] } = useAdminCompanies();
 
-      // Fetch pending users for the approval cards
-      const pendingResponse = await fetch("/api/admin/users?filter=pending&limit=100");
-      if (!pendingResponse.ok) {
-        if (pendingResponse.status === 401) {
-          router.push("/auth/signin");
-          return;
-        }
-        throw new Error("Failed to fetch pending users");
-      }
-      const pendingData: UsersResponse = await pendingResponse.json();
-      setPendingUsers(pendingData.users);
+  const pendingUsers = pendingQuery.data?.users ?? [];
+  const allUsers = usersQuery.data?.users ?? [];
+  const totalPages = usersQuery.data?.pagination.totalPages ?? 1;
+  const loading = usersQuery.isLoading;
 
-      // Fetch filtered users for the table (with details for edit dialog)
-      const params = new URLSearchParams({
-        filter,
-        page: page.toString(),
-        limit: "10",
-        include: "details",
-      });
-      if (search) params.append("search", search);
+  const approveUser = useApproveUser();
+  const rejectUser = useRejectUser();
+  const deleteUser = useDeleteUser();
+  const bulkApprove = useBulkApproveUsers();
+  const bulkReject = useBulkRejectUsers();
+  const bulkDelete = useBulkDeleteUsers();
+  const bulkLoading = bulkApprove.isPending || bulkReject.isPending || bulkDelete.isPending;
 
-      const allResponse = await fetch(`/api/admin/users?${params}`);
-      if (!allResponse.ok) {
-        throw new Error("Failed to fetch users");
-      }
-      const allData: UsersResponse = await allResponse.json();
-      setAllUsers(allData.users);
-      setTotalPages(allData.pagination.totalPages);
-    } catch (error) {
-      console.error("Error fetching users:", error);
-    } finally {
-      setLoading(false);
-    }
-  }, [filter, search, page, router]);
-
-  // Fetch locations and companies for the edit dialog
-  const fetchLocationsAndCompanies = useCallback(async () => {
-    try {
-      const [locResponse, compResponse] = await Promise.all([
-        fetch("/api/locations"),
-        fetch("/api/admin/companies"),
-      ]);
-
-      if (locResponse.ok) {
-        const locData = await locResponse.json();
-        setLocations(locData.locations || locData || []);
-      }
-
-      if (compResponse.ok) {
-        const compData = await compResponse.json();
-        setCompanies(compData.companies || compData || []);
-      }
-    } catch (error) {
-      console.error("Error fetching locations/companies:", error);
-    }
-  }, []);
-
+  // Preserve the original 401 -> signin redirect (was on the pending fetch).
   useEffect(() => {
-    fetchUsers();
-  }, [fetchUsers]);
-
-  useEffect(() => {
-    fetchLocationsAndCompanies();
-  }, [fetchLocationsAndCompanies]);
+    if (pendingQuery.error?.status === 401 || usersQuery.error?.status === 401) {
+      router.push("/auth/signin");
+    }
+  }, [pendingQuery.error, usersQuery.error, router]);
 
   const handleEdit = (user: User) => {
     setEditingUser(user);
     setEditDialogOpen(true);
   };
 
-  const handleEditSuccess = () => {
-    fetchUsers();
-  };
+  // Refresh is handled by useUpdateUser's cache invalidation inside the dialog.
+  const handleEditSuccess = () => {};
 
   const handleApprove = async (userId: number) => {
     try {
-      const response = await fetch(`/api/admin/users/${userId}/approve`, {
-        method: "POST",
-        headers: withCSRFHeaders({}, csrfToken),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to approve user");
-      }
-
-      // Refresh the user lists
-      await fetchUsers();
+      await approveUser.mutateAsync(userId);
       toast.success("User approved successfully");
     } catch (error) {
       console.error("Error approving user:", error);
@@ -153,23 +80,7 @@ export default function AdminUsersPage() {
 
   const handleReject = async (userId: number, reason?: string) => {
     try {
-      const response = await fetch(`/api/admin/users/${userId}/reject`, {
-        method: "DELETE",
-        headers: withCSRFHeaders(
-          {
-            "Content-Type": "application/json",
-          },
-          csrfToken
-        ),
-        body: JSON.stringify({ reason }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to reject user");
-      }
-
-      // Refresh the user lists
-      await fetchUsers();
+      await rejectUser.mutateAsync({ userId, reason });
       toast.success("User rejected successfully");
     } catch (error) {
       console.error("Error rejecting user:", error);
@@ -183,17 +94,8 @@ export default function AdminUsersPage() {
     }
 
     try {
-      const response = await fetch(`/api/admin/users/${userId}`, {
-        method: "DELETE",
-        headers: withCSRFHeaders({}, csrfToken),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to delete user");
-      }
-
+      await deleteUser.mutateAsync(userId);
       toast.success("User deleted successfully");
-      await fetchUsers();
     } catch (error) {
       console.error("Error deleting user:", error);
       toast.error("Failed to delete user");
@@ -207,32 +109,13 @@ export default function AdminUsersPage() {
       return;
     }
 
-    setBulkLoading(true);
     try {
-      const response = await fetch("/api/admin/users/bulk-approve", {
-        method: "POST",
-        headers: withCSRFHeaders(
-          {
-            "Content-Type": "application/json",
-          },
-          csrfToken
-        ),
-        body: JSON.stringify({ userIds: Array.from(selectedUsers) }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to approve users");
-      }
-
-      const result = await response.json();
+      const result = await bulkApprove.mutateAsync(Array.from(selectedUsers));
       toast.success(`Successfully approved ${result.approved} users`);
       setSelectedUsers(new Set());
-      await fetchUsers();
     } catch (error) {
       console.error("Error bulk approving users:", error);
       toast.error("Failed to approve users");
-    } finally {
-      setBulkLoading(false);
     }
   };
 
@@ -246,32 +129,13 @@ export default function AdminUsersPage() {
       return;
     }
 
-    setBulkLoading(true);
     try {
-      const response = await fetch("/api/admin/users/bulk-reject", {
-        method: "POST",
-        headers: withCSRFHeaders(
-          {
-            "Content-Type": "application/json",
-          },
-          csrfToken
-        ),
-        body: JSON.stringify({ userIds: Array.from(selectedUsers) }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to reject users");
-      }
-
-      const result = await response.json();
+      const result = await bulkReject.mutateAsync(Array.from(selectedUsers));
       toast.success(`Successfully rejected ${result.rejected} users`);
       setSelectedUsers(new Set());
-      await fetchUsers();
     } catch (error) {
       console.error("Error bulk rejecting users:", error);
       toast.error("Failed to reject users");
-    } finally {
-      setBulkLoading(false);
     }
   };
 
@@ -285,32 +149,13 @@ export default function AdminUsersPage() {
       return;
     }
 
-    setBulkLoading(true);
     try {
-      const response = await fetch("/api/admin/users/bulk-delete", {
-        method: "POST",
-        headers: withCSRFHeaders(
-          {
-            "Content-Type": "application/json",
-          },
-          csrfToken
-        ),
-        body: JSON.stringify({ userIds: Array.from(selectedUsers) }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to delete users");
-      }
-
-      const result = await response.json();
+      const result = await bulkDelete.mutateAsync(Array.from(selectedUsers));
       toast.success(`Successfully deleted ${result.deleted} users`);
       setSelectedUsers(new Set());
-      await fetchUsers();
     } catch (error) {
       console.error("Error bulk deleting users:", error);
       toast.error("Failed to delete users");
-    } finally {
-      setBulkLoading(false);
     }
   };
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -9,55 +9,18 @@ import Link from "next/link";
 import { formatNumber } from "@/lib/utils";
 import { toast } from "sonner";
 import { RateLimitMonitor } from "@/components/admin/rate-limit-monitor";
-
-interface DashboardMetrics {
-  totalProducts: number;
-  totalUsers: number;
-  activeUsers: number;
-  pendingUsers: number;
-  lowStockProducts: number;
-  outOfStockProducts: number;
-  recentTransactions: number;
-  topMovingProducts: Array<{
-    id: number;
-    name: string;
-    movement: number;
-  }>;
-  recentActivity: Array<{
-    id: number;
-    user: string;
-    action: string;
-    product: string;
-    quantity: number;
-    timestamp: string;
-  }>;
-}
+import { useAdminDashboard } from "@/hooks/use-admin";
 
 export default function AdminDashboardPage() {
-  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  // 30s auto-refresh preserved inside the hook via refetchInterval.
+  const { data: metrics, isLoading, isError, errorUpdatedAt } = useAdminDashboard();
 
-  const fetchDashboardData = async () => {
-    try {
-      const response = await fetch("/api/admin/dashboard");
-      if (!response.ok) throw new Error("Failed to fetch dashboard data");
-      const data = await response.json();
-      setMetrics(data);
-    } catch (error) {
-      console.error("Error fetching dashboard data:", error);
-      toast.error("Failed to load dashboard data");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
+  // Preserve the original toast on each failed (poll) fetch.
   useEffect(() => {
-    fetchDashboardData();
-
-    // Auto-refresh every 30 seconds
-    const interval = setInterval(fetchDashboardData, 30000);
-    return () => clearInterval(interval);
-  }, []);
+    if (isError) {
+      toast.error("Failed to load dashboard data");
+    }
+  }, [isError, errorUpdatedAt]);
 
   if (isLoading) {
     return (

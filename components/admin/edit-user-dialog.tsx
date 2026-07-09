@@ -21,7 +21,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { useCSRF } from "@/hooks/use-csrf";
+import { useUpdateUser } from "@/hooks/use-admin";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 
 interface Location {
@@ -70,8 +71,9 @@ export function EditUserDialog({
   locations,
   companies,
 }: EditUserDialogProps) {
-  const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const { isLoading: csrfLoading } = useCSRF();
+  const updateUser = useUpdateUser();
+  const isSubmitting = updateUser.isPending;
 
   // Form state
   const [username, setUsername] = useState("");
@@ -105,12 +107,10 @@ export function EditUserDialog({
       return;
     }
 
-    setIsSubmitting(true);
     try {
-      const response = await fetch(`/api/admin/users/${user.id}`, {
-        method: "PATCH",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({
+      await updateUser.mutateAsync({
+        id: user.id,
+        data: {
           username,
           defaultLocationId,
           isAdmin,
@@ -120,13 +120,8 @@ export function EditUserDialog({
           companies: userCompanies.map((c) => ({
             companyId: c.companyId,
           })),
-        }),
+        },
       });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to update user");
-      }
 
       toast.success("User updated successfully");
       onOpenChange(false);
@@ -134,8 +129,6 @@ export function EditUserDialog({
     } catch (error) {
       console.error("Error updating user:", error);
       toast.error(error instanceof Error ? error.message : "Failed to update user");
-    } finally {
-      setIsSubmitting(false);
     }
   };
 

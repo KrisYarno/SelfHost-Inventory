@@ -1,44 +1,19 @@
 'use client';
 
-import { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Clock, TrendingUp } from 'lucide-react';
+import { useRateLimits } from '@/hooks/use-admin';
 
-// Shape returned by /api/admin/rate-limits. The in-memory store only knows the
-// request count and expiry per key — it does NOT persist each scope's configured
-// limit, nor a separate "blocked" tally — so the widget shows only what is
-// actually knowable rather than dividing by an invented limit (which rendered NaN).
-interface RateLimitData {
-  endpoint: string;
-  current: number; // peak request count by a single client within the window
-  entries: number; // distinct clients (keys) grouped under this scope
-  resetTime: string;
-}
+// Shape returned by /api/admin/rate-limits documented in hooks/use-admin.ts:
+// the in-memory store only knows the request count and expiry per key — it does
+// NOT persist each scope's configured limit, nor a separate "blocked" tally — so
+// the widget shows only what is actually knowable rather than dividing by an
+// invented limit (which rendered NaN).
 
 export function RateLimitMonitor() {
-  const [rateLimits, setRateLimits] = useState<RateLimitData[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    fetchRateLimitData();
-    const interval = setInterval(fetchRateLimitData, 5000); // Update every 5 seconds
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchRateLimitData = async () => {
-    try {
-      const response = await fetch('/api/admin/rate-limits');
-      if (response.ok) {
-        const data = await response.json();
-        setRateLimits(data);
-      }
-    } catch (error) {
-      console.error('Failed to fetch rate limit data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data, isLoading: loading } = useRateLimits();
+  const rateLimits = data ?? [];
 
   if (loading) {
     return (

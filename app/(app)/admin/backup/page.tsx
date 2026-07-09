@@ -1,58 +1,20 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Download, HardDrive, RefreshCw } from "lucide-react";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
-
-interface ListedFile {
-  name: string;
-  mtimeMs: number;
-}
+import { useBackups, useCreateBackup } from "@/hooks/use-admin";
 
 export default function AdminBackupPage() {
-  const { token: csrfToken } = useCSRF();
-  const [files, setFiles] = useState<ListedFile[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  const fetchList = async () => {
-    try {
-      const res = await fetch("/api/admin/backup?list=1", { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      setFiles(data.files || []);
-    } catch {}
-  };
-
-  useEffect(() => {
-    fetchList();
-  }, []);
+  const { data: files = [], refetch } = useBackups();
+  const createBackupMutation = useCreateBackup();
+  const loading = createBackupMutation.isPending;
 
   const createBackup = async () => {
-    setLoading(true);
     try {
-      const res = await fetch("/api/admin/backup", {
-        method: "POST",
-        headers: withCSRFHeaders({}, csrfToken),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        alert(j.error || "Backup failed");
-        return;
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `backup-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.sql`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      await fetchList();
-    } finally {
-      setLoading(false);
+      await createBackupMutation.mutateAsync();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Backup failed");
     }
   };
 
@@ -81,7 +43,7 @@ export default function AdminBackupPage() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={fetchList}>
+          <Button variant="outline" onClick={() => refetch()}>
             <RefreshCw className="h-4 w-4 mr-2" />
             Refresh
           </Button>

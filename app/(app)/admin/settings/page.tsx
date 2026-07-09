@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,50 +19,33 @@ import {
   BarChart3,
 } from "lucide-react";
 import Link from "next/link";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
-
-interface Location {
-  id: number;
-  name: string;
-  _count?: {
-    product_locations: number;
-    inventory_logs: number;
-  };
-}
-
-interface SystemSettings {
-  locations: Location[];
-  weeklyReportsEnabled: boolean;
-  analyticsRebuildEnabled: boolean;
-}
+import {
+  useAdminSettings,
+  useAddLocation,
+  useDeleteSettingsLocation,
+  useToggleSetting,
+  type SettingsLocation,
+} from "@/hooks/use-admin";
 
 export default function AdminSettingsPage() {
   const [newLocationName, setNewLocationName] = useState("");
-  const [data, setData] = useState<SystemSettings | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isAddingLocation, setIsAddingLocation] = useState(false);
-  const [isDeletingLocation, setIsDeletingLocation] = useState(false);
-  const [isTogglingWeekly, setIsTogglingWeekly] = useState(false);
-  const [isTogglingAnalytics, setIsTogglingAnalytics] = useState(false);
-  const { token: csrfToken } = useCSRF();
+  const { data, isLoading, isError } = useAdminSettings();
+  const addLocation = useAddLocation();
+  const deleteLocation = useDeleteSettingsLocation();
+  const toggleWeekly = useToggleSetting("weeklyReportsEnabled");
+  const toggleAnalytics = useToggleSetting("analyticsRebuildEnabled");
 
-  const fetchSettings = async () => {
-    try {
-      const response = await fetch("/api/admin/settings");
-      if (!response.ok) throw new Error("Failed to fetch settings");
-      const result = await response.json();
-      setData(result);
-    } catch (error) {
-      console.error("Error fetching settings:", error);
-      toast.error("Failed to load settings");
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  const isAddingLocation = addLocation.isPending;
+  const isDeletingLocation = deleteLocation.isPending;
+  const isTogglingWeekly = toggleWeekly.isPending;
+  const isTogglingAnalytics = toggleAnalytics.isPending;
 
+  // Preserve the original load-failure toast.
   useEffect(() => {
-    fetchSettings();
-  }, []);
+    if (isError) {
+      toast.error("Failed to load settings");
+    }
+  }, [isError]);
 
   const handleAddLocation = async () => {
     if (!newLocationName.trim()) {
@@ -71,29 +54,15 @@ export default function AdminSettingsPage() {
     }
 
     try {
-      setIsAddingLocation(true);
-      const response = await fetch("/api/admin/locations", {
-        method: "POST",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({ name: newLocationName.trim() }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to add location");
-      }
-
+      await addLocation.mutateAsync(newLocationName.trim());
       toast.success("Location added successfully");
       setNewLocationName("");
-      await fetchSettings();
     } catch (error: any) {
       toast.error(error.message || "Failed to add location");
-    } finally {
-      setIsAddingLocation(false);
     }
   };
 
-  const handleDeleteLocation = async (location: Location) => {
+  const handleDeleteLocation = async (location: SettingsLocation) => {
     const hasData =
       (location._count?.product_locations || 0) > 0 || (location._count?.inventory_logs || 0) > 0;
 
@@ -105,43 +74,16 @@ export default function AdminSettingsPage() {
     }
 
     try {
-      setIsDeletingLocation(true);
-      const response = await fetch(`/api/admin/locations/${location.id}`, {
-        method: "DELETE",
-        headers: withCSRFHeaders({}, csrfToken),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to delete location");
-      }
-
+      await deleteLocation.mutateAsync(location.id);
       toast.success("Location deleted successfully");
-      await fetchSettings();
     } catch (error: any) {
       toast.error(error.message || "Failed to delete location");
-    } finally {
-      setIsDeletingLocation(false);
     }
   };
 
   const handleToggleWeeklyReports = async (enabled: boolean) => {
     try {
-      setIsTogglingWeekly(true);
-      const response = await fetch("/api/admin/settings", {
-        method: "POST",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({ weeklyReportsEnabled: enabled }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to update setting");
-      }
-
-      setData((prev) =>
-        prev ? { ...prev, weeklyReportsEnabled: enabled } : prev
-      );
+      await toggleWeekly.mutateAsync(enabled);
       toast.success(
         enabled
           ? "Weekly inventory reports enabled"
@@ -149,28 +91,12 @@ export default function AdminSettingsPage() {
       );
     } catch (error: any) {
       toast.error(error.message || "Failed to update setting");
-    } finally {
-      setIsTogglingWeekly(false);
     }
   };
 
   const handleToggleAnalyticsRebuild = async (enabled: boolean) => {
     try {
-      setIsTogglingAnalytics(true);
-      const response = await fetch("/api/admin/settings", {
-        method: "POST",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({ analyticsRebuildEnabled: enabled }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to update setting");
-      }
-
-      setData((prev) =>
-        prev ? { ...prev, analyticsRebuildEnabled: enabled } : prev
-      );
+      await toggleAnalytics.mutateAsync(enabled);
       toast.success(
         enabled
           ? "Product analytics rebuilds enabled"
@@ -178,8 +104,6 @@ export default function AdminSettingsPage() {
       );
     } catch (error: any) {
       toast.error(error.message || "Failed to update setting");
-    } finally {
-      setIsTogglingAnalytics(false);
     }
   };
 

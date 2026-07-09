@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,83 +24,46 @@ import {
 } from "@/components/ui/table";
 import { toast } from "sonner";
 import { Building2, Plus, Pencil, Trash2 } from "lucide-react";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
-
-interface Company {
-  id: string;
-  name: string;
-  slug: string;
-  createdAt: string;
-  _count?: {
-    users: number;
-    integrations: number;
-  };
-}
+import {
+  useAdminCompanies,
+  useCreateCompany,
+  useUpdateCompany,
+  useDeleteCompany,
+  type AdminCompany as Company,
+} from "@/hooks/use-admin";
 
 export default function AdminCompaniesPage() {
   const router = useRouter();
-  const { token: csrfToken } = useCSRF();
-  const [companies, setCompanies] = useState<Company[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: companies = [], isLoading: loading, error } = useAdminCompanies();
+  const createCompany = useCreateCompany();
+  const updateCompany = useUpdateCompany();
+  const deleteCompany = useDeleteCompany();
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [editingCompany, setEditingCompany] = useState<Company | null>(null);
   const [formData, setFormData] = useState({ name: "", slug: "" });
-  const [submitting, setSubmitting] = useState(false);
+  const submitting = createCompany.isPending || updateCompany.isPending;
 
-  const fetchCompanies = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await fetch("/api/admin/companies");
-      if (!response.ok) {
-        if (response.status === 401) {
-          router.push("/auth/signin");
-          return;
-        }
-        throw new Error("Failed to fetch companies");
-      }
-      const data = await response.json();
-      setCompanies(data.companies || []);
-    } catch (error) {
-      console.error("Error fetching companies:", error);
-      toast.error("Failed to load companies");
-    } finally {
-      setLoading(false);
-    }
-  }, [router]);
-
+  // Preserve the original 401 -> signin redirect and load-failure toast.
   useEffect(() => {
-    fetchCompanies();
-  }, [fetchCompanies]);
+    if (error?.status === 401) {
+      router.push("/auth/signin");
+    } else if (error) {
+      toast.error("Failed to load companies");
+    }
+  }, [error, router]);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSubmitting(true);
 
     try {
-      const response = await fetch("/api/admin/companies", {
-        method: "POST",
-        headers: withCSRFHeaders(
-          { "Content-Type": "application/json" },
-          csrfToken
-        ),
-        body: JSON.stringify(formData),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to create company");
-      }
-
+      await createCompany.mutateAsync(formData);
       toast.success("Company created successfully");
       setIsCreateDialogOpen(false);
       setFormData({ name: "", slug: "" });
-      await fetchCompanies();
     } catch (error) {
       console.error("Error creating company:", error);
       toast.error(error instanceof Error ? error.message : "Failed to create company");
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -108,33 +71,15 @@ export default function AdminCompaniesPage() {
     e.preventDefault();
     if (!editingCompany) return;
 
-    setSubmitting(true);
-
     try {
-      const response = await fetch(`/api/admin/companies/${editingCompany.id}`, {
-        method: "PUT",
-        headers: withCSRFHeaders(
-          { "Content-Type": "application/json" },
-          csrfToken
-        ),
-        body: JSON.stringify(formData),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to update company");
-      }
-
+      await updateCompany.mutateAsync({ id: editingCompany.id, formData });
       toast.success("Company updated successfully");
       setIsEditDialogOpen(false);
       setEditingCompany(null);
       setFormData({ name: "", slug: "" });
-      await fetchCompanies();
     } catch (error) {
       console.error("Error updating company:", error);
       toast.error(error instanceof Error ? error.message : "Failed to update company");
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -148,18 +93,8 @@ export default function AdminCompaniesPage() {
     }
 
     try {
-      const response = await fetch(`/api/admin/companies/${company.id}`, {
-        method: "DELETE",
-        headers: withCSRFHeaders({}, csrfToken),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to delete company");
-      }
-
+      await deleteCompany.mutateAsync(company.id);
       toast.success("Company deleted successfully");
-      await fetchCompanies();
     } catch (error) {
       console.error("Error deleting company:", error);
       toast.error(error instanceof Error ? error.message : "Failed to delete company");

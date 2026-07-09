@@ -1,33 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { Undo2 } from "lucide-react";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import {
+  useThresholds,
+  useSaveThresholds,
+  type ProductMinimum,
+} from "@/hooks/use-admin";
 import { cn } from "@/lib/utils";
-
-interface LocationMeta {
-  id: number;
-  name: string;
-}
-
-interface MinimumLocation {
-  locationId: number;
-  locationName: string;
-  quantity: number;
-  minQuantity: number;
-}
-
-interface ProductMinimum {
-  id: number;
-  name: string;
-  combinedMinimum: number;
-  totalStock: number;
-  perLocation: MinimumLocation[];
-}
 
 type MinEdit = {
   combinedMin?: number;
@@ -52,47 +36,43 @@ function countChanges(edits: EditsMap) {
 }
 
 export default function MinimumSettingsPage() {
-  const [products, setProducts] = useState<ProductMinimum[]>([]);
-  const [locations, setLocations] = useState<LocationMeta[]>([]);
+  const { data, isLoading, isError, dataUpdatedAt, errorUpdatedAt } = useThresholds();
+  const saveThresholds = useSaveThresholds();
+  const products = useMemo(() => data?.products ?? [], [data]);
+  const locations = useMemo(() => data?.locations ?? [], [data]);
+  const isSaving = saveThresholds.isPending;
+
   const [visibleLocationIds, setVisibleLocationIds] = useState<number[]>([]);
   const [showCombined, setShowCombined] = useState(true);
   const [edits, setEdits] = useState<EditsMap>({});
   const [history, setHistory] = useState<EditsMap[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<FilterType>("all");
   const [view, setView] = useState<ViewMode>("matrix");
   const [drawerProduct, setDrawerProduct] = useState<ProductMinimum | null>(null);
-  const { token: csrfToken } = useCSRF();
 
-  const loadData = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const res = await fetch("/api/admin/products/thresholds");
-      if (!res.ok) throw new Error("Failed to load minimums");
-      const data = await res.json();
-
-      setProducts(data.products);
-      setLocations(data.locations);
-      // Default: show all locations; user can toggle off as needed
-      setVisibleLocationIds(data.locations.map((l: LocationMeta) => l.id));
+  // Whenever a fresh dataset loads (mount + after a save-triggered refetch),
+  // default all locations visible and clear pending edits/history — mirrors the
+  // old loadData() resets. dataUpdatedAt changes on every completed fetch.
+  useEffect(() => {
+    if (data) {
+      setVisibleLocationIds(data.locations.map((l) => l.id));
       setEdits({});
       setHistory([]);
       setError(null);
-    } catch (err) {
-      console.error("Error loading minimums", err);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataUpdatedAt]);
+
+  // Surface load failures the same way loadData did.
+  useEffect(() => {
+    if (isError) {
       setError("Failed to load product minimums");
       toast.error("Failed to load product minimums");
-    } finally {
-      setIsLoading(false);
     }
-  }, []);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isError, errorUpdatedAt]);
 
   const pushHistory = () => setHistory((prev) => [...prev, edits]);
 
@@ -192,7 +172,6 @@ export default function MinimumSettingsPage() {
       return;
     }
 
-    setIsSaving(true);
     setError(null);
 
     try {
@@ -207,22 +186,15 @@ export default function MinimumSettingsPage() {
           : undefined,
       }));
 
-      const res = await fetch("/api/admin/products/thresholds", {
-        method: "PATCH",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({ updates }),
-      });
-
-      if (!res.ok) throw new Error("Failed to save minimums");
+      // Cache invalidation refetches thresholds, which resets edits/history/
+      // visibleLocationIds via the effect above (was: await loadData()).
+      await saveThresholds.mutateAsync(updates);
 
       toast.success("Minimums saved");
-      await loadData();
     } catch (err) {
       console.error("Error saving minimums", err);
       setError("Failed to save minimums");
       toast.error("Failed to save minimums");
-    } finally {
-      setIsSaving(false);
     }
   };
 
