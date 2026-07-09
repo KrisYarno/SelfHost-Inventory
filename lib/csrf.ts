@@ -14,24 +14,6 @@ export function generateCSRFToken(): string {
 }
 
 /**
- * Get or create CSRF token for the current session
- * This should be called from server components or API routes
- */
-export async function getCSRFToken(): Promise<string> {
-  const cookieStore = await cookies();
-  const existingToken = cookieStore.get(CSRF_TOKEN_COOKIE);
-  
-  if (existingToken?.value) {
-    return existingToken.value;
-  }
-  
-  // Generate new token but don't set it here
-  // Token will be set via the /api/csrf endpoint
-  const newToken = generateCSRFToken();
-  return newToken;
-}
-
-/**
  * Get existing CSRF token without creating a new one
  * Safe to use in Server Components
  */
@@ -79,33 +61,4 @@ function timingSafeEqual(a: string, b: string): boolean {
   }
   
   return result === 0;
-}
-
-/**
- * Client-side helper to get CSRF token from meta tag
- */
-export function getClientCSRFToken(): string | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-  
-  const metaTag = document.querySelector('meta[name="csrf-token"]');
-  return metaTag?.getAttribute('content') || null;
-}
-
-/**
- * Add CSRF token to fetch headers
- */
-export function addCSRFHeader(headers: HeadersInit = {}): HeadersInit {
-  const token = getClientCSRFToken();
-  
-  if (!token) {
-    console.warn('CSRF token not found');
-    return headers;
-  }
-  
-  return {
-    ...headers,
-    [CSRF_HEADER]: token
-  };
 }

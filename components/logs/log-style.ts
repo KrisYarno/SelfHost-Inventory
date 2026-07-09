@@ -53,11 +53,5 @@ export function getInventoryLogTone(logType: inventory_logs_logType | string, de
       ? { label: "Stock In", className: "bg-emerald-600 text-white" }
       : { label: "Stock Out", className: "bg-rose-500 text-white" };
   }
-  if (logType === "AUTO_ADJUST") {
-    return { label: "Transfer Auto Add", className: "bg-slate-500 text-white" };
-  }
-  if (logType === "DEDUCTION") {
-    return { label: "Deduction", className: "bg-rose-500 text-white" };
-  }
   return { label: String(logType), className: "bg-gray-600 text-white" };
 }
