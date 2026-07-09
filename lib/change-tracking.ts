@@ -380,3 +380,80 @@ export async function recordIngestion(
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Read path (spec §4 read-path compat / §10 R-D5). Ported verbatim from
+// lib/audit.ts's AuditService.getAuditLogs/getBatchLogs — same query, same
+// include shape, same ordering. The ONLY change is the filter's `entityId`
+// type: `number` -> `string`, matching the migrated VARCHAR(64) column so both
+// numeric-string ids (`"42"`) and cuid strings filter identically.
+// ---------------------------------------------------------------------------
+
+/**
+ * Retrieve audit logs with filtering.
+ */
+export async function getAuditLogs(filters: {
+  userId?: number
+  actionType?: AuditActionType
+  entityType?: EntityType
+  entityId?: string
+  batchId?: string
+  startDate?: Date
+  endDate?: Date
+  limit?: number
+  offset?: number
+}) {
+  const where: any = {}
+
+  if (filters.userId) where.userId = filters.userId
+  if (filters.actionType) where.actionType = filters.actionType
+  if (filters.entityType) where.entityType = filters.entityType
+  if (filters.entityId) where.entityId = filters.entityId
+  if (filters.batchId) where.batchId = filters.batchId
+
+  if (filters.startDate || filters.endDate) {
+    where.createdAt = {}
+    if (filters.startDate) where.createdAt.gte = filters.startDate
+    if (filters.endDate) where.createdAt.lte = filters.endDate
+  }
+
+  const [logs, total] = await Promise.all([
+    prisma.auditLog.findMany({
+      where,
+      include: {
+        user: {
+          select: {
+            id: true,
+            username: true,
+            email: true
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' },
+      take: filters.limit || 50,
+      skip: filters.offset || 0
+    }),
+    prisma.auditLog.count({ where })
+  ])
+
+  return { logs, total }
+}
+
+/**
+ * Get audit logs for a specific batch.
+ */
+export async function getBatchLogs(batchId: string) {
+  return prisma.auditLog.findMany({
+    where: { batchId },
+    include: {
+      user: {
+        select: {
+          id: true,
+          username: true,
+          email: true
+        }
+      }
+    },
+    orderBy: { createdAt: 'asc' }
+  })
+}

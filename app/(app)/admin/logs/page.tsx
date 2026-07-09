@@ -457,7 +457,7 @@ interface AuditLog {
   userId: number;
   actionType: string;
   entityType: string;
-  entityId: number | null;
+  entityId: string | null;
   batchId: string | null;
   action: string;
   details: Record<string, unknown>;

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
-import { auditService } from "@/lib/audit";
-import type { AuditActionType, EntityType } from "@/lib/audit";
+import { getAuditLogs, getBatchLogs } from "@/lib/change-tracking";
+import type { AuditActionType, EntityType } from "@/lib/change-tracking";
 import { z } from "zod";
 import { AuditBatchLogsSchema } from "@/lib/validation/admin";
 
@@ -10,7 +10,7 @@ const auditLogQuerySchema = z.object({
   userId: z.coerce.number().optional(),
   actionType: z.string().optional(),
   entityType: z.string().optional(),
-  entityId: z.coerce.number().optional(),
+  entityId: z.string().trim().min(1).optional(),
   batchId: z.string().optional(),
   startDate: z.string().datetime().optional(),
   endDate: z.string().datetime().optional(),
@@ -46,7 +46,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
   };
 
   // Retrieve audit logs
-  const result = await auditService.getAuditLogs(processedFilters);
+  const result = await getAuditLogs(processedFilters);
 
   return NextResponse.json({
     logs: result.logs,
@@ -65,7 +65,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
   const body = await request.json();
   const { batchId } = AuditBatchLogsSchema.parse(body);
 
-  const logs = await auditService.getBatchLogs(batchId);
+  const logs = await getBatchLogs(batchId);
 
   return NextResponse.json({ logs });
 });
