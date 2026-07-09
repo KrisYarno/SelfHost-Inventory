@@ -204,11 +204,17 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
       })
     )
 
-    // Verify audit log was called
-    expect(_auditCalls.length).toBeGreaterThan(0)
-    expect(_auditCalls[0][0]).toEqual(
+    // Task 12 (change-tracking): the change event is now recorded via
+    // recordChange INSIDE the tx — assert the ORDER audit row was created on the
+    // SAME tx as the restoration (entityType=ORDER, entityId=the order cuid,
+    // companyId threaded from the loaded order).
+    expect(tx.auditLog.create).toHaveBeenCalledTimes(1)
+    expect((tx.auditLog.create as jest.Mock).mock.calls[0][0].data).toEqual(
       expect.objectContaining({
         actionType: 'EXTERNAL_ORDER_UNFULFILLMENT',
+        entityType: 'ORDER',
+        entityId: 'order-1',
+        companyId: 'co-test',
       })
     )
   })
@@ -525,8 +531,10 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
       POST(req, { params: { orderId: 'order-1' } })
     ).rejects.toThrow('DB write failed')
 
-    // Audit log should NOT have been called (it's outside the transaction)
-    expect(_auditCalls).toHaveLength(0)
+    // Task 12: the change event is recorded INSIDE the tx, AFTER the item loop.
+    // A mid-item failure aborts before it, so no audit row is written and the
+    // whole transaction (deductions + would-be audit) rolls back together.
+    expect(tx.auditLog.create).not.toHaveBeenCalled()
   })
 
   // -----------------------------------------------------------------------
