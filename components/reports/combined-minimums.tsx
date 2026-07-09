@@ -1,34 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Loader2 } from "lucide-react";
-import type { CombinedMinBreach } from "@/types/inventory";
+import { useReportsMinimums } from "@/hooks/use-reports";
 
 export function CombinedMinimumsReport() {
-  const [breaches, setBreaches] = useState<CombinedMinBreach[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const load = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const res = await fetch("/api/reports/minimums");
-        if (!res.ok) throw new Error("Failed to fetch minimum report");
-        const data = await res.json();
-        setBreaches(data.breaches || []);
-      } catch (err) {
-        console.error(err);
-        setError("Failed to load minimum report");
-      } finally {
-        setLoading(false);
-      }
-    };
-    load();
-  }, []);
+  const { data: breaches = [], isLoading: loading, isError } = useReportsMinimums();
+  const error = isError ? "Failed to load minimum report" : null;
 
   return (
     <Card>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
   Table,
@@ -20,12 +20,9 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import {
-  ReorderRecommendation,
-  ReorderSummary,
-  StockStatus,
-} from "@/types/reports";
+import { StockStatus } from "@/types/reports";
 import { AlertTriangle, Package, ShoppingCart, TrendingDown, CheckCircle } from "lucide-react";
+import { useReportsReorder } from "@/hooks/use-reports";
 
 interface ReorderRecommendationsProps {
   statusFilter?: string;
@@ -74,40 +71,15 @@ function StatusDot({ status, className }: { status: StockStatus; className?: str
 }
 
 export function ReorderRecommendations({ statusFilter: externalStatusFilter }: ReorderRecommendationsProps) {
-  const [recommendations, setRecommendations] = useState<ReorderRecommendation[]>([]);
-  const [summary, setSummary] = useState<ReorderSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState(externalStatusFilter || "all");
   const [sortBy, setSortBy] = useState<"alphabetical" | "status">("alphabetical");
 
-  const fetchRecommendations = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      const params = new URLSearchParams({
-        sortBy,
-        limit: "100",
-        ...(statusFilter !== "all" && { statusFilter }),
-      });
-
-      const response = await fetch(`/api/reports/reorder-recommendations?${params}`);
-      if (!response.ok) throw new Error("Failed to fetch reorder recommendations");
-
-      const data = await response.json();
-      setRecommendations(data.recommendations);
-      setSummary(data.summary);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load recommendations");
-    } finally {
-      setLoading(false);
-    }
-  }, [statusFilter, sortBy]);
-
-  useEffect(() => {
-    fetchRecommendations();
-  }, [fetchRecommendations]);
+  // Filter/sort are in the query key, so a change refetches naturally and a
+  // previously-viewed filter returns instantly from cache.
+  const { data, isLoading: loading, error: queryError } = useReportsReorder({ sortBy, statusFilter });
+  const recommendations = data?.recommendations ?? [];
+  const summary = data?.summary ?? null;
+  const error = queryError instanceof Error ? queryError.message : null;
 
   // Update internal filter when external prop changes
   useEffect(() => {

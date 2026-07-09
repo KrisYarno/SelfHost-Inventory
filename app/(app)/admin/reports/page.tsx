@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useRef } from "react";
 import { MetricsCard } from "@/components/reports/metrics-card";
 import { ActivityTimeline } from "@/components/reports/activity-timeline";
 import { ProductPerformance } from "@/components/reports/product-performance";
@@ -22,8 +22,12 @@ import {
   Archive,
   Info,
 } from "lucide-react";
-import { DashboardMetrics, StockLevelChartData, ActivityChartData } from "@/types/reports";
 import { useLocation } from "@/contexts/location-context";
+import {
+  useReportsMetrics,
+  useReportsInventoryTrends,
+  useReportsDailyActivity,
+} from "@/hooks/use-reports";
 import { DateRangePicker, DateRangePreset } from "@/components/ui/date-range-picker";
 import { DateRange } from "react-day-picker";
 import { format, startOfDay, endOfDay, subDays } from "date-fns";
@@ -48,11 +52,6 @@ const currencyFormatter = new Intl.NumberFormat("en-US", {
 const formatCurrency = (value?: number) => currencyFormatter.format(value ?? 0);
 
 export default function AdminReportsPage() {
-  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
-  const [inventoryTrends, setInventoryTrends] = useState<StockLevelChartData[]>([]);
-  const [dailyActivity, setDailyActivity] = useState<ActivityChartData[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
-  const [hasRecentActivity, setHasRecentActivity] = useState(true);
   const [dateRange, setDateRange] = useState<DateRange | undefined>({
     from: startOfDay(subDays(new Date(), 6)),
     to: endOfDay(new Date()),
@@ -72,89 +71,30 @@ export default function AdminReportsPage() {
   const { selectedLocationId } = useLocation();
   const chartRefs = useRef<{ [key: string]: HTMLDivElement | null }>({});
 
-  const fetchMetrics = useCallback(async () => {
-    try {
-      const params = new URLSearchParams();
-      if (dateRange?.from) {
-        params.append("startDate", dateRange.from.toISOString());
-      }
-      if (dateRange?.to) {
-        params.append("endDate", dateRange.to.toISOString());
-      }
-      if (selectedLocationId) {
-        params.append("locationId", selectedLocationId.toString());
-      }
+  // Range + location scope drives all three page-level queries; both live in
+  // each query key (["reports", <report>, { range, locationId }]), so changing
+  // the date range or location refetches naturally and a previously-viewed
+  // scope returns instantly from cache.
+  const scope = { dateRange, locationId: selectedLocationId };
+  const metricsQuery = useReportsMetrics(scope);
+  const inventoryTrendsQuery = useReportsInventoryTrends(scope);
+  const dailyActivityQuery = useReportsDailyActivity(scope);
 
-      const response = await fetch(`/api/reports/metrics?${params}`);
-      if (!response.ok) throw new Error("Failed to fetch metrics");
-      const data = await response.json();
-      setMetrics(data.metrics);
-      setHasRecentActivity(data.metrics.recentActivityCount > 0);
-    } catch (error) {
-      console.error("Error fetching metrics:", error);
-    }
-  }, [dateRange, selectedLocationId]);
+  const metrics = metricsQuery.data?.metrics ?? null;
+  const inventoryTrends = inventoryTrendsQuery.data ?? [];
+  const dailyActivity = dailyActivityQuery.data ?? [];
+  // Preserve prior default: true until metrics load reporting zero recent activity.
+  const hasRecentActivity = !metrics || metrics.recentActivityCount > 0;
+  // Spinner reflects an explicit refetch of existing data, not the initial load.
+  const refreshing =
+    metricsQuery.isRefetching ||
+    inventoryTrendsQuery.isRefetching ||
+    dailyActivityQuery.isRefetching;
 
-  const fetchInventoryTrends = useCallback(async () => {
-    try {
-      const params = new URLSearchParams();
-      if (dateRange?.from) {
-        params.append("startDate", dateRange.from.toISOString());
-      }
-      if (dateRange?.to) {
-        params.append("endDate", dateRange.to.toISOString());
-      }
-      if (selectedLocationId) {
-        params.append("locationId", selectedLocationId.toString());
-      }
-
-      const response = await fetch(`/api/reports/inventory-trends?${params}`);
-      if (!response.ok) throw new Error("Failed to fetch inventory trends");
-      const data = await response.json();
-      setInventoryTrends(data.data);
-    } catch (error) {
-      console.error("Error fetching inventory trends:", error);
-    }
-  }, [dateRange, selectedLocationId]);
-
-  const fetchDailyActivity = useCallback(async () => {
-    try {
-      const params = new URLSearchParams();
-      if (dateRange?.from) {
-        params.append("startDate", dateRange.from.toISOString());
-      }
-      if (dateRange?.to) {
-        params.append("endDate", dateRange.to.toISOString());
-      }
-      if (selectedLocationId) {
-        params.append("locationId", selectedLocationId.toString());
-      }
-
-      const response = await fetch(`/api/reports/daily-activity?${params}`);
-      if (!response.ok) throw new Error("Failed to fetch daily activity");
-      const data = await response.json();
-      setDailyActivity(data.data);
-    } catch (error) {
-      console.error("Error fetching daily activity:", error);
-    }
-  }, [dateRange, selectedLocationId]);
-
-  const fetchAllData = useCallback(async () => {
-    try {
-      await Promise.all([fetchMetrics(), fetchInventoryTrends(), fetchDailyActivity()]);
-    } catch (error) {
-      console.error("Error fetching data:", error);
-    }
-  }, [fetchMetrics, fetchInventoryTrends, fetchDailyActivity]);
-
-  useEffect(() => {
-    fetchAllData();
-  }, [fetchAllData]);
-
-  const handleRefresh = async () => {
-    setRefreshing(true);
-    await fetchAllData();
-    setRefreshing(false);
+  const handleRefresh = () => {
+    metricsQuery.refetch();
+    inventoryTrendsQuery.refetch();
+    dailyActivityQuery.refetch();
   };
 
   const handleDateRangeChange = (newDateRange: DateRange | undefined, _preset: DateRangePreset) => {

@@ -1,6 +1,5 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -8,30 +7,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { Users, Package, Settings } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
-import { UserActivitySummary } from "@/types/reports";
+import { useReportsUserActivity } from "@/hooks/use-reports";
 
 export function UserActivity() {
-  const [users, setUsers] = useState<UserActivitySummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchUserActivity();
-  }, []);
-
-  const fetchUserActivity = async () => {
-    try {
-      setLoading(true);
-      const response = await fetch("/api/reports/user-activity");
-      if (!response.ok) throw new Error("Failed to fetch user activity");
-      const data = await response.json();
-      setUsers(data.users.slice(0, 6)); // Top 6 users
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load user activity");
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Server applies a 365-day default window; the hook sends no params.
+  const { data: allUsers = [], isLoading: loading, error: queryError } = useReportsUserActivity();
+  const users = allUsers.slice(0, 6); // Top 6 users
+  const error = queryError instanceof Error ? queryError.message : null;
 
   const getInitials = (username: string) => {
     return username

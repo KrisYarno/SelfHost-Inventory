@@ -1,37 +1,17 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AlertTriangle, Package } from "lucide-react";
-import { LowStockAlert as LowStockAlertType } from "@/types/reports";
 import { cn } from "@/lib/utils";
+import { useReportsLowStock } from "@/hooks/use-reports";
 
 export function LowStockAlert() {
-  const [alerts, setAlerts] = useState<LowStockAlertType[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchLowStockAlerts();
-  }, []);
-
-  const fetchLowStockAlerts = async () => {
-    try {
-      setLoading(true);
-      const response = await fetch("/api/reports/low-stock");
-      if (!response.ok) throw new Error("Failed to fetch low stock alerts");
-      const data = await response.json();
-      setAlerts(data.alerts);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load alerts");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data: alerts = [], isLoading: loading, error: queryError } = useReportsLowStock();
+  const error = queryError instanceof Error ? queryError.message : null;
 
   const getSeverity = (percentageRemaining: number) => {
     if (percentageRemaining === 0) return "critical";

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -9,66 +9,34 @@ import { TrendingUp, TrendingDown, Minus, Loader2 } from "lucide-react";
 import { BarChartComponent } from "./inventory-chart";
 import { cn } from "@/lib/utils";
 import { useLocation } from "@/contexts/location-context";
-import { ProductMovementSummary, TrendDirection } from "@/types/reports";
-
-const PAGE_SIZE = 20;
+import { TrendDirection } from "@/types/reports";
+import { useReportsProductPerformance } from "@/hooks/use-reports";
 
 export function ProductPerformance() {
-  const [products, setProducts] = useState<ProductMovementSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [page, setPage] = useState(1);
-  const [hasMore, setHasMore] = useState(true);
-  const [totalProducts, setTotalProducts] = useState(0);
   const { selectedLocationId } = useLocation();
   const observerRef = useRef<IntersectionObserver | null>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
 
-  const fetchProductPerformance = useCallback(async (pageNum: number, append: boolean = false) => {
-    try {
-      if (!append) {
-        setLoading(true);
-        setProducts([]);
-      } else {
-        setLoadingMore(true);
-      }
-
-      // Use new server-side aggregation API
-      const params = new URLSearchParams({
-        days: "30",
-        page: pageNum.toString(),
-        pageSize: PAGE_SIZE.toString(),
-        sortBy: "activity",
-        ...(selectedLocationId && { locationId: selectedLocationId.toString() }),
-      });
-
-      const response = await fetch(`/api/reports/product-movement-summary?${params}`);
-      if (!response.ok) throw new Error("Failed to fetch product performance");
-
-      const data = await response.json();
-
-      if (append) {
-        setProducts((prev) => [...prev, ...data.products]);
-      } else {
-        setProducts(data.products);
-      }
-
-      setTotalProducts(data.pagination.total);
-      setHasMore(pageNum < data.pagination.totalPages);
-      setPage(pageNum);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load performance data");
-    } finally {
-      setLoading(false);
-      setLoadingMore(false);
-    }
-  }, [selectedLocationId]);
+  // Server-side paginated via useInfiniteQuery; locationId is in the key, so a
+  // location change starts a fresh page sequence (skeleton) and cached scopes
+  // return instantly.
+  const query = useReportsProductPerformance(selectedLocationId);
+  const { fetchNextPage } = query;
+  const products = query.data?.products ?? [];
+  const totalProducts = query.data?.total ?? 0;
+  const loading = query.isLoading;
+  const loadingMore = query.isFetchingNextPage;
+  const hasMore = query.hasNextPage ?? false;
+  const error = query.isError
+    ? query.error instanceof Error
+      ? query.error.message
+      : "Failed to load performance data"
+    : null;
 
   const loadMoreProducts = useCallback(() => {
     if (loadingMore || !hasMore) return;
-    fetchProductPerformance(page + 1, true);
-  }, [page, loadingMore, hasMore, fetchProductPerformance]);
+    fetchNextPage();
+  }, [loadingMore, hasMore, fetchNextPage]);
 
   // Infinite scroll observer
   useEffect(() => {
@@ -95,11 +63,6 @@ export function ProductPerformance() {
       }
     };
   }, [loading, loadingMore, hasMore, loadMoreProducts]);
-
-  // Initial load and refresh on location change
-  useEffect(() => {
-    fetchProductPerformance(1, false);
-  }, [fetchProductPerformance]);
 
   if (loading) {
     return (

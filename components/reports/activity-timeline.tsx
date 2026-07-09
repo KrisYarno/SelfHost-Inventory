@@ -1,6 +1,5 @@
 "use client";
 
-import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -15,29 +14,11 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { ActivityItem } from "@/types/reports";
+import { useReportsActivity } from "@/hooks/use-reports";
 
 export function ActivityTimeline() {
-  const [activities, setActivities] = useState<ActivityItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchActivities();
-  }, []);
-
-  const fetchActivities = async () => {
-    try {
-      setLoading(true);
-      const response = await fetch("/api/reports/activity?pageSize=10");
-      if (!response.ok) throw new Error("Failed to fetch activities");
-      const data = await response.json();
-      setActivities(data.activities);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load activities");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { data: activities = [], isLoading: loading, error: queryError } = useReportsActivity(10);
+  const error = queryError instanceof Error ? queryError.message : null;
 
   const getActivityIcon = (type: ActivityItem['type']) => {
     switch (type) {
