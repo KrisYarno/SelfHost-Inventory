@@ -158,17 +158,20 @@ model Location {
 }
 
 model inventory_logs {
-  id         Int                    @id @default(autoincrement())
-  userId     Int
-  productId  Int
-  delta      Int
-  changeTime DateTime               @db.DateTime(0)
-  locationId Int?
-  logType    inventory_logs_logType @default(ADJUSTMENT)
-  transferId String?                @db.VarChar(36)
-  locations  Location?              @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_log_location")
-  users      User                   @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_1")
-  products   Product                @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_2")
+  id            Int                    @id @default(autoincrement())
+  userId        Int?
+  productId     Int
+  delta         Int
+  changeTime    DateTime               @db.DateTime(3)
+  locationId    Int?
+  logType       inventory_logs_logType @default(ADJUSTMENT)
+  transferId    String?                @db.VarChar(36)
+  actorKind     String                 @default("USER") @db.VarChar(16)
+  reasonCode    String?                @db.VarChar(20)
+  unitCostCents Int?
+  locations     Location?              @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_log_location")
+  users         User?                  @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_1")
+  products      Product                @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_2")
 
   @@index([locationId], map: "fk_log_location")
   @@index([productId, locationId, changeTime], map: "idx_inventory_logs_product_location_time_desc")
@@ -216,24 +219,27 @@ model NotificationHistory {
 
 model AuditLog {
   id            Int      @id @default(autoincrement())
-  userId        Int
+  userId        Int?
+  actorKind     String   @default("USER") @db.VarChar(16)
+  companyId     String?  @db.VarChar(30)
   actionType    String   @db.VarChar(50)
   entityType    String   @db.VarChar(50)
-  entityId      Int?
+  entityId      String?  @db.VarChar(64)
   batchId       String?  @db.VarChar(36)
   action        String   @db.Text
   details       Json?
   ipAddress     String?  @db.VarChar(45)
   userAgent     String?  @db.VarChar(255)
   affectedCount Int      @default(1)
-  createdAt     DateTime @default(now()) @db.DateTime(0)
-  user          User     @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_audit_user")
+  createdAt     DateTime @default(now()) @db.DateTime(3)
+  user          User?    @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_audit_user")
 
   @@index([userId], map: "idx_audit_user")
   @@index([actionType], map: "idx_audit_actionType")
   @@index([entityType, entityId], map: "idx_audit_entity")
   @@index([batchId], map: "idx_audit_batch")
   @@index([createdAt], map: "idx_audit_created")
+  @@index([companyId, createdAt], map: "idx_audit_company_time")
   @@map("audit_logs")
 }
 
@@ -248,6 +254,10 @@ model SystemSetting {
 enum inventory_logs_logType {
   ADJUSTMENT
   TRANSFER
+  STOCK_IN
+  SALE
+  CORRECTION
+  COUNT
 }
 
 enum ProductApprovalStatus {
