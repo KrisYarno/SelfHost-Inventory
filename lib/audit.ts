@@ -44,7 +44,7 @@ interface AuditLogEntry {
   userId: number
   actionType: AuditActionType
   entityType: EntityType
-  entityId?: number
+  entityId?: number | string
   action: string
   details?: Record<string, any>
   affectedCount?: number
@@ -103,7 +103,7 @@ class AuditService {
           userId: entry.userId,
           actionType: entry.actionType,
           entityType: entry.entityType,
-          entityId: entry.entityId,
+          entityId: entry.entityId != null ? String(entry.entityId) : null,
           action: entry.action,
           details: entry.details || undefined,
           affectedCount: entry.affectedCount || 1,
