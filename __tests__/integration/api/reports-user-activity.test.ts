@@ -114,6 +114,39 @@ test("a user with no activity gets zero counts and null lastActivity", async () 
   });
 });
 
+test("machine-actor rows (userId null) are excluded from per-user stats and never form a 'System' bucket", async () => {
+  // Change-tracking foundation: inventory_logs.userId is now nullable, so groupBy(["userId"])
+  // can surface a null key. Per-user attribution must NOT count these against any real user,
+  // and must NOT invent a synthetic "System" user row (truthful-data: exclude, don't fabricate).
+  routeGroupBy({
+    totals: [
+      { userId: 1, _count: { _all: 5 }, _max: { changeTime: new Date("2026-06-10T00:00:00.000Z") } },
+      { userId: null, _count: { _all: 99 }, _max: { changeTime: new Date("2026-06-11T00:00:00.000Z") } },
+    ],
+    stockIn: [
+      { userId: 1, _count: { _all: 3 } },
+      { userId: null, _count: { _all: 50 } },
+    ],
+    stockOut: [{ userId: null, _count: { _all: 40 } }],
+    adjustments: [{ userId: null, _count: { _all: 9 } }],
+  });
+
+  const res = await GET(new NextRequest("http://x/api/reports/user-activity"));
+  const body = await res.json();
+
+  // Only the two approved real users appear — no synthetic System/null row.
+  expect(body.users).toHaveLength(2);
+  expect(body.users.map((u: any) => u.userId)).toEqual([1, 2]);
+  expect(body.users.some((u: any) => u.username === "System")).toBe(false);
+  expect(body.users.some((u: any) => u.userId === null)).toBe(false);
+
+  // The null-actor counts (99/50/40/9) leak into NObody's totals.
+  const alice = body.users.find((u: any) => u.userId === 1);
+  expect(alice).toMatchObject({ totalTransactions: 5, stockInCount: 3, stockOutCount: 0, adjustmentCount: 0 });
+  const bob = body.users.find((u: any) => u.userId === 2);
+  expect(bob).toMatchObject({ totalTransactions: 0, stockInCount: 0, stockOutCount: 0, adjustmentCount: 0 });
+});
+
 test("no range params => a default trailing window (~365d) bounds every aggregate; nothing is streamed via findMany", async () => {
   await GET(new NextRequest("http://x/api/reports/user-activity"));
 

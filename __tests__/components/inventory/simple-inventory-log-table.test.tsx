@@ -72,3 +72,26 @@ test("two TRANSFER rows with DIFFERENT transferIds stay SEPARATE even when the h
   const rows = container.querySelectorAll("tbody tr");
   expect(rows).toHaveLength(2);
 });
+
+// --- machine-actor (nullable userId) rows ---
+test("a log with users: null renders the actor as 'System'", () => {
+  // Change-tracking foundation: inventory_logs.userId is nullable, so machine-actor
+  // rows arrive with users === null. The table must show "System", never crash.
+  const machineLog = {
+    id: 42,
+    userId: null,
+    productId: 7,
+    delta: 3,
+    changeTime: BASE_TIME,
+    locationId: 2,
+    logType: "STOCK_IN",
+    transferId: null,
+    users: null,
+    products: { id: 7, name: "Widget" },
+    locations: { id: 2, name: "Shelf A" },
+  } as any;
+
+  render(<SimpleInventoryLogTable logs={[machineLog]} />);
+  // Desktop table cell + mobile card both render the "System" fallback.
+  expect(screen.getAllByText("System").length).toBeGreaterThan(0);
+});

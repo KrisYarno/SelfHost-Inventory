@@ -17,8 +17,10 @@ import { inventory_logs, Product, Location, User } from '@prisma/client';
 
 // Narrowed to the relation fields the API selects (and this table renders):
 // users.username, products.name, locations.name. Full rows remain assignable.
+// `users` is nullable: machine-actor rows (nullable userId) have no owning user —
+// rendered as "System" below.
 type SimpleInventoryLog = inventory_logs & {
-  users: Pick<User, 'id' | 'username' | 'email'>;
+  users: Pick<User, 'id' | 'username' | 'email'> | null;
   products: Pick<Product, 'id' | 'name' | 'baseName' | 'variant'>;
   locations: Pick<Location, 'id' | 'name'> | null;
 };
@@ -168,7 +170,7 @@ export function SimpleInventoryLogTable({
                         <StatusBadge tone="info">Transfer</StatusBadge>
                       </div>
                       </div>
-                      {showUser && <p className="text-xs text-muted-foreground">by {from.users.username}</p>}
+                      {showUser && <p className="text-xs text-muted-foreground">by {from.users?.username ?? 'System'}</p>}
                     </div>
                   );
                 }
@@ -198,7 +200,7 @@ export function SimpleInventoryLogTable({
                         <StatusBadge tone={getLogTone(log.logType)}>{log.logType}</StatusBadge>
                       </div>
                     </div>
-                    {showUser && <p className="text-xs text-muted-foreground">by {log.users.username}</p>}
+                    {showUser && <p className="text-xs text-muted-foreground">by {log.users?.username ?? 'System'}</p>}
                   </div>
                 );
               })}
@@ -258,7 +260,7 @@ export function SimpleInventoryLogTable({
                             <ValueChip tone="positive">+{qty}</ValueChip>
                           </div>
                         </TableCell>
-                        {showUser && <TableCell>{from.users.username}</TableCell>}
+                        {showUser && <TableCell>{from.users?.username ?? 'System'}</TableCell>}
                       </TableRow>
                     );
                   }
@@ -278,7 +280,7 @@ export function SimpleInventoryLogTable({
                           {formatDelta(log.delta)}
                         </ValueChip>
                       </TableCell>
-                      {showUser && <TableCell>{log.users.username}</TableCell>}
+                      {showUser && <TableCell>{log.users?.username ?? 'System'}</TableCell>}
                     </TableRow>
                   );
                 })

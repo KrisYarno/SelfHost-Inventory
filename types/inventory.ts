@@ -10,8 +10,10 @@ import {
 // Relations are deliberately NARROWED to the fields the API actually selects
 // (see lib/inventory.ts createInventoryLog and /api/inventory/logs): full
 // User would imply passwordHash crosses the wire, which it must never do.
+// `users` is nullable: inventory_logs.userId is now nullable (change-tracking
+// foundation) so machine-actor rows have no owning user — consumers render "System".
 export type InventoryLogWithRelations = inventory_logs & {
-  users: Pick<User, 'id' | 'username' | 'email'>;
+  users: Pick<User, 'id' | 'username' | 'email'> | null;
   products: Pick<Product, 'id' | 'name' | 'baseName' | 'variant'>;
   locations: Pick<Location, 'id' | 'name'> | null;
 };

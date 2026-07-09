@@ -84,9 +84,12 @@ export const GET = apiHandler(async (request: NextRequest) => {
       timestamp: log.changeTime,
       type,
       description,
+      // Machine-actor rows (nullable userId) have no owning user. This is an event
+      // feed, not per-user attribution, so we label the actor "System"; id 0 is a
+      // never-a-real-user sentinel (autoincrement starts at 1) and is unused by the UI.
       user: {
-        id: log.users.id,
-        username: log.users.username,
+        id: log.users?.id ?? 0,
+        username: log.users?.username ?? "System",
       },
       product: {
         id: log.products.id,

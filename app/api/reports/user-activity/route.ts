@@ -67,11 +67,28 @@ export const GET = apiHandler(async (request: NextRequest) => {
     }),
   ]);
 
+  // groupBy(["userId"]) types the key as `number | null` because inventory_logs.userId
+  // is now nullable (machine actors). Here `baseWhere` constrains `userId: { in: userIds }`
+  // to approved real users, so null/machine rows are STRUCTURALLY excluded from every
+  // aggregate — the null branch below is never taken. We do NOT add a "System" bucket:
+  // this panel is per-user attribution, and a truthful System row would always be empty.
+  // The null guards keep the code type-safe and correct even if that filter ever changes.
   const totalMap = new Map<number, { count: number; last: Date | null }>();
-  totals.forEach((t) => totalMap.set(t.userId, { count: t._count._all, last: t._max.changeTime }));
-  const stockInMap = new Map<number, number>(stockIn.map((s) => [s.userId, s._count._all]));
-  const stockOutMap = new Map<number, number>(stockOut.map((s) => [s.userId, s._count._all]));
-  const adjustmentMap = new Map<number, number>(adjustments.map((s) => [s.userId, s._count._all]));
+  totals.forEach((t) => {
+    if (t.userId === null) return;
+    totalMap.set(t.userId, { count: t._count._all, last: t._max.changeTime });
+  });
+  const toCountMap = (rows: typeof stockIn) => {
+    const map = new Map<number, number>();
+    rows.forEach((s) => {
+      if (s.userId === null) return;
+      map.set(s.userId, s._count._all);
+    });
+    return map;
+  };
+  const stockInMap = toCountMap(stockIn);
+  const stockOutMap = toCountMap(stockOut);
+  const adjustmentMap = toCountMap(adjustments);
 
   const userActivities: UserActivitySummary[] = users.map((user) => {
     const total = totalMap.get(user.id);

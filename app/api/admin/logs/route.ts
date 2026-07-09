@@ -77,7 +77,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
     id: log.id,
     timestamp: log.changeTime.toISOString(),
     productName: log.products.name,
-    userName: log.users.username,
+    // Machine-actor rows (nullable userId) have no owning user — render "System".
+    userName: log.users?.username ?? "System",
     locationName: log.locations?.name || "Unknown",
     delta: log.delta,
     logType: log.logType,

@@ -454,7 +454,9 @@ type AuditFilterState = {
 
 interface AuditLog {
   id: number;
-  userId: number;
+  // Nullable for machine-actor rows (change-tracking foundation): AuditLog.userId
+  // is now nullable and `user` is absent for SYSTEM/WEBHOOK/LLM actors — rendered "System".
+  userId: number | null;
   actionType: string;
   entityType: string;
   entityId: string | null;
@@ -469,7 +471,7 @@ interface AuditLog {
     id: number;
     username: string;
     email: string;
-  };
+  } | null;
 }
 
 interface AuditLogsResponse {
@@ -566,7 +568,7 @@ function AuditLogTab({ active }: { active: boolean }) {
       // Pre-format timestamps for export
       const exportData = data.logs.map((log: AuditLog) => ({
         timestamp: format(new Date(log.createdAt), "yyyy-MM-dd HH:mm:ss"),
-        userEmail: log.user.email,
+        userEmail: log.user?.email ?? "System",
         actionType: log.actionType,
         entityType: log.entityType,
         action: log.action,
@@ -726,10 +728,10 @@ function AuditLogTab({ active }: { active: boolean }) {
                       <TableCell className="min-w-[160px]">
                         <div className="min-w-0">
                           <div className="font-medium truncate max-w-[50vw] sm:max-w-none">
-                            {log.user.username}
+                            {log.user?.username ?? "System"}
                           </div>
                           <div className="text-sm text-muted-foreground truncate max-w-[60vw] sm:max-w-none">
-                            {log.user.email}
+                            {log.user?.email ?? ""}
                           </div>
                         </div>
                       </TableCell>

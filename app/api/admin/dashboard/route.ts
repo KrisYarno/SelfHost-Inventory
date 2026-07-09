@@ -121,7 +121,8 @@ export const GET = apiHandler(async () => {
     })),
     recentActivity: recentActivity.map((log) => ({
       id: log.id,
-      user: log.users.username,
+      // Machine-actor rows (nullable userId) have no owning user — render "System".
+      user: log.users?.username ?? "System",
       action: log.delta > 0 ? "Added to" : "Removed from",
       product: log.products.name,
       quantity: log.delta,
