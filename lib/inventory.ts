@@ -572,48 +572,28 @@ export async function createInventoryTransaction(
         }
       }
 
-      // Create log entry
-      const log = await createInventoryLog({
+      // Apply the stock delta through the shared write core: log +
+      // product_locations upsert (quantity/version increment) + loc-1
+      // Product.quantity mirror — the same path adjust/stock-in/batch-adjust use.
+      // logType is pinned to ADJUSTMENT to preserve this path's exact prior
+      // behavior — deductions/sales are recorded as ADJUSTMENT with a negative
+      // delta (no SALE/DEDUCTION logType exists); item.changeType is not mapped.
+      //
+      // Concurrency note: the read-compare version guard above stays OUTSIDE
+      // applyStockDelta and is UNCHANGED. Like createInventoryAdjustment, this
+      // path's write is a commutative relative increment, for which read-compare
+      // is the documented-safe idiom. Unlike createInventoryAdjustment, this path
+      // intentionally has NO retry loop (single attempt) — that pre-existing
+      // difference is preserved.
+      const { log, newVersion } = await applyStockDelta(tx, {
         userId,
         productId: item.productId,
         locationId: item.locationId,
         delta: item.quantityChange,
         logType: inventory_logs_logType.ADJUSTMENT,
-      }, tx);
-
-      // Update product_locations with version increment
-      const updatedProductLocation = await tx.product_locations.upsert({
-        where: {
-          productId_locationId: {
-            productId: item.productId,
-            locationId: item.locationId,
-          },
-        },
-        update: {
-          quantity: {
-            increment: item.quantityChange,
-          },
-          version: {
-            increment: 1,
-          },
-        },
-        create: {
-          productId: item.productId,
-          locationId: item.locationId,
-          quantity: item.quantityChange,
-          version: 1,
-        },
       });
 
-      versions[`${item.productId}-${item.locationId}`] = updatedProductLocation.version;
-
-      // Update product quantity for location 1 (compatibility)
-      if (item.locationId === 1) {
-        await tx.product.update({
-          where: { id: item.productId },
-          data: { quantity: { increment: item.quantityChange } },
-        });
-      }
+      versions[`${item.productId}-${item.locationId}`] = newVersion;
 
       logs.push(log);
     }
