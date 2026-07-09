@@ -15,6 +15,7 @@
 import { Prisma } from '@prisma/client';
 import { headers } from 'next/headers';
 import { v4 as uuidv4 } from 'uuid';
+import prisma from '@/lib/prisma';
 
 // ---------------------------------------------------------------------------
 // Taxonomy (spec §3 D5). Seeded from lib/audit.ts's current unions and EXTENDED
@@ -349,4 +350,33 @@ export async function recordChange(
 ): Promise<void> {
   const data = await buildAuditData(event);
   await tx.auditLog.create({ data });
+}
+
+/**
+ * BEST-EFFORT write for machine ingestion paths (webhook/cron) (spec §3 / §10
+ * R-D2). Uses its own implicit transaction (`prisma.auditLog.create`) and NEVER
+ * throws into the caller: on failure it logs, awaits `opts.onFailure` (which is
+ * itself try/caught so a broken health hook cannot surface), and returns false.
+ * Returns true when the row is written. Callers wire `onFailure` to their health
+ * counter (webhooks: webhookFailureCount/lastWebhookError; cron: job lastError).
+ */
+export async function recordIngestion(
+  event: ChangeEvent,
+  opts?: { onFailure?: (err: unknown) => void | Promise<void> },
+): Promise<boolean> {
+  try {
+    const data = await buildAuditData(event);
+    await prisma.auditLog.create({ data });
+    return true;
+  } catch (err) {
+    console.error('[change-tracking] ingestion record failed', err);
+    if (opts?.onFailure) {
+      try {
+        await opts.onFailure(err);
+      } catch (callbackErr) {
+        console.error('[change-tracking] ingestion onFailure callback threw', callbackErr);
+      }
+    }
+    return false;
+  }
 }

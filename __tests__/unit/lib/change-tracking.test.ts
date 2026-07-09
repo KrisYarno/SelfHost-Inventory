@@ -35,6 +35,7 @@ import {
   redactDeep,
   diff,
   recordChange,
+  recordIngestion,
   COMPANY_SCOPED_ENTITY_TYPES,
   REDACTED_KEYS,
   type ChangeEvent,
@@ -441,5 +442,95 @@ describe('change-tracking: recordChange', () => {
       process.env.NODE_ENV = prev;
       errSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 4 — recordIngestion (best-effort, never throws)
+// ---------------------------------------------------------------------------
+
+describe('change-tracking: recordIngestion', () => {
+  let errSpy: jest.SpyInstance;
+
+  const webhookEvent: ChangeEvent = {
+    actor: { kind: 'WEBHOOK', envelope: { source: 'shopify' } },
+    actionType: 'EXTERNAL_ORDER_FULFILLMENT',
+    entityType: 'ORDER',
+    entityId: 'ord_1',
+    companyId: 'cmp_1',
+    action: 'Order fulfilled via webhook',
+  };
+
+  beforeEach(() => {
+    mockReset(mockPrisma);
+    mockHeaders.mockReset();
+    mockHeaders.mockRejectedValue(new Error('no request scope')); // machine path
+    errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errSpy.mockRestore();
+  });
+
+  it('writes via the singleton prisma (own tx) and returns true on success', async () => {
+    (mockPrisma.auditLog.create as jest.Mock).mockResolvedValue({ id: 1 });
+    const ok = await recordIngestion(webhookEvent);
+    expect(ok).toBe(true);
+    expect(mockPrisma.auditLog.create).toHaveBeenCalledTimes(1);
+    const data = (mockPrisma.auditLog.create as jest.Mock).mock.calls[0][0].data;
+    expect(data.actorKind).toBe('WEBHOOK');
+    expect(data.userId).toBeNull();
+    expect(data.entityId).toBe('ord_1');
+  });
+
+  it('never throws on create failure: returns false, logs, invokes onFailure', async () => {
+    const boom = new Error('db down');
+    (mockPrisma.auditLog.create as jest.Mock).mockRejectedValue(boom);
+    const onFailure = jest.fn();
+
+    let ok: boolean | undefined;
+    await expect(
+      (async () => {
+        ok = await recordIngestion(webhookEvent, { onFailure });
+      })(),
+    ).resolves.toBeUndefined();
+
+    expect(ok).toBe(false);
+    expect(onFailure).toHaveBeenCalledTimes(1);
+    expect(onFailure).toHaveBeenCalledWith(boom);
+    expect(errSpy).toHaveBeenCalled();
+  });
+
+  it('swallows an onFailure callback that itself throws (still returns false, no throw)', async () => {
+    (mockPrisma.auditLog.create as jest.Mock).mockRejectedValue(new Error('db down'));
+    const onFailure = jest.fn().mockRejectedValue(new Error('health counter exploded'));
+
+    let ok: boolean | undefined;
+    await expect(
+      (async () => {
+        ok = await recordIngestion(webhookEvent, { onFailure });
+      })(),
+    ).resolves.toBeUndefined();
+
+    expect(ok).toBe(false);
+    expect(onFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns true with no onFailure provided', async () => {
+    (mockPrisma.auditLog.create as jest.Mock).mockResolvedValue({ id: 2 });
+    await expect(recordIngestion(webhookEvent)).resolves.toBe(true);
+  });
+
+  it('awaits an async onFailure before resolving', async () => {
+    (mockPrisma.auditLog.create as jest.Mock).mockRejectedValue(new Error('db down'));
+    const order: string[] = [];
+    const onFailure = jest.fn(async () => {
+      await Promise.resolve();
+      order.push('onFailure-done');
+    });
+    const ok = await recordIngestion(webhookEvent, { onFailure });
+    order.push('returned');
+    expect(ok).toBe(false);
+    expect(order).toEqual(['onFailure-done', 'returned']);
   });
 });
