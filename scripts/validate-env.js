@@ -86,21 +86,59 @@ Examples:
     prompt: 'Enter Google OAuth client secret',
   },
   {
-    name: 'SENDGRID_API_KEY',
-    description: 'SendGrid API key',
+    name: 'ENCRYPTION_KEY',
+    description: 'AES-256-GCM key for encrypting integration credentials at rest (base64, 32 bytes)',
     required: true,
+    generator: () => crypto.randomBytes(32).toString('base64'),
+    validator: (value) => {
+      try {
+        return Buffer.from(value, 'base64').length === 32;
+      } catch {
+        return false;
+      }
+    },
+    prompt: 'Enter encryption key (or press Enter to generate)',
+  },
+  {
+    name: 'ALLOWED_EMAIL_DOMAINS',
+    description: 'Comma-separated Google Workspace domains allowed to sign up/in',
+    required: false,
+    default: 'advancedresearchpep.com',
+    prompt: 'Enter allowed email domain(s)',
+  },
+  // SendGrid/CRON_SECRET/INTERNAL_SYNC_TOKEN are optional: the app degrades
+  // gracefully without them (see lib/email.ts and /api/cron/* routes) even
+  // though they gate real functionality (email delivery, cron auth, sync auth).
+  {
+    name: 'SENDGRID_API_KEY',
+    description: 'SendGrid API key (unset = emails silently skipped, no crash)',
+    required: false,
     example: 'SG.your-api-key',
     validator: (value) => value.startsWith('SG.') || value === 'fake-key-for-local-dev',
-    prompt: 'Enter SendGrid API key (or "fake-key-for-local-dev" for development)',
+    prompt: 'Enter SendGrid API key (or leave blank to skip email)',
     help: 'Get from https://app.sendgrid.com/settings/api_keys',
   },
   {
-    name: 'FROM_EMAIL',
-    description: 'Sender email address',
-    required: true,
-    default: 'noreply@localhost',
+    name: 'SENDGRID_FROM_EMAIL',
+    description: 'Sender email address for SendGrid emails',
+    required: false,
+    default: 'alerts@advancedresearchpep.com',
     validator: (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
     prompt: 'Enter sender email address',
+  },
+  {
+    name: 'CRON_SECRET',
+    description: 'Bearer token required by /api/cron/* routes (unset = cron routes 401)',
+    required: false,
+    generator: () => crypto.randomBytes(24).toString('hex'),
+    prompt: 'Enter cron secret (or press Enter to generate)',
+  },
+  {
+    name: 'INTERNAL_SYNC_TOKEN',
+    description: 'Shared token between app and the external-sync sidecar',
+    required: false,
+    generator: () => crypto.randomBytes(24).toString('hex'),
+    prompt: 'Enter internal sync token (or press Enter to generate)',
   },
   {
     name: 'NODE_ENV',

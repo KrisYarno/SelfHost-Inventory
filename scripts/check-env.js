@@ -44,26 +44,31 @@ const REQUIRED_ENV_VARS = [
     validator: (value) => value.length > 0,
   },
   {
-    name: 'SENDGRID_API_KEY',
-    description: 'SendGrid API key for emails',
-    example: 'SG.your-api-key',
-    validator: (value) => value.startsWith('SG.') || value === 'fake-key-for-local-dev',
-  },
-  {
-    name: 'FROM_EMAIL',
-    description: 'Sender email address',
-    example: 'noreply@yourdomain.com',
-    validator: (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),
+    name: 'ENCRYPTION_KEY',
+    description: 'AES-256-GCM key for encrypting integration credentials at rest (base64, 32 bytes)',
+    example: 'Generated with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"',
+    validator: (value) => {
+      try {
+        return Buffer.from(value, 'base64').length === 32;
+      } catch {
+        return false;
+      }
+    },
   },
 ];
 
 // Optional environment variables
+// (SendGrid/CRON_SECRET/etc are not "required" here because the code
+// degrades gracefully without them — see lib/email.ts and the /api/cron/*
+// routes — even though they gate real functionality.)
 const OPTIONAL_ENV_VARS = [
   { name: 'NODE_ENV', description: 'Environment mode', default: 'development' },
-  { name: 'NEXTAUTH_DEBUG', description: 'Enable auth debugging', default: 'false' },
-  { name: 'RATE_LIMIT_PER_MINUTE', description: 'API rate limit', default: '60' },
-  { name: 'SENTRY_DSN', description: 'Sentry error tracking' },
-  { name: 'REDIS_URL', description: 'Redis connection for caching' },
+  { name: 'ALLOWED_EMAIL_DOMAINS', description: 'Comma-separated Google Workspace domains allowed to sign up/in', default: 'advancedresearchpep.com' },
+  { name: 'SENDGRID_API_KEY', description: 'SendGrid API key for emails (unset = emails silently skipped)' },
+  { name: 'SENDGRID_FROM_EMAIL', description: 'Sender email address for SendGrid emails', default: 'alerts@advancedresearchpep.com' },
+  { name: 'TEMPLATE_ID', description: 'SendGrid dynamic template id (unset = inline HTML fallback)' },
+  { name: 'CRON_SECRET', description: 'Bearer token required by /api/cron/* routes (unset = cron routes 401)' },
+  { name: 'INTERNAL_SYNC_TOKEN', description: 'Shared token between app and the external-sync sidecar' },
 ];
 
 // Check if we have chalk available, if not, use basic console colors
