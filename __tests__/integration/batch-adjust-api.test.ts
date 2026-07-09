@@ -12,11 +12,6 @@ jest.mock('next-auth', () => ({
 }))
 
 // Mock audit service
-jest.mock('@/lib/audit', () => ({
-  auditService: {
-    logBulkInventoryUpdate: jest.fn(),
-  },
-}))
 
 // Change-tracking is exercised end-to-end in
 // __tests__/integration/api/change-tracking-inventory.test.ts; here the route's

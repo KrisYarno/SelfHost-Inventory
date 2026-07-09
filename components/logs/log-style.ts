@@ -1,6 +1,6 @@
 "use client";
 
-import { AuditActionType } from "@/lib/audit";
+import { AuditActionType } from "@/lib/change-tracking";
 import { inventory_logs_logType } from "@prisma/client";
 
 type Tone = {

@@ -56,9 +56,6 @@ jest.mock('@/lib/rateLimit', () => ({
   applyRateLimitHeaders: jest.fn((resp: any) => resp),
 }));
 
-jest.mock('@/lib/audit', () => ({
-  auditService: { log: jest.fn(async () => undefined) },
-}));
 
 // The weekly-report route sends email; stub the whole service.
 jest.mock('@/lib/email', () => ({

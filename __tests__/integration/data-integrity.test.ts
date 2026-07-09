@@ -10,11 +10,6 @@ jest.mock('next-auth', () => ({
   getServerSession: jest.fn(),
 }))
 
-jest.mock('@/lib/audit', () => ({
-  auditService: {
-    logBulkInventoryUpdate: jest.fn(),
-  },
-}))
 
 // The route now records its change in-transaction; audit behavior is covered by
 // __tests__/integration/api/change-tracking-inventory.test.ts. Stub it here so

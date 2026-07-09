@@ -50,15 +50,6 @@ jest.mock('@/lib/external-orders/shared', () => ({
 }))
 
 // Audit service mock
-const _auditCalls: any[] = []
-jest.mock('@/lib/audit', () => ({
-  auditService: {
-    log: jest.fn((...args: any[]) => {
-      _auditCalls.push(args)
-      return Promise.resolve()
-    }),
-  },
-}))
 
 // createInventoryLog mock
 let _inventoryLogImpl: (...args: any[]) => Promise<any>
@@ -79,7 +70,6 @@ beforeEach(() => {
   mockReset(getMockPrisma())
   jest.clearAllMocks()
   _csrfValid = true
-  _auditCalls.length = 0
   _inventoryLogImpl = () => Promise.resolve({ id: 100 })
   mockPushOrderStatus.mockReset().mockResolvedValue({ success: true })
   mockRequireCompanyMembership.mockReset().mockResolvedValue(undefined)

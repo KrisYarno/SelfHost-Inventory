@@ -74,9 +74,6 @@ jest.mock("@/lib/rateLimit", () => {
 
 // Deprecated legacy audit service (deleted by Task 14 — when lib/audit.ts goes,
 // remove this jest.mock line too; routes will no longer import it).
-jest.mock("@/lib/audit", () => ({
-  auditService: { log: jest.fn(async () => undefined) },
-}));
 
 jest.mock("@/lib/email", () => ({
   __esModule: true,

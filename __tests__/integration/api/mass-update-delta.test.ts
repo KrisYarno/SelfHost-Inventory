@@ -18,9 +18,6 @@ jest.mock("@/lib/rateLimit", () => ({
   enforceRateLimit: jest.fn(() => ({})),
   applyRateLimitHeaders: jest.fn((r: any) => r),
 }));
-jest.mock("@/lib/audit", () => ({
-  auditService: { logBulkInventoryUpdate: jest.fn().mockResolvedValue(undefined) },
-}));
 // The single bulk-update event is recorded in its own post-batch transaction;
 // its end-to-end behavior (R-D14 rows) is covered by
 // __tests__/integration/api/change-tracking-inventory.test.ts. Stub it here so
