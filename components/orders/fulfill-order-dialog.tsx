@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { CheckCircle, AlertCircle, AlertTriangle, Package, MapPin, Loader2, Link2 } from "lucide-react";
 import {
@@ -21,8 +22,8 @@ import { Button } from "@/components/ui/button";
 import { ProductMapDialog } from "@/components/products/product-map-dialog";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { useFulfillmentValidation, useFulfillOrder } from "@/hooks/use-orders";
 import type { ExternalOrder } from "@/types/external-orders";
-import type { FulfillmentValidationResult } from "@/lib/fulfillment";
 
 interface FulfillOrderDialogProps {
   order: ExternalOrder | null;
@@ -45,11 +46,6 @@ export function FulfillOrderDialog({
   csrfToken,
 }: FulfillOrderDialogProps) {
   const [selectedLocationId, setSelectedLocationId] = useState<number | null>(null);
-  const [locations, setLocations] = useState<Location[]>([]);
-  const [validation, setValidation] = useState<FulfillmentValidationResult | null>(null);
-  const [isLoadingLocations, setIsLoadingLocations] = useState(false);
-  const [isLoadingValidation, setIsLoadingValidation] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
   const { data: session } = useSession();
   const isAdmin = session?.user?.isAdmin ?? false;
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
@@ -60,63 +56,54 @@ export function FulfillOrderDialog({
     sku?: string;
   } | null>(null);
 
-  const loadLocations = useCallback(async () => {
-    setIsLoadingLocations(true);
-    try {
-      const response = await fetch("/api/locations");
-      if (response.ok) {
-        const data = await response.json();
-        setLocations(data);
+  // Locations for the fulfillment picker (read).
+  const locationsQuery = useQuery<Location[]>({
+    queryKey: ["locations"],
+    queryFn: async ({ signal }) => {
+      const res = await fetch("/api/locations", { signal });
+      if (!res.ok) throw new Error("Failed to load locations");
+      return res.json();
+    },
+    enabled: open,
+  });
+  const locations = locationsQuery.data ?? [];
+  const isLoadingLocations = locationsQuery.isLoading;
 
-        // Auto-select first location if available
-        if (data.length > 0 && !selectedLocationId) {
-          setSelectedLocationId(data[0].id);
-        }
-      }
-    } catch (error) {
-      console.error("Failed to load locations:", error);
+  // Auto-select first location once loaded (preserves prior behavior).
+  useEffect(() => {
+    const locs = locationsQuery.data;
+    if (locs && locs.length > 0 && selectedLocationId === null) {
+      setSelectedLocationId(locs[0].id);
+    }
+  }, [locationsQuery.data, selectedLocationId]);
+
+  useEffect(() => {
+    if (locationsQuery.isError) {
       toast.error("Failed to load locations");
-    } finally {
-      setIsLoadingLocations(false);
     }
-  }, [selectedLocationId]);
+  }, [locationsQuery.isError]);
 
-  const loadValidation = useCallback(async () => {
-    if (!order) return;
+  // Pre-fulfillment validation for the chosen location (read).
+  const validationQuery = useFulfillmentValidation(order?.id ?? null, selectedLocationId, {
+    enabled: open && !!order && selectedLocationId !== null,
+  });
+  const validation = validationQuery.data ?? null;
+  const isLoadingValidation = validationQuery.isFetching;
 
-    setIsLoadingValidation(true);
-    try {
-      const url = `/api/orders/${order.id}/fulfill/validate?locationId=${selectedLocationId}`;
-      const response = await fetch(url);
-
-      if (response.ok) {
-        const data = await response.json();
-        setValidation(data);
-      } else {
-        const errorData = await response.json();
-        toast.error(errorData.error?.message || "Failed to validate order");
-      }
-    } catch (error) {
-      console.error("Failed to validate order:", error);
-      toast.error("Failed to validate order");
-    } finally {
-      setIsLoadingValidation(false);
-    }
-  }, [order, selectedLocationId]);
-
-  // Load locations
+  // Preserve the prior toast-on-validation-failure surface.
   useEffect(() => {
-    if (open) {
-      loadLocations();
+    if (validationQuery.isError) {
+      toast.error(
+        validationQuery.error instanceof Error
+          ? validationQuery.error.message
+          : "Failed to validate order",
+      );
     }
-  }, [open, loadLocations]);
+  }, [validationQuery.isError, validationQuery.error]);
 
-  // Load validation when location changes
-  useEffect(() => {
-    if (order && selectedLocationId) {
-      loadValidation();
-    }
-  }, [order, selectedLocationId, loadValidation]);
+  // Fulfill mutation — invalidates orders + inventory caches on success.
+  const fulfillMutation = useFulfillOrder();
+  const isProcessing = fulfillMutation.isPending;
 
   const handleFulfill = async () => {
     if (!order || !selectedLocationId || !csrfToken) {
@@ -129,48 +116,32 @@ export function FulfillOrderDialog({
       return;
     }
 
-    setIsProcessing(true);
-
-    try {
-      // Build items array for fulfillment
-      const items = (order.items || [])
-        .filter((item) => {
-          const remainingQty = item.quantity - item.fulfilledQty;
-          return remainingQty > 0;
-        })
-        .map((item) => {
-          const remainingQty = item.quantity - item.fulfilledQty;
-          return {
-            itemId: item.id,
-            quantity: remainingQty,
-            skipUnmapped: !item.isMapped, // Skip unmapped items by default
-          };
-        });
-
-      if (items.length === 0) {
-        toast.error("No items to fulfill");
-        setIsProcessing(false);
-        return;
-      }
-
-      const response = await fetch(`/api/orders/${order.id}/fulfill`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token": csrfToken,
-        },
-        body: JSON.stringify({
-          locationId: selectedLocationId,
-          items,
-        }),
+    // Build items array for fulfillment
+    const items = (order.items || [])
+      .filter((item) => {
+        const remainingQty = item.quantity - item.fulfilledQty;
+        return remainingQty > 0;
+      })
+      .map((item) => {
+        const remainingQty = item.quantity - item.fulfilledQty;
+        return {
+          itemId: item.id,
+          quantity: remainingQty,
+          skipUnmapped: !item.isMapped, // Skip unmapped items by default
+        };
       });
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error?.message || "Failed to fulfill order");
-      }
+    if (items.length === 0) {
+      toast.error("No items to fulfill");
+      return;
+    }
 
-      const result = await response.json();
+    try {
+      const result = await fulfillMutation.mutateAsync({
+        orderId: order.id,
+        locationId: selectedLocationId,
+        items,
+      });
 
       // Show success message
       toast.success(
@@ -206,8 +177,6 @@ export function FulfillOrderDialog({
           duration: 5000,
         }
       );
-    } finally {
-      setIsProcessing(false);
     }
   };
 
@@ -454,7 +423,7 @@ export function FulfillOrderDialog({
           externalProduct={mappingItem}
           onMapped={() => {
             // Re-validate to see updated mapping status
-            loadValidation();
+            validationQuery.refetch();
           }}
         />
       )}

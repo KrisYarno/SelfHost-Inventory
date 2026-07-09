@@ -1,8 +1,10 @@
 "use client";
 
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useWorkbench } from "@/hooks/use-workbench";
 import { useInventoryProducts } from "@/hooks/use-inventory-products";
+import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { groupProductsByBaseName } from "@/lib/product-utils";
 import { ProductTile } from "@/components/workbench/product-tile";
@@ -43,6 +45,7 @@ export default function WorkbenchPage() {
 
   const { selectedLocationId } = useLocation();
   const { token: csrfToken } = useCSRF();
+  const queryClient = useQueryClient();
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMobile = useIsMobile();
   const { data: products = [], isLoading: loading, refetch: refetchProducts } = useInventoryProducts({
@@ -80,10 +83,12 @@ export default function WorkbenchPage() {
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
-  // Clean up undo timer on unmount
+  // Clean up undo timer on unmount. Snapshot the ref into a local so the cleanup
+  // closes over a stable value (satisfies react-hooks/exhaustive-deps).
   useEffect(() => {
+    const timer = undoTimerRef;
     return () => {
-      if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+      if (timer.current) clearTimeout(timer.current);
     };
   }, []);
 
@@ -139,7 +144,10 @@ export default function WorkbenchPage() {
         const allOk = results.every((r) => r.ok);
         if (allOk) {
           toast.success(`Undone: ${items.length} item${items.length !== 1 ? "s" : ""} restored for order ${orderRef}`);
-          refetchProducts();
+          // The undo restored inventory via unfulfill/adjust — flush the full
+          // inventory cache set (not just this page) so /inventory, dashboard,
+          // and journal stay coherent, matching the deduct path.
+          invalidateInventoryCaches(queryClient);
         } else {
           toast.error("Some items could not be restored. Check inventory manually.");
         }
@@ -148,7 +156,7 @@ export default function WorkbenchPage() {
         toast.error("Failed to undo deduction. Please adjust inventory manually.");
       }
     },
-    [csrfToken, refetchProducts]
+    [csrfToken, queryClient]
   );
 
   const showUndoToast = useCallback(

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { useMemo, useState, useCallback, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -96,20 +97,18 @@ interface TransferSuggestionsProps {
 
 function TransferSuggestions({ item, destinationLocationId, onRequestTransfer }: TransferSuggestionsProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [surplusLocations, setSurplusLocations] = useState<SurplusLocation[]>([]);
-  const [hasFetched, setHasFetched] = useState(false);
 
-  const fetchSurplusData = useCallback(async () => {
-    if (hasFetched) return;
-    setIsLoading(true);
-    try {
-      const res = await fetch(`/api/inventory/product/${item.productId}/locations`);
+  // Surplus at OTHER locations — fetched lazily the first time the row expands
+  // (enabled flips with isOpen; cached thereafter so re-opening is instant).
+  const surplusQuery = useQuery<SurplusLocation[]>({
+    queryKey: ["stocker-surplus", item.productId, destinationLocationId],
+    queryFn: async ({ signal }) => {
+      const res = await fetch(`/api/inventory/product/${item.productId}/locations`, { signal });
       if (!res.ok) throw new Error("Failed to fetch");
       const data: { locations: ProductLocationQuantity[] } = await res.json();
 
       // Filter to locations that have stock and are not the current location
-      const otherLocations = data.locations
+      return data.locations
         .filter((loc) => loc.locationId !== destinationLocationId && loc.quantity > 0)
         .map((loc) => ({
           locationId: loc.locationId,
@@ -119,22 +118,14 @@ function TransferSuggestions({ item, destinationLocationId, onRequestTransfer }:
           version: loc.version,
         }))
         .sort((a, b) => b.available - a.available);
-
-      setSurplusLocations(otherLocations);
-      setHasFetched(true);
-    } catch (err) {
-      console.error("Error fetching surplus data:", err);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [item.productId, destinationLocationId, hasFetched]);
+    },
+    enabled: isOpen,
+  });
+  const surplusLocations = surplusQuery.data ?? [];
+  const isLoading = surplusQuery.isLoading;
 
   const handleToggle = () => {
-    const willOpen = !isOpen;
-    setIsOpen(willOpen);
-    if (willOpen && !hasFetched) {
-      fetchSurplusData();
-    }
+    setIsOpen((v) => !v);
   };
 
   return (
@@ -210,11 +201,6 @@ export default function StockerPage() {
     selectedLocationId: undefined,
     selectedLocation: null,
   };
-  const [location, setLocation] = useState<StockerLocation | null>(null);
-  const [items, setItems] = useState<StockerItem[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   // Sort and filter state
   const [sortBy, setSortBy] = useState<SortOption>("name");
   const [searchQuery, setSearchQuery] = useState("");
@@ -226,32 +212,25 @@ export default function StockerPage() {
   // Print ref
   const printRef = useRef<HTMLDivElement>(null);
 
-  const loadData = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
+  // Low-stock refill list for the selected location (read).
+  const stockerQuery = useQuery<StockerResponse>({
+    queryKey: ["stocker-minimums", selectedLocationId ?? null],
+    queryFn: async ({ signal }) => {
       const params = new URLSearchParams();
       if (selectedLocationId) {
         params.set("locationId", String(selectedLocationId));
       }
       const query = params.toString();
       const url = query ? `/api/stocker/minimums?${query}` : "/api/stocker/minimums";
-      const res = await fetch(url);
+      const res = await fetch(url, { signal });
       if (!res.ok) throw new Error("Failed to load stocker data");
-      const data: StockerResponse = await res.json();
-      setLocation(data.location);
-      setItems(data.items ?? []);
-    } catch (err) {
-      console.error("Error loading stocker data", err);
-      setError("Unable to load refill list. Please try again.");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [selectedLocationId]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+      return res.json();
+    },
+  });
+  const location = stockerQuery.data?.location ?? null;
+  const items = useMemo(() => stockerQuery.data?.items ?? [], [stockerQuery.data]);
+  const isLoading = stockerQuery.isLoading;
+  const error = stockerQuery.isError ? "Unable to load refill list. Please try again." : null;
 
   const handleStockIn = (item: StockerItem) => {
     setStockInProduct({
@@ -265,7 +244,7 @@ export default function StockerPage() {
   };
 
   const handleStockInSuccess = () => {
-    loadData();
+    stockerQuery.refetch();
   };
 
   // Filter items by search query

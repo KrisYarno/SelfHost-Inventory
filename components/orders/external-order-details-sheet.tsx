@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import { useLocation } from "@/contexts/location-context";
 import { Package, Check, AlertTriangle, ExternalLink, ShoppingCart, RefreshCw, Link2 } from "lucide-react";
@@ -52,41 +53,46 @@ export function ExternalOrderDetailsSheet({
     sku?: string;
   } | null>(null);
   const { selectedLocationId } = useLocation();
-  const [stockByProductId, setStockByProductId] = useState<Record<number, number>>({});
 
-  // Fetch live stock for mapped items at the user's selected location
-  useEffect(() => {
-    if (!open || !order?.items || !selectedLocationId) {
-      setStockByProductId({});
-      return;
+  // Mapped line-item product IDs — the ones we show live stock for.
+  const mappedProductIds = useMemo(() => {
+    if (!order?.items) return [] as number[];
+    return Array.from(
+      new Set(
+        order.items
+          .filter((item) => item.isMapped && item.productLink?.internalProductId)
+          .map((item) => item.productLink!.internalProductId),
+      ),
+    );
+  }, [order?.items]);
+
+  // Live stock at the user's selected location (read).
+  // The endpoint returns { inventory: Array<{ productId, quantity, ... }> }.
+  const stockQuery = useQuery<{ inventory: Array<{ productId: number; quantity: number }> }>({
+    queryKey: ["inventory-current-fast", selectedLocationId],
+    queryFn: async ({ signal }) => {
+      const res = await fetch(
+        `/api/inventory/current-fast?locationId=${selectedLocationId}`,
+        { signal },
+      );
+      if (!res.ok) throw new Error("Failed to fetch inventory");
+      return res.json();
+    },
+    enabled: open && !!selectedLocationId && mappedProductIds.length > 0,
+    // Fetch fresh stock each time the sheet opens (the prior effect re-ran on open).
+    staleTime: 0,
+  });
+
+  const stockByProductId = useMemo(() => {
+    const map: Record<number, number> = {};
+    const inventory = stockQuery.data?.inventory ?? [];
+    for (const item of inventory) {
+      if (mappedProductIds.includes(item.productId)) {
+        map[item.productId] = item.quantity;
+      }
     }
-
-    const mappedProductIds = order.items
-      .filter((item) => item.isMapped && item.productLink?.internalProductId)
-      .map((item) => item.productLink!.internalProductId);
-
-    if (mappedProductIds.length === 0) {
-      setStockByProductId({});
-      return;
-    }
-
-    const uniqueIds = Array.from(new Set(mappedProductIds));
-    // Fetch current stock via the inventory API.
-    // The endpoint returns { inventory: Array<{ productId, quantity, ... }> }
-    fetch(`/api/inventory/current-fast?locationId=${selectedLocationId}`)
-      .then((res) => (res.ok ? res.json() : { inventory: [] }))
-      .then((data) => {
-        const map: Record<number, number> = {};
-        const inventory = data.inventory || [];
-        for (const item of inventory) {
-          if (uniqueIds.includes(item.productId)) {
-            map[item.productId] = item.quantity;
-          }
-        }
-        setStockByProductId(map);
-      })
-      .catch(() => setStockByProductId({}));
-  }, [open, order?.items, selectedLocationId]);
+    return map;
+  }, [stockQuery.data, mappedProductIds]);
 
   if (!order) return null;
 

@@ -50,7 +50,9 @@ export default function OrdersPage() {
     pageSize: 50,
   });
 
-  const orders = ordersData?.orders || [];
+  // Memoized so the identity is stable across renders — the rebind effect below
+  // depends on `orders`, and a fresh array each render would re-run it endlessly.
+  const orders = useMemo(() => ordersData?.orders || [], [ordersData?.orders]);
   const hasMore = ordersData?.hasMore || false;
 
   // Handle order selection
