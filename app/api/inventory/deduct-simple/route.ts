@@ -3,7 +3,7 @@ import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { createInventoryTransaction } from "@/lib/inventory";
 import { SimpleDeductSchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
-import { auditService } from "@/lib/audit";
+import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
@@ -29,7 +29,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
   const operationId = randomUUID();
 
-  // Create the deduction transaction
+  const batchId = newBatchId();
+
+  // Create the deduction transaction. The bulk-update event is recorded INSIDE
+  // the same transaction as the deduction writes (via the record callback), so
+  // an unrecordable deduction never commits.
   const result = await createInventoryTransaction(
     "DEDUCTION",
     user.id,
@@ -38,23 +42,26 @@ export const POST = apiHandler(async (request: NextRequest) => {
       orderReference: body.orderReference,
       notes: body.notes,
       operationId,
+    },
+    async (tx, logs) => {
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: "INVENTORY_BULK_UPDATE",
+        entityType: "INVENTORY",
+        action: `Bulk updated inventory for ${logs.length} products`,
+        details: {
+          updates: logs.map((log) => ({
+            productId: log.productId,
+            productName: log.products?.name ?? `Product ${log.productId}`,
+            delta: log.delta,
+          })),
+          locationId: body.locationId,
+        },
+        affectedCount: logs.length,
+        batchId,
+      });
     }
   );
-
-  // Audit as bulk inventory update/deduction
-  try {
-    await auditService.logBulkInventoryUpdate(
-      user.id,
-      result.logs.map((log) => ({
-        productId: log.productId,
-        productName: log.products?.name ?? `Product ${log.productId}`,
-        delta: log.delta,
-      })),
-      body.locationId
-    );
-  } catch (auditError) {
-    console.error("Failed to log audit deduction:", auditError);
-  }
 
   const response = NextResponse.json({
     success: true,

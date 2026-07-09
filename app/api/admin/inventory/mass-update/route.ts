@@ -8,7 +8,7 @@ import {
   UpdateFailureReason,
   PaginatedMassUpdateResponse,
 } from "@/types/mass-update-errors";
-import { auditService } from "@/lib/audit";
+import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { MassUpdateSchema } from "@/lib/validation/inventory";
 
 export const dynamic = "force-dynamic";
@@ -442,21 +442,37 @@ export const POST = apiHandler(async (request: NextRequest) => {
     transactionId,
   };
 
-  // Log the operation for audit (single bulk entry)
-  if (successCount > 0) {
-    try {
-      await auditService.logBulkInventoryUpdate(
-        user.id,
-        processedChanges.map((c) => ({
-          productId: c.productId,
-          productName: c.productName,
-          delta: c.delta,
-        })),
-        0
-      );
-    } catch (auditError) {
-      console.error("Failed to log bulk inventory update:", auditError);
+  // Record the operation as a single bulk-update event. mass-update commits its
+  // stock writes across multiple batched transactions (BATCH_SIZE) to avoid
+  // timeouts, so there is no single stock-write tx to join; the summary event is
+  // recorded in its own transaction after all batches settle. R-D14: carry
+  // per-row {entityId, changes:{quantity:{from,to}}} for <=500 rows, else fall
+  // back to a summary count (bounds the details payload).
+  if (processedChanges.length > 0) {
+    const MAX_ROWS = 500;
+    const details: Record<string, unknown> = { locationId: 0 };
+    if (processedChanges.length <= MAX_ROWS) {
+      details.rows = processedChanges.map((c) => ({
+        entityId: String(c.productId),
+        changes: { quantity: { from: c.newQuantity - c.delta, to: c.newQuantity } },
+      }));
+    } else {
+      details.rowCount = processedChanges.length;
+      details.rowsOmitted = true;
     }
+
+    const batchId = newBatchId();
+    await prisma.$transaction(async (tx) => {
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: "INVENTORY_BULK_UPDATE",
+        entityType: "INVENTORY",
+        action: `Bulk updated inventory for ${processedChanges.length} products`,
+        details,
+        affectedCount: processedChanges.length,
+        batchId,
+      });
+    });
   }
 
   return NextResponse.json(result);

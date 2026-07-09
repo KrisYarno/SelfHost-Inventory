@@ -5,7 +5,7 @@ import {
   validateStockAvailability,
 } from "@/lib/inventory";
 import { inventory_logs_logType } from "@prisma/client";
-import { auditService } from "@/lib/audit";
+import { recordChange, newBatchId } from "@/lib/change-tracking";
 import prisma from "@/lib/prisma";
 import { InventoryAdjustmentSchema } from "@/lib/validation/inventory";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
@@ -38,32 +38,51 @@ export const POST = apiHandler(async (request: NextRequest) => {
     }
   }
 
-  // Get product info for audit log
+  // Get product info for the change record
   const product = await prisma.product.findUnique({
     where: { id: body.productId },
     select: { name: true },
   });
+  const productName = product?.name ?? `Product ${body.productId}`;
 
-  // Create the adjustment with version checking
+  // One batch id per request flow; recorded inside the adjustment's transaction.
+  const batchId = newBatchId();
+
+  // Create the adjustment with version checking. The change is recorded INSIDE
+  // the same transaction as the stock write (via the record callback) so an
+  // unrecordable adjustment never commits. An auto-add-for-transfer adjustment
+  // preserves its dedicated actionType; every other adjustment records as
+  // INVENTORY_ADJUSTMENT.
   const result = await createInventoryAdjustment(
     user.id,
     body.productId,
     body.locationId,
     body.delta,
     body.logType || inventory_logs_logType.ADJUSTMENT,
-    body.expectedVersion
+    body.expectedVersion,
+    async (tx) => {
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: autoAddForTransfer
+          ? "INVENTORY_TRANSFER_AUTO_ADD"
+          : "INVENTORY_ADJUSTMENT",
+        entityType: "INVENTORY",
+        entityId: body.productId,
+        action: autoAddForTransfer
+          ? `Auto-added ${body.delta} units of "${productName}" at location ${body.locationId} to complete a transfer`
+          : `Adjusted inventory for "${productName}" by ${body.delta > 0 ? "+" : ""}${body.delta}`,
+        details: autoAddForTransfer
+          ? {
+              productId: body.productId,
+              productName,
+              delta: body.delta,
+              locationId: body.locationId,
+            }
+          : { productName, delta: body.delta, locationId: body.locationId },
+        batchId,
+      });
+    }
   );
-
-  // Log only transfer auto-add in audit trail
-  if (product && autoAddForTransfer) {
-    await auditService.logInventoryTransferAutoAdd(
-      user.id,
-      body.productId,
-      product.name,
-      body.delta,
-      body.locationId
-    );
-  }
 
   const response = NextResponse.json({
     success: true,

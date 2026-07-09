@@ -21,6 +21,14 @@ jest.mock("@/lib/rateLimit", () => ({
 jest.mock("@/lib/audit", () => ({
   auditService: { logBulkInventoryUpdate: jest.fn().mockResolvedValue(undefined) },
 }));
+// The single bulk-update event is recorded in its own post-batch transaction;
+// its end-to-end behavior (R-D14 rows) is covered by
+// __tests__/integration/api/change-tracking-inventory.test.ts. Stub it here so
+// the delta-truthfulness assertions stay focused.
+jest.mock("@/lib/change-tracking", () => ({
+  recordChange: jest.fn(async () => undefined),
+  newBatchId: jest.fn(() => "batch-test"),
+}));
 jest.mock("@/lib/prisma", () => ({ __esModule: true, default: { $transaction: jest.fn() } }));
 
 import { NextRequest } from "next/server";

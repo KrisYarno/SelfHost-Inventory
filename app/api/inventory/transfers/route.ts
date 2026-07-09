@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
-import { auditService } from "@/lib/audit";
+import { getAuditLogs } from "@/lib/change-tracking";
 
 export const dynamic = "force-dynamic";
 
@@ -14,7 +14,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const limit = Math.max(1, Math.min(pageSize, 50));
   const offset = (Math.max(page, 1) - 1) * limit;
 
-  const { logs, total } = await auditService.getAuditLogs({
+  const { logs, total } = await getAuditLogs({
     actionType: "INVENTORY_TRANSFER",
     entityType: "INVENTORY",
     limit,

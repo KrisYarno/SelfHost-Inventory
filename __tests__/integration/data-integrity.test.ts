@@ -16,6 +16,14 @@ jest.mock('@/lib/audit', () => ({
   },
 }))
 
+// The route now records its change in-transaction; audit behavior is covered by
+// __tests__/integration/api/change-tracking-inventory.test.ts. Stub it here so
+// these data-integrity assertions stay focused on the stock write path.
+jest.mock('@/lib/change-tracking', () => ({
+  recordChange: jest.fn(async () => undefined),
+  newBatchId: jest.fn(() => 'batch-test'),
+}))
+
 // The route checks CSRF; the real impl reads next/headers cookies, which has no
 // request context under jest, so it would fail every request with 403.
 jest.mock('@/lib/csrf', () => ({
@@ -185,11 +193,8 @@ describe('Data Integrity Tests', () => {
         { id: 2, name: 'Product Beta' },
       ]
 
-      const auditRecords: any[] = []
-      const mockAuditService = require('@/lib/audit').auditService
-      mockAuditService.logBulkInventoryUpdate.mockImplementation((userId: number, updates: any[]) => {
-        auditRecords.push({ userId, updates })
-      })
+      const { recordChange } = require('@/lib/change-tracking')
+      ;(recordChange as jest.Mock).mockClear()
 
       ;(prisma.product.findMany as jest.Mock).mockResolvedValue(mockProducts)
       ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
@@ -224,13 +229,16 @@ describe('Data Integrity Tests', () => {
       const response = await POST(request)
 
       expect(response.status).toBe(200)
-      expect(auditRecords).toHaveLength(1)
-      expect(auditRecords[0].userId).toBe(1)
-      expect(auditRecords[0].updates).toHaveLength(2)
-      expect(auditRecords[0].updates[0]).toMatchObject({
+      // The single bulk-update change is recorded in-transaction via recordChange.
+      expect(recordChange).toHaveBeenCalledTimes(1)
+      const event = (recordChange as jest.Mock).mock.calls[0][1]
+      expect(event.actor.userId).toBe(1)
+      expect(event.actionType).toBe('INVENTORY_BULK_UPDATE')
+      expect(event.details.updates).toHaveLength(2)
+      expect(event.details.updates[0]).toMatchObject({
         productId: 1,
         productName: 'Product Alpha',
-        delta: 50
+        delta: 50,
       })
     })
   })

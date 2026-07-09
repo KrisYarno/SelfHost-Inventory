@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma, type inventory_logs } from "@prisma/client";
 import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { auditService } from "@/lib/audit";
+import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { applyStockDelta, OptimisticLockError } from "@/lib/inventory";
 import { BatchInventoryAdjustmentSchema } from "@/lib/validation/inventory";
 import { enforceRateLimit, applyRateLimitHeaders } from "@/lib/rateLimit";
@@ -25,6 +25,9 @@ export const POST = apiHandler(async (request: NextRequest) => {
     select: { id: true, name: true },
   });
   const productMap = new Map(products.map((p) => [p.id, p.name]));
+
+  // One batch id per request flow, shared by every event in this transaction.
+  const batchId = newBatchId();
 
   // Execute all adjustments in a transaction
   const results = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
@@ -107,17 +110,22 @@ export const POST = apiHandler(async (request: NextRequest) => {
       }
     }
 
+    // Record the single bulk-update event INSIDE the same transaction as the
+    // stock writes, so an unrecordable batch never commits.
+    if (auditUpdates.length > 0) {
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: "INVENTORY_BULK_UPDATE",
+        entityType: "INVENTORY",
+        action: `Bulk updated inventory for ${auditUpdates.length} products`,
+        details: { updates: auditUpdates, locationId: adjustments[0]?.locationId },
+        affectedCount: auditUpdates.length,
+        batchId,
+      });
+    }
+
     return { logs, auditUpdates };
   });
-
-  // Log the bulk inventory update after successful transaction
-  if (results.auditUpdates.length > 0) {
-    await auditService.logBulkInventoryUpdate(
-      user.id,
-      results.auditUpdates,
-      adjustments[0]?.locationId
-    );
-  }
 
   const response = NextResponse.json({
     success: true,

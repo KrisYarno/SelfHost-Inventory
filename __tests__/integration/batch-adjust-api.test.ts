@@ -18,6 +18,14 @@ jest.mock('@/lib/audit', () => ({
   },
 }))
 
+// Change-tracking is exercised end-to-end in
+// __tests__/integration/api/change-tracking-inventory.test.ts; here the route's
+// in-tx recordChange is stubbed so these stock-mechanics assertions stay focused.
+jest.mock('@/lib/change-tracking', () => ({
+  recordChange: jest.fn(async () => undefined),
+  newBatchId: jest.fn(() => 'batch-test'),
+}))
+
 // The route checks CSRF; the real impl reads next/headers cookies, which has no
 // request context under jest, so it would fail every request with 403.
 jest.mock('@/lib/csrf', () => ({

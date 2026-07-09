@@ -230,7 +230,14 @@ export async function createInventoryAdjustment(
   locationId: number,
   delta: number,
   logType?: inventory_logs_logType,
-  expectedVersion?: number
+  expectedVersion?: number,
+  // Optional in-transaction recorder (change-tracking Task 8): invoked with the
+  // SAME `tx` as the stock write so recordChange joins the caller's transaction
+  // and hard-aborts the mutation if the audit row cannot be written.
+  record?: (
+    tx: Prisma.TransactionClient,
+    result: { log: Awaited<ReturnType<typeof createInventoryLog>>; newVersion: number }
+  ) => Promise<void>
 ) {
   const maxRetries = 3;
   let retryCount = 0;
@@ -298,6 +305,9 @@ export async function createInventoryAdjustment(
           logType,
         });
 
+        // Record the change inside the SAME transaction as the stock write.
+        if (record) await record(tx, { log, newVersion });
+
         return {
           log,
           newVersion,
@@ -328,6 +338,13 @@ export async function createInventoryTransfer(options: {
   quantity: number;
   expectedFromVersion?: number;
   expectedToVersion?: number;
+  // Optional in-transaction recorder (change-tracking Task 8): invoked with the
+  // SAME `tx` as both transfer legs' writes so recordChange joins this
+  // transaction and hard-aborts the transfer if the audit row cannot be written.
+  record?: (
+    tx: Prisma.TransactionClient,
+    result: { transferId: string; fromVersion: number; toVersion: number }
+  ) => Promise<void>;
 }) {
   const {
     userId,
@@ -337,6 +354,7 @@ export async function createInventoryTransfer(options: {
     quantity,
     expectedFromVersion,
     expectedToVersion,
+    record,
   } = options;
 
   if (fromLocationId === toLocationId) {
@@ -468,6 +486,15 @@ export async function createInventoryTransfer(options: {
           await tx.product.update({ where: { id: productId }, data: { quantity: { increment: quantity } } });
         }
 
+        // Record the change inside the SAME transaction as both transfer legs.
+        if (record) {
+          await record(tx, {
+            transferId,
+            fromVersion: updatedFrom.version,
+            toVersion: updatedTo.version,
+          });
+        }
+
         return {
           logs: { from: fromLog, to: toLog },
           fromVersion: updatedFrom.version,
@@ -515,7 +542,14 @@ export async function createInventoryTransaction(
     notes?: string;
     expectedVersion?: number;
   }>,
-  metadata?: Record<string, unknown>
+  metadata?: Record<string, unknown>,
+  // Optional in-transaction recorder (change-tracking Task 8): invoked with the
+  // SAME `tx` as every item's stock write so recordChange joins this
+  // transaction and hard-aborts the batch if the audit row cannot be written.
+  record?: (
+    tx: Prisma.TransactionClient,
+    logs: Awaited<ReturnType<typeof createInventoryLog>>[]
+  ) => Promise<void>
 ) {
   return await prisma.$transaction(async (tx) => {
     const logs = [];
@@ -597,6 +631,9 @@ export async function createInventoryTransaction(
 
       logs.push(log);
     }
+
+    // Record the change inside the SAME transaction as the item stock writes.
+    if (record) await record(tx, logs);
 
     return {
       transaction: {
