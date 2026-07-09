@@ -9,7 +9,6 @@ import {
   Filter,
   RotateCcw,
   Save,
-  FileSpreadsheet,
   AlertCircle,
   MapPin,
   TrendingUp,
@@ -24,7 +23,7 @@ import { ValueChip } from "@/components/ui/value-chip";
 import { JournalProductRow } from "@/components/journal/journal-product-row";
 import { ReviewChangesDialog } from "@/components/journal/review-changes-dialog";
 import { JournalFilters } from "@/components/journal/journal-filters";
-import { BatchOperationsDialog } from "@/components/journal/batch-operations-dialog";
+import type { JournalFilters as JournalFilterState } from "@/components/journal/journal-filters";
 import { useQueryClient } from "@tanstack/react-query";
 import { useJournalStore } from "@/hooks/use-journal";
 import { useInventoryProducts } from "@/hooks/use-inventory-products";
@@ -45,8 +44,13 @@ export default function JournalPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [showFilters, setShowFilters] = useState(false);
   const [showReviewDialog, setShowReviewDialog] = useState(false);
-  const [showBatchOperations, setShowBatchOperations] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [filters, setFilters] = useState<JournalFilterState>({
+    showWithChanges: true,
+    showWithoutChanges: true,
+    stockLevel: "all",
+    sortBy: "name",
+  });
 
   const { announceChange, announceBatchSubmission, announceSubmissionResult } =
     useInventoryChangeAnnouncer();
@@ -73,13 +77,63 @@ export default function JournalPage() {
     }
   }, [session, status, router]);
 
-  // Filter products based on search term
+  // Filter + sort products based on the search term and the advanced filter panel.
+  // Product Status (active/inactive) filters were dropped from the panel: the
+  // journal's data source has no active/inactive concept (soft-deleted products
+  // are already excluded server-side), so filtering on it would be inventing
+  // state. Everything below is computed from data already on the client.
   const filteredProducts = useMemo(() => {
-    if (!searchTerm) return products;
-    return products.filter((product) =>
-      product.name.toLowerCase().includes(searchTerm.toLowerCase())
-    );
-  }, [searchTerm, products]);
+    let result = products;
+
+    if (searchTerm) {
+      const term = searchTerm.toLowerCase();
+      result = result.filter((product) => product.name.toLowerCase().includes(term));
+    }
+
+    // Change status — has a pending adjustment in the journal store, or not.
+    const hasChange = (id: number) => Boolean(adjustments[id]);
+    if (!filters.showWithChanges) {
+      result = result.filter((product) => !hasChange(product.id));
+    }
+    if (!filters.showWithoutChanges) {
+      result = result.filter((product) => hasChange(product.id));
+    }
+
+    // Stock level — derived from current quantity vs. the product's threshold.
+    if (filters.stockLevel !== "all") {
+      result = result.filter((product) => {
+        const qty = product.currentQuantity ?? 0;
+        const threshold = product.lowStockThreshold ?? 0;
+        switch (filters.stockLevel) {
+          case "out":
+            return qty <= 0;
+          case "low":
+            return qty > 0 && threshold > 0 && qty <= threshold;
+          case "normal":
+            return threshold > 0 ? qty > threshold : qty > 0;
+          default:
+            return true;
+        }
+      });
+    }
+
+    // Sort — name is the server default; quantity surfaces low stock first;
+    // changes surfaces the largest pending adjustment first.
+    const sorted = [...result];
+    if (filters.sortBy === "quantity") {
+      sorted.sort((a, b) => (a.currentQuantity ?? 0) - (b.currentQuantity ?? 0));
+    } else if (filters.sortBy === "changes") {
+      sorted.sort(
+        (a, b) =>
+          Math.abs(adjustments[b.id]?.quantityChange ?? 0) -
+          Math.abs(adjustments[a.id]?.quantityChange ?? 0)
+      );
+    } else {
+      sorted.sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    return sorted;
+  }, [searchTerm, products, filters, adjustments]);
 
   const handleQuantityChange = (productId: number, change: number) => {
     const product = products.find((p) => p.id === productId);
@@ -338,33 +392,11 @@ export default function JournalPage() {
               <Filter className="h-4 w-4" aria-hidden="true" />
               Filters
             </Button>
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={() => setShowBatchOperations(true)}
-              className="sm:hidden flex-shrink-0"
-              aria-label="Open batch operations dialog"
-            >
-              <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => setShowBatchOperations(true)}
-              className="hidden sm:flex gap-2"
-              aria-label="Open batch operations dialog"
-            >
-              <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
-              Batch
-            </Button>
           </div>
 
           {showFilters && (
             <div className="mt-4" id="journal-filters" role="region" aria-label="Product filters">
-              <JournalFilters
-                onFilterChange={(_filters) => {
-                  // TODO: Implement filter logic here
-                }}
-              />
+              <JournalFilters onFilterChange={setFilters} />
             </div>
           )}
         </CardContent>
@@ -475,9 +507,6 @@ export default function JournalPage() {
         onConfirm={handleSubmitAdjustments}
         isSubmitting={isSubmitting}
       />
-
-      {/* Batch Operations Dialog */}
-      <BatchOperationsDialog open={showBatchOperations} onOpenChange={setShowBatchOperations} />
     </div>
   );
 }

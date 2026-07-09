@@ -14,27 +14,25 @@ import {
 } from "@/components/ui/select";
 
 export interface JournalFilters {
-  showActive: boolean;
-  showInactive: boolean;
   showWithChanges: boolean;
   showWithoutChanges: boolean;
   stockLevel: "all" | "low" | "out" | "normal";
   sortBy: "name" | "quantity" | "changes";
 }
 
+const DEFAULT_FILTERS: JournalFilters = {
+  showWithChanges: true,
+  showWithoutChanges: true,
+  stockLevel: "all",
+  sortBy: "name",
+};
+
 interface JournalFiltersProps {
   onFilterChange: (filters: JournalFilters) => void;
 }
 
 export function JournalFilters({ onFilterChange }: JournalFiltersProps) {
-  const [filters, setFilters] = useState<JournalFilters>({
-    showActive: true,
-    showInactive: false,
-    showWithChanges: true,
-    showWithoutChanges: true,
-    stockLevel: "all",
-    sortBy: "name",
-  });
+  const [filters, setFilters] = useState<JournalFilters>(DEFAULT_FILTERS);
 
   const handleFilterChange = (updates: Partial<JournalFilters>) => {
     const newFilters = { ...filters, ...updates };
@@ -43,24 +41,15 @@ export function JournalFilters({ onFilterChange }: JournalFiltersProps) {
   };
 
   const activeFilterCount = [
-    !filters.showActive && "inactive hidden",
-    filters.showInactive && "inactive shown",
+    !filters.showWithChanges && "changed hidden",
     !filters.showWithoutChanges && "unchanged hidden",
     filters.stockLevel !== "all" && `stock: ${filters.stockLevel}`,
     filters.sortBy !== "name" && `sort: ${filters.sortBy}`,
   ].filter(Boolean).length;
 
   const resetFilters = () => {
-    const defaultFilters: JournalFilters = {
-      showActive: true,
-      showInactive: false,
-      showWithChanges: true,
-      showWithoutChanges: true,
-      stockLevel: "all",
-      sortBy: "name",
-    };
-    setFilters(defaultFilters);
-    onFilterChange(defaultFilters);
+    setFilters(DEFAULT_FILTERS);
+    onFilterChange(DEFAULT_FILTERS);
   };
 
   return (
@@ -85,44 +74,7 @@ export function JournalFilters({ onFilterChange }: JournalFiltersProps) {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* Product Status */}
-        <div className="space-y-2">
-          <Label className="text-sm font-medium">Product Status</Label>
-          <div className="space-y-2">
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="active"
-                checked={filters.showActive}
-                onCheckedChange={(checked) =>
-                  handleFilterChange({ showActive: !!checked })
-                }
-              />
-              <label
-                htmlFor="active"
-                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-              >
-                Active Products
-              </label>
-            </div>
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="inactive"
-                checked={filters.showInactive}
-                onCheckedChange={(checked) =>
-                  handleFilterChange({ showInactive: !!checked })
-                }
-              />
-              <label
-                htmlFor="inactive"
-                className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-              >
-                Inactive Products
-              </label>
-            </div>
-          </div>
-        </div>
-
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* Change Status */}
         <div className="space-y-2">
           <Label className="text-sm font-medium">Change Status</Label>

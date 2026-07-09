@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Mail, CheckCircle2, AlertCircle } from "lucide-react";
+import { toast } from "sonner";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 export default function TestEmailPage() {
@@ -62,28 +63,32 @@ export default function TestEmailPage() {
     setResult(null);
 
     try {
-      const response = await fetch("/api/cron/stock-check"); // GET request, no CSRF needed
+      // Admin-gated trigger (requireAdmin + CSRF + rate limit) that invokes the
+      // StockChecker directly. The cron route is CRON_SECRET-gated and can't be
+      // called from the browser, so this route exists for the manual button.
+      const response = await fetch("/api/admin/stock-check", {
+        method: "POST",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+      });
       const data = await response.json();
 
       if (response.ok) {
-        setResult({
-          success: true,
-          message: `Stock check completed. Found ${data.lowStockCount} low stock items.`,
-          details: data,
-        });
+        const message = `Stock check completed. Found ${data.lowStockCount} low stock item(s).`;
+        setResult({ success: true, message, details: data });
+        toast.success(message);
       } else {
-        setResult({
-          success: false,
-          message: data.error || "Stock check failed",
-          details: data.details,
-        });
+        const message = data.error || "Stock check failed";
+        setResult({ success: false, message, details: data.details });
+        toast.error(message);
       }
     } catch (error) {
+      const message = "Network error occurred";
       setResult({
         success: false,
-        message: "Network error occurred",
+        message,
         details: error instanceof Error ? error.message : "Unknown error",
       });
+      toast.error(message);
     } finally {
       setIsSending(false);
     }

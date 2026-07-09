@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import { getRateLimitStats } from "@/lib/rateLimit";
 
+// Reads request headers (via requireAdmin -> session) and the in-memory store,
+// so it must never be statically rendered/cached at build time.
+export const dynamic = "force-dynamic";
+
 export const GET = apiHandler(async (_request: NextRequest) => {
   await requireAdmin();
 
