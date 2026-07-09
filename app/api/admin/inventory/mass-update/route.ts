@@ -9,6 +9,7 @@ import {
   PaginatedMassUpdateResponse,
 } from "@/types/mass-update-errors";
 import { auditService } from "@/lib/audit";
+import { MassUpdateSchema } from "@/lib/validation/inventory";
 
 export const dynamic = "force-dynamic";
 
@@ -156,27 +157,28 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
   await requireCSRF(request);
 
-  let body;
+  let raw: unknown;
   try {
-    body = await request.json();
-    console.log("Request body parsed successfully:", {
-      hasChanges: !!body.changes,
-      changesLength: body.changes?.length,
-      note: body.note,
-      isRetry: body.isRetry,
-      allowPartial: body.allowPartial,
-    });
+    raw = await request.json();
   } catch (parseError) {
     console.error("Failed to parse request body:", parseError);
     return NextResponse.json({ error: "Invalid JSON in request body" }, { status: 400 });
   }
 
-  const { changes, note: _note, isRetry: _isRetry = false } = body;
+  // Envelope validation: non-empty `changes` array + typed fields. Per-item
+  // business rules (negative / non-integer quantity, missing product/location)
+  // are still handled below as structured per-row failures — never a blanket 400
+  // — so `newQuantity` is intentionally left unconstrained in the schema.
+  const body = MassUpdateSchema.parse(raw);
+  console.log("Request body parsed successfully:", {
+    hasChanges: !!body.changes,
+    changesLength: body.changes?.length,
+    note: body.note,
+    isRetry: body.isRetry,
+    allowPartial: body.allowPartial,
+  });
 
-  if (!changes || !Array.isArray(changes) || changes.length === 0) {
-    console.log("No changes provided or invalid format");
-    return NextResponse.json({ error: "No changes provided" }, { status: 400 });
-  }
+  const { changes } = body;
 
   console.log(`Processing ${changes.length} changes`);
 

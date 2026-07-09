@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { syncIntegrationOrders } from "@/lib/external-orders/sync";
+import { SyncOrdersSchema } from "@/lib/validation/integrations";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -13,10 +14,9 @@ export const POST = apiHandler(async (
 
   await requireCSRF(request);
 
-  const body = await request.json().catch(() => ({}));
-  const lookbackDays =
-    typeof body.lookbackDays === "number" ? body.lookbackDays : undefined;
-  const maxOrders = typeof body.maxOrders === "number" ? body.maxOrders : undefined;
+  const { lookbackDays, maxOrders } = SyncOrdersSchema.parse(
+    await request.json().catch(() => ({}))
+  );
   // When the user explicitly provides lookbackDays via the dialog, force a
   // full lookback instead of using the lastSyncAt cursor. Without this, the
   // user's "14 days" input is silently ignored after the first sync.

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { SystemSettingsSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
 
@@ -41,9 +42,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = await request.json();
-  const { weeklyReportsEnabled, analyticsRebuildEnabled } = body;
+  const { weeklyReportsEnabled, analyticsRebuildEnabled } =
+    SystemSettingsSchema.parse(body);
 
-  if (typeof weeklyReportsEnabled === "boolean") {
+  if (weeklyReportsEnabled !== undefined) {
     await prisma.systemSetting.upsert({
       where: { key: "weeklyReportsEnabled" },
       update: { value: String(weeklyReportsEnabled) },
@@ -51,7 +53,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
     });
   }
 
-  if (typeof analyticsRebuildEnabled === "boolean") {
+  if (analyticsRebuildEnabled !== undefined) {
     await prisma.systemSetting.upsert({
       where: { key: "analyticsRebuildEnabled" },
       update: { value: String(analyticsRebuildEnabled) },

@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { UpdateUsernameSchema } from "@/lib/validation/account";
 
 export const dynamic = "force-dynamic";
-
-// Username validation regex: lowercase alphanumeric, dots, underscores, 3-30 chars
-const USERNAME_REGEX = /^[a-z0-9._]{3,30}$/;
 
 /**
  * GET - Get current user's username
@@ -34,25 +32,8 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = await request.json();
-  const { username } = body;
-
-  if (!username) {
-    return NextResponse.json(
-      { error: "Username is required" },
-      { status: 400 }
-    );
-  }
-
-  // Normalize username to lowercase
-  const normalizedUsername = username.toLowerCase().trim();
-
-  // Validate format
-  if (!USERNAME_REGEX.test(normalizedUsername)) {
-    return NextResponse.json(
-      { error: "Username must be 3-30 characters and contain only lowercase letters, numbers, dots, and underscores" },
-      { status: 400 }
-    );
-  }
+  // Schema trims + lowercases + enforces the 3-30 char format.
+  const { username: normalizedUsername } = UpdateUsernameSchema.parse(body);
 
   // Get current user
   const currentUser = await prisma.user.findUnique({

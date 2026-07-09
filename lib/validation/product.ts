@@ -84,3 +84,15 @@ export const ProductUpdateSchema = z
   );
 
 export type ProductUpdateInput = z.infer<typeof ProductUpdateSchema>;
+
+/**
+ * POST /api/products/[id]/price-source — set/clear a product's price source.
+ * linkId = null (or absent) clears it; a string links to a productLink. syncNow
+ * optionally triggers an immediate price pull.
+ */
+export const PriceSourceSchema = z.object({
+  linkId: z.string().nullable().optional(),
+  syncNow: z.boolean().optional(),
+});
+
+export type PriceSourceInput = z.infer<typeof PriceSourceSchema>;

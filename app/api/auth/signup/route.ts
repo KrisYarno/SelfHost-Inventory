@@ -3,6 +3,7 @@ import prisma from "@/lib/prisma";
 import { hashPassword } from "@/lib/auth-helpers";
 import { apiHandler } from "@/lib/api-utils";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
+import { SignupSchema } from "@/lib/validation/auth";
 
 // Allowed email domains, matching auth.ts
 const allowedDomains = (process.env.ALLOWED_EMAIL_DOMAINS || 'advancedresearchpep.com')
@@ -20,51 +21,21 @@ function isAllowedDomain(email: string): boolean {
 export const POST = apiHandler(async (request: NextRequest) => {
   const rateLimitHeaders = enforceRateLimit(request, "auth:signup");
 
-  const { email, password, username } = await request.json();
-
-  // Validate input
-  if (!email || !password || !username) {
-    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
-  }
-
-  // Normalize email
-  const normalizedEmail = email.toLowerCase().trim();
+  const raw = await request.json();
+  // Schema normalizes email (trim+lowercase) and username, and enforces the
+  // username format + password strength. The env-driven domain restriction and
+  // the uniqueness check remain below.
+  const {
+    email: normalizedEmail,
+    username: normalizedUsername,
+    password,
+  } = SignupSchema.parse(raw);
 
   // Validate domain
   if (!isAllowedDomain(normalizedEmail)) {
     return NextResponse.json(
       { error: `Sign up is restricted to company email addresses (${allowedDomains.join(', ')})` },
       { status: 403 }
-    );
-  }
-
-  // Validate username format
-  const normalizedUsername = username.toLowerCase().trim();
-  if (!/^[a-z0-9._]{3,30}$/.test(normalizedUsername)) {
-    return NextResponse.json(
-      { error: "Username must be 3-30 characters and contain only letters, numbers, dots, and underscores" },
-      { status: 400 }
-    );
-  }
-
-  // Validate password strength
-  const passwordErrors: string[] = [];
-  if (password.length < 10) {
-    passwordErrors.push("at least 10 characters");
-  }
-  if (!/[a-z]/.test(password)) {
-    passwordErrors.push("at least one lowercase letter");
-  }
-  if (!/[A-Z]/.test(password)) {
-    passwordErrors.push("at least one uppercase letter");
-  }
-  if (!/[0-9]/.test(password)) {
-    passwordErrors.push("at least one digit");
-  }
-  if (passwordErrors.length > 0) {
-    return NextResponse.json(
-      { error: `Password must contain: ${passwordErrors.join(", ")}` },
-      { status: 400 }
     );
   }
 

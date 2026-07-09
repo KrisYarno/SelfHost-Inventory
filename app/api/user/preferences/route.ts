@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { UpdateUserPreferencesSchema } from "@/lib/validation/account";
 
 export const dynamic = "force-dynamic";
 
@@ -39,10 +40,11 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = await request.json();
+  const parsed = UpdateUserPreferencesSchema.parse(body);
   const updateData: Record<string, unknown> = {};
 
-  if (typeof body.emailAlerts === "boolean") {
-    updateData.emailAlerts = body.emailAlerts;
+  if (parsed.emailAlerts !== undefined) {
+    updateData.emailAlerts = parsed.emailAlerts;
   }
 
   const booleanFields = [
@@ -51,14 +53,17 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
   ] as const;
 
   booleanFields.forEach((field) => {
-    if (typeof body[field] === "boolean") {
-      updateData[field] = body[field];
+    if (parsed[field] !== undefined) {
+      updateData[field] = parsed[field];
     }
   });
 
   // Update defaultLocationId if provided
-  if (body.defaultLocationId !== undefined) {
-    const locationId = parseInt(body.defaultLocationId);
+  if (parsed.defaultLocationId !== undefined) {
+    const locationId =
+      typeof parsed.defaultLocationId === "number"
+        ? parsed.defaultLocationId
+        : parseInt(parsed.defaultLocationId);
     if (!isNaN(locationId)) {
       // Verify location exists
       const location = await prisma.location.findUnique({

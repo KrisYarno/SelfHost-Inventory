@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { CompanyInputSchema } from "@/lib/validation/companies";
 
 export const dynamic = "force-dynamic";
 
@@ -47,23 +48,7 @@ export const PUT = apiHandler(async (
   await requireCSRF(request);
 
   const body = await request.json();
-  const { name, slug } = body;
-
-  // Validate input
-  if (!name || !slug) {
-    return NextResponse.json(
-      { error: "Name and slug are required" },
-      { status: 400 }
-    );
-  }
-
-  // Validate slug format
-  if (!/^[a-z0-9-]+$/.test(slug)) {
-    return NextResponse.json(
-      { error: "Slug must contain only lowercase letters, numbers, and hyphens" },
-      { status: 400 }
-    );
-  }
+  const { name, slug } = CompanyInputSchema.parse(body);
 
   // Check if slug is being changed and if it conflicts
   const existing = await prisma.company.findUnique({

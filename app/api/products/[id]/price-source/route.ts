@@ -8,6 +8,7 @@ import {
 import prisma from "@/lib/prisma";
 import { auditService } from "@/lib/audit";
 import { fetchExternalProductPrice } from "@/lib/external-orders/price-sync";
+import { PriceSourceSchema } from "@/lib/validation/product";
 
 export const dynamic = "force-dynamic";
 
@@ -38,8 +39,9 @@ export const POST = apiHandler(
     }
 
     const body = await request.json();
-    const linkId: string | null = body.linkId ?? null;
-    const syncNow: boolean = body.syncNow === true;
+    const parsed = PriceSourceSchema.parse(body);
+    const linkId: string | null = parsed.linkId ?? null;
+    const syncNow: boolean = parsed.syncNow === true;
 
     // Verify product exists
     const product = await prisma.product.findFirst({

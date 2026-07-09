@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { encryptValue } from "@/lib/encryption";
+import { UpdateIntegrationSchema } from "@/lib/validation/integrations";
 
 export const dynamic = "force-dynamic";
 
@@ -60,6 +61,9 @@ export const PUT = apiHandler(async (
   await requireCSRF(request);
 
   const body = await request.json();
+  // Schema validates the store URL when present and strips unknown keys the edit
+  // form carries (companyId, platform). Credential fields stay optional strings so
+  // the "empty string = leave unchanged" behavior below is preserved.
   const {
     name,
     storeUrl,
@@ -70,25 +74,13 @@ export const PUT = apiHandler(async (
     stockSyncEnabled,
     fulfillmentPushEnabled,
     syncLocationId,
-  } = body;
+  } = UpdateIntegrationSchema.parse(body);
 
   const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : apiKey;
   const normalizedApiSecret =
     typeof apiSecret === "string" ? apiSecret.trim() : apiSecret;
   const normalizedWebhookSecret =
     typeof webhookSecret === "string" ? webhookSecret.trim() : webhookSecret;
-
-  // Validate URL if provided
-  if (storeUrl) {
-    try {
-      new URL(storeUrl);
-    } catch {
-      return NextResponse.json(
-        { error: "Invalid store URL" },
-        { status: 400 }
-      );
-    }
-  }
 
   // Build update data
   const updateData: any = {};

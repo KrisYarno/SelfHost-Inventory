@@ -99,8 +99,18 @@ test("POST without analyticsRebuildEnabled does NOT upsert it (only weekly handl
   });
 });
 
-test("POST with non-boolean analyticsRebuildEnabled is ignored (no upsert)", async () => {
-  await POST(postReq({ analyticsRebuildEnabled: "yes" }));
+test("POST with non-boolean analyticsRebuildEnabled is rejected by the schema (400, no upsert)", async () => {
+  // SystemSettingsSchema types both flags as booleans, so a non-boolean now
+  // fails validation (400) instead of being silently ignored — either way, no
+  // SystemSetting is written.
+  const res = await POST(postReq({ analyticsRebuildEnabled: "yes" }));
+  expect(res.status).toBe(400);
+  expect(m.systemSetting.upsert).not.toHaveBeenCalled();
+});
+
+test("POST with an empty body validates and no-ops (200, no upsert)", async () => {
+  const res = await POST(postReq({}));
+  expect(res.status).toBe(200);
   expect(m.systemSetting.upsert).not.toHaveBeenCalled();
 });
 

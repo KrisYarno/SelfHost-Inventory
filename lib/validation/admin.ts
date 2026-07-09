@@ -16,8 +16,8 @@ export const UpdateLocationSchema = z.object({
   message: 'At least one field must be provided',
 });
 
-// Shared password strength rules
-const strongPassword = z.string()
+// Shared password strength rules (also reused by the public signup schema).
+export const strongPassword = z.string()
   .min(10, 'Password must be at least 10 characters')
   .regex(/[a-z]/, 'Must contain a lowercase letter')
   .regex(/[A-Z]/, 'Must contain an uppercase letter')
@@ -48,3 +48,43 @@ export const UpdateUserSchema = z.object({
 }).refine(data => Object.values(data).some(v => v !== undefined), {
   message: 'At least one field must be provided',
 });
+
+// POST /api/admin/settings — toggle system-level boolean SystemSettings.
+// Both optional; the handler upserts only the flags actually provided.
+export const SystemSettingsSchema = z.object({
+  weeklyReportsEnabled: z.boolean().optional(),
+  analyticsRebuildEnabled: z.boolean().optional(),
+});
+
+// PATCH /api/admin/products/thresholds — bulk minimum-quantity updates.
+// combinedMinimum maps to Product.lowStockThreshold (Int); perLocation entries
+// map to product_locations.minQuantity (Int). Both bounded at >= 0, replacing
+// the route's inline negative-value guards.
+const ThresholdUpdateSchema = z.object({
+  productId: z.number().int().positive(),
+  combinedMinimum: z
+    .number()
+    .int()
+    .min(0, 'Combined minimum cannot be negative')
+    .optional(),
+  perLocation: z
+    .array(
+      z.object({
+        locationId: z.number().int().positive(),
+        minQuantity: z.number().int().min(0, 'Location minimum cannot be negative'),
+      }),
+    )
+    .optional(),
+});
+
+export const ThresholdsUpdateSchema = z.object({
+  updates: z.array(ThresholdUpdateSchema).min(1, 'No updates provided'),
+});
+
+// POST /api/admin/audit-logs — fetch a batch's logs by its batchId.
+export const AuditBatchLogsSchema = z.object({
+  batchId: z.string().min(1, 'Batch ID is required'),
+});
+
+export type SystemSettingsInput = z.infer<typeof SystemSettingsSchema>;
+export type ThresholdsUpdateInput = z.infer<typeof ThresholdsUpdateSchema>;

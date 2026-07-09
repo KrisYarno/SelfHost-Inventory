@@ -108,6 +108,28 @@ test("when the row does not exist, current=0 so logged delta equals newQuantity"
   expect(logged.delta).toBe(4); // 4 - 0
 });
 
+test("empty changes array is rejected by the envelope schema before any DB work", async () => {
+  // This suite stubs apiHandler as a passthrough, so the ZodError surfaces
+  // directly (in production apiHandler maps it to a 400). Either way the schema
+  // short-circuits before touching the database.
+  await expect(POST(postWith({ changes: [] }))).rejects.toThrow();
+  expect(db.$transaction).not.toHaveBeenCalled();
+});
+
+test("negative newQuantity is NOT a blanket 400: it becomes a per-row structured failure", async () => {
+  // The schema deliberately leaves newQuantity unconstrained so the handler can
+  // report a negative quantity as a per-item VALIDATION_ERROR (preserving the
+  // partial-update / recovery UX) rather than rejecting the whole batch at parse.
+  const res = await POST(
+    postWith({ changes: [{ productId: 1, locationId: 1, newQuantity: -5, delta: 0 }] })
+  );
+  expect(res.status).toBe(400);
+  const body = await res.json();
+  expect(body.failures).toHaveLength(1);
+  expect(body.failures[0].reason).toBe("VALIDATION_ERROR");
+  expect(db.$transaction).not.toHaveBeenCalled();
+});
+
 test("no-op based on the REAL delta: when newQuantity equals current, skip log + upsert", async () => {
   const tx = makeTx(4); // current already 4
   db.$transaction.mockImplementation(async (cb: any) => cb(tx));

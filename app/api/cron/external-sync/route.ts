@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import prisma from "@/lib/prisma";
 import { apiHandler } from "@/lib/api-utils";
 import { syncIntegrationOrders } from "@/lib/external-orders/sync";
+import { SyncOrdersSchema } from "@/lib/validation/integrations";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -23,10 +24,9 @@ export const POST = apiHandler(async (request: NextRequest) => {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = await request.json().catch(() => ({}));
-  const lookbackDays =
-    typeof body.lookbackDays === "number" ? body.lookbackDays : undefined;
-  const maxOrders = typeof body.maxOrders === "number" ? body.maxOrders : undefined;
+  const { lookbackDays, maxOrders } = SyncOrdersSchema.parse(
+    await request.json().catch(() => ({}))
+  );
 
   const integrations = await prisma.integration.findMany({
     where: { isActive: true },

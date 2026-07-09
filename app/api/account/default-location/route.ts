@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { UpdateDefaultLocationSchema } from "@/lib/validation/account";
 
 export const dynamic = "force-dynamic";
 
@@ -10,11 +11,7 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = await request.json();
-  const { locationId } = body;
-
-  if (!locationId || typeof locationId !== "number") {
-    return NextResponse.json({ error: "Invalid location ID" }, { status: 400 });
-  }
+  const { locationId } = UpdateDefaultLocationSchema.parse(body);
 
   // Verify location exists
   const location = await prisma.location.findUnique({

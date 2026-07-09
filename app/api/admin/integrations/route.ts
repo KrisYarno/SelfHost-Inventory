@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { encryptValue } from "@/lib/encryption";
+import { CreateIntegrationSchema } from "@/lib/validation/integrations";
 
 export const dynamic = "force-dynamic";
 
@@ -54,56 +55,20 @@ export const POST = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = await request.json();
+  // Schema trims name/storeUrl/apiKey/apiSecret, enforces the platform enum, and
+  // validates the store URL (same "Invalid store URL" message as before).
   const {
     companyId,
     platform,
     name,
-    storeUrl,
-    apiKey,
-    apiSecret,
+    storeUrl: normalizedStoreUrl,
+    apiKey: normalizedApiKey,
+    apiSecret: normalizedApiSecret,
     webhookSecret,
-  } = body;
+  } = CreateIntegrationSchema.parse(body);
 
-  const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : apiKey;
-  const normalizedApiSecret =
-    typeof apiSecret === "string" ? apiSecret.trim() : apiSecret;
   const normalizedWebhookSecret =
     typeof webhookSecret === "string" ? webhookSecret.trim() : webhookSecret;
-  const normalizedStoreUrl =
-    typeof storeUrl === "string" ? storeUrl.trim() : storeUrl;
-
-  // Validate input
-  if (
-    !companyId ||
-    !platform ||
-    !name ||
-    !normalizedStoreUrl ||
-    !normalizedApiKey ||
-    !normalizedApiSecret
-  ) {
-    return NextResponse.json(
-      { error: "Missing required fields" },
-      { status: 400 }
-    );
-  }
-
-  // Validate platform
-  if (platform !== "SHOPIFY" && platform !== "WOOCOMMERCE") {
-    return NextResponse.json(
-      { error: "Invalid platform. Must be SHOPIFY or WOOCOMMERCE" },
-      { status: 400 }
-    );
-  }
-
-  // Validate URL
-  try {
-    new URL(normalizedStoreUrl);
-  } catch {
-    return NextResponse.json(
-      { error: "Invalid store URL" },
-      { status: 400 }
-    );
-  }
 
   // Check if company exists
   const company = await prisma.company.findUnique({

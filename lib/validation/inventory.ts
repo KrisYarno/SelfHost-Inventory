@@ -56,8 +56,33 @@ export const BatchTransferSchema = z.object({
     .min(1, "At least one transfer is required"),
 });
 
+// Admin bulk mass-update (POST /api/admin/inventory/mass-update).
+// Envelope-level validation only: the handler intentionally performs per-item
+// business validation (negative / non-integer quantity, missing product/location)
+// and reports each as a structured, per-row failure rather than rejecting the
+// whole batch — so `newQuantity` is left unconstrained here (any number) and the
+// handler recomputes the truthful delta itself. Shape mirrors MassUpdateChange
+// in types/mass-update-errors.ts.
+export const MassUpdateChangeSchema = z.object({
+  productId: positiveInt,
+  locationId: positiveInt,
+  newQuantity: z.number(),
+  delta: z.number(),
+  productName: z.string().optional(),
+  locationName: z.string().optional(),
+});
+
+export const MassUpdateSchema = z.object({
+  changes: z.array(MassUpdateChangeSchema).min(1, 'No changes provided'),
+  note: z.string().optional(),
+  isRetry: z.boolean().optional(),
+  allowPartial: z.boolean().optional(),
+});
+
 export type InventoryAdjustmentInput = z.infer<typeof InventoryAdjustmentSchema>;
 export type BatchInventoryAdjustmentInput = z.infer<typeof BatchInventoryAdjustmentSchema>;
 export type StockInInput = z.infer<typeof StockInSchema>;
 export type TransferInput = z.infer<typeof TransferSchema>;
 export type BatchTransferInput = z.infer<typeof BatchTransferSchema>;
+export type MassUpdateChangeInput = z.infer<typeof MassUpdateChangeSchema>;
+export type MassUpdateInput = z.infer<typeof MassUpdateSchema>;

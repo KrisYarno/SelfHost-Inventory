@@ -3,6 +3,7 @@ import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { auditService } from "@/lib/audit";
 import type { AuditActionType, EntityType } from "@/lib/audit";
 import { z } from "zod";
+import { AuditBatchLogsSchema } from "@/lib/validation/admin";
 
 // Input validation schema
 const auditLogQuerySchema = z.object({
@@ -62,11 +63,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = await request.json();
-  const { batchId } = body;
-
-  if (!batchId || typeof batchId !== "string") {
-    return NextResponse.json({ error: "Batch ID is required" }, { status: 400 });
-  }
+  const { batchId } = AuditBatchLogsSchema.parse(body);
 
   const logs = await auditService.getBatchLogs(batchId);
 

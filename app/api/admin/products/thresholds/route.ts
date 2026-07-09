@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { ThresholdsUpdateSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
 
@@ -57,29 +58,12 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = await request.json();
-  const { updates } = body as {
-    updates: Array<{
-      productId: number;
-      combinedMinimum?: number;
-      perLocation?: { locationId: number; minQuantity: number }[];
-    }>;
-  };
-
-  if (!Array.isArray(updates) || updates.length === 0) {
-    return NextResponse.json({ error: "No updates provided" }, { status: 400 });
-  }
+  // Schema enforces >= 0 integers and a non-empty updates array.
+  const { updates } = ThresholdsUpdateSchema.parse(body);
 
   const ops: any[] = [];
 
   for (const update of updates) {
-    if (!update.productId) {
-      return NextResponse.json({ error: "Invalid update format" }, { status: 400 });
-    }
-
-    if (update.combinedMinimum !== undefined && update.combinedMinimum < 0) {
-      return NextResponse.json({ error: "Combined minimum cannot be negative" }, { status: 400 });
-    }
-
     if (update.combinedMinimum !== undefined) {
       ops.push(
         prisma.product.update({
@@ -89,14 +73,8 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
       );
     }
 
-    if (Array.isArray(update.perLocation)) {
+    if (update.perLocation) {
       for (const loc of update.perLocation) {
-        if (loc.minQuantity < 0) {
-          return NextResponse.json(
-            { error: "Location minimum cannot be negative" },
-            { status: 400 }
-          );
-        }
         ops.push(
           prisma.product_locations.upsert({
             where: {
