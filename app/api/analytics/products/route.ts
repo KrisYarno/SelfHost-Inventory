@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, requireCompanyMembership, apiHandler } from "@/lib/api-utils";
+import { requireApproved, apiHandler } from "@/lib/api-utils";
 import { enforceRateLimit, applyRateLimitHeaders } from "@/lib/rateLimit";
 import prisma from "@/lib/prisma";
 import { getSales } from "@/lib/analytics/queries";
+import { resolveCallerCompanyIds } from "@/lib/analytics/company-scope";
 import { getProductStockTrends } from "@/lib/analytics/product-trends";
 import {
   buildHubRows,
@@ -44,17 +45,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const companyId = sp.get("companyId");
 
   // Resolve the company scope (sales only; stock is GLOBAL).
-  let companyIds: string[];
-  if (companyId) {
-    await requireCompanyMembership(user.id, companyId, user.isAdmin); // throws 404 on non-member
-    companyIds = [companyId];
-  } else {
-    const memberships = await prisma.userCompany.findMany({
-      where: { userId: user.id },
-      select: { companyId: true },
-    });
-    companyIds = memberships.map((m: { companyId: string }) => m.companyId);
-  }
+  const companyIds = await resolveCallerCompanyIds(user, companyId);
 
   // 1) FULL candidate set: current real products after search + current-state filter.
   //    NOT a page — sort/filter happen after the sales merge (ER mechanical correction).

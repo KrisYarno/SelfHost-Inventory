@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
+import { rowsToCSV } from "@/lib/csv";
 
 export const dynamic = "force-dynamic";
 
@@ -65,10 +66,9 @@ export const GET = apiHandler(async (request: NextRequest) => {
     rows.push(row);
   });
 
-  // Convert to CSV string
-  const csvContent = rows
-    .map((row) => row.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(","))
-    .join("\n");
+  // Convert to CSV string (alwaysQuote preserves this route's historical
+  // fully-quoted output byte-for-byte via the shared escaper).
+  const csvContent = rowsToCSV(rows, { alwaysQuote: true });
 
   // Return as downloadable file
   const response = new NextResponse(csvContent, {

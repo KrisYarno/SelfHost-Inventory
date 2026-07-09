@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { format, parseISO, eachDayOfInterval, subDays } from "date-fns";
+import { format } from "date-fns";
+import {
+  parseReportDateRange,
+  formatDayKey,
+  parseDayKey,
+  eachDayUTC,
+} from "@/lib/reports/date-range";
 
 export const dynamic = "force-dynamic";
 
@@ -14,8 +20,6 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
   }
 
   const searchParams = request.nextUrl.searchParams;
-  const startDate = searchParams.get("startDate");
-  const endDate = searchParams.get("endDate");
 
   // Verify user exists
   const user = await prisma.user.findUnique({
@@ -27,13 +31,14 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
     return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
 
-  // Build date filter
+  // Build date filter (UTC; bounds applied only when provided)
+  const { start: filterStart, end: filterEnd } = parseReportDateRange(searchParams);
   const dateFilter: any = { userId };
-  if (startDate) {
-    dateFilter.changeTime = { ...dateFilter.changeTime, gte: new Date(startDate) };
+  if (filterStart) {
+    dateFilter.changeTime = { ...dateFilter.changeTime, gte: filterStart };
   }
-  if (endDate) {
-    dateFilter.changeTime = { ...dateFilter.changeTime, lte: new Date(endDate) };
+  if (filterEnd) {
+    dateFilter.changeTime = { ...dateFilter.changeTime, lte: filterEnd };
   }
 
   // Get user's recent transactions
@@ -59,18 +64,17 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
   }));
 
   // Build activity pattern (for the bar chart tab)
-  // Group by date with stockIn/stockOut/adjustments
-  const end = endDate ? new Date(endDate) : new Date();
-  const start = startDate ? new Date(startDate) : subDays(end, 6);
-  const allDates = eachDayOfInterval({ start, end });
+  // Group by date with stockIn/stockOut/adjustments (UTC; default last 7 days)
+  const { start, end } = parseReportDateRange(searchParams, { defaultLastDays: 7 });
+  const allDates = eachDayUTC(start, end);
 
   const patternMap = new Map<string, { stockIn: number; stockOut: number; adjustments: number }>();
   allDates.forEach((d) => {
-    patternMap.set(format(d, "yyyy-MM-dd"), { stockIn: 0, stockOut: 0, adjustments: 0 });
+    patternMap.set(formatDayKey(d), { stockIn: 0, stockOut: 0, adjustments: 0 });
   });
 
   transactions.forEach((t) => {
-    const dateKey = format(t.changeTime, "yyyy-MM-dd");
+    const dateKey = formatDayKey(t.changeTime);
     const entry = patternMap.get(dateKey);
     if (!entry) return;
 
@@ -82,7 +86,7 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
   const activityPattern = Array.from(patternMap.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([dateKey, data]) => ({
-      date: format(parseISO(dateKey), "MMM dd"),
+      date: format(parseDayKey(dateKey), "MMM dd"),
       stockIn: data.stockIn,
       stockOut: data.stockOut,
       adjustments: data.adjustments,

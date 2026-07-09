@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, requireCompanyMembership, apiHandler } from "@/lib/api-utils";
-import prisma from "@/lib/prisma";
+import { requireApproved, apiHandler } from "@/lib/api-utils";
 import { getSales, SalesGroupBy } from "@/lib/analytics/queries";
+import { resolveCallerCompanyIds, serializeSalesRows } from "@/lib/analytics/company-scope";
 
 export const dynamic = "force-dynamic";
 
@@ -28,31 +28,13 @@ export const GET = apiHandler(async (request: NextRequest) => {
       ? (rawGroupBy as SalesGroupBy)
       : "product";
 
-  let companyIds: string[];
-  if (companyId) {
-    // Throws AppError 404 on non-member (admins bypass inside). apiHandler maps it.
-    await requireCompanyMembership(user.id, companyId, user.isAdmin);
-    companyIds = [companyId];
-  } else {
-    // Ownership view: scope to the caller's OWN memberships, never all companies.
-    const memberships = await prisma.userCompany.findMany({
-      where: { userId: user.id },
-      select: { companyId: true },
-    });
-    companyIds = memberships.map((m: { companyId: string }) => m.companyId);
-  }
+  const companyIds = await resolveCallerCompanyIds(user, companyId);
 
   const rows = await getSales({ companyIds, productId, from, to, groupBy });
 
   // Serialize the Prisma Decimal revenue sum to a string per row so NextResponse.json
   // never emits a raw Decimal object. Other _sum fields are plain numbers.
-  const series = rows.map((row) => {
-    const sum = (row as { _sum?: { revenue?: unknown } })._sum;
-    if (sum && sum.revenue != null) {
-      return { ...row, _sum: { ...sum, revenue: sum.revenue.toString() } };
-    }
-    return row;
-  });
+  const series = serializeSalesRows(rows);
 
   return NextResponse.json({
     series,

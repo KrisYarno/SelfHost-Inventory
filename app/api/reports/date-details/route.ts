@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { startOfDay, endOfDay, parseISO } from "date-fns";
+import { parseDayParam, startOfDayUTC, endOfDayUTC } from "@/lib/reports/date-range";
 
 export const dynamic = "force-dynamic";
 
@@ -15,9 +15,9 @@ export const GET = apiHandler(async (request: NextRequest) => {
     return NextResponse.json({ error: "Date parameter required" }, { status: 400 });
   }
 
-  const targetDate = parseISO(dateParam);
-  const dayStart = startOfDay(targetDate);
-  const dayEnd = endOfDay(targetDate);
+  const targetDate = parseDayParam(dateParam);
+  const dayStart = startOfDayUTC(targetDate);
+  const dayEnd = endOfDayUTC(targetDate);
 
   // Get all activities for the specified date
   const activities = await prisma.inventory_logs.findMany({

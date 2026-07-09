@@ -1,15 +1,8 @@
 import { format } from "date-fns";
-
-// Escape a single CSV cell value according to RFC 4180
-function escapeCSVCell(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  const str = String(value);
-  // Wrap in quotes if it contains commas, quotes, or newlines
-  if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r")) {
-    return `"${str.replace(/"/g, '""')}"`;
-  }
-  return str;
-}
+// Shared, server-safe RFC 4180 escaping (single source of truth; also used by the
+// server-side export routes). Re-exported for any consumer expecting it here.
+import { escapeCSVCell } from "@/lib/csv";
+export { escapeCSVCell };
 
 // Export data to CSV and trigger a browser download.
 // Accepts an array of objects, a column definition (header + key mapping), and a filename.

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, requireCompanyMembership, apiHandler } from "@/lib/api-utils";
-import prisma from "@/lib/prisma";
+import { requireApproved, apiHandler } from "@/lib/api-utils";
 import { getStockSeries, getSales } from "@/lib/analytics/queries";
+import { resolveCallerCompanyIds, serializeSalesRows } from "@/lib/analytics/company-scope";
 
 export const dynamic = "force-dynamic";
 
@@ -16,9 +16,6 @@ export const dynamic = "force-dynamic";
 //     non-member, anti-enumeration), then scope sales to that one company. Omit => sum the
 //     caller's OWN memberships (default; zero memberships => getSales returns []).
 //
-// TODO(reports-rework): share caller-company resolution + sales-row serialization with
-// /api/analytics/sales (duplicated intentionally to avoid re-touching the reviewed sales
-// route mid-build).
 export const GET = apiHandler(
   async (request: NextRequest, { params }: { params: { id: string } }) => {
     const { user } = await requireApproved();
@@ -35,18 +32,7 @@ export const GET = apiHandler(
 
     // Sales scope (stock is GLOBAL): explicit companyId => membership-checked; else
     // sum the caller's OWN memberships. A non-member NEVER reaches the data layer.
-    let companyIds: string[];
-    if (companyId) {
-      // Throws AppError 404 on non-member (admins bypass inside). apiHandler maps it.
-      await requireCompanyMembership(user.id, companyId, user.isAdmin);
-      companyIds = [companyId];
-    } else {
-      const memberships = await prisma.userCompany.findMany({
-        where: { userId: user.id },
-        select: { companyId: true },
-      });
-      companyIds = memberships.map((m: { companyId: string }) => m.companyId);
-    }
+    const companyIds = await resolveCallerCompanyIds(user, companyId);
 
     const [stock, salesRows] = await Promise.all([
       getStockSeries({ productId, from, to }),
@@ -55,13 +41,7 @@ export const GET = apiHandler(
 
     // Serialize the Prisma Decimal revenue sum to a string per row so NextResponse.json
     // never emits a raw Decimal object. Other _sum fields are plain numbers.
-    const sales = salesRows.map((row) => {
-      const sum = (row as { _sum?: { revenue?: unknown } })._sum;
-      if (sum && sum.revenue != null) {
-        return { ...row, _sum: { ...sum, revenue: sum.revenue.toString() } };
-      }
-      return row;
-    });
+    const sales = serializeSalesRows(salesRows);
 
     return NextResponse.json({
       productId,

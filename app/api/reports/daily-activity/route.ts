@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { format, eachDayOfInterval, parseISO } from "date-fns";
+import { format } from "date-fns";
+import {
+  parseReportDateRange,
+  formatDayKey,
+  parseDayKey,
+  eachDayUTC,
+} from "@/lib/reports/date-range";
 
 export const dynamic = "force-dynamic";
 
@@ -9,15 +15,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
   await requireApproved();
 
   const searchParams = request.nextUrl.searchParams;
-  const startDate = searchParams.get("startDate");
-  const endDate = searchParams.get("endDate");
   const locationId = searchParams.get("locationId");
 
-  // Default to last 7 days if no dates provided
-  const end = endDate ? parseISO(endDate) : new Date();
-  const start = startDate
-    ? parseISO(startDate)
-    : new Date(end.getTime() - 6 * 24 * 60 * 60 * 1000);
+  // Default to last 7 days if no dates provided (UTC day bucketing)
+  const { start, end } = parseReportDateRange(searchParams, { defaultLastDays: 7 });
 
   // Build where clause
   const whereClause: any = {
@@ -48,15 +49,15 @@ export const GET = apiHandler(async (request: NextRequest) => {
   >();
 
   // Initialize all dates
-  const allDates = eachDayOfInterval({ start, end });
+  const allDates = eachDayUTC(start, end);
   allDates.forEach((date) => {
-    const dateKey = format(date, "yyyy-MM-dd");
+    const dateKey = formatDayKey(date);
     activityMap.set(dateKey, { stockIn: 0, stockOut: 0, adjustments: 0 });
   });
 
   // Aggregate activities
   activities.forEach((activity) => {
-    const dateKey = format(activity.changeTime, "yyyy-MM-dd");
+    const dateKey = formatDayKey(activity.changeTime);
     const dayData = activityMap.get(dateKey) || { stockIn: 0, stockOut: 0, adjustments: 0 };
 
     // Categorize based on delta value and logType
@@ -78,7 +79,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const activityData = Array.from(activityMap.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([date, data]) => ({
-      date: format(parseISO(date), "MMM dd"),
+      date: format(parseDayKey(date), "MMM dd"),
       stockIn: data.stockIn,
       stockOut: data.stockOut,
       adjustments: data.adjustments,

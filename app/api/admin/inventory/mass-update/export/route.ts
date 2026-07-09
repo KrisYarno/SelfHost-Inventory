@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { rowsToCSV } from "@/lib/csv";
 
 export const dynamic = "force-dynamic";
 
@@ -57,21 +58,11 @@ export const GET = apiHandler(async (_request: NextRequest) => {
     rows.push(row);
   });
 
-  // Convert to CSV format
-  const csvContent = [
-    headers.join(","),
-    ...rows.map((row) =>
-      row
-        .map((cell) => {
-          // Escape cells containing commas or quotes
-          if (cell.includes(",") || cell.includes('"')) {
-            return `"${cell.replace(/"/g, '""')}"`;
-          }
-          return cell;
-        })
-        .join(",")
-    ),
-  ].join("\n");
+  // Convert to CSV format. Data rows go through the shared RFC 4180 escaper,
+  // which (unlike the previous inline escaper) also quotes cells containing
+  // newlines — the fix for malformed CSV when a product name contains a line
+  // break. Header construction is unchanged.
+  const csvContent = [headers.join(","), rowsToCSV(rows)].join("\n");
 
   // Return CSV file
   return new NextResponse(csvContent, {

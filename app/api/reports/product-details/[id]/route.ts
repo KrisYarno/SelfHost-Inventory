@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { format } from "date-fns";
+import { parseReportDateRange, formatDayKey, parseDayKey } from "@/lib/reports/date-range";
 
 export const dynamic = "force-dynamic";
 
@@ -14,16 +15,15 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
   }
 
   const searchParams = request.nextUrl.searchParams;
-  const startDate = searchParams.get("startDate");
-  const endDate = searchParams.get("endDate");
 
-  // Build where clause for date filtering
+  // Build where clause for date filtering (UTC; bounds applied only when provided)
+  const { start, end } = parseReportDateRange(searchParams);
   const dateFilter: any = { productId };
-  if (startDate) {
-    dateFilter.changeTime = { ...dateFilter.changeTime, gte: new Date(startDate) };
+  if (start) {
+    dateFilter.changeTime = { ...dateFilter.changeTime, gte: start };
   }
-  if (endDate) {
-    dateFilter.changeTime = { ...dateFilter.changeTime, lte: new Date(endDate) };
+  if (end) {
+    dateFilter.changeTime = { ...dateFilter.changeTime, lte: end };
   }
 
   // Get product details
@@ -80,7 +80,7 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
   // Group deltas by date
   const dailyMap = new Map<string, number>();
   for (const log of dailyLogs) {
-    const dateKey = format(log.changeTime, "yyyy-MM-dd");
+    const dateKey = formatDayKey(log.changeTime);
     dailyMap.set(dateKey, (dailyMap.get(dateKey) || 0) + log.delta);
   }
 
@@ -91,7 +91,7 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
     .map(([dateKey, delta]) => {
       runningTotal += delta;
       return {
-        date: format(new Date(dateKey + "T00:00:00"), "MMM dd"),
+        date: format(parseDayKey(dateKey), "MMM dd"),
         quantity: runningTotal,
       };
     });
