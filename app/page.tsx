@@ -18,7 +18,7 @@ export default async function Home() {
             Inventory Management System
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            Modern inventory tracking and management
+            Advanced Research / Awake
           </p>
         </div>
         <div className="mt-8 space-y-4">
