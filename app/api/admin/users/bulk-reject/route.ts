@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { auditService } from "@/lib/audit";
+import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { BulkUserIdsSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
+
+// R-D14: bulk events carry per-row detail up to this cap, then summary+count.
+const MAX_DETAIL_ROWS = 500;
 
 export const POST = apiHandler(async (request: NextRequest) => {
   const { user } = await requireAdmin();
@@ -36,20 +39,42 @@ export const POST = apiHandler(async (request: NextRequest) => {
     });
   }
 
-  // Soft delete users
-  const updateResult = await prisma.user.updateMany({
-    where: {
-      id: { in: usersToReject.map((u) => u.id) },
-    },
-    data: { deletedAt: new Date() },
-  });
+  // ONE event for the whole bulk op, sharing a fresh batchId (spec R-D14 +
+  // batchId recipe). Rejection soft-deletes the row; the before-state is uniform
+  // (every fetched row matched `deletedAt: null`), so each row's change is the
+  // deletedAt null -> timestamp transition the route actually performs.
+  const rejectedAt = new Date();
+  const batchId = newBatchId();
+  const updateResult = await prisma.$transaction(async (tx) => {
+    const result = await tx.user.updateMany({
+      where: {
+        id: { in: usersToReject.map((u) => u.id) },
+      },
+      data: { deletedAt: rejectedAt },
+    });
 
-  // Log the bulk rejection action
-  await auditService.logBulkUserRejection(
-    user.id,
-    usersToReject.map((u) => u.id),
-    usersToReject.map((u) => u.email)
-  );
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "USER_BULK_REJECTION",
+      entityType: "USER",
+      action: `Bulk rejected ${usersToReject.length} users`,
+      details: {
+        userIds: usersToReject.map((u) => u.id),
+        emails: usersToReject.map((u) => u.email),
+        rows: usersToReject.slice(0, MAX_DETAIL_ROWS).map((u) => ({
+          entityId: String(u.id),
+          changes: { deletedAt: { from: null, to: rejectedAt } },
+        })),
+        ...(usersToReject.length > MAX_DETAIL_ROWS
+          ? { rowsTruncated: true, rowCount: usersToReject.length }
+          : {}),
+      },
+      affectedCount: usersToReject.length,
+      batchId,
+    });
+
+    return result;
+  });
 
   return NextResponse.json({
     rejected: updateResult.count,

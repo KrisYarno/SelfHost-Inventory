@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { auditService } from "@/lib/audit";
+import { recordChange } from "@/lib/change-tracking";
 
 export const dynamic = "force-dynamic";
 
@@ -15,14 +15,23 @@ export const POST = apiHandler(async (request: NextRequest, { params }: { params
     return NextResponse.json({ error: "Invalid user ID" }, { status: 400 });
   }
 
-  // Update user approval status
-  const user = await prisma.user.update({
-    where: { id: userId },
-    data: { isApproved: true },
+  // Update approval + record the change atomically (spec R-D2/D4: the bare write
+  // is wrapped in a transaction so an unrecordable approval never commits).
+  const user = await prisma.$transaction(async (tx) => {
+    const updated = await tx.user.update({
+      where: { id: userId },
+      data: { isApproved: true },
+    });
+    await recordChange(tx, {
+      actor: { userId: adminUser.id },
+      actionType: "USER_APPROVAL",
+      entityType: "USER",
+      entityId: updated.id,
+      action: `Approved user ${updated.email}`,
+      details: { targetEmail: updated.email },
+    });
+    return updated;
   });
-
-  // Log the approval action
-  await auditService.logUserApproval(adminUser.id, user.id, user.email);
 
   return NextResponse.json({
     message: "User approved successfully",

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { auditService } from "@/lib/audit";
+import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { UpdateUserSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
@@ -154,6 +154,12 @@ export const PATCH = apiHandler(async (
     changes.minCombinedEmailAlerts = { from: targetUser.minCombinedEmailAlerts, to: body.minCombinedEmailAlerts };
   }
 
+  // One batchId per request ties the USER_UPDATE event to the additional
+  // USER_ROLE_CHANGE event emitted when isAdmin flips (spec D6: privilege
+  // escalation is queryable on its own AND grouped with the update it rode in
+  // on). Replaces the deleted audit singleton's startBatch/endBatch.
+  const batchId = newBatchId();
+
   // Handle company associations in a transaction
   const result = await prisma.$transaction(async (tx) => {
     // Update user fields if any changed
@@ -211,27 +217,44 @@ export const PATCH = apiHandler(async (
       });
     }
 
+    // Record the change inside the SAME transaction as the mutation — an
+    // unrecordable admin edit must not commit (spec R-D2). `changes` already
+    // holds the full field-level diff (including companies, computed above).
+    if (Object.keys(changes).length > 0) {
+      await recordChange(tx, {
+        actor: { userId: adminUser.id },
+        actionType: "USER_UPDATE",
+        entityType: "USER",
+        entityId: userId,
+        action: `Updated user ${targetUser.email}`,
+        changes,
+        details: { targetEmail: targetUser.email },
+        batchId,
+      });
+
+      // Privilege escalation gets its own queryable event alongside the
+      // USER_UPDATE, sharing the same batchId (spec D6). Emitted only when the
+      // admin flag actually changed.
+      if (changes.isAdmin) {
+        await recordChange(tx, {
+          actor: { userId: adminUser.id },
+          actionType: "USER_ROLE_CHANGE",
+          entityType: "USER",
+          entityId: userId,
+          action: `Changed admin role for user ${targetUser.email}`,
+          changes: { isAdmin: changes.isAdmin },
+          details: { targetEmail: targetUser.email },
+          batchId,
+        });
+      }
+    }
+
     return updatedUser;
   });
 
   const companyNameById = await resolveCompanyNamesById(
     (result as any).companies?.map((c: any) => c.companyId) ?? []
   );
-
-  // Log the update if there were changes
-  if (Object.keys(changes).length > 0) {
-    await auditService.log({
-      userId: adminUser.id,
-      actionType: "USER_UPDATE",
-      entityType: "USER",
-      entityId: userId,
-      action: `Updated user ${targetUser.email}`,
-      details: {
-        targetEmail: targetUser.email,
-        changes,
-      },
-    });
-  }
 
   return NextResponse.json({
     message: "User updated successfully",
