@@ -34,8 +34,10 @@ import {
   normalizeEntityId,
   redactDeep,
   diff,
+  recordChange,
   COMPANY_SCOPED_ENTITY_TYPES,
   REDACTED_KEYS,
+  type ChangeEvent,
 } from '@/lib/change-tracking';
 
 const mockPrisma = prisma as unknown as DeepMockProxy<typeof prisma>;
@@ -241,5 +243,203 @@ describe('change-tracking: diff', () => {
     expect(diff(before, after, ['passwordHash', 'name'])).toEqual({
       name: { from: 'A', to: 'B' },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 3 — recordChange (hard-abort, joins the caller's tx)
+// ---------------------------------------------------------------------------
+
+describe('change-tracking: recordChange', () => {
+  let createMock: jest.Mock;
+  let mockTx: Prisma.TransactionClient;
+
+  beforeEach(() => {
+    mockReset(mockPrisma);
+    createMock = jest.fn().mockResolvedValue({ id: 1 });
+    mockTx = { auditLog: { create: createMock } } as unknown as Prisma.TransactionClient;
+    mockHeaders.mockReset();
+    mockHeaders.mockResolvedValue(makeHeaderStore());
+  });
+
+  const lastData = () => createMock.mock.calls[0][0].data;
+
+  it('writes on the SAME tx passed in (not the singleton prisma)', async () => {
+    await recordChange(mockTx, {
+      actor: { userId: 7 },
+      actionType: 'PRODUCT_UPDATE',
+      entityType: 'PRODUCT',
+      entityId: 42,
+      action: 'Updated product',
+    });
+    expect(createMock).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.auditLog.create).not.toHaveBeenCalled();
+  });
+
+  it('USER actor: records userId + actorKind "USER" and normalizes entityId to string', async () => {
+    await recordChange(mockTx, {
+      actor: { userId: 7 },
+      actionType: 'PRODUCT_UPDATE',
+      entityType: 'PRODUCT',
+      entityId: 42,
+      action: 'Updated product 42',
+    });
+    const data = lastData();
+    expect(data.userId).toBe(7);
+    expect(data.actorKind).toBe('USER');
+    expect(data.entityId).toBe('42');
+    expect(typeof data.entityId).toBe('string');
+    expect(data.actionType).toBe('PRODUCT_UPDATE');
+    expect(data.entityType).toBe('PRODUCT');
+    expect(data.affectedCount).toBe(1);
+  });
+
+  it('machine actor: userId null, actorKind from kind, envelope redacted under details.actor', async () => {
+    await recordChange(mockTx, {
+      actor: {
+        kind: 'WEBHOOK',
+        envelope: { source: 'shopify', apiKey: 'sk_live_xyz' },
+      },
+      actionType: 'EXTERNAL_ORDER_FULFILLMENT',
+      entityType: 'ORDER',
+      entityId: 'ord_abc',
+      companyId: 'cmp_1',
+      action: 'Order fulfilled via webhook',
+    });
+    const data = lastData();
+    expect(data.userId).toBeNull();
+    expect(data.actorKind).toBe('WEBHOOK');
+    expect(data.details.actor).toEqual({ source: 'shopify', apiKey: '[REDACTED]' });
+  });
+
+  it('carries the diff verbatim under details.changes', async () => {
+    const changes = { name: { from: 'A', to: 'B' } };
+    await recordChange(mockTx, {
+      actor: { userId: 7 },
+      actionType: 'PRODUCT_UPDATE',
+      entityType: 'PRODUCT',
+      entityId: 42,
+      action: 'Updated product',
+      changes,
+    });
+    expect(lastData().details.changes).toEqual(changes);
+  });
+
+  it('deep-redacts denylisted keys inside details', async () => {
+    await recordChange(mockTx, {
+      actor: { userId: 7 },
+      actionType: 'INTEGRATION_UPDATE',
+      entityType: 'INTEGRATION',
+      entityId: 'int_1',
+      companyId: 'cmp_1',
+      action: 'Updated integration',
+      details: { name: 'shopify', encryptedApiSecret: 'raw-secret' },
+    });
+    const data = lastData();
+    expect(data.details.name).toBe('shopify');
+    expect(data.details.encryptedApiSecret).toBe('[REDACTED]');
+  });
+
+  it('passes batchId through verbatim', async () => {
+    const batchId = newBatchId();
+    await recordChange(mockTx, {
+      actor: { userId: 7 },
+      actionType: 'INVENTORY_TRANSFER',
+      entityType: 'INVENTORY',
+      entityId: 42,
+      action: 'Transfer',
+      batchId,
+    });
+    expect(lastData().batchId).toBe(batchId);
+  });
+
+  it('captures ipAddress + userAgent from headers()', async () => {
+    await recordChange(mockTx, {
+      actor: { userId: 7 },
+      actionType: 'PRODUCT_UPDATE',
+      entityType: 'PRODUCT',
+      entityId: 42,
+      action: 'Updated product',
+    });
+    const data = lastData();
+    expect(data.ipAddress).toBe('203.0.113.5');
+    expect(data.userAgent).toBe('jest-agent/1.0');
+  });
+
+  it('tolerates headers() throwing (SYSTEM caller outside a request)', async () => {
+    mockHeaders.mockRejectedValue(new Error('headers() outside request scope'));
+    await expect(
+      recordChange(mockTx, {
+        actor: { kind: 'SYSTEM' },
+        actionType: 'SYSTEM_MAINTENANCE',
+        entityType: 'SYSTEM',
+        action: 'Cron ran',
+      }),
+    ).resolves.toBeUndefined();
+    const data = lastData();
+    expect(data.ipAddress).toBeUndefined();
+    expect(data.userAgent).toBeUndefined();
+    expect(data.actorKind).toBe('SYSTEM');
+  });
+
+  it('PROPAGATES a create rejection (hard-abort — no swallow)', async () => {
+    createMock.mockRejectedValue(new Error('db down'));
+    await expect(
+      recordChange(mockTx, {
+        actor: { userId: 7 },
+        actionType: 'PRODUCT_UPDATE',
+        entityType: 'PRODUCT',
+        entityId: 42,
+        action: 'Updated product',
+      }),
+    ).rejects.toThrow('db down');
+  });
+
+  it('company-scoped entityType without companyId THROWS in non-production', async () => {
+    // Jest runs with NODE_ENV=test (!== production) -> throw path.
+    await expect(
+      recordChange(mockTx, {
+        actor: { userId: 7 },
+        actionType: 'COMPANY_UPDATE',
+        entityType: 'COMPANY',
+        entityId: 'cmp_1',
+        action: 'Updated company',
+      }),
+    ).rejects.toThrow(/companyId/i);
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('company-scoped entityType WITH companyId records it', async () => {
+    await recordChange(mockTx, {
+      actor: { userId: 7 },
+      actionType: 'COMPANY_UPDATE',
+      entityType: 'COMPANY',
+      entityId: 'cmp_1',
+      companyId: 'cmp_1',
+      action: 'Updated company',
+    });
+    expect(lastData().companyId).toBe('cmp_1');
+  });
+
+  it('in production, missing companyId records null + console.error (no throw)', async () => {
+    const prev = process.env.NODE_ENV;
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      // @ts-expect-error - NODE_ENV is readonly in the type but writable at runtime
+      process.env.NODE_ENV = 'production';
+      await recordChange(mockTx, {
+        actor: { userId: 7 },
+        actionType: 'COMPANY_UPDATE',
+        entityType: 'COMPANY',
+        entityId: 'cmp_1',
+        action: 'Updated company',
+      });
+      expect(lastData().companyId).toBeNull();
+      expect(errSpy).toHaveBeenCalled();
+    } finally {
+      // @ts-expect-error - restore
+      process.env.NODE_ENV = prev;
+      errSpy.mockRestore();
+    }
   });
 });

@@ -12,6 +12,8 @@
  * coexist and their type unions are intentionally duplicated during the migration.
  */
 
+import { Prisma } from '@prisma/client';
+import { headers } from 'next/headers';
 import { v4 as uuidv4 } from 'uuid';
 
 // ---------------------------------------------------------------------------
@@ -257,4 +259,94 @@ export function diff<T extends Record<string, unknown>>(
       : { from, to };
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Write path — shared payload assembly
+// ---------------------------------------------------------------------------
+
+/** Best-effort ip/userAgent from the request; absent for machine callers. */
+async function captureRequestContext(): Promise<{ ipAddress?: string; userAgent?: string }> {
+  try {
+    const headersList = await headers();
+    return {
+      ipAddress:
+        headersList.get('x-forwarded-for')?.split(',')[0] ||
+        headersList.get('x-real-ip') ||
+        undefined,
+      userAgent: headersList.get('user-agent') || undefined,
+    };
+  } catch {
+    // headers() throws when called outside a request scope (SYSTEM/WEBHOOK). Fine.
+    return {};
+  }
+}
+
+/**
+ * Resolve a ChangeEvent into the `audit_logs` create payload:
+ *   - actor -> (userId|null, actorKind)
+ *   - entityId normalized to string|null
+ *   - companyId asserted for company-scoped types (dev throw / prod record-null)
+ *   - details = redactDeep({ ...details, changes, actor:envelope })
+ *   - ip/userAgent captured from headers()
+ * Shared by both write tiers so the row shape is identical regardless of path.
+ */
+async function buildAuditData(event: ChangeEvent): Promise<Prisma.AuditLogUncheckedCreateInput> {
+  const actorKind: ActorKind = event.actor.kind ?? 'USER';
+  const userId = event.actor.userId ?? null;
+
+  let companyId: string | null = event.companyId ?? null;
+  if (COMPANY_SCOPED_ENTITY_TYPES.has(event.entityType) && !companyId) {
+    const message = `[change-tracking] companyId is required for company-scoped entityType "${event.entityType}" (actionType ${event.actionType})`;
+    if (process.env.NODE_ENV !== 'production') {
+      throw new Error(message);
+    }
+    console.error(message);
+    companyId = null;
+  }
+
+  const mergedDetails: Record<string, unknown> = { ...(event.details ?? {}) };
+  if (event.changes && Object.keys(event.changes).length > 0) {
+    mergedDetails.changes = event.changes;
+  }
+  const envelope = 'envelope' in event.actor ? event.actor.envelope : undefined;
+  if (envelope && Object.keys(envelope).length > 0) {
+    mergedDetails.actor = envelope;
+  }
+  const redactedDetails = redactDeep(mergedDetails);
+  const details =
+    Object.keys(redactedDetails).length > 0
+      ? (redactedDetails as Prisma.InputJsonValue)
+      : undefined;
+
+  const { ipAddress, userAgent } = await captureRequestContext();
+
+  return {
+    userId,
+    actorKind,
+    companyId,
+    actionType: event.actionType,
+    entityType: event.entityType,
+    entityId: normalizeEntityId(event.entityId),
+    action: event.action,
+    details,
+    affectedCount: event.affectedCount ?? 1,
+    batchId: event.batchId ?? null,
+    ipAddress,
+    userAgent,
+  };
+}
+
+/**
+ * TRANSACTIONAL, hard-abort write (spec §3 D3(a) / §10 R-D2). MUST be called with
+ * the SAME `tx` as the mutation it records — it does NOT catch: a failed record
+ * aborts the caller's transaction, so an unrecordable user change never commits.
+ * (companyId assertion throws in dev; the create rejection propagates.)
+ */
+export async function recordChange(
+  tx: Prisma.TransactionClient,
+  event: ChangeEvent,
+): Promise<void> {
+  const data = await buildAuditData(event);
+  await tx.auditLog.create({ data });
 }
