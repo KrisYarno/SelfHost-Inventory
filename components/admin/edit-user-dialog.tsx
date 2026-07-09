@@ -48,11 +48,8 @@ interface UserWithDetails {
   isApproved: boolean;
   defaultLocationId?: number;
   emailAlerts?: boolean | null;
-  phoneNumber?: string | null;
   minLocationEmailAlerts?: boolean;
-  minLocationSmsAlerts?: boolean;
   minCombinedEmailAlerts?: boolean;
-  minCombinedSmsAlerts?: boolean;
   companies?: CompanyAssociation[];
 }
 
@@ -78,28 +75,22 @@ export function EditUserDialog({
 
   // Form state
   const [username, setUsername] = useState("");
-  const [phoneNumber, setPhoneNumber] = useState("");
   const [defaultLocationId, setDefaultLocationId] = useState<number>(1);
   const [isAdmin, setIsAdmin] = useState(false);
   const [emailAlerts, setEmailAlerts] = useState(false);
   const [minLocationEmailAlerts, setMinLocationEmailAlerts] = useState(false);
-  const [minLocationSmsAlerts, setMinLocationSmsAlerts] = useState(false);
   const [minCombinedEmailAlerts, setMinCombinedEmailAlerts] = useState(false);
-  const [minCombinedSmsAlerts, setMinCombinedSmsAlerts] = useState(false);
   const [userCompanies, setUserCompanies] = useState<CompanyAssociation[]>([]);
 
   // Reset form when user changes
   useEffect(() => {
     if (user) {
       setUsername(user.username || "");
-      setPhoneNumber(user.phoneNumber || "");
       setDefaultLocationId(user.defaultLocationId || 1);
       setIsAdmin(user.isAdmin || false);
       setEmailAlerts(user.emailAlerts || false);
       setMinLocationEmailAlerts(user.minLocationEmailAlerts || false);
-      setMinLocationSmsAlerts(user.minLocationSmsAlerts || false);
       setMinCombinedEmailAlerts(user.minCombinedEmailAlerts || false);
-      setMinCombinedSmsAlerts(user.minCombinedSmsAlerts || false);
       setUserCompanies(user.companies || []);
     }
   }, [user]);
@@ -121,14 +112,11 @@ export function EditUserDialog({
         headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({
           username,
-          phoneNumber: phoneNumber || null,
           defaultLocationId,
           isAdmin,
           emailAlerts,
           minLocationEmailAlerts,
-          minLocationSmsAlerts,
           minCombinedEmailAlerts,
-          minCombinedSmsAlerts,
           companies: userCompanies.map((c) => ({
             companyId: c.companyId,
           })),
@@ -224,17 +212,6 @@ export function EditUserDialog({
                 />
               </div>
             </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="phone">Phone Number</Label>
-              <Input
-                id="phone"
-                type="tel"
-                value={phoneNumber}
-                onChange={(e) => setPhoneNumber(e.target.value)}
-                placeholder="+1 (555) 123-4567"
-              />
-            </div>
           </div>
 
           {/* Permissions Section */}
@@ -303,34 +280,12 @@ export function EditUserDialog({
 
               <div className="flex items-center space-x-2">
                 <Checkbox
-                  id="minLocationSmsAlerts"
-                  checked={minLocationSmsAlerts}
-                  onCheckedChange={(checked) => setMinLocationSmsAlerts(checked === true)}
-                />
-                <Label htmlFor="minLocationSmsAlerts" className="cursor-pointer text-sm">
-                  Per-Location SMS Alerts
-                </Label>
-              </div>
-
-              <div className="flex items-center space-x-2">
-                <Checkbox
                   id="minCombinedEmailAlerts"
                   checked={minCombinedEmailAlerts}
                   onCheckedChange={(checked) => setMinCombinedEmailAlerts(checked === true)}
                 />
                 <Label htmlFor="minCombinedEmailAlerts" className="cursor-pointer text-sm">
                   Combined Email Alerts
-                </Label>
-              </div>
-
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="minCombinedSmsAlerts"
-                  checked={minCombinedSmsAlerts}
-                  onCheckedChange={(checked) => setMinCombinedSmsAlerts(checked === true)}
-                />
-                <Label htmlFor="minCombinedSmsAlerts" className="cursor-pointer text-sm">
-                  Combined SMS Alerts
                 </Label>
               </div>
             </div>

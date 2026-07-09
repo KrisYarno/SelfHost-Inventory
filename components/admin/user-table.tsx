@@ -19,11 +19,8 @@ export interface User {
   isApproved: boolean;
   defaultLocationId?: number;
   emailAlerts?: boolean | null;
-  phoneNumber?: string | null;
   minLocationEmailAlerts?: boolean;
-  minLocationSmsAlerts?: boolean;
   minCombinedEmailAlerts?: boolean;
-  minCombinedSmsAlerts?: boolean;
   companies?: CompanyAssociation[];
 }
 

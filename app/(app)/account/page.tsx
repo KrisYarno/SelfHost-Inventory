@@ -48,11 +48,8 @@ export default function AccountPage() {
 
   // Notification state
   const [emailAlerts, setEmailAlerts] = useState(false);
-  const [phoneNumber, setPhoneNumber] = useState("");
   const [minLocationEmailAlerts, setMinLocationEmailAlerts] = useState(false);
-  const [minLocationSmsAlerts, setMinLocationSmsAlerts] = useState(false);
   const [minCombinedEmailAlerts, setMinCombinedEmailAlerts] = useState(false);
-  const [minCombinedSmsAlerts, setMinCombinedSmsAlerts] = useState(false);
   const [isSavingNotifications, setIsSavingNotifications] = useState(false);
 
   // Fetch locations, user preferences, and account details
@@ -71,11 +68,8 @@ export default function AccountPage() {
         if (userResponse.ok) {
           const userData = await userResponse.json();
           setEmailAlerts(userData.emailAlerts || false);
-          setPhoneNumber(userData.phoneNumber || "");
           setMinLocationEmailAlerts(userData.minLocationEmailAlerts || false);
-          setMinLocationSmsAlerts(userData.minLocationSmsAlerts || false);
           setMinCombinedEmailAlerts(userData.minCombinedEmailAlerts || false);
-          setMinCombinedSmsAlerts(userData.minCombinedSmsAlerts || false);
           setHasPassword(userData.hasPassword ?? false);
           if (userData.username) {
             setUsername(userData.username);
@@ -270,12 +264,9 @@ export default function AccountPage() {
         method: "PATCH",
         headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
         body: JSON.stringify({
-          phoneNumber,
           emailAlerts,
           minLocationEmailAlerts,
-          minLocationSmsAlerts,
           minCombinedEmailAlerts,
-          minCombinedSmsAlerts,
         }),
       });
 
@@ -430,21 +421,6 @@ export default function AccountPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div>
-                <Label htmlFor="phone-number">Phone number for SMS alerts</Label>
-                <Input
-                  id="phone-number"
-                  type="tel"
-                  value={phoneNumber}
-                  onChange={(event) => setPhoneNumber(event.target.value)}
-                  placeholder="+1 (555) 123-4567"
-                  className="mt-2"
-                />
-                <p className="text-xs text-muted-foreground mt-1">
-                  SMS notifications are sent only if a number is provided.
-                </p>
-              </div>
-
               <div className="space-y-3">
                 <div className="flex items-center justify-between rounded-lg border p-4">
                   <div className="pr-4">
@@ -477,20 +453,6 @@ export default function AccountPage() {
 
                 <div className="flex items-center justify-between rounded-lg border p-4">
                   <div className="pr-4">
-                    <p className="text-sm font-medium">Location minimum SMS alerts</p>
-                    <p className="text-xs text-muted-foreground">
-                      SMS alerts for refill needs at your default location.
-                    </p>
-                  </div>
-                  <Switch
-                    id="location-sms"
-                    checked={minLocationSmsAlerts}
-                    onCheckedChange={setMinLocationSmsAlerts}
-                  />
-                </div>
-
-                <div className="flex items-center justify-between rounded-lg border p-4">
-                  <div className="pr-4">
                     <p className="text-sm font-medium">Combined minimum email alerts</p>
                     <p className="text-xs text-muted-foreground">
                       Email me when total inventory for a product falls below its combined minimum.
@@ -500,20 +462,6 @@ export default function AccountPage() {
                     id="combined-email"
                     checked={minCombinedEmailAlerts}
                     onCheckedChange={setMinCombinedEmailAlerts}
-                  />
-                </div>
-
-                <div className="flex items-center justify-between rounded-lg border p-4">
-                  <div className="pr-4">
-                    <p className="text-sm font-medium">Combined minimum SMS alerts</p>
-                    <p className="text-xs text-muted-foreground">
-                      SMS summary for products below combined minimums.
-                    </p>
-                  </div>
-                  <Switch
-                    id="combined-sms"
-                    checked={minCombinedSmsAlerts}
-                    onCheckedChange={setMinCombinedSmsAlerts}
                   />
                 </div>
               </div>

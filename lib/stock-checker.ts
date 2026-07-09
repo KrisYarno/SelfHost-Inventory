@@ -1,6 +1,5 @@
 import prisma from '@/lib/prisma';
 import { emailService, LowStockItem } from '@/lib/email';
-import { smsService } from '@/lib/sms';
 import type { CombinedMinBreach, LocationMinBreach } from '@/types/inventory';
 
 export interface LowStockProduct {
@@ -281,7 +280,7 @@ export class StockChecker {
   }
 
   /**
-   * Send notifications for minimum breaches via email/SMS
+   * Send notifications for minimum breaches via email
    */
   async sendMinimumNotifications(
     locationBreaches: LocationMinBreach[],
@@ -296,9 +295,7 @@ export class StockChecker {
         isApproved: true,
         OR: [
           { minLocationEmailAlerts: true },
-          { minLocationSmsAlerts: true },
           { minCombinedEmailAlerts: true },
-          { minCombinedSmsAlerts: true },
           { emailAlerts: true },
         ],
       },
@@ -365,23 +362,6 @@ export class StockChecker {
             user.minCombinedEmailAlerts || user.emailAlerts
               ? combinedToNotify
               : [],
-        });
-      }
-
-      // SMS notifications
-      if (
-        user.phoneNumber &&
-        user.smsVerified &&
-        ((user.minLocationSmsAlerts && locToNotify.length > 0) ||
-          (user.minCombinedSmsAlerts && combinedToNotify.length > 0))
-      ) {
-        await smsService.sendMinimumsSummary(user.phoneNumber, {
-          locationItems: user.minLocationSmsAlerts
-            ? locToNotify
-            : [],
-          combinedItems: user.minCombinedSmsAlerts
-            ? combinedToNotify
-            : [],
         });
       }
 

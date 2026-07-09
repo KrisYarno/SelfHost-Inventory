@@ -46,11 +46,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
         ...(includeDetails && {
           defaultLocationId: true,
           emailAlerts: true,
-          phoneNumber: true,
           minLocationEmailAlerts: true,
-          minLocationSmsAlerts: true,
           minCombinedEmailAlerts: true,
-          minCombinedSmsAlerts: true,
           companies: {
             select: {
               companyId: true,

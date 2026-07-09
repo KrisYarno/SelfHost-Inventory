@@ -10,7 +10,7 @@
  * back the reports/cron/sync surfaces), plus one SHOW-site guard proving the
  * provisional product is NOT filtered out of the main inventory list.
  *
- * Prisma (and stock-checker's email/sms deps) are mocked with jest-mock-extended
+ * Prisma (and stock-checker's email dep) are mocked with jest-mock-extended
  * — no real DB. We assert on the `where` clause passed to `prisma.*.findMany`.
  */
 
@@ -21,15 +21,11 @@ jest.mock('@/lib/prisma', () => {
   return { __esModule: true, default: md() };
 });
 
-// stock-checker imports the email + sms services at module load; stub them so
+// stock-checker imports the email service at module load; stub it so
 // the module under test can be imported without real transports.
 jest.mock('@/lib/email', () => ({
   __esModule: true,
   emailService: { sendLowStockDigest: jest.fn(), sendMinimumsDigest: jest.fn() },
-}));
-jest.mock('@/lib/sms', () => ({
-  __esModule: true,
-  smsService: { sendMinimumsSummary: jest.fn() },
 }));
 
 import prisma from '@/lib/prisma';

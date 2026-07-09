@@ -27,11 +27,8 @@ interface UpdateUserBody {
   defaultLocationId?: number;
   isAdmin?: boolean;
   emailAlerts?: boolean;
-  phoneNumber?: string | null;
   minLocationEmailAlerts?: boolean;
-  minLocationSmsAlerts?: boolean;
   minCombinedEmailAlerts?: boolean;
-  minCombinedSmsAlerts?: boolean;
   companies?: CompanyAssociation[];
 }
 
@@ -84,17 +81,6 @@ export const PATCH = apiHandler(async (
     if (!location) {
       return NextResponse.json(
         { error: "Invalid default location" },
-        { status: 400 }
-      );
-    }
-  }
-
-  // Validate phone number format if provided (basic validation)
-  if (body.phoneNumber !== undefined && body.phoneNumber !== null && body.phoneNumber !== "") {
-    const phoneRegex = /^[+]?[(]?[0-9]{1,4}[)]?[-\s./0-9]*$/;
-    if (!phoneRegex.test(body.phoneNumber)) {
-      return NextResponse.json(
-        { error: "Invalid phone number format" },
         { status: 400 }
       );
     }
@@ -158,32 +144,14 @@ export const PATCH = apiHandler(async (
     changes.emailAlerts = { from: targetUser.emailAlerts, to: body.emailAlerts };
   }
 
-  if (body.phoneNumber !== undefined) {
-    const newPhone = body.phoneNumber === "" ? null : body.phoneNumber;
-    if (newPhone !== targetUser.phoneNumber) {
-      updateData.phoneNumber = newPhone;
-      changes.phoneNumber = { from: targetUser.phoneNumber, to: newPhone };
-    }
-  }
-
   if (body.minLocationEmailAlerts !== undefined && body.minLocationEmailAlerts !== targetUser.minLocationEmailAlerts) {
     updateData.minLocationEmailAlerts = body.minLocationEmailAlerts;
     changes.minLocationEmailAlerts = { from: targetUser.minLocationEmailAlerts, to: body.minLocationEmailAlerts };
   }
 
-  if (body.minLocationSmsAlerts !== undefined && body.minLocationSmsAlerts !== targetUser.minLocationSmsAlerts) {
-    updateData.minLocationSmsAlerts = body.minLocationSmsAlerts;
-    changes.minLocationSmsAlerts = { from: targetUser.minLocationSmsAlerts, to: body.minLocationSmsAlerts };
-  }
-
   if (body.minCombinedEmailAlerts !== undefined && body.minCombinedEmailAlerts !== targetUser.minCombinedEmailAlerts) {
     updateData.minCombinedEmailAlerts = body.minCombinedEmailAlerts;
     changes.minCombinedEmailAlerts = { from: targetUser.minCombinedEmailAlerts, to: body.minCombinedEmailAlerts };
-  }
-
-  if (body.minCombinedSmsAlerts !== undefined && body.minCombinedSmsAlerts !== targetUser.minCombinedSmsAlerts) {
-    updateData.minCombinedSmsAlerts = body.minCombinedSmsAlerts;
-    changes.minCombinedSmsAlerts = { from: targetUser.minCombinedSmsAlerts, to: body.minCombinedSmsAlerts };
   }
 
   // Handle company associations in a transaction
@@ -275,11 +243,8 @@ export const PATCH = apiHandler(async (
       isApproved: result.isApproved,
       defaultLocationId: result.defaultLocationId,
       emailAlerts: result.emailAlerts,
-      phoneNumber: result.phoneNumber,
       minLocationEmailAlerts: result.minLocationEmailAlerts,
-      minLocationSmsAlerts: result.minLocationSmsAlerts,
       minCombinedEmailAlerts: result.minCombinedEmailAlerts,
-      minCombinedSmsAlerts: result.minCombinedSmsAlerts,
       companies: (result as any).companies?.map((c: any) => ({
         companyId: c.companyId,
         companyName: companyNameById.get(c.companyId) ?? "(deleted company)",

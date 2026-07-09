@@ -15,11 +15,8 @@ export const GET = apiHandler(async () => {
       passwordHash: true,
       emailAlerts: true,
       defaultLocationId: true,
-      phoneNumber: true,
       minLocationEmailAlerts: true,
-      minLocationSmsAlerts: true,
       minCombinedEmailAlerts: true,
-      minCombinedSmsAlerts: true,
     },
   });
 
@@ -50,9 +47,7 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
 
   const booleanFields = [
     "minLocationEmailAlerts",
-    "minLocationSmsAlerts",
     "minCombinedEmailAlerts",
-    "minCombinedSmsAlerts",
   ] as const;
 
   booleanFields.forEach((field) => {
@@ -60,11 +55,6 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
       updateData[field] = body[field];
     }
   });
-
-  if (typeof body.phoneNumber === "string") {
-    const trimmed = body.phoneNumber.trim();
-    updateData.phoneNumber = trimmed.length ? trimmed : null;
-  }
 
   // Update defaultLocationId if provided
   if (body.defaultLocationId !== undefined) {
@@ -91,11 +81,8 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
     select: {
       emailAlerts: true,
       defaultLocationId: true,
-      phoneNumber: true,
       minLocationEmailAlerts: true,
-      minLocationSmsAlerts: true,
       minCombinedEmailAlerts: true,
-      minCombinedSmsAlerts: true,
     },
   });
 
