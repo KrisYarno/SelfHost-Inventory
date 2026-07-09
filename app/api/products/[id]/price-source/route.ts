@@ -6,7 +6,7 @@ import {
   requireCSRF,
 } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { auditService } from "@/lib/audit";
+import { recordChange } from "@/lib/change-tracking";
 import { fetchExternalProductPrice } from "@/lib/external-orders/price-sync";
 import { PriceSourceSchema } from "@/lib/validation/product";
 
@@ -57,18 +57,26 @@ export const POST = apiHandler(
 
     // Clear source
     if (linkId === null) {
-      await prisma.product.update({
-        where: { id: productId },
-        data: { priceSourceLinkId: null },
-      });
+      // BUG FIX (plan step 5): was actionType "ProductUpdate" as any with the
+      // transition buried in details.previousLinkId. Now a real PRODUCT_UPDATE
+      // with a first-class {priceSourceLinkId:{from,to}} diff, recorded in the
+      // SAME tx as the update.
+      await prisma.$transaction(async (tx) => {
+        await tx.product.update({
+          where: { id: productId },
+          data: { priceSourceLinkId: null },
+        });
 
-      await auditService.log({
-        userId: user.id,
-        actionType: "ProductUpdate" as any,
-        entityType: "PRODUCT",
-        action: `Cleared price source for ${product.name}`,
-        details: { productId, previousLinkId: product.priceSourceLinkId },
-        affectedCount: 1,
+        await recordChange(tx, {
+          actor: { userId: user.id },
+          actionType: "PRODUCT_UPDATE",
+          entityType: "PRODUCT",
+          entityId: productId,
+          action: `Cleared price source for ${product.name}`,
+          changes: { priceSourceLinkId: { from: product.priceSourceLinkId, to: null } },
+          details: { productId },
+          affectedCount: 1,
+        });
       });
 
       return NextResponse.json({
@@ -107,16 +115,14 @@ export const POST = apiHandler(
       user.isAdmin
     );
 
-    // Set the price source
-    await prisma.product.update({
-      where: { id: productId },
-      data: { priceSourceLinkId: linkId },
-    });
-
     let newRetailPrice = Number(product.retailPrice);
     let syncError: string | undefined;
+    let fetchedPrice: number | null = null;
 
-    // Optionally sync the price immediately
+    // Optionally sync the price immediately. The external fetch is a network call
+    // and MUST stay OUTSIDE the transaction (spec D4) — it depends only on the
+    // link's integration/external ids, not on priceSourceLinkId being set yet, so
+    // pulling it ahead of the writes is behavior-equivalent.
     if (syncNow) {
       const { regularPrice, error } = await fetchExternalProductPrice(
         link.integration.id,
@@ -125,31 +131,47 @@ export const POST = apiHandler(
       );
 
       if (regularPrice !== null) {
-        await prisma.product.update({
-          where: { id: productId },
-          data: { retailPrice: regularPrice },
-        });
+        fetchedPrice = regularPrice;
         newRetailPrice = regularPrice;
       } else {
         syncError = error;
       }
     }
 
-    await auditService.log({
-      userId: user.id,
-      actionType: "ProductUpdate" as any,
-      entityType: "PRODUCT",
-      action: `Set price source for ${product.name} to ${link.integration.name} (${link.externalTitle || link.externalProductId})`,
-      details: {
-        productId,
-        linkId,
-        integrationName: link.integration.name,
-        externalTitle: link.externalTitle,
-        syncNow,
-        newRetailPrice,
-        syncError,
-      },
-      affectedCount: 1,
+    // Set the price source (+ synced retail price) and record atomically.
+    // BUG FIX (plan step 5): real PRODUCT_UPDATE with a first-class
+    // {priceSourceLinkId:{from,to}} diff instead of "ProductUpdate" as any.
+    await prisma.$transaction(async (tx) => {
+      await tx.product.update({
+        where: { id: productId },
+        data: { priceSourceLinkId: linkId },
+      });
+
+      if (fetchedPrice !== null) {
+        await tx.product.update({
+          where: { id: productId },
+          data: { retailPrice: fetchedPrice },
+        });
+      }
+
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: "PRODUCT_UPDATE",
+        entityType: "PRODUCT",
+        entityId: productId,
+        action: `Set price source for ${product.name} to ${link.integration.name} (${link.externalTitle || link.externalProductId})`,
+        changes: { priceSourceLinkId: { from: product.priceSourceLinkId, to: linkId } },
+        details: {
+          productId,
+          linkId,
+          integrationName: link.integration.name,
+          externalTitle: link.externalTitle,
+          syncNow,
+          newRetailPrice,
+          syncError,
+        },
+        affectedCount: 1,
+      });
     });
 
     return NextResponse.json({

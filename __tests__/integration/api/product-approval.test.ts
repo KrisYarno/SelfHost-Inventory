@@ -38,8 +38,12 @@ jest.mock('@/lib/rateLimit', () => ({
   applyRateLimitHeaders: jest.fn((resp: any) => resp),
 }));
 
-jest.mock('@/lib/audit', () => ({
-  auditService: { log: jest.fn(async () => undefined) },
+// Routes record through @/lib/change-tracking now (recordChange in a tx) instead
+// of the legacy auditService.log.
+jest.mock('@/lib/change-tracking', () => ({
+  __esModule: true,
+  recordChange: jest.fn(async () => undefined),
+  newBatchId: jest.fn(() => 'test-batch-id'),
 }));
 
 // The decline reversal is unit-tested separately; here we mock it so the route
@@ -53,11 +57,12 @@ import { POST as declinePOST } from '@/app/api/admin/products/[id]/decline/route
 import { requireAdmin } from '@/lib/api-utils';
 import { declineProduct } from '@/lib/products/decline';
 import { validateCSRFToken } from '@/lib/csrf';
-import { auditService } from '@/lib/audit';
+import { recordChange } from '@/lib/change-tracking';
 import prisma from '@/lib/prisma';
 
 const db: any = prisma as any;
 const mockValidateCSRF = validateCSRFToken as jest.Mock;
+const mockRecordChange = recordChange as jest.Mock;
 
 const ADMIN_USER = { id: 9, isAdmin: true, isApproved: true };
 
@@ -98,8 +103,13 @@ describe('POST /api/admin/products/[id]/approve', () => {
     expect(updateArgs.data.reviewedBy).toBe(ADMIN_USER.id);
     expect(updateArgs.data.reviewedAt).toBeInstanceOf(Date);
 
-    expect((auditService.log as jest.Mock)).toHaveBeenCalledWith(
-      expect.objectContaining({ actionType: 'PRODUCT_APPROVE', entityId: 5, userId: ADMIN_USER.id })
+    expect(mockRecordChange).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actionType: 'PRODUCT_APPROVE',
+        entityId: 5,
+        actor: { userId: ADMIN_USER.id },
+      })
     );
   });
 
@@ -149,8 +159,13 @@ describe('POST /api/admin/products/[id]/decline', () => {
     expect(body).toEqual({ reversed: true, alreadyDeclined: false });
 
     expect(declineProduct as jest.Mock).toHaveBeenCalledWith(7, { id: ADMIN_USER.id });
-    expect((auditService.log as jest.Mock)).toHaveBeenCalledWith(
-      expect.objectContaining({ actionType: 'PRODUCT_DECLINE', entityId: 7, userId: ADMIN_USER.id })
+    expect(mockRecordChange).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        actionType: 'PRODUCT_DECLINE',
+        entityId: 7,
+        actor: { userId: ADMIN_USER.id },
+      })
     );
   });
 

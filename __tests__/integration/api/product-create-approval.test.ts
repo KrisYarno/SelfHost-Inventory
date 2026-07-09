@@ -44,12 +44,12 @@ jest.mock('@/lib/rateLimit', () => ({
   applyRateLimitHeaders: jest.fn((resp: any) => resp),
 }));
 
-jest.mock('@/lib/audit', () => ({
-  auditService: {
-    log: jest.fn(async () => undefined),
-    logProductCreate: jest.fn(async () => undefined),
-    logProductUpdate: jest.fn(async () => undefined),
-  },
+// Routes record through @/lib/change-tracking now; mock it so the product-only
+// mock tx never needs an auditLog model.
+jest.mock('@/lib/change-tracking', () => ({
+  __esModule: true,
+  recordChange: jest.fn(async () => undefined),
+  newBatchId: jest.fn(() => 'test-batch-id'),
 }));
 
 // lib/products helpers are exercised elsewhere; here we stub the pure helpers the

@@ -200,35 +200,19 @@ const PERMANENT_EXEMPT: Exemption[] = [
  * fails the coverage assertion. Both directions are enforced.
  */
 const PHASE_PENDING_EXEMPT: Exemption[] = [
-  // --- Task 8: inventory group (phase-A2 pending) ---
-  { path: "app/api/inventory/adjust/route.ts", reason: "phase-A2 pending (Task 8 inventory group)" },
-  { path: "app/api/inventory/batch-adjust/route.ts", reason: "phase-A2 pending (Task 8 inventory group)" },
-  { path: "app/api/inventory/deduct-simple/route.ts", reason: "phase-A2 pending (Task 8 inventory group)" },
-  { path: "app/api/inventory/transfer/route.ts", reason: "phase-A2 pending (Task 8 inventory group)" },
-  { path: "app/api/inventory/transfer/batch/route.ts", reason: "phase-A2 pending (Task 8 inventory group)" },
-  { path: "app/api/admin/inventory/mass-update/route.ts", reason: "phase-A2 pending (Task 8 inventory group)" },
-  // --- Task 9: products group (phase-A2 pending) ---
-  { path: "app/api/products/route.ts", reason: "phase-A2 pending (Task 9 products group)" },
-  { path: "app/api/products/[id]/route.ts", reason: "phase-A2 pending (Task 9 products group)" },
-  { path: "app/api/products/[id]/price-source/route.ts", reason: "phase-A2 pending (Task 9 products group)" },
-  { path: "app/api/admin/products/[id]/approve/route.ts", reason: "phase-A2 pending (Task 9 products group)" },
-  { path: "app/api/admin/products/[id]/decline/route.ts", reason: "phase-A2 pending (Task 9 products group)" },
+  // --- Task 8: inventory group — MIGRATED (adjust/batch-adjust/deduct-simple/
+  //     transfer/transfer-batch/mass-update now recordChange inside the
+  //     stock-write transaction; stock-in absorbed here per the Task 7 seam, so
+  //     its former phase-B entry is removed too; transfers is GET-only read-switch). ---
+  // --- Task 9: products group — MIGRATED (create/update/delete/price-source/approve/decline now recordChange) ---
   // --- Task 10: staging/scratchpad group (phase-A2 pending) ---
   { path: "app/api/staging-items/route.ts", reason: "phase-A2 pending (Task 10 staging/scratchpad group)" },
   { path: "app/api/staging-items/[id]/graduate/route.ts", reason: "phase-A2 pending (Task 10 staging/scratchpad group)" },
   { path: "app/api/staging-items/[id]/discard/route.ts", reason: "phase-A2 pending (Task 10 staging/scratchpad group)" },
   { path: "app/api/scratchpad/route.ts", reason: "phase-A2 pending (Task 10 staging/scratchpad group)" },
   { path: "app/api/scratchpad/[id]/route.ts", reason: "phase-A2 pending (Task 10 staging/scratchpad group)" },
-  // --- Task 11: users group (phase-A2 pending) ---
-  { path: "app/api/admin/users/[userId]/route.ts", reason: "phase-A2 pending (Task 11 users group)" },
-  { path: "app/api/admin/users/[userId]/approve/route.ts", reason: "phase-A2 pending (Task 11 users group)" },
-  { path: "app/api/admin/users/[userId]/reject/route.ts", reason: "phase-A2 pending (Task 11 users group)" },
-  { path: "app/api/admin/users/bulk-approve/route.ts", reason: "phase-A2 pending (Task 11 users group)" },
-  { path: "app/api/admin/users/bulk-reject/route.ts", reason: "phase-A2 pending (Task 11 users group)" },
-  { path: "app/api/admin/users/bulk-delete/route.ts", reason: "phase-A2 pending (Task 11 users group)" },
-  // --- Task 12: orders group (phase-A2 pending) ---
-  { path: "app/api/orders/[orderId]/fulfill/route.ts", reason: "phase-A2 pending (Task 12 orders group)" },
-  { path: "app/api/orders/[orderId]/unfulfill/route.ts", reason: "phase-A2 pending (Task 12 orders group)" },
+  // --- Task 11: users group — MIGRATED (all 6 admin/users routes now recordChange) ---
+  // --- Task 12: orders group — MIGRATED (fulfill/unfulfill now recordChange) ---
   // --- Phase B: coverage closure (not in any A2 task group) ---
   { path: "app/api/account/default-location/route.ts", reason: "phase-B pending" },
   { path: "app/api/account/password/route.ts", reason: "phase-B pending" },
@@ -250,7 +234,6 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
   { path: "app/api/admin/stock-check/route.ts", reason: "phase-B pending (manual stock-check trigger)" },
   { path: "app/api/auth/resend-notification/route.ts", reason: "phase-B pending" },
   { path: "app/api/auth/signup/route.ts", reason: "phase-B pending (USER_SIGNUP)" },
-  { path: "app/api/inventory/stock-in/route.ts", reason: "phase-B pending (not in an A2 task group)" },
   { path: "app/api/orders/external/[orderId]/recheck/route.ts", reason: "phase-B pending (external orders; ingestion tier)" },
   { path: "app/api/products/bundle-links/route.ts", reason: "phase-B pending" },
   { path: "app/api/products/bundle-links/[linkId]/route.ts", reason: "phase-B pending" },

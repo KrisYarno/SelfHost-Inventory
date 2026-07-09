@@ -6,7 +6,7 @@ import {
   applyRateLimitHeaders,
   enforceRateLimit,
 } from '@/lib/rateLimit';
-import { auditService } from '@/lib/audit';
+import { recordChange, newBatchId } from '@/lib/change-tracking';
 import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
 import { pushStockForProducts } from '@/lib/external-orders/stock-sync';
 import prisma from '@/lib/prisma';
@@ -39,46 +39,42 @@ export const POST = apiHandler(async (
   }
   await requireCompanyMembership(user.id, orderCompany.companyId, user.isAdmin);
 
-  // Perform fulfillment
+  // ONE batchId per request, shared by the change event and echoed into its
+  // details so the audit row and the deduction's ledger rows are joinable.
+  const batchId = newBatchId();
+
+  // Perform fulfillment. The ORDER change event is captured INSIDE the
+  // deduction transaction (via the `record` callback) so an unrecordable
+  // fulfillment never commits (spec R-D2 / Task 12). Behavior-preserving:
+  // record only when at least one item was fulfilled, and keep the
+  // full/partial actionType split. entityType=ORDER, entityId=the ExternalOrder
+  // cuid, companyId from the loaded order (company-scoped, asserted).
   const result = await fulfillExternalOrder(
     params.orderId,
     body.locationId,
     body.items,
     user.id,
-    body.notes
-  );
-
-  // Determine overall fulfillment status
-  const totalItems = body.items.length;
-  const fulfilledCount = result.fulfilled.length;
-  const fulfillmentStatus =
-    fulfilledCount === totalItems
-      ? 'fulfilled'
-      : fulfilledCount > 0
-      ? 'partial'
-      : 'none';
-
-  // Audit logging
-  try {
-    if (fulfilledCount > 0) {
-      const actionType =
-        fulfillmentStatus === 'fulfilled'
+    body.notes,
+    async (tx, r) => {
+      if (r.fulfilled.length === 0) return;
+      const isFull = r.fulfilled.length === body.items.length;
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: isFull
           ? 'EXTERNAL_ORDER_FULFILLMENT'
-          : 'EXTERNAL_ORDER_PARTIAL_FULFILLMENT';
-
-      await auditService.log({
-        userId: user.id,
-        actionType: actionType as any,
-        entityType: 'INVENTORY',
-        action: `${fulfillmentStatus === 'fulfilled' ? 'Fulfilled' : 'Partially fulfilled'} external order ${params.orderId}`,
+          : 'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
+        entityType: 'ORDER',
+        entityId: params.orderId,
+        companyId: orderCompany.companyId,
+        action: `${isFull ? 'Fulfilled' : 'Partially fulfilled'} external order ${params.orderId}`,
         details: {
           orderId: params.orderId,
           locationId: body.locationId,
-          fulfilled: result.fulfilled.length,
-          skipped: result.skipped.length,
-          failed: result.failed.length,
+          fulfilled: r.fulfilled.length,
+          skipped: r.skipped.length,
+          failed: r.failed.length,
           // FIX C: never expose the bundle sentinel productId in audit details.
-          items: result.fulfilled.map((f) => {
+          items: r.fulfilled.map((f) => {
             if (f.productId === BUNDLE_SENTINEL_PRODUCT_ID) {
               return {
                 productName: f.productName,
@@ -94,13 +90,23 @@ export const POST = apiHandler(async (
             };
           }),
           notes: body.notes,
+          batchId,
         },
-        affectedCount: result.fulfilled.length,
+        affectedCount: r.fulfilled.length,
+        batchId,
       });
     }
-  } catch (auditError) {
-    console.error('Failed to log audit fulfillment:', auditError);
-  }
+  );
+
+  // Determine overall fulfillment status
+  const totalItems = body.items.length;
+  const fulfilledCount = result.fulfilled.length;
+  const fulfillmentStatus =
+    fulfilledCount === totalItems
+      ? 'fulfilled'
+      : fulfilledCount > 0
+      ? 'partial'
+      : 'none';
 
   // Push fulfillment status to external platform (best-effort, never fails the fulfillment).
   // P1-6: Only push when every requested item succeeded. If any item hit the catch

@@ -348,7 +348,19 @@ export async function fulfillExternalOrder(
   locationId: number,
   items: FulfillmentItem[],
   userId: number,
-  _notes?: string
+  _notes?: string,
+  /**
+   * Task 12 (change-tracking): same-transaction change-capture seam. The route
+   * supplies an ORDER-scoped `recordChange` closure; we invoke it INSIDE this
+   * function's deduction transaction (after all deductions + the order-status
+   * write, before commit) so an unrecordable fulfillment never commits (spec
+   * R-D2). The deduction tx lives here — this is the only place same-tx capture
+   * is possible, since a route-level wrap would spawn a separate nested tx.
+   */
+  record?: (
+    tx: Prisma.TransactionClient,
+    result: FulfillmentResult
+  ) => Promise<void>
 ): Promise<FulfillmentResult> {
   const result: FulfillmentResult = {
     fulfilled: [],
@@ -794,6 +806,12 @@ export async function fulfillExternalOrder(
 
       // FIX H: materialize the deduplicated component-id Set into the result.
       result.affectedComponentIds = Array.from(affectedComponentIdSet);
+
+      // Task 12: capture the ORDER change on THIS tx, after all deductions and
+      // the order-status write, so a failed record aborts the fulfillment.
+      if (record) {
+        await record(tx, result);
+      }
 
       return result;
     },

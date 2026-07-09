@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin, apiHandler, requireCSRF } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
-import { auditService } from '@/lib/audit';
+import { recordChange } from '@/lib/change-tracking';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
 
 export const dynamic = 'force-dynamic';
@@ -28,21 +28,25 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     return NextResponse.json({ error: 'Invalid product ID' }, { status: 400 });
   }
 
-  const updated = await prisma.product.update({
-    where: { id },
-    data: {
-      approvalStatus: 'APPROVED',
-      reviewedBy: user.id,
-      reviewedAt: new Date(),
-    },
-  });
+  const updated = await prisma.$transaction(async (tx) => {
+    const u = await tx.product.update({
+      where: { id },
+      data: {
+        approvalStatus: 'APPROVED',
+        reviewedBy: user.id,
+        reviewedAt: new Date(),
+      },
+    });
 
-  await auditService.log({
-    userId: user.id,
-    actionType: 'PRODUCT_APPROVE',
-    entityType: 'PRODUCT',
-    entityId: updated.id,
-    action: `Approved product ${updated.id}`,
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: 'PRODUCT_APPROVE',
+      entityType: 'PRODUCT',
+      entityId: u.id,
+      action: `Approved product ${u.id}`,
+    });
+
+    return u;
   });
 
   const response = NextResponse.json({

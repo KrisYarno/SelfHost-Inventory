@@ -4,7 +4,7 @@ import { AppError } from "@/lib/error-handling";
 import prisma from "@/lib/prisma";
 import { isProductUnique, formatProductName } from "@/lib/products";
 import { getCurrentQuantity } from "@/lib/inventory";
-import { auditService } from "@/lib/audit";
+import { recordChange, type ChangeDiff } from "@/lib/change-tracking";
 import { ProductUpdateSchema } from "@/lib/validation/product";
 import { enforceRateLimit, applyRateLimitHeaders } from "@/lib/rateLimit";
 
@@ -135,12 +135,10 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
     updateData.retailPrice = sanitizedRetail >= 0 ? sanitizedRetail : 0;
   }
 
-  const product = await prisma.product.update({
-    where: { id: productId },
-    data: updateData,
-  });
-
-  const changes: Record<string, any> = {};
+  // Field-level diff already in {field:{from,to}} shape — flows straight through
+  // as ChangeEvent.changes (recordChange nests it under details.changes, matching
+  // the legacy logProductUpdate row while preserving the exact numeric coercions).
+  const changes: ChangeDiff = {};
   if (body.baseName !== undefined && body.baseName !== existingProduct.baseName) {
     changes.baseName = { from: existingProduct.baseName, to: body.baseName };
   }
@@ -169,7 +167,25 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
     changes.retailPrice = { from: Number(existingProduct.retailPrice), to: body.retailPrice };
   }
 
-  await auditService.logProductUpdate(user.id, product.id, product.name, changes);
+  // Update + record atomically (spec D4): fetch/parse/diff above stay outside the tx.
+  const product = await prisma.$transaction(async (tx) => {
+    const updated = await tx.product.update({
+      where: { id: productId },
+      data: updateData,
+    });
+
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "PRODUCT_UPDATE",
+      entityType: "PRODUCT",
+      entityId: updated.id,
+      action: `Updated product "${updated.name}"`,
+      changes,
+      details: { productName: updated.name },
+    });
+
+    return updated;
+  });
 
   const response = NextResponse.json(product);
   return applyRateLimitHeaders(response, rateLimitHeaders);
@@ -202,15 +218,26 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: RouteP
     return NextResponse.json({ error: "Product is already deleted" }, { status: 400 });
   }
 
-  const product = await prisma.product.update({
-    where: { id: productId },
-    data: {
-      deletedAt: new Date(),
-      deletedBy: user.id,
-    },
-  });
+  const product = await prisma.$transaction(async (tx) => {
+    const deleted = await tx.product.update({
+      where: { id: productId },
+      data: {
+        deletedAt: new Date(),
+        deletedBy: user.id,
+      },
+    });
 
-  await auditService.logProductDelete(user.id, product.id, product.name);
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "PRODUCT_DELETE",
+      entityType: "PRODUCT",
+      entityId: deleted.id,
+      action: `Deleted product "${deleted.name}"`,
+      details: { productName: deleted.name },
+    });
+
+    return deleted;
+  });
 
   const response = NextResponse.json({
     message: "Product deleted successfully",

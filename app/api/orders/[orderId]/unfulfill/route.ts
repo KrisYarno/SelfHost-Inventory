@@ -10,7 +10,7 @@ import {
   applyRateLimitHeaders,
   enforceRateLimit,
 } from '@/lib/rateLimit';
-import { auditService } from '@/lib/audit';
+import { recordChange, newBatchId } from '@/lib/change-tracking';
 import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
 import { Prisma, inventory_logs_logType } from '@prisma/client';
@@ -66,6 +66,10 @@ export const POST = apiHandler(async (
   let newOrderStatus: string = '';
   let orderExternalId: string = '';
   let orderIntegrationId: string = '';
+
+  // ONE batchId per request, shared by the change event and echoed into its
+  // details so the audit row and the restoration's ledger rows are joinable.
+  const batchId = newBatchId();
 
   await prisma.$transaction(
     async (tx) => {
@@ -389,6 +393,44 @@ export const POST = apiHandler(async (
       });
 
       newOrderStatus = order.internalStatus;
+
+      // Task 12: capture the ORDER change on THIS tx (after all restorations
+      // and the order update) so an unrecordable unfulfillment never commits
+      // (spec R-D2). entityType=ORDER, entityId=the ExternalOrder cuid,
+      // companyId from the loaded order (company-scoped, asserted). FIX C: the
+      // details items are sanitized (mirrors publicRestored) so the bundle
+      // sentinel productId never lands in the audit trail.
+      if (restored.length > 0) {
+        await recordChange(tx, {
+          actor: { userId: user.id },
+          actionType: 'EXTERNAL_ORDER_UNFULFILLMENT',
+          entityType: 'ORDER',
+          entityId: params.orderId,
+          companyId: orderCompany.companyId,
+          action: `Unfulfilled external order ${params.orderId}`,
+          details: {
+            orderId: params.orderId,
+            items: restored.map((r) => {
+              if (r.productId === BUNDLE_SENTINEL_PRODUCT_ID) {
+                const { productId: _pid, inventoryLogId: _lid, ...rest } = r;
+                void _pid;
+                void _lid;
+                return {
+                  ...rest,
+                  isBundle: true,
+                  componentIds: r.componentIds ?? [],
+                };
+              }
+              return r;
+            }),
+            skipped,
+            notes: body.notes,
+            batchId,
+          },
+          affectedCount: restored.length,
+          batchId,
+        });
+      }
     },
     {
       timeout: 30000, // 30 second timeout matching fulfillment
@@ -411,27 +453,6 @@ export const POST = apiHandler(async (
     }
     return r;
   });
-
-  // Audit log (outside transaction)
-  try {
-    if (restored.length > 0) {
-      await auditService.log({
-        userId: user.id,
-        actionType: 'EXTERNAL_ORDER_UNFULFILLMENT',
-        entityType: 'INVENTORY',
-        action: `Unfulfilled external order ${params.orderId}`,
-        details: {
-          orderId: params.orderId,
-          items: publicRestored,
-          skipped,
-          notes: body.notes,
-        },
-        affectedCount: restored.length,
-      });
-    }
-  } catch (auditError) {
-    console.error('Failed to log audit unfulfillment:', auditError);
-  }
 
   // Push status revert to external platform (best-effort, never fails the unfulfillment)
   if (orderIntegrationId && orderExternalId && restored.length > 0) {

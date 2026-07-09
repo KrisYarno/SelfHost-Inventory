@@ -46,12 +46,13 @@ jest.mock('@/lib/rateLimit', () => ({
   applyRateLimitHeaders: jest.fn((resp: any) => resp),
 }));
 
-jest.mock('@/lib/audit', () => ({
-  auditService: {
-    log: jest.fn(async () => undefined),
-    logProductCreate: jest.fn(async () => undefined),
-    logProductUpdate: jest.fn(async () => undefined),
-  },
+// The route now records through @/lib/change-tracking (recordChange) instead of
+// the legacy auditService. Mock it so the change diff is inspectable and the mock
+// tx (product-only) never needs an auditLog model.
+jest.mock('@/lib/change-tracking', () => ({
+  __esModule: true,
+  recordChange: jest.fn(async () => undefined),
+  newBatchId: jest.fn(() => 'test-batch-id'),
 }));
 
 // Stub the pure lib/products helpers the route calls so the test focuses on the
@@ -75,12 +76,12 @@ jest.mock('@/lib/inventory', () => ({
 import { PUT as updatePUT } from '@/app/api/products/[id]/route';
 import { requireApproved } from '@/lib/api-utils';
 import { validateCSRFToken } from '@/lib/csrf';
-import { auditService } from '@/lib/audit';
+import { recordChange } from '@/lib/change-tracking';
 import prisma from '@/lib/prisma';
 
 const db: any = prisma as any;
 const mockValidateCSRF = validateCSRFToken as jest.Mock;
-const mockLogProductUpdate = auditService.logProductUpdate as jest.Mock;
+const mockRecordChange = recordChange as jest.Mock;
 
 const ADMIN_USER = { id: 1, isAdmin: true, isApproved: true };
 
@@ -154,8 +155,8 @@ describe('PUT /api/products/[id] (size-field pass-through: unit + numericValue)'
     );
 
     expect(resp.status).toBe(200);
-    expect(mockLogProductUpdate).toHaveBeenCalled();
-    const changes = mockLogProductUpdate.mock.calls[0][3];
+    expect(mockRecordChange).toHaveBeenCalled();
+    const changes = mockRecordChange.mock.calls[0][1].changes;
     expect(changes.unit).toEqual({ from: null, to: 'mg' });
     expect(changes.numericValue).toEqual({ from: null, to: 10 });
   });

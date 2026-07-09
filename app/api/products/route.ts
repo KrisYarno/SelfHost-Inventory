@@ -3,7 +3,7 @@ import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { ProductFilters } from "@/types/product";
 import { getProductsWithQuantities, isProductUnique, formatProductName } from "@/lib/products";
-import { auditService } from "@/lib/audit";
+import { recordChange } from "@/lib/change-tracking";
 import { ProductCreateUISchema } from "@/lib/validation/product";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 
@@ -93,24 +93,37 @@ export const POST = apiHandler(async (request: NextRequest) => {
   const costPrice = Number(body.costPrice ?? 0);
   const retailPrice = Number(body.retailPrice ?? 0);
 
-  const product = await prisma.product.create({
-    data: {
-      name,
-      baseName,
-      variant,
-      unit,
-      numericValue,
-      quantity: 0,
-      location: locationId,
-      lowStockThreshold: body.lowStockThreshold ?? 10,
-      costPrice: costPrice >= 0 ? costPrice : 0,
-      retailPrice: retailPrice >= 0 ? retailPrice : 0,
-      approvalStatus: user.isAdmin ? "APPROVED" : "PENDING_REVIEW",
-      createdBy: user.id,
-    },
-  });
+  // Create + record atomically: the audit row is written in the SAME transaction
+  // as the product insert, so an unrecordable create never commits (spec D4).
+  const product = await prisma.$transaction(async (tx) => {
+    const created = await tx.product.create({
+      data: {
+        name,
+        baseName,
+        variant,
+        unit,
+        numericValue,
+        quantity: 0,
+        location: locationId,
+        lowStockThreshold: body.lowStockThreshold ?? 10,
+        costPrice: costPrice >= 0 ? costPrice : 0,
+        retailPrice: retailPrice >= 0 ? retailPrice : 0,
+        approvalStatus: user.isAdmin ? "APPROVED" : "PENDING_REVIEW",
+        createdBy: user.id,
+      },
+    });
 
-  await auditService.logProductCreate(user.id, product.id, product.name);
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "PRODUCT_CREATE",
+      entityType: "PRODUCT",
+      entityId: created.id,
+      action: `Created product "${created.name}"`,
+      details: { productName: created.name },
+    });
+
+    return created;
+  });
 
   const response = NextResponse.json(product, { status: 201 });
   return applyRateLimitHeaders(response, rateLimitHeaders);
