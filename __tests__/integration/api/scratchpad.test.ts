@@ -25,9 +25,20 @@ jest.mock('@/lib/rateLimit', () => ({
   applyRateLimitHeaders: jest.fn((resp: any) => resp),
 }));
 
-// Keep audit logging a no-op (it touches next/headers + prisma.auditLog).
-jest.mock('@/lib/audit', () => ({
-  auditService: { log: jest.fn(async () => undefined) },
+// The routes now wrap their mutation + recordChange in one prisma.$transaction;
+// the mutations are mocked below, so tx only needs to be a stable sentinel the
+// recordChange spy can be asserted against.
+jest.mock('@/lib/prisma', () => ({
+  __esModule: true,
+  default: { $transaction: jest.fn(async (fn: any) => fn({})) },
+}));
+
+// change-tracking recordChange is stubbed (it touches next/headers + tx.auditLog);
+// these route tests focus on the HTTP layer + whether a row was recorded (or not).
+jest.mock('@/lib/change-tracking', () => ({
+  __esModule: true,
+  recordChange: jest.fn(async () => undefined),
+  newBatchId: jest.fn(() => 'test-batch-id'),
 }));
 
 // The mutations + queries are unit-tested separately; mock them here so the
@@ -48,7 +59,7 @@ import { GET as labelsGET } from '@/app/api/scratchpad/labels/route';
 import { requireApproved } from '@/lib/api-utils';
 import { validateCSRFToken } from '@/lib/csrf';
 import { applyRateLimitHeaders } from '@/lib/rateLimit';
-import { auditService } from '@/lib/audit';
+import { recordChange } from '@/lib/change-tracking';
 import {
   createScratchpadRow,
   updateScratchpadRow,
@@ -60,7 +71,7 @@ import { AppError } from '@/lib/error-handling';
 
 const mockValidateCSRF = validateCSRFToken as jest.Mock;
 const mockApplyRateLimitHeaders = applyRateLimitHeaders as jest.Mock;
-const mockAuditLog = auditService.log as jest.Mock;
+const mockRecordChange = recordChange as jest.Mock;
 
 const APPROVED_USER = { id: 7, isAdmin: false, isApproved: true };
 
@@ -97,7 +108,8 @@ describe('POST /api/scratchpad (create)', () => {
     const [input, actor] = (createScratchpadRow as jest.Mock).mock.calls[0];
     expect(input).toMatchObject({ productId: 1, label: 'Awake Price' });
     expect(actor).toEqual({ id: APPROVED_USER.id });
-    expect(mockAuditLog).toHaveBeenCalledWith(
+    expect(mockRecordChange).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ actionType: 'SCRATCHPAD_CREATE', entityType: 'SCRATCHPAD', entityId: 42 }),
     );
   });
@@ -156,7 +168,8 @@ describe('PATCH /api/scratchpad/[id]', () => {
     expect(expectedVersion).toBe(2);
     expect(patch).toEqual({ value: '42' }); // expectedVersion stripped from the patch
     expect(actor).toEqual({ id: APPROVED_USER.id });
-    expect(mockAuditLog).toHaveBeenCalledWith(
+    expect(mockRecordChange).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ actionType: 'SCRATCHPAD_UPDATE', entityType: 'SCRATCHPAD', entityId: 5 }),
     );
   });
@@ -204,7 +217,7 @@ describe('PATCH /api/scratchpad/[id]', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.deleted).toBe(true);
-    expect(mockAuditLog).not.toHaveBeenCalled(); // no row to log against
+    expect(mockRecordChange).not.toHaveBeenCalled(); // no row to log against
   });
 
   it('returns 400 (Zod) on an empty PATCH (no mutable field), without calling the lib', async () => {
@@ -247,7 +260,8 @@ describe('DELETE /api/scratchpad/[id]', () => {
     const [id, expectedVersion] = (deleteScratchpadRow as jest.Mock).mock.calls[0];
     expect(id).toBe(5);
     expect(expectedVersion).toBe(1);
-    expect(mockAuditLog).toHaveBeenCalledWith(
+    expect(mockRecordChange).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ actionType: 'SCRATCHPAD_DELETE', entityType: 'SCRATCHPAD', entityId: 5 }),
     );
   });

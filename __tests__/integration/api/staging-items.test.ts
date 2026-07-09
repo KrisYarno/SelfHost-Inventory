@@ -44,9 +44,12 @@ jest.mock('@/lib/rateLimit', () => ({
   applyRateLimitHeaders: jest.fn((resp: any) => resp),
 }));
 
-// Keep audit logging a no-op (it touches next/headers + prisma.auditLog).
-jest.mock('@/lib/audit', () => ({
-  auditService: { log: jest.fn(async () => undefined) },
+// change-tracking recordChange is stubbed (it touches next/headers + tx.auditLog);
+// these route tests focus on the HTTP layer (auth, CSRF, validation, status mapping).
+jest.mock('@/lib/change-tracking', () => ({
+  __esModule: true,
+  recordChange: jest.fn(async () => undefined),
+  newBatchId: jest.fn(() => 'test-batch-id'),
 }));
 
 // The graduation transaction is unit-tested separately; here we mock it so the

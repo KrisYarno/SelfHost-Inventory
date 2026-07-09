@@ -1,6 +1,6 @@
 import prisma from '@/lib/prisma';
 import { applyStockDelta, withDeadlockRetry } from '@/lib/inventory';
-import { inventory_logs_logType } from '@prisma/client';
+import { inventory_logs_logType, Prisma } from '@prisma/client';
 import { AppError } from '@/lib/error-handling';
 import { formatProductName } from '@/lib/products';
 import type { GraduateInput } from '@/lib/validation/staging';
@@ -10,6 +10,21 @@ export type GraduateResult = {
   approvalStatus: 'APPROVED' | 'PENDING_REVIEW';
   locationId: number;
   countedQuantity: number;
+};
+
+/**
+ * Context handed to the change-tracking recorder (change-tracking Task 10). Lets
+ * the CALLER emit its correlated events (STAGING_GRADUATE + PRODUCT_CREATE + any
+ * stock event) from INSIDE this helper's atomic transaction, all under one
+ * batchId — so an unrecordable event aborts the graduation, and the whole fan-out
+ * commits or rolls back together. `created` is true only on the "new product" path.
+ */
+export type GraduateRecordContext = {
+  productId: number;
+  approvalStatus: 'APPROVED' | 'PENDING_REVIEW';
+  locationId: number;
+  countedQuantity: number;
+  created: boolean;
 };
 
 /**
@@ -36,7 +51,8 @@ export type GraduateResult = {
 export async function graduateStagingItem(
   stagingItemId: number,
   body: GraduateInput,
-  actor: { id: number; isAdmin: boolean }
+  actor: { id: number; isAdmin: boolean },
+  onRecord?: (tx: Prisma.TransactionClient, ctx: GraduateRecordContext) => Promise<void>
 ): Promise<GraduateResult> {
   return withDeadlockRetry(() =>
     prisma.$transaction(async (tx) => {
@@ -60,6 +76,7 @@ export async function graduateStagingItem(
       // 2. Resolve the product.
       let productId: number;
       let approvalStatus: 'APPROVED' | 'PENDING_REVIEW';
+      let created = false;
 
       if (body.mode === 'existing') {
         const target = await tx.product.findFirst({
@@ -85,7 +102,7 @@ export async function graduateStagingItem(
         const costPrice = Number(f.costPrice ?? 0);
         const retailPrice = Number(f.retailPrice ?? 0);
 
-        const created = await tx.product.create({
+        const created_ = await tx.product.create({
           data: {
             name,
             baseName,
@@ -101,8 +118,9 @@ export async function graduateStagingItem(
             createdBy: actor.id,
           },
         });
-        productId = created.id;
-        approvalStatus = created.approvalStatus as 'APPROVED' | 'PENDING_REVIEW';
+        productId = created_.id;
+        approvalStatus = created_.approvalStatus as 'APPROVED' | 'PENDING_REVIEW';
+        created = true;
       }
 
       // 3. Stock-in via the shared core (log + product_locations upsert + loc-1 mirror).
@@ -122,6 +140,20 @@ export async function graduateStagingItem(
           countedQuantity: body.countedQuantity,
         },
       });
+
+      // 5. Change-tracking (Task 10): emit the caller's correlated events from
+      //    INSIDE this same transaction, so the graduation, the product-create,
+      //    and any stock event share one batchId and commit/roll back together.
+      //    A throw here (unrecordable change) aborts the entire graduation.
+      if (onRecord) {
+        await onRecord(tx, {
+          productId,
+          approvalStatus,
+          locationId: body.locationId,
+          countedQuantity: body.countedQuantity,
+          created,
+        });
+      }
 
       return {
         productId,

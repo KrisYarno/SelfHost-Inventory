@@ -1,9 +1,19 @@
 import prisma from "@/lib/prisma";
 import { OptimisticLockError } from "@/lib/inventory";
 import { AppError } from "@/lib/error-handling";
+import type { Prisma } from "@prisma/client";
 
-async function nextSortOrder(productId: number): Promise<number> {
-  const agg = await prisma.productScratchpadPrice.aggregate({
+/**
+ * Every mutation accepts an optional `tx` (change-tracking Task 10). When the
+ * caller runs the version-CAS write and its recordChange in ONE transaction, it
+ * threads that `tx` through so the guarded write and the audit event share the
+ * same atomic scope — a stale-version 409 (count === 0) records nothing. When
+ * omitted, `db` falls back to the singleton client (behavior unchanged).
+ */
+type ScratchpadDb = typeof prisma | Prisma.TransactionClient;
+
+async function nextSortOrder(productId: number, db: ScratchpadDb): Promise<number> {
+  const agg = await db.productScratchpadPrice.aggregate({
     where: { productId },
     _max: { sortOrder: true },
   });
@@ -13,14 +23,16 @@ async function nextSortOrder(productId: number): Promise<number> {
 export async function createScratchpadRow(
   input: { productId: number; label: string; value?: string | null; note?: string | null; sortOrder?: number },
   actor: { id: number },
+  tx?: Prisma.TransactionClient,
 ) {
-  const product = await prisma.product.findFirst({
+  const db: ScratchpadDb = tx ?? prisma;
+  const product = await db.product.findFirst({
     where: { id: input.productId, deletedAt: null },
     select: { id: true },
   });
   if (!product) throw new AppError("Product not found", "BAD_REQUEST", 400);
-  const sortOrder = input.sortOrder ?? (await nextSortOrder(input.productId));
-  return prisma.productScratchpadPrice.create({
+  const sortOrder = input.sortOrder ?? (await nextSortOrder(input.productId, db));
+  return db.productScratchpadPrice.create({
     data: {
       productId: input.productId,
       label: input.label,
@@ -40,28 +52,31 @@ export async function updateScratchpadRow(
   expectedVersion: number,
   patch: { label?: string; value?: string | null; note?: string | null; sortOrder?: number },
   actor: { id: number },
+  tx?: Prisma.TransactionClient,
 ) {
-  const res = await prisma.productScratchpadPrice.updateMany({
+  const db: ScratchpadDb = tx ?? prisma;
+  const res = await db.productScratchpadPrice.updateMany({
     where: { id, version: expectedVersion },
     data: { ...patch, version: { increment: 1 }, updatedBy: actor.id },
   });
   if (res.count === 0) {
-    const current = await prisma.productScratchpadPrice.findUnique({ where: { id } });
+    const current = await db.productScratchpadPrice.findUnique({ where: { id } });
     if (!current) throw new AppError("Scratchpad row not found", "NOT_FOUND", 404);
     throw new OptimisticLockError("Row was modified by someone else", current.version, expectedVersion);
   }
   // Racey edge: a concurrent delete between the guarded update and this read returns null.
   // Return null; the route maps null -> 200 { deleted: true } (client refetches), never a 500.
-  return prisma.productScratchpadPrice.findUnique({
+  return db.productScratchpadPrice.findUnique({
     where: { id },
     include: { updatedByUser: { select: { id: true, username: true } } },
   });
 }
 
-export async function deleteScratchpadRow(id: number, expectedVersion: number) {
-  const res = await prisma.productScratchpadPrice.deleteMany({ where: { id, version: expectedVersion } });
+export async function deleteScratchpadRow(id: number, expectedVersion: number, tx?: Prisma.TransactionClient) {
+  const db: ScratchpadDb = tx ?? prisma;
+  const res = await db.productScratchpadPrice.deleteMany({ where: { id, version: expectedVersion } });
   if (res.count === 0) {
-    const current = await prisma.productScratchpadPrice.findUnique({ where: { id } });
+    const current = await db.productScratchpadPrice.findUnique({ where: { id } });
     if (!current) throw new AppError("Scratchpad row not found", "NOT_FOUND", 404);
     throw new OptimisticLockError("Row was modified by someone else", current.version, expectedVersion);
   }

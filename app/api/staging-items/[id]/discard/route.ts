@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, apiHandler, requireCSRF } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import { StagingItemStatus } from '@prisma/client';
-import { auditService } from '@/lib/audit';
+import { recordChange } from '@/lib/change-tracking';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
 
 export const dynamic = 'force-dynamic';
@@ -30,25 +30,35 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     return NextResponse.json({ error: 'Invalid staging item ID' }, { status: 400 });
   }
 
-  const result = await prisma.stagingItem.updateMany({
-    where: { id, status: StagingItemStatus.RECEIVED },
-    data: { status: StagingItemStatus.DISCARDED },
+  // The atomic guard (updateMany WHERE status=RECEIVED) and the STAGING_DISCARD
+  // event share one transaction, and recordChange runs ONLY after the count
+  // check succeeds — so a 409 (count 0: already graduated/discarded/missing)
+  // records nothing.
+  const discarded = await prisma.$transaction(async (tx) => {
+    const result = await tx.stagingItem.updateMany({
+      where: { id, status: StagingItemStatus.RECEIVED },
+      data: { status: StagingItemStatus.DISCARDED },
+    });
+
+    if (result.count === 0) return false;
+
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: 'STAGING_DISCARD',
+      entityType: 'STAGING',
+      entityId: id,
+      action: `Discarded staging item ${id}`,
+    });
+
+    return true;
   });
 
-  if (result.count === 0) {
+  if (!discarded) {
     return NextResponse.json(
       { error: 'Staging item not found or not in a discardable state' },
       { status: 409 }
     );
   }
-
-  await auditService.log({
-    userId: user.id,
-    actionType: 'STAGING_DISCARD',
-    entityType: 'STAGING',
-    entityId: id,
-    action: `Discarded staging item ${id}`,
-  });
 
   const response = NextResponse.json({ id, status: StagingItemStatus.DISCARDED });
   return applyRateLimitHeaders(response, rateLimitHeaders);

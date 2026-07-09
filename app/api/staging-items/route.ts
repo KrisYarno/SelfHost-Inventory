@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, apiHandler, requireCSRF } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import { StagingItemStatus } from '@prisma/client';
-import { auditService } from '@/lib/audit';
+import { recordChange } from '@/lib/change-tracking';
 import { CreateStagingSchema } from '@/lib/validation/staging';
 import { listStagingItems } from '@/lib/staging/queries';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
@@ -38,27 +38,33 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
   const body = CreateStagingSchema.parse(await request.json());
 
-  const item = await prisma.stagingItem.create({
-    data: {
-      description: body.description,
-      expectedQuantity: body.expectedQuantity ?? null,
-      resolvedProductId: body.resolvedProductId ?? null,
-      vendor: body.vendor ?? null,
-      reference: body.reference ?? null,
-      notes: body.notes ?? null,
-      locationId: body.locationId,
-      receivedBy: user.id,
-      status: StagingItemStatus.RECEIVED,
-    },
-  });
+  // Create + record atomically: the STAGING_CREATE event shares the create's
+  // transaction, so an unrecordable change never leaves a committed box behind.
+  const item = await prisma.$transaction(async (tx) => {
+    const created = await tx.stagingItem.create({
+      data: {
+        description: body.description,
+        expectedQuantity: body.expectedQuantity ?? null,
+        resolvedProductId: body.resolvedProductId ?? null,
+        vendor: body.vendor ?? null,
+        reference: body.reference ?? null,
+        notes: body.notes ?? null,
+        locationId: body.locationId,
+        receivedBy: user.id,
+        status: StagingItemStatus.RECEIVED,
+      },
+    });
 
-  await auditService.log({
-    userId: user.id,
-    actionType: 'STAGING_CREATE',
-    entityType: 'STAGING',
-    entityId: item.id,
-    action: `Logged staging item "${item.description}"`,
-    details: { description: item.description, locationId: item.locationId },
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: 'STAGING_CREATE',
+      entityType: 'STAGING',
+      entityId: created.id,
+      action: `Logged staging item "${created.description}"`,
+      details: { description: created.description, locationId: created.locationId },
+    });
+
+    return created;
   });
 
   const response = NextResponse.json(item, { status: 201 });

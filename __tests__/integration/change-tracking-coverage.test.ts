@@ -205,12 +205,7 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
   //     stock-write transaction; stock-in absorbed here per the Task 7 seam, so
   //     its former phase-B entry is removed too; transfers is GET-only read-switch). ---
   // --- Task 9: products group — MIGRATED (create/update/delete/price-source/approve/decline now recordChange) ---
-  // --- Task 10: staging/scratchpad group (phase-A2 pending) ---
-  { path: "app/api/staging-items/route.ts", reason: "phase-A2 pending (Task 10 staging/scratchpad group)" },
-  { path: "app/api/staging-items/[id]/graduate/route.ts", reason: "phase-A2 pending (Task 10 staging/scratchpad group)" },
-  { path: "app/api/staging-items/[id]/discard/route.ts", reason: "phase-A2 pending (Task 10 staging/scratchpad group)" },
-  { path: "app/api/scratchpad/route.ts", reason: "phase-A2 pending (Task 10 staging/scratchpad group)" },
-  { path: "app/api/scratchpad/[id]/route.ts", reason: "phase-A2 pending (Task 10 staging/scratchpad group)" },
+  // --- Task 10: staging/scratchpad group — MIGRATED (create/discard/graduate + scratchpad create/patch/delete now recordChange; graduation groups STAGING_GRADUATE + PRODUCT_CREATE under one batchId) ---
   // --- Task 11: users group — MIGRATED (all 6 admin/users routes now recordChange) ---
   // --- Task 12: orders group — MIGRATED (fulfill/unfulfill now recordChange) ---
   // --- Phase B: coverage closure (not in any A2 task group) ---
