@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, XCircle, ClipboardCheck, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import type { FetchError } from "@/hooks/use-integrations";
 
 interface PendingProduct {
   id: number;
@@ -33,41 +35,49 @@ interface PendingProduct {
 
 export default function ProductReviewPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { token: csrfToken } = useCSRF();
 
-  const [products, setProducts] = useState<PendingProduct[]>([]);
-  const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [pendingId, setPendingId] = useState<number | null>(null);
   const [bulkLoading, setBulkLoading] = useState(false);
 
-  const fetchProducts = useCallback(async () => {
-    try {
-      setLoading(true);
+  const productsQuery = useQuery<PendingProduct[], FetchError>({
+    queryKey: ["pending-products"],
+    queryFn: async () => {
       const response = await fetch(
         "/api/admin/products?approvalStatus=PENDING_REVIEW"
       );
       if (!response.ok) {
-        if (response.status === 401) {
-          router.push("/auth/signin");
-          return;
-        }
-        throw new Error("Failed to fetch products");
+        const err = new Error("Failed to fetch products") as FetchError;
+        err.status = response.status;
+        throw err;
       }
       const data = await response.json();
-      setProducts(data.products ?? []);
-      setSelected(new Set());
-    } catch (error) {
-      console.error("Error fetching pending products:", error);
-      toast.error("Failed to load products");
-    } finally {
-      setLoading(false);
-    }
-  }, [router]);
+      return (data.products ?? []) as PendingProduct[];
+    },
+  });
 
+  const products = productsQuery.data ?? [];
+  const loading = productsQuery.isFetching;
+
+  // Refetch the pending list and clear selection (mirrors the original fetchProducts).
+  const refresh = () => {
+    setSelected(new Set());
+    queryClient.invalidateQueries({ queryKey: ["pending-products"] });
+  };
+
+  // Redirect on auth failure; toast other load errors (mirrors the original fetchProducts catch).
   useEffect(() => {
-    fetchProducts();
-  }, [fetchProducts]);
+    const err = productsQuery.error;
+    if (!err) return;
+    if (err.status === 401) {
+      router.push("/auth/signin");
+    } else {
+      console.error("Error fetching pending products:", err);
+      toast.error("Failed to load products");
+    }
+  }, [productsQuery.error, router]);
 
   const approveOne = async (id: number): Promise<boolean> => {
     const response = await fetch(`/api/admin/products/${id}/approve`, {
@@ -91,7 +101,7 @@ export default function ProductReviewPage() {
       const ok = await approveOne(id);
       if (!ok) throw new Error("Failed to approve product");
       toast.success("Product approved");
-      await fetchProducts();
+      refresh();
     } catch (error) {
       console.error("Error approving product:", error);
       toast.error("Failed to approve product");
@@ -113,7 +123,7 @@ export default function ProductReviewPage() {
       const ok = await declineOne(id);
       if (!ok) throw new Error("Failed to decline product");
       toast.success("Product declined");
-      await fetchProducts();
+      refresh();
     } catch (error) {
       console.error("Error declining product:", error);
       toast.error("Failed to decline product");
@@ -133,7 +143,7 @@ export default function ProductReviewPage() {
       const results = await Promise.all(ids.map((id) => approveOne(id)));
       const ok = results.filter(Boolean).length;
       toast.success(`Approved ${ok} of ${ids.length} products`);
-      await fetchProducts();
+      refresh();
     } catch (error) {
       console.error("Error bulk approving products:", error);
       toast.error("Failed to approve products");
@@ -160,7 +170,7 @@ export default function ProductReviewPage() {
       const results = await Promise.all(ids.map((id) => declineOne(id)));
       const ok = results.filter(Boolean).length;
       toast.success(`Declined ${ok} of ${ids.length} products`);
-      await fetchProducts();
+      refresh();
     } catch (error) {
       console.error("Error bulk declining products:", error);
       toast.error("Failed to decline products");

@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
+import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -112,10 +113,19 @@ function ChangeLogTab({ active }: { active: boolean }) {
   const [typeFilter, setTypeFilter] = useState("all");
   const [dateFrom, setDateFrom] = useState<Date | undefined>(undefined);
   const [dateTo, setDateTo] = useState<Date | undefined>(undefined);
-  const [filters, setFilters] = useState<{
+
+  const { data: filters } = useQuery<{
     users: Array<{ id: number; email: string }>;
     locations?: Array<{ id: number; name: string }>;
-  } | null>(null);
+  }>({
+    queryKey: ["admin-logs-filters"],
+    queryFn: async () => {
+      const response = await fetch("/api/admin/logs/filters");
+      if (!response.ok) throw new Error("Failed to fetch filters");
+      return response.json();
+    },
+    enabled: active,
+  });
 
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const debouncedSearch = useDebounce(searchTerm, 300);
@@ -160,17 +170,6 @@ function ChangeLogTab({ active }: { active: boolean }) {
     buildQuery,
   });
 
-  const fetchFilters = useCallback(async () => {
-    try {
-      const response = await fetch("/api/admin/logs/filters");
-      if (!response.ok) throw new Error("Failed to fetch filters");
-      const result = await response.json();
-      setFilters(result);
-    } catch (error) {
-      console.error("Error fetching filters:", error);
-    }
-  }, []);
-
   useEffect(() => {
     if (!isLoading && isInitialLoading) {
       setIsInitialLoading(false);
@@ -182,12 +181,6 @@ function ChangeLogTab({ active }: { active: boolean }) {
       toast.error(error);
     }
   }, [error]);
-
-  useEffect(() => {
-    if (active) {
-      fetchFilters();
-    }
-  }, [fetchFilters, active]);
 
   const handleRefresh = async () => {
     await refresh();
@@ -832,31 +825,28 @@ interface TransferLogRow {
 }
 
 function TransferLogTab({ active }: { active: boolean }) {
-  const [logs, setLogs] = useState<TransferLogRow[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const loadTransfers = useCallback(async () => {
-    if (!active) return;
-    try {
-      setIsLoading(true);
-      setError(null);
+  const {
+    data: logs = [],
+    isFetching: isLoading,
+    error,
+    refetch,
+  } = useQuery<TransferLogRow[]>({
+    queryKey: ["inventory-transfers", { pageSize: 50 }],
+    queryFn: async () => {
       const res = await fetch("/api/inventory/transfers?pageSize=50");
       if (!res.ok) throw new Error("Failed to load transfer history");
       const data = await res.json();
-      setLogs(data.transfers ?? []);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to load transfer history";
-      setError(message);
-      toast.error(message);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [active]);
+      return (data.transfers ?? []) as TransferLogRow[];
+    },
+    enabled: active,
+  });
+
+  const errorMessage =
+    error instanceof Error ? error.message : error ? "Failed to load transfer history" : null;
 
   useEffect(() => {
-    loadTransfers();
-  }, [loadTransfers]);
+    if (errorMessage) toast.error(errorMessage);
+  }, [errorMessage]);
 
   return (
     <div className="space-y-4">
@@ -867,7 +857,7 @@ function TransferLogTab({ active }: { active: boolean }) {
             From/to location moves, separate from other adjustments.
           </p>
         </div>
-        <Button onClick={loadTransfers} variant="outline" size="sm" disabled={isLoading}>
+        <Button onClick={() => refetch()} variant="outline" size="sm" disabled={isLoading}>
           {isLoading ? (
             <>
               <span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -899,7 +889,7 @@ function TransferLogTab({ active }: { active: boolean }) {
             <TransferLogTable logs={logs} />
           )}
 
-          {error && <p className="text-sm text-destructive mt-3">{error}</p>}
+          {errorMessage && <p className="text-sm text-destructive mt-3">{errorMessage}</p>}
         </CardContent>
       </Card>
     </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,55 +34,41 @@ import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { Plug, Plus, Pencil, Trash2, Copy, Link2, Power, PowerOff, RefreshCw, Loader2, ChevronDown, ChevronRight, AlertTriangle, Eye, EyeOff } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
-
-interface Company {
-  id: string;
-  name: string;
-  slug: string;
-}
-
-interface Integration {
-  id: string;
-  companyId: string;
-  platform: "SHOPIFY" | "WOOCOMMERCE";
-  name: string;
-  storeUrl: string;
-  isActive: boolean;
-  lastSyncAt: string | null;
-  createdAt: string;
-  stockSyncEnabled: boolean;
-  fulfillmentPushEnabled: boolean;
-  lastStockSyncAt: string | null;
-  lastStockSyncError: string | null;
-  lastWebhookReceivedAt: string | null;
-  lastWebhookError: string | null;
-  webhookFailureCount: number;
-  company: {
-    name: string;
-  };
-}
-
-interface FormData {
-  companyId: string;
-  platform: "SHOPIFY" | "WOOCOMMERCE";
-  name: string;
-  storeUrl: string;
-  apiKey: string;
-  apiSecret: string;
-  webhookSecret: string;
-}
+import {
+  useIntegrations,
+  useCompanies,
+  useCreateIntegration,
+  useUpdateIntegration,
+  useToggleIntegrationField,
+  useDeleteIntegration,
+  useSyncIntegration,
+  useStockSyncIntegration,
+  usePriceSyncIntegration,
+  type Integration,
+  type IntegrationFormData,
+} from "@/hooks/use-integrations";
 
 export default function AdminIntegrationsPage() {
   const router = useRouter();
-  const { token: csrfToken } = useCSRF();
-  const [integrations, setIntegrations] = useState<Integration[]>([]);
-  const [companies, setCompanies] = useState<Company[]>([]);
-  const [loading, setLoading] = useState(true);
+
+  const integrationsQuery = useIntegrations();
+  const companiesQuery = useCompanies();
+  const integrations = integrationsQuery.data ?? [];
+  const companies = companiesQuery.data ?? [];
+  const loading = integrationsQuery.isLoading || companiesQuery.isLoading;
+
+  const createIntegration = useCreateIntegration();
+  const updateIntegration = useUpdateIntegration();
+  const toggleFieldMutation = useToggleIntegrationField();
+  const deleteIntegration = useDeleteIntegration();
+  const syncIntegration = useSyncIntegration();
+  const stockSyncIntegration = useStockSyncIntegration();
+  const priceSyncIntegration = usePriceSyncIntegration();
+
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [editingIntegration, setEditingIntegration] = useState<Integration | null>(null);
-  const [formData, setFormData] = useState<FormData>({
+  const [formData, setFormData] = useState<IntegrationFormData>({
     companyId: "",
     platform: "SHOPIFY",
     name: "",
@@ -103,61 +89,23 @@ export default function AdminIntegrationsPage() {
   const [priceSyncing, setPriceSyncing] = useState<Set<string>>(new Set());
   const [togglingField, setTogglingField] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
-    try {
-      setLoading(true);
-      const [integrationsRes, companiesRes] = await Promise.all([
-        fetch("/api/admin/integrations"),
-        fetch("/api/admin/companies"),
-      ]);
-
-      if (!integrationsRes.ok || !companiesRes.ok) {
-        if (integrationsRes.status === 401 || companiesRes.status === 401) {
-          router.push("/auth/signin");
-          return;
-        }
-        throw new Error("Failed to fetch data");
-      }
-
-      const [integrationsData, companiesData] = await Promise.all([
-        integrationsRes.json(),
-        companiesRes.json(),
-      ]);
-
-      setIntegrations(integrationsData.integrations || []);
-      setCompanies(companiesData.companies || []);
-    } catch (error) {
-      console.error("Error fetching data:", error);
-      toast.error("Failed to load data");
-    } finally {
-      setLoading(false);
-    }
-  }, [router]);
-
+  // Redirect on auth failure; toast other load errors (mirrors the original fetchData catch).
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    const err = integrationsQuery.error || companiesQuery.error;
+    if (!err) return;
+    if (err.status === 401) {
+      router.push("/auth/signin");
+    } else {
+      toast.error("Failed to load data");
+    }
+  }, [integrationsQuery.error, companiesQuery.error, router]);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
 
     try {
-      const response = await fetch("/api/admin/integrations", {
-        method: "POST",
-        headers: withCSRFHeaders(
-          { "Content-Type": "application/json" },
-          csrfToken
-        ),
-        body: JSON.stringify(formData),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to create integration");
-      }
-
-      const result = await response.json();
+      const result = await createIntegration.mutateAsync(formData);
 
       // Show webhook URL
       const baseUrl = window.location.origin;
@@ -165,7 +113,6 @@ export default function AdminIntegrationsPage() {
       setWebhookUrl(generatedWebhookUrl);
 
       toast.success("Integration created successfully");
-      await fetchData();
     } catch (error) {
       console.error("Error creating integration:", error);
       toast.error(error instanceof Error ? error.message : "Failed to create integration");
@@ -181,25 +128,12 @@ export default function AdminIntegrationsPage() {
     setSubmitting(true);
 
     try {
-      const response = await fetch(`/api/admin/integrations/${editingIntegration.id}`, {
-        method: "PUT",
-        headers: withCSRFHeaders(
-          { "Content-Type": "application/json" },
-          csrfToken
-        ),
-        body: JSON.stringify(formData),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to update integration");
-      }
+      await updateIntegration.mutateAsync({ id: editingIntegration.id, body: formData });
 
       toast.success("Integration updated successfully");
       setIsEditDialogOpen(false);
       setEditingIntegration(null);
       resetForm();
-      await fetchData();
     } catch (error) {
       console.error("Error updating integration:", error);
       toast.error(error instanceof Error ? error.message : "Failed to update integration");
@@ -218,18 +152,9 @@ export default function AdminIntegrationsPage() {
     }
 
     try {
-      const response = await fetch(`/api/admin/integrations/${integration.id}`, {
-        method: "DELETE",
-        headers: withCSRFHeaders({}, csrfToken),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to delete integration");
-      }
+      await deleteIntegration.mutateAsync(integration.id);
 
       toast.success("Integration deleted successfully");
-      await fetchData();
     } catch (error) {
       console.error("Error deleting integration:", error);
       toast.error(error instanceof Error ? error.message : "Failed to delete integration");
@@ -238,26 +163,14 @@ export default function AdminIntegrationsPage() {
 
   const handleToggleActive = async (integration: Integration) => {
     try {
-      const response = await fetch(`/api/admin/integrations/${integration.id}`, {
-        method: "PUT",
-        headers: withCSRFHeaders(
-          { "Content-Type": "application/json" },
-          csrfToken
-        ),
-        body: JSON.stringify({
-          isActive: !integration.isActive,
-        }),
+      await updateIntegration.mutateAsync({
+        id: integration.id,
+        body: { isActive: !integration.isActive },
       });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || "Failed to update integration");
-      }
 
       toast.success(
         `Integration ${!integration.isActive ? "activated" : "deactivated"}`
       );
-      await fetchData();
     } catch (error) {
       console.error("Error toggling integration:", error);
       toast.error(error instanceof Error ? error.message : "Failed to update integration");
@@ -299,26 +212,11 @@ export default function AdminIntegrationsPage() {
 
   const handleSync = async (integration: Integration, options?: { lookbackDays?: number; maxOrders?: number }) => {
     try {
-      const response = await fetch(`/api/admin/integrations/${integration.id}/sync`, {
-        method: "POST",
-        headers: withCSRFHeaders(
-          {
-            "Content-Type": "application/json",
-          },
-          csrfToken
-        ),
-        body: JSON.stringify(options || {}),
-      });
-
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.error || "Sync failed");
-      }
+      const data = await syncIntegration.mutateAsync({ id: integration.id, options: options || {} });
 
       toast.success(
         `Synced ${integration.name}: ${data.result?.upserted ?? 0} updated, ${data.result?.skipped ?? 0} skipped`
       );
-      await fetchData();
     } catch (error) {
       console.error("Error syncing integration:", error);
       toast.error(error instanceof Error ? error.message : "Sync failed");
@@ -349,23 +247,10 @@ export default function AdminIntegrationsPage() {
     const key = `${integration.id}-${field}`;
     setTogglingField(key);
     try {
-      const response = await fetch(`/api/admin/integrations/${integration.id}`, {
-        method: "PUT",
-        headers: withCSRFHeaders(
-          { "Content-Type": "application/json" },
-          csrfToken
-        ),
-        body: JSON.stringify({ [field]: value }),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || `Failed to update ${field}`);
-      }
+      await toggleFieldMutation.mutateAsync({ id: integration.id, field, value });
 
       const label = field === "stockSyncEnabled" ? "Stock sync" : "Fulfillment push";
       toast.success(`${label} ${value ? "enabled" : "disabled"}`);
-      await fetchData();
     } catch (error) {
       console.error(`Error toggling ${field}:`, error);
       toast.error(error instanceof Error ? error.message : `Failed to update ${field}`);
@@ -377,27 +262,12 @@ export default function AdminIntegrationsPage() {
   const handleStockSyncNow = async (integration: Integration) => {
     setStockSyncing((prev) => new Set(prev).add(integration.id));
     try {
-      const response = await fetch(
-        `/api/admin/integrations/${integration.id}/stock-sync`,
-        {
-          method: "POST",
-          headers: withCSRFHeaders(
-            { "Content-Type": "application/json" },
-            csrfToken
-          ),
-        }
-      );
-
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.error || "Stock sync failed");
-      }
+      const data = await stockSyncIntegration.mutateAsync(integration.id);
 
       const result = data.result || data;
       toast.success(
         `Stock sync complete: ${result.synced ?? 0} synced, ${result.failed ?? 0} failed`
       );
-      await fetchData();
     } catch (error) {
       console.error("Error syncing stock:", error);
       toast.error(error instanceof Error ? error.message : "Stock sync failed");
@@ -413,27 +283,12 @@ export default function AdminIntegrationsPage() {
   const handlePriceSyncNow = async (integration: Integration) => {
     setPriceSyncing((prev) => new Set(prev).add(integration.id));
     try {
-      const response = await fetch(
-        `/api/admin/integrations/${integration.id}/price-sync`,
-        {
-          method: "POST",
-          headers: withCSRFHeaders(
-            { "Content-Type": "application/json" },
-            csrfToken
-          ),
-        }
-      );
-
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.error || "Price sync failed");
-      }
+      const data = await priceSyncIntegration.mutateAsync(integration.id);
 
       const result = data.result || data;
       toast.success(
         `Price sync complete: ${result.synced ?? 0} synced, ${result.skipped ?? 0} skipped, ${(result.failed ?? []).length} failed`
       );
-      await fetchData();
     } catch (error) {
       console.error("Error syncing prices:", error);
       toast.error(error instanceof Error ? error.message : "Price sync failed");

@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link2, Search, Trash2, Plus, Loader2, DollarSign, Check, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,6 +31,7 @@ import { BulkMapChooserDialog } from "@/components/products/mass-map/bulk-map-ch
 import { PlatformBadge } from "@/components/orders/platform-badge";
 import { toast } from "sonner";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { useIntegrations, type FetchError } from "@/hooks/use-integrations";
 import type { PlatformType } from "@/types/external-orders";
 
 interface MappingEntry {
@@ -72,29 +74,17 @@ interface MappingsResponse {
   };
 }
 
-interface Integration {
-  id: string;
-  name: string;
-  platform: string;
-  storeUrl: string;
-}
-
 export default function AdminProductMappingsPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const { token: csrfToken } = useCSRF();
-  const [mappings, setMappings] = useState<MappingEntry[]>([]);
-  const [integrations, setIntegrations] = useState<Integration[]>([]);
-  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [integrationFilter, setIntegrationFilter] = useState<string>("all");
   const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
-  const [total, setTotal] = useState(0);
 
   // Delete confirmation
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deletingMapping, setDeletingMapping] = useState<MappingEntry | null>(null);
-  const [isDeleting, setIsDeleting] = useState(false);
 
   // Bulk map chooser dialog
   const [chooserOpen, setChooserOpen] = useState(false);
@@ -104,55 +94,12 @@ export default function AdminProductMappingsPage() {
   const [addIntegrationId, setAddIntegrationId] = useState<string | null>(null);
   const [settingPriceSource, setSettingPriceSource] = useState<string | null>(null);
 
-  const handleSetPriceSource = async (
-    mapping: MappingEntry,
-    clear: boolean = false
-  ) => {
-    if (!csrfToken) return;
-    setSettingPriceSource(mapping.id);
-    try {
-      const response = await fetch(
-        `/api/products/${mapping.internalProductId}/price-source`,
-        {
-          method: "POST",
-          headers: withCSRFHeaders(
-            { "Content-Type": "application/json" },
-            csrfToken
-          ),
-          body: JSON.stringify({
-            linkId: clear ? null : mapping.id,
-            syncNow: !clear,
-          }),
-        }
-      );
+  const integrationsQuery = useIntegrations();
+  const integrations = integrationsQuery.data ?? [];
 
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to set price source");
-      }
-
-      if (clear) {
-        toast.success(`Cleared price source for ${mapping.internalProduct?.name ?? "product"}`);
-      } else {
-        toast.success(
-          `Price source set for ${mapping.internalProduct?.name ?? "product"}${
-            data.retailPrice != null ? ` → $${Number(data.retailPrice).toFixed(2)}` : ""
-          }`
-        );
-      }
-      await fetchMappings();
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to update price source"
-      );
-    } finally {
-      setSettingPriceSource(null);
-    }
-  };
-
-  const fetchMappings = useCallback(async () => {
-    try {
-      setLoading(true);
+  const mappingsQuery = useQuery<MappingsResponse, FetchError>({
+    queryKey: ["product-mappings", { page, integrationId: integrationFilter, search }],
+    queryFn: async () => {
       const params = new URLSearchParams({
         page: page.toString(),
         pageSize: "50",
@@ -166,76 +113,120 @@ export default function AdminProductMappingsPage() {
 
       const response = await fetch(`/api/admin/product-mappings?${params}`);
       if (!response.ok) {
-        if (response.status === 401 || response.status === 403) {
-          router.push("/auth/signin");
-          return;
-        }
-        throw new Error("Failed to fetch mappings");
+        const err = new Error("Failed to fetch mappings") as FetchError;
+        err.status = response.status;
+        throw err;
       }
+      return response.json() as Promise<MappingsResponse>;
+    },
+  });
 
-      const data: MappingsResponse = await response.json();
-      setMappings(data.mappings);
-      setTotalPages(data.pagination.totalPages);
-      setTotal(data.pagination.total);
-    } catch (error) {
-      console.error("Error fetching mappings:", error);
+  const mappings = mappingsQuery.data?.mappings ?? [];
+  const totalPages = mappingsQuery.data?.pagination.totalPages ?? 1;
+  const total = mappingsQuery.data?.pagination.total ?? 0;
+  const loading = mappingsQuery.isFetching;
+
+  // Redirect on auth failure; toast other load errors (mirrors the original fetchMappings catch).
+  useEffect(() => {
+    const err = mappingsQuery.error;
+    if (!err) return;
+    if (err.status === 401 || err.status === 403) {
+      router.push("/auth/signin");
+    } else {
+      console.error("Error fetching mappings:", err);
       toast.error("Failed to load product mappings");
-    } finally {
-      setLoading(false);
     }
-  }, [page, integrationFilter, search, router]);
+  }, [mappingsQuery.error, router]);
 
-  const fetchIntegrations = useCallback(async () => {
+  const priceSourceMutation = useMutation({
+    mutationFn: async ({
+      productId,
+      linkId,
+      syncNow,
+    }: {
+      productId: number | null;
+      linkId: string | null;
+      syncNow: boolean;
+    }) => {
+      const response = await fetch(`/api/products/${productId}/price-source`, {
+        method: "POST",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+        body: JSON.stringify({ linkId, syncNow }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to set price source");
+      }
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["product-mappings"] });
+    },
+  });
+
+  const handleSetPriceSource = async (
+    mapping: MappingEntry,
+    clear: boolean = false
+  ) => {
+    if (!csrfToken) return;
+    setSettingPriceSource(mapping.id);
     try {
-      const response = await fetch("/api/admin/integrations");
-      if (response.ok) {
-        const data = await response.json();
-        const intList = data.integrations || data || [];
-        setIntegrations(intList);
+      const data = await priceSourceMutation.mutateAsync({
+        productId: mapping.internalProductId,
+        linkId: clear ? null : mapping.id,
+        syncNow: !clear,
+      });
+
+      if (clear) {
+        toast.success(`Cleared price source for ${mapping.internalProduct?.name ?? "product"}`);
+      } else {
+        toast.success(
+          `Price source set for ${mapping.internalProduct?.name ?? "product"}${
+            data.retailPrice != null ? ` → $${Number(data.retailPrice).toFixed(2)}` : ""
+          }`
+        );
       }
     } catch (error) {
-      console.error("Error fetching integrations:", error);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchMappings();
-  }, [fetchMappings]);
-
-  useEffect(() => {
-    fetchIntegrations();
-  }, [fetchIntegrations]);
-
-  const handleDelete = async () => {
-    if (!deletingMapping || !csrfToken) return;
-
-    setIsDeleting(true);
-    try {
-      const params = new URLSearchParams({ linkId: deletingMapping.id });
-      const response = await fetch(
-        `/api/admin/product-mappings?${params}`,
-        {
-          method: "DELETE",
-          headers: withCSRFHeaders({}, csrfToken),
-        }
+      toast.error(
+        error instanceof Error ? error.message : "Failed to update price source"
       );
+    } finally {
+      setSettingPriceSource(null);
+    }
+  };
 
+  const deleteMutation = useMutation({
+    mutationFn: async (linkId: string) => {
+      const params = new URLSearchParams({ linkId });
+      const response = await fetch(`/api/admin/product-mappings?${params}`, {
+        method: "DELETE",
+        headers: withCSRFHeaders({}, csrfToken),
+      });
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.error || "Failed to delete mapping");
       }
+      return response.json().catch(() => ({}));
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["product-mappings"] });
+    },
+  });
+
+  const handleDelete = async () => {
+    if (!deletingMapping || !csrfToken) return;
+
+    try {
+      await deleteMutation.mutateAsync(deletingMapping.id);
 
       toast.success("Product mapping deleted");
       setDeleteDialogOpen(false);
       setDeletingMapping(null);
-      fetchMappings();
     } catch (error) {
       console.error("Error deleting mapping:", error);
       toast.error(
         error instanceof Error ? error.message : "Failed to delete mapping"
       );
-    } finally {
-      setIsDeleting(false);
     }
   };
 
@@ -598,16 +589,16 @@ export default function AdminProductMappingsPage() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
                 e.preventDefault();
                 handleDelete();
               }}
-              disabled={isDeleting}
+              disabled={deleteMutation.isPending}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {isDeleting ? (
+              {deleteMutation.isPending ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                   Deleting...
@@ -627,7 +618,7 @@ export default function AdminProductMappingsPage() {
           onOpenChange={setAddDialogOpen}
           integrationId={addIntegrationId}
           onMapped={() => {
-            fetchMappings();
+            queryClient.invalidateQueries({ queryKey: ["product-mappings"] });
           }}
         />
       )}
