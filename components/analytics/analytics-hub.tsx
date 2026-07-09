@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import { CompanyScopeSelect } from "@/components/analytics/company-scope-select";
 import { useAnalyticsProducts } from "@/hooks/use-analytics-products";
+import { useAnalyticsRebuildState } from "@/hooks/use-analytics";
 import type { HubProductRow, HubSort, HubDir, HubFilter, StockTrend } from "@/lib/analytics/hub";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -154,21 +155,7 @@ export function AnalyticsHub() {
   const [to, setTo] = useState(initial.to);
 
   // The single GLOBAL unattributed-orders note (last rebuild). Surfaced once, not per row.
-  const [unattributed, setUnattributed] = useState(0);
-  useEffect(() => {
-    let active = true;
-    fetch("/api/analytics/rebuild-state")
-      .then((r) => (r.ok ? r.json() : { unattributed: 0 }))
-      .then((d) => {
-        if (active) setUnattributed(d?.unattributed ?? 0);
-      })
-      .catch(() => {
-        /* note is best-effort; never block the hub on it */
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
+  const unattributed = useAnalyticsRebuildState().data?.unattributed ?? 0;
 
   const { data, isLoading, isError, isFetching, refetch } = useAnalyticsProducts({
     search,

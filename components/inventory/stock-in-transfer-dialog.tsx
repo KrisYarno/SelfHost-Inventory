@@ -3,7 +3,9 @@
 import * as React from "react";
 import { toast } from "sonner";
 import { Package, MapPin, ArrowDown, Loader2 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import {
   Dialog,
   DialogContent,
@@ -52,6 +54,7 @@ export function StockInTransferDialog({
   onSuccess,
 }: StockInTransferDialogProps) {
   const { token: csrfToken } = useCSRF();
+  const queryClient = useQueryClient();
 
   const [locations, setLocations] = React.useState<LocationTransferState[]>([]);
   const [isLoading, setIsLoading] = React.useState(false);
@@ -160,6 +163,9 @@ export function StockInTransferDialog({
         toast.success(
           `Transferred ${data.totalTransferred} units of ${product.productName} from ${locationsWithTransfer.length} location${locationsWithTransfer.length > 1 ? "s" : ""}`
         );
+        // Cross-page coherence (commit 9ecac19): keep /inventory, /journal, and dashboard
+        // query keys in sync with the batch transfer, not just the stocker's local refetch.
+        invalidateInventoryCaches(queryClient, product.productId);
         onOpenChange(false);
         onSuccess?.();
       } else if (response.status === 207) {
@@ -169,6 +175,8 @@ export function StockInTransferDialog({
         toast.warning(
           `Partially completed: ${succeeded.length} transfer${succeeded.length !== 1 ? "s" : ""} succeeded (${data.totalTransferred} units), ${failed.length} failed`
         );
+        // Partial success still moved stock; invalidate the same cross-page keys.
+        invalidateInventoryCaches(queryClient, product.productId);
         onSuccess?.(); // Still refresh data
         onOpenChange(false);
       } else {

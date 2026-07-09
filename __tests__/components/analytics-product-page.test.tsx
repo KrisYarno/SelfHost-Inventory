@@ -1,6 +1,18 @@
 /** @jest-environment jsdom */
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import ProductAnalyticsPage from "@/app/(app)/analytics/product/[id]/page";
+
+// The page's two reads now run through one useQuery, so renders need a client. A fresh
+// client per render keeps each test's cache isolated.
+function renderPage() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <ProductAnalyticsPage />
+    </QueryClientProvider>
+  );
+}
 
 // The page reads the product id from the route via useParams().
 jest.mock("next/navigation", () => ({
@@ -94,7 +106,7 @@ it("renders the stock chart, the company scope selector, and date-range inputs",
     },
   });
 
-  render(<ProductAnalyticsPage />);
+  renderPage();
 
   // The stock series is rendered as a recharts line chart (via the wrapper), not a table.
   await waitFor(() => expect(screen.getByTestId("line-chart")).toBeInTheDocument());
@@ -131,7 +143,7 @@ it("renders a sales chart and the verbatim bundle-revenue note when sales exist"
     },
   });
 
-  render(<ProductAnalyticsPage />);
+  renderPage();
 
   await waitFor(() => expect(screen.getByTestId("bar-chart")).toBeInTheDocument());
   // The bundle-revenue note must stay visible so revenue isn't misread.
@@ -159,7 +171,7 @@ it("does NOT render a 'Fulfilled' column/metric (structurally 0), and notes its 
     },
   });
 
-  render(<ProductAnalyticsPage />);
+  renderPage();
 
   await waitFor(() => expect(screen.getByTestId("line-chart")).toBeInTheDocument());
   // The Fulfilled column/metric is hidden entirely; only the omission note may mention it.
@@ -182,7 +194,7 @@ it("renders the stock-trend sparkline when the stock series has >= 2 days", asyn
     },
   });
 
-  render(<ProductAnalyticsPage />);
+  renderPage();
 
   await waitFor(() => expect(screen.getByTestId("sparkline")).toBeInTheDocument());
 });
@@ -202,7 +214,7 @@ it("exports the stock chart as a PNG via exportChartAsImage when data is present
     },
   });
 
-  render(<ProductAnalyticsPage />);
+  renderPage();
 
   await waitFor(() => expect(screen.getByTestId("line-chart")).toBeInTheDocument());
 
@@ -239,7 +251,7 @@ it("exports the stock + sales series as a CSV via exportToCSV when data is prese
     },
   });
 
-  render(<ProductAnalyticsPage />);
+  renderPage();
 
   await waitFor(() => expect(screen.getByTestId("line-chart")).toBeInTheDocument());
 
@@ -265,7 +277,7 @@ it("renders the empty state when both series are empty", async () => {
     },
   });
 
-  render(<ProductAnalyticsPage />);
+  renderPage();
 
   await waitFor(() =>
     expect(screen.getByText(/no analytics yet/i)).toBeInTheDocument(),
@@ -278,7 +290,7 @@ it("renders an error state when the per-product fetch fails", async () => {
     productOk: false,
   });
 
-  render(<ProductAnalyticsPage />);
+  renderPage();
 
   await waitFor(() =>
     expect(screen.getByText(/could not load analytics/i)).toBeInTheDocument(),

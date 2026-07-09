@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSession } from "next-auth/react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -17,23 +17,32 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Switch } from "@/components/ui/switch";
 import { AlertCircle, CheckCircle2, Pencil } from "lucide-react";
 import { toast } from "sonner";
-import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
-
-interface Location {
-  id: number;
-  name: string;
-}
+import {
+  useLocations,
+  useUserPreferences,
+  useUpdateDefaultLocation,
+  useUpdateUsername,
+  useUpdatePassword,
+  useCreatePassword,
+  useUpdatePreferences,
+} from "@/hooks/use-account";
 
 export default function AccountPage() {
   const { data: session } = useSession();
-  const { token: csrfToken } = useCSRF();
-  const [locations, setLocations] = useState<Location[]>([]);
+  const locationsQuery = useLocations();
+  const locations = locationsQuery.data ?? [];
+  const preferencesQuery = useUserPreferences();
+  const updateDefaultLocation = useUpdateDefaultLocation();
+  const updateUsername = useUpdateUsername();
+  const updatePassword = useUpdatePassword();
+  const createPassword = useCreatePassword();
+  const updatePreferences = useUpdatePreferences();
+  const isPasswordPending = updatePassword.isPending || createPassword.isPending;
   const [defaultLocation, setDefaultLocation] = useState<string>("");
 
   // Username state
   const [username, setUsername] = useState("");
   const [isEditingUsername, setIsEditingUsername] = useState(false);
-  const [isLoadingUsername, setIsLoadingUsername] = useState(false);
   const [usernameError, setUsernameError] = useState("");
 
   // Password state
@@ -41,8 +50,6 @@ export default function AccountPage() {
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [isLoadingLocation, setIsLoadingLocation] = useState(false);
-  const [isLoadingPassword, setIsLoadingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState("");
   const [passwordSuccess, setPasswordSuccess] = useState(false);
 
@@ -50,38 +57,24 @@ export default function AccountPage() {
   const [emailAlerts, setEmailAlerts] = useState(false);
   const [minLocationEmailAlerts, setMinLocationEmailAlerts] = useState(false);
   const [minCombinedEmailAlerts, setMinCombinedEmailAlerts] = useState(false);
-  const [isSavingNotifications, setIsSavingNotifications] = useState(false);
 
-  // Fetch locations, user preferences, and account details
+  // Seed the editable form state from the preferences query ONCE. A guard (not a plain
+  // data-dep effect) so an invalidation-driven refetch after a save never clobbers other
+  // unsaved edits on the page — mirrors the original single on-mount fetch.
+  const seededRef = useRef(false);
   useEffect(() => {
-    const fetchData = async () => {
-      try {
-        // Fetch locations
-        const locResponse = await fetch("/api/locations");
-        if (locResponse.ok) {
-          const locData = await locResponse.json();
-          setLocations(locData);
-        }
-
-        // Fetch user preferences (includes hasPassword)
-        const userResponse = await fetch("/api/user/preferences");
-        if (userResponse.ok) {
-          const userData = await userResponse.json();
-          setEmailAlerts(userData.emailAlerts || false);
-          setMinLocationEmailAlerts(userData.minLocationEmailAlerts || false);
-          setMinCombinedEmailAlerts(userData.minCombinedEmailAlerts || false);
-          setHasPassword(userData.hasPassword ?? false);
-          if (userData.username) {
-            setUsername(userData.username);
-          }
-        }
-      } catch (error) {
-        console.error("Error fetching data:", error);
-      }
-    };
-
-    fetchData();
-  }, []);
+    if (seededRef.current) return;
+    const p = preferencesQuery.data;
+    if (!p) return;
+    seededRef.current = true;
+    setEmailAlerts(p.emailAlerts || false);
+    setMinLocationEmailAlerts(p.minLocationEmailAlerts || false);
+    setMinCombinedEmailAlerts(p.minCombinedEmailAlerts || false);
+    setHasPassword(p.hasPassword ?? false);
+    if (p.username) {
+      setUsername(p.username);
+    }
+  }, [preferencesQuery.data]);
 
   // Initialize username from session
   useEffect(() => {
@@ -98,23 +91,11 @@ export default function AccountPage() {
   }, [session]);
 
   const handleLocationSave = async () => {
-    setIsLoadingLocation(true);
     try {
-      const response = await fetch("/api/account/default-location", {
-        method: "PATCH",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({ locationId: parseInt(defaultLocation) }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to update default location");
-      }
-
+      await updateDefaultLocation.mutateAsync(parseInt(defaultLocation));
       toast.success("Default location updated successfully");
     } catch {
       toast.error("Failed to update default location");
-    } finally {
-      setIsLoadingLocation(false);
     }
   };
 
@@ -136,27 +117,13 @@ export default function AccountPage() {
       return;
     }
 
-    setIsLoadingUsername(true);
     try {
-      const response = await fetch("/api/account/username", {
-        method: "PATCH",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({ username: username.toLowerCase() }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to update username");
-      }
-
+      const data = await updateUsername.mutateAsync(username.toLowerCase());
       setUsername(data.username);
       setIsEditingUsername(false);
       toast.success("Username updated successfully");
     } catch (error) {
       setUsernameError(error instanceof Error ? error.message : "Failed to update username");
-    } finally {
-      setIsLoadingUsername(false);
     }
   };
 
@@ -181,20 +148,8 @@ export default function AccountPage() {
       return;
     }
 
-    setIsLoadingPassword(true);
     try {
-      const response = await fetch("/api/account/password", {
-        method: "PATCH",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({ oldPassword, newPassword }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to update password");
-      }
-
+      await updatePassword.mutateAsync({ oldPassword, newPassword });
       setPasswordSuccess(true);
       toast.success("Password updated successfully");
 
@@ -204,8 +159,6 @@ export default function AccountPage() {
       setConfirmPassword("");
     } catch (error) {
       setPasswordError(error instanceof Error ? error.message : "Failed to update password");
-    } finally {
-      setIsLoadingPassword(false);
     }
   };
 
@@ -229,20 +182,8 @@ export default function AccountPage() {
       return;
     }
 
-    setIsLoadingPassword(true);
     try {
-      const response = await fetch("/api/account/password", {
-        method: "POST",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({ newPassword, confirmPassword }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to create password");
-      }
-
+      await createPassword.mutateAsync({ newPassword, confirmPassword });
       setPasswordSuccess(true);
       setHasPassword(true);
       toast.success("Password created! You can now sign in with email and password.");
@@ -252,34 +193,19 @@ export default function AccountPage() {
       setConfirmPassword("");
     } catch (error) {
       setPasswordError(error instanceof Error ? error.message : "Failed to create password");
-    } finally {
-      setIsLoadingPassword(false);
     }
   };
 
   const handleNotificationSave = async () => {
-    setIsSavingNotifications(true);
     try {
-      const response = await fetch("/api/user/preferences", {
-        method: "PATCH",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({
-          emailAlerts,
-          minLocationEmailAlerts,
-          minCombinedEmailAlerts,
-        }),
+      await updatePreferences.mutateAsync({
+        emailAlerts,
+        minLocationEmailAlerts,
+        minCombinedEmailAlerts,
       });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || "Failed to update notifications");
-      }
-
       toast.success("Notification preferences updated");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to update notifications");
-    } finally {
-      setIsSavingNotifications(false);
     }
   };
 
@@ -329,9 +255,9 @@ export default function AccountPage() {
                         <Button
                           size="sm"
                           onClick={handleUsernameSave}
-                          disabled={isLoadingUsername}
+                          disabled={updateUsername.isPending}
                         >
-                          {isLoadingUsername ? "Saving..." : "Save"}
+                          {updateUsername.isPending ? "Saving..." : "Save"}
                         </Button>
                         <Button
                           size="sm"
@@ -341,7 +267,7 @@ export default function AccountPage() {
                             setUsernameError("");
                             setUsername(session?.user?.name || "");
                           }}
-                          disabled={isLoadingUsername}
+                          disabled={updateUsername.isPending}
                         >
                           Cancel
                         </Button>
@@ -403,10 +329,10 @@ export default function AccountPage() {
                 </div>
                 <Button
                   onClick={handleLocationSave}
-                  disabled={isLoadingLocation || !defaultLocation}
+                  disabled={updateDefaultLocation.isPending || !defaultLocation}
                   className="w-full sm:w-auto"
                 >
-                  {isLoadingLocation ? "Saving..." : "Save Default Location"}
+                  {updateDefaultLocation.isPending ? "Saving..." : "Save Default Location"}
                 </Button>
               </div>
             </CardContent>
@@ -468,10 +394,10 @@ export default function AccountPage() {
 
               <Button
                 onClick={handleNotificationSave}
-                disabled={isSavingNotifications}
+                disabled={updatePreferences.isPending}
                 className="w-full sm:w-auto"
               >
-                {isSavingNotifications ? "Saving..." : "Save Notification Preferences"}
+                {updatePreferences.isPending ? "Saving..." : "Save Notification Preferences"}
               </Button>
             </CardContent>
           </Card>
@@ -553,10 +479,10 @@ export default function AccountPage() {
 
                 <Button
                   onClick={hasPassword ? handlePasswordUpdate : handlePasswordCreate}
-                  disabled={isLoadingPassword || hasPassword === null}
+                  disabled={isPasswordPending || hasPassword === null}
                   className="w-full sm:w-auto"
                 >
-                  {isLoadingPassword
+                  {isPasswordPending
                     ? hasPassword
                       ? "Updating..."
                       : "Creating..."

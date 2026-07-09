@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useCallback, useMemo, useRef } from "react";
 import { useParams } from "next/navigation";
+import { useProductAnalytics, type StockPoint } from "@/hooks/use-analytics";
 import { TrendingUp, TrendingDown, Minus, Download, ImageIcon } from "lucide-react";
 import {
   Card,
@@ -24,31 +25,8 @@ import {
   generateExportFilename,
 } from "@/lib/export-utils";
 
-// Shape of GET /api/analytics/product/[id]. revenue is serialized to a string
-// per-row by the API (Prisma Decimal -> string); other _sum fields are numbers.
-type StockPoint = { dayKey: string; locationId: number; quantity: number };
-type SalesRow = {
-  productId?: number;
-  _sum?: {
-    orderedQty?: number | null;
-    fulfilledQty?: number | null;
-    revenue?: string | null;
-    orderCount?: number | null;
-  };
-};
-type ProductAnalytics = {
-  productId: number;
-  stock: { series: StockPoint[]; mode: string };
-  sales: { series: SalesRow[]; mode: string; note: string };
-};
-
-// Shape of GET /api/analytics/sales?groupBy=day (one row per dayKey).
-type SalesDayRow = {
-  dayKey: string;
-  _sum?: { orderedQty?: number | null; revenue?: string | null };
-};
-type SalesByDay = { series: SalesDayRow[]; mode: string; note: string };
-
+// Payload types (StockPoint, ProductAnalytics, SalesByDay, ...) live with the query hook
+// in @/hooks/use-analytics; StockPoint is imported above for toStockChartData's signature.
 const numberFormatter = new Intl.NumberFormat("en-US");
 const formatUnits = (value?: number | null) => numberFormatter.format(value ?? 0);
 
@@ -83,61 +61,18 @@ export default function ProductAnalyticsPage() {
   const params = useParams<{ id: string }>();
   const id = params?.id;
 
-  const [data, setData] = useState<ProductAnalytics | null>(null);
-  const [salesByDay, setSalesByDay] = useState<SalesByDay | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   // Sales scope (memberships sum by default) + date-range (last 90 days, UTC YYYY-MM-DD).
   const [companyId, setCompanyId] = useState<string | undefined>(undefined);
   const [from, setFrom] = useState<string>(() => daysAgoDayKey(90));
   const [to, setTo] = useState<string>(() => toDayKey(new Date()));
 
-  const fetchAnalytics = useCallback(async () => {
-    if (!id) return;
-    setLoading(true);
-    setError(null);
-    try {
-      // Thread the selected company + date range into BOTH reads (T5 route accepts them).
-      const qp = new URLSearchParams();
-      if (from) qp.set("from", from);
-      if (to) qp.set("to", to);
-      if (companyId) qp.set("companyId", companyId);
-
-      // Sales as a time series for the chart (per-product payload's sales.series is a single
-      // groupBy=product aggregate, not a day grain). groupBy=day gives one row per dayKey.
-      const salesQp = new URLSearchParams(qp);
-      salesQp.set("productId", id);
-      salesQp.set("groupBy", "day");
-
-      const [productRes, salesRes] = await Promise.all([
-        fetch(`/api/analytics/product/${id}?${qp.toString()}`),
-        // Best-effort: swallow a network rejection so a sales failure never blanks the page.
-        fetch(`/api/analytics/sales?${salesQp.toString()}`).catch(() => null),
-      ]);
-
-      if (!productRes.ok) throw new Error("Failed to load analytics");
-      const productJson = (await productRes.json()) as ProductAnalytics;
-      setData(productJson);
-
-      // The sales-by-day chart is best-effort: a rejected fetch (null) OR a non-2xx must
-      // not blank the page (the stock chart does not depend on it).
-      if (salesRes && salesRes.ok) {
-        setSalesByDay((await salesRes.json()) as SalesByDay);
-      } else {
-        setSalesByDay(null);
-      }
-    } catch (err) {
-      console.error("Error fetching product analytics:", err);
-      setError("Could not load analytics for this product.");
-    } finally {
-      setLoading(false);
-    }
-  }, [id, from, to, companyId]);
-
-  useEffect(() => {
-    fetchAnalytics();
-  }, [fetchAnalytics]);
+  // One query drives both reads (per-product payload + best-effort sales-by-day), keyed by
+  // [id, {from, to, companyId}] so a scope/date change refetches and is cached per scope.
+  const analyticsQuery = useProductAnalytics(id, { from, to, companyId });
+  const data = analyticsQuery.data?.product ?? null;
+  const salesByDay = analyticsQuery.data?.salesByDay ?? null;
+  const loading = analyticsQuery.isLoading;
+  const error = analyticsQuery.isError ? "Could not load analytics for this product." : null;
 
   const stockSeries = useMemo(() => data?.stock.series ?? [], [data]);
   const salesSeries = useMemo(() => data?.sales.series ?? [], [data]);
