@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
-import { UpdateLocationSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
 
@@ -64,39 +63,5 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: { para
   return NextResponse.json({
     message: "Location deleted successfully",
     deletedId: locationId,
-  });
-});
-
-export const PATCH = apiHandler(async (request: NextRequest, { params }: { params: { id: string } }) => {
-  await requireAdmin();
-
-  await requireCSRF(request);
-
-  const locationId = parseInt(params.id);
-  if (isNaN(locationId)) {
-    return NextResponse.json({ error: "Invalid location ID" }, { status: 400 });
-  }
-
-  const body = await request.json();
-  const parsed = UpdateLocationSchema.parse(body);
-
-  // Check if location exists
-  const location = await prisma.location.findUnique({
-    where: { id: locationId },
-  });
-
-  if (!location) {
-    return NextResponse.json({ error: "Location not found" }, { status: 404 });
-  }
-
-  // Update location
-  const updated = await prisma.location.update({
-    where: { id: locationId },
-    data: parsed,
-  });
-
-  return NextResponse.json({
-    location: updated,
-    message: "Location updated successfully",
   });
 });

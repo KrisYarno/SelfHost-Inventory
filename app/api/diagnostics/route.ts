@@ -33,7 +33,6 @@ export async function GET(request: NextRequest) {
     const apiRoutes = {
       "/api/products": "Product management",
       "/api/inventory/current-fast": "Current inventory",
-      "/api/inventory/deduct": "Mass update (deduct)",
       "/api/inventory/adjust": "Inventory adjustment",
       "/api/inventory/stock-in": "Stock in",
       "/api/auth/session": "Authentication session",
