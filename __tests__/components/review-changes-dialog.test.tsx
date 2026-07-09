@@ -2,7 +2,7 @@
  * @jest-environment jsdom
  */
 import React from 'react'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ReviewChangesDialog } from '@/components/journal/review-changes-dialog'
 import type { ProductWithQuantity } from '@/types/product'
@@ -80,17 +80,21 @@ describe('ReviewChangesDialog', () => {
       />
     )
 
+    // '+20'/'-10' also render in the per-product adjustment list below, so scope
+    // the summary assertions to the "Summary statistics" group.
+    const summary = screen.getByRole('group', { name: 'Summary statistics' })
+
     // Check product count
-    expect(screen.getByText('2')).toBeInTheDocument()
-    expect(screen.getByText('Products')).toBeInTheDocument()
+    expect(within(summary).getByText('2')).toBeInTheDocument()
+    expect(within(summary).getByText('Products')).toBeInTheDocument()
 
     // Check additions
-    expect(screen.getByText('+20')).toBeInTheDocument()
-    expect(screen.getByText('Added')).toBeInTheDocument()
+    expect(within(summary).getByText('+20')).toBeInTheDocument()
+    expect(within(summary).getByText('Added')).toBeInTheDocument()
 
     // Check removals
-    expect(screen.getByText('-10')).toBeInTheDocument()
-    expect(screen.getByText('Removed')).toBeInTheDocument()
+    expect(within(summary).getByText('-10')).toBeInTheDocument()
+    expect(within(summary).getByText('Removed')).toBeInTheDocument()
   })
 
   it('displays adjustment list with product details', () => {
@@ -104,17 +108,21 @@ describe('ReviewChangesDialog', () => {
       />
     )
 
+    // '+20'/'-10' also render in the summary above, so scope these to the
+    // adjustment list (role="list").
+    const list = screen.getByRole('list')
+
     // Check Product 1
-    expect(screen.getByText('Product 1')).toBeInTheDocument()
-    expect(screen.getByText('100')).toBeInTheDocument() // Current quantity
-    expect(screen.getByText('120')).toBeInTheDocument() // New quantity
-    expect(screen.getByText('+20')).toBeInTheDocument()
+    expect(within(list).getByText('Product 1')).toBeInTheDocument()
+    expect(within(list).getByText('100')).toBeInTheDocument() // Current quantity
+    expect(within(list).getByText('120')).toBeInTheDocument() // New quantity
+    expect(within(list).getByText('+20')).toBeInTheDocument()
 
     // Check Product 2
-    expect(screen.getByText('Product 2')).toBeInTheDocument()
-    expect(screen.getByText('50')).toBeInTheDocument() // Current quantity
-    expect(screen.getByText('40')).toBeInTheDocument() // New quantity
-    expect(screen.getByText('-10')).toBeInTheDocument()
+    expect(within(list).getByText('Product 2')).toBeInTheDocument()
+    expect(within(list).getByText('50')).toBeInTheDocument() // Current quantity
+    expect(within(list).getByText('40')).toBeInTheDocument() // New quantity
+    expect(within(list).getByText('-10')).toBeInTheDocument()
   })
 
   it('shows negative stock warning', () => {
@@ -125,7 +133,10 @@ describe('ReviewChangesDialog', () => {
       />
     )
 
-    expect(screen.getByRole('alert')).toBeInTheDocument()
+    // The dialog renders two role="alert" nodes: the warning banner and the
+    // per-row "Negative Stock" badge. Assert an alert exists, then pin the banner
+    // via its heading text.
+    expect(screen.getAllByRole('alert').length).toBeGreaterThan(0)
     expect(screen.getByText('Stock Warning')).toBeInTheDocument()
     expect(screen.getByText('1 product(s) would have negative stock after these adjustments.')).toBeInTheDocument()
     
@@ -142,7 +153,7 @@ describe('ReviewChangesDialog', () => {
       />
     )
 
-    const confirmButton = screen.getByRole('button', { name: /confirm adjustments/i })
+    const confirmButton = screen.getByRole('button', { name: /confirm and submit adjustments/i })
     expect(confirmButton).toBeDisabled()
   })
 
@@ -157,7 +168,7 @@ describe('ReviewChangesDialog', () => {
       />
     )
 
-    const confirmButton = screen.getByRole('button', { name: /confirm adjustments/i })
+    const confirmButton = screen.getByRole('button', { name: /confirm and submit adjustments/i })
     expect(confirmButton).toBeEnabled()
   })
 
@@ -207,7 +218,7 @@ describe('ReviewChangesDialog', () => {
       />
     )
 
-    const confirmButton = screen.getByRole('button', { name: /confirm adjustments/i })
+    const confirmButton = screen.getByRole('button', { name: /confirm and submit adjustments/i })
     await user.click(confirmButton)
 
     expect(onConfirm).toHaveBeenCalled()
@@ -228,9 +239,12 @@ describe('ReviewChangesDialog', () => {
   it('handles empty adjustments', () => {
     render(<ReviewChangesDialog {...defaultProps} />)
 
-    expect(screen.getByText('0')).toBeInTheDocument() // Products count
-    expect(screen.getByText('+0')).toBeInTheDocument() // Added
-    expect(screen.getByText('-0')).toBeInTheDocument() // Removed
+    // The Net Change badge also renders '0', so scope the count/added/removed
+    // assertions to the "Summary statistics" group.
+    const summary = screen.getByRole('group', { name: 'Summary statistics' })
+    expect(within(summary).getByText('0')).toBeInTheDocument() // Products count
+    expect(within(summary).getByText('+0')).toBeInTheDocument() // Added
+    expect(within(summary).getByText('-0')).toBeInTheDocument() // Removed
   })
 
   it('uses correct ARIA attributes', () => {
@@ -281,8 +295,18 @@ describe('ReviewChangesDialog', () => {
       />
     )
 
-    // Check that proper icons are shown (by checking aria-labels)
-    expect(screen.getByLabelText('Increase')).toBeInTheDocument()
-    expect(screen.getByLabelText('Decrease')).toBeInTheDocument()
+    // The component maps quantityChange > 0 to an "Increase" icon and everything
+    // else (including a 0 change) to "Decrease", so Product 1's 0-change row also
+    // renders a "Decrease" label. Scope to the specific rows to assert the
+    // meaningful mapping: a positive change shows Increase, a negative shows Decrease.
+    const increaseRow = screen.getByRole('listitem', {
+      name: /Product 2: changing from 50 to 60/i,
+    })
+    expect(within(increaseRow).getByLabelText('Increase')).toBeInTheDocument()
+
+    const decreaseRow = screen.getByRole('listitem', {
+      name: /Product 3: changing from 10 to 5/i,
+    })
+    expect(within(decreaseRow).getByLabelText('Decrease')).toBeInTheDocument()
   })
 })
