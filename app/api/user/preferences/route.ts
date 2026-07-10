@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { recordChange, diff } from "@/lib/change-tracking";
 import { UpdateUserPreferencesSchema } from "@/lib/validation/account";
 
 export const dynamic = "force-dynamic";
@@ -80,15 +81,41 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
     return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
   }
 
-  const updatedUser = await prisma.user.update({
-    where: { id: sessionUser.id },
-    data: updateData,
-    select: {
-      emailAlerts: true,
-      defaultLocationId: true,
-      minLocationEmailAlerts: true,
-      minCombinedEmailAlerts: true,
-    },
+  // Fetch the before-image inside the tx, update, and record only the provided
+  // fields that actually changed (ER-B9 no-op rule).
+  const prefFields = {
+    emailAlerts: true,
+    defaultLocationId: true,
+    minLocationEmailAlerts: true,
+    minCombinedEmailAlerts: true,
+  } as const;
+
+  const updatedUser = await prisma.$transaction(async (tx) => {
+    const before = await tx.user.findUniqueOrThrow({
+      where: { id: sessionUser.id },
+      select: prefFields,
+    });
+    const updated = await tx.user.update({
+      where: { id: sessionUser.id },
+      data: updateData,
+      select: prefFields,
+    });
+    const changes = diff(
+      before as Record<string, unknown>,
+      updateData,
+      Object.keys(updateData),
+    );
+    if (Object.keys(changes).length > 0) {
+      await recordChange(tx, {
+        actor: { userId: sessionUser.id },
+        actionType: "ACCOUNT_PREFERENCES_CHANGE",
+        entityType: "USER",
+        entityId: sessionUser.id,
+        action: "Updated account preferences",
+        changes,
+      });
+    }
+    return updated;
   });
 
   return NextResponse.json(updatedUser);

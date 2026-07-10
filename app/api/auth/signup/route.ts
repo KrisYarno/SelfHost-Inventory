@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { hashPassword } from "@/lib/auth-helpers";
 import { apiHandler } from "@/lib/api-utils";
+import { recordChange } from "@/lib/change-tracking";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import { SignupSchema } from "@/lib/validation/auth";
 
@@ -56,22 +57,35 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // Hash the password
   const hashedPassword = await hashPassword(password);
 
-  // Create the user
-  const user = await prisma.user.create({
-    data: {
-      email: normalizedEmail,
-      username: normalizedUsername,
-      passwordHash: hashedPassword,
-      isAdmin: false,
-      isApproved: false,
-    },
-    select: {
-      id: true,
-      email: true,
-      username: true,
-      isAdmin: true,
-      isApproved: true,
-    },
+  // Create the user + record the SIGNUP in ONE transaction (R-D2). The actor is
+  // the just-created user; the event carries identity only (no diff, no password
+  // material — D6).
+  const user = await prisma.$transaction(async (tx) => {
+    const created = await tx.user.create({
+      data: {
+        email: normalizedEmail,
+        username: normalizedUsername,
+        passwordHash: hashedPassword,
+        isAdmin: false,
+        isApproved: false,
+      },
+      select: {
+        id: true,
+        email: true,
+        username: true,
+        isAdmin: true,
+        isApproved: true,
+      },
+    });
+    await recordChange(tx, {
+      actor: { userId: created.id },
+      actionType: "SIGNUP",
+      entityType: "USER",
+      entityId: created.id,
+      action: `New account created: ${created.email}`,
+      details: { email: created.email, username: created.username },
+    });
+    return created;
   });
 
   const response = NextResponse.json({

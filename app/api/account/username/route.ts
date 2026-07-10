@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { recordChange } from "@/lib/change-tracking";
 import { UpdateUsernameSchema } from "@/lib/validation/account";
 
 export const dynamic = "force-dynamic";
@@ -64,10 +65,21 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
     );
   }
 
-  // Update username
-  await prisma.user.update({
-    where: { id: currentUser.id },
-    data: { username: normalizedUsername },
+  // Update + record in ONE transaction (R-D2) — the unchanged short-circuit
+  // above already guarantees a real from!=to change here (ER-B9).
+  await prisma.$transaction(async (tx) => {
+    await tx.user.update({
+      where: { id: currentUser.id },
+      data: { username: normalizedUsername },
+    });
+    await recordChange(tx, {
+      actor: { userId: currentUser.id },
+      actionType: "ACCOUNT_USERNAME_CHANGE",
+      entityType: "USER",
+      entityId: currentUser.id,
+      action: `Changed username from "${currentUser.username}" to "${normalizedUsername}"`,
+      changes: { username: { from: currentUser.username, to: normalizedUsername } },
+    });
   });
 
   return NextResponse.json({

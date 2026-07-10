@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
+import { AppError } from "@/lib/error-handling";
 import prisma from "@/lib/prisma";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { UpdateUserSchema } from "@/lib/validation/admin";
@@ -291,10 +292,31 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: { para
     return NextResponse.json({ error: "Cannot delete your own account" }, { status: 400 });
   }
 
-  // Soft delete - set deletedAt timestamp instead of hard deleting
-  await prisma.user.update({
-    where: { id: userId },
-    data: { deletedAt: new Date() },
+  // Fetch the target inside the tx (honest 404 if missing — a bare update on a
+  // missing id used to 500), soft-delete, and record USER_DELETION with the
+  // deletedAt transition + a redacted full-row snapshot (R-D11). recordChange
+  // auto-redacts passwordHash inside the snapshot.
+  await prisma.$transaction(async (tx) => {
+    const target = await tx.user.findUnique({ where: { id: userId } });
+    if (!target) {
+      throw new AppError("User not found", "NOT_FOUND", 404);
+    }
+
+    const deletedAt = new Date();
+    await tx.user.update({
+      where: { id: userId },
+      data: { deletedAt },
+    });
+
+    await recordChange(tx, {
+      actor: { userId: adminUser.id },
+      actionType: "USER_DELETION",
+      entityType: "USER",
+      entityId: userId,
+      action: `Deleted user ${target.email}`,
+      changes: { deletedAt: { from: target.deletedAt, to: deletedAt } },
+      details: { snapshot: target },
+    });
   });
 
   return NextResponse.json({
