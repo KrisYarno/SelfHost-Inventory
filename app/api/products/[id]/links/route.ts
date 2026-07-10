@@ -8,6 +8,7 @@ import {
 } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import type { Prisma } from '@prisma/client';
+import { recordChange } from '@/lib/change-tracking';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import {
   CreateProductLinkSchema,
@@ -159,6 +160,22 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
         },
       });
 
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: 'MAPPING_CREATE',
+        entityType: 'MAPPING',
+        entityId: link.id,
+        companyId: integration.companyId,
+        action: `Created product mapping ${link.id}`,
+        details: {
+          integrationId: body.integrationId,
+          internalProductId: productId,
+          externalProductId: body.externalProductId,
+          externalVariantId: body.externalVariantId || null,
+          backfilledOrderItems: backfill.count,
+        },
+      });
+
       return { productLink: link, backfilledCount: backfill.count };
     }
   );
@@ -214,8 +231,44 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: RouteP
     user.isAdmin
   );
 
-  await prisma.productLink.delete({
-    where: { id: queryValidation.linkId },
+  // Full redacted link-row snapshot (R-D11) — strip the joined integration relation.
+  const { integration, ...linkRow } = existingLink;
+
+  // Normalized to the product-mappings delete pattern: wrap in a $transaction,
+  // unmap the stranded order items (the SetNull FK nulls productLinkId but leaves
+  // isMapped=true otherwise), and record MAPPING_DELETE — all in ONE tx.
+  await prisma.$transaction(async (tx) => {
+    // R-D11 cascade identity: read bundle components BEFORE the delete cascades them.
+    const bundleComponents = await tx.bundleComponent.findMany({
+      where: { productLinkId: queryValidation.linkId },
+      select: { id: true, internalProductId: true, quantity: true },
+      take: 1000,
+    });
+
+    const unmapped = await tx.externalOrderItem.updateMany({
+      where: { productLinkId: queryValidation.linkId },
+      data: { isMapped: false },
+    });
+
+    await tx.productLink.delete({
+      where: { id: queryValidation.linkId },
+    });
+
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: 'MAPPING_DELETE',
+      entityType: 'MAPPING',
+      entityId: queryValidation.linkId,
+      companyId: integration.companyId,
+      action: `Deleted product mapping ${queryValidation.linkId}`,
+      details: {
+        snapshot: linkRow,
+        cascade: {
+          bundleComponents,
+          unmappedOrderItems: unmapped.count,
+        },
+      },
+    });
   });
 
   const response = NextResponse.json({

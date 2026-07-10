@@ -6,6 +6,7 @@ import {
   requireCSRF,
 } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
+import { recordChange } from '@/lib/change-tracking';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { UpdateBundleLinkSchema } from '@/lib/validation/bundle-links';
 import { ZodError } from 'zod';
@@ -80,6 +81,17 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
 
   // D7: replace components atomically; do NOT touch existing ExternalOrderItem snapshots
   await prisma.$transaction(async (tx) => {
+    // R-D16: the OLD component rows' ids ARE the destroyed identities — capture
+    // them BEFORE the deleteMany. The new set lands via createMany (no ids
+    // returned), so `to` carries the component set, which IS the created state
+    // (R-D11 create semantics). Cap 1000 (schema caps components at 50).
+    const oldComponents = await tx.bundleComponent.findMany({
+      where: { productLinkId: link.id },
+      select: { id: true, internalProductId: true, quantity: true },
+      orderBy: { sortOrder: 'asc' },
+      take: 1000,
+    });
+
     await tx.bundleComponent.deleteMany({ where: { productLinkId: link.id } });
     await tx.bundleComponent.createMany({
       data: body.components.map((c, i) => ({
@@ -88,6 +100,24 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
         quantity: c.quantity,
         sortOrder: i,
       })),
+    });
+
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: 'BUNDLE_CHANGE',
+      entityType: 'MAPPING',
+      entityId: link.id,
+      companyId: link.integration.companyId,
+      action: `Updated bundle components for ${link.id}`,
+      changes: {
+        components: {
+          from: oldComponents,
+          to: body.components.map((c) => ({
+            internalProductId: c.internalProductId,
+            quantity: c.quantity,
+          })),
+        },
+      },
     });
   });
 

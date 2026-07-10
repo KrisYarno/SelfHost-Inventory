@@ -12,10 +12,12 @@ jest.mock('@/lib/api-utils', () => ({
 jest.mock('@/lib/prisma', () => {
   const tx = {
     productLink: { findFirst: jest.fn(), create: jest.fn(), findUnique: jest.fn() },
-    bundleComponent: { createMany: jest.fn(), deleteMany: jest.fn() },
+    bundleComponent: { createMany: jest.fn(), deleteMany: jest.fn(), findMany: jest.fn() },
     externalOrderItem: { updateMany: jest.fn() },
     product: { findMany: jest.fn() },
     integration: { findUnique: jest.fn() },
+    // Phase B: routes now record via change-tracking inside the tx.
+    auditLog: { create: jest.fn() },
   };
   return {
     __esModule: true,

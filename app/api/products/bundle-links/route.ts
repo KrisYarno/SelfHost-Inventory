@@ -7,6 +7,7 @@ import {
 } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
+import { recordChange } from '@/lib/change-tracking';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { CreateBundleLinkSchema } from '@/lib/validation/bundle-links';
 import type { BundleComponentSnapshot } from '@/types/bulk-map';
@@ -138,6 +139,27 @@ export const POST = apiHandler(async (request: NextRequest) => {
           productLinkId: link.id,
           isMapped: true,
           bundleComponentSnapshot: snapshot as unknown as object,
+        },
+      });
+
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: 'MAPPING_CREATE',
+        entityType: 'MAPPING',
+        entityId: link.id,
+        companyId: integration.companyId,
+        action: `Created bundle mapping ${link.id}`,
+        details: {
+          integrationId: body.integrationId,
+          internalProductId: null,
+          externalProductId: body.externalProductId,
+          externalVariantId: body.externalVariantId ?? null,
+          isBundle: true,
+          components: body.components.map((c) => ({
+            internalProductId: c.internalProductId,
+            quantity: c.quantity,
+          })),
+          backfilledOrderItems: backfill.count,
         },
       });
 

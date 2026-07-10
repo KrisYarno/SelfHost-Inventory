@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, requireCompanyMembership, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { recordChange } from "@/lib/change-tracking";
 
 export const dynamic = "force-dynamic";
 
@@ -140,11 +141,23 @@ export const DELETE = apiHandler(async (request: NextRequest) => {
     user.isAdmin
   );
 
+  // Full redacted link-row snapshot (R-D11) — strip the joined integration
+  // relation so `snapshot` is the link row itself, not its parent.
+  const { integration, ...linkRow } = existingLink;
+
   // Delete the product link. With onDelete: SetNull, the FK on ExternalOrderItem
   // will be nulled automatically by the database. But we also need to set isMapped = false.
   await prisma.$transaction(async (tx) => {
+    // R-D11 cascade identity: read the bundle components BEFORE the link (and its
+    // Cascade-deleted components) vanish. Cap 1000.
+    const bundleComponents = await tx.bundleComponent.findMany({
+      where: { productLinkId: linkId },
+      select: { id: true, internalProductId: true, quantity: true },
+      take: 1000,
+    });
+
     // Set isMapped = false on affected order items
-    await tx.externalOrderItem.updateMany({
+    const unmapped = await tx.externalOrderItem.updateMany({
       where: { productLinkId: linkId },
       data: { isMapped: false },
     });
@@ -152,6 +165,22 @@ export const DELETE = apiHandler(async (request: NextRequest) => {
     // Delete the product link
     await tx.productLink.delete({
       where: { id: linkId },
+    });
+
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "MAPPING_DELETE",
+      entityType: "MAPPING",
+      entityId: linkId,
+      companyId: integration.companyId,
+      action: `Deleted product mapping ${linkId}`,
+      details: {
+        snapshot: linkRow,
+        cascade: {
+          bundleComponents,
+          unmappedOrderItems: unmapped.count,
+        },
+      },
     });
   });
 
