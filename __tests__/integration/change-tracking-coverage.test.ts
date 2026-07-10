@@ -206,9 +206,6 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
   // --- Task 11: users group — MIGRATED (all 6 admin/users routes now recordChange) ---
   // --- Task 12: orders group — MIGRATED (fulfill/unfulfill now recordChange) ---
   // --- Phase B: coverage closure (not in any A2 task group) ---
-  { path: "app/api/account/default-location/route.ts", reason: "phase-B pending" },
-  { path: "app/api/account/password/route.ts", reason: "phase-B pending" },
-  { path: "app/api/account/username/route.ts", reason: "phase-B pending" },
   { path: "app/api/admin/backup/route.ts", reason: "phase-B pending (backup trigger; decide record-vs-exempt in Phase B)" },
   { path: "app/api/admin/companies/route.ts", reason: "phase-B pending" },
   { path: "app/api/admin/companies/[id]/route.ts", reason: "phase-B pending" },
@@ -219,19 +216,13 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
   { path: "app/api/admin/integrations/[id]/sync/route.ts", reason: "phase-B pending (sync trigger; ingestion tier)" },
   { path: "app/api/admin/locations/route.ts", reason: "phase-B pending" },
   { path: "app/api/admin/locations/[id]/route.ts", reason: "phase-B pending" },
-  { path: "app/api/admin/product-mappings/route.ts", reason: "phase-B pending" },
   { path: "app/api/admin/products/[id]/restore/route.ts", reason: "phase-B pending" },
   { path: "app/api/admin/products/thresholds/route.ts", reason: "phase-B pending (R-D16 closure list)" },
   { path: "app/api/admin/settings/route.ts", reason: "phase-B pending" },
   { path: "app/api/admin/stock-check/route.ts", reason: "phase-B pending (manual stock-check trigger)" },
   { path: "app/api/auth/resend-notification/route.ts", reason: "phase-B pending" },
-  { path: "app/api/auth/signup/route.ts", reason: "phase-B pending (USER_SIGNUP)" },
   { path: "app/api/orders/external/[orderId]/recheck/route.ts", reason: "phase-B pending (external orders; ingestion tier)" },
-  { path: "app/api/products/bundle-links/route.ts", reason: "phase-B pending" },
-  { path: "app/api/products/bundle-links/[linkId]/route.ts", reason: "phase-B pending" },
-  { path: "app/api/products/[id]/links/route.ts", reason: "phase-B pending" },
   { path: "app/api/staging-items/[id]/route.ts", reason: "phase-B pending (R-D16 closure list)" },
-  { path: "app/api/user/preferences/route.ts", reason: "phase-B pending" },
   { path: "app/api/webhooks/[integrationId]/route.ts", reason: "phase-B pending (webhook ingestion tier, R-D4)" },
 ];
 
@@ -249,9 +240,7 @@ const CARVE_OUTS: Exemption[] = [];
  * fix the handler, delete the entry.
  */
 interface HandlerExemption { path: string; method: (typeof MUTATING_METHODS)[number]; reason: string }
-const HANDLER_EXEMPT: HandlerExemption[] = [
-  { path: "app/api/admin/users/[userId]/route.ts", method: "DELETE", reason: "phase-B pending (Task 2: USER_DELETION on soft-delete)" },
-];
+const HANDLER_EXEMPT: HandlerExemption[] = [];
 
 // ---------------------------------------------------------------------------
 // Discovery + classification
