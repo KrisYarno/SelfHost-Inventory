@@ -3,7 +3,6 @@ import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import { decryptOrNull, hostFromStoreUrl, upsertOrderWithItems } from "@/lib/external-orders/shared";
 import { recordIngestion } from "@/lib/change-tracking";
 import type { PlatformType } from "@/lib/platforms/core/types";
-import type { Prisma } from "@prisma/client";
 
 type SyncResult = {
   integrationId: string;
