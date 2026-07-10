@@ -187,6 +187,18 @@ const PERMANENT_EXEMPT: Exemption[] = [
     path: "app/api/dev/db-stats/route.ts",
     reason: "dev-gated diagnostics (currently GET-only; defensively permanent)",
   },
+  {
+    path: "app/api/admin/stock-check/route.ts",
+    reason:
+      "trigger-only: delegates to lib/stock-checker, which writes only notificationHistory " +
+      "dispatch rows (plumbing, not business state — R-D16 telemetry class)",
+  },
+  {
+    path: "app/api/auth/resend-notification/route.ts",
+    reason:
+      "mutates no persistent state (currently a stub that also sends nothing — " +
+      "registered in deferred-work.md)",
+  },
 ];
 
 /**
@@ -206,11 +218,6 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
   // --- Task 11: users group — MIGRATED (all 6 admin/users routes now recordChange) ---
   // --- Task 12: orders group — MIGRATED (fulfill/unfulfill now recordChange) ---
   // --- Phase B: coverage closure (not in any A2 task group) ---
-  { path: "app/api/admin/backup/route.ts", reason: "phase-B pending (backup trigger; decide record-vs-exempt in Phase B)" },
-  { path: "app/api/admin/companies/route.ts", reason: "phase-B pending" },
-  { path: "app/api/admin/companies/[id]/route.ts", reason: "phase-B pending" },
-  { path: "app/api/admin/integrations/route.ts", reason: "phase-B pending" },
-  { path: "app/api/admin/integrations/[id]/route.ts", reason: "phase-B pending" },
   { path: "app/api/admin/integrations/[id]/price-sync/route.ts", reason: "phase-B pending (sync trigger; ingestion tier)" },
   { path: "app/api/admin/integrations/[id]/stock-sync/route.ts", reason: "phase-B pending (sync trigger; ingestion tier)" },
   { path: "app/api/admin/integrations/[id]/sync/route.ts", reason: "phase-B pending (sync trigger; ingestion tier)" },
@@ -218,9 +225,6 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
   { path: "app/api/admin/locations/[id]/route.ts", reason: "phase-B pending" },
   { path: "app/api/admin/products/[id]/restore/route.ts", reason: "phase-B pending" },
   { path: "app/api/admin/products/thresholds/route.ts", reason: "phase-B pending (R-D16 closure list)" },
-  { path: "app/api/admin/settings/route.ts", reason: "phase-B pending" },
-  { path: "app/api/admin/stock-check/route.ts", reason: "phase-B pending (manual stock-check trigger)" },
-  { path: "app/api/auth/resend-notification/route.ts", reason: "phase-B pending" },
   { path: "app/api/orders/external/[orderId]/recheck/route.ts", reason: "phase-B pending (external orders; ingestion tier)" },
   { path: "app/api/staging-items/[id]/route.ts", reason: "phase-B pending (R-D16 closure list)" },
   { path: "app/api/webhooks/[integrationId]/route.ts", reason: "phase-B pending (webhook ingestion tier, R-D4)" },
