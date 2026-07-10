@@ -77,7 +77,12 @@ export type AuditActionType =
   | 'PRODUCT_RESTORE'
   | 'SIGNUP'
   | 'CATALOG_IMPORT'
-  | 'BACKUP_CREATED';
+  | 'BACKUP_CREATED'
+  // --- Phase B additions ---
+  | 'STAGING_UPDATE'
+  | 'EXTERNAL_ORDER_CREATE'
+  | 'EXTERNAL_ORDER_UPDATE'
+  | 'EXTERNAL_ORDER_DELETE';
 
 export type EntityType =
   | 'USER'

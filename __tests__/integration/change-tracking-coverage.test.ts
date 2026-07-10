@@ -243,10 +243,27 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
  */
 const CARVE_OUTS: Exemption[] = [];
 
+/**
+ * PER-HANDLER exemptions — a RECORDS file whose named mutating handler does not
+ * itself contain a record call. Same bookkeeping contract as PHASE_PENDING_EXEMPT:
+ * fix the handler, delete the entry.
+ */
+interface HandlerExemption { path: string; method: (typeof MUTATING_METHODS)[number]; reason: string }
+const HANDLER_EXEMPT: HandlerExemption[] = [
+  { path: "app/api/admin/users/[userId]/route.ts", method: "DELETE", reason: "phase-B pending (Task 2: USER_DELETION on soft-delete)" },
+];
+
 // ---------------------------------------------------------------------------
 // Discovery + classification
 // ---------------------------------------------------------------------------
 
+// D12 (GET blind spot — documented, not closed): this gate classifies MUTATING
+// VERBS only. GET routes with side effects are invisible to it — known today:
+// cron/stock-check + admin/stock-check's delegation into lib/stock-checker
+// (notificationHistory rows), and the 3 DATA_EXPORT routes (inventory/export,
+// admin/logs/export, mass-update/export) whose recording is enforced by Task 3's
+// tests, not here. A verb-agnostic side-effect sweep is a Lane 5 roadmap item —
+// Task 11 registers it in deferred-work.md.
 const MUTATING_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
 const REPO_ROOT = process.cwd();
 const API_DIR = path.join(REPO_ROOT, "app", "api");
@@ -276,6 +293,28 @@ function recordsChanges(sourceText: string): boolean {
     sourceText.includes("@/lib/change-tracking") &&
     (/\brecordChange\s*\(/.test(sourceText) || /\brecordIngestion\s*\(/.test(sourceText))
   );
+}
+
+// ER-B5 (known limitation — documented, not engineered-away): the scan slices a
+// route file at export boundaries, so a shared helper containing a record call
+// that sits BETWEEN two exports lands in the PRECEDING handler's segment and can
+// false-PASS it; it cannot false-FAIL a real recorder. Behavior is owned by the
+// per-lane characterization tests; this gate is belt-and-suspenders. Lane writers
+// keep record calls inside handler bodies (Global Constraints).
+/** Split a route source into per-exported-handler segments. House style is
+ *  `export const POST = apiHandler(...)` / `export async function POST(...)`;
+ *  a segment runs from its export keyword to the next `export` or EOF. */
+function handlerSegments(sourceText: string): Map<string, string> {
+  const re = /^export\s+(?:const|async\s+function)\s+(POST|PUT|PATCH|DELETE|GET)\b/gm;
+  const hits: Array<{ method: string; index: number }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(sourceText)) !== null) hits.push({ method: m[1], index: m.index });
+  const segments = new Map<string, string>();
+  hits.forEach((h, i) => {
+    const end = i + 1 < hits.length ? hits[i + 1].index : sourceText.length;
+    segments.set(h.method, sourceText.slice(h.index, end));
+  });
+  return segments;
 }
 
 interface RouteAnalysis {
@@ -381,6 +420,29 @@ describe("change-tracking route coverage (R-D9 / D10 enforcement gate)", () => {
     ).toBe("");
   });
 
+  it("every mutating handler inside a RECORDS file records (per-handler gate)", () => {
+    const exemptKey = new Set(HANDLER_EXEMPT.map((e) => `${e.path}#${e.method}`));
+    const gaps: string[] = [];
+    for (const [repoPath, methods] of Array.from(analysis.mutating)) {
+      if (!analysis.records.has(repoPath)) continue; // file-level gate covers non-RECORDS files
+      const source = fs.readFileSync(path.join(REPO_ROOT, repoPath), "utf8");
+      const segments = handlerSegments(source);
+      for (const method of methods) {
+        const segment = segments.get(method) ?? "";
+        const records = /\brecordChange\s*\(/.test(segment) || /\brecordIngestion\s*\(/.test(segment);
+        if (!records && !exemptKey.has(`${repoPath}#${method}`)) {
+          gaps.push(`  ${repoPath} [${method}]`);
+        }
+      }
+    }
+    expect(
+      gaps.length === 0
+        ? ""
+        : `Handlers inside RECORDS files that do not record — record inside the handler's\n` +
+          `transaction or add a HANDLER_EXEMPT entry:\n` + gaps.join("\n")
+    ).toBe("");
+  });
+
   it("EXEMPT hygiene: entries are unique, point at real files, and phase-pending entries are still mutating", () => {
     const all = [...PERMANENT_EXEMPT, ...PHASE_PENDING_EXEMPT, ...CARVE_OUTS];
 
@@ -406,6 +468,25 @@ describe("change-tracking route coverage (R-D9 / D10 enforcement gate)", () => {
         : `PHASE-PENDING exemptions for routes that no longer export a mutating method —\n` +
             `remove these stale entries:\n` +
             notMutating.map((e) => `  ${e.path}`).join("\n")
+    ).toBe("");
+
+    // HANDLER_EXEMPT hygiene: every entry points at a real file, its method is
+    // among the file's detected mutating methods, and its reason is non-empty.
+    const handlerMissing = HANDLER_EXEMPT.filter((e) => !fs.existsSync(path.join(REPO_ROOT, e.path)));
+    expect(handlerMissing.map((e) => e.path)).toEqual([]);
+
+    const handlerUnreasoned = HANDLER_EXEMPT.filter((e) => !e.reason || e.reason.trim().length === 0);
+    expect(handlerUnreasoned.map((e) => e.path)).toEqual([]);
+
+    const handlerNotMutating = HANDLER_EXEMPT.filter(
+      (e) => !(analysis.mutating.get(e.path) ?? []).includes(e.method)
+    );
+    expect(
+      handlerNotMutating.length === 0
+        ? ""
+        : `HANDLER_EXEMPT entries whose method is not a detected mutating method of the file —\n` +
+            `remove these stale entries:\n` +
+            handlerNotMutating.map((e) => `  ${e.path} [${e.method}]`).join("\n")
     ).toBe("");
   });
 
