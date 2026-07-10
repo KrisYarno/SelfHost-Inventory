@@ -280,6 +280,11 @@ describe("transfer/batch — one shared batchId across every transfer's event", 
   });
 });
 
+// P-B1: mass-update's post-batch summary is the ONE sanctioned USER-actor
+// exception to the same-tx rule — its stock writes already committed across the
+// batch transactions, so the summary is recorded best-effort via
+// `recordIngestion` (its OWN implicit tx = the top-level prisma client, `db`),
+// NOT on the batch `tx`. So these assert `db.auditLog.create`, not `tx.*`.
 describe("mass-update — ONE INVENTORY_BULK_UPDATE with R-D14 per-row from/to", () => {
   it("records details.rows {entityId, changes:{quantity:{from,to}}} for <=500 rows", async () => {
     const tx = makeTx();
@@ -293,8 +298,11 @@ describe("mass-update — ONE INVENTORY_BULK_UPDATE with R-D14 per-row from/to",
     }));
     expect(res.status).toBe(200);
 
-    expect(tx.auditLog.create).toHaveBeenCalledTimes(1);
-    const data = tx.auditLog.create.mock.calls[0][0].data;
+    // Summary went through recordIngestion -> prisma.auditLog.create (db), and
+    // NOT the batch tx (which only carried the stock writes).
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+    expect(db.auditLog.create).toHaveBeenCalledTimes(1);
+    const data = db.auditLog.create.mock.calls[0][0]!.data as any;
     expect(data.actionType).toBe("INVENTORY_BULK_UPDATE");
     expect(data.affectedCount).toBe(1);
     const rows = (data.details as any).rows;
@@ -319,7 +327,7 @@ describe("mass-update — ONE INVENTORY_BULK_UPDATE with R-D14 per-row from/to",
     const res = await MASS_UPDATE(post("http://x/api/admin/inventory/mass-update", { changes }));
     expect(res.status).toBe(200);
 
-    const data = tx.auditLog.create.mock.calls[0][0].data;
+    const data = db.auditLog.create.mock.calls[0][0]!.data as any;
     expect((data.details as any).rows).toBeUndefined();
     expect((data.details as any).rowsOmitted).toBe(true);
     expect((data.details as any).rowCount).toBe(501);

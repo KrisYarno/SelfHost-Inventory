@@ -8,7 +8,7 @@ import {
   UpdateFailureReason,
   PaginatedMassUpdateResponse,
 } from "@/types/mass-update-errors";
-import { recordChange, newBatchId } from "@/lib/change-tracking";
+import { recordIngestion, newBatchId } from "@/lib/change-tracking";
 import { MassUpdateSchema } from "@/lib/validation/inventory";
 
 export const dynamic = "force-dynamic";
@@ -462,8 +462,9 @@ export const POST = apiHandler(async (request: NextRequest) => {
     }
 
     const batchId = newBatchId();
-    await prisma.$transaction(async (tx) => {
-      await recordChange(tx, {
+    // Post-batch summary: stock committed per-batch above; a summary-write failure must not 500 a succeeded operation (P-B1). Per-row inventory_logs are authoritative.
+    await recordIngestion(
+      {
         actor: { userId: user.id },
         actionType: "INVENTORY_BULK_UPDATE",
         entityType: "INVENTORY",
@@ -471,8 +472,9 @@ export const POST = apiHandler(async (request: NextRequest) => {
         details,
         affectedCount: processedChanges.length,
         batchId,
-      });
-    });
+      },
+      {}
+    );
   }
 
   return NextResponse.json(result);

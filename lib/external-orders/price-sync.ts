@@ -1,5 +1,6 @@
 import prisma from "@/lib/prisma";
 import { getIntegrationClient } from "@/lib/external-orders/shared";
+import { recordChange, newBatchId } from "@/lib/change-tracking";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -93,9 +94,18 @@ export async function fetchExternalProductPrice(
  * belonging to the given integration. Fetches each product's regular_price
  * from WC and updates retailPrice. Best-effort: individual failures do not
  * abort the batch.
+ *
+ * Change-tracking (D10, R-D2): unlike mass-update, a price sync has NO per-row
+ * ledger fallback — the recorded event is the ONLY record of a money-field
+ * change — so each changed product records a PRODUCT_UPDATE via `recordChange`
+ * INSIDE its own per-product transaction (hard-abort per product; the batch
+ * stays best-effort because a per-product throw only fails that product). The
+ * actor kind follows the trigger: `{ userId }` → USER (manual admin route),
+ * `{}` → SYSTEM (a future cron caller).
  */
 export async function syncPricesForIntegration(
-  integrationId: string
+  integrationId: string,
+  actor: { userId?: number } = {}
 ): Promise<PriceSyncResult> {
   // Find all products whose price source points at this integration
   const products = await prisma.product.findMany({
@@ -124,6 +134,16 @@ export async function syncPricesForIntegration(
     return { synced: 0, skipped: 0, failed: [] };
   }
 
+  // Platform label for the human-readable action string (one query per run).
+  const integration = await prisma.integration.findUnique({
+    where: { id: integrationId },
+    select: { platform: true },
+  });
+  const platform = integration?.platform ?? "external platform";
+
+  // ONE batch id groups every price-change event from this run (R-D14 grouping).
+  const batchId = newBatchId();
+
   let synced = 0;
   let skipped = 0;
   const failed: PriceSyncResult["failed"] = [];
@@ -148,10 +168,37 @@ export async function syncPricesForIntegration(
         continue;
       }
 
-      // Update retailPrice
-      await prisma.product.update({
-        where: { id: product.id },
-        data: { retailPrice: regularPrice },
+      // ER-B9 no-op rule: if the retail price already matches, skip entirely —
+      // no update, no event. Normalize both sides via String() so a Prisma
+      // Decimal never false-differs from the parsed number.
+      const fromValue = String(product.retailPrice);
+      const toValue = String(regularPrice);
+      if (fromValue === toValue) {
+        skipped++;
+        continue;
+      }
+
+      // Update retailPrice + record the change on the SAME per-product tx
+      // (R-D2 hard-abort per product; a throw lands this product in failed[]
+      // and the loop continues — the batch stays best-effort).
+      await prisma.$transaction(async (tx) => {
+        await tx.product.update({
+          where: { id: product.id },
+          data: { retailPrice: regularPrice },
+        });
+        await recordChange(tx, {
+          actor: actor.userId ? { userId: actor.userId } : { kind: "SYSTEM" },
+          actionType: "PRODUCT_UPDATE",
+          entityType: "PRODUCT",
+          entityId: product.id,
+          action: `Synced retail price for "${product.name}" from ${platform}`,
+          changes: { retailPrice: { from: fromValue, to: toValue } },
+          details: {
+            trigger: actor.userId ? "manual" : "cron",
+            integrationId,
+          },
+          batchId,
+        });
       });
 
       synced++;

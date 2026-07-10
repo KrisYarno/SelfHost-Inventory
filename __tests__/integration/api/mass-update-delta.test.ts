@@ -18,12 +18,15 @@ jest.mock("@/lib/rateLimit", () => ({
   enforceRateLimit: jest.fn(() => ({})),
   applyRateLimitHeaders: jest.fn((r: any) => r),
 }));
-// The single bulk-update event is recorded in its own post-batch transaction;
-// its end-to-end behavior (R-D14 rows) is covered by
+// The single bulk-update summary is recorded post-batch via `recordIngestion`
+// (P-B1: best-effort ingestion tier — stock already committed per-batch, so a
+// summary-write failure must not 500 a succeeded operation). Its end-to-end
+// R-D14 rows behavior is covered by
 // __tests__/integration/api/change-tracking-inventory.test.ts. Stub it here so
-// the delta-truthfulness assertions stay focused.
+// the delta-truthfulness assertions stay focused; the recording-tier assertions
+// live in their own tests below.
 jest.mock("@/lib/change-tracking", () => ({
-  recordChange: jest.fn(async () => undefined),
+  recordIngestion: jest.fn(async () => true),
   newBatchId: jest.fn(() => "batch-test"),
 }));
 jest.mock("@/lib/prisma", () => ({ __esModule: true, default: { $transaction: jest.fn() } }));
@@ -32,6 +35,7 @@ import { NextRequest } from "next/server";
 import { POST } from "@/app/api/admin/inventory/mass-update/route";
 import { requireAdmin } from "@/lib/api-utils";
 import { validateCSRFToken } from "@/lib/csrf";
+import { recordIngestion } from "@/lib/change-tracking";
 import prisma from "@/lib/prisma";
 
 const db = prisma as unknown as { $transaction: jest.Mock };
@@ -149,4 +153,56 @@ test("no-op based on the REAL delta: when newQuantity equals current, skip log +
   expect(tx.product_locations.upsert).not.toHaveBeenCalled();
   const body = await res.json();
   expect(body.successful).toBe(1); // still counts as a successful (no-op) change
+});
+
+// ---------------------------------------------------------------------------
+// P-B1: the post-batch summary is recorded through the best-effort ingestion
+// tier (`recordIngestion`), NOT a recordChange-in-its-own-tx. Stock already
+// committed per-batch above, so a summary-write failure must never 500 a
+// succeeded operation. These pin the tier switch + the R-D14 payload parity.
+// ---------------------------------------------------------------------------
+
+test("post-batch summary is recorded via recordIngestion (not a summary tx) with the R-D14 payload", async () => {
+  const tx = makeTx(10); // current 10 -> newQuantity 4 => real delta -6 (changed)
+  db.$transaction.mockImplementation(async (cb: any) => cb(tx));
+
+  const res = await POST(
+    postWith({ changes: [{ productId: 1, locationId: 1, newQuantity: 4, delta: 100 }] })
+  );
+  expect(res.status).toBe(200);
+
+  // Exactly one $transaction ran — the stock BATCH. The summary is NOT wrapped
+  // in its own transaction anymore (that was the recordChange-in-tx path).
+  expect(db.$transaction).toHaveBeenCalledTimes(1);
+
+  expect(recordIngestion).toHaveBeenCalledTimes(1);
+  const [event, opts] = (recordIngestion as jest.Mock).mock.calls[0];
+  expect(event.actor).toEqual({ userId: 7 }); // USER actor via ingestion (P-B1 exception)
+  expect(event.actionType).toBe("INVENTORY_BULK_UPDATE");
+  expect(event.entityType).toBe("INVENTORY");
+  expect(event.affectedCount).toBe(1);
+  expect(event.batchId).toBe("batch-test");
+  // R-D14 per-row from/to, server-truthful (current 10 -> 4, client delta ignored).
+  expect(event.details.rows).toEqual([
+    { entityId: "1", changes: { quantity: { from: 10, to: 4 } } },
+  ]);
+  expect(opts).toEqual({});
+});
+
+test("a summary ingestion failure does NOT fail the response (P-B1: 200 with result body)", async () => {
+  const tx = makeTx(10);
+  db.$transaction.mockImplementation(async (cb: any) => cb(tx));
+
+  // recordIngestion swallows its own errors and reports failure by returning
+  // false; the route must ignore that and still return the operation result.
+  (recordIngestion as jest.Mock).mockResolvedValueOnce(false);
+
+  const res = await POST(
+    postWith({ changes: [{ productId: 1, locationId: 1, newQuantity: 4, delta: 100 }] })
+  );
+
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.successful).toBe(1);
+  expect(body.failed).toBe(0);
 });

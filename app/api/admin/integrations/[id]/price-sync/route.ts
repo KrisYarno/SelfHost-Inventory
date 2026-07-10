@@ -16,12 +16,17 @@ export const POST = apiHandler(
     request: NextRequest,
     { params }: { params: { id: string } }
   ) => {
-    await requireAdmin();
+    const { user } = await requireAdmin();
 
     await requireCSRF(request);
 
     const integrationId = params.id;
-    const result = await syncPricesForIntegration(integrationId);
+    // USER-tier trigger: recording lives in lib/external-orders/price-sync
+    // (per-product recordChange). Pass the actor so the events attribute to
+    // this admin (R-D16 actorKind per trigger).
+    const result = await syncPricesForIntegration(integrationId, {
+      userId: user.id,
+    });
 
     return NextResponse.json({ result });
   }

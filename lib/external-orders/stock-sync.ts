@@ -74,6 +74,11 @@ export async function syncStockToExternal(
   ]);
 
   if (productLinks.length === 0 && bundleLinks.length === 0) {
+    // R-D16 EXEMPT-with-reason: the `integration.update` calls in this function
+    // write ONLY telemetry fields (lastStockSyncAt / lastStockSyncError) — job
+    // plumbing, not business state — so by spec they carry NO change-tracking
+    // record. (The business changes — outward stock_status pushes — are the
+    // external platform's own state; nothing internal mutates here.)
     // Nothing to sync — update timestamp and return
     await prisma.integration.update({
       where: { id: integrationId },
