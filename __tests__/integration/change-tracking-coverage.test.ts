@@ -199,6 +199,24 @@ const PERMANENT_EXEMPT: Exemption[] = [
       "mutates no persistent state (currently a stub that also sends nothing — " +
       "registered in deferred-work.md)",
   },
+  {
+    path: "app/api/admin/integrations/[id]/price-sync/route.ts",
+    reason:
+      "trigger-only: delegates to lib/external-orders/price-sync, which records " +
+      "per-product PRODUCT_UPDATE via recordChange in per-product transactions (Phase B, D10)",
+  },
+  {
+    path: "app/api/admin/integrations/[id]/stock-sync/route.ts",
+    reason:
+      "trigger-only: lib/external-orders/stock-sync writes only Integration telemetry " +
+      "fields (R-D16 EXEMPT-with-reason: plumbing, not business state)",
+  },
+  {
+    path: "app/api/admin/integrations/[id]/sync/route.ts",
+    reason:
+      "trigger-only: delegates to lib/external-orders/sync, which records effective " +
+      "order transitions via recordIngestion (Phase B, R-D4)",
+  },
 ];
 
 /**
@@ -218,16 +236,6 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
   // --- Task 11: users group — MIGRATED (all 6 admin/users routes now recordChange) ---
   // --- Task 12: orders group — MIGRATED (fulfill/unfulfill now recordChange) ---
   // --- Phase B: coverage closure (not in any A2 task group) ---
-  { path: "app/api/admin/integrations/[id]/price-sync/route.ts", reason: "phase-B pending (sync trigger; ingestion tier)" },
-  { path: "app/api/admin/integrations/[id]/stock-sync/route.ts", reason: "phase-B pending (sync trigger; ingestion tier)" },
-  { path: "app/api/admin/integrations/[id]/sync/route.ts", reason: "phase-B pending (sync trigger; ingestion tier)" },
-  { path: "app/api/admin/locations/route.ts", reason: "phase-B pending" },
-  { path: "app/api/admin/locations/[id]/route.ts", reason: "phase-B pending" },
-  { path: "app/api/admin/products/[id]/restore/route.ts", reason: "phase-B pending" },
-  { path: "app/api/admin/products/thresholds/route.ts", reason: "phase-B pending (R-D16 closure list)" },
-  { path: "app/api/orders/external/[orderId]/recheck/route.ts", reason: "phase-B pending (external orders; ingestion tier)" },
-  { path: "app/api/staging-items/[id]/route.ts", reason: "phase-B pending (R-D16 closure list)" },
-  { path: "app/api/webhooks/[integrationId]/route.ts", reason: "phase-B pending (webhook ingestion tier, R-D4)" },
 ];
 
 /**
