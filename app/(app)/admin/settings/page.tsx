@@ -63,15 +63,10 @@ export default function AdminSettingsPage() {
   };
 
   const handleDeleteLocation = async (location: SettingsLocation) => {
-    const hasData =
-      (location._count?.product_locations || 0) > 0 || (location._count?.inventory_logs || 0) > 0;
-
-    if (hasData) {
-      const confirmDelete = confirm(
-        `${location.name} has associated inventory data. Are you sure you want to delete it?`
-      );
-      if (!confirmDelete) return;
-    }
+    // The server now decides deletability (D7): a location with any history is
+    // blocked with a 409 whose message names each blocker. Just confirm intent;
+    // the catch below surfaces the server's blocker list verbatim.
+    if (!confirm(`Delete location ${location.name}?`)) return;
 
     try {
       await deleteLocation.mutateAsync(location.id);
