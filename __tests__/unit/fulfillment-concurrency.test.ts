@@ -177,6 +177,38 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     expect(tx.product_locations.upsert).not.toHaveBeenCalled()
   })
 
+  // Phase C (P-C2): a single-product fulfillment deduction is a SALE; the route's
+  // event batchId threads through fulfillExternalOrder onto the ledger row.
+  it('Phase C: deducts a single product as SALE stamped with the threaded batchId', async () => {
+    const tx = setupTransaction()
+    const order = buildOrder()
+
+    tx.externalOrder.findUnique.mockResolvedValue(order as any)
+    tx.product.findUnique.mockResolvedValue({ name: 'Widget A' } as any)
+    tx.externalOrderItem.update.mockResolvedValue({} as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 5, fulfilledQty: 5 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    // signature: (orderId, locationId, items, userId, _notes?, record?, batchId?)
+    await fulfillExternalOrder(
+      'order-1',
+      1,
+      [{ itemId: 'item-1', quantity: 5 }],
+      42,
+      undefined,
+      undefined,
+      'batch-c-single'
+    )
+
+    const { createInventoryLog } = require('@/lib/inventory')
+    const calls = (createInventoryLog as jest.Mock).mock.calls
+    expect(calls).toHaveLength(1)
+    expect(calls[0][0].logType).toBe('SALE')
+    expect(calls[0][0].batchId).toBe('batch-c-single')
+  })
+
   it('P0-1: mixed batch — one item succeeds, another fails stock check', async () => {
     const tx = setupTransaction()
     const order = {

@@ -339,8 +339,8 @@ describe('POST /api/admin/products/[id]/approve — PRODUCT_APPROVE', () => {
   });
 });
 
-describe('POST /api/admin/products/[id]/decline — PRODUCT_DECLINE (batchId)', () => {
-  it('records PRODUCT_DECLINE carrying a batchId after declineProduct', async () => {
+describe('POST /api/admin/products/[id]/decline — PRODUCT_DECLINE (seam fix)', () => {
+  it('hands declineProduct an in-tx record callback + shared batchId; the callback records PRODUCT_DECLINE', async () => {
     setAdmin();
     (declineProduct as jest.Mock).mockResolvedValue({ reversed: true, alreadyDeclined: false });
 
@@ -350,15 +350,30 @@ describe('POST /api/admin/products/[id]/decline — PRODUCT_DECLINE (batchId)', 
     );
 
     expect(resp.status).toBe(200);
-    expect(declineProduct).toHaveBeenCalledWith(7, { id: ADMIN_USER.id });
+
+    // Phase C seam fix: the route no longer records in its OWN separate tx — it
+    // passes declineProduct an in-tx record callback + a shared batchId so the
+    // audit row is atomic with the stock reversal. declineProduct is mocked here,
+    // so the callback has not fired yet.
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+    const [pid, admin, opts] = (declineProduct as jest.Mock).mock.calls[0];
+    expect(pid).toBe(7);
+    expect(admin).toEqual({ id: ADMIN_USER.id });
+    expect(typeof opts.record).toBe('function');
+    // one batchId spans the flow (uuid v4, 36 chars) so the event correlates with
+    // the stock-reversal ledger rows declineProduct writes for this request.
+    expect(typeof opts.batchId).toBe('string');
+    expect(opts.batchId).toHaveLength(36);
+
+    // Drive the captured callback the way declineProduct's tx would: the
+    // PRODUCT_DECLINE event lands with the shared batchId + the DeclineResult ctx.
+    await opts.record(tx, { reversed: true, alreadyDeclined: false });
     expect(tx.auditLog.create).toHaveBeenCalledTimes(1);
     const data = lastAuditData();
     expect(data.actionType).toBe('PRODUCT_DECLINE');
+    expect(data.entityType).toBe('PRODUCT');
     expect(data.entityId).toBe('7');
-    // one batchId spans the flow (uuid v4, 36 chars) so audit correlates with
-    // the stock-reversal ledger rows declineProduct writes for this request.
-    expect(typeof data.batchId).toBe('string');
-    expect(data.batchId).toHaveLength(36);
+    expect(data.batchId).toBe(opts.batchId);
     expect(data.details).toMatchObject({ reversed: true, alreadyDeclined: false });
   });
 });

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin, apiHandler, requireCSRF } from '@/lib/api-utils';
-import prisma from '@/lib/prisma';
 import { declineProduct } from '@/lib/products/decline';
 import { recordChange, newBatchId } from '@/lib/change-tracking';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
@@ -30,27 +29,27 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     return NextResponse.json({ error: 'Invalid product ID' }, { status: 400 });
   }
 
-  // One batchId spans the whole decline flow so the audit row correlates with the
-  // stock-reversal ledger rows declineProduct writes for this request.
+  // One batchId spans the whole decline flow so the audit event correlates with
+  // the stock-reversal ledger rows declineProduct writes for this request.
   const batchId = newBatchId();
 
-  const result = await declineProduct(id, { id: user.id });
-
-  // declineProduct owns its own (concurrency-hardened, retried) transaction, so the
-  // audit row is recorded in its own tx here — recordChange still hard-aborts (a
-  // failed audit write throws) rather than the legacy fire-and-forget swallow.
-  // SEAM: making the audit atomic with the reversal would need a record-callback
-  // seam inside lib/products/decline.ts (out of this task's file scope).
-  await prisma.$transaction(async (tx) => {
-    await recordChange(tx, {
-      actor: { userId: user.id },
-      actionType: 'PRODUCT_DECLINE',
-      entityType: 'PRODUCT',
-      entityId: id,
-      action: `Declined product ${id}`,
-      details: { reversed: result.reversed, alreadyDeclined: result.alreadyDeclined },
-      batchId,
-    });
+  // Phase C (DECLINE SEAM FIX / R-D2): record the PRODUCT_DECLINE event INSIDE
+  // declineProduct's retried transaction (via the record callback) so the audit
+  // row is atomic with the stock reversal. A failed audit write now hard-aborts
+  // and rolls back the reversal instead of leaving it committed-but-unrecorded.
+  const result = await declineProduct(id, { id: user.id }, {
+    batchId,
+    record: async (tx, ctx) => {
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: 'PRODUCT_DECLINE',
+        entityType: 'PRODUCT',
+        entityId: id,
+        action: `Declined product ${id}`,
+        details: { reversed: ctx.reversed, alreadyDeclined: ctx.alreadyDeclined },
+        batchId,
+      });
+    },
   });
 
   const response = NextResponse.json(result);

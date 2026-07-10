@@ -28,17 +28,34 @@ export type DeclineResult = {
  *      re-opens it in the review queue.
  *
  * Returns { reversed, alreadyDeclined }.
+ *
+ * Phase C (DECLINE SEAM FIX — R-D2): the caller may pass an in-transaction
+ * `record` callback (and a shared `batchId`). It is invoked with THIS function's
+ * retried `tx` right before the result is returned, so the PRODUCT_DECLINE audit
+ * event is written atomically with the stock reversal — an unrecordable decline
+ * now hard-aborts and rolls back the reversal instead of committing it
+ * unrecorded. The callback fires on BOTH the no-op (already-declined) and the
+ * reversal paths so the event is emitted exactly as before. `batchId` is passed
+ * (not regenerated), so `withDeadlockRetry` re-runs reuse the same id.
  */
 export async function declineProduct(
   productId: number,
-  admin: { id: number }
+  admin: { id: number },
+  opts?: {
+    record?: (tx: Prisma.TransactionClient, ctx: DeclineResult) => Promise<void>;
+    batchId?: string | null;
+  }
 ): Promise<DeclineResult> {
+  const { record, batchId } = opts ?? {};
   return withDeadlockRetry(() =>
     prisma.$transaction(async (tx) => {
       // 0. Idempotency — bail if already declined/deleted (or never existed).
       const product = await tx.product.findUnique({ where: { id: productId } });
       if (!product || product.deletedAt) {
-        return { reversed: false, alreadyDeclined: true };
+        const result: DeclineResult = { reversed: false, alreadyDeclined: true };
+        // Record on THIS tx so the audit event is atomic with the (no-op) decline.
+        if (record) await record(tx, result);
+        return result;
       }
 
       // 1. Lock the product_locations rows FOR UPDATE, reverse to zero FIRST.
@@ -55,7 +72,11 @@ export async function declineProduct(
             productId,
             locationId: loc.locationId,
             delta: -loc.quantity,
-            logType: inventory_logs_logType.ADJUSTMENT,
+            // Phase C (P-C2): a decline reversal is a CORRECTION, not a neutral
+            // adjustment; batchId joins the row to the PRODUCT_DECLINE event.
+            logType: inventory_logs_logType.CORRECTION,
+            reasonCode: 'CORRECTION',
+            batchId,
           });
         }
       }
@@ -71,7 +92,10 @@ export async function declineProduct(
         },
       });
 
-      return { reversed: true, alreadyDeclined: false };
+      const result: DeclineResult = { reversed: true, alreadyDeclined: false };
+      // Record on THIS (retried) tx so the audit event is atomic with the reversal.
+      if (record) await record(tx, result);
+      return result;
     })
   );
 }

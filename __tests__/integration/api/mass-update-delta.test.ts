@@ -206,3 +206,52 @@ test("a summary ingestion failure does NOT fail the response (P-B1: 200 with res
   expect(body.successful).toBe(1);
   expect(body.failed).toBe(0);
 });
+
+// ---------------------------------------------------------------------------
+// Phase C phantom-summary fix (codex): processedChanges/successCount are folded
+// into the running totals only AFTER a batch's $transaction resolves, so a batch
+// that throws mid-way (all-or-nothing rollback) contributes ZERO rows to the
+// summary. Pre-fix, the first change's in-tx push survived the rollback and
+// inflated the summary; now it is discarded with the rolled-back writes.
+// ---------------------------------------------------------------------------
+test("phantom-summary fix: a batch that throws mid-way contributes ZERO rows to the summary", async () => {
+  // One batch, two changes. Change 1 succeeds (and pushes a log INSIDE the tx);
+  // change 2's product is missing, so the batch throws and rolls back.
+  const tx = {
+    product: {
+      findUnique: jest
+        .fn()
+        .mockResolvedValueOnce({ id: 1, name: "Widget", deletedAt: null })
+        .mockResolvedValueOnce(null), // second product missing -> throw -> rollback
+    },
+    location: {
+      findUnique: jest.fn().mockResolvedValue({ id: 1, name: "Warehouse" }),
+    },
+    product_locations: {
+      findUnique: jest.fn().mockResolvedValue({ quantity: 10 }),
+      upsert: jest.fn().mockResolvedValue({}),
+    },
+    inventory_logs: {
+      create: jest.fn().mockResolvedValue({ id: 999 }),
+    },
+  };
+  db.$transaction.mockImplementation(async (cb: any) => cb(tx));
+
+  const res = await POST(
+    postWith({
+      changes: [
+        { productId: 1, locationId: 1, newQuantity: 4, delta: 0 },
+        { productId: 2, locationId: 1, newQuantity: 7, delta: 0 },
+      ],
+    })
+  );
+
+  // All-or-nothing (default allowPartial=false): the whole batch rolled back, so
+  // there are zero successes and the summary event is NEVER recorded.
+  expect(res.status).toBe(500);
+  expect(recordIngestion).not.toHaveBeenCalled();
+
+  // Change 1 DID write a log inside the tx — proving the rollback (not a skipped
+  // write) is what keeps the phantom row out of the summary.
+  expect(tx.inventory_logs.create).toHaveBeenCalledTimes(1);
+});

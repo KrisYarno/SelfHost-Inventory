@@ -60,7 +60,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
         affectedCount: logs.length,
         batchId,
       });
-    }
+    },
+    // ER-C3: thread the event batchId so every DEDUCTION->SALE ledger row joins
+    // this deduction's bulk-update event.
+    { batchId }
   );
 
   const response = NextResponse.json({

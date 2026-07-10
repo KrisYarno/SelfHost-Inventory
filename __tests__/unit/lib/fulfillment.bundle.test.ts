@@ -468,6 +468,40 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     ]);
   });
 
+  // Phase C (P-C2): bundle-component deductions are SALEs; the route's event
+  // batchId is threaded through fulfillExternalOrder onto every ledger row so it
+  // joins the fulfillment audit event.
+  it('deducts each bundle component as SALE stamped with the threaded batchId', async () => {
+    const tx = getTx();
+    const order = buildBundleOrder({
+      snapshot: [
+        { internalProductId: 1, internalProductName: 'A', quantity: 1, sortOrder: 0 },
+        { internalProductId: 2, internalProductName: 'B', quantity: 2, sortOrder: 1 },
+      ],
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+    setupSuccessfulMocks(1);
+
+    // signature: (orderId, locationId, items, userId, _notes?, record?, batchId?)
+    await fulfillExternalOrder(
+      'ord1',
+      1,
+      [{ itemId: 'oi1', quantity: 1 }],
+      42,
+      undefined,
+      undefined,
+      'batch-c-bundle'
+    );
+
+    const calls = (createInventoryLog as jest.Mock).mock.calls;
+    expect(calls).toHaveLength(2);
+    for (const [data] of calls) {
+      expect(data.logType).toBe('SALE');
+      expect(data.batchId).toBe('batch-c-bundle');
+    }
+  });
+
   it('does NOT re-write the snapshot when one already exists (idempotency)', async () => {
     const tx = getTx();
     const order = buildBundleOrder({

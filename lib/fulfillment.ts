@@ -360,7 +360,13 @@ export async function fulfillExternalOrder(
   record?: (
     tx: Prisma.TransactionClient,
     result: FulfillmentResult
-  ) => Promise<void>
+  ) => Promise<void>,
+  /**
+   * Phase C (P-C1/P-C2): the route's per-request event batchId. Stamped onto
+   * BOTH deduction ledger rows (single + bundle-component) so each SALE row
+   * joins the fulfillment audit event. NULL for callers that don't record.
+   */
+  batchId?: string | null
 ): Promise<FulfillmentResult> {
   const result: FulfillmentResult = {
     fulfilled: [],
@@ -579,7 +585,10 @@ export async function fulfillExternalOrder(
                   productId: component.internalProductId,
                   locationId,
                   delta: -deductQty,
-                  logType: inventory_logs_logType.ADJUSTMENT,
+                  // Phase C (P-C2): a bundle-component deduction is a SALE, not a
+                  // neutral adjustment; batchId joins the row to the audit event.
+                  logType: inventory_logs_logType.SALE,
+                  batchId,
                 },
                 tx
               );
@@ -712,7 +721,10 @@ export async function fulfillExternalOrder(
               productId,
               locationId,
               delta: -quantityToFulfill,
-              logType: inventory_logs_logType.ADJUSTMENT,
+              // Phase C (P-C2): a fulfillment deduction is a SALE; batchId joins
+              // the row to the fulfillment audit event.
+              logType: inventory_logs_logType.SALE,
+              batchId,
             },
             tx
           );

@@ -244,6 +244,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
   console.log(`Processing ${validChanges.length} changes in ${batches.length} batches`);
 
+  // Phase C (P-C1): ONE batchId for the whole operation, stamped on every ledger
+  // row below AND reused by the post-batch summary event so the summary joins its
+  // rows. Hoisted above the loop so all batches share it.
+  const batchId = newBatchId();
+
   // Process each batch
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
     const batch = batches[batchIndex];
@@ -252,8 +257,15 @@ export const POST = apiHandler(async (request: NextRequest) => {
     );
 
     try {
-      await prisma.$transaction(
+      // Phantom-summary fix (codex): accumulate THIS batch's committed results in
+      // LOCAL vars and fold them into processedChanges/successCount only AFTER the
+      // $transaction resolves. Mutating the shared arrays inside the tx let a
+      // rolled-back batch inflate the summary — the DB writes vanished on rollback
+      // but the in-memory pushes did not.
+      const batchResult = await prisma.$transaction(
         async (tx) => {
+          const batchProcessed: any[] = [];
+          let batchSuccess = 0;
           // Process each change individually within the transaction
           for (const change of batch) {
             try {
@@ -310,7 +322,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
               // Skip if no actual change (based on the REAL delta, not the client's)
               if (serverDelta === 0) {
-                successCount++;
+                batchSuccess++;
                 continue;
               }
 
@@ -323,6 +335,8 @@ export const POST = apiHandler(async (request: NextRequest) => {
                   delta: serverDelta,
                   changeTime: new Date(),
                   logType: "ADJUSTMENT",
+                  // Phase C (P-C1): join each ledger row to the summary event.
+                  batchId,
                 },
               });
 
@@ -345,7 +359,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
                 },
               });
 
-              processedChanges.push({
+              batchProcessed.push({
                 ...change,
                 // Carry the truthful (server-recomputed) delta forward so the
                 // bulk audit entry also reflects the real change, not the client's.
@@ -354,7 +368,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
                 productName: product.name,
                 locationName: location.name,
               });
-              successCount++;
+              batchSuccess++;
             } catch (error: any) {
               // If error wasn't already handled, create a generic failure
               if (
@@ -385,12 +399,18 @@ export const POST = apiHandler(async (request: NextRequest) => {
               }
             }
           }
+          return { batchProcessed, batchSuccess };
         },
         {
           isolationLevel: "Serializable",
           timeout: 10000, // 10 second timeout per batch
         }
       );
+      // Batch committed — NOW fold its results into the running totals. A batch
+      // that threw never reaches here (control jumps to the catch below), so its
+      // partial rows are correctly discarded along with the rolled-back writes.
+      processedChanges.push(...batchResult.batchProcessed);
+      successCount += batchResult.batchSuccess;
     } catch (transactionError: any) {
       console.error(`=== BATCH ${batchIndex + 1} TRANSACTION ERROR ===`);
       console.error("Transaction error:", transactionError);
@@ -461,8 +481,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
       details.rowsOmitted = true;
     }
 
-    const batchId = newBatchId();
-    // Post-batch summary: stock committed per-batch above; a summary-write failure must not 500 a succeeded operation (P-B1). Per-row inventory_logs are authoritative.
+    // Post-batch summary reuses the operation-wide batchId (hoisted above the
+    // batch loop) so it joins the ledger rows it summarizes. Stock committed
+    // per-batch above; a summary-write failure must not 500 a succeeded operation
+    // (P-B1). Per-row inventory_logs are authoritative.
     await recordIngestion(
       {
         actor: { userId: user.id },

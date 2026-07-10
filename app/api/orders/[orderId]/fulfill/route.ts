@@ -87,6 +87,9 @@ export const POST = apiHandler(async (
               productId: f.productId,
               productName: f.productName,
               quantity: f.quantity,
+              // P-C8: carry the deduction's ledger row id (parity with unfulfill)
+              // so the audit event points straight at its SALE row.
+              inventoryLogId: f.inventoryLogId,
             };
           }),
           notes: body.notes,
@@ -95,7 +98,10 @@ export const POST = apiHandler(async (
         affectedCount: r.fulfilled.length,
         batchId,
       });
-    }
+    },
+    // Phase C (P-C1): thread the event batchId into the deduction tx so every
+    // SALE ledger row it writes joins this fulfillment's audit event.
+    batchId
   );
 
   // Determine overall fulfillment status

@@ -888,4 +888,101 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     expect(productIds).toEqual(expect.arrayContaining([10, 20]))
     expect(productIds).not.toContain(50) // live composition must be ignored
   })
+
+  // -----------------------------------------------------------------------
+  // Phase C (P-C2): restoration ledger rows are CORRECTION + reasonCode, joined
+  // to the unfulfill audit event by the route's shared batchId (single path).
+  // -----------------------------------------------------------------------
+  it('Phase C: single-product restorations are CORRECTION + reasonCode joined by batchId', async () => {
+    const tx = setupTransaction()
+    const order = buildOrder()
+
+    tx.externalOrder.findUnique.mockResolvedValue(order as any)
+    tx.product.findUnique.mockResolvedValue({ id: 1, deletedAt: null } as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 5, fulfilledQty: 0 },
+      { quantity: 3, fulfilledQty: 0 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    const req = buildRequest({
+      items: [
+        { itemId: 'item-1', productId: 1, quantity: 5, locationId: 1 },
+        { itemId: 'item-2', productId: 2, quantity: 3, locationId: 1 },
+      ],
+    })
+
+    const response = await POST(req, { params: { orderId: 'order-1' } })
+    const data = await response.json()
+    expect(data.success).toBe(true)
+    expect(data.restored).toHaveLength(2)
+
+    // The event's batchId is what the ledger rows must join on.
+    const auditData = (tx.auditLog.create as jest.Mock).mock.calls[0][0].data
+    expect(typeof auditData.batchId).toBe('string')
+    expect(auditData.batchId).toBeTruthy()
+
+    const { createInventoryLog: mockLog } = require('@/lib/inventory')
+    const logCalls = (mockLog as jest.Mock).mock.calls
+    expect(logCalls).toHaveLength(2)
+    for (const [logArg] of logCalls) {
+      expect(logArg.logType).toBe('CORRECTION')
+      expect(logArg.reasonCode).toBe('CORRECTION')
+      expect(logArg.batchId).toBe(auditData.batchId)
+    }
+  })
+
+  // -----------------------------------------------------------------------
+  // Phase C (P-C2): bundle-component restorations carry the same CORRECTION +
+  // reasonCode + batchId as the single path (both restoration sites).
+  // -----------------------------------------------------------------------
+  it('Phase C: bundle-component restorations are CORRECTION + reasonCode joined by batchId', async () => {
+    const tx = setupTransaction()
+    const bundleOrder = buildOrder({
+      items: [
+        {
+          id: 'item-1',
+          orderId: 'order-1',
+          quantity: 1,
+          fulfilledQty: 1,
+          isMapped: true,
+          name: 'Bundle Product',
+          sku: 'BUNDLE-001',
+          bundleComponentSnapshot: [
+            { internalProductId: 10, internalProductName: 'X', quantity: 1, sortOrder: 0 },
+            { internalProductId: 20, internalProductName: 'Y', quantity: 2, sortOrder: 1 },
+          ],
+          productLink: { internalProductId: 99, isBundle: true, bundleComponents: [] },
+        },
+      ],
+    })
+
+    tx.externalOrder.findUnique.mockResolvedValue(bundleOrder as any)
+    tx.$executeRaw.mockResolvedValue(1 as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 1, fulfilledQty: 0 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    const req = buildRequest({
+      items: [{ itemId: 'item-1', productId: 99, quantity: 1, locationId: 1 }],
+    })
+
+    const response = await POST(req, { params: { orderId: 'order-1' } })
+    const data = await response.json()
+    expect(data.success).toBe(true)
+    expect(data.restored).toHaveLength(1)
+
+    const auditData = (tx.auditLog.create as jest.Mock).mock.calls[0][0].data
+    expect(auditData.batchId).toBeTruthy()
+
+    const { createInventoryLog: mockLog } = require('@/lib/inventory')
+    const logCalls = (mockLog as jest.Mock).mock.calls
+    expect(logCalls).toHaveLength(2)
+    for (const [logArg] of logCalls) {
+      expect(logArg.logType).toBe('CORRECTION')
+      expect(logArg.reasonCode).toBe('CORRECTION')
+      expect(logArg.batchId).toBe(auditData.batchId)
+    }
+  })
 })

@@ -89,6 +89,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
           locationId: adjustment.locationId,
           delta: adjustment.delta,
           logType: adjustment.logType,
+          // Task 2 seam: the shared schema now accepts a per-item reasonCode;
+          // persist it on the ledger row instead of silently dropping it.
+          reasonCode: adjustment.reasonCode ?? null,
+          // ER-C3: join every ledger row to this request's bulk-update event.
+          batchId,
         });
 
         // applyStockDelta's log includes full relations (users incl.

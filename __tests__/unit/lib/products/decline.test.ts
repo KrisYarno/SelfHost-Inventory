@@ -155,3 +155,70 @@ describe('declineProduct — idempotency', () => {
     expect(result).toEqual({ reversed: false, alreadyDeclined: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase C (DECLINE SEAM FIX / P-C2): the reversal is now a CORRECTION carrying
+// the shared batchId, and the caller's recordChange joins THIS retried tx via
+// the optional `record` callback (hard-abort restored). These pin both.
+// ---------------------------------------------------------------------------
+describe('declineProduct — Phase C ledger semantics + record seam', () => {
+  it('reverses stock as CORRECTION + reasonCode, stamped with the shared batchId', async () => {
+    mockTx.product.findUnique.mockResolvedValue({ id: 10, deletedAt: null } as any);
+    mockTx.$queryRaw.mockResolvedValue([
+      { id: 1, locationId: 1, quantity: 5 },
+    ] as any);
+
+    await declineProduct(10, { id: 99 }, { batchId: 'batch-decline-1' });
+
+    expect(mockApplyStockDelta).toHaveBeenCalledTimes(1);
+    expect(mockApplyStockDelta.mock.calls[0][1]).toMatchObject({
+      productId: 10,
+      locationId: 1,
+      delta: -5,
+      userId: 99,
+      logType: 'CORRECTION',
+      reasonCode: 'CORRECTION',
+      batchId: 'batch-decline-1',
+    });
+  });
+
+  it('records the change on the SAME (retried) tx as the reversal, after it (mock identity)', async () => {
+    mockTx.product.findUnique.mockResolvedValue({ id: 10, deletedAt: null } as any);
+    mockTx.$queryRaw.mockResolvedValue([
+      { id: 1, locationId: 1, quantity: 5 },
+    ] as any);
+
+    const record = jest.fn(async (_tx: any, _ctx: any) => {});
+    const result = await declineProduct(10, { id: 99 }, { record, batchId: 'b1' });
+
+    expect(record).toHaveBeenCalledTimes(1);
+    // Same tx object drove both the stock write and the audit write.
+    expect(record.mock.calls[0][0]).toBe(mockTx);
+    expect(mockApplyStockDelta.mock.calls[0][0]).toBe(mockTx);
+    // ctx carries the DeclineResult.
+    expect(record.mock.calls[0][1]).toEqual({ reversed: true, alreadyDeclined: false });
+    expect(result).toEqual({ reversed: true, alreadyDeclined: false });
+    // The reversal + soft-delete happen BEFORE the record call.
+    expect(mockApplyStockDelta.mock.invocationCallOrder[0]).toBeLessThan(
+      record.mock.invocationCallOrder[0]
+    );
+    expect(mockTx.product.update.mock.invocationCallOrder[0]).toBeLessThan(
+      record.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('still records (no-op ctx) on the already-declined path, no reversal', async () => {
+    mockTx.product.findUnique.mockResolvedValue({ id: 10, deletedAt: new Date() } as any);
+
+    const record = jest.fn(async (_tx: any, _ctx: any) => {});
+    const result = await declineProduct(10, { id: 99 }, { record });
+
+    expect(mockApplyStockDelta).not.toHaveBeenCalled();
+    expect(mockTx.product.update).not.toHaveBeenCalled();
+    // The audit event is still emitted, on the same tx, with the no-op ctx.
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(record.mock.calls[0][0]).toBe(mockTx);
+    expect(record.mock.calls[0][1]).toEqual({ reversed: false, alreadyDeclined: true });
+    expect(result).toEqual({ reversed: false, alreadyDeclined: true });
+  });
+});

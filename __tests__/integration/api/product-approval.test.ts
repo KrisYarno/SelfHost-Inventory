@@ -158,13 +158,28 @@ describe('POST /api/admin/products/[id]/decline', () => {
     const body = await resp.json();
     expect(body).toEqual({ reversed: true, alreadyDeclined: false });
 
-    expect(declineProduct as jest.Mock).toHaveBeenCalledWith(7, { id: ADMIN_USER.id });
+    // Phase C seam fix: the route hands declineProduct an in-tx record callback +
+    // a shared batchId instead of recording in a separate tx of its own.
+    expect(declineProduct as jest.Mock).toHaveBeenCalledTimes(1);
+    const [pid, admin, opts] = (declineProduct as jest.Mock).mock.calls[0];
+    expect(pid).toBe(7);
+    expect(admin).toEqual({ id: ADMIN_USER.id });
+    expect(typeof opts.record).toBe('function');
+    expect(opts.batchId).toBe('test-batch-id');
+
+    // declineProduct is mocked, so the callback has not fired yet.
+    expect(mockRecordChange).not.toHaveBeenCalled();
+    // Driving the callback (as declineProduct's tx would) records PRODUCT_DECLINE
+    // with the DeclineResult ctx + the shared batchId.
+    await opts.record({}, { reversed: true, alreadyDeclined: false });
     expect(mockRecordChange).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         actionType: 'PRODUCT_DECLINE',
         entityId: 7,
         actor: { userId: ADMIN_USER.id },
+        batchId: 'test-batch-id',
+        details: { reversed: true, alreadyDeclined: false },
       })
     );
   });
@@ -181,7 +196,10 @@ describe('POST /api/admin/products/[id]/decline', () => {
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body).toEqual({ reversed: false, alreadyDeclined: true });
-    expect(declineProduct as jest.Mock).toHaveBeenCalledWith(7, { id: ADMIN_USER.id });
+    const [pid, admin, opts] = (declineProduct as jest.Mock).mock.calls[0];
+    expect(pid).toBe(7);
+    expect(admin).toEqual({ id: ADMIN_USER.id });
+    expect(typeof opts.record).toBe('function');
   });
 
   it('returns 403 for a non-admin (requireAdmin throws, lib not called)', async () => {

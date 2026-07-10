@@ -204,7 +204,11 @@ export const POST = apiHandler(async (
                 productId: component.internalProductId,
                 locationId: unfulfillItem.locationId,
                 delta: +restoreQty, // POSITIVE (restoration)
-                logType: inventory_logs_logType.ADJUSTMENT,
+                // Phase C (P-C2): unfulfill reverses a prior SALE — a CORRECTION,
+                // not a fresh adjustment; batchId joins the row to the audit event.
+                logType: inventory_logs_logType.CORRECTION,
+                reasonCode: 'CORRECTION',
+                batchId,
               },
               tx
             );
@@ -316,7 +320,11 @@ export const POST = apiHandler(async (
             productId: unfulfillItem.productId,
             locationId: unfulfillItem.locationId,
             delta: +unfulfillItem.quantity, // POSITIVE (restoration)
-            logType: inventory_logs_logType.ADJUSTMENT,
+            // Phase C (P-C2): unfulfill reverses a prior SALE — a CORRECTION,
+            // not a fresh adjustment; batchId joins the row to the audit event.
+            logType: inventory_logs_logType.CORRECTION,
+            reasonCode: 'CORRECTION',
+            batchId,
           },
           tx
         );
