@@ -23,6 +23,10 @@ import prisma from '@/lib/prisma';
 // with lib/audit.ts in Task 14.
 // ---------------------------------------------------------------------------
 
+// D5 closure prune (Phase B T10): EMAIL_SENT, SYSTEM_MAINTENANCE,
+// INVENTORY_STOCK_IN, INVENTORY_DEDUCTION, LOCATION_UPDATE, PRODUCT_BULK_DELETE,
+// CATALOG_IMPORT (spec R-D17) removed — grep-verified zero emit sites;
+// historical DB rows render via the log-style unknown-actionType fallback.
 export type AuditActionType =
   // --- carried over from lib/audit.ts ---
   | 'USER_APPROVAL'
@@ -34,7 +38,6 @@ export type AuditActionType =
   | 'PRODUCT_CREATE'
   | 'PRODUCT_UPDATE'
   | 'PRODUCT_DELETE'
-  | 'PRODUCT_BULK_DELETE'
   | 'PRODUCT_APPROVE'
   | 'PRODUCT_DECLINE'
   | 'STAGING_CREATE'
@@ -44,8 +47,6 @@ export type AuditActionType =
   | 'SCRATCHPAD_UPDATE'
   | 'SCRATCHPAD_DELETE'
   | 'INVENTORY_ADJUSTMENT'
-  | 'INVENTORY_STOCK_IN'
-  | 'INVENTORY_DEDUCTION'
   | 'INVENTORY_BULK_UPDATE'
   | 'INVENTORY_TRANSFER'
   | 'INVENTORY_TRANSFER_AUTO_ADD'
@@ -53,12 +54,9 @@ export type AuditActionType =
   | 'EXTERNAL_ORDER_PARTIAL_FULFILLMENT'
   | 'EXTERNAL_ORDER_UNFULFILLMENT'
   | 'LOCATION_CREATE'
-  | 'LOCATION_UPDATE'
   | 'LOCATION_DELETE'
   | 'SETTINGS_UPDATE'
-  | 'EMAIL_SENT'
   | 'DATA_EXPORT'
-  | 'SYSTEM_MAINTENANCE'
   // --- spec D5 additions ---
   | 'USER_ROLE_CHANGE'
   | 'ACCOUNT_PASSWORD_CHANGE'
@@ -76,7 +74,6 @@ export type AuditActionType =
   | 'BUNDLE_CHANGE'
   | 'PRODUCT_RESTORE'
   | 'SIGNUP'
-  | 'CATALOG_IMPORT'
   | 'BACKUP_CREATED'
   // --- Phase B additions ---
   | 'STAGING_UPDATE'

@@ -372,7 +372,7 @@ describe('change-tracking: recordChange', () => {
     await expect(
       recordChange(mockTx, {
         actor: { kind: 'SYSTEM' },
-        actionType: 'SYSTEM_MAINTENANCE',
+        actionType: 'BACKUP_CREATED',
         entityType: 'SYSTEM',
         action: 'Cron ran',
       }),
