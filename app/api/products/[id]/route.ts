@@ -219,10 +219,20 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: RouteP
   }
 
   const product = await prisma.$transaction(async (tx) => {
+    // D8: snapshot the stock held at delete time (nonzero rows only). No physical
+    // movement occurs — a soft-deleted product's stock silently leaves
+    // current-state views, so the event documents exactly what was held and when
+    // it left view. Read inside the tx so the snapshot is consistent with the flip.
+    const heldStock = await tx.product_locations.findMany({
+      where: { productId, quantity: { not: 0 } },
+      select: { locationId: true, quantity: true },
+    });
+
+    const deletedAt = new Date();
     const deleted = await tx.product.update({
       where: { id: productId },
       data: {
-        deletedAt: new Date(),
+        deletedAt,
         deletedBy: user.id,
       },
     });
@@ -233,7 +243,8 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: RouteP
       entityType: "PRODUCT",
       entityId: deleted.id,
       action: `Deleted product "${deleted.name}"`,
-      details: { productName: deleted.name },
+      changes: { deletedAt: { from: null, to: deletedAt.toISOString() } },
+      details: { productName: deleted.name, heldStock },
     });
 
     return deleted;

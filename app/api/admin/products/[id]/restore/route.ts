@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { recordChange } from "@/lib/change-tracking";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +13,7 @@ interface RouteParams {
 
 // POST /api/admin/products/[id]/restore - Restore a soft deleted product (Admin only)
 export const POST = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
-  await requireAdmin();
+  const { user } = await requireAdmin();
 
   await requireCSRF(request);
 
@@ -34,13 +35,36 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     return NextResponse.json({ error: "Product is not deleted" }, { status: 400 });
   }
 
-  // Restore the product
-  const product = await prisma.product.update({
-    where: { id: productId },
-    data: {
-      deletedAt: null,
-      deletedBy: null,
-    },
+  const priorDeletedAt = existingProduct.deletedAt;
+
+  // Restore + record atomically (D4/D8): capture the stock that RE-ENTERS
+  // current-state views (nonzero rows only) as the soft-delete is reversed —
+  // the symmetric counterpart of PRODUCT_DELETE's heldStock snapshot.
+  const product = await prisma.$transaction(async (tx) => {
+    const heldStock = await tx.product_locations.findMany({
+      where: { productId, quantity: { not: 0 } },
+      select: { locationId: true, quantity: true },
+    });
+
+    const restored = await tx.product.update({
+      where: { id: productId },
+      data: {
+        deletedAt: null,
+        deletedBy: null,
+      },
+    });
+
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "PRODUCT_RESTORE",
+      entityType: "PRODUCT",
+      entityId: restored.id,
+      action: `Restored product "${restored.name}"`,
+      changes: { deletedAt: { from: priorDeletedAt.toISOString(), to: null } },
+      details: { productName: restored.name, heldStock },
+    });
+
+    return restored;
   });
 
   return NextResponse.json({

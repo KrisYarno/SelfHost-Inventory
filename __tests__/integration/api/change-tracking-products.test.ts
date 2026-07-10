@@ -39,6 +39,8 @@ jest.mock('@/lib/prisma', () => {
       findUnique: jest.fn(),
       findFirst: jest.fn(),
     },
+    // DELETE now snapshots held stock (D8) via tx.product_locations.findMany.
+    product_locations: { findMany: jest.fn(async () => []) },
     productLink: { findUnique: jest.fn() },
     location: { findUnique: jest.fn() },
     auditLog: { create: jest.fn(async () => ({ id: 1 })) },
