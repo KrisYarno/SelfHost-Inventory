@@ -3,6 +3,8 @@ import { deriveExternalOrderMeta } from "@/lib/external-orders/meta";
 import { AppError } from "@/lib/error-handling";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import prisma from "@/lib/prisma";
+import { diff } from "@/lib/change-tracking";
+import type { ChangeDiff } from "@/lib/change-tracking";
 import type { PlatformType, PlatformAdapter, NormalizedOrder } from "@/lib/platforms/core/types";
 import type { Integration } from "@prisma/client";
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -103,24 +105,93 @@ type StatusCompute = { statusMode: "compute"; platform: PlatformType };
 type StatusPreserve = { statusMode: "preserve"; internalStatus: string };
 type StatusHandling = StatusCompute | StatusPreserve;
 
+/**
+ * Change summary returned by `upsertOrderWithItems`. Consumed by the webhook,
+ * cron sync, and recheck callers to drive R-D4 ingestion recording — a change
+ * event is written ONLY when `changed` is true (effective transition, not every
+ * re-delivery). `itemsProcessed`/`itemsMapped` are PRESERVED from the historical
+ * return shape (the recheck response contract depends on them).
+ */
+export interface OrderChangeSummary {
+  /** true when the upsert took the create branch (no prior row). */
+  created: boolean;
+  /** created || material field diff || item-set change (the R-D4 gate). */
+  changed: boolean;
+  /** Material field changes only, from/to (normalized per ER-B1). */
+  changes: ChangeDiff;
+  /**
+   * Rows removed by the stale-item cleanup, captured before the deleteMany
+   * (R-D16). Note: `id` is the ExternalOrderItem cuid (String), not a number.
+   */
+  prunedItems: Array<{
+    id: string;
+    externalItemId: string | null;
+    productLinkId: string | null;
+  }>;
+  /** ExternalOrder cuid. */
+  orderId: string;
+  orderNumber: string | null;
+  itemsProcessed: number;
+  itemsMapped: number;
+}
+
+type TransactionClient = Omit<
+  PrismaClient,
+  "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends"
+>;
+
 export type UpsertOrderParams = {
   integrationId: string;
   companyId: string;
   storeUrl: string;
   normalized: NormalizedOrder;
   status: StatusHandling;
+  /**
+   * User-tier same-tx recording seam (P-B2, recheck). When present AND the
+   * upsert produced an effective change, it is awaited with the SAME tx client
+   * as the write, so an unrecordable user change aborts the whole upsert.
+   * Machine paths (webhook/cron) do NOT use this — they record best-effort via
+   * `recordIngestion` AFTER the returned summary instead.
+   */
+  onRecorded?: (
+    tx: Prisma.TransactionClient,
+    summary: OrderChangeSummary
+  ) => Promise<void>;
 };
 
-export type UpsertOrderResult = {
-  orderId: string;
-  itemsProcessed: number;
-  itemsMapped: number;
+/** A normalized, comparison-stable line item (ER-B1). */
+type NormalizedItemRow = {
+  externalItemId: string | null;
+  quantity: number;
+  unitPrice: string | null;
 };
 
-type TransactionClient = Omit<
-  PrismaClient,
-  "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends"
->;
+/**
+ * Normalize an item set for diffing (ER-B1): money via String() (Prisma Decimal
+ * never compares equal to a parsed number raw), nullish → null, sorted by a
+ * stable key — `externalItemId` when present, else the `(name, quantity)` tuple
+ * (the null-id findFirst-fallback rows carry no external identity).
+ */
+function normalizeOrderItems(
+  items: Array<{
+    externalItemId: string | null;
+    quantity: number;
+    price: unknown;
+    name?: string | null;
+  }>
+): NormalizedItemRow[] {
+  return items
+    .map((i) => ({
+      externalItemId: i.externalItemId ?? null,
+      quantity: i.quantity,
+      unitPrice:
+        i.price === null || i.price === undefined ? null : String(i.price),
+      _key:
+        i.externalItemId ?? JSON.stringify([i.name ?? "", i.quantity]),
+    }))
+    .sort((a, b) => (a._key < b._key ? -1 : a._key > b._key ? 1 : 0))
+    .map(({ _key, ...rest }) => rest);
+}
 
 /**
  * Atomically upsert an ExternalOrder and its line items.
@@ -137,11 +208,46 @@ type TransactionClient = Omit<
 export async function upsertOrderWithItems(
   prismaClient: PrismaClient,
   params: UpsertOrderParams
-): Promise<UpsertOrderResult> {
-  const { integrationId, companyId, storeUrl, normalized, status } = params;
+): Promise<OrderChangeSummary> {
+  const { integrationId, companyId, storeUrl, normalized, status, onRecorded } =
+    params;
 
   return prismaClient.$transaction(
     async (tx: TransactionClient) => {
+      // R-D4 gate (P-B3): read the before-image INSIDE the tx, before the
+      // upsert, so the diff sees the material field set (nativeStatus,
+      // financialStatus, fulfillmentStatus, internalStatus, total, currency,
+      // customer, orderNumber) + the item set — not the write-only
+      // externalStatusHash (which omits total/currency/customer/line-items).
+      const beforeOrder = await tx.externalOrder.findUnique({
+        where: {
+          integrationId_externalId: {
+            integrationId,
+            externalId: normalized.externalId,
+          },
+        },
+        select: {
+          nativeStatus: true,
+          financialStatus: true,
+          fulfillmentStatus: true,
+          internalStatus: true,
+          total: true,
+          currency: true,
+          customerEmail: true,
+          customerName: true,
+          orderNumber: true,
+          items: {
+            select: {
+              externalItemId: true,
+              quantity: true,
+              price: true,
+              name: true,
+            },
+          },
+        },
+      });
+      const created = beforeOrder === null || beforeOrder === undefined;
+
       // Determine internal status based on discriminated union
       const internalStatus =
         status.statusMode === "compute"
@@ -344,27 +450,118 @@ export async function upsertOrderWithItems(
       // P0-3: Run unconditionally. If seenExternalItemIds is empty (every line
       // item in the payload lacked an externalItemId), delete all rows with a
       // non-null externalItemId for this order. Prisma's empty `notIn: []` is
-      // ambiguous, so we split into two explicit branches.
-      if (seenExternalItemIds.size > 0) {
-        await tx.externalOrderItem.deleteMany({
-          where: {
-            orderId: externalOrder.id,
-            AND: [
-              { externalItemId: { not: null } },
-              { externalItemId: { notIn: Array.from(seenExternalItemIds) } },
-            ],
+      // ambiguous, so we split into two explicit branches. The where-clause is
+      // captured so we can read the to-be-pruned rows before they vanish.
+      const staleWhere: Prisma.ExternalOrderItemWhereInput =
+        seenExternalItemIds.size > 0
+          ? {
+              orderId: externalOrder.id,
+              AND: [
+                { externalItemId: { not: null } },
+                { externalItemId: { notIn: Array.from(seenExternalItemIds) } },
+              ],
+            }
+          : {
+              orderId: externalOrder.id,
+              externalItemId: { not: null },
+            };
+
+      // R-D16: capture id + identity of the rows about to be pruned BEFORE the
+      // deleteMany — today they vanish unrecorded. KNOWN LIMITATION: stale
+      // null-externalItemId items are never pruned (the cleanup is non-null
+      // scoped), so they cannot appear here — unchanged behavior, now written
+      // down.
+      const prunedItems =
+        (await tx.externalOrderItem.findMany({
+          where: staleWhere,
+          select: { id: true, externalItemId: true, productLinkId: true },
+        })) ?? [];
+
+      await tx.externalOrderItem.deleteMany({ where: staleWhere });
+
+      // Read the post-write item set (after the loop + prune) so BOTH sides of
+      // the item diff are Decimal-typed and normalize identically (ER-B1 — a
+      // number built from normalized.lineItems would never re-compare equal).
+      const afterItemRows =
+        (await tx.externalOrderItem.findMany({
+          where: { orderId: externalOrder.id },
+          select: {
+            externalItemId: true,
+            quantity: true,
+            price: true,
+            name: true,
           },
-        });
-      } else {
-        await tx.externalOrderItem.deleteMany({
-          where: {
-            orderId: externalOrder.id,
-            externalItemId: { not: null },
-          },
-        });
+        })) ?? [];
+
+      // --- R-D4 material field-set diff (P-B3, ER-B1 normalization) ---
+      const beforeScalar = {
+        nativeStatus: beforeOrder?.nativeStatus ?? null,
+        financialStatus: beforeOrder?.financialStatus ?? null,
+        fulfillmentStatus: beforeOrder?.fulfillmentStatus ?? null,
+        internalStatus: beforeOrder?.internalStatus ?? null,
+        total:
+          beforeOrder == null || beforeOrder.total == null
+            ? null
+            : String(beforeOrder.total),
+        currency: beforeOrder?.currency ?? null,
+        customerEmail: beforeOrder?.customerEmail ?? null,
+        customerName: beforeOrder?.customerName ?? null,
+        orderNumber: beforeOrder?.orderNumber ?? null,
+      };
+      const afterScalar = {
+        nativeStatus: normalized.nativeStatus ?? null,
+        financialStatus: normalized.financialStatus ?? null,
+        fulfillmentStatus: normalized.fulfillmentStatus ?? null,
+        internalStatus,
+        total: normalized.total == null ? null : String(normalized.total),
+        currency: normalized.currency ?? null,
+        customerEmail: normalized.customer?.email ?? null,
+        customerName: normalized.customer?.name ?? null,
+        orderNumber: normalized.externalOrderNumber ?? null,
+      };
+      const changes: ChangeDiff = diff(beforeScalar, afterScalar, [
+        "nativeStatus",
+        "financialStatus",
+        "fulfillmentStatus",
+        "internalStatus",
+        "total",
+        "currency",
+        "customerEmail",
+        "customerName",
+        "orderNumber",
+      ]);
+
+      const beforeItems = normalizeOrderItems(beforeOrder?.items ?? []);
+      const afterItems = normalizeOrderItems(afterItemRows);
+      const itemsChanged =
+        JSON.stringify(beforeItems) !== JSON.stringify(afterItems);
+      if (itemsChanged || prunedItems.length > 0) {
+        changes.items = { from: beforeItems, to: afterItems };
       }
 
-      return { orderId: externalOrder.id, itemsProcessed, itemsMapped };
+      const changed = created || Object.keys(changes).length > 0;
+
+      const summary: OrderChangeSummary = {
+        created,
+        changed,
+        changes,
+        prunedItems,
+        orderId: externalOrder.id,
+        orderNumber:
+          externalOrder.orderNumber ?? normalized.externalOrderNumber ?? null,
+        itemsProcessed,
+        itemsMapped,
+      };
+
+      // User-tier same-tx recording seam (P-B2, recheck). Machine ingestion
+      // paths (webhook/cron) do NOT pass onRecorded — they call recordIngestion
+      // best-effort AFTER this returns. A throw here aborts the whole upsert
+      // (correct: an unrecordable user change must not commit).
+      if (onRecorded && changed) {
+        await onRecorded(tx, summary);
+      }
+
+      return summary;
     },
     { timeout: 10000 }
   );

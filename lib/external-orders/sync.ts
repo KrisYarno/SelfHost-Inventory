@@ -1,7 +1,9 @@
 import prisma from "@/lib/prisma";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import { decryptOrNull, hostFromStoreUrl, upsertOrderWithItems } from "@/lib/external-orders/shared";
+import { recordIngestion } from "@/lib/change-tracking";
 import type { PlatformType } from "@/lib/platforms/core/types";
+import type { Prisma } from "@prisma/client";
 
 type SyncResult = {
   integrationId: string;
@@ -232,6 +234,26 @@ export async function syncIntegrationOrders(
     console.warn(
       `[sync] Skipping integration ${integrationId}: another sync run holds the lock`
     );
+    const skipMessage = 'Sync skipped — another run is in progress';
+    // R-D2: the lock-skip is a durable job signal too (today it was
+    // response-only). Best-effort — must not throw out of this early return.
+    try {
+      await prisma.integration.update({
+        where: { id: integrationId },
+        data: {
+          lastSyncError: JSON.stringify({
+            at: new Date().toISOString(),
+            errors: [{ message: skipMessage }],
+            errorCount: 1,
+          }),
+        },
+      });
+    } catch (writeError) {
+      console.error(
+        `[sync] Failed to write lock-skip lastSyncError for ${integrationId}:`,
+        writeError
+      );
+    }
     return {
       integrationId,
       platform,
@@ -240,7 +262,7 @@ export async function syncIntegrationOrders(
       upserted: 0,
       skipped: 0,
       deleted: 0,
-      errors: [{ message: 'Sync skipped — another run is in progress' }],
+      errors: [{ message: skipMessage }],
       lastSyncAt: integration.lastSyncAt?.toISOString() ?? new Date(0).toISOString(),
     };
   }
@@ -302,13 +324,47 @@ export async function syncIntegrationOrders(
     try {
       const normalized = adapter.parseOrderWebhook(JSON.stringify(order));
 
-      await upsertOrderWithItems(prisma, {
+      const summary = await upsertOrderWithItems(prisma, {
         integrationId: integration.id,
         companyId: integration.companyId,
         storeUrl: integration.storeUrl,
         normalized,
         status: { statusMode: "compute", platform },
       });
+
+      // R-D4: machine (SYSTEM) ingestion — record only an effective transition,
+      // best-effort (never throws into the loop). A record failure writes the
+      // durable per-integration lastSyncError signal (R-D2).
+      if (summary.changed) {
+        await recordIngestion(
+          {
+            actor: { kind: "SYSTEM" },
+            actionType: summary.created
+              ? "EXTERNAL_ORDER_CREATE"
+              : "EXTERNAL_ORDER_UPDATE",
+            entityType: "ORDER",
+            entityId: summary.orderId,
+            companyId: integration.companyId,
+            action: `Sync ${summary.created ? "created" : "updated"} order ${summary.orderNumber ?? summary.orderId}`,
+            changes: summary.changes,
+            details: { platform, prunedItems: summary.prunedItems },
+          },
+          {
+            onFailure: async () => {
+              await prisma.integration.update({
+                where: { id: integration.id },
+                data: {
+                  lastSyncError: JSON.stringify({
+                    at: new Date().toISOString(),
+                    errors: [{ message: "change-tracking write failed" }],
+                    errorCount: 1,
+                  }),
+                },
+              });
+            },
+          }
+        );
+      }
 
       upserted += 1;
     } catch (error) {
@@ -322,14 +378,29 @@ export async function syncIntegrationOrders(
   // P1-2: Only advance lastSyncAt when at least one order successfully
   // upserted. On total failure, leave it unchanged so the next run retries
   // the same window rather than silently skipping the failed orders.
+  //
+  // R-D2 run-level signal: on a run with errors write a JSON summary to
+  // lastSyncError; on a clean run clear it (null) alongside the cursor advance.
+  // The lastSyncError write happens even on total failure (no cursor advance).
   const now = new Date();
   const shouldAdvanceCursor = upserted > 0 || remoteOrders.length === 0;
+  const runData: Record<string, unknown> = {
+    lastSyncError:
+      errors.length > 0
+        ? JSON.stringify({
+            at: now.toISOString(),
+            errors: errors.slice(0, 5),
+            errorCount: errors.length,
+          })
+        : null,
+  };
   if (shouldAdvanceCursor) {
-    await prisma.integration.update({
-      where: { id: integration.id },
-      data: { lastSyncAt: now },
-    });
+    runData.lastSyncAt = now;
   }
+  await prisma.integration.update({
+    where: { id: integration.id },
+    data: runData,
+  });
 
   return {
     integrationId: integration.id,

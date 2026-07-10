@@ -7,6 +7,7 @@ import {
   hostFromStoreUrl,
   upsertOrderWithItems,
 } from "@/lib/external-orders/shared";
+import { recordChange } from "@/lib/change-tracking";
 import type { PlatformType } from "@/lib/platforms/core/types";
 
 export const dynamic = "force-dynamic";
@@ -105,12 +106,29 @@ export const POST = apiHandler(async (
   // With stockedOut separation, internalStatus is purely WC-derived.
   // Recheck always uses compute mode — no need for reconcileStatus since
   // stockedOut handles the deduction truth independently.
+  //
+  // P-B2 (USER tier): a human clicked recheck, so record via `onRecorded`
+  // INSIDE the upsert transaction (R-D2 hard-abort — an unrecordable recheck
+  // aborts the whole upsert). No change => callback not invoked => no event.
   const result = await upsertOrderWithItems(prisma, {
     integrationId: order.integration.id,
     companyId: order.companyId,
     storeUrl: order.integration.storeUrl,
     normalized,
     status: { statusMode: "compute", platform },
+    onRecorded: (tx, summary) =>
+      recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: summary.created
+          ? "EXTERNAL_ORDER_CREATE"
+          : "EXTERNAL_ORDER_UPDATE",
+        entityType: "ORDER",
+        entityId: summary.orderId,
+        companyId: order.integration.companyId,
+        action: `Rechecked order ${summary.orderNumber ?? summary.orderId} against ${platform}`,
+        changes: summary.changes,
+        details: { trigger: "recheck", prunedItems: summary.prunedItems },
+      }),
   });
 
   return NextResponse.json({

@@ -4,6 +4,7 @@ import prisma from "@/lib/prisma";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import { decryptValue, isEncrypted } from "@/lib/encryption";
 import { upsertOrderWithItems } from "@/lib/external-orders/shared";
+import { recordIngestion } from "@/lib/change-tracking";
 import type { PlatformType } from "@/lib/platforms/core/types";
 import type { Prisma } from "@prisma/client";
 import { createHash, createHmac } from "crypto";
@@ -225,6 +226,8 @@ export const POST = apiHandler(async (
       // row to explain why. The WC side is now divergent; the operator must
       // decide whether to unfulfill + delete manually, or accept divergence.
       const deleteResult = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        // R-D11: capture the FULL order + items snapshot inside the tx BEFORE
+        // deleting — destroyed state is otherwise unrecoverable.
         const existing = await tx.externalOrder.findUnique({
           where: {
             integrationId_externalId: {
@@ -232,11 +235,7 @@ export const POST = apiHandler(async (
               externalId,
             },
           },
-          select: {
-            id: true,
-            orderNumber: true,
-            stockedOut: true,
-          },
+          include: { items: true },
         });
 
         if (!existing) {
@@ -256,15 +255,24 @@ export const POST = apiHandler(async (
         // Safe to delete — no fulfillment work to preserve
         await tx.externalOrderItem.deleteMany({ where: { orderId: existing.id } });
         await tx.externalOrder.delete({ where: { id: existing.id } });
-        return { action: "deleted" as const, orderNumber: existing.orderNumber };
+        return {
+          action: "deleted" as const,
+          orderId: existing.id,
+          orderNumber: existing.orderNumber,
+          snapshot: existing,
+        };
       });
 
       // Phase 7c.3: all three delete outcomes count as successful webhook
       // deliveries (signature passed, we processed the event). Record health.
+      // ER-B3 ORDER: recordWebhookSuccess FIRST, THEN the ingestion record —
+      // so an audit-write failure (recorded by onFailure) is never wiped by the
+      // success reset.
       await recordWebhookSuccess(integration.id);
 
       if (deleteResult.action === "not_found") {
-        // Idempotent: if we never had the order, delete is a no-op
+        // Idempotent: if we never had the order, delete is a no-op — records
+        // NOTHING (no state change).
         return NextResponse.json({ success: true, ignored: true });
       }
 
@@ -282,6 +290,29 @@ export const POST = apiHandler(async (
       console.log(
         `Deleted external order ${deleteResult.orderNumber} for integration ${integrationId}, externalId ${externalId}`
       );
+
+      // R-D4/R-D11: record the delete as an ingestion event with the full
+      // pre-delete snapshot. Best-effort — a record failure bumps the webhook
+      // health counter but never fails the 200 (the row is already gone).
+      await recordIngestion(
+        {
+          actor: {
+            kind: "WEBHOOK",
+            envelope: { integrationId: integration.id, topic },
+          },
+          actionType: "EXTERNAL_ORDER_DELETE",
+          entityType: "ORDER",
+          entityId: deleteResult.orderId,
+          companyId: integration.companyId,
+          action: `Webhook deleted order ${deleteResult.orderNumber}`,
+          details: { platform, snapshot: deleteResult.snapshot },
+        },
+        {
+          onFailure: () =>
+            recordWebhookFailure(integration.id, "change-tracking write failed"),
+        }
+      );
+
       return NextResponse.json({ success: true, deleted: true });
     }
 
@@ -298,7 +329,7 @@ export const POST = apiHandler(async (
     }
 
     // 4. Upsert ExternalOrder and ExternalOrderItem records (atomic transaction)
-    const { orderId: upsertedOrderId } = await upsertOrderWithItems(prisma, {
+    const summary = await upsertOrderWithItems(prisma, {
       integrationId: integration.id,
       companyId: integration.companyId,
       storeUrl: integration.storeUrl,
@@ -312,12 +343,43 @@ export const POST = apiHandler(async (
 
     // Update lastSyncAt so the incremental poller can catch up from outages,
     // and record webhook health for operator visibility.
+    // ER-B3 ORDER: recordWebhookSuccess (resets webhookFailureCount) FIRST,
+    // THEN the R-D4 ingestion record — so an audit-write failure signalled by
+    // onFailure survives instead of being wiped by the success reset.
     await recordWebhookSuccess(integration.id);
+
+    // 5. R-D4: record ONLY an effective transition (gate on summary.changed).
+    // An unchanged re-delivery writes no event. Best-effort — a record failure
+    // bumps webhook health but never fails the 200 (the upsert already
+    // committed).
+    if (summary.changed) {
+      await recordIngestion(
+        {
+          actor: {
+            kind: "WEBHOOK",
+            envelope: { integrationId: integration.id, topic },
+          },
+          actionType: summary.created
+            ? "EXTERNAL_ORDER_CREATE"
+            : "EXTERNAL_ORDER_UPDATE",
+          entityType: "ORDER",
+          entityId: summary.orderId,
+          companyId: integration.companyId,
+          action: `Webhook ${summary.created ? "created" : "updated"} order ${summary.orderNumber ?? summary.orderId}`,
+          changes: summary.changes,
+          details: { platform, prunedItems: summary.prunedItems },
+        },
+        {
+          onFailure: () =>
+            recordWebhookFailure(integration.id, "change-tracking write failed"),
+        }
+      );
+    }
 
   // 6. Return 200 OK
   return NextResponse.json({
     success: true,
-    orderId: upsertedOrderId,
+    orderId: summary.orderId,
     orderNumber: normalizedOrder.externalOrderNumber,
   });
 });
