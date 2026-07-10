@@ -3,6 +3,7 @@ import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { subDays } from "date-fns";
 import { UserActivityResponse, UserActivitySummary } from "@/types/reports";
+import { ADJUSTMENT_LIKE } from "@/lib/reports/log-buckets";
 
 export const dynamic = "force-dynamic";
 
@@ -62,7 +63,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
     }),
     prisma.inventory_logs.groupBy({
       by: ["userId"],
-      where: { ...baseWhere, logType: "ADJUSTMENT" },
+      where: { ...baseWhere, logType: { in: [...ADJUSTMENT_LIKE] } },
       _count: { _all: true },
     }),
   ]);

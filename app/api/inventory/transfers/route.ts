@@ -32,6 +32,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
       toLocationName: details.toLocationName ?? "",
       userName: log.user?.username ?? log.user?.email ?? "Unknown user",
       batchId: log.batchId,
+      // Phase C (P-C7): the precise leg-pair key, surfaced from the event details.
+      transferId: details.transferId ?? null,
     };
   });
 

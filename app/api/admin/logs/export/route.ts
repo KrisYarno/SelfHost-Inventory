@@ -3,6 +3,8 @@ import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { recordChange } from "@/lib/change-tracking";
 import { rowsToCSV } from "@/lib/csv";
+import { inventory_logs_logType } from "@prisma/client";
+import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
@@ -41,7 +43,9 @@ export const GET = apiHandler(async (request: NextRequest) => {
   }
 
   if (typeFilter && typeFilter !== "all") {
-    whereClause.logType = typeFilter;
+    // Validate against the enum BEFORE the export record is written: garbage input
+    // is a clean 400 (via apiHandler's ZodError map) with no DATA_EXPORT side effect.
+    whereClause.logType = z.nativeEnum(inventory_logs_logType).parse(typeFilter);
   }
 
   if (dateFrom || dateTo) {
@@ -91,7 +95,17 @@ export const GET = apiHandler(async (request: NextRequest) => {
   });
 
   // Build CSV content
-  const headers = ["Timestamp", "Product Name", "User", "Location", "Type", "Change (Delta)"];
+  const headers = [
+    "Timestamp",
+    "Product Name",
+    "User",
+    "Location",
+    "Type",
+    "Change (Delta)",
+    "Batch ID",
+    "Reason Code",
+    "Unit Cost (cents)",
+  ];
   const rows = [headers];
 
   logs.forEach((log) => {
@@ -103,6 +117,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
       log.locations?.name || "Unknown",
       log.logType,
       log.delta.toString(),
+      // Phase C ledger semantics; NULL columns export as empty cells (truthful blank).
+      log.batchId ?? "",
+      log.reasonCode ?? "",
+      log.unitCostCents != null ? log.unitCostCents.toString() : "",
     ]);
   });
 

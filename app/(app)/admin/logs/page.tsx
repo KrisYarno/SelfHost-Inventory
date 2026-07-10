@@ -327,6 +327,10 @@ function ChangeLogTab({ active }: { active: boolean }) {
                   <SelectItem value="all">All Types</SelectItem>
                   <SelectItem value="ADJUSTMENT">Adjustment</SelectItem>
                   <SelectItem value="TRANSFER">Transfer</SelectItem>
+                  <SelectItem value="STOCK_IN">Stock In</SelectItem>
+                  <SelectItem value="SALE">Sale</SelectItem>
+                  <SelectItem value="CORRECTION">Correction</SelectItem>
+                  <SelectItem value="COUNT">Count</SelectItem>
                 </SelectContent>
               </Select>
             </div>

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { parseDayParam, startOfDayUTC, endOfDayUTC } from "@/lib/reports/date-range";
+import { ADJUSTMENT_LIKE } from "@/lib/reports/log-buckets";
 
 export const dynamic = "force-dynamic";
 
@@ -50,8 +51,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
       totalStockOut += Math.abs(activity.delta);
     }
 
-    // Count adjustments separately
-    if (activity.logType === "ADJUSTMENT") {
+    // Count adjustments separately (ADJUSTMENT + CORRECTION + COUNT; STOCK_IN/SALE are flow, not correction)
+    if ((ADJUSTMENT_LIKE as readonly string[]).includes(activity.logType)) {
       totalAdjustments += Math.abs(activity.delta);
     }
   });

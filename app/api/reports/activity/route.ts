@@ -61,6 +61,26 @@ export const GET = apiHandler(async (request: NextRequest) => {
         type = "adjustment";
         description = `Transfer with no quantity change for ${log.products.name}`;
       }
+    } else if (log.logType === "STOCK_IN") {
+      // Receiving stock (stock-in route / graduation)
+      type = "stock_in";
+      description = `Received ${log.delta} units of ${log.products.name}`;
+    } else if (log.logType === "SALE") {
+      // Customer purchase (fulfillment / manual-order deduction)
+      type = "stock_out";
+      description = `Sold ${Math.abs(log.delta)} units of ${log.products.name}`;
+    } else if (log.logType === "CORRECTION") {
+      // Reversal / correction (unfulfill, decline) — signed delta conveys direction
+      type = log.delta > 0 ? "stock_in" : log.delta < 0 ? "stock_out" : "adjustment";
+      const signed = log.delta > 0 ? `+${log.delta}` : `${log.delta}`;
+      description = `Corrected by ${signed} units of ${log.products.name}`;
+    } else if (log.logType === "COUNT") {
+      // Physical count — a zero delta is "no change", never "Removed 0"
+      type = "adjustment";
+      description =
+        log.delta === 0
+          ? `Counted ${log.products.name} — no change`
+          : `Counted ${log.products.name}: ${log.delta > 0 ? `+${log.delta}` : `${log.delta}`} units`;
     } else if (log.logType === "ADJUSTMENT") {
       // Adjustment activities - determine type based on delta
       if (log.delta > 0) {
@@ -74,7 +94,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
         description = `No quantity change for ${log.products.name}`;
       }
     } else {
-      // Fallback for any unexpected logType values
+      // Fallback for genuinely unknown / future logType values only
       type = log.delta > 0 ? "stock_in" : log.delta < 0 ? "stock_out" : "adjustment";
       description = `${log.delta > 0 ? "Added" : "Removed"} ${Math.abs(log.delta)} units of ${log.products.name}`;
     }

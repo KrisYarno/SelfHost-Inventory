@@ -39,13 +39,25 @@ export function getAuditTone(actionType: string): Tone {
 }
 
 export function getInventoryLogTone(logType: inventory_logs_logType | string, delta: number): Tone {
-  if (logType === "TRANSFER") {
-    return { label: "Transfer", className: "bg-slate-600 text-white" };
+  switch (logType) {
+    case "TRANSFER":
+      return { label: "Transfer", className: "bg-slate-600 text-white" };
+    case "STOCK_IN":
+      return { label: "Stock In", className: "bg-emerald-600 text-white" };
+    case "SALE":
+      return { label: "Sale", className: "bg-sky-600 text-white" };
+    case "CORRECTION":
+      return { label: "Correction", className: "bg-amber-600 text-white" };
+    case "COUNT":
+      return { label: "Count", className: "bg-slate-500 text-white" };
+    case "ADJUSTMENT":
+      // Single canonical label — the delta column conveys direction (+/-), so a
+      // positive ADJUSTMENT no longer mislabels itself "Stock In". Colour still
+      // tracks the sign for at-a-glance scanning.
+      return delta >= 0
+        ? { label: "Adjustment", className: "bg-emerald-600 text-white" }
+        : { label: "Adjustment", className: "bg-rose-500 text-white" };
+    default:
+      return { label: String(logType), className: "bg-gray-600 text-white" };
   }
-  if (logType === "ADJUSTMENT") {
-    return delta >= 0
-      ? { label: "Stock In", className: "bg-emerald-600 text-white" }
-      : { label: "Stock Out", className: "bg-rose-500 text-white" };
-  }
-  return { label: String(logType), className: "bg-gray-600 text-white" };
 }

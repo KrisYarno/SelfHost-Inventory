@@ -73,6 +73,44 @@ test("two TRANSFER rows with DIFFERENT transferIds stay SEPARATE even when the h
   expect(rows).toHaveLength(2);
 });
 
+// --- human badge labels (P-C9): render "Stock In", never the raw "STOCK_IN" enum ---
+function normalLog(id: number, logType: string, delta: number) {
+  return {
+    id,
+    userId: 1,
+    productId: 7,
+    delta,
+    changeTime: BASE_TIME,
+    locationId: 2,
+    logType,
+    transferId: null,
+    users: { id: 1, username: "kris" },
+    products: { id: 7, name: "Widget" },
+    locations: { id: 2, name: "Shelf A" },
+  } as any;
+}
+
+test("badges render HUMAN labels for the new ledger logTypes, not raw enum strings", () => {
+  const { container } = render(
+    <SimpleInventoryLogTable
+      logs={[
+        normalLog(1, "STOCK_IN", 5),
+        normalLog(2, "SALE", -3),
+        normalLog(3, "CORRECTION", -2),
+        normalLog(4, "COUNT", 0),
+      ]}
+    />
+  );
+  const text = container.textContent ?? "";
+  expect(text).toContain("Stock In");
+  expect(text).toContain("Sale");
+  expect(text).toContain("Correction");
+  expect(text).toContain("Count");
+  // Raw enum strings must NOT leak into the badge text.
+  expect(text).not.toContain("STOCK_IN");
+  expect(text).not.toContain("CORRECTION");
+});
+
 // --- machine-actor (nullable userId) rows ---
 test("a log with users: null renders the actor as 'System'", () => {
   // Change-tracking foundation: inventory_logs.userId is nullable, so machine-actor

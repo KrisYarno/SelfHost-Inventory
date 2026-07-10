@@ -8,6 +8,7 @@ import {
   parseDayKey,
   eachDayUTC,
 } from "@/lib/reports/date-range";
+import { ADJUSTMENT_LIKE } from "@/lib/reports/log-buckets";
 
 export const dynamic = "force-dynamic";
 
@@ -80,7 +81,8 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
 
     if (t.delta > 0) entry.stockIn += t.delta;
     if (t.delta < 0) entry.stockOut += Math.abs(t.delta);
-    if (t.logType === "ADJUSTMENT") entry.adjustments += Math.abs(t.delta);
+    // ADJUSTMENT + CORRECTION + COUNT count as adjustments; STOCK_IN/SALE are flow, not correction.
+    if ((ADJUSTMENT_LIKE as readonly string[]).includes(t.logType)) entry.adjustments += Math.abs(t.delta);
   });
 
   const activityPattern = Array.from(patternMap.entries())

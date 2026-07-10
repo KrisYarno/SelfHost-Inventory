@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/table';
 import { StatusBadge, type StatusBadgeProps } from '@/components/ui/status-badge';
 import { ValueChip } from '@/components/ui/value-chip';
+import { getInventoryLogTone } from '@/components/logs/log-style';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { inventory_logs, Product, Location, User } from '@prisma/client';
 
@@ -119,14 +120,22 @@ export function SimpleInventoryLogTable({
         return 'info';
       case 'STOCK_IN':
         return 'positive';
-      case 'STOCK_OUT':
+      case 'SALE':
         return 'negative';
+      case 'CORRECTION':
+        return 'warning';
+      case 'COUNT':
+        return 'neutral';
       case 'ADJUSTMENT':
         return 'neutral';
       default:
         return 'neutral';
     }
   };
+  // Human-readable badge text, sourced from the shared canonical tone map so the
+  // ledger table and the admin logs page never disagree (renders "Stock In", not "STOCK_IN").
+  const getLogLabel = (log: SimpleInventoryLog): string =>
+    getInventoryLogTone(log.logType, log.delta).label;
 
   return (
     <Card>
@@ -197,7 +206,7 @@ export function SimpleInventoryLogTable({
                         >
                           {formatDelta(log.delta)}
                         </ValueChip>
-                        <StatusBadge tone={getLogTone(log.logType)}>{log.logType}</StatusBadge>
+                        <StatusBadge tone={getLogTone(log.logType)}>{getLogLabel(log)}</StatusBadge>
                       </div>
                     </div>
                     {showUser && <p className="text-xs text-muted-foreground">by {log.users?.username ?? 'System'}</p>}
@@ -273,7 +282,7 @@ export function SimpleInventoryLogTable({
                       {showProduct && <TableCell className="font-medium">{log.products.name}</TableCell>}
                       {showLocation && <TableCell>{log.locations?.name || '-'}</TableCell>}
                       <TableCell>
-                        <StatusBadge tone={getLogTone(log.logType)}>{log.logType}</StatusBadge>
+                        <StatusBadge tone={getLogTone(log.logType)}>{getLogLabel(log)}</StatusBadge>
                       </TableCell>
                       <TableCell className="text-right">
                         <ValueChip tone={log.delta > 0 ? 'positive' : log.delta < 0 ? 'negative' : 'neutral'}>

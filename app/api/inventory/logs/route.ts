@@ -14,6 +14,7 @@ const LogsQuerySchema = z.object({
   locationId: z.coerce.number().int().optional(),
   userId: z.coerce.number().int().optional(),
   logType: z.nativeEnum(inventory_logs_logType).optional(),
+  batchId: z.string().uuid().optional(),
   startDate: z.coerce.date().optional(),
   endDate: z.coerce.date().optional(),
 });
@@ -36,6 +37,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
   if (query.locationId) where.locationId = query.locationId;
   if (query.userId) where.userId = query.userId;
   if (query.logType) where.logType = query.logType;
+  // Phase C (P-C1) join consumer: filter a ledger row set by its operation batchId.
+  if (query.batchId) where.batchId = query.batchId;
 
   if (query.startDate || query.endDate) {
     where.changeTime = {};

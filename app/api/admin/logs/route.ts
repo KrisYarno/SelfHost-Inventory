@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { inventory_logs_logType } from "@prisma/client";
+import { z } from "zod";
 
 export const dynamic = "force-dynamic";
 
@@ -43,7 +45,9 @@ export const GET = apiHandler(async (request: NextRequest) => {
   }
 
   if (typeFilter && typeFilter !== "all") {
-    whereClause.logType = typeFilter;
+    // Validate against the enum so garbage input is a clean 400 (via apiHandler's
+    // ZodError map), never a raw Prisma passthrough that 500s.
+    whereClause.logType = z.nativeEnum(inventory_logs_logType).parse(typeFilter);
   }
 
   if (dateFrom || dateTo) {
@@ -82,6 +86,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
     locationName: log.locations?.name || "Unknown",
     delta: log.delta,
     logType: log.logType,
+    // Phase C ledger semantics exposed to the read path.
+    batchId: log.batchId,
+    reasonCode: log.reasonCode,
+    unitCostCents: log.unitCostCents,
   }));
 
   return NextResponse.json({

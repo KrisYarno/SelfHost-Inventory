@@ -167,6 +167,23 @@ test("no range params => a default trailing window (~365d) bounds every aggregat
   }
 });
 
+test("the adjustments aggregate counts ADJUSTMENT + CORRECTION + COUNT and excludes SALE/STOCK_IN (P-C6)", async () => {
+  // Capture the where-clause of the adjustments groupBy (the one that filters by logType).
+  await GET(new NextRequest("http://x/api/reports/user-activity"));
+
+  const adjustmentsCall = m.inventory_logs.groupBy.mock.calls.find(
+    (call) => call[0].where.logType !== undefined
+  );
+  expect(adjustmentsCall).toBeDefined();
+  // Once CORRECTION/COUNT rows exist, the bucket must not silently undercount.
+  expect(adjustmentsCall![0].where.logType).toEqual({
+    in: ["ADJUSTMENT", "CORRECTION", "COUNT"],
+  });
+  // Flow types are never adjustments.
+  expect(adjustmentsCall![0].where.logType.in).not.toContain("SALE");
+  expect(adjustmentsCall![0].where.logType.in).not.toContain("STOCK_IN");
+});
+
 test("explicit startDate/endDate are honored server-side and clamped into every aggregate", async () => {
   const start = "2026-01-01T00:00:00.000Z";
   const end = "2026-03-01T00:00:00.000Z";
