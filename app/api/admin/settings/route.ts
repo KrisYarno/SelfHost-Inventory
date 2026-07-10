@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { recordChange, type ChangeDiff } from "@/lib/change-tracking";
 import { SystemSettingsSchema } from "@/lib/validation/admin";
 
 export const dynamic = "force-dynamic";
@@ -37,7 +38,7 @@ export const GET = apiHandler(async () => {
 });
 
 export const POST = apiHandler(async (request: NextRequest) => {
-  await requireAdmin();
+  const { user } = await requireAdmin();
 
   await requireCSRF(request);
 
@@ -45,21 +46,54 @@ export const POST = apiHandler(async (request: NextRequest) => {
   const { weeklyReportsEnabled, analyticsRebuildEnabled } =
     SystemSettingsSchema.parse(body);
 
+  // Only the flags actually present in the request are touched (ER-B9).
+  const provided: Array<{ key: string; to: string }> = [];
   if (weeklyReportsEnabled !== undefined) {
-    await prisma.systemSetting.upsert({
-      where: { key: "weeklyReportsEnabled" },
-      update: { value: String(weeklyReportsEnabled) },
-      create: { key: "weeklyReportsEnabled", value: String(weeklyReportsEnabled) },
-    });
+    provided.push({ key: "weeklyReportsEnabled", to: String(weeklyReportsEnabled) });
+  }
+  if (analyticsRebuildEnabled !== undefined) {
+    provided.push({ key: "analyticsRebuildEnabled", to: String(analyticsRebuildEnabled) });
   }
 
-  if (analyticsRebuildEnabled !== undefined) {
-    await prisma.systemSetting.upsert({
-      where: { key: "analyticsRebuildEnabled" },
-      update: { value: String(analyticsRebuildEnabled) },
-      create: { key: "analyticsRebuildEnabled", value: String(analyticsRebuildEnabled) },
-    });
+  // Nothing provided => nothing to write and no change to record (ER-B9).
+  if (provided.length === 0) {
+    return NextResponse.json({ success: true });
   }
+
+  // D4: both upserts + the SETTINGS_UPDATE record land in ONE transaction, so a
+  // partial commit can never leave one flag written without the audit row. The
+  // from-values are FETCHED inside the tx (today's route wrote blindly).
+  await prisma.$transaction(async (tx) => {
+    const keys = provided.map((p) => p.key);
+    const current = await tx.systemSetting.findMany({ where: { key: { in: keys } } });
+    const fromByKey = new Map(current.map((s) => [s.key, s.value]));
+
+    const changes: ChangeDiff = {};
+    for (const { key, to } of provided) {
+      const from = fromByKey.get(key) ?? null;
+      await tx.systemSetting.upsert({
+        where: { key },
+        update: { value: to },
+        create: { key, value: to },
+      });
+      // Drop no-op flags (from === to); only real changes reach the event (ER-B9).
+      if (from !== to) {
+        changes[key] = { from, to };
+      }
+    }
+
+    // No effective change across the provided flags => no event (ER-B9).
+    if (Object.keys(changes).length > 0) {
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: "SETTINGS_UPDATE",
+        entityType: "SETTINGS",
+        entityId: null,
+        action: "Updated system settings",
+        changes,
+      });
+    }
+  });
 
   return NextResponse.json({ success: true });
 });

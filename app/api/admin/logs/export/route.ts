@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { recordChange } from "@/lib/change-tracking";
 import { rowsToCSV } from "@/lib/csv";
 
 export const dynamic = "force-dynamic";
 
 export const GET = apiHandler(async (request: NextRequest) => {
-  await requireAdmin();
+  const { user } = await requireAdmin();
 
   const searchParams = request.nextUrl.searchParams;
   const search = searchParams.get("search") || "";
@@ -62,6 +63,31 @@ export const GET = apiHandler(async (request: NextRequest) => {
       locations: true,
     },
     orderBy: { changeTime: "desc" },
+  });
+
+  // Record the export BEFORE streaming the CSV (ER-B6: a rejecting record MUST
+  // 500 with no CSV body — record-before-stream ordering). GET routes are
+  // invisible to the coverage gate; this record + its test are the enforcement.
+  await prisma.$transaction(async (tx) => {
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "DATA_EXPORT",
+      entityType: "SYSTEM",
+      entityId: null,
+      action: "Exported inventory logs CSV",
+      details: {
+        export: "inventory-logs",
+        filters: {
+          search,
+          user: userFilter,
+          location: locationFilter,
+          type: typeFilter,
+          dateFrom,
+          dateTo,
+        },
+        rowCount: logs.length,
+      },
+    });
   });
 
   // Build CSV content

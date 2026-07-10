@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { enforceRateLimit } from "@/lib/rateLimit";
+import prisma from "@/lib/prisma";
+import { recordChange } from "@/lib/change-tracking";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -147,6 +149,20 @@ export const POST = apiHandler(async (req: NextRequest) => {
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(full, res.out);
   } catch {}
+
+  // Record AFTER a successful dump, in its own tx. A record failure fails the
+  // request (truthful): the admin retries and the on-disk file is timestamped,
+  // not clobbered. sizeBytes comes from the dump already in memory.
+  await prisma.$transaction(async (tx) => {
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "BACKUP_CREATED",
+      entityType: "SYSTEM",
+      entityId: null,
+      action: `Created database backup ${filename}`,
+      details: { filename, sizeBytes: Buffer.byteLength(res.out) },
+    });
+  });
 
   // Return as download (Buffer -> fresh ArrayBuffer)
   const ab = new Uint8Array(res.out).buffer;

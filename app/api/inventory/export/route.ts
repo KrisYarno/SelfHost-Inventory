@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { recordChange } from "@/lib/change-tracking";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import { rowsToCSV } from "@/lib/csv";
 
@@ -34,6 +35,19 @@ export const GET = apiHandler(async (request: NextRequest) => {
   // Get all locations for column headers
   const locations = await prisma.location.findMany({
     orderBy: { name: "asc" },
+  });
+
+  // Record the export BEFORE streaming the CSV (D6). GET routes are invisible to
+  // the coverage gate; this record + its test are the enforcement.
+  await prisma.$transaction(async (tx) => {
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "DATA_EXPORT",
+      entityType: "SYSTEM",
+      entityId: null,
+      action: "Exported inventory CSV",
+      details: { export: "inventory", rowCount: products.length },
+    });
   });
 
   // Build CSV content

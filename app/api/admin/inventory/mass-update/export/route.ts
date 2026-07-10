@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { recordChange } from "@/lib/change-tracking";
 import { rowsToCSV } from "@/lib/csv";
 
 export const dynamic = "force-dynamic";
 
 export const GET = apiHandler(async (_request: NextRequest) => {
-  await requireAdmin();
+  const { user } = await requireAdmin();
 
   // Get all products with their current inventory levels
   const products = await prisma.product.findMany({
@@ -26,6 +27,19 @@ export const GET = apiHandler(async (_request: NextRequest) => {
   // Get all locations
   const locations = await prisma.location.findMany({
     orderBy: { name: "asc" },
+  });
+
+  // Record the export BEFORE streaming the CSV (D6). GET routes are invisible to
+  // the coverage gate; this record + its test are the enforcement.
+  await prisma.$transaction(async (tx) => {
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "DATA_EXPORT",
+      entityType: "SYSTEM",
+      entityId: null,
+      action: "Exported mass-update count sheet CSV",
+      details: { export: "count-sheet", rowCount: products.length },
+    });
   });
 
   // Build CSV header

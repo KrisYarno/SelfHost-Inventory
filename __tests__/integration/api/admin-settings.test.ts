@@ -9,18 +9,32 @@ jest.mock("@/lib/api-utils", () => ({
   // and the REAL apiHandler, so the invalid-CSRF test still observes the
   // mapped 403 response.
   ...jest.requireActual("@/lib/api-utils"),
-  requireAdmin: jest.fn(() => Promise.resolve()),
+  // POST now records SETTINGS_UPDATE as user.id, so the guard must return a user.
+  requireAdmin: jest.fn(() => Promise.resolve({ user: { id: 1 } })),
 }));
 jest.mock("@/lib/csrf", () => ({
   validateCSRFToken: jest.fn(() => Promise.resolve(true)),
 }));
-jest.mock("@/lib/prisma", () => ({
-  __esModule: true,
-  default: {
-    location: { findMany: jest.fn(() => Promise.resolve([])) },
-    systemSetting: { findUnique: jest.fn(), upsert: jest.fn() },
-  },
+// Real recordChange (now invoked by POST) calls headers(); keep it deterministic.
+jest.mock("next/headers", () => ({
+  headers: jest.fn(async () => ({ get: () => null })),
 }));
+// POST is now atomic: findMany (from-values) + upserts + the audit record run in
+// ONE $transaction. `tx` IS the same object as `db`, so the existing top-level
+// upsert assertions still hold; the audit row lands on db.auditLog.create.
+jest.mock("@/lib/prisma", () => {
+  const db: any = {
+    location: { findMany: jest.fn(() => Promise.resolve([])) },
+    systemSetting: {
+      findUnique: jest.fn(),
+      findMany: jest.fn(() => Promise.resolve([])),
+      upsert: jest.fn(),
+    },
+    auditLog: { create: jest.fn() },
+  };
+  db.$transaction = jest.fn(async (fn: (t: typeof db) => unknown) => fn(db));
+  return { __esModule: true, default: db };
+});
 
 import { NextRequest } from "next/server";
 import { GET, POST } from "@/app/api/admin/settings/route";
