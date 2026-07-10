@@ -61,6 +61,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
     {
       logType: body.logType || inventory_logs_logType.ADJUSTMENT,
       expectedVersion: body.expectedVersion,
+      // Phase C (P-C5/P-C1): the coded reason rides onto the ledger row; the same
+      // batchId stamps the row so it joins the audit event; the free-text reason /
+      // notes ride onto the audit event details (below).
+      reasonCode: body.reasonCode,
+      batchId,
       record: async (tx) => {
         await recordChange(tx, {
           actor: { userId: user.id },
@@ -72,14 +77,21 @@ export const POST = apiHandler(async (request: NextRequest) => {
           action: autoAddForTransfer
             ? `Auto-added ${body.delta} units of "${productName}" at location ${body.locationId} to complete a transfer`
             : `Adjusted inventory for "${productName}" by ${body.delta > 0 ? "+" : ""}${body.delta}`,
-          details: autoAddForTransfer
-            ? {
-                productId: body.productId,
-                productName,
-                delta: body.delta,
-                locationId: body.locationId,
-              }
-            : { productName, delta: body.delta, locationId: body.locationId },
+          // Phase C (P-C5): persist the operator's own words when supplied — zod
+          // used to strip these. Included only when present so no-reason callers
+          // (transfer auto-add, workbench undo, journal) keep their lean details.
+          details: {
+            ...(autoAddForTransfer
+              ? {
+                  productId: body.productId,
+                  productName,
+                  delta: body.delta,
+                  locationId: body.locationId,
+                }
+              : { productName, delta: body.delta, locationId: body.locationId }),
+            ...(body.reason ? { reason: body.reason } : {}),
+            ...(body.notes ? { notes: body.notes } : {}),
+          },
           batchId,
         });
       },

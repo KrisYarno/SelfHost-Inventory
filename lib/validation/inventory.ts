@@ -3,6 +3,12 @@ import { inventory_logs_logType } from '@prisma/client';
 
 const positiveInt = z.number().int().positive();
 
+// Phase C (P-C5): closed set of coded adjustment reasons. Kept alongside the
+// free-text reason so the ledger row carries a machine-filterable reasonCode while
+// the audit event keeps the operator's own words.
+export const REASON_CODES = ['COUNT', 'DAMAGE', 'THEFT', 'EXPIRY', 'CORRECTION'] as const;
+export type ReasonCode = (typeof REASON_CODES)[number];
+
 export const InventoryAdjustmentSchema = z.object({
   productId: positiveInt,
   locationId: positiveInt,
@@ -10,8 +16,20 @@ export const InventoryAdjustmentSchema = z.object({
     .number()
     .int()
     .refine((value) => value !== 0, { message: 'Delta must not be zero' }),
-  logType: z.nativeEnum(inventory_logs_logType).optional(),
+  // Phase C (P-C2): logType is PINNED to ADJUSTMENT here (and, by reuse, in
+  // BatchInventoryAdjustmentSchema below). SALE / STOCK_IN / CORRECTION are set
+  // server-side only, so a client cannot forge a flow logType through the public
+  // adjust / batch-adjust API.
+  logType: z.literal(inventory_logs_logType.ADJUSTMENT).optional(),
   expectedVersion: z.number().int().min(0).optional(),
+  // Phase C (P-C5): optional coded reason + the free-text reason / notes that
+  // finally persist (the audit event previously stripped them). reason / notes are
+  // OPTIONAL server-side — transfer auto-add, workbench undo, and journal all POST
+  // here without them; quick-adjust keeps its own client-side required gate on the
+  // free-text reason.
+  reasonCode: z.enum(REASON_CODES).optional(),
+  reason: z.string().trim().min(1).max(500).optional(),
+  notes: z.string().trim().max(2000).optional(),
 });
 
 export const BatchInventoryAdjustmentSchema = z.object({

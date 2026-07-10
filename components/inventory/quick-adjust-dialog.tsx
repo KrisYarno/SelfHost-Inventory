@@ -19,6 +19,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { ValueChip } from "@/components/ui/value-chip";
 import { ContextTag } from "@/components/ui/context-tag";
 import { InlineHighlight } from "@/components/ui/inline-highlight";
@@ -31,6 +38,16 @@ interface QuickAdjustDialogProps {
   onSuccess?: () => void;
 }
 
+// Phase C (P-C5): the optional coded reasons (mirrors REASON_CODES in
+// lib/validation/inventory.ts) with human-facing labels.
+const REASON_CODE_OPTIONS: { value: string; label: string }[] = [
+  { value: "COUNT", label: "Count correction" },
+  { value: "DAMAGE", label: "Damage" },
+  { value: "THEFT", label: "Theft" },
+  { value: "EXPIRY", label: "Expiry" },
+  { value: "CORRECTION", label: "Correction" },
+];
+
 export function QuickAdjustDialog({
   open,
   onOpenChange,
@@ -41,6 +58,7 @@ export function QuickAdjustDialog({
   const [adjustmentType, setAdjustmentType] = useState<"add" | "remove">("add");
   const [quantity, setQuantity] = useState("");
   const [reason, setReason] = useState("");
+  const [reasonCode, setReasonCode] = useState("");
   const [notes, setNotes] = useState("");
 
   const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
@@ -93,6 +111,7 @@ export function QuickAdjustDialog({
         delta: adjustmentType === "add" ? quantityNum : -quantityNum,
         reason,
         notes: notes || undefined,
+        reasonCode: reasonCode || undefined,
       });
 
       toast.success(
@@ -107,6 +126,7 @@ export function QuickAdjustDialog({
       // Reset form
       setQuantity("");
       setReason("");
+      setReasonCode("");
       setNotes("");
       setAdjustmentType("add");
     } catch (error) {
@@ -248,6 +268,23 @@ export function QuickAdjustDialog({
               onChange={(e) => setReason(e.target.value)}
               placeholder="e.g., Damaged goods, Inventory count, Customer return"
             />
+          </div>
+
+          {/* Reason code (optional, coded) — persists on the ledger row (Phase C) */}
+          <div className="space-y-2">
+            <Label htmlFor="reasonCode">Reason code (optional)</Label>
+            <Select value={reasonCode || undefined} onValueChange={setReasonCode}>
+              <SelectTrigger id="reasonCode">
+                <SelectValue placeholder="Select a reason code" />
+              </SelectTrigger>
+              <SelectContent>
+                {REASON_CODE_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           {/* Notes */}

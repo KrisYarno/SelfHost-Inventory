@@ -18,7 +18,9 @@
  */
 
 import { mockDeep, type DeepMockProxy } from "jest-mock-extended";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import { ZodError } from "zod";
+import { InventoryAdjustmentSchema } from "@/lib/validation/inventory";
 
 jest.mock("@/lib/api-utils", () => ({
   ...jest.requireActual("@/lib/api-utils"),
@@ -135,12 +137,111 @@ describe("adjust — INVENTORY_ADJUSTMENT recorded in the stock-write tx", () =>
     expect(data.actionType).toBe("INVENTORY_TRANSFER_AUTO_ADD");
     expect(data.entityId).toBe("5");
   });
+
+  // Phase C (P-C5): reasonCode persists on the ledger row; the previously-stripped
+  // free-text reason + notes now persist in the event details; row<->event join by
+  // the shared batchId.
+  it("persists reasonCode on the ledger + reason/notes in details, joined by batchId", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+    db.product.findUnique.mockResolvedValue({ name: "Widget" } as any);
+    db.product_locations.findUnique.mockResolvedValue({ quantity: 100, version: 1 } as any);
+
+    const res = await ADJUST(post("http://x/api/inventory/adjust", {
+      productId: 5,
+      locationId: 2,
+      delta: -4,
+      reasonCode: "DAMAGE",
+      reason: "Broken on arrival",
+      notes: "Two cartons crushed",
+    }));
+    expect(res.status).toBe(200);
+
+    const logData = tx.inventory_logs.create.mock.calls[0][0].data;
+    expect(logData.reasonCode).toBe("DAMAGE");
+
+    const auditData = tx.auditLog.create.mock.calls[0][0].data;
+    expect((auditData.details as any).reason).toBe("Broken on arrival");
+    expect((auditData.details as any).notes).toBe("Two cartons crushed");
+    expect(auditData.batchId).toMatch(UUID_RE);
+    expect(logData.batchId).toBe(auditData.batchId);
+  });
+
+  it("omits details.reason/notes and ledger reasonCode when none are supplied", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+    db.product.findUnique.mockResolvedValue({ name: "Widget" } as any);
+
+    const res = await ADJUST(post("http://x/api/inventory/adjust", {
+      productId: 5,
+      locationId: 2,
+      delta: 6,
+    }));
+    expect(res.status).toBe(200);
+
+    const logData = tx.inventory_logs.create.mock.calls[0][0].data;
+    expect(logData.reasonCode ?? null).toBeNull();
+    const details = tx.auditLog.create.mock.calls[0][0].data.details as any;
+    expect(details.reason).toBeUndefined();
+    expect(details.notes).toBeUndefined();
+  });
+
+  it("rejects an unknown reasonCode before any write (400 via ZodError)", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+    db.product.findUnique.mockResolvedValue({ name: "Widget" } as any);
+
+    await expect(
+      ADJUST(post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: 3,
+        reasonCode: "BOGUS",
+      }))
+    ).rejects.toBeInstanceOf(ZodError);
+    expect(tx.inventory_logs.create).not.toHaveBeenCalled();
+  });
+});
+
+// Phase C (P-C2/P-C5): the schema is the 400 gate. reasonCode is a closed enum;
+// reason/notes are OPTIONAL (transfer auto-add, workbench undo, journal all POST
+// without them); logType is PINNED to ADJUSTMENT so SALE/STOCK_IN cannot be forged
+// through the public adjust/batch-adjust API.
+describe("InventoryAdjustmentSchema — Phase C reasonCode + logType pin", () => {
+  const base = { productId: 5, locationId: 2, delta: 3 };
+
+  it("accepts a known reasonCode with optional reason/notes", () => {
+    expect(
+      InventoryAdjustmentSchema.safeParse({ ...base, reasonCode: "DAMAGE", reason: "x", notes: "y" }).success
+    ).toBe(true);
+  });
+
+  it("accepts a bare payload (reason/notes/reasonCode all optional)", () => {
+    expect(InventoryAdjustmentSchema.safeParse(base).success).toBe(true);
+  });
+
+  it("rejects an unknown reasonCode", () => {
+    expect(InventoryAdjustmentSchema.safeParse({ ...base, reasonCode: "BOGUS" }).success).toBe(false);
+  });
+
+  it("rejects an empty reason but accepts a non-empty one", () => {
+    expect(InventoryAdjustmentSchema.safeParse({ ...base, reason: "" }).success).toBe(false);
+    expect(InventoryAdjustmentSchema.safeParse({ ...base, reason: "ok" }).success).toBe(true);
+  });
+
+  it("pins logType to ADJUSTMENT (rejects forged SALE/STOCK_IN/TRANSFER)", () => {
+    expect(InventoryAdjustmentSchema.safeParse({ ...base, logType: "ADJUSTMENT" }).success).toBe(true);
+    expect(InventoryAdjustmentSchema.safeParse({ ...base, logType: "SALE" }).success).toBe(false);
+    expect(InventoryAdjustmentSchema.safeParse({ ...base, logType: "STOCK_IN" }).success).toBe(false);
+    expect(InventoryAdjustmentSchema.safeParse({ ...base, logType: "TRANSFER" }).success).toBe(false);
+  });
 });
 
 describe("stock-in — records as INVENTORY_ADJUSTMENT with a stock-in marker", () => {
   it("records in the stock-write tx with details.source = 'stock-in'", async () => {
     const tx = makeTx();
     driveTxWith(tx);
+    db.product.findUnique.mockResolvedValue({ costPrice: new Prisma.Decimal("12.34"), name: "Widget" } as any);
 
     const res = await STOCK_IN(post("http://x/api/inventory/stock-in", {
       productId: 5,
@@ -156,6 +257,70 @@ describe("stock-in — records as INVENTORY_ADJUSTMENT with a stock-in marker", 
     expect(data.entityType).toBe("INVENTORY");
     expect(data.entityId).toBe("5");
     expect((data.details as any).source).toBe("stock-in");
+  });
+});
+
+// Phase C (P-C2/P-C3): the stock-in route now stamps the STOCK_IN logType and a
+// frozen unitCostCents (product.costPrice x 100, null when unset) onto the ledger
+// row, surfaces the frozen cost in the event details, and joins row<->event by
+// the shared batchId. A missing/soft-deleted product 404s before any stock write.
+describe("stock-in — STOCK_IN semantics + frozen unit cost (Phase C)", () => {
+  it("stamps STOCK_IN + frozen unitCostCents and joins the event by batchId", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+    db.product.findUnique.mockResolvedValue({ costPrice: new Prisma.Decimal("12.34"), name: "Widget" } as any);
+
+    const res = await STOCK_IN(post("http://x/api/inventory/stock-in", {
+      productId: 5,
+      locationId: 2,
+      quantity: 12,
+    }));
+    expect(res.status).toBe(200);
+
+    // Ledger row carries the STOCK_IN logType + frozen cost (12.34 -> 1234).
+    const logData = tx.inventory_logs.create.mock.calls[0][0].data;
+    expect(logData.logType).toBe("STOCK_IN");
+    expect(logData.unitCostCents).toBe(1234);
+
+    // Event surfaces the frozen cost and shares the ledger row's batchId.
+    const auditData = tx.auditLog.create.mock.calls[0][0].data;
+    expect((auditData.details as any).source).toBe("stock-in");
+    expect((auditData.details as any).unitCostCents).toBe(1234);
+    expect(auditData.batchId).toMatch(UUID_RE);
+    expect(logData.batchId).toBe(auditData.batchId);
+  });
+
+  it("freezes null unitCostCents when costPrice is 0 (unset default)", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+    db.product.findUnique.mockResolvedValue({ costPrice: new Prisma.Decimal("0"), name: "Widget" } as any);
+
+    const res = await STOCK_IN(post("http://x/api/inventory/stock-in", {
+      productId: 5,
+      locationId: 2,
+      quantity: 4,
+    }));
+    expect(res.status).toBe(200);
+
+    const logData = tx.inventory_logs.create.mock.calls[0][0].data;
+    expect(logData.logType).toBe("STOCK_IN");
+    expect(logData.unitCostCents).toBeNull();
+    expect((tx.auditLog.create.mock.calls[0][0].data.details as any).unitCostCents).toBeNull();
+  });
+
+  it("404s (no stock write) when the product is missing or soft-deleted", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+    db.product.findUnique.mockResolvedValue(null as any);
+
+    await expect(
+      STOCK_IN(post("http://x/api/inventory/stock-in", { productId: 999, locationId: 2, quantity: 3 }))
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    // The lookup excludes soft-deleted rows.
+    const where = (db.product.findUnique.mock.calls[0][0] as any).where;
+    expect(where).toMatchObject({ id: 999, deletedAt: null });
+    expect(tx.inventory_logs.create).not.toHaveBeenCalled();
   });
 });
 

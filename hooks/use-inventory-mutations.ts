@@ -52,7 +52,7 @@ async function postJSON(url: string, body: unknown, csrfToken: string | null) {
 }
 
 // Field names mirror the dialogs' live POST bodies (zod strips extras server-side):
-// quick-adjust-dialog sends { productId, locationId, delta, reason, notes };
+// quick-adjust-dialog sends { productId, locationId, delta, reason, notes, reasonCode? };
 // the transfer auto-add path additionally sends { autoAddForTransfer: true }.
 export interface AdjustInput {
   productId: number;
@@ -60,6 +60,7 @@ export interface AdjustInput {
   delta: number;
   reason?: string;
   notes?: string;
+  reasonCode?: string; // Phase C (P-C5): optional coded reason (COUNT/DAMAGE/THEFT/EXPIRY/CORRECTION)
   autoAddForTransfer?: boolean; // transfer auto-add audit flag (route reads it outside zod)
 }
 // stock-in-dialog sends { productId, locationId, quantity, orderNumber, notes }.
