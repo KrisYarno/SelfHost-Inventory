@@ -33,6 +33,9 @@ jest.mock('@/lib/inventory', () => ({
   applyStockDelta: (...args: any[]) => mockApplyStockDelta(...args),
   // run the fn once; the deadlock-retry behavior itself is covered in lib/inventory tests
   withDeadlockRetry: (fn: () => Promise<any>) => fn(),
+  // Phase C (Task 4): graduate.ts now freezes STOCK_IN unitCostCents via the real
+  // ER-C2 helper — provide it unmocked so the conversion runs.
+  centsFromCostPrice: jest.requireActual('@/lib/inventory').centsFromCostPrice,
 }));
 
 import prisma from '@/lib/prisma';

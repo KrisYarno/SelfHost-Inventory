@@ -66,3 +66,21 @@ test('createInventoryTransfer stamps the SAME transferId on both log rows', asyn
   expect(creates[0].transferId).toMatch(/^[0-9a-f-]{36}$/);
   expect(creates[0].transferId).toBe(creates[1].transferId);
 });
+
+test('createInventoryTransfer stamps the caller batchId on BOTH log rows (P-C1 join)', async () => {
+  await createInventoryTransfer({
+    userId: 1,
+    productId: 7,
+    fromLocationId: 2,
+    toLocationId: 3,
+    quantity: 5,
+    batchId: 'BATCH-XYZ',
+  });
+
+  const creates = mockTx.inventory_logs.create.mock.calls.map(
+    (call) => (call[0] as any).data
+  );
+  expect(creates).toHaveLength(2);
+  expect(creates[0].batchId).toBe('BATCH-XYZ');
+  expect(creates[1].batchId).toBe('BATCH-XYZ');
+});

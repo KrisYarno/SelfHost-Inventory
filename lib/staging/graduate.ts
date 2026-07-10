@@ -1,5 +1,5 @@
 import prisma from '@/lib/prisma';
-import { applyStockDelta, withDeadlockRetry } from '@/lib/inventory';
+import { applyStockDelta, withDeadlockRetry, centsFromCostPrice } from '@/lib/inventory';
 import { inventory_logs_logType, Prisma } from '@prisma/client';
 import { AppError } from '@/lib/error-handling';
 import { formatProductName } from '@/lib/products';
@@ -52,8 +52,17 @@ export async function graduateStagingItem(
   stagingItemId: number,
   body: GraduateInput,
   actor: { id: number; isAdmin: boolean },
-  onRecord?: (tx: Prisma.TransactionClient, ctx: GraduateRecordContext) => Promise<void>
+  // Phase C (ER-C1): options object, not a fifth positional (P-C4 rationale). The
+  // route's onRecord moves in here, alongside the SAME batchId it stamps on the
+  // STAGING_GRADUATE/PRODUCT_CREATE events — so the STOCK_IN ledger row joins the
+  // same batch (P-C1). withDeadlockRetry re-runs reuse this opts.batchId; it is
+  // NEVER regenerated inside the retried transaction.
+  opts?: {
+    onRecord?: (tx: Prisma.TransactionClient, ctx: GraduateRecordContext) => Promise<void>;
+    batchId?: string | null;
+  }
 ): Promise<GraduateResult> {
+  const { onRecord, batchId } = opts ?? {};
   return withDeadlockRetry(() =>
     prisma.$transaction(async (tx) => {
       // 1. Atomic claim — the double-stock guard.
@@ -77,6 +86,10 @@ export async function graduateStagingItem(
       let productId: number;
       let approvalStatus: 'APPROVED' | 'PENDING_REVIEW';
       let created = false;
+      // Phase C (P-C3): the frozen "cost at receipt" for the STOCK_IN row, captured
+      // from whichever branch's product row is in scope BEFORE the stock write (no
+      // single `product` variable spans both branches).
+      let costPriceAtGraduation: Prisma.Decimal | number;
 
       if (body.mode === 'existing') {
         const target = await tx.product.findFirst({
@@ -89,6 +102,7 @@ export async function graduateStagingItem(
         // Unchanged: restocking an existing (possibly still-pending) product
         // does not flip its approval status.
         approvalStatus = target.approvalStatus as 'APPROVED' | 'PENDING_REVIEW';
+        costPriceAtGraduation = target.costPrice;
       } else {
         // Mirror POST /api/products create mapping exactly. `productFields`
         // is validated by ProductCreateUISchema (variant required; unit already
@@ -120,16 +134,23 @@ export async function graduateStagingItem(
         });
         productId = created_.id;
         approvalStatus = created_.approvalStatus as 'APPROVED' | 'PENDING_REVIEW';
+        costPriceAtGraduation = created_.costPrice;
         created = true;
       }
 
-      // 3. Stock-in via the shared core (log + product_locations upsert + loc-1 mirror).
+      // 3. Stock-in via the shared core (log + product_locations upsert + loc-1
+      //    mirror). Phase C: graduation is a receipt, so the ledger row is STOCK_IN
+      //    with unitCostCents frozen from the product's cost (P-C3, via the ER-C2
+      //    helper — never re-derive) and the caller's batchId joining it to the
+      //    STAGING_GRADUATE/PRODUCT_CREATE events (P-C1).
       await applyStockDelta(tx, {
         userId: actor.id,
         productId,
         locationId: body.locationId,
         delta: body.countedQuantity,
-        logType: inventory_logs_logType.ADJUSTMENT,
+        logType: inventory_logs_logType.STOCK_IN,
+        unitCostCents: centsFromCostPrice(costPriceAtGraduation),
+        batchId,
       });
 
       // 4. Finalize the staging item.

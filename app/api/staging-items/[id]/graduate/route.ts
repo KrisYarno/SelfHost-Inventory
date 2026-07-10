@@ -44,38 +44,43 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     id,
     body,
     { id: user.id, isAdmin: user.isAdmin },
-    async (tx, ctx) => {
-      if (ctx.created) {
+    {
+      // Phase C (P-C1): the SAME batchId groups the STAGING_GRADUATE +
+      // PRODUCT_CREATE events AND the STOCK_IN ledger row the helper writes.
+      batchId,
+      onRecord: async (tx, ctx) => {
+        if (ctx.created) {
+          await recordChange(tx, {
+            actor: { userId: user.id },
+            actionType: 'PRODUCT_CREATE',
+            entityType: 'PRODUCT',
+            entityId: ctx.productId,
+            action: `Created product ${ctx.productId} via graduation of staging item ${id}`,
+            details: {
+              source: 'staging-graduation',
+              stagingItemId: id,
+              approvalStatus: ctx.approvalStatus,
+              locationId: ctx.locationId,
+            },
+            batchId,
+          });
+        }
+
         await recordChange(tx, {
           actor: { userId: user.id },
-          actionType: 'PRODUCT_CREATE',
-          entityType: 'PRODUCT',
-          entityId: ctx.productId,
-          action: `Created product ${ctx.productId} via graduation of staging item ${id}`,
+          actionType: 'STAGING_GRADUATE',
+          entityType: 'STAGING',
+          entityId: id,
+          action: `Graduated staging item ${id} into product ${ctx.productId}`,
           details: {
-            source: 'staging-graduation',
-            stagingItemId: id,
+            productId: ctx.productId,
             approvalStatus: ctx.approvalStatus,
             locationId: ctx.locationId,
+            countedQuantity: ctx.countedQuantity,
           },
           batchId,
         });
-      }
-
-      await recordChange(tx, {
-        actor: { userId: user.id },
-        actionType: 'STAGING_GRADUATE',
-        entityType: 'STAGING',
-        entityId: id,
-        action: `Graduated staging item ${id} into product ${ctx.productId}`,
-        details: {
-          productId: ctx.productId,
-          approvalStatus: ctx.approvalStatus,
-          locationId: ctx.locationId,
-          countedQuantity: ctx.countedQuantity,
-        },
-        batchId,
-      });
+      },
     }
   );
 

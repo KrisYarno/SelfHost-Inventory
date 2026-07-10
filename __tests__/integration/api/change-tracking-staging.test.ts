@@ -70,12 +70,18 @@ jest.mock('@/lib/scratchpad/queries', () => ({
 jest.mock('@/lib/staging/graduate', () => ({ graduateStagingItem: jest.fn() }));
 
 // --- inventory mocked so the REAL graduate helper's stock-in is a spy (Part B);
-// OptimisticLockError stays the real class so apiHandler's instanceof holds.
+// OptimisticLockError + centsFromCostPrice stay the REAL implementations
+// (graduate.ts imports centsFromCostPrice to freeze STOCK_IN unit cost — Task 4).
+// withDeadlockRetry is a reconfigurable spy: its default runs the fn once, but the
+// batchId-across-retries test overrides it to re-run the fn (Phase C P-C1: re-runs
+// reuse the caller's opts.batchId, never regenerate).
 const mockApplyStockDelta = jest.fn();
+const mockWithDeadlockRetry = jest.fn((fn: () => Promise<any>) => fn());
 jest.mock('@/lib/inventory', () => ({
   __esModule: true,
   applyStockDelta: (...a: any[]) => mockApplyStockDelta(...a),
-  withDeadlockRetry: (fn: () => Promise<any>) => fn(),
+  withDeadlockRetry: (fn: () => Promise<any>) => mockWithDeadlockRetry(fn),
+  centsFromCostPrice: jest.requireActual('@/lib/inventory').centsFromCostPrice,
   OptimisticLockError: jest.requireActual('@/lib/inventory').OptimisticLockError,
 }));
 
@@ -178,9 +184,9 @@ describe('staging POST /api/staging-items/[id]/discard', () => {
 describe('graduate POST /api/staging-items/[id]/graduate — flagship fan-out', () => {
   it('new-product path: STAGING_GRADUATE + PRODUCT_CREATE share ONE batchId on ONE tx', async () => {
     const GRAD_TX: any = { __gradTx: true };
-    mockGraduate.mockImplementation(async (_id: number, _body: any, _actor: any, onRecord: any) => {
-      if (onRecord) {
-        await onRecord(GRAD_TX, {
+    mockGraduate.mockImplementation(async (_id: number, _body: any, _actor: any, opts: any) => {
+      if (opts?.onRecord) {
+        await opts.onRecord(GRAD_TX, {
           productId: 100,
           approvalStatus: 'PENDING_REVIEW',
           locationId: 1,
@@ -217,13 +223,20 @@ describe('graduate POST /api/staging-items/[id]/graduate — flagship fan-out', 
     expect(byType.STAGING_GRADUATE).toMatchObject({ entityType: 'STAGING', entityId: 5 });
     // A single batchId across the two distinct events (not two independent ids).
     expect(byType.PRODUCT_CREATE.batchId).toBe(byType.STAGING_GRADUATE.batchId);
+
+    // The route threads its event batchId into graduateStagingItem via opts, so the
+    // helper stamps the SAME id onto the STOCK_IN ledger row (P-C1 join). onRecord
+    // moved into opts too (ER-C1: options object, not a positional).
+    const opts = mockGraduate.mock.calls[0][3];
+    expect(opts.batchId).toBe('BATCH-UUID');
+    expect(typeof opts.onRecord).toBe('function');
   });
 
   it('existing-restock path: only STAGING_GRADUATE fires (no PRODUCT_CREATE)', async () => {
     const GRAD_TX: any = { __gradTx: true };
-    mockGraduate.mockImplementation(async (_id: number, _body: any, _actor: any, onRecord: any) => {
-      if (onRecord) {
-        await onRecord(GRAD_TX, {
+    mockGraduate.mockImplementation(async (_id: number, _body: any, _actor: any, opts: any) => {
+      if (opts?.onRecord) {
+        await opts.onRecord(GRAD_TX, {
           productId: 77,
           approvalStatus: 'APPROVED',
           locationId: 1,
@@ -387,7 +400,7 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
       55,
       { mode: 'new', productFields: newFields as any, countedQuantity: 8, locationId: 1 },
       { id: 42, isAdmin: false },
-      onRecord,
+      { onRecord, batchId: 'GRAD-BATCH' },
     );
 
     expect(onRecord).toHaveBeenCalledTimes(1);
@@ -395,6 +408,105 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
     expect(txArg).toBe(tx); // same tx as the mutation
     expect(tx.product.create).toHaveBeenCalled(); // mutation ran on this tx
     expect(ctx).toMatchObject({ productId: 101, approvalStatus: 'PENDING_REVIEW', created: true });
+
+    // Task 4: the graduation stock-in is a STOCK_IN row joined to the batch, on the
+    // SAME tx as the mutation.
+    expect(mockApplyStockDelta).toHaveBeenCalledTimes(1);
+    const [stockTx, stockArgs] = mockApplyStockDelta.mock.calls[0];
+    expect(stockTx).toBe(tx);
+    expect(stockArgs).toMatchObject({
+      productId: 101,
+      locationId: 1,
+      delta: 8,
+      logType: 'STOCK_IN',
+      batchId: 'GRAD-BATCH',
+    });
+  });
+
+  it('new-product path: freezes unitCostCents from the created product row (12.34 -> 1234)', async () => {
+    const tx = driveWithTx();
+    tx.product.create.mockResolvedValue({
+      id: 101,
+      approvalStatus: 'PENDING_REVIEW',
+      costPrice: 12.34,
+    } as any);
+
+    await realGraduate(
+      55,
+      { mode: 'new', productFields: newFields as any, countedQuantity: 8, locationId: 1 },
+      { id: 42, isAdmin: false },
+      { onRecord: jest.fn(), batchId: 'GRAD-BATCH' },
+    );
+
+    const stockArgs = mockApplyStockDelta.mock.calls[0][1];
+    expect(stockArgs.logType).toBe('STOCK_IN');
+    expect(stockArgs.unitCostCents).toBe(1234);
+  });
+
+  it('new-product path: costPrice 0 freezes unitCostCents to null (unset = no cost)', async () => {
+    const tx = driveWithTx();
+    tx.product.create.mockResolvedValue({
+      id: 101,
+      approvalStatus: 'PENDING_REVIEW',
+      costPrice: 0,
+    } as any);
+
+    await realGraduate(
+      55,
+      { mode: 'new', productFields: newFields as any, countedQuantity: 8, locationId: 1 },
+      { id: 42, isAdmin: false },
+      { onRecord: jest.fn(), batchId: 'GRAD-BATCH' },
+    );
+
+    const stockArgs = mockApplyStockDelta.mock.calls[0][1];
+    expect(stockArgs.unitCostCents).toBeNull();
+  });
+
+  it('existing-restock path: freezes unitCostCents from the LOADED product row', async () => {
+    const tx = driveWithTx();
+    tx.product.findFirst.mockResolvedValue({
+      id: 7,
+      approvalStatus: 'APPROVED',
+      deletedAt: null,
+      costPrice: 5,
+    } as any);
+
+    await realGraduate(
+      55,
+      { mode: 'existing', productId: 7, countedQuantity: 3, locationId: 2 },
+      { id: 42, isAdmin: false },
+      { onRecord: jest.fn(), batchId: 'GRAD-BATCH' },
+    );
+
+    const stockArgs = mockApplyStockDelta.mock.calls[0][1];
+    expect(stockArgs).toMatchObject({
+      productId: 7,
+      logType: 'STOCK_IN',
+      unitCostCents: 500,
+      batchId: 'GRAD-BATCH',
+    });
+  });
+
+  it('deadlock re-runs reuse the caller opts.batchId — never regenerate inside', async () => {
+    const tx = driveWithTx();
+    tx.product.create.mockResolvedValue({ id: 101, approvalStatus: 'PENDING_REVIEW' } as any);
+    // Simulate a deadlock retry: withDeadlockRetry re-invokes the tx fn once more.
+    mockWithDeadlockRetry.mockImplementationOnce(async (fn: () => Promise<any>) => {
+      await fn();
+      return fn();
+    });
+
+    await realGraduate(
+      55,
+      { mode: 'new', productFields: newFields as any, countedQuantity: 8, locationId: 1 },
+      { id: 42, isAdmin: false },
+      { onRecord: jest.fn(), batchId: 'GRAD-BATCH' },
+    );
+
+    // Both attempts stamped the SAME opts.batchId (not a fresh id per re-run).
+    expect(mockApplyStockDelta).toHaveBeenCalledTimes(2);
+    expect(mockApplyStockDelta.mock.calls[0][1].batchId).toBe('GRAD-BATCH');
+    expect(mockApplyStockDelta.mock.calls[1][1].batchId).toBe('GRAD-BATCH');
   });
 
   it('existing-restock path: created=false (no product minted)', async () => {
@@ -406,7 +518,7 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
       55,
       { mode: 'existing', productId: 7, countedQuantity: 12, locationId: 3 },
       { id: 42, isAdmin: false },
-      onRecord,
+      { onRecord, batchId: 'GRAD-BATCH' },
     );
 
     expect(onRecord).toHaveBeenCalledTimes(1);
@@ -426,7 +538,7 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
         55,
         { mode: 'existing', productId: 7, countedQuantity: 5, locationId: 1 },
         { id: 42, isAdmin: false },
-        onRecord,
+        { onRecord, batchId: 'GRAD-BATCH' },
       ),
     ).rejects.toMatchObject({ statusCode: 409 });
 

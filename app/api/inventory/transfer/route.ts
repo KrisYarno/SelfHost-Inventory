@@ -72,7 +72,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
     quantity: body.quantity,
     expectedFromVersion: body.expectedFromVersion,
     expectedToVersion: body.expectedToVersion,
-    record: async (tx) => {
+    // Phase C (P-C1/P-C7): stamp the event batchId onto both legs so the audit
+    // event joins its ledger rows.
+    batchId,
+    record: async (tx, transferResult) => {
       await recordChange(tx, {
         actor: { userId: user.id },
         actionType: "INVENTORY_TRANSFER",
@@ -87,6 +90,9 @@ export const POST = apiHandler(async (request: NextRequest) => {
           fromLocationName: fromLocation.name,
           toLocationId: toLocation.id,
           toLocationName: toLocation.name,
+          // P-C7: the precise leg-pair key, read from the callback's result (the
+          // callback fires inside the tx BEFORE createInventoryTransfer returns).
+          transferId: transferResult.transferId,
         },
         batchId,
       });

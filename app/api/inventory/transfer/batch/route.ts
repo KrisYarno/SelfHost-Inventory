@@ -117,14 +117,17 @@ export const POST = apiHandler(async (request: NextRequest) => {
   for (const transfer of body.transfers) {
     try {
       const fromLocation = sourceLocationMap.get(transfer.fromLocationId)!;
-      const _result = await createInventoryTransfer({
+      const result = await createInventoryTransfer({
         userId: user.id,
         productId: body.productId,
         fromLocationId: transfer.fromLocationId,
         toLocationId: body.toLocationId,
         quantity: transfer.quantity,
         expectedFromVersion: transfer.expectedVersion,
-        record: async (tx) => {
+        // Phase C (P-C1/P-C7): one shared batchId across every transfer's event and
+        // both of its legs (2N rows join the N events).
+        batchId,
+        record: async (tx, transferResult) => {
           await recordChange(tx, {
             actor: { userId: user.id },
             actionType: "INVENTORY_TRANSFER",
@@ -139,6 +142,8 @@ export const POST = apiHandler(async (request: NextRequest) => {
               fromLocationName: fromLocation.name,
               toLocationId: toLocation.id,
               toLocationName: toLocation.name,
+              // P-C7: the leg-pair key for this specific transfer.
+              transferId: transferResult.transferId,
             },
             batchId,
           });
@@ -149,6 +154,8 @@ export const POST = apiHandler(async (request: NextRequest) => {
         fromLocationId: transfer.fromLocationId,
         quantity: transfer.quantity,
         success: true,
+        // P-C7: surface the leg-pair key from the RETURN (built after the callback).
+        transferId: result.transferId,
       });
       totalTransferred += transfer.quantity;
     } catch (error) {

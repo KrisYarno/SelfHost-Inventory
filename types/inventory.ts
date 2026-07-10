@@ -168,6 +168,9 @@ export interface BatchTransferResult {
     fromLocationId: number;
     quantity: number;
     success: boolean;
+    // Phase C (P-C7): the leg-pair key for a successful transfer; absent on the
+    // failure branch (no transfer id was minted).
+    transferId?: string;
     error?: string;
   }>;
   totalTransferred: number;
