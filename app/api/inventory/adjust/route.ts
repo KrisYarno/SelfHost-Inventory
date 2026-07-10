@@ -58,29 +58,31 @@ export const POST = apiHandler(async (request: NextRequest) => {
     body.productId,
     body.locationId,
     body.delta,
-    body.logType || inventory_logs_logType.ADJUSTMENT,
-    body.expectedVersion,
-    async (tx) => {
-      await recordChange(tx, {
-        actor: { userId: user.id },
-        actionType: autoAddForTransfer
-          ? "INVENTORY_TRANSFER_AUTO_ADD"
-          : "INVENTORY_ADJUSTMENT",
-        entityType: "INVENTORY",
-        entityId: body.productId,
-        action: autoAddForTransfer
-          ? `Auto-added ${body.delta} units of "${productName}" at location ${body.locationId} to complete a transfer`
-          : `Adjusted inventory for "${productName}" by ${body.delta > 0 ? "+" : ""}${body.delta}`,
-        details: autoAddForTransfer
-          ? {
-              productId: body.productId,
-              productName,
-              delta: body.delta,
-              locationId: body.locationId,
-            }
-          : { productName, delta: body.delta, locationId: body.locationId },
-        batchId,
-      });
+    {
+      logType: body.logType || inventory_logs_logType.ADJUSTMENT,
+      expectedVersion: body.expectedVersion,
+      record: async (tx) => {
+        await recordChange(tx, {
+          actor: { userId: user.id },
+          actionType: autoAddForTransfer
+            ? "INVENTORY_TRANSFER_AUTO_ADD"
+            : "INVENTORY_ADJUSTMENT",
+          entityType: "INVENTORY",
+          entityId: body.productId,
+          action: autoAddForTransfer
+            ? `Auto-added ${body.delta} units of "${productName}" at location ${body.locationId} to complete a transfer`
+            : `Adjusted inventory for "${productName}" by ${body.delta > 0 ? "+" : ""}${body.delta}`,
+          details: autoAddForTransfer
+            ? {
+                productId: body.productId,
+                productName,
+                delta: body.delta,
+                locationId: body.locationId,
+              }
+            : { productName, delta: body.delta, locationId: body.locationId },
+          batchId,
+        });
+      },
     }
   );
 

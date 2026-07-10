@@ -23,6 +23,11 @@ export async function createInventoryLog(
     delta: number;
     logType?: inventory_logs_logType;
     transferId?: string;
+    // Phase C (P-C1): nullable passthrough. reasonCode/unitCostCents give the row
+    // its ledger meaning; batchId joins the row to its companion audit event.
+    reasonCode?: string | null;
+    unitCostCents?: number | null;
+    batchId?: string | null;
   },
   tx?: Prisma.TransactionClient
 ) {
@@ -38,6 +43,9 @@ export async function createInventoryLog(
       changeTime: new Date(),
       logType: data.logType || inventory_logs_logType.ADJUSTMENT,
       transferId: data.transferId ?? null,
+      reasonCode: data.reasonCode ?? null,
+      unitCostCents: data.unitCostCents ?? null,
+      batchId: data.batchId ?? null,
     },
     // SECURITY: never `users: true` here — these rows are returned verbatim by
     // adjust/stock-in/transfer/batch-adjust responses, so a full User include
@@ -49,6 +57,28 @@ export async function createInventoryLog(
       locations: { select: { id: true, name: true } },
     }
   });
+}
+
+/**
+ * Phase C (ER-C2): frozen-at-write unit-cost conversion, DRY across every writer
+ * that stamps `unitCostCents` (stock-in route + graduation import Tasks 2/4 — they
+ * MUST call this, never re-derive it).
+ *
+ * `costPrice` is a NON-NULL Decimal @default(0.00); a value of 0 means "unset" and
+ * yields null (NULL truthfully = no cost). Negative is impossible in real data but
+ * defended (→ null). The signed-INT `unitCostCents` column caps at 2147483647, i.e.
+ * a cost of 21474836.47; ABOVE that we cannot represent the value, so we return null
+ * AND console.error — writing a truncated number would be a lie (truthful-data).
+ */
+export function centsFromCostPrice(costPrice: Prisma.Decimal | number): number | null {
+  const n = Number(costPrice);
+  if (n > 21474836.47) {
+    console.error(
+      `centsFromCostPrice: costPrice ${n} exceeds the INT-cents bound (21474836.47); storing null instead of a truncated value`
+    );
+    return null;
+  }
+  return n > 0 ? Math.round(n * 100) : null;
 }
 
 /**
@@ -130,6 +160,11 @@ export async function applyStockDelta(
     locationId: number;
     delta: number;
     logType?: inventory_logs_logType;
+    // Phase C (P-C1): pure passthrough into createInventoryLog — this hot path
+    // adds no semantics of its own; callers decide the values.
+    reasonCode?: string | null;
+    unitCostCents?: number | null;
+    batchId?: string | null;
   }
 ): Promise<{
   log: Awaited<ReturnType<typeof createInventoryLog>>;
@@ -141,6 +176,9 @@ export async function applyStockDelta(
     locationId,
     delta,
     logType = inventory_logs_logType.ADJUSTMENT,
+    reasonCode,
+    unitCostCents,
+    batchId,
   } = args;
 
   // Create the log entry
@@ -151,6 +189,9 @@ export async function applyStockDelta(
       locationId,
       delta,
       logType,
+      reasonCode,
+      unitCostCents,
+      batchId,
     },
     tx
   );
@@ -229,16 +270,26 @@ export async function createInventoryAdjustment(
   productId: number,
   locationId: number,
   delta: number,
-  logType?: inventory_logs_logType,
-  expectedVersion?: number,
-  // Optional in-transaction recorder (change-tracking Task 8): invoked with the
-  // SAME `tx` as the stock write so recordChange joins the caller's transaction
+  // Phase C (P-C4): trailing positionals converted to an options bag. The record
+  // callback was the LAST of 7 positionals; adding 3 more (reasonCode/unitCostCents/
+  // batchId) as positionals would be unreadable. The record callback is invoked with
+  // the SAME `tx` as the stock write so recordChange joins the caller's transaction
   // and hard-aborts the mutation if the audit row cannot be written.
-  record?: (
-    tx: Prisma.TransactionClient,
-    result: { log: Awaited<ReturnType<typeof createInventoryLog>>; newVersion: number }
-  ) => Promise<void>
+  opts?: {
+    logType?: inventory_logs_logType;
+    expectedVersion?: number;
+    reasonCode?: string | null;
+    unitCostCents?: number | null;
+    batchId?: string | null;
+    record?: (
+      tx: Prisma.TransactionClient,
+      result: { log: Awaited<ReturnType<typeof createInventoryLog>>; newVersion: number }
+    ) => Promise<void>;
+  }
 ) {
+  const { logType, expectedVersion, reasonCode, unitCostCents, batchId, record } =
+    opts ?? {};
+
   const maxRetries = 3;
   let retryCount = 0;
   
@@ -303,6 +354,9 @@ export async function createInventoryAdjustment(
           locationId,
           delta,
           logType,
+          reasonCode,
+          unitCostCents,
+          batchId,
         });
 
         // Record the change inside the SAME transaction as the stock write.
@@ -338,6 +392,11 @@ export async function createInventoryTransfer(options: {
   quantity: number;
   expectedFromVersion?: number;
   expectedToVersion?: number;
+  // Phase C (P-C1/P-C7): the caller's event batchId, stamped onto BOTH legs so
+  // the audit event joins its ledger rows. transferId remains the precise leg-pair
+  // key; batchId is the operation GROUP key (a batch transfer shares one batchId
+  // across N events / 2N rows).
+  batchId?: string | null;
   // Optional in-transaction recorder (change-tracking Task 8): invoked with the
   // SAME `tx` as both transfer legs' writes so recordChange joins this
   // transaction and hard-aborts the transfer if the audit row cannot be written.
@@ -354,6 +413,7 @@ export async function createInventoryTransfer(options: {
     quantity,
     expectedFromVersion,
     expectedToVersion,
+    batchId,
     record,
   } = options;
 
@@ -432,6 +492,7 @@ export async function createInventoryTransfer(options: {
               delta: -quantity,
               logType: inventory_logs_logType.TRANSFER,
               transferId,
+              batchId,
             },
             tx
           ),
@@ -443,6 +504,7 @@ export async function createInventoryTransfer(options: {
               delta: quantity,
               logType: inventory_logs_logType.TRANSFER,
               transferId,
+              batchId,
             },
             tx
           ),
@@ -496,6 +558,9 @@ export async function createInventoryTransfer(options: {
         }
 
         return {
+          // Phase C (P-C7): expose transferId top-level so transfer/batch results
+          // (built AFTER the record callback returns) can surface the leg-pair key.
+          transferId,
           logs: { from: fromLog, to: toLog },
           fromVersion: updatedFrom.version,
           toVersion: updatedTo.version,
@@ -549,8 +614,21 @@ export async function createInventoryTransaction(
   record?: (
     tx: Prisma.TransactionClient,
     logs: Awaited<ReturnType<typeof createInventoryLog>>[]
-  ) => Promise<void>
+  ) => Promise<void>,
+  // Phase C (P-C1): NEW trailing options object (this path had none). opts.batchId
+  // is threaded onto every ledger row so the companion audit event joins them.
+  opts?: { batchId?: string | null }
 ) {
+  const batchId = opts?.batchId ?? null;
+  // Phase C (D6 / R-D18): the manual-order fulfillment path (deduct-simple ->
+  // workbench complete-order) posts type "DEDUCTION" — the same business event as
+  // an external-order sale, so it gets the SALE logType. Every other transaction
+  // type keeps ADJUSTMENT (item.changeType is still not mapped).
+  const logType =
+    type === "DEDUCTION"
+      ? inventory_logs_logType.SALE
+      : inventory_logs_logType.ADJUSTMENT;
+
   return await prisma.$transaction(async (tx) => {
     const logs = [];
     const versions: Record<string, number> = {};
@@ -609,9 +687,9 @@ export async function createInventoryTransaction(
       // Apply the stock delta through the shared write core: log +
       // product_locations upsert (quantity/version increment) + loc-1
       // Product.quantity mirror — the same path adjust/stock-in/batch-adjust use.
-      // logType is pinned to ADJUSTMENT to preserve this path's exact prior
-      // behavior — deductions/sales are recorded as ADJUSTMENT with a negative
-      // delta (no SALE/DEDUCTION logType exists); item.changeType is not mapped.
+      // Phase C (D6): logType is SALE for "DEDUCTION" (manual-order fulfillment)
+      // and ADJUSTMENT otherwise — computed once above from `type`; item.changeType
+      // is still not mapped. batchId (from opts) joins each row to its event.
       //
       // Concurrency note: the read-compare version guard above stays OUTSIDE
       // applyStockDelta and is UNCHANGED. Like createInventoryAdjustment, this
@@ -624,7 +702,8 @@ export async function createInventoryTransaction(
         productId: item.productId,
         locationId: item.locationId,
         delta: item.quantityChange,
-        logType: inventory_logs_logType.ADJUSTMENT,
+        logType,
+        batchId,
       });
 
       versions[`${item.productId}-${item.locationId}`] = newVersion;

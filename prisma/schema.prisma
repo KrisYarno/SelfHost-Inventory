@@ -169,6 +169,7 @@ model inventory_logs {
   actorKind     String                 @default("USER") @db.VarChar(16)
   reasonCode    String?                @db.VarChar(20)
   unitCostCents Int?
+  batchId       String?                @db.VarChar(36)
   locations     Location?              @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_log_location")
   users         User?                  @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_1")
   products      Product                @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_2")
@@ -180,6 +181,7 @@ model inventory_logs {
   // Indices for reports system performance
   @@index([changeTime, productId, delta], map: "idx_logs_time_product_delta")
   @@index([productId, changeTime, delta], map: "idx_logs_product_time_delta")
+  @@index([batchId], map: "idx_inventory_logs_batch")
 }
 
 model product_locations {

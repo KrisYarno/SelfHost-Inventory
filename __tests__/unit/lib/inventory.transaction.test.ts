@@ -67,19 +67,20 @@ beforeEach(() => {
 });
 
 describe('createInventoryTransaction — unified applyStockDelta write path', () => {
-  it('locationId === 1: writes ADJUSTMENT log + upsert (qty/version increment) + loc-1 mirror', async () => {
+  it('locationId === 1: writes SALE log (DEDUCTION type) + upsert (qty/version increment) + loc-1 mirror', async () => {
     const result = await createInventoryTransaction('DEDUCTION', 42, [
       { productId: 7, locationId: 1, quantityChange: -5 },
     ]);
 
-    // 1. inventory_logs.create — negative delta passed through, ALWAYS ADJUSTMENT
+    // 1. inventory_logs.create — negative delta passed through. Phase C (D6/R-D18):
+    // the "DEDUCTION" type (manual-order fulfillment) now maps to logType SALE.
     expect(mockTx.inventory_logs.create).toHaveBeenCalledTimes(1);
     const logArg = mockTx.inventory_logs.create.mock.calls[0][0] as any;
     expect(logArg.data.delta).toBe(-5);
     expect(logArg.data.productId).toBe(7);
     expect(logArg.data.locationId).toBe(1);
     expect(logArg.data.userId).toBe(42);
-    expect(logArg.data.logType).toBe(inventory_logs_logType.ADJUSTMENT);
+    expect(logArg.data.logType).toBe(inventory_logs_logType.SALE);
     expect(logArg.data.transferId).toBeNull();
 
     // 2. product_locations.upsert — increment quantity by delta, version by 1

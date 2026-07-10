@@ -30,23 +30,24 @@ export const POST = apiHandler(async (request: NextRequest) => {
     body.productId,
     body.locationId,
     body.quantity,
-    inventory_logs_logType.ADJUSTMENT,
-    undefined,
-    async (tx) => {
-      await recordChange(tx, {
-        actor: { userId: user.id },
-        actionType: "INVENTORY_ADJUSTMENT",
-        entityType: "INVENTORY",
-        entityId: body.productId,
-        action: `Stocked in ${body.quantity} units (product ${body.productId}) at location ${body.locationId}`,
-        details: {
-          source: "stock-in",
-          productId: body.productId,
-          delta: body.quantity,
-          locationId: body.locationId,
-        },
-        batchId,
-      });
+    {
+      logType: inventory_logs_logType.ADJUSTMENT,
+      record: async (tx) => {
+        await recordChange(tx, {
+          actor: { userId: user.id },
+          actionType: "INVENTORY_ADJUSTMENT",
+          entityType: "INVENTORY",
+          entityId: body.productId,
+          action: `Stocked in ${body.quantity} units (product ${body.productId}) at location ${body.locationId}`,
+          details: {
+            source: "stock-in",
+            productId: body.productId,
+            delta: body.quantity,
+            locationId: body.locationId,
+          },
+          batchId,
+        });
+      },
     }
   );
 
