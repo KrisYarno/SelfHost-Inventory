@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { recordChange } from "@/lib/change-tracking";
 import { CompanyInputSchema } from "@/lib/validation/companies";
 
 export const dynamic = "force-dynamic";
@@ -57,17 +58,32 @@ export const POST = apiHandler(async (request: NextRequest) => {
     );
   }
 
-  // Create company
-  const company = await prisma.company.create({
-    data: { name, slug },
-  });
+  // Atomic (D4): company + auto-membership + COMPANY_CREATE audit in ONE tx so a
+  // crash can never leave a memberless company or an unrecorded creation.
+  const company = await prisma.$transaction(async (tx) => {
+    const created = await tx.company.create({
+      data: { name, slug },
+    });
 
-  // Ensure the creating admin is associated with the new company
-  await prisma.userCompany.create({
-    data: {
-      userId: user.id,
-      companyId: company.id,
-    },
+    // Ensure the creating admin is associated with the new company
+    await tx.userCompany.create({
+      data: {
+        userId: user.id,
+        companyId: created.id,
+      },
+    });
+
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "COMPANY_CREATE",
+      entityType: "COMPANY",
+      entityId: created.id,
+      companyId: created.id,
+      action: `Created company "${created.name}"`,
+      details: { snapshot: created, autoMembership: user.id },
+    });
+
+    return created;
   });
 
   return NextResponse.json({ company }, { status: 201 });

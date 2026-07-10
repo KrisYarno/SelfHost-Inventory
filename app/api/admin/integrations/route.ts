@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { recordChange } from "@/lib/change-tracking";
 import { encryptValue } from "@/lib/encryption";
 import { CreateIntegrationSchema } from "@/lib/validation/integrations";
 
@@ -50,7 +51,7 @@ export const GET = apiHandler(async (_request: NextRequest) => {
  * Create new integration (encrypt credentials)
  */
 export const POST = apiHandler(async (request: NextRequest) => {
-  await requireAdmin();
+  const { user } = await requireAdmin();
 
   await requireCSRF(request);
 
@@ -110,26 +111,42 @@ export const POST = apiHandler(async (request: NextRequest) => {
       ? encryptValue(resolvedWebhookSecret)
       : null;
 
-  // Create integration
-  const integration = await prisma.integration.create({
-    data: {
-      companyId,
-      platform,
-      name,
-      storeUrl: normalizedStoreUrl,
-      encryptedApiKey,
-      encryptedApiSecret,
-      webhookSecret: encryptedWebhookSecret,
-      isActive: true,
-    },
-    include: {
-      company: {
-        select: {
-          name: true,
-          slug: true,
+  // Create integration + INTEGRATION_CREATE audit in ONE tx. The snapshot carries
+  // ONLY non-credential identity fields — credential material is never recorded,
+  // even pre-redaction (R-D11 create-state).
+  const integration = await prisma.$transaction(async (tx) => {
+    const created = await tx.integration.create({
+      data: {
+        companyId,
+        platform,
+        name,
+        storeUrl: normalizedStoreUrl,
+        encryptedApiKey,
+        encryptedApiSecret,
+        webhookSecret: encryptedWebhookSecret,
+        isActive: true,
+      },
+      include: {
+        company: {
+          select: {
+            name: true,
+            slug: true,
+          },
         },
       },
-    },
+    });
+
+    await recordChange(tx, {
+      actor: { userId: user.id },
+      actionType: "INTEGRATION_CREATE",
+      entityType: "INTEGRATION",
+      entityId: created.id,
+      companyId,
+      action: `Created integration "${name}" (${platform})`,
+      details: { snapshot: { name, platform, storeUrl: normalizedStoreUrl } },
+    });
+
+    return created;
   });
 
   return NextResponse.json({ integration }, { status: 201 });
