@@ -4,6 +4,11 @@ import prisma from "@/lib/prisma";
 import { getCurrentQuantity } from "@/lib/inventory";
 import type { ProductInventoryHistory } from "@/types/inventory";
 
+// Lane 3 (spec R-L15): this raw per-product ledger read is KEPT, not deprecated —
+// the inventory page consumes it via hooks/use-product-location-quantity.ts. The
+// union History timeline (audit events + ledger rows, batch-grouped) is the
+// separate GET /api/products/[id]/history; the two serve different surfaces.
+
 export const dynamic = "force-dynamic";
 
 export const GET = apiHandler(async (request: NextRequest, { params }: { params: { id: string } }) => {

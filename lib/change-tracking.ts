@@ -388,11 +388,12 @@ export async function recordIngestion(
 }
 
 // ---------------------------------------------------------------------------
-// Read path (spec §4 read-path compat / §10 R-D5). Ported verbatim from
-// lib/audit.ts's AuditService.getAuditLogs/getBatchLogs — same query, same
-// include shape, same ordering. The ONLY change is the filter's `entityId`
-// type: `number` -> `string`, matching the migrated VARCHAR(64) column so both
-// numeric-string ids (`"42"`) and cuid strings filter identically.
+// Read path (spec §4 read-path compat / §10 R-D5). getAuditLogs was ported
+// verbatim from lib/audit.ts's AuditService — same query, include shape, and
+// ordering; the ONLY change is the filter's `entityId` type: `number` ->
+// `string`, matching the migrated VARCHAR(64) column so both numeric-string
+// ids ("42") and cuid strings filter identically. (getBatchLogs was deleted in
+// Lane 3 R-L8 — the batch drill-down endpoint queries both tables directly.)
 // ---------------------------------------------------------------------------
 
 /**

@@ -117,7 +117,6 @@ jest.mock("@/lib/change-tracking", () => ({
   redactDeep: jest.fn(<T,>(v: T) => v),
   diff: jest.fn(() => ({})),
   getAuditLogs: jest.fn(async () => ({ logs: [], total: 0 })),
-  getBatchLogs: jest.fn(async () => []),
   COMPANY_SCOPED_ENTITY_TYPES: new Set(),
   REDACTED_KEYS: [],
 }));
@@ -145,9 +144,9 @@ const PERMANENT_EXEMPT: Exemption[] = [
   {
     path: "app/api/admin/audit-logs/route.ts",
     reason:
-      "read-only audit-log lookup; POST only carries batch filters in the body. " +
-      "Imports @/lib/change-tracking for READ functions (getAuditLogs/getBatchLogs) " +
-      "only — a read-only importer must never classify as RECORDS",
+      "read-only audit-log lookup (the batch-filter POST and getBatchLogs were " +
+      "deleted in Lane 3 R-L8). Imports @/lib/change-tracking for the READ " +
+      "function getAuditLogs only — a read-only importer must never classify as RECORDS",
   },
   {
     path: "app/api/cron/external-sync/route.ts",
