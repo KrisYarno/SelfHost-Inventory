@@ -5,6 +5,17 @@ import { Button } from "@/components/ui/button";
 import { Download, HardDrive, RefreshCw } from "lucide-react";
 import { useBackups, useCreateBackup } from "@/hooks/use-admin";
 
+/** Relative age from an mtime (ms epoch). */
+function backupAge(mtimeMs: number): string {
+  if (!mtimeMs) return "unknown age";
+  const mins = Math.round((Date.now() - mtimeMs) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 48) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
+}
+
 export default function AdminBackupPage() {
   const { data: files = [], refetch } = useBackups();
   const createBackupMutation = useCreateBackup();
@@ -66,8 +77,11 @@ export default function AdminBackupPage() {
             <ul className="divide-y">
               {files.map((f) => (
                 <li key={f.name} className="flex items-center justify-between py-2">
-                  <div className="truncate pr-2">
-                    <p className="font-medium truncate">{f.name}</p>
+                  <div className="min-w-0 truncate pr-2">
+                    <p className="truncate font-medium">{f.name}</p>
+                    <p className="text-xs text-muted-foreground" title={f.mtimeMs ? new Date(f.mtimeMs).toISOString() : undefined}>
+                      {backupAge(f.mtimeMs)}
+                    </p>
                   </div>
                   <Button size="sm" variant="outline" onClick={() => download(f.name)}>
                     <Download className="h-4 w-4 mr-2" /> Download

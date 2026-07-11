@@ -3,7 +3,7 @@ jest.mock("@/lib/prisma", () => ({
   default: { analyticsRebuildState: { updateMany: jest.fn(), update: jest.fn() } },
 }));
 import prisma from "@/lib/prisma";
-import { acquireRebuildLock, heartbeatRebuildLock, releaseRebuildLock, recordRebuildRun } from "@/lib/analytics/rebuild-lock";
+import { acquireRebuildLock, heartbeatRebuildLock, releaseRebuildLock } from "@/lib/analytics/rebuild-lock";
 const m = prisma as unknown as { analyticsRebuildState: { updateMany: jest.Mock; update: jest.Mock } };
 
 beforeEach(() => jest.clearAllMocks());
@@ -49,12 +49,5 @@ test("heartbeat returns false when the lease was lost / superseded (count===0)",
   expect(await heartbeatRebuildLock("sales", new Date("2026-06-04T00:00:00Z"))).toBe(false);
 });
 
-test("recordRebuildRun writes run fields + stamps lastRunAt", async () => {
-  m.analyticsRebuildState.update.mockResolvedValue({});
-  await recordRebuildRun("snapshots", { rowsInserted: 5, flaggedPairs: 1, lastError: null });
-  const call = m.analyticsRebuildState.update.mock.calls[0][0];
-  expect(call.where).toEqual({ job: "snapshots" });
-  expect(call.data.rowsInserted).toBe(5);
-  expect(call.data.flaggedPairs).toBe(1);
-  expect(call.data.lastRunAt).toBeInstanceOf(Date);
-});
+// beginRebuildRun / finalizeRebuildRun (the run lifecycle that replaced
+// recordRebuildRun) are covered in __tests__/unit/lib/lane3-rebuild-lifecycle.test.ts.

@@ -1,7 +1,7 @@
 import prisma from "@/lib/prisma";
 import { saleDayKey, dayKeyRange, dayKeyStart, nextDayStart, toDayKey } from "./dates";
 import { attributeOrderItems, AttributableItem } from "./attribution";
-import { acquireRebuildLock, heartbeatRebuildLock, releaseRebuildLock, recordRebuildRun } from "./rebuild-lock";
+import { beginRebuildRun, finalizeRebuildRun, heartbeatRebuildLock, RebuildMeta } from "./rebuild-lock";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -61,9 +61,10 @@ async function recomputeDayKey(dayKey: string, companyId?: string): Promise<{ de
 /** Nightly (rolling window ∪ updatedAt window) or weekly true-full rebuild. Locked + heartbeated. Idempotent.
  *  Returns `skipped: true` (with a zero result) ONLY when the cross-process lock is already held — so a
  *  contended run is distinguishable from a real completed run that happened to touch zero days. */
-export async function rebuildSalesFacts(opts: { since?: Date; full?: boolean; companyId?: string } = {}): Promise<{ rowsDeleted: number; rowsInserted: number; unattributed: number; skipped: boolean }> {
-  const token = await acquireRebuildLock("sales");
-  if (!token) return { rowsDeleted: 0, rowsInserted: 0, unattributed: 0, skipped: true };
+export async function rebuildSalesFacts(opts: { since?: Date; full?: boolean; companyId?: string; meta?: RebuildMeta } = {}): Promise<{ rowsDeleted: number; rowsInserted: number; unattributed: number; skipped: boolean }> {
+  const begin = await beginRebuildRun("sales", opts.meta ?? { mode: opts.full ? "full" : "nightly", source: "cron" });
+  if (!begin.acquired) return { rowsDeleted: 0, rowsInserted: 0, unattributed: 0, skipped: true };
+  const { runId, token } = begin;
   let rowsDeleted = 0, rowsInserted = 0, unattributed = 0, watermark: Date | null = null, aborted = false;
   try {
     let dayKeys: string[];
@@ -101,13 +102,19 @@ export async function rebuildSalesFacts(opts: { since?: Date; full?: boolean; co
       const r = await recomputeDayKey(dk, opts.companyId);
       rowsDeleted += r.deleted; rowsInserted += r.inserted; unattributed += r.unattributed;
     }
-    await recordRebuildRun("sales", { lastWindowFrom: dayKeys[0] ?? null, lastWindowTo: dayKeys[dayKeys.length - 1] ?? null,
-      rowsDeleted, rowsInserted, unattributed, sourceWatermark: watermark, lastError: aborted ? "aborted: lease lost mid-run" : null });
+    await finalizeRebuildRun(runId, token, {
+      status: aborted ? "ABORTED" : "SUCCEEDED",
+      skippedReason: aborted ? "lease-lost" : undefined,
+      lastWindowFrom: dayKeys[0] ?? null,
+      lastWindowTo: dayKeys[dayKeys.length - 1] ?? null,
+      rowsDeleted, rowsInserted, unattributed,
+      sourceWatermark: watermark,
+      lastError: aborted ? "aborted: lease lost mid-run" : null,
+    });
     return { rowsDeleted, rowsInserted, unattributed, skipped: false };
   } catch (e) {
-    await recordRebuildRun("sales", { lastError: String((e as Error).message) });
+    // FAILED: preserve partial counters accumulated before the throw.
+    await finalizeRebuildRun(runId, token, { status: "FAILED", rowsDeleted, rowsInserted, unattributed, sourceWatermark: watermark, lastError: String((e as Error).message) });
     throw e;
-  } finally {
-    await releaseRebuildLock("sales", token);
   }
 }

@@ -73,9 +73,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
 /** Run the requested rebuild and return the lib result object. */
 export async function runJob(args: ParsedArgs): Promise<unknown> {
+  // Every CLI invocation is telemetered as source:'cli' with the requested mode.
+  const meta = { mode: args.mode, source: "cli" as const };
+
   if (args.job === "snapshots") {
     // snapshots: explicit window if given, else default (today + per-pair backfill).
-    return rebuildStockSnapshots({ from: args.from, to: args.to });
+    return rebuildStockSnapshots({ from: args.from, to: args.to, meta });
   }
 
   // sales:
@@ -83,12 +86,12 @@ export async function runJob(args: ParsedArgs): Promise<unknown> {
   //   --from given => since = start of that UTC day
   //   nightly     => lib default (~36h updatedAt window)
   if (args.mode === "full") {
-    return rebuildSalesFacts({ full: true });
+    return rebuildSalesFacts({ full: true, meta });
   }
   if (args.from) {
-    return rebuildSalesFacts({ since: new Date(`${args.from}T00:00:00Z`) });
+    return rebuildSalesFacts({ since: new Date(`${args.from}T00:00:00Z`), meta });
   }
-  return rebuildSalesFacts({});
+  return rebuildSalesFacts({ meta });
 }
 
 async function main(): Promise<void> {

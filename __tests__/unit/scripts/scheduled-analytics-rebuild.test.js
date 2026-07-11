@@ -9,6 +9,7 @@ const {
   weekKey,
   allOk,
   runJob,
+  sendHeartbeat,
 } = require("../../../scripts/scheduled-analytics-rebuild");
 
 // Cadence used across cases: nightly at 03:00 UTC, weekly full on Sunday (DOW 0)
@@ -268,5 +269,57 @@ describe("runJob (HTTP outcome -> status)", () => {
       throw new Error("ECONNREFUSED");
     });
     expect(await runJob(URL, "sek", "sales", "full")).toBe("error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sendHeartbeat — the every-tick liveness ping. Curls ?op=heartbeat&env=<0|1>
+// with the Bearer secret; best-effort (a failed heartbeat never blocks a tick).
+// ---------------------------------------------------------------------------
+describe("sendHeartbeat (liveness ping)", () => {
+  const URL = "http://app:3000/api/cron/analytics-rebuild";
+  let origFetch;
+  let logSpy;
+  let errSpy;
+  beforeEach(() => {
+    origFetch = global.fetch;
+    logSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+    errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    global.fetch = origFetch;
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  test("2xx => true, curls ?op=heartbeat with env=1 and the Bearer secret", async () => {
+    global.fetch = jest.fn(async () => ({ ok: true, status: 200 }));
+    const ok = await sendHeartbeat(URL, "sek", true);
+    expect(ok).toBe(true);
+    expect(global.fetch).toHaveBeenCalledWith(
+      `${URL}?op=heartbeat&env=1`,
+      expect.objectContaining({ method: "GET", headers: { authorization: "Bearer sek" } })
+    );
+  });
+
+  test("env=0 when the sidecar reports itself disabled", async () => {
+    global.fetch = jest.fn(async () => ({ ok: true, status: 200 }));
+    await sendHeartbeat(URL, "sek", false);
+    expect(global.fetch).toHaveBeenCalledWith(
+      `${URL}?op=heartbeat&env=0`,
+      expect.anything()
+    );
+  });
+
+  test("non-2xx => false (logged, tick continues)", async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 401 }));
+    expect(await sendHeartbeat(URL, "sek", true)).toBe(false);
+  });
+
+  test("fetch throws => false (best-effort, never blocks a tick)", async () => {
+    global.fetch = jest.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+    expect(await sendHeartbeat(URL, "sek", true)).toBe(false);
   });
 });

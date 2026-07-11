@@ -40,6 +40,27 @@ export const GET = apiHandler(async (request: NextRequest) => {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const sp0 = request.nextUrl.searchParams;
+
+  // HEARTBEAT op (codex #8): an authenticated no-op ping the sidecar calls on
+  // EVERY loop tick (including idle ticks). It upserts the durable
+  // `analyticsSidecarHeartbeat` SystemSetting so ops-health can distinguish a
+  // sidecar that is OFF (no / stale heartbeat) from jobs that are FAILING (fresh
+  // heartbeat, no recent SUCCESS). Deliberately runs BEFORE the flag gate: the
+  // sidecar's presence is independent of the app-side analyticsRebuildEnabled
+  // flag (they are two separate flags — that misconfig is exactly what this
+  // detects). `env` carries the sidecar's own ENABLE_ANALYTICS_REBUILD value.
+  if (sp0.get("op") === "heartbeat") {
+    const envEnabled = sp0.get("env") === "1" || sp0.get("env") === "true";
+    const value = JSON.stringify({ at: new Date().toISOString(), envEnabled });
+    await prisma.systemSetting.upsert({
+      where: { key: "analyticsSidecarHeartbeat" },
+      update: { value },
+      create: { key: "analyticsSidecarHeartbeat", value },
+    });
+    return NextResponse.json({ success: true, heartbeat: true });
+  }
+
   // Global flag gate (mirrors weeklyReportsEnabled). Off => no-op, never run.
   const setting = await prisma.systemSetting.findUnique({
     where: { key: "analyticsRebuildEnabled" },
@@ -54,7 +75,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   const sp = request.nextUrl.searchParams;
   const job = sp.get("job") === "snapshots" ? "snapshots" : "sales";
-  const mode = sp.get("mode") === "full" ? "full" : "nightly";
+  const mode: "nightly" | "full" = sp.get("mode") === "full" ? "full" : "nightly";
 
   const startTime = Date.now();
   console.log(`[analytics-rebuild] job=${job} mode=${mode} starting...`);
@@ -68,10 +89,11 @@ export const GET = apiHandler(async (request: NextRequest) => {
   //                weekly / one-time, not nightly.
   // Sales mirrors this: nightly `{}` (lib's ~36h updatedAt window) vs full
   // `{ full: true }` (re-scan every dayKey to reconcile late reversals).
+  const meta = { mode, source: "cron" as const };
   let result;
   if (job === "snapshots") {
     if (mode === "full") {
-      result = await rebuildStockSnapshots({});
+      result = await rebuildStockSnapshots({ meta });
     } else {
       const nightlyDays = parseInt(
         process.env.ANALYTICS_SNAPSHOT_NIGHTLY_DAYS || "3",
@@ -80,13 +102,13 @@ export const GET = apiHandler(async (request: NextRequest) => {
       const from = toDayKey(
         new Date(Date.now() - nightlyDays * 24 * 60 * 60 * 1000)
       );
-      result = await rebuildStockSnapshots({ from });
+      result = await rebuildStockSnapshots({ from, meta });
     }
   } else {
     result =
       mode === "full"
-        ? await rebuildSalesFacts({ full: true })
-        : await rebuildSalesFacts({});
+        ? await rebuildSalesFacts({ full: true, meta })
+        : await rebuildSalesFacts({ meta });
   }
 
   const duration = Date.now() - startTime;

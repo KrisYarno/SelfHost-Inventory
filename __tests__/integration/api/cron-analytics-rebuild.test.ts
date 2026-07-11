@@ -11,7 +11,7 @@ jest.mock("@/lib/api-utils", () => ({
 }));
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
-  default: { systemSetting: { findUnique: jest.fn() } },
+  default: { systemSetting: { findUnique: jest.fn(), upsert: jest.fn() } },
 }));
 jest.mock("@/lib/analytics/rebuild-snapshots", () => ({
   rebuildStockSnapshots: jest.fn(),
@@ -27,7 +27,7 @@ import { rebuildStockSnapshots } from "@/lib/analytics/rebuild-snapshots";
 import { rebuildSalesFacts } from "@/lib/analytics/rebuild-sales";
 
 const m = prisma as unknown as {
-  systemSetting: { findUnique: jest.Mock };
+  systemSetting: { findUnique: jest.Mock; upsert: jest.Mock };
 };
 const snapshotsMock = rebuildStockSnapshots as jest.Mock;
 const salesMock = rebuildSalesFacts as jest.Mock;
@@ -111,8 +111,8 @@ test("valid Bearer + enabled + job=snapshots&mode=full => snapshots called with 
 
   expect(res.status).toBe(200);
   expect(snapshotsMock).toHaveBeenCalledTimes(1);
-  // full: no `from` => per-pair earliest = FULL history backfill.
-  expect(snapshotsMock).toHaveBeenCalledWith({});
+  // full: no `from` => per-pair earliest = FULL history backfill; meta carries source/mode.
+  expect(snapshotsMock).toHaveBeenCalledWith({ meta: { mode: "full", source: "cron" } });
   expect(salesMock).not.toHaveBeenCalled();
   const body = await res.json();
   expect(body.job).toBe("snapshots");
@@ -133,8 +133,8 @@ test("valid Bearer + enabled + job=sales&mode=nightly => rebuildSalesFacts calle
 
   expect(res.status).toBe(200);
   expect(salesMock).toHaveBeenCalledTimes(1);
-  // nightly: rebuild-sales defaults to its own rolling-window ∪ updatedAt window when called with {}
-  expect(salesMock).toHaveBeenCalledWith({});
+  // nightly: rebuild-sales defaults to its own rolling-window ∪ updatedAt window; meta carries source/mode.
+  expect(salesMock).toHaveBeenCalledWith({ meta: { mode: "nightly", source: "cron" } });
   expect(snapshotsMock).not.toHaveBeenCalled();
   const body = await res.json();
   expect(body.job).toBe("sales");
@@ -161,13 +161,51 @@ test("valid Bearer + enabled + job=sales&mode=full => rebuildSalesFacts called w
 
   expect(res.status).toBe(200);
   expect(salesMock).toHaveBeenCalledTimes(1);
-  // full: re-scan every dayKey to reconcile late reversals.
-  expect(salesMock).toHaveBeenCalledWith({ full: true });
+  // full: re-scan every dayKey to reconcile late reversals; meta carries source/mode.
+  expect(salesMock).toHaveBeenCalledWith({ full: true, meta: { mode: "full", source: "cron" } });
   expect(snapshotsMock).not.toHaveBeenCalled();
   const body = await res.json();
   expect(body.job).toBe("sales");
   expect(body.mode).toBe("full");
   expect(body.skipped).toBe(false);
+});
+
+// ---------------------------------------------------------------------------
+// Heartbeat op (codex #8): the sidecar pings ?op=heartbeat every loop tick so
+// ops-health can tell "sidecar off" from "jobs failing". It runs BEFORE the flag
+// gate (sidecar presence is independent of analyticsRebuildEnabled) and never
+// dispatches a rebuild.
+// ---------------------------------------------------------------------------
+
+test("op=heartbeat (valid Bearer) upserts analyticsSidecarHeartbeat, skips the flag gate + rebuilds", async () => {
+  const res = await GET(req("?op=heartbeat&env=1", `Bearer ${SECRET}`));
+
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.heartbeat).toBe(true);
+  // Durable heartbeat row upserted with { at, envEnabled }.
+  expect(m.systemSetting.upsert).toHaveBeenCalledTimes(1);
+  const call = m.systemSetting.upsert.mock.calls[0][0];
+  expect(call.where).toEqual({ key: "analyticsSidecarHeartbeat" });
+  const stored = JSON.parse(call.update.value);
+  expect(stored.envEnabled).toBe(true);
+  expect(typeof stored.at).toBe("string");
+  // Independent of the app-side flag: the gate is never consulted, no rebuild runs.
+  expect(m.systemSetting.findUnique).not.toHaveBeenCalled();
+  expect(snapshotsMock).not.toHaveBeenCalled();
+  expect(salesMock).not.toHaveBeenCalled();
+});
+
+test("op=heartbeat with env=0 records envEnabled:false", async () => {
+  await GET(req("?op=heartbeat&env=0", `Bearer ${SECRET}`));
+  const stored = JSON.parse(m.systemSetting.upsert.mock.calls[0][0].update.value);
+  expect(stored.envEnabled).toBe(false);
+});
+
+test("op=heartbeat without auth => 401, no upsert", async () => {
+  const res = await GET(req("?op=heartbeat", "Bearer nope"));
+  expect(res.status).toBe(401);
+  expect(m.systemSetting.upsert).not.toHaveBeenCalled();
 });
 
 test("lock held: rebuild lib returns skipped:true => route surfaces top-level skipped:true but success:true (no-op, scheduler must NOT advance)", async () => {

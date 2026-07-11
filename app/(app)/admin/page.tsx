@@ -4,12 +4,45 @@ import { useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Package, Users, AlertTriangle, ArrowRight, Activity, TrendingUp } from "lucide-react";
+import { ArrowRight, Activity } from "lucide-react";
 import Link from "next/link";
 import { formatNumber } from "@/lib/utils";
 import { toast } from "sonner";
 import { RateLimitMonitor } from "@/components/admin/rate-limit-monitor";
+import { OpsHealthSection } from "@/components/admin/ops-health-section";
 import { useAdminDashboard } from "@/hooks/use-admin";
+
+/** Compact, borderless metric strip (D-L1): the demoted 4-KPI grid. */
+function MetricStrip({
+  metrics,
+}: {
+  metrics: {
+    totalProducts?: number;
+    activeUsers?: number;
+    pendingUsers?: number;
+    lowStockProducts?: number;
+    outOfStockProducts?: number;
+    recentTransactions?: number;
+  };
+}) {
+  const items = [
+    { label: "Total products", value: metrics.totalProducts ?? 0, sub: "Across all locations" },
+    { label: "Active users", value: metrics.activeUsers ?? 0, sub: `${metrics.pendingUsers ?? 0} pending approval` },
+    { label: "Low stock", value: metrics.lowStockProducts ?? 0, sub: `${metrics.outOfStockProducts ?? 0} out of stock` },
+    { label: "Activity (24h)", value: metrics.recentTransactions ?? 0, sub: "Inventory movements" },
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4 sm:divide-x sm:divide-border">
+      {items.map((it) => (
+        <div key={it.label} className="sm:pl-6 sm:first:pl-0">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{it.label}</p>
+          <p className="mt-1 text-2xl font-bold tabular-nums">{formatNumber(it.value)}</p>
+          <p className="text-xs text-muted-foreground">{it.sub}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export default function AdminDashboardPage() {
   // 30s auto-refresh preserved inside the hook via refetchInterval.
@@ -22,29 +55,9 @@ export default function AdminDashboardPage() {
     }
   }, [isError, errorUpdatedAt]);
 
-  if (isLoading) {
-    return (
-      <div className="container mx-auto p-6 space-y-6">
-        <h1 className="text-3xl font-bold">Admin Dashboard</h1>
-        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
-          {[...Array(4)].map((_, i) => (
-            <Card key={i}>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <Skeleton className="h-4 w-[100px]" />
-              </CardHeader>
-              <CardContent>
-                <Skeleton className="h-8 w-[60px]" />
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="container mx-auto p-[var(--card-padding)] space-y-6 overflow-x-hidden">
-      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2">
+    <div className="container mx-auto space-y-6 overflow-x-hidden p-[var(--card-padding)]">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-3xl font-bold">Admin Dashboard</h1>
         <div className="flex gap-2">
           <Button asChild variant="outline">
@@ -56,56 +69,19 @@ export default function AdminDashboardPage() {
         </div>
       </div>
 
-      {/* Metrics Grid */}
-      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Products</CardTitle>
-            <Package className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{metrics?.totalProducts || 0}</div>
-            <p className="text-xs text-muted-foreground">Across all locations</p>
-          </CardContent>
-        </Card>
+      {/* Triage-first: verdict strip + needs-attention + ops workspaces */}
+      <OpsHealthSection />
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Active Users</CardTitle>
-            <Users className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{metrics?.activeUsers || 0}</div>
-            <p className="text-xs text-muted-foreground">
-              {metrics?.pendingUsers || 0} pending approval
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Low Stock Alert</CardTitle>
-            <AlertTriangle className="h-4 w-4 text-warning" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{metrics?.lowStockProducts || 0}</div>
-            <p className="text-xs text-muted-foreground">
-              {metrics?.outOfStockProducts || 0} out of stock
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Recent Activity</CardTitle>
-            <TrendingUp className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{metrics?.recentTransactions || 0}</div>
-            <p className="text-xs text-muted-foreground">Last 24 hours</p>
-          </CardContent>
-        </Card>
-      </div>
+      {/* Demoted KPI strip */}
+      {isLoading ? (
+        <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
+          {[...Array(4)].map((_, i) => (
+            <Skeleton key={i} className="h-16 w-full" />
+          ))}
+        </div>
+      ) : (
+        <MetricStrip metrics={metrics ?? {}} />
+      )}
 
       <div className="grid gap-6 md:grid-cols-2">
         {/* Top Moving Products */}
@@ -198,7 +174,7 @@ export default function AdminDashboardPage() {
               <Link href="/admin/settings">System Settings</Link>
             </Button>
             <Button asChild variant="outline" className="w-full">
-              <Link href="/admin/logs">View Logs</Link>
+              <Link href="/admin/backup">Database Backups</Link>
             </Button>
           </div>
         </CardContent>

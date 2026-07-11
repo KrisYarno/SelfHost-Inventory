@@ -30,6 +30,10 @@ export const GET = apiHandler(async (_request: NextRequest) => {
       fulfillmentPushEnabled: true,
       lastStockSyncAt: true,
       lastStockSyncError: true,
+      // R-D2 order-sync health (previously write-only) + the sync lock timestamp
+      // ops-health reads for >5min staleness.
+      lastSyncError: true,
+      syncLockedAt: true,
       lastWebhookReceivedAt: true,
       lastWebhookError: true,
       webhookFailureCount: true,

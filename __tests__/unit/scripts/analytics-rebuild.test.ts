@@ -36,24 +36,25 @@ describe("parseArgs", () => {
 });
 
 describe("runJob routing", () => {
-  test("snapshots passes the from/to window through", async () => {
+  // Every CLI invocation telemeters as source:'cli' with the requested mode.
+  test("snapshots passes the from/to window through with source:'cli' meta", async () => {
     await runJob({ job: "snapshots", mode: "backfill", from: "2026-01-01", to: "2026-01-31" });
-    expect(snapshotsMock).toHaveBeenCalledWith({ from: "2026-01-01", to: "2026-01-31" });
+    expect(snapshotsMock).toHaveBeenCalledWith({ from: "2026-01-01", to: "2026-01-31", meta: { mode: "backfill", source: "cli" } });
     expect(salesMock).not.toHaveBeenCalled();
   });
 
-  test("sales full => { full: true }", async () => {
+  test("sales full => { full: true } with source:'cli' meta", async () => {
     await runJob({ job: "sales", mode: "full" });
-    expect(salesMock).toHaveBeenCalledWith({ full: true });
+    expect(salesMock).toHaveBeenCalledWith({ full: true, meta: { mode: "full", source: "cli" } });
   });
 
-  test("sales with --from => since = start of that UTC day", async () => {
+  test("sales with --from => since = start of that UTC day, source:'cli' meta", async () => {
     await runJob({ job: "sales", mode: "nightly", from: "2026-02-15" });
-    expect(salesMock).toHaveBeenCalledWith({ since: new Date("2026-02-15T00:00:00Z") });
+    expect(salesMock).toHaveBeenCalledWith({ since: new Date("2026-02-15T00:00:00Z"), meta: { mode: "nightly", source: "cli" } });
   });
 
-  test("sales nightly (no from) => {} (lib default ~36h window)", async () => {
+  test("sales nightly (no from) => {} (lib default ~36h window) with source:'cli' meta", async () => {
     await runJob({ job: "sales", mode: "nightly" });
-    expect(salesMock).toHaveBeenCalledWith({});
+    expect(salesMock).toHaveBeenCalledWith({ meta: { mode: "nightly", source: "cli" } });
   });
 });

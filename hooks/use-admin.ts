@@ -94,6 +94,129 @@ export function useAdminDashboard() {
 }
 
 // ===========================================================================
+// Ops health  (app/(app)/admin/page.tsx — triage-first Overview, D-L1)
+//
+// Response contract lives HERE (not in the route module) so BOTH the server
+// route and the client hook/components share one source without a client bundle
+// ever importing a route handler. The route imports these type-only.
+// ===========================================================================
+
+/** Per-subsystem envelope: a failing subsystem degrades, never 500s the route. */
+export type Sub<T> = { status: "ok"; data: T } | { status: "unavailable"; errorCode: string };
+
+export interface IntegrationHealth {
+  id: string;
+  name: string;
+  platform: string;
+  companyName: string;
+  isActive: boolean;
+  lastSyncAt: string | null;
+  lastSyncError: { at: string | null; message: string; errorCount: number } | null;
+  lastStockSyncError: string | null;
+  syncLockedAt: string | null;
+  lockStale: boolean;
+  webhookFailureCount: number;
+  lastWebhookReceivedAt: string | null;
+}
+
+export interface BackupsHealth {
+  newest: { name: string; mtimeMs: number; ageHours: number } | null;
+  count: number;
+  volume: "ok" | "unavailable";
+}
+
+export interface PendingReviewsHealth {
+  pendingUsers: number;
+  pendingProducts: number;
+  stagingReceived: number;
+}
+
+export interface RebuildJobHealth {
+  job: string;
+  enabled: boolean;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  lockHeld: boolean;
+  lockStale: boolean;
+  sidecarSeenAt: string | null;
+}
+
+export interface RebuildRunRow {
+  id: number;
+  job: string;
+  mode: string;
+  source: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  windowFrom: string | null;
+  windowTo: string | null;
+  rowsDeleted: number;
+  rowsInserted: number;
+  unattributed: number;
+  flaggedPairs: number;
+  skippedReason: string | null;
+  error: string | null;
+}
+
+export interface RebuildHealth {
+  jobs: RebuildJobHealth[];
+  runs: RebuildRunRow[];
+  sidecarSeenAt: string | null;
+  heartbeatStale: boolean;
+}
+
+export interface AttentionItem {
+  severity: "warning" | "negative";
+  system: string;
+  message: string;
+  href: string;
+}
+
+export interface OpsHealthResponse {
+  verdict: "ok" | "degraded" | "failing";
+  attention: AttentionItem[];
+  integrations: Sub<IntegrationHealth[]>;
+  backups: Sub<BackupsHealth>;
+  pendingReviews: Sub<PendingReviewsHealth>;
+  rebuild: Sub<RebuildHealth>;
+}
+
+/** Ops-health aggregate. 60s poll (slower than the 30s dashboard route). */
+export function useOpsHealth() {
+  return useQuery<OpsHealthResponse>({
+    queryKey: ["admin", "ops-health"],
+    queryFn: ({ signal }) => getJSON<OpsHealthResponse>("/api/admin/ops-health", { signal }),
+    refetchInterval: 60_000,
+  });
+}
+
+export interface TriggerRebuildInput {
+  job: "snapshots" | "sales";
+  mode: "nightly" | "full";
+}
+
+/**
+ * Manual rebuild trigger (admin). The server inserts a RUNNING row at lock
+ * acquire, so on success we invalidate ops-health to surface it immediately.
+ */
+export function useTriggerRebuild() {
+  const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
+  return useMutation({
+    mutationFn: ({ job, mode }: TriggerRebuildInput) =>
+      mutateJSON<{ success: boolean; job: string; mode: string; skipped: boolean }>(
+        "/api/admin/analytics-rebuild",
+        "POST",
+        { job, mode },
+        csrfToken,
+      ),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "ops-health"] }),
+  });
+}
+
+// ===========================================================================
 // Users  (app/(app)/admin/users/page.tsx + edit-user-dialog.tsx)
 // ===========================================================================
 

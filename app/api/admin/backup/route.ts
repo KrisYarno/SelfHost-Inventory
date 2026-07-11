@@ -3,15 +3,10 @@ import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { enforceRateLimit } from "@/lib/rateLimit";
 import prisma from "@/lib/prisma";
 import { recordChange } from "@/lib/change-tracking";
+import { listBackups, getBackupDir } from "@/lib/backup/list";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-
-function getBackupDir() {
-  // Prefer the mounted backup volume
-  const dir = process.env.BACKUP_DIR || "/backup";
-  return dir;
-}
 
 function parseDatabaseUrl(url: string) {
   try {
@@ -36,19 +31,10 @@ export const GET = apiHandler(async (req: NextRequest) => {
   const file = searchParams.get("file");
   const dir = getBackupDir();
   if (list) {
-    const entries = await fs.readdir(dir).catch(() => []);
-    const files = (entries || [])
-      .filter((f) => f.endsWith(".sql") || f.endsWith(".sql.gz"))
-      .map((name) => ({ name, mtimeMs: 0 }));
-    // Get mtimes
-    for (const f of files) {
-      try {
-        const st = await fs.stat(path.join(dir, f.name));
-        f.mtimeMs = st.mtimeMs;
-      } catch {}
-    }
-    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    return new Response(JSON.stringify({ files }), {
+    // Shared reader: sorted newest-first with per-file mtimeMs; status distinguishes
+    // an empty volume from an unreadable one (ops-health surfaces the latter).
+    const listing = await listBackups();
+    return new Response(JSON.stringify({ files: listing.files, status: listing.status }), {
       headers: { "content-type": "application/json" },
     });
   }

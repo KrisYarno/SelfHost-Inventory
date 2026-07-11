@@ -1,6 +1,6 @@
 import prisma from "@/lib/prisma";
 import { dayKeyRange, lastCompletedDayKey, nextDayStart, toDayKey } from "./dates";
-import { acquireRebuildLock, heartbeatRebuildLock, releaseRebuildLock, recordRebuildRun } from "./rebuild-lock";
+import { beginRebuildRun, finalizeRebuildRun, heartbeatRebuildLock, RebuildMeta } from "./rebuild-lock";
 
 export interface LevelPoint { dayKey: string; quantity: number; }
 export interface ReconstructInput { current: number; deltas: { changeTime: Date; delta: number }[]; fromDayKey: string; toDayKey: string; }
@@ -25,9 +25,10 @@ export function reconstructLevels({ current, deltas, fromDayKey, toDayKey: to }:
  *  `from` defaults to the earliest log day for the pair (>= seed date); `to` defaults to the last COMPLETED UTC day. Idempotent + locked.
  *  Returns `skipped: true` (with a zero result) ONLY when the cross-process lock is already held — so a contended
  *  run is distinguishable from a real completed run that happened to touch zero rows. */
-export async function rebuildStockSnapshots(opts: { from?: string; to?: string } = {}): Promise<{ rowsInserted: number; flaggedPairs: number; nullLocationCutoff: string | null; skipped: boolean }> {
-  const token = await acquireRebuildLock("snapshots");
-  if (!token) return { rowsInserted: 0, flaggedPairs: 0, nullLocationCutoff: null, skipped: true };
+export async function rebuildStockSnapshots(opts: { from?: string; to?: string; meta?: RebuildMeta } = {}): Promise<{ rowsInserted: number; flaggedPairs: number; nullLocationCutoff: string | null; skipped: boolean }> {
+  const begin = await beginRebuildRun("snapshots", opts.meta ?? { mode: opts.from ? "nightly" : "full", source: "cron" });
+  if (!begin.acquired) return { rowsInserted: 0, flaggedPairs: 0, nullLocationCutoff: null, skipped: true };
+  const { runId, token } = begin;
   let rowsInserted = 0, flaggedPairs = 0;
   let aborted = false;
   try {
@@ -68,13 +69,21 @@ export async function rebuildStockSnapshots(opts: { from?: string; to?: string }
         rowsInserted++; // counts rows upserted (touched), including updates of existing rows — not strictly net-new
       }
     }
-    // Record the EFFECTIVE floor (the applied cutoff) so the run record reflects the actual backfill start.
-    await recordRebuildRun("snapshots", { lastWindowFrom: nullLocationCutoff ?? opts.from ?? null, lastWindowTo: to, rowsInserted, flaggedPairs, lastError: aborted ? "aborted: lease lost mid-run" : null });
+    // Finalize: terminal run row + state mirror + retention + fenced release, atomically.
+    // Record the EFFECTIVE floor (the applied cutoff) so the run reflects the actual backfill start.
+    await finalizeRebuildRun(runId, token, {
+      status: aborted ? "ABORTED" : "SUCCEEDED",
+      skippedReason: aborted ? "lease-lost" : undefined,
+      lastWindowFrom: nullLocationCutoff ?? opts.from ?? null,
+      lastWindowTo: to,
+      rowsInserted,
+      flaggedPairs,
+      lastError: aborted ? "aborted: lease lost mid-run" : null,
+    });
     return { rowsInserted, flaggedPairs, nullLocationCutoff, skipped: false };
   } catch (e) {
-    await recordRebuildRun("snapshots", { lastError: String((e as Error).message) });
+    // FAILED: preserve whatever partial counters we accumulated before the throw.
+    await finalizeRebuildRun(runId, token, { status: "FAILED", rowsInserted, flaggedPairs, lastError: String((e as Error).message) });
     throw e;
-  } finally {
-    await releaseRebuildLock("snapshots", token);
   }
 }

@@ -5,11 +5,17 @@ jest.mock("@/lib/prisma", () => ({ __esModule: true, default: {
   $transaction: jest.fn(),
 } }));
 jest.mock("@/lib/analytics/rebuild-lock", () => ({
-  acquireRebuildLock: jest.fn(), heartbeatRebuildLock: jest.fn(), releaseRebuildLock: jest.fn(), recordRebuildRun: jest.fn(),
+  beginRebuildRun: jest.fn(), finalizeRebuildRun: jest.fn(), heartbeatRebuildLock: jest.fn(),
 }));
 import prisma from "@/lib/prisma";
-import { acquireRebuildLock, heartbeatRebuildLock, releaseRebuildLock, recordRebuildRun } from "@/lib/analytics/rebuild-lock";
+import { beginRebuildRun, finalizeRebuildRun, heartbeatRebuildLock } from "@/lib/analytics/rebuild-lock";
 import { collectTouchedDayKeys, factRowsFor, rebuildSalesFacts } from "@/lib/analytics/rebuild-sales";
+
+// begin acquires the lock + opens a RUNNING row; finalize writes the terminal
+// row + state mirror + retention + fenced release (unit-tested directly in
+// lane3-rebuild-lifecycle.test.ts).
+const TOKEN = new Date("2026-06-04T00:00:00Z");
+const acquired = { acquired: true as const, runId: 1, token: TOKEN };
 
 beforeEach(() => jest.clearAllMocks());
 
@@ -50,15 +56,16 @@ describe("factRowsFor (pure: cents->Decimal string, orderIds.size->orderCount)",
 
 describe("rebuildSalesFacts (orchestration)", () => {
   test("short-circuits when the sales lock is held -> skipped:true (no work, marker must NOT advance)", async () => {
-    (acquireRebuildLock as jest.Mock).mockResolvedValue(null);
+    (beginRebuildRun as jest.Mock).mockResolvedValue({ acquired: false, runId: 9 });
     const res = await rebuildSalesFacts({ since: new Date("2026-06-01T00:00:00Z") });
     expect(res).toEqual({ rowsDeleted: 0, rowsInserted: 0, unattributed: 0, skipped: true });
     expect((prisma as any).externalOrder.findMany).not.toHaveBeenCalled();
-    expect(releaseRebuildLock as jest.Mock).not.toHaveBeenCalled();
+    // begin already finalized the ABORTED/'lock-held' row; the caller does NOT finalize.
+    expect(finalizeRebuildRun as jest.Mock).not.toHaveBeenCalled();
   });
 
   test("nightly: delete-scope == recompute-scope per touched dayKey (delete by dayKey, reinsert from all orders of that day)", async () => {
-    (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
+    (beginRebuildRun as jest.Mock).mockResolvedValue(acquired);
     (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
     // Pin "now" so the rolling window is deterministic. The touched order sits at 2026-06-04 — OUTSIDE the
     // 14-day rolling window (2026-06-06..2026-06-20) — proving the union also recomputes an updatedAt-touched
@@ -108,11 +115,11 @@ describe("rebuildSalesFacts (orchestration)", () => {
     expect(txCreate).toHaveBeenCalledTimes(1);
     expect(res.rowsInserted).toBe(1);
     expect(res.skipped).toBe(false);
-    expect(releaseRebuildLock as jest.Mock).toHaveBeenCalledTimes(1);
+    expect(finalizeRebuildRun as jest.Mock).toHaveBeenCalledTimes(1);
   });
 
   test("companyId scope: delete and re-scan are both narrowed to that company", async () => {
-    (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
+    (beginRebuildRun as jest.Mock).mockResolvedValue(acquired);
     (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
     // Pin "now" to the touched day so the rolling window includes 2026-06-04; the company scoping below
     // holds for every recomputed dayKey (touched + rolling alike).
@@ -137,7 +144,7 @@ describe("rebuildSalesFacts (orchestration)", () => {
   });
 
   test("weekly full: TRUE full range starts at the earliest SALE day (min across both branches), not earliest createdAt", async () => {
-    (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
+    (beginRebuildRun as jest.Mock).mockResolvedValue(acquired);
     (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
     // F4 bug scenario: an IMPORTED order has a LATER createdAt (2026-06-15) but an OLDER externalCreatedAt
     // (2026-06-01 = its true sale day). The old code keyed the floor off `orderBy createdAt asc` and would have
@@ -173,7 +180,7 @@ describe("rebuildSalesFacts (orchestration)", () => {
   });
 
   test("weekly full: when only the createdAt branch has rows (no externalCreatedAt anywhere), floors at that sale day", async () => {
-    (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
+    (beginRebuildRun as jest.Mock).mockResolvedValue(acquired);
     (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
     // No order has a non-null externalCreatedAt -> call 1 returns null; call 2 returns the earliest-createdAt order.
     (prisma as any).externalOrder.findFirst
@@ -193,17 +200,17 @@ describe("rebuildSalesFacts (orchestration)", () => {
   });
 
   test("weekly full with no orders -> no work, clean run (skipped:false — it ran, just found nothing)", async () => {
-    (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
+    (beginRebuildRun as jest.Mock).mockResolvedValue(acquired);
     (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
     (prisma as any).externalOrder.findFirst.mockResolvedValue(null);
     const res = await rebuildSalesFacts({ full: true });
     expect(res).toEqual({ rowsDeleted: 0, rowsInserted: 0, unattributed: 0, skipped: false });
     expect((prisma as any).$transaction).not.toHaveBeenCalled();
-    expect(releaseRebuildLock as jest.Mock).toHaveBeenCalledTimes(1);
+    expect(finalizeRebuildRun as jest.Mock).toHaveBeenCalledTimes(1);
   });
 
   test("heartbeat lost mid-run -> aborts remaining days and records the abort honestly", async () => {
-    (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
+    (beginRebuildRun as jest.Mock).mockResolvedValue(acquired);
     (heartbeatRebuildLock as jest.Mock).mockResolvedValue(false); // lease lost on first heartbeat (day #10)
     // 12 touched days 2026-06-01..2026-06-12. Pin "now" to 2026-06-30 so the rolling window (2026-06-16..06-30)
     // sorts strictly AFTER the touched days; the first 9 recomputed days are thus 06-01..06-09 and the heartbeat
@@ -229,27 +236,29 @@ describe("rebuildSalesFacts (orchestration)", () => {
     expect(txDelete.mock.calls.map((c) => c[0].where.dayKey)).toEqual([
       "2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-06", "2026-06-07", "2026-06-08", "2026-06-09",
     ]);
-    expect(recordRebuildRun as jest.Mock).toHaveBeenCalledWith(
-      "sales",
-      expect.objectContaining({ lastError: expect.stringContaining("lease lost") }),
+    expect(finalizeRebuildRun as jest.Mock).toHaveBeenCalledWith(
+      1,
+      TOKEN,
+      expect.objectContaining({ status: "ABORTED", lastError: expect.stringContaining("lease lost") }),
     );
-    expect(releaseRebuildLock as jest.Mock).toHaveBeenCalledTimes(1);
+    expect(finalizeRebuildRun as jest.Mock).toHaveBeenCalledTimes(1);
   });
 
   test("a query throw mid-run records a non-null error and still releases the lock (finally)", async () => {
-    (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
+    (beginRebuildRun as jest.Mock).mockResolvedValue(acquired);
     (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
     (prisma as any).externalOrder.findMany.mockRejectedValue(new Error("db exploded"));
     await expect(rebuildSalesFacts({ since: new Date("2026-06-01T00:00:00Z") })).rejects.toThrow("db exploded");
-    expect(recordRebuildRun as jest.Mock).toHaveBeenCalledWith(
-      "sales",
-      expect.objectContaining({ lastError: expect.stringMatching(/.+/) }),
+    expect(finalizeRebuildRun as jest.Mock).toHaveBeenCalledWith(
+      1,
+      TOKEN,
+      expect.objectContaining({ status: "FAILED", lastError: expect.stringMatching(/.+/) }),
     );
-    expect(releaseRebuildLock as jest.Mock).toHaveBeenCalledTimes(1);
+    expect(finalizeRebuildRun as jest.Mock).toHaveBeenCalledTimes(1);
   });
 
   test("clean nightly run records the watermark (max updatedAt) and a null error; window spans the rolling union", async () => {
-    (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
+    (beginRebuildRun as jest.Mock).mockResolvedValue(acquired);
     (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
     // Pin "now" so the 14-day rolling window is 2026-05-21..2026-06-04 and the touched orders (both on 2026-06-04)
     // fall inside it. The recorded window therefore spans the union [2026-05-21 .. 2026-06-04].
@@ -269,15 +278,16 @@ describe("rebuildSalesFacts (orchestration)", () => {
       jest.useRealTimers();
     }
     // watermark is still the updatedAt frontier (the rolling window is time-derived, not order-derived)
-    expect(recordRebuildRun as jest.Mock).toHaveBeenCalledWith(
-      "sales",
-      expect.objectContaining({ sourceWatermark: new Date("2026-06-04T18:30:00Z"), lastError: null, lastWindowFrom: "2026-05-21", lastWindowTo: "2026-06-04" }),
+    expect(finalizeRebuildRun as jest.Mock).toHaveBeenCalledWith(
+      1,
+      TOKEN,
+      expect.objectContaining({ status: "SUCCEEDED", sourceWatermark: new Date("2026-06-04T18:30:00Z"), lastError: null, lastWindowFrom: "2026-05-21", lastWindowTo: "2026-06-04" }),
     );
     expect(res.skipped).toBe(false);
   });
 
   test("nightly rolling default: with NO updatedAt-touched orders, still recomputes the last 14 completed days (catches non-updatedAt edits)", async () => {
-    (acquireRebuildLock as jest.Mock).mockResolvedValue(new Date("2026-06-04T00:00:00Z"));
+    (beginRebuildRun as jest.Mock).mockResolvedValue(acquired);
     (heartbeatRebuildLock as jest.Mock).mockResolvedValue(true);
     jest.useFakeTimers().setSystemTime(new Date("2026-06-20T03:00:00Z"));
     (prisma as any).externalOrder.findMany.mockResolvedValue([]); // nothing bumped updatedAt
@@ -298,9 +308,10 @@ describe("rebuildSalesFacts (orchestration)", () => {
       "2026-06-14", "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19", "2026-06-20",
     ]);
     // no updatedAt-touched orders -> watermark is null, but the run still did work
-    expect(recordRebuildRun as jest.Mock).toHaveBeenCalledWith(
-      "sales",
-      expect.objectContaining({ sourceWatermark: null, lastWindowFrom: "2026-06-06", lastWindowTo: "2026-06-20", lastError: null }),
+    expect(finalizeRebuildRun as jest.Mock).toHaveBeenCalledWith(
+      1,
+      TOKEN,
+      expect.objectContaining({ status: "SUCCEEDED", sourceWatermark: null, lastWindowFrom: "2026-06-06", lastWindowTo: "2026-06-20", lastError: null }),
     );
     expect(res.skipped).toBe(false);
   });

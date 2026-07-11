@@ -142,6 +142,33 @@ async function runJob(url, secret, job, mode) {
   return skipped ? "skipped" : "ok";
 }
 
+/**
+ * Ping the authenticated heartbeat op on EVERY loop tick (including idle ticks).
+ * The route upserts a durable SystemSetting so ops-health can tell "sidecar off"
+ * (no / stale heartbeat) from "jobs failing" (fresh heartbeat, no recent SUCCESS).
+ * `enabled` is the sidecar's own ENABLE_ANALYTICS_REBUILD value (recorded as
+ * envEnabled). Best-effort: a failed heartbeat is logged and never blocks a tick.
+ * @returns {Promise<boolean>}
+ */
+async function sendHeartbeat(url, secret, enabled) {
+  const target = `${url}?op=heartbeat&env=${enabled ? "1" : "0"}`;
+  try {
+    const resp = await fetch(target, {
+      method: "GET",
+      headers: { authorization: `Bearer ${secret}` },
+    });
+    if (!resp.ok) {
+      console.error(`[analytics-rebuild] heartbeat HTTP ${resp.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[analytics-rebuild] heartbeat request failed: ${message}`);
+    return false;
+  }
+}
+
 async function main() {
   const enabledRaw = process.env.ENABLE_ANALYTICS_REBUILD || "0";
   const enabled = enabledRaw === "1" || enabledRaw === "true";
@@ -181,6 +208,9 @@ async function main() {
       console.error("[analytics-rebuild] CRON_SECRET is not set. Skipping run.");
       return;
     }
+    // Heartbeat FIRST, on every tick — including idle ticks with no job due — so
+    // ops-health always sees a live, running sidecar (that IS the "sidecar on" signal).
+    await sendHeartbeat(url, secret, enabled);
     const decision = decideJobs(new Date(), state, cfg);
     if (decision.jobs.length === 0) return;
     // Run every due job and collect outcomes. Do NOT advance the dedup marker up front: if a job is
@@ -206,7 +236,7 @@ async function main() {
 // Exports for unit tests. decideJobs + allOk are pure; runJob is exported so its HTTP-outcome
 // classification ("ok"/"skipped"/"error") can be tested with a mocked fetch. Importing this file
 // must NOT start the loop — only direct execution does (mirrors scripts/analytics-rebuild.ts).
-module.exports = { decideJobs, dayKey, weekKey, allOk, runJob };
+module.exports = { decideJobs, dayKey, weekKey, allOk, runJob, sendHeartbeat };
 
 if (require.main === module) {
   main().catch((err) => {

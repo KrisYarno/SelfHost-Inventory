@@ -26,6 +26,9 @@ export interface Integration {
   fulfillmentPushEnabled: boolean;
   lastStockSyncAt: string | null;
   lastStockSyncError: string | null;
+  // R-D2 order-sync health + sync lock timestamp (>5min = stale).
+  lastSyncError: string | null;
+  syncLockedAt: string | null;
   lastWebhookReceivedAt: string | null;
   lastWebhookError: string | null;
   webhookFailureCount: number;
