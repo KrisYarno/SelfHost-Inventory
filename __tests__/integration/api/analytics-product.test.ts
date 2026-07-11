@@ -13,7 +13,13 @@ jest.mock("@/lib/analytics/queries", () => ({
 }));
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
-  default: { userCompany: { findMany: jest.fn() } },
+  default: {
+    userCompany: { findMany: jest.fn() },
+    // Lane 3 T3: the route now also loads product identity + a GLOBAL stock sum
+    // for the D-L2 History-host header (see analytics-product-id.test.ts).
+    product: { findUnique: jest.fn() },
+    product_locations: { aggregate: jest.fn() },
+  },
 }));
 
 import { NextRequest } from "next/server";
@@ -22,14 +28,22 @@ import { requireApproved } from "@/lib/api-utils";
 import { getStockSeries, getSales } from "@/lib/analytics/queries";
 import prisma from "@/lib/prisma";
 
-const m = prisma as unknown as { userCompany: { findMany: jest.Mock } };
+const m = prisma as unknown as {
+  userCompany: { findMany: jest.Mock };
+  product: { findUnique: jest.Mock };
+  product_locations: { aggregate: jest.Mock };
+};
 const getStockSeriesMock = getStockSeries as jest.Mock;
 const getSalesMock = getSales as jest.Mock;
 
 const req = () => new NextRequest("http://x/api/analytics/product/42");
 const ctx = (id: string) => ({ params: { id } });
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  m.product.findUnique.mockResolvedValue({ name: "W", baseName: "W", variant: null });
+  m.product_locations.aggregate.mockResolvedValue({ _sum: { quantity: 0 } });
+});
 
 test("returns a unified { stock, sales } payload", async () => {
   (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isAdmin: false } });

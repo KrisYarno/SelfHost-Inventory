@@ -36,8 +36,18 @@ export type SalesRow = {
     orderCount?: number | null;
   };
 };
+// Product identity for the D-L2 History-host header (added by the T5 route
+// alongside the existing stock/sales payload). currentStock = GLOBAL sum across
+// all locations (the physical pool). Optional so an older payload never crashes.
+export type ProductIdentity = {
+  name: string | null;
+  baseName: string | null;
+  variant: string | null;
+  currentStock: number;
+};
 export type ProductAnalytics = {
   productId: number;
+  product?: ProductIdentity | null;
   stock: { series: StockPoint[]; mode: string };
   sales: { series: SalesRow[]; mode: string; note: string };
 };

@@ -5,7 +5,7 @@ import { ProductWithQuantity } from "@/types/product";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { MoreHorizontal, Edit, Trash2, TrendingUp, Package } from "lucide-react";
+import { MoreHorizontal, Edit, Trash2, TrendingUp, Package, History } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -71,11 +71,19 @@ export function ProductCard({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                {/* Analytics (available to anyone who can open the menu) */}
+                {/* Per-product deep page: the row action splits into Analytics
+                    (the bare Performance URL) and History (?tab=history deep link,
+                    D-L2). Available to anyone who can open the menu. */}
                 <DropdownMenuItem asChild>
                   <Link href={`/analytics/product/${product.id}`}>
                     <TrendingUp className="mr-2 h-4 w-4" />
-                    View analytics
+                    Analytics
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem asChild>
+                  <Link href={`/analytics/product/${product.id}?tab=history`}>
+                    <History className="mr-2 h-4 w-4" />
+                    History
                   </Link>
                 </DropdownMenuItem>
                 {((showInventoryActions && (onQuickAdjust || onStockIn)) ||

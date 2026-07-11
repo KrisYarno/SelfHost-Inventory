@@ -14,9 +14,14 @@ function renderPage() {
   );
 }
 
-// The page reads the product id from the route via useParams().
+// The page reads the product id from the route via useParams(), and the
+// Performance|History tab is synced to ?tab= via useRouter/usePathname/
+// useSearchParams (Lane 3 T3). Default (no ?tab) => Performance is active.
 jest.mock("next/navigation", () => ({
   useParams: () => ({ id: "42" }),
+  useRouter: () => ({ replace: jest.fn(), push: jest.fn(), prefetch: jest.fn() }),
+  usePathname: () => "/analytics/product/42",
+  useSearchParams: () => new URLSearchParams(""),
 }));
 
 // The page renders the memberships-only company scope selector. Stub the hook so the

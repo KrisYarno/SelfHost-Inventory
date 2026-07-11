@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
+import prisma from "@/lib/prisma";
 import { getStockSeries, getSales } from "@/lib/analytics/queries";
 import { resolveCallerCompanyIds, serializeSalesRows } from "@/lib/analytics/company-scope";
 
@@ -34,9 +35,20 @@ export const GET = apiHandler(
     // sum the caller's OWN memberships. A non-member NEVER reaches the data layer.
     const companyIds = await resolveCallerCompanyIds(user, companyId);
 
-    const [stock, salesRows] = await Promise.all([
+    // The D-L2 History-host header consumes product identity (name/baseName/variant)
+    // + current GLOBAL stock (sum across all locations — the physical pool, never
+    // company-scoped). The historical payload carried no identity fields; add them.
+    const [stock, salesRows, identity, stockAgg] = await Promise.all([
       getStockSeries({ productId, from, to }),
       getSales({ companyIds, productId, from, to }),
+      prisma.product.findUnique({
+        where: { id: productId },
+        select: { name: true, baseName: true, variant: true },
+      }),
+      prisma.product_locations.aggregate({
+        _sum: { quantity: true },
+        where: { productId },
+      }),
     ]);
 
     // Serialize the Prisma Decimal revenue sum to a string per row so NextResponse.json
@@ -45,6 +57,12 @@ export const GET = apiHandler(
 
     return NextResponse.json({
       productId,
+      product: {
+        name: identity?.name ?? null,
+        baseName: identity?.baseName ?? null,
+        variant: identity?.variant ?? null,
+        currentStock: stockAgg._sum.quantity ?? 0,
+      },
       stock: { series: stock, mode: "historical (GLOBAL inventory)" },
       sales: {
         series: sales,

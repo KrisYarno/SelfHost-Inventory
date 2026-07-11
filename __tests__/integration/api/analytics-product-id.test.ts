@@ -7,7 +7,13 @@ jest.mock("@/lib/api-utils", () => ({
 jest.mock("@/lib/analytics/queries", () => ({ getStockSeries: jest.fn(), getSales: jest.fn() }));
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
-  default: { userCompany: { findMany: jest.fn() } },
+  default: {
+    userCompany: { findMany: jest.fn() },
+    // Lane 3 T3: the route now also loads product identity + a GLOBAL stock sum
+    // for the D-L2 History-host header.
+    product: { findUnique: jest.fn() },
+    product_locations: { aggregate: jest.fn() },
+  },
 }));
 
 import { NextRequest } from "next/server";
@@ -16,7 +22,11 @@ import { requireApproved, requireCompanyMembership } from "@/lib/api-utils";
 import { getStockSeries, getSales } from "@/lib/analytics/queries";
 import prisma from "@/lib/prisma";
 
-const m = prisma as unknown as { userCompany: { findMany: jest.Mock } };
+const m = prisma as unknown as {
+  userCompany: { findMany: jest.Mock };
+  product: { findUnique: jest.Mock };
+  product_locations: { aggregate: jest.Mock };
+};
 const stockMock = getStockSeries as jest.Mock;
 const salesMock = getSales as jest.Mock;
 const ctx = (id: string) => ({ params: { id } });
@@ -27,6 +37,8 @@ beforeEach(() => {
   stockMock.mockResolvedValue([]);
   salesMock.mockResolvedValue([]);
   m.userCompany.findMany.mockResolvedValue([{ companyId: "c1" }]);
+  m.product.findUnique.mockResolvedValue({ name: "BPC 5mg", baseName: "BPC", variant: "5mg" });
+  m.product_locations.aggregate.mockResolvedValue({ _sum: { quantity: 42 } });
 });
 
 test("requireApproved gates the route before any data access", async () => {
@@ -77,4 +89,33 @@ test("invalid id => 400, no queries", async () => {
   const res = await GET(new NextRequest("http://x/api/analytics/product/abc"), ctx("abc"));
   expect(res.status).toBe(400);
   expect(stockMock).not.toHaveBeenCalled();
+});
+
+test("payload carries product identity + GLOBAL current stock for the D-L2 header", async () => {
+  const res = await GET(new NextRequest("http://x/api/analytics/product/5"), ctx("5"));
+  expect(res.status).toBe(200);
+  const body = await (res as Response).json();
+  expect(body.product).toEqual({
+    name: "BPC 5mg",
+    baseName: "BPC",
+    variant: "5mg",
+    currentStock: 42,
+  });
+  expect(m.product.findUnique).toHaveBeenCalledWith({
+    where: { id: 5 },
+    select: { name: true, baseName: true, variant: true },
+  });
+  expect(m.product_locations.aggregate).toHaveBeenCalledWith({
+    _sum: { quantity: true },
+    where: { productId: 5 },
+  });
+});
+
+test("missing product row => identity nulls + zero stock (no crash)", async () => {
+  m.product.findUnique.mockResolvedValue(null);
+  m.product_locations.aggregate.mockResolvedValue({ _sum: { quantity: null } });
+  const res = await GET(new NextRequest("http://x/api/analytics/product/5"), ctx("5"));
+  expect(res.status).toBe(200);
+  const body = await (res as Response).json();
+  expect(body.product).toEqual({ name: null, baseName: null, variant: null, currentStock: 0 });
 });

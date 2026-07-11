@@ -20,7 +20,7 @@ const product: any = {
   costPrice: 0, retailPrice: 0,
 };
 
-test("product card exposes a 'View analytics' action to /analytics/product/[id]", async () => {
+test("product card row action splits into 'Analytics' (bare URL) and 'History' (?tab=history)", async () => {
   const user = userEvent.setup();
   render(
     <ProductCard
@@ -30,9 +30,15 @@ test("product card exposes a 'View analytics' action to /analytics/product/[id]"
       onEdit={() => {}}
     />
   );
-  // The action lives inside the dropdown menu, closed/portalled by default.
+  // Both actions live inside the dropdown menu, closed/portalled by default.
   // userEvent dispatches the full pointer sequence Radix needs to open it.
   await user.click(screen.getByRole("button", { name: /open menu/i }));
-  const link = await screen.findByRole("menuitem", { name: /view analytics/i });
-  expect(link).toHaveAttribute("href", "/analytics/product/42");
+
+  // Analytics -> the bare Performance URL (existing deep links land unchanged).
+  const analytics = await screen.findByRole("menuitem", { name: /^analytics$/i });
+  expect(analytics).toHaveAttribute("href", "/analytics/product/42");
+
+  // History -> the ?tab=history deep link (D-L2 host contract).
+  const history = await screen.findByRole("menuitem", { name: /^history$/i });
+  expect(history).toHaveAttribute("href", "/analytics/product/42?tab=history");
 });
