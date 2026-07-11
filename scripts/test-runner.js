@@ -17,7 +17,7 @@ const colors = {
 const testSuites = {
   unit: {
     name: 'Unit Tests',
-    pattern: '__tests__/unit/**/*.test.{ts,tsx}',
+    pattern: '__tests__/unit/**/*.test.{ts,tsx,js,jsx}',
     description: 'Testing individual functions and hooks'
   },
   integration: {
@@ -37,7 +37,7 @@ const testSuites = {
   },
   all: {
     name: 'All Tests',
-    pattern: '__tests__/**/*.test.{ts,tsx}',
+    pattern: '__tests__/**/*.test.{ts,tsx,js,jsx}',
     description: 'Running all test suites'
   }
 };

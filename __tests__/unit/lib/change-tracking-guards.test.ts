@@ -178,6 +178,8 @@ const KNOWN_VERBS: readonly string[] = [
   'SENT',
   'BULK_UPDATE',
   'STOCK_IN',
+  // Lane 3 (R-L14): ANALYTICS_REBUILD_TRIGGER -- the manual-rebuild admin action.
+  'TRIGGER',
 ];
 
 /**

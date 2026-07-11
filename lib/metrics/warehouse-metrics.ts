@@ -56,32 +56,6 @@ export function calculateMonthlyCarryingCost(
 }
 
 /**
- * Calculate reorder health score (0-100)
- * Represents percentage of products in healthy stock position
- * @param statusCounts - Count of products in each status category
- * @returns Health score percentage (0-100)
- */
-export function calculateReorderHealthScore(statusCounts: {
-  orderNow: number;
-  orderSoon: number;
-  watch: number;
-  ok: number;
-}): number {
-  const total =
-    statusCounts.orderNow +
-    statusCounts.orderSoon +
-    statusCounts.watch +
-    statusCounts.ok;
-
-  if (total === 0) return 100; // No products = 100% healthy (edge case)
-
-  // Health score = percentage of products in OK or WATCH status
-  // (WATCH products are being monitored but not urgent)
-  const healthyCount = statusCounts.ok + statusCounts.watch;
-  return Math.round((healthyCount / total) * 100);
-}
-
-/**
  * Calculate trend percentage between two values
  * @param current - Current period value
  * @param previous - Previous period value

@@ -41,7 +41,6 @@ export const StockInSchema = z.object({
   productId: positiveInt,
   locationId: positiveInt,
   quantity: z.number().int().positive(),
-  logType: z.nativeEnum(inventory_logs_logType).optional(),
 });
 
 // Transfer inventory between locations

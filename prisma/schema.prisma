@@ -53,7 +53,7 @@ model Product {
   numericValue      Decimal?              @db.Decimal(10, 2)
   quantity          Int                   @default(0)
   location          Int                   @default(1)
-  lowStockThreshold Int?                  @default(1)
+  lowStockThreshold Int?
   costPrice         Decimal               @default(0.00) @db.Decimal(10, 2)
   retailPrice       Decimal               @default(0.00) @db.Decimal(10, 2)
   deletedAt         DateTime?             @db.DateTime(0)
@@ -177,6 +177,7 @@ model inventory_logs {
   @@index([locationId], map: "fk_log_location")
   @@index([productId, locationId, changeTime], map: "idx_inventory_logs_product_location_time_desc")
   @@index([logType, changeTime], map: "idx_inventory_logs_type_time")
+  @@index([logType, productId, changeTime], map: "idx_inventory_logs_type_product_time")
   @@index([userId, changeTime, productId, locationId, delta], map: "idx_inventory_logs_user_covering")
   // Indices for reports system performance
   @@index([changeTime, productId, delta], map: "idx_logs_time_product_delta")
@@ -238,7 +239,7 @@ model AuditLog {
 
   @@index([userId], map: "idx_audit_user")
   @@index([actionType], map: "idx_audit_actionType")
-  @@index([entityType, entityId], map: "idx_audit_entity")
+  @@index([entityType, entityId, createdAt], map: "idx_audit_entity_time")
   @@index([batchId], map: "idx_audit_batch")
   @@index([createdAt], map: "idx_audit_created")
   @@index([companyId, createdAt], map: "idx_audit_company_time")
@@ -527,4 +528,31 @@ model AnalyticsRebuildState {
   updatedAt       DateTime  @default(now()) @updatedAt @db.DateTime(0)
 
   @@map("analytics_rebuild_state")
+}
+
+// Lane 3 (spec D8 / R-L14): per-run operational telemetry for the analytics
+// rebuild jobs. Small dedicated table (NOT audit_logs) — rebuild runs are
+// telemetry, not entity changes. Retention = keep newest 100 per job.
+model AnalyticsRebuildRun {
+  id                Int       @id @default(autoincrement())
+  job               String    @db.VarChar(32)
+  mode              String    @db.VarChar(16)
+  source            String    @db.VarChar(16)
+  status            String    @db.VarChar(16)
+  requestedByUserId Int?
+  startedAt         DateTime  @db.DateTime(3)
+  finishedAt        DateTime? @db.DateTime(3)
+  durationMs        Int?
+  windowFrom        String?   @db.Char(10)
+  windowTo          String?   @db.Char(10)
+  rowsDeleted       Int       @default(0)
+  rowsInserted      Int       @default(0)
+  unattributed      Int       @default(0)
+  flaggedPairs      Int       @default(0)
+  sourceWatermark   DateTime? @db.DateTime(0)
+  skippedReason     String?   @db.VarChar(64)
+  error             String?   @db.Text
+
+  @@index([job, startedAt], map: "idx_rebuild_runs_job_started")
+  @@map("analytics_rebuild_runs")
 }

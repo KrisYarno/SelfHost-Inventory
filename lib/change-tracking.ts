@@ -79,7 +79,11 @@ export type AuditActionType =
   | 'STAGING_UPDATE'
   | 'EXTERNAL_ORDER_CREATE'
   | 'EXTERNAL_ORDER_UPDATE'
-  | 'EXTERNAL_ORDER_DELETE';
+  | 'EXTERNAL_ORDER_DELETE'
+  // --- Lane 3 additions (spec R-L14): the admin manual-rebuild action. Run
+  // telemetry itself stays out of the audit log -- only the human TRIGGER is
+  // recorded.
+  | 'ANALYTICS_REBUILD_TRIGGER';
 
 export type EntityType =
   | 'USER'
