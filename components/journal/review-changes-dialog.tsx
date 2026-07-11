@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, TrendingUp, TrendingDown } from "lucide-react";
+import { AlertTriangle, TrendingUp, TrendingDown, Minus } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -38,9 +38,11 @@ export function ReviewChangesDialog({
 
   const totals = adjustmentList.reduce(
     (acc, adj) => {
+      // D11: a 0-change row is neither an addition nor a removal — it is folded
+      // into neither total (previously it fell into the `removals` branch).
       if (adj.quantityChange > 0) {
         acc.additions += adj.quantityChange;
-      } else {
+      } else if (adj.quantityChange < 0) {
         acc.removals += Math.abs(adj.quantityChange);
       }
       acc.net += adj.quantityChange;
@@ -136,7 +138,7 @@ export function ReviewChangesDialog({
                         {newQuantity}
                       </span>
                       {isNegative && (
-                        <Badge variant="destructive" className="text-xs" role="alert">
+                        <Badge variant="destructive" className="text-xs">
                           Negative Stock
                         </Badge>
                       )}
@@ -146,19 +148,25 @@ export function ReviewChangesDialog({
                   <div className="flex items-center gap-2" aria-hidden="true">
                     {adjustment.quantityChange > 0 ? (
                       <TrendingUp className="h-4 w-4 text-positive" aria-label="Increase" />
-                    ) : (
+                    ) : adjustment.quantityChange < 0 ? (
                       <TrendingDown className="h-4 w-4 text-negative" aria-label="Decrease" />
+                    ) : (
+                      <Minus className="h-4 w-4 text-muted-foreground" aria-label="No change" />
                     )}
-                    <span
-                      className={
-                        adjustment.quantityChange > 0
-                          ? "text-positive font-medium"
-                          : "text-negative font-medium"
-                      }
-                    >
-                      {adjustment.quantityChange > 0 ? "+" : ""}
-                      {adjustment.quantityChange}
-                    </span>
+                    {adjustment.quantityChange === 0 ? (
+                      <span className="text-muted-foreground">No change</span>
+                    ) : (
+                      <span
+                        className={
+                          adjustment.quantityChange > 0
+                            ? "text-positive font-medium"
+                            : "text-negative font-medium"
+                        }
+                      >
+                        {adjustment.quantityChange > 0 ? "+" : ""}
+                        {adjustment.quantityChange}
+                      </span>
+                    )}
                   </div>
                 </div>
               );

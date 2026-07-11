@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from 'react';
+import { Check, Copy } from 'lucide-react';
 import { formatDateTime, formatShortDateTime } from '@/lib/utils';
 import {
   Table,
@@ -23,10 +24,41 @@ export interface TransferLogRow {
   toLocationName: string;
   userName: string;
   batchId?: string | null;
+  transferId?: string | null;
 }
 
 interface TransferLogTableProps {
   logs: TransferLogRow[];
+}
+
+/** A monospace id truncated with a copy-to-clipboard affordance. */
+function CopyableId({ value, label = "Copy id" }: { value: string; label?: string }) {
+  const [copied, setCopied] = React.useState(false);
+  const short = value.length > 10 ? `${value.slice(0, 8)}…` : value;
+  return (
+    <button
+      type="button"
+      title={value}
+      aria-label={label}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(value);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        } catch {
+          /* clipboard unavailable — no-op */
+        }
+      }}
+      className="inline-flex items-center gap-1 rounded-sm font-mono text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <span className="tabular-nums">{short}</span>
+      {copied ? (
+        <Check className="h-3 w-3 text-positive-foreground" aria-hidden />
+      ) : (
+        <Copy className="h-3 w-3" aria-hidden />
+      )}
+    </button>
+  );
 }
 
 export function TransferLogTable({ logs }: TransferLogTableProps) {
@@ -80,10 +112,18 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
                 </div>
                 <div className="mt-2 text-xs font-medium">
                   <span className="text-negative">{log.fromLocationName}</span>
-                  <span className="mx-2 text-muted-foreground">-&gt;</span>
+                  <span className="mx-2 text-muted-foreground" aria-hidden>→</span>
                   <span className="text-positive">{log.toLocationName}</span>
                 </div>
-                <div className="mt-1 text-xs text-muted-foreground">by {log.userName}</div>
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span>by {log.userName}</span>
+                  {log.transferId && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <CopyableId value={log.transferId} label="Copy transfer id" />
+                    </>
+                  )}
+                </div>
               </div>
             );
           })}
@@ -99,6 +139,7 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
                 <TableHead>From</TableHead>
                 <TableHead>To</TableHead>
                 <TableHead className="text-right">Quantity</TableHead>
+                <TableHead>Transfer ID</TableHead>
                 <TableHead>User</TableHead>
               </TableRow>
             </TableHeader>
@@ -115,6 +156,20 @@ export function TransferLogTable({ logs }: TransferLogTableProps) {
                     <TableCell className="text-positive">{log.toLocationName}</TableCell>
                     <TableCell className="text-right">
                       <span className="font-medium tabular-nums">{qty}</span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        {log.transferId ? (
+                          <CopyableId value={log.transferId} label="Copy transfer id" />
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                        {log.batchId && (
+                          <StatusBadge tone="neutral" className="bg-muted text-muted-foreground border-border/60">
+                            Batch
+                          </StatusBadge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>{log.userName}</TableCell>
                   </TableRow>

@@ -53,7 +53,7 @@ jest.mock('next/headers', () => ({
   headers: jest.fn(async () => ({ get: () => null })),
 }));
 
-import { GET as auditLogsGET, POST as batchLogsPOST } from '@/app/api/admin/audit-logs/route';
+import { GET as auditLogsGET } from '@/app/api/admin/audit-logs/route';
 import { requireAdmin } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 
@@ -86,14 +86,6 @@ const CUID = 'cmcy1x2z90000abcd1234efgh';
 
 function mkGet(query = '') {
   return new NextRequest(`http://t/api/admin/audit-logs${query}`, { method: 'GET' });
-}
-
-function mkPost(body: any) {
-  return new NextRequest('http://t/api/admin/audit-logs', {
-    method: 'POST',
-    body: JSON.stringify(body),
-    headers: { 'Content-Type': 'application/json', 'x-csrf-token': 'x' },
-  });
 }
 
 beforeEach(() => {
@@ -177,25 +169,5 @@ describe('GET /api/admin/audit-logs (read path via lib/change-tracking)', () => 
     const where = db.auditLog.findMany.mock.calls[0][0].where;
     expect('entityId' in where).toBe(false);
     expect(where.actionType).toBe('PRODUCT_UPDATE');
-  });
-});
-
-describe('POST /api/admin/audit-logs (batch logs via lib/change-tracking)', () => {
-  it('returns the batch rows with the same include/order as lib/audit.ts getBatchLogs', async () => {
-    const batchRow = { ...LEGACY_ROW, batchId: 'batch-1' };
-    db.auditLog.findMany.mockResolvedValue([batchRow]);
-
-    const resp = await batchLogsPOST(mkPost({ batchId: 'batch-1' }), undefined as any);
-    expect(resp.status).toBe(200);
-
-    const body = await (resp as Response).json();
-    expect(body.logs).toHaveLength(1);
-    expect(body.logs[0].entityId).toBe('42');
-
-    expect(db.auditLog.findMany).toHaveBeenCalledWith({
-      where: { batchId: 'batch-1' },
-      include: { user: { select: { id: true, username: true, email: true } } },
-      orderBy: { createdAt: 'asc' },
-    });
   });
 });

@@ -444,22 +444,3 @@ export async function getAuditLogs(filters: {
 
   return { logs, total }
 }
-
-/**
- * Get audit logs for a specific batch.
- */
-export async function getBatchLogs(batchId: string) {
-  return prisma.auditLog.findMany({
-    where: { batchId },
-    include: {
-      user: {
-        select: {
-          id: true,
-          username: true,
-          email: true
-        }
-      }
-    },
-    orderBy: { createdAt: 'asc' }
-  })
-}
