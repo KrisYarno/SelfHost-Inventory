@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import {
+  getLowStockDefault,
+  effectiveLowStockThreshold,
+  isLowStock,
+} from "@/lib/stock-threshold";
 
 export const dynamic = "force-dynamic";
 
@@ -68,21 +73,28 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
     lastActivities.map((la) => [la.productId, la.changeTime])
   );
 
-  // Build products array matching DrillDownModal expectations
+  // System default a NULL-threshold product inherits (R-L13).
+  const lowStockDefault = await getLowStockDefault();
+
+  // Build products array matching DrillDownModal expectations. lowStockThreshold
+  // stays RAW (nullable) so the modal resolves the effective value itself; the
+  // default rides the payload so the modal need not refetch it.
   const products = activeProductLocations.map((pl) => ({
     id: pl.products.id,
     name: pl.products.name,
     stock: pl.quantity,
-    lowStockThreshold: pl.products.lowStockThreshold ?? 10,
+    lowStockThreshold: pl.products.lowStockThreshold,
     lastActivity: lastActivityMap.get(pl.products.id) || null,
   }));
 
-  // Sort: out-of-stock first, then low-stock, then by name
+  // Sort: out-of-stock first, then low-stock (inclusive, effective threshold), then name.
   products.sort((a, b) => {
     if (a.stock === 0 && b.stock !== 0) return -1;
     if (a.stock !== 0 && b.stock === 0) return 1;
-    if (a.stock < a.lowStockThreshold && b.stock >= b.lowStockThreshold) return -1;
-    if (a.stock >= a.lowStockThreshold && b.stock < b.lowStockThreshold) return 1;
+    const aLow = isLowStock(a.stock, effectiveLowStockThreshold(a.lowStockThreshold, lowStockDefault));
+    const bLow = isLowStock(b.stock, effectiveLowStockThreshold(b.lowStockThreshold, lowStockDefault));
+    if (aLow && !bLow) return -1;
+    if (!aLow && bLow) return 1;
     return a.name.localeCompare(b.name);
   });
 
@@ -91,6 +103,7 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
 
   return NextResponse.json({
     locationName: location.name,
+    lowStockDefault,
     totalProducts,
     totalStock,
     products,

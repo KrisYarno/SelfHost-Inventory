@@ -16,6 +16,7 @@ jest.mock("@/lib/prisma", () => ({
     userCompany: { findMany: jest.fn() },
     product: { findMany: jest.fn() },
     product_locations: { groupBy: jest.fn() },
+    systemSetting: { findUnique: jest.fn() },
   },
 }));
 
@@ -31,6 +32,7 @@ const m = prisma as unknown as {
   userCompany: { findMany: jest.Mock };
   product: { findMany: jest.Mock };
   product_locations: { groupBy: jest.Mock };
+  systemSetting: { findUnique: jest.Mock };
 };
 const getSalesMock = getSales as jest.Mock;
 const getTrendsMock = getProductStockTrends as jest.Mock;
@@ -38,6 +40,8 @@ const getTrendsMock = getProductStockTrends as jest.Mock;
 beforeEach(() => {
   jest.clearAllMocks();
   (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isAdmin: false } });
+  // No lowStockDefaultThreshold row => getLowStockDefault falls back to 10.
+  m.systemSetting.findUnique.mockResolvedValue(null);
   // Default to zero memberships; tests that exercise the sales path override this.
   m.userCompany.findMany.mockResolvedValue([]);
   m.product.findMany.mockResolvedValue([

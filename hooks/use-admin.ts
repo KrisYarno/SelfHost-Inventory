@@ -461,6 +461,8 @@ export interface SystemSettings {
   locations: SettingsLocation[];
   weeklyReportsEnabled: boolean;
   analyticsRebuildEnabled: boolean;
+  /** System-wide default low-stock threshold products inherit when NULL (R-L13). */
+  lowStockDefaultThreshold: number;
 }
 
 export function useAdminSettings() {
@@ -528,7 +530,9 @@ export interface ThresholdMinimumLocation {
 export interface ProductMinimum {
   id: number;
   name: string;
-  combinedMinimum: number;
+  // RAW nullable low-stock alert threshold (R-L13 tri-state): null = inherit the
+  // system default, 0 = alerts off, >0 = explicit override.
+  combinedMinimum: number | null;
   totalStock: number;
   perLocation: ThresholdMinimumLocation[];
 }
@@ -536,11 +540,14 @@ export interface ProductMinimum {
 export interface ThresholdsData {
   products: ProductMinimum[];
   locations: ThresholdLocationMeta[];
+  /** System default inheritors resolve to; shown inline + editable at the top (D-L9). */
+  lowStockDefault: number;
 }
 
 export interface ThresholdUpdate {
   productId: number;
-  combinedMinimum?: number;
+  // null clears the override (inherit), 0 disables, >0 is explicit (R-L13).
+  combinedMinimum?: number | null;
   perLocation?: Array<{ locationId: number; minQuantity: number }>;
 }
 
@@ -559,6 +566,31 @@ export function useSaveThresholds() {
     mutationFn: (updates: ThresholdUpdate[]) =>
       mutateJSON("/api/admin/products/thresholds", "PATCH", { updates }, csrfToken),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "thresholds"] }),
+  });
+}
+
+/**
+ * Save the system-wide default low-stock threshold (D-L9 matrix header input).
+ * Persisted via the settings POST (records a SETTINGS_UPDATE diff); invalidates
+ * both the thresholds matrix and the settings card, plus the client-cached
+ * default hook so every low-stock surface picks up the new value.
+ */
+export function useSaveLowStockDefault() {
+  const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
+  return useMutation({
+    mutationFn: (lowStockDefaultThreshold: number) =>
+      mutateJSON(
+        "/api/admin/settings",
+        "POST",
+        { lowStockDefaultThreshold },
+        csrfToken,
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "thresholds"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "settings"] });
+      queryClient.invalidateQueries({ queryKey: ["settings", "low-stock-default"] });
+    },
   });
 }
 

@@ -29,6 +29,8 @@ import { useJournalStore } from "@/hooks/use-journal";
 import { useInventoryProducts } from "@/hooks/use-inventory-products";
 import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import { useLocation } from "@/contexts/location-context";
+import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
+import { useLowStockDefault } from "@/hooks/use-low-stock-default";
 import { getUserFriendlyMessage, handleBatchOperationErrors } from "@/lib/error-handling";
 import { useInventoryChangeAnnouncer } from "@/hooks/use-accessibility-announcer";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
@@ -40,6 +42,7 @@ export default function JournalPage() {
   const router = useRouter();
   const { selectedLocationId, locations } = useLocation();
   const { token: csrfToken } = useCSRF();
+  const lowStockDefault = useLowStockDefault();
   const queryClient = useQueryClient();
   const [searchTerm, setSearchTerm] = useState("");
   const [showFilters, setShowFilters] = useState(false);
@@ -99,18 +102,21 @@ export default function JournalPage() {
       result = result.filter((product) => hasChange(product.id));
     }
 
-    // Stock level — derived from current quantity vs. the product's threshold.
+    // Stock level — derived from current quantity vs. the product's EFFECTIVE
+    // threshold (R-L13 inheritance; NULL inherits the system default, no longer
+    // collapsed to 0). "low" is the shared INCLUSIVE predicate, so the filter and
+    // the per-row "Low" badge finally agree (was `?? 0` here vs `?? 10` in the row).
     if (filters.stockLevel !== "all") {
       result = result.filter((product) => {
         const qty = product.currentQuantity ?? 0;
-        const threshold = product.lowStockThreshold ?? 0;
+        const threshold = effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault);
         switch (filters.stockLevel) {
           case "out":
             return qty <= 0;
           case "low":
-            return qty > 0 && threshold > 0 && qty <= threshold;
+            return isLowStock(qty, threshold);
           case "normal":
-            return threshold > 0 ? qty > threshold : qty > 0;
+            return qty > 0 && !isLowStock(qty, threshold);
           default:
             return true;
         }
@@ -133,7 +139,7 @@ export default function JournalPage() {
     }
 
     return sorted;
-  }, [searchTerm, products, filters, adjustments]);
+  }, [searchTerm, products, filters, adjustments, lowStockDefault]);
 
   const handleQuantityChange = (productId: number, change: number) => {
     const product = products.find((p) => p.id === productId);

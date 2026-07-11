@@ -22,6 +22,8 @@ import { Download, X } from "lucide-react";
 import { exportToCSV, generateExportFilename } from "@/lib/export-utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { LineChartComponent, ActivityBarChart } from "./inventory-chart";
+import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
+import { useLowStockDefault } from "@/hooks/use-low-stock-default";
 
 interface DrillDownModalProps {
   isOpen: boolean;
@@ -41,6 +43,7 @@ export function DrillDownModal({
   type,
 }: DrillDownModalProps) {
   const [activeTab, setActiveTab] = useState("table");
+  const lowStockDefault = useLowStockDefault();
 
   const handleExport = () => {
     if (!data) return;
@@ -290,20 +293,26 @@ export function DrillDownModal({
                 </TableCell>
                 <TableCell>
                   {(() => {
-                    const threshold = product.lowStockThreshold ?? 10;
+                    // Effective threshold via the shared inheritance model (R-L13);
+                    // NULL inherits the system default. Low = shared INCLUSIVE predicate.
+                    const effective = effectiveLowStockThreshold(
+                      product.lowStockThreshold,
+                      lowStockDefault
+                    );
+                    const low = isLowStock(product.stock, effective);
                     return (
                       <span
                         className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
                           product.stock === 0
                             ? "bg-red-100 text-red-800 dark:bg-red-400/15 dark:text-red-200"
-                            : product.stock < threshold
+                            : low
                             ? "bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-200"
                             : "bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-200"
                         }`}
                       >
                         {product.stock === 0
                           ? "Out of Stock"
-                          : product.stock < threshold
+                          : low
                           ? "Low Stock"
                           : "In Stock"}
                       </span>

@@ -125,7 +125,10 @@ export async function graduateStagingItem(
             numericValue,
             quantity: 0,
             location: body.locationId,
-            lowStockThreshold: f.lowStockThreshold ?? 10,
+            // NULL = inherit the system default (R-L13); mirror POST /api/products
+            // — stop materializing 10 so the configurable default governs. An
+            // omitted field writes NULL explicitly (no low-stock predicate here).
+            lowStockThreshold: f.lowStockThreshold === undefined ? null : f.lowStockThreshold,
             costPrice: costPrice >= 0 ? costPrice : 0,
             retailPrice: retailPrice >= 0 ? retailPrice : 0,
             approvalStatus: actor.isAdmin ? 'APPROVED' : 'PENDING_REVIEW',

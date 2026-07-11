@@ -19,7 +19,8 @@ export interface ProductFormData {
   variant?: string;
   unit?: string;
   numericValue?: number;
-  lowStockThreshold?: number;
+  // NULL = inherit the system default (spec R-L13); undefined = field omitted.
+  lowStockThreshold?: number | null;
   costPrice?: number;
   retailPrice?: number;
 }
@@ -48,7 +49,8 @@ export interface CreateProductRequest {
   variant?: string;
   unit?: string;
   numericValue?: number;
-  lowStockThreshold?: number;
+  // NULL = inherit the system default (spec R-L13).
+  lowStockThreshold?: number | null;
   locationId?: number;
   costPrice?: number;
   retailPrice?: number;
@@ -61,7 +63,8 @@ export interface UpdateProductRequest {
   variant?: string;
   unit?: string;
   numericValue?: number;
-  lowStockThreshold?: number;
+  // NULL = inherit the system default (spec R-L13).
+  lowStockThreshold?: number | null;
   costPrice?: number;
   retailPrice?: number;
 }

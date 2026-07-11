@@ -1,6 +1,11 @@
 import prisma from '@/lib/prisma';
 import { emailService, LowStockItem } from '@/lib/email';
 import type { CombinedMinBreach, LocationMinBreach } from '@/types/inventory';
+import {
+  getLowStockDefault,
+  effectiveLowStockThreshold,
+  isLowStock,
+} from '@/lib/stock-threshold';
 
 export interface LowStockProduct {
   id: number;
@@ -8,6 +13,17 @@ export interface LowStockProduct {
   currentStock: number;
   threshold: number;
   daysUntilEmpty: number | null;
+}
+
+/**
+ * Days until a product runs out, from a precomputed average daily outflow.
+ * Pure so callers can batch the outflow read once and map over the result.
+ * 0 stock -> 0 days; no measurable outflow -> null (unknown).
+ */
+function daysUntilEmptyFrom(currentQuantity: number, avgDailyOutflow: number): number | null {
+  if (currentQuantity <= 0) return 0;
+  if (avgDailyOutflow <= 0) return null;
+  return Math.floor(currentQuantity / avgDailyOutflow);
 }
 
 export class StockChecker {
@@ -18,45 +34,53 @@ export class StockChecker {
     // Get all products with their thresholds and current quantities.
     // Exclude soft-deleted products so deleted products don't trigger alerts
     // (matches checkMinimums behavior — current-state reports skip deleted).
+    // NOTE: no `lowStockThreshold > 0` SQL prefilter anymore — a NULL threshold
+    // now INHERITS the configurable system default (R-L13), so those products
+    // must be evaluated too. The shared `isLowStock` predicate (INCLUSIVE ≤) is
+    // the single notification boundary; a 0 effective threshold disables alerts.
+    const systemDefault = await getLowStockDefault();
     const products = await prisma.product.findMany({
       where: {
         deletedAt: null,
         // Provisional (PENDING_REVIEW) products are excluded from operational
         // alerts until an admin approves them.
         approvalStatus: 'APPROVED',
-        lowStockThreshold: {
-          gt: 0, // Only check products with a threshold set
-        },
       },
       include: {
         product_locations: true,
       },
     });
 
-    const lowStockProducts: LowStockProduct[] = [];
-
+    // First pass: identify low products via the shared predicate.
+    const lowCandidates: Array<{ id: number; name: string; total: number; threshold: number }> = [];
     for (const product of products) {
-      // Calculate total quantity across all locations
       const totalQuantity = product.product_locations.reduce(
         (sum, location) => sum + location.quantity,
         0
       );
-
-      // Check if below threshold
-      const threshold = product.lowStockThreshold || 10; // Default to 10 if null
-      if (totalQuantity <= threshold) {
-        // Calculate days until empty based on recent usage
-        const daysUntilEmpty = await this.calculateDaysUntilEmpty(product.id, totalQuantity);
-        
-        lowStockProducts.push({
+      const threshold = effectiveLowStockThreshold(product.lowStockThreshold, systemDefault);
+      if (isLowStock(totalQuantity, threshold)) {
+        lowCandidates.push({
           id: product.id,
           name: product.name,
-          currentStock: totalQuantity,
-          threshold: threshold,
-          daysUntilEmpty,
+          total: totalQuantity,
+          threshold,
         });
       }
     }
+
+    // Batch the outflow-usage read for ALL low products in ONE groupBy (R-L12 —
+    // replaces the former per-product query N+1). daysUntilEmpty is outflow-based
+    // (includes transfers and corrections), not SALE-only.
+    const usageByProduct = await this.batchAvgDailyOutflow(lowCandidates.map((c) => c.id));
+
+    const lowStockProducts: LowStockProduct[] = lowCandidates.map((c) => ({
+      id: c.id,
+      name: c.name,
+      currentStock: c.total,
+      threshold: c.threshold,
+      daysUntilEmpty: daysUntilEmptyFrom(c.total, usageByProduct.get(c.id) ?? 0),
+    }));
 
     // Sort by criticality (days until empty, then by stock level)
     lowStockProducts.sort((a, b) => {
@@ -78,6 +102,10 @@ export class StockChecker {
     locationBreaches: LocationMinBreach[];
     combinedBreaches: CombinedMinBreach[];
   }> {
+    // Combined-minimum breaches key on lowStockThreshold, which now INHERITS the
+    // system default when NULL (R-L13) — preserving the pre-migration behavior of
+    // the seeded 10 for products that were reset to NULL by the migration.
+    const systemDefault = await getLowStockDefault();
     const products = await prisma.product.findMany({
       where: { deletedAt: null, approvalStatus: 'APPROVED' },
       include: {
@@ -88,7 +116,14 @@ export class StockChecker {
     });
 
     const locationBreaches: LocationMinBreach[] = [];
-    const combinedBreaches: CombinedMinBreach[] = [];
+    // Build combined breaches first WITHOUT daysUntilEmpty, collect ids, then
+    // batch the outflow-usage read (R-L12 — no per-product query N+1).
+    const combinedPending: Array<{
+      productId: number;
+      productName: string;
+      totalQuantity: number;
+      combinedMinimum: number;
+    }> = [];
 
     for (const product of products) {
       let totalQuantity = 0;
@@ -108,21 +143,24 @@ export class StockChecker {
         }
       }
 
-      const combinedMin = product.lowStockThreshold ?? 0;
+      const combinedMin = effectiveLowStockThreshold(product.lowStockThreshold, systemDefault);
       if (combinedMin > 0 && totalQuantity < combinedMin) {
-        const daysUntilEmpty = await this.calculateDaysUntilEmpty(
-          product.id,
-          totalQuantity
-        );
-        combinedBreaches.push({
+        combinedPending.push({
           productId: product.id,
           productName: product.name,
           totalQuantity,
           combinedMinimum: combinedMin,
-          daysUntilEmpty,
         });
       }
     }
+
+    const usageByProduct = await this.batchAvgDailyOutflow(
+      combinedPending.map((c) => c.productId)
+    );
+    const combinedBreaches: CombinedMinBreach[] = combinedPending.map((c) => ({
+      ...c,
+      daysUntilEmpty: daysUntilEmptyFrom(c.totalQuantity, usageByProduct.get(c.productId) ?? 0),
+    }));
 
     return { locationBreaches, combinedBreaches };
   }
@@ -167,41 +205,33 @@ export class StockChecker {
   }
 
   /**
-   * Calculate days until a product runs out based on recent usage
+   * Batch the 30-day average daily OUTFLOW (all negative deltas: sales, transfers,
+   * corrections — outflow-based, includes transfers and corrections) for many
+   * products in ONE groupBy, keyed productId -> avgDailyOutflow. Replaces the
+   * former per-product findMany (R-L12 N+1 fix). Products with no outflow rows are
+   * absent from the map (callers treat that as "no usage" -> null days).
    */
-  private async calculateDaysUntilEmpty(
-    productId: number,
-    currentQuantity: number
-  ): Promise<number | null> {
-    if (currentQuantity === 0) return 0;
+  private async batchAvgDailyOutflow(productIds: number[]): Promise<Map<number, number>> {
+    const map = new Map<number, number>();
+    if (productIds.length === 0) return map;
 
-    // Get inventory logs from the last 30 days
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    const logs = await prisma.inventory_logs.findMany({
+    const rows = await prisma.inventory_logs.groupBy({
+      by: ['productId'],
       where: {
-        productId,
-        changeTime: {
-          gte: thirtyDaysAgo,
-        },
-        delta: {
-          lt: 0, // Only negative changes (usage)
-        },
+        productId: { in: productIds },
+        changeTime: { gte: thirtyDaysAgo },
+        delta: { lt: 0 }, // Only negative changes (outflow)
       },
+      _sum: { delta: true },
     });
 
-    if (logs.length === 0) return null;
-
-    // Calculate average daily usage
-    const totalUsage = logs.reduce((sum, log) => sum + Math.abs(log.delta), 0);
-    const daysCovered = 30;
-    const avgDailyUsage = totalUsage / daysCovered;
-
-    if (avgDailyUsage === 0) return null;
-
-    // Calculate days until empty
-    return Math.floor(currentQuantity / avgDailyUsage);
+    for (const row of rows) {
+      map.set(row.productId, Math.abs(row._sum.delta ?? 0) / 30);
+    }
+    return map;
   }
 
   /**

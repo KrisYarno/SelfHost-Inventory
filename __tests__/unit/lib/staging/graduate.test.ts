@@ -242,7 +242,7 @@ describe('graduateStagingItem — new product (provisional)', () => {
     expect(result.approvalStatus).toBe('APPROVED');
   });
 
-  it('defaults lowStockThreshold to 10 and prices to 0 when omitted', async () => {
+  it('writes NULL lowStockThreshold (inherit system default) and prices to 0 when omitted', async () => {
     mockTx.product.create.mockResolvedValue({
       id: 103,
       approvalStatus: 'PENDING_REVIEW',
@@ -260,7 +260,7 @@ describe('graduateStagingItem — new product (provisional)', () => {
     );
 
     const data = (mockTx.product.create.mock.calls[0][0] as any).data;
-    expect(data.lowStockThreshold).toBe(10);
+    expect(data.lowStockThreshold).toBeNull();
     expect(data.costPrice).toBe(0);
     expect(data.retailPrice).toBe(0);
     expect(data.unit).toBeNull();

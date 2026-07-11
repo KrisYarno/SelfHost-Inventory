@@ -1,11 +1,17 @@
 import { NextResponse } from "next/server";
 import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
+import { getLowStockDefault } from "@/lib/stock-threshold";
 
 export const dynamic = "force-dynamic";
 
 export const GET = apiHandler(async () => {
   await requireAdmin();
+
+  // System-wide default a NULL-threshold product inherits (spec R-L13). Bound as
+  // a query parameter (never string-concatenated) inside the stock classifier.
+  const lowStockDefault = await getLowStockDefault();
 
   // Get metrics in parallel for performance
   const [
@@ -27,29 +33,32 @@ export const GET = apiHandler(async () => {
       _count: true,
     }),
 
-    // Stock statistics across all locations
-    prisma.$queryRaw<Array<{ status: string; count: bigint }>>`
-      SELECT
-        CASE
-          WHEN total_quantity = 0 THEN 'out_of_stock'
-          WHEN total_quantity <= 10 THEN 'low_stock'
-          ELSE 'in_stock'
-        END as status,
-        COUNT(*) as count
+    // Stock statistics across all locations (spec R-L13): JOIN products so only
+    // APPROVED, non-deleted products are classified; the low-stock threshold is
+    // COALESCE(lowStockThreshold, :default) with :default a BOUND parameter;
+    // negative totals classify out_of_stock; a 0 effective threshold (disabled)
+    // never counts as low; comparison is INCLUSIVE (total <= threshold).
+    prisma.$queryRaw<Array<{ status: string; count: bigint }>>(Prisma.sql`
+      SELECT status, COUNT(*) as count
       FROM (
         SELECT
-          productId,
-          SUM(quantity) as total_quantity
-        FROM product_locations
-        GROUP BY productId
-      ) as product_totals
-      GROUP BY
-        CASE
-          WHEN total_quantity = 0 THEN 'out_of_stock'
-          WHEN total_quantity <= 10 THEN 'low_stock'
-          ELSE 'in_stock'
-        END
-    `,
+          CASE
+            WHEN pt.total_quantity <= 0 THEN 'out_of_stock'
+            WHEN COALESCE(p.lowStockThreshold, ${lowStockDefault}) > 0
+                 AND pt.total_quantity <= COALESCE(p.lowStockThreshold, ${lowStockDefault})
+              THEN 'low_stock'
+            ELSE 'in_stock'
+          END as status
+        FROM (
+          SELECT productId, SUM(quantity) as total_quantity
+          FROM product_locations
+          GROUP BY productId
+        ) as pt
+        INNER JOIN products p ON p.id = pt.productId
+        WHERE p.deletedAt IS NULL AND p.approvalStatus = 'APPROVED'
+      ) as classified
+      GROUP BY status
+    `),
 
     // Recent transactions (last 24 hours)
     prisma.inventory_logs.count({

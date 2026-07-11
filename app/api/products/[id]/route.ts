@@ -121,8 +121,11 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
   if (body.unit !== undefined) updateData.unit = body.unit;
   if (body.numericValue !== undefined) updateData.numericValue = body.numericValue;
 
+  // NULL = inherit the system default (R-L13); persisted distinctly from 0.
+  // Only a real number is floored at 0 (the schema already enforces >= 0).
   if (body.lowStockThreshold !== undefined) {
-    updateData.lowStockThreshold = Math.max(0, body.lowStockThreshold);
+    updateData.lowStockThreshold =
+      body.lowStockThreshold === null ? null : Math.max(0, body.lowStockThreshold);
   }
 
   if (body.costPrice !== undefined) {

@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { Decimal } from "@prisma/client/runtime/library";
+import { getLowStockDefault, effectiveLowStockThreshold } from "@/lib/stock-threshold";
 import {
   ReorderRecommendation,
   ReorderSummary,
@@ -92,6 +93,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
     products.map((p: ProductRecord) => [p.id, p])
   );
 
+  // System default a NULL-threshold product inherits (R-L13). Was `|| 0`, which
+  // collapsed inherit and disabled together; the helper keeps them distinct.
+  const lowStockDefault = await getLowStockDefault();
+
   // ============================================
   // Query 2: Get current stock per product from product_locations (source of truth)
   // ============================================
@@ -110,7 +115,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const recommendations: ReorderRecommendation[] = products.map(
     (product: ProductRecord) => {
       const currentStock = stockMap.get(product.id) || 0;
-      const minimum = product.lowStockThreshold || 0;
+      const minimum = effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault);
       const costPrice = Number(product.costPrice ?? 0);
 
       const status = calculateStatus(currentStock, minimum);

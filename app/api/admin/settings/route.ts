@@ -3,6 +3,7 @@ import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { recordChange, type ChangeDiff } from "@/lib/change-tracking";
 import { SystemSettingsSchema } from "@/lib/validation/admin";
+import { getLowStockDefault } from "@/lib/stock-threshold";
 
 export const dynamic = "force-dynamic";
 
@@ -29,11 +30,14 @@ export const GET = apiHandler(async () => {
   const analyticsRebuildSetting = await prisma.systemSetting.findUnique({
     where: { key: "analyticsRebuildEnabled" },
   });
+  // Resolved default (fallback 10 when unset) — the matrix header input edits it.
+  const lowStockDefaultThreshold = await getLowStockDefault();
 
   return NextResponse.json({
     locations,
     weeklyReportsEnabled: weeklyReportsSetting?.value === "true",
     analyticsRebuildEnabled: analyticsRebuildSetting?.value === "true",
+    lowStockDefaultThreshold,
   });
 });
 
@@ -43,16 +47,19 @@ export const POST = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = await request.json();
-  const { weeklyReportsEnabled, analyticsRebuildEnabled } =
+  const { weeklyReportsEnabled, analyticsRebuildEnabled, lowStockDefaultThreshold } =
     SystemSettingsSchema.parse(body);
 
-  // Only the flags actually present in the request are touched (ER-B9).
+  // Only the keys actually present in the request are touched (ER-B9).
   const provided: Array<{ key: string; to: string }> = [];
   if (weeklyReportsEnabled !== undefined) {
     provided.push({ key: "weeklyReportsEnabled", to: String(weeklyReportsEnabled) });
   }
   if (analyticsRebuildEnabled !== undefined) {
     provided.push({ key: "analyticsRebuildEnabled", to: String(analyticsRebuildEnabled) });
+  }
+  if (lowStockDefaultThreshold !== undefined) {
+    provided.push({ key: "lowStockDefaultThreshold", to: String(lowStockDefaultThreshold) });
   }
 
   // Nothing provided => nothing to write and no change to record (ER-B9).

@@ -1,3 +1,5 @@
+import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
+
 // Canonical owner of StockTrend (shared with lib/analytics/product-trends.ts).
 export type StockTrend = { value: number; direction: "up" | "down" | "stable" };
 
@@ -32,9 +34,10 @@ export interface HubMergeInput {
   dir: HubDir;
   page: number;
   pageSize: number;
+  // System-wide default a product inherits when its lowStockThreshold is NULL
+  // (spec R-L13). The route resolves it via getLowStockDefault().
+  lowStockDefault: number;
 }
-
-const LOW_STOCK_DEFAULT = 10;
 
 // Merge the batched reads into rows, apply the stock-status filter over the FULL set,
 // sort the FULL set, THEN paginate. Never paginate before sort (units/revenue would be wrong).
@@ -54,15 +57,18 @@ export function buildHubRows(input: HubMergeInput): HubResponse {
     };
   });
 
-  // Stock-status filter (mirrors the products page predicate: low = >0 && < threshold).
+  // Stock-status filter via the shared inheritance model + INCLUSIVE predicate
+  // (spec R-L13): low ⇔ isLowStock over the product's effective threshold, so a
+  // product at exactly its threshold now counts (unified with every other surface).
   const filtered = merged.filter((r) => {
-    const threshold =
-      candidates.find((c) => c.id === r.productId)?.lowStockThreshold ?? LOW_STOCK_DEFAULT;
+    const productThreshold =
+      candidates.find((c) => c.id === r.productId)?.lowStockThreshold;
+    const effective = effectiveLowStockThreshold(productThreshold, input.lowStockDefault);
     switch (input.filter) {
       case "in":
         return r.currentStock > 0;
       case "low":
-        return r.currentStock > 0 && r.currentStock < threshold;
+        return isLowStock(r.currentStock, effective);
       case "out":
         return r.currentStock === 0;
       default:

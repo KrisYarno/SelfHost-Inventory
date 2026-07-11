@@ -5,6 +5,8 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { Package } from "lucide-react";
+import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
+import { useLowStockDefault } from "@/hooks/use-low-stock-default";
 
 interface ProductCardMobileProps {
   product: ProductWithQuantity;
@@ -17,8 +19,12 @@ export function ProductCardMobile({
   onClick,
   className,
 }: ProductCardMobileProps) {
+  const lowStockDefault = useLowStockDefault();
   const isOutOfStock = product.currentQuantity === 0;
-  const isLowStock = product.currentQuantity > 0 && product.currentQuantity <= 10;
+  const isLow = isLowStock(
+    product.currentQuantity,
+    effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault)
+  );
   const isPendingReview = product.approvalStatus === "PENDING_REVIEW";
 
   return (
@@ -58,7 +64,7 @@ export function ProductCardMobile({
           variant={
             isOutOfStock
               ? "destructive"
-              : isLowStock
+              : isLow
               ? "warning"
               : "default"
           }

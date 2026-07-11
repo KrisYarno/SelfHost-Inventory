@@ -8,16 +8,27 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Product } from "@/types/product";
 import { cn } from "@/lib/utils";
+import { effectiveLowStockThreshold } from "@/lib/stock-threshold";
+import { useLowStockDefault } from "@/hooks/use-low-stock-default";
 
 interface ProductFormInputs {
   baseName: string;
   variantLabel: string;
   numericValue: number | null;
   unit: string;
-  lowStockThreshold: number;
   locationId?: number;
   costPrice: number;
   retailPrice: number;
+}
+
+// R-L13/D-L9 tri-state: inherit the system default (NULL) / explicit custom value
+// (>0) / alerts off (0). One control, resolved to a single nullable threshold.
+type ThresholdMode = "inherit" | "custom" | "off";
+
+function initialThresholdMode(value: number | null | undefined): ThresholdMode {
+  if (value === null || value === undefined) return "inherit";
+  if (value === 0) return "off";
+  return "custom";
 }
 
 interface ProductFormProps {
@@ -52,7 +63,19 @@ export function ProductForm({
 }: ProductFormProps) {
   const [error, setError] = useState<string | null>(null);
   const allowedUnits = ["mg", "ml", "mcg", "iu"];
-  
+
+  const lowStockDefault = useLowStockDefault();
+  // Tri-state alert-threshold control (D-L9). NULL/undefined -> inherit; 0 -> off;
+  // >0 -> custom. No `|| 10` coercion — a 0 stays "off", not silently forced to 10.
+  const [thresholdMode, setThresholdMode] = useState<ThresholdMode>(
+    initialThresholdMode(product?.lowStockThreshold)
+  );
+  const [customThreshold, setCustomThreshold] = useState<number>(
+    product?.lowStockThreshold && product.lowStockThreshold > 0
+      ? product.lowStockThreshold
+      : lowStockDefault
+  );
+
   const {
     register,
     handleSubmit,
@@ -66,12 +89,16 @@ export function ProductForm({
       variantLabel: product?.variant || "",
       numericValue: product?.numericValue ? Number(product.numericValue) : null,
       unit: product?.unit || "",
-      lowStockThreshold: product?.lowStockThreshold || 10,
       locationId: locations[0]?.id,
       costPrice: product ? Number(product.costPrice ?? 0) : 0,
       retailPrice: product ? Number(product.retailPrice ?? 0) : 0,
     },
   });
+
+  // Resolve the tri-state selection to the single nullable value the API persists.
+  const resolvedThreshold: number | null =
+    thresholdMode === "inherit" ? null : thresholdMode === "off" ? 0 : customThreshold;
+  const effectiveThreshold = effectiveLowStockThreshold(resolvedThreshold, lowStockDefault);
 
   // Set default location when provided (create mode only)
   useEffect(() => {
@@ -167,7 +194,8 @@ export function ProductForm({
         variant,
         unit: normalizedUnit,
         numericValue: numericValue ?? undefined,
-        lowStockThreshold: data.lowStockThreshold,
+        // Tri-state -> single nullable value (D-L9): null inherit / 0 off / n custom.
+        lowStockThreshold: resolvedThreshold,
         locationId: data.locationId,
         costPrice: sanitizedCostPrice,
         retailPrice: sanitizedRetailPrice,
@@ -327,29 +355,63 @@ export function ProductForm({
         </div>
       )}
 
-      <div className="space-y-2">
-        <Label htmlFor="lowStockThreshold">Low Stock Threshold</Label>
-        <Input
-          id="lowStockThreshold"
-          type="number"
-          min="0"
-          placeholder="10"
-          {...register("lowStockThreshold", {
-            valueAsNumber: true,
-            min: {
-              value: 0,
-              message: "Threshold must be 0 or greater",
-            },
-          })}
-          disabled={isSubmitting}
-        />
+      <fieldset className="space-y-2" disabled={isSubmitting}>
+        <legend className="text-sm font-medium">Low-stock alert threshold</legend>
         <p className="text-sm text-muted-foreground">
-          Email alerts will be sent when total stock across all locations drops below this level
+          Email alerts are sent when total stock across all locations drops to this level.
         </p>
-        {errors.lowStockThreshold && (
-          <p className="text-sm text-destructive">{errors.lowStockThreshold.message}</p>
-        )}
-      </div>
+
+        <label className="flex items-start gap-2">
+          <input
+            type="radio"
+            name="thresholdMode"
+            className="mt-1"
+            checked={thresholdMode === "inherit"}
+            onChange={() => setThresholdMode("inherit")}
+          />
+          <span className="text-sm">Use system default ({lowStockDefault})</span>
+        </label>
+
+        <label className="flex items-center gap-2">
+          <input
+            type="radio"
+            name="thresholdMode"
+            checked={thresholdMode === "custom"}
+            onChange={() => setThresholdMode("custom")}
+          />
+          <span className="text-sm">Custom threshold</span>
+          <Input
+            type="number"
+            min="0"
+            aria-label="Custom low-stock threshold"
+            className="h-8 w-24"
+            value={Number.isFinite(customThreshold) ? customThreshold : ""}
+            onFocus={() => setThresholdMode("custom")}
+            onChange={(e) => {
+              const parsed = parseInt(e.target.value, 10);
+              setCustomThreshold(Number.isNaN(parsed) ? 0 : Math.max(0, parsed));
+              setThresholdMode("custom");
+            }}
+          />
+        </label>
+
+        <label className="flex items-start gap-2">
+          <input
+            type="radio"
+            name="thresholdMode"
+            className="mt-1"
+            checked={thresholdMode === "off"}
+            onChange={() => setThresholdMode("off")}
+          />
+          <span className="text-sm">Alerts off</span>
+        </label>
+
+        <p className="text-xs text-muted-foreground">
+          {effectiveThreshold > 0
+            ? `Effective: ${effectiveThreshold}`
+            : "Effective: alerts disabled"}
+        </p>
+      </fieldset>
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">

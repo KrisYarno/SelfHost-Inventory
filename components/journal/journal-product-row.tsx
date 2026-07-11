@@ -7,6 +7,8 @@ import { AdjustmentInput } from "./adjustment-input";
 import { SwipeableAdjustment } from "./swipeable-adjustment";
 import type { ProductWithQuantity } from "@/types/product";
 import type { JournalAdjustment } from "@/hooks/use-journal";
+import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
+import { useLowStockDefault } from "@/hooks/use-low-stock-default";
 
 interface JournalProductRowProps {
   product: ProductWithQuantity;
@@ -19,13 +21,17 @@ export function JournalProductRow({
   adjustment,
   onQuantityChange,
 }: JournalProductRowProps) {
+  const lowStockDefault = useLowStockDefault();
   const currentQuantity = product.currentQuantity || 0;
   const delta = adjustment?.quantityChange || 0;
   const adjustedQuantity = currentQuantity + delta;
   const hasChange = delta !== 0;
 
   const isOutOfStock = currentQuantity === 0;
-  const isLowStock = currentQuantity > 0 && currentQuantity <= (product.lowStockThreshold || 10);
+  const isLow = isLowStock(
+    currentQuantity,
+    effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault)
+  );
 
   const handleQuantityChange = (change: number) => {
     onQuantityChange(change);
@@ -51,7 +57,7 @@ export function JournalProductRow({
             : "border-negative-border bg-negative-muted"
           : isOutOfStock
             ? "border-negative-border/50 bg-negative-muted/30"
-            : isLowStock
+            : isLow
               ? "border-warning-border/50 bg-warning-muted/30"
               : "border-border/70 bg-surface"
       )}
@@ -68,7 +74,7 @@ export function JournalProductRow({
               {isOutOfStock && (
                 <StatusBadge tone="negative" className="flex-shrink-0">Out</StatusBadge>
               )}
-              {isLowStock && (
+              {isLow && (
                 <StatusBadge tone="warning" className="flex-shrink-0">Low</StatusBadge>
               )}
             </div>
@@ -94,7 +100,7 @@ export function JournalProductRow({
             <div className="flex items-center gap-1.5 min-w-0 flex-1">
               <h4 className="text-body-lg font-semibold truncate" id={`product-name-mobile-${product.id}`}>{product.name}</h4>
               {isOutOfStock && <StatusBadge tone="negative" className="flex-shrink-0 text-[10px] px-1.5 py-0">Out</StatusBadge>}
-              {isLowStock && <StatusBadge tone="warning" className="flex-shrink-0 text-[10px] px-1.5 py-0">Low</StatusBadge>}
+              {isLow && <StatusBadge tone="warning" className="flex-shrink-0 text-[10px] px-1.5 py-0">Low</StatusBadge>}
             </div>
             <div className="text-right flex-shrink-0">
               <span className="text-lg font-bold font-mono tabular-nums" role="status" aria-label={`Current quantity: ${currentQuantity}`}>

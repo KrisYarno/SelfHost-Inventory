@@ -31,6 +31,8 @@ import { useLocation } from "@/contexts/location-context";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/page-header";
+import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
+import { useLowStockDefault } from "@/hooks/use-low-stock-default";
 
 export default function WorkbenchPage() {
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
@@ -45,6 +47,7 @@ export default function WorkbenchPage() {
 
   const { selectedLocationId } = useLocation();
   const { token: csrfToken } = useCSRF();
+  const lowStockDefault = useLowStockDefault();
   const queryClient = useQueryClient();
   const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMobile = useIsMobile();
@@ -291,15 +294,22 @@ export default function WorkbenchPage() {
         if (!matchesSearch) return false;
       }
 
-      // Stock filters
+      // Stock filters. "Low" uses the shared inheritance model + INCLUSIVE
+      // predicate (R-L13) instead of a hard-coded ≤ 10.
       if (showInStockOnly && product.currentQuantity <= 0) return false;
-      if (showLowStockOnly && (product.currentQuantity <= 0 || product.currentQuantity > 10))
+      if (
+        showLowStockOnly &&
+        !isLowStock(
+          product.currentQuantity,
+          effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault)
+        )
+      )
         return false;
       if (showOutOfStockOnly && product.currentQuantity !== 0) return false;
 
       return true;
     });
-  }, [products, searchTerm, showInStockOnly, showLowStockOnly, showOutOfStockOnly]);
+  }, [products, searchTerm, showInStockOnly, showLowStockOnly, showOutOfStockOnly, lowStockDefault]);
 
   // Group filtered products by baseName
   const groupedProducts = useMemo(

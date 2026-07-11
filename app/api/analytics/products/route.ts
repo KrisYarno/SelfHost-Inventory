@@ -12,6 +12,7 @@ import {
   HubFilter,
   StockTrend,
 } from "@/lib/analytics/hub";
+import { getLowStockDefault } from "@/lib/stock-threshold";
 
 export const dynamic = "force-dynamic";
 
@@ -76,6 +77,9 @@ export const GET = apiHandler(async (request: NextRequest) => {
     );
   }
 
+  // System default a NULL-threshold product inherits for the "low" filter (R-L13).
+  const lowStockDefault = await getLowStockDefault();
+
   // 2) Batch the three rollup reads in parallel.
   const [stockRows, salesRows, trendByProduct] = await Promise.all([
     // (a) GLOBAL current stock SUM per product (independent of date range).
@@ -121,6 +125,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
     dir,
     page,
     pageSize,
+    lowStockDefault,
   });
 
   return applyRateLimitHeaders(NextResponse.json(body), headers);

@@ -128,10 +128,11 @@ export default function AdminSettingsPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <AlertTriangle className="h-5 w-5 text-warning" />
-                Low Stock Thresholds
+                Low-stock alert thresholds
               </CardTitle>
               <CardDescription>
-                Configure when products should trigger low stock email alerts
+                Set the system default threshold and per-product overrides that
+                trigger low-stock email alerts.
               </CardDescription>
             </CardHeader>
           </Card>

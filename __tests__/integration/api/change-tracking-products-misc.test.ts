@@ -224,13 +224,15 @@ describe("POST [id]/restore — PRODUCT_RESTORE captures D8 heldStock", () => {
 });
 
 // ---------------------------------------------------------------------------
-// PATCH /api/admin/products/thresholds — bulk PRODUCT_UPDATE (R-D14 rows)
+// PATCH /api/admin/products/thresholds — per-product PRODUCT_UPDATE (R-L6)
+// One PRODUCT_UPDATE per changed product, each addressed to its product, all
+// sharing ONE batchId (replaces the former single bulk details.rows event).
 // ---------------------------------------------------------------------------
-describe("PATCH thresholds — callback-tx conversion + R-D14 rows", () => {
-  it("fetches before-images in the tx, records only changed rows on the SAME tx", async () => {
+describe("PATCH thresholds — per-product PRODUCT_UPDATE events (R-L6)", () => {
+  it("fetches before-images in the tx, records one event per changed product on the SAME tx", async () => {
     tx.product.findMany.mockResolvedValue([
-      { id: 10, lowStockThreshold: 5 },
-      { id: 11, lowStockThreshold: 8 },
+      { id: 10, name: "Alpha", lowStockThreshold: 5 },
+      { id: 11, name: "Bravo", lowStockThreshold: 8 },
     ]);
     tx.product_locations.findMany.mockResolvedValue([
       { productId: 10, locationId: 1, minQuantity: 2 },
@@ -252,6 +254,7 @@ describe("PATCH thresholds — callback-tx conversion + R-D14 rows", () => {
     // record + writes share the tx client (callback-tx conversion).
     expect(tx.product.update).toHaveBeenCalled();
     expect(tx.product_locations.upsert).toHaveBeenCalled();
+    // Only product 10 changed; product 11 (8->8) dropped by ER-B9 => exactly ONE event.
     expect(tx.auditLog.create).toHaveBeenCalledTimes(1);
     // before-images fetched inside the tx.
     expect(tx.product.findMany).toHaveBeenCalledTimes(1);
@@ -260,24 +263,67 @@ describe("PATCH thresholds — callback-tx conversion + R-D14 rows", () => {
     const [row] = auditRows();
     expect(row.actionType).toBe("PRODUCT_UPDATE");
     expect(row.entityType).toBe("PRODUCT");
-    expect(row.entityId).toBeNull(); // bulk op is unaddressed
+    expect(row.entityId).toBe("10"); // addressed to its product (number -> string)
     expect(row.batchId).toBe("test-batch-0001");
-    // Only product 10 changed; product 11 (8->8) dropped by ER-B9.
     expect(row.affectedCount).toBe(1);
-    expect(row.details.rows).toEqual([
-      {
-        entityId: "10",
-        changes: {
-          lowStockThreshold: { from: 5, to: 15 },
-          "minQuantity[1]": { from: 2, to: 4 },
-        },
-      },
+    expect(row.details.changes).toEqual({
+      lowStockThreshold: { from: 5, to: 15 },
+      "minQuantity[1]": { from: 2, to: 4 },
+    });
+    expect(row.details.productName).toBe("Alpha");
+  });
+
+  it("emits one event PER changed product, all sharing ONE batchId", async () => {
+    tx.product.findMany.mockResolvedValue([
+      { id: 10, name: "Alpha", lowStockThreshold: 5 },
+      { id: 11, name: "Bravo", lowStockThreshold: 8 },
     ]);
-    expect(row.details.rowsOmitted).toBeUndefined();
+    tx.product_locations.findMany.mockResolvedValue([]);
+    tx.product.update.mockResolvedValue({});
+
+    const resp = await thresholdsPATCH(
+      mkReq("http://t/api/admin/products/thresholds", "PATCH", {
+        updates: [
+          { productId: 10, combinedMinimum: 15 },
+          { productId: 11, combinedMinimum: 20 },
+        ],
+      })
+    );
+
+    expect(resp.status).toBe(200);
+    expect(tx.auditLog.create).toHaveBeenCalledTimes(2);
+    const rows = auditRows();
+    expect(rows.map((r) => r.entityId).sort()).toEqual(["10", "11"]);
+    // ONE shared batchId groups the bulk save.
+    expect(new Set(rows.map((r) => r.batchId))).toEqual(new Set(["test-batch-0001"]));
+    expect(rows.every((r) => r.actionType === "PRODUCT_UPDATE")).toBe(true);
+  });
+
+  it("null combinedMinimum clears an override (records from -> null)", async () => {
+    tx.product.findMany.mockResolvedValue([{ id: 30, name: "Carol", lowStockThreshold: 7 }]);
+    tx.product_locations.findMany.mockResolvedValue([]);
+    tx.product.update.mockResolvedValue({});
+
+    const resp = await thresholdsPATCH(
+      mkReq("http://t/api/admin/products/thresholds", "PATCH", {
+        updates: [{ productId: 30, combinedMinimum: null }],
+      })
+    );
+
+    expect(resp.status).toBe(200);
+    // The write persists NULL (inherit), not 0.
+    expect(tx.product.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 30 },
+        data: { lowStockThreshold: null },
+      })
+    );
+    const [row] = auditRows();
+    expect(row.details.changes.lowStockThreshold).toEqual({ from: 7, to: null });
   });
 
   it("upsert create-path from-value is null when the product_locations row is new", async () => {
-    tx.product.findMany.mockResolvedValue([{ id: 20, lowStockThreshold: 0 }]);
+    tx.product.findMany.mockResolvedValue([{ id: 20, name: "Delta", lowStockThreshold: 0 }]);
     tx.product_locations.findMany.mockResolvedValue([]); // no existing row for the pair
     tx.product.update.mockResolvedValue({});
     tx.product_locations.upsert.mockResolvedValue({});
@@ -299,13 +345,12 @@ describe("PATCH thresholds — callback-tx conversion + R-D14 rows", () => {
     });
 
     const [row] = auditRows();
-    expect(row.details.rows).toEqual([
-      { entityId: "20", changes: { "minQuantity[3]": { from: null, to: 9 } } },
-    ]);
+    expect(row.entityId).toBe("20");
+    expect(row.details.changes).toEqual({ "minQuantity[3]": { from: null, to: 9 } });
   });
 
   it("ER-B9: no real change across all rows => NO event (writes still applied)", async () => {
-    tx.product.findMany.mockResolvedValue([{ id: 10, lowStockThreshold: 5 }]);
+    tx.product.findMany.mockResolvedValue([{ id: 10, name: "Alpha", lowStockThreshold: 5 }]);
     tx.product_locations.findMany.mockResolvedValue([]);
     tx.product.update.mockResolvedValue({});
 
@@ -318,26 +363,6 @@ describe("PATCH thresholds — callback-tx conversion + R-D14 rows", () => {
     expect(resp.status).toBe(200);
     expect(tx.product.update).toHaveBeenCalledTimes(1); // write still applied
     expect(tx.auditLog.create).not.toHaveBeenCalled(); // but no event
-  });
-
-  it("R-D14 cap: >500 changed rows degrade to 500 rows + rowCount + rowsOmitted", async () => {
-    const before = Array.from({ length: 501 }, (_, i) => ({ id: i + 1, lowStockThreshold: 0 }));
-    tx.product.findMany.mockResolvedValue(before);
-    tx.product_locations.findMany.mockResolvedValue([]);
-    tx.product.update.mockResolvedValue({});
-
-    const updates = before.map((p) => ({ productId: p.id, combinedMinimum: 99 })); // each 0 -> 99
-
-    const resp = await thresholdsPATCH(
-      mkReq("http://t/api/admin/products/thresholds", "PATCH", { updates })
-    );
-
-    expect(resp.status).toBe(200);
-    const [row] = auditRows();
-    expect(row.details.rows).toHaveLength(500);
-    expect(row.details.rowCount).toBe(501);
-    expect(row.details.rowsOmitted).toBe(true);
-    expect(row.affectedCount).toBe(501);
   });
 });
 

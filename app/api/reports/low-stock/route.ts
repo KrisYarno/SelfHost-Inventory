@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { LowStockResponse, LowStockAlert } from "@/types/reports";
+import { getLowStockDefault, effectiveLowStockThreshold } from "@/lib/stock-threshold";
 
 export const dynamic = "force-dynamic";
 
@@ -9,7 +10,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
   await requireApproved();
 
   const searchParams = request.nextUrl.searchParams;
-  const defaultThreshold = parseInt(searchParams.get("threshold") || "10");
+  // An explicit ?threshold overrides the inherited default for NULL-threshold
+  // products; otherwise fall back to the configurable system default (R-L13).
+  const thresholdParam = searchParams.get("threshold");
+  const defaultThreshold = thresholdParam ? parseInt(thresholdParam) : await getLowStockDefault();
 
   // Get all products with their location quantities (source of truth)
   const products = await prisma.product.findMany({
@@ -71,9 +75,11 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   products.forEach((product) => {
     const currentStock = stockMap.get(product.id) || 0;
-    const productThreshold = product.lowStockThreshold ?? defaultThreshold;
+    const productThreshold = effectiveLowStockThreshold(product.lowStockThreshold, defaultThreshold);
 
-    if (currentStock < productThreshold) {
+    // INCLUSIVE boundary (R-L13); a 0 effective threshold (disabled) never alerts.
+    // Out-of-stock (0) stays in this reorder-oriented report as the most critical.
+    if (productThreshold > 0 && currentStock <= productThreshold) {
       const avgDailyUsage = usageMap.get(product.id) || 0;
       const daysUntilEmpty = avgDailyUsage > 0 ? Math.floor(currentStock / avgDailyUsage) : null;
       const percentageRemaining = productThreshold > 0 ? (currentStock / productThreshold) * 100 : 0;

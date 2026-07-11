@@ -49,11 +49,14 @@ export const UpdateUserSchema = z.object({
   message: 'At least one field must be provided',
 });
 
-// POST /api/admin/settings — toggle system-level boolean SystemSettings.
-// Both optional; the handler upserts only the flags actually provided.
+// POST /api/admin/settings — update system-level SystemSettings. All optional;
+// the handler upserts only the keys actually provided. lowStockDefaultThreshold
+// (spec R-L13/D-L9) is the system-wide default alert threshold products inherit
+// when their own lowStockThreshold is NULL; 0 is valid (disables inheritors).
 export const SystemSettingsSchema = z.object({
   weeklyReportsEnabled: z.boolean().optional(),
   analyticsRebuildEnabled: z.boolean().optional(),
+  lowStockDefaultThreshold: z.number().int().min(0).max(1_000_000).optional(),
 });
 
 // PATCH /api/admin/products/thresholds — bulk minimum-quantity updates.
@@ -62,10 +65,13 @@ export const SystemSettingsSchema = z.object({
 // the route's inline negative-value guards.
 const ThresholdUpdateSchema = z.object({
   productId: z.number().int().positive(),
+  // NULL = clear the override / inherit the system default; 0 = alerts off;
+  // >0 = explicit override (spec R-L13 tri-state). Distinct from an omitted field.
   combinedMinimum: z
     .number()
     .int()
     .min(0, 'Combined minimum cannot be negative')
+    .nullable()
     .optional(),
   perLocation: z
     .array(
@@ -79,11 +85,6 @@ const ThresholdUpdateSchema = z.object({
 
 export const ThresholdsUpdateSchema = z.object({
   updates: z.array(ThresholdUpdateSchema).min(1, 'No updates provided'),
-});
-
-// POST /api/admin/audit-logs — fetch a batch's logs by its batchId.
-export const AuditBatchLogsSchema = z.object({
-  batchId: z.string().min(1, 'Batch ID is required'),
 });
 
 export type SystemSettingsInput = z.infer<typeof SystemSettingsSchema>;

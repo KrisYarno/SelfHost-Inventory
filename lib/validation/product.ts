@@ -29,11 +29,14 @@ export const ProductCreateUISchema = z.object({
     .nonnegative('Numeric value must be >= 0')
     .max(1_000_000, 'Numeric value is too large')
     .optional(),
+  // NULL = inherit the system default (spec R-L13). undefined = field omitted;
+  // both are honored — the create path writes NULL unless an explicit value is set.
   lowStockThreshold: z
     .number()
     .int()
     .min(0)
     .max(1_000_000)
+    .nullable()
     .optional(),
   costPrice: z.number().min(0, 'Cost must be >= 0').optional(),
   retailPrice: z.number().min(0, 'Retail must be >= 0').optional(),
@@ -68,11 +71,14 @@ export const ProductUpdateSchema = z
     numericValue: z.number().nonnegative().optional(),
     costPrice: z.number().min(0, 'Cost must be >= 0').optional(),
     retailPrice: z.number().min(0, 'Retail must be >= 0').optional(),
+    // NULL = inherit the system default (spec R-L13); the PUT diffs and persists
+    // null distinctly from 0 (disabled) and from an explicit override.
     lowStockThreshold: z
       .number()
       .int()
       .min(0)
       .max(1_000_000)
+      .nullable()
       .optional(),
   })
   .refine(

@@ -10,6 +10,7 @@ jest.mock("@/lib/prisma", () => ({
     product_locations: { findMany: jest.fn() },
     inventory_logs: { groupBy: jest.fn(), count: jest.fn() },
     productStockSnapshot: { groupBy: jest.fn(), aggregate: jest.fn() },
+    systemSetting: { findUnique: jest.fn() },
   },
 }));
 
@@ -23,11 +24,14 @@ const m = prisma as unknown as {
   product_locations: { findMany: jest.Mock };
   inventory_logs: { groupBy: jest.Mock; count: jest.Mock };
   productStockSnapshot: { groupBy: jest.Mock; aggregate: jest.Mock };
+  systemSetting: { findUnique: jest.Mock };
 };
 
 beforeEach(() => {
   jest.clearAllMocks();
   (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isAdmin: true } });
+  // No lowStockDefaultThreshold row => getLowStockDefault falls back to 10.
+  m.systemSetting.findUnique.mockResolvedValue(null);
   m.product.count.mockResolvedValue(2);
   // Two products, both threshold 10.
   m.product.findMany.mockResolvedValue([

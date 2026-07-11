@@ -105,7 +105,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
         numericValue,
         quantity: 0,
         location: locationId,
-        lowStockThreshold: body.lowStockThreshold ?? 10,
+        // NULL = inherit the system default (R-L13); stop materializing 10 so the
+        // configurable default actually governs newly created products. An omitted
+        // field writes NULL explicitly (no low-stock predicate here — this route
+        // resolves nothing against the threshold, so it needs no shared helper).
+        lowStockThreshold: body.lowStockThreshold === undefined ? null : body.lowStockThreshold,
         costPrice: costPrice >= 0 ? costPrice : 0,
         retailPrice: retailPrice >= 0 ? retailPrice : 0,
         approvalStatus: user.isAdmin ? "APPROVED" : "PENDING_REVIEW",

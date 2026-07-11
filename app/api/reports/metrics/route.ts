@@ -12,6 +12,11 @@ import {
   calculateTrend,
   DEAD_STOCK_DAYS,
 } from "@/lib/metrics/warehouse-metrics";
+import {
+  getLowStockDefault,
+  effectiveLowStockThreshold,
+  isLowStock,
+} from "@/lib/stock-threshold";
 
 export const dynamic = "force-dynamic";
 
@@ -75,7 +80,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
     productStockMap.set(pl.productId, (productStockMap.get(pl.productId) || 0) + pl.quantity);
   });
 
-  const lowStockThreshold = 10;
+  // System-wide default a NULL-threshold product inherits (R-L13).
+  const lowStockDefault = await getLowStockDefault();
   const products = await prisma.product.findMany({
     where: { deletedAt: null, approvalStatus: "APPROVED" },
     select: {
@@ -132,17 +138,17 @@ export const GET = apiHandler(async (request: NextRequest) => {
 
   products.forEach((product) => {
     const quantity = productStockMap.get(product.id) || 0;
-    const threshold = product.lowStockThreshold ?? lowStockThreshold;
+    const threshold = effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault);
     const cost = Number(product.costPrice ?? 0);
     const retail = Number(product.retailPrice ?? 0);
     const productCostValue = quantity * cost;
 
-    // Legacy metrics
-    if (quantity > 0 && quantity < threshold) {
+    // Low-stock count uses the shared INCLUSIVE predicate (R-L13) so this metric
+    // converges with the notification boundary and every other counting surface.
+    if (isLowStock(quantity, threshold)) {
       lowStockProducts++;
-    }
-    // Health score: product is healthy if stock is at or above its threshold
-    if (quantity >= threshold) {
+    } else if (quantity > 0) {
+      // Healthy = has stock and is not low (mutually exclusive at the boundary).
       healthyProducts++;
     }
     totalInventoryCostValue += productCostValue;
@@ -204,10 +210,11 @@ export const GET = apiHandler(async (request: NextRequest) => {
   const daysOfSupplyAvg =
     productsWithMovement > 0 ? Math.round(daysOfSupplySum / productsWithMovement) : 0;
 
-  // B8: honest low-stock %-trend (proxy) backed by product_stock_snapshots.
+  // B8: honest low-stock %-trend backed by product_stock_snapshots.
   // calculateTrend returns a PERCENTAGE (the card renders {value}%); this is the % change in
   // the COUNT of low-stock products between the latest snapshot day and the snapshot 7 days
-  // earlier, reusing the EXISTING lowStockProducts predicate. Respects selectedLocationId.
+  // earlier, reusing the SAME shared isLowStock predicate over effective thresholds.
+  // Respects selectedLocationId.
   // <2 distinct snapshot days => {value:0, direction:"stable"} so the card never breaks pre-backfill.
   let lowStockTrend: { value: number; direction: "up" | "down" | "stable" } = {
     value: 0,
@@ -238,10 +245,13 @@ export const GET = apiHandler(async (request: NextRequest) => {
     : [];
 
   if (snapshotRows.length > 0) {
-    // Threshold per product (reuse the predicate's source: product.lowStockThreshold ?? 10).
+    // Effective threshold per product (inheritance model, R-L13).
     const thresholdByProduct = new Map<number, number>();
     products.forEach((p) =>
-      thresholdByProduct.set(p.id, p.lowStockThreshold ?? lowStockThreshold)
+      thresholdByProduct.set(
+        p.id,
+        effectiveLowStockThreshold(p.lowStockThreshold, lowStockDefault)
+      )
     );
     // Only count APPROVED + non-deleted products (the `products` set above already is).
     const approvedIds = new Set(products.map((p) => p.id));
@@ -262,8 +272,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
           if (r.dayKey !== day) continue;
           if (!approvedIds.has(r.productId)) continue;
           const qty = r._sum.quantity ?? 0;
-          const threshold = thresholdByProduct.get(r.productId) ?? lowStockThreshold;
-          if (qty > 0 && qty < threshold) count++;
+          const threshold = thresholdByProduct.get(r.productId) ?? lowStockDefault;
+          if (isLowStock(qty, threshold)) count++;
         }
         return count;
       };

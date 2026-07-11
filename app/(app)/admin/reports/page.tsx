@@ -327,7 +327,7 @@ export default function AdminReportsPage() {
             <MetricsCard
               title="Stockout Risk"
               value={metrics?.stockoutRiskCount || 0}
-              subtitle={`Avg ${metrics?.daysOfSupplyAvg || 0} days supply - trend = low-stock count direction (proxy)`}
+              subtitle={`Avg ${metrics?.daysOfSupplyAvg || 0} days of supply (outflow-based — includes transfers and corrections) · trend tracks the low-stock count`}
               icon={<AlertTriangle className="h-4 w-4" />}
               trend={metrics?.lowStockTrend}
             />

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { Prisma, Product, product_locations, Location } from "@prisma/client";
+import { getLowStockDefault, effectiveLowStockThreshold } from "@/lib/stock-threshold";
 
 export const dynamic = "force-dynamic";
 
@@ -44,6 +45,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
     ];
   }
 
+  // System default a NULL-threshold product inherits (R-L13). Previously `?? 0`
+  // collapsed inherit (NULL) and disabled (0) into the same 0 — now distinct.
+  const lowStockDefault = await getLowStockDefault();
+
   // Get total count for pagination
   const total = await prisma.product.count({ where: whereClause });
 
@@ -85,7 +90,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
         name: product.name,
         baseName: product.baseName || "",
         variant: product.variant,
-        combinedMinimum: product.lowStockThreshold ?? 0,
+        combinedMinimum: effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault),
         locations: locations.sort((a, b) => b.quantity - a.quantity),
         totalQuantity,
       };

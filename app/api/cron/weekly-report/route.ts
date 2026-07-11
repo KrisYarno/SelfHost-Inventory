@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { apiHandler } from "@/lib/api-utils";
 import { emailService } from "@/lib/email";
+import { getLowStockDefault, effectiveLowStockThreshold } from "@/lib/stock-threshold";
 
 export const dynamic = "force-dynamic";
 
@@ -49,7 +50,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
   });
   const totalStock = stockAgg._sum.quantity ?? 0;
 
-  // Products below their minimum / low-stock threshold
+  // Products at/below their effective low-stock threshold. NULL now INHERITS the
+  // configurable system default (R-L13, was collapsed to 0) and the comparison is
+  // INCLUSIVE (was exclusive `<`, which skipped products exactly at their minimum).
+  const lowStockDefault = await getLowStockDefault();
   const products = await prisma.product.findMany({
     where: { deletedAt: null, approvalStatus: "APPROVED" },
     include: { product_locations: true },
@@ -67,8 +71,8 @@ export const GET = apiHandler(async (request: NextRequest) => {
       (sum, pl) => sum + pl.quantity,
       0
     );
-    const minimum = product.lowStockThreshold ?? 0;
-    if (minimum > 0 && totalQty < minimum) {
+    const minimum = effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault);
+    if (minimum > 0 && totalQty <= minimum) {
       lowStockItems.push({
         name: product.name,
         currentStock: totalQty,

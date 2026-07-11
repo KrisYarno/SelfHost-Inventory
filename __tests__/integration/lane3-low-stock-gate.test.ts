@@ -36,29 +36,10 @@ const SIGNAL_PATTERNS: readonly RegExp[] = [
 
 const HELPER_IMPORT = /from\s*['"]@\/lib\/stock-threshold['"]/;
 
-// Current offenders (plan P-L4 seed). Task 7 empties this list.
-const EXEMPT: readonly string[] = [
-  'app/api/admin/dashboard/route.ts',
-  'app/api/admin/products/thresholds/route.ts',
-  'app/api/cron/weekly-report/route.ts',
-  'app/api/inventory/variants/route.ts',
-  'app/api/products/route.ts',
-  'app/api/reports/location-details/[id]/route.ts',
-  'app/api/reports/low-stock/route.ts',
-  'app/api/reports/metrics/route.ts',
-  'app/api/reports/reorder-recommendations/route.ts',
-  'app/(app)/journal/page.tsx',
-  'app/(app)/workbench/page.tsx',
-  'components/journal/journal-product-row.tsx',
-  'components/products/product-card-mobile.tsx',
-  'components/products/product-form.tsx',
-  'components/products/product-list-optimized.tsx',
-  'components/reports/drill-down-modal.tsx',
-  'components/workbench/product-tile.tsx',
-  'lib/analytics/hub.ts',
-  'lib/staging/graduate.ts',
-  'lib/stock-checker.ts',
-];
+// Plan P-L4: the 20-site offender seed was emptied by Task 7's sweep (2026-07-11).
+// Every low-stock predicate site now imports @/lib/stock-threshold. New offenders
+// fail the gate; additions to this list require orchestrator sign-off.
+const EXEMPT: readonly string[] = [];
 
 function walk(absDir: string, out: string[]): void {
   for (const entry of fs.readdirSync(absDir, { withFileTypes: true })) {

@@ -9,12 +9,17 @@ import { Undo2 } from "lucide-react";
 import {
   useThresholds,
   useSaveThresholds,
+  useSaveLowStockDefault,
   type ProductMinimum,
 } from "@/hooks/use-admin";
+import { effectiveLowStockThreshold } from "@/lib/stock-threshold";
 import { cn } from "@/lib/utils";
 
+// combinedMin is the RAW alert-threshold value (R-L13 tri-state): null = inherit
+// the system default, 0 = alerts off, >0 = explicit override. `undefined` = the
+// row has no pending edit (fall back to the product's stored value).
 type MinEdit = {
-  combinedMin?: number;
+  combinedMin?: number | null;
   perLocation?: Record<number, number>;
 };
 
@@ -38,8 +43,10 @@ function countChanges(edits: EditsMap) {
 export default function MinimumSettingsPage() {
   const { data, isLoading, isError, dataUpdatedAt, errorUpdatedAt } = useThresholds();
   const saveThresholds = useSaveThresholds();
+  const saveDefault = useSaveLowStockDefault();
   const products = useMemo(() => data?.products ?? [], [data]);
   const locations = useMemo(() => data?.locations ?? [], [data]);
+  const systemDefault = data?.lowStockDefault ?? 10;
   const isSaving = saveThresholds.isPending;
 
   const [visibleLocationIds, setVisibleLocationIds] = useState<number[]>([]);
@@ -52,6 +59,10 @@ export default function MinimumSettingsPage() {
   const [view, setView] = useState<ViewMode>("matrix");
   const [drawerProduct, setDrawerProduct] = useState<ProductMinimum | null>(null);
 
+  // Draft of the system default input (D-L9 header control). Seeded from the
+  // loaded value on every fresh dataset.
+  const [defaultDraft, setDefaultDraft] = useState<number>(10);
+
   // Whenever a fresh dataset loads (mount + after a save-triggered refetch),
   // default all locations visible and clear pending edits/history — mirrors the
   // old loadData() resets. dataUpdatedAt changes on every completed fetch.
@@ -61,6 +72,7 @@ export default function MinimumSettingsPage() {
       setEdits({});
       setHistory([]);
       setError(null);
+      setDefaultDraft(data.lowStockDefault ?? 10);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataUpdatedAt]);
@@ -90,14 +102,14 @@ export default function MinimumSettingsPage() {
     });
   };
 
-  const handleCombinedChange = (productId: number, value: string) => {
+  // Tri-state alert-threshold change: null = inherit / 0 = off / n = custom.
+  const handleCombinedChange = (productId: number, value: number | null) => {
     pushHistory();
-    const nextValue = clampNumber(value);
     setEdits((prev) => ({
       ...prev,
       [productId]: {
         ...(prev[productId] ?? {}),
-        combinedMin: nextValue,
+        combinedMin: value,
       },
     }));
   };
@@ -127,6 +139,12 @@ export default function MinimumSettingsPage() {
 
   const changesCount = useMemo(() => countChanges(edits), [edits]);
 
+  // Resolve a product's pending-or-stored raw alert threshold (null/0/>0).
+  const rawThresholdFor = (product: ProductMinimum): number | null => {
+    const edit = edits[product.id];
+    return edit?.combinedMin !== undefined ? edit.combinedMin : product.combinedMinimum;
+  };
+
   const filteredProducts = useMemo(() => {
     const query = search.toLowerCase();
     const base = !search.trim()
@@ -135,8 +153,9 @@ export default function MinimumSettingsPage() {
 
     return base.filter((product) => {
       const edit = edits[product.id];
-      const combinedValue = edit?.combinedMin ?? product.combinedMinimum;
-      const combinedMissing = combinedValue <= 0;
+      const raw = edit?.combinedMin !== undefined ? edit.combinedMin : product.combinedMinimum;
+      // "Needs setup" = inheriting the default (never explicitly configured).
+      const combinedMissing = raw === null;
       const perLocationEdits = Object.keys(edit?.perLocation ?? {}).length > 0;
       const hasChanged = perLocationEdits || edit?.combinedMin !== undefined;
       const hasMissingLocation = product.perLocation.some(
@@ -198,7 +217,18 @@ export default function MinimumSettingsPage() {
     }
   };
 
+  const handleSaveDefault = async () => {
+    try {
+      await saveDefault.mutateAsync(Math.max(0, defaultDraft));
+      toast.success("Default low-stock threshold saved");
+    } catch (err) {
+      console.error("Error saving default", err);
+      toast.error("Failed to save default threshold");
+    }
+  };
+
   const visibleLocations = locations.filter((loc) => visibleLocationIds.includes(loc.id));
+  const defaultDirty = defaultDraft !== systemDefault;
 
   return (
     <div className="space-y-4 pb-44 sm:pb-28">
@@ -207,7 +237,7 @@ export default function MinimumSettingsPage() {
           <div>
             <h1 className="text-2xl font-semibold">Product minimums</h1>
             <p className="text-sm text-muted-foreground">
-              Combined order minimums and per-location refill minimums.
+              Low-stock alert thresholds and per-location refill minimums.
             </p>
           </div>
           {view === "matrix" && (
@@ -218,7 +248,7 @@ export default function MinimumSettingsPage() {
                 onClick={() => setShowCombined((prev) => !prev)}
                 aria-pressed={showCombined}
               >
-                Combined min
+                Alert threshold
               </Button>
               {locations.map((location) => {
                 const active = visibleLocationIds.includes(location.id);
@@ -241,6 +271,37 @@ export default function MinimumSettingsPage() {
             </div>
           )}
         </div>
+
+        {/* D-L9: system default input lives at the top of the matrix page. */}
+        <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface px-3 py-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="space-y-1">
+            <label htmlFor="default-threshold" className="text-sm font-medium">
+              Default low-stock threshold
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="default-threshold"
+                type="number"
+                min={0}
+                className="h-9 w-24"
+                value={Number.isFinite(defaultDraft) ? defaultDraft : ""}
+                onChange={(e) => setDefaultDraft(clampNumber(e.target.value))}
+              />
+              <span className="text-sm text-muted-foreground">units</span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Used by products set to system default.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            onClick={handleSaveDefault}
+            disabled={!defaultDirty || saveDefault.isPending}
+          >
+            {saveDefault.isPending ? "Saving..." : "Save default"}
+          </Button>
+        </div>
+
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="max-w-md flex-1">
             <Input
@@ -300,7 +361,11 @@ export default function MinimumSettingsPage() {
               <thead className="bg-muted/60 sticky top-0 z-10">
                 <tr>
                   <th className="sticky left-0 z-20 bg-muted/80 px-3 py-2 text-left">Product</th>
-                  {showCombined && <th className="px-3 py-2 text-right">Combined min</th>}
+                  {showCombined && (
+                    <th className="px-3 py-2 text-right whitespace-nowrap">
+                      Low-stock alert threshold
+                    </th>
+                  )}
                   {visibleLocations.map((loc) => (
                     <th key={loc.id} className="px-3 py-2 text-right whitespace-nowrap">
                       {loc.name}
@@ -310,9 +375,10 @@ export default function MinimumSettingsPage() {
               </thead>
               <tbody>
                 {filteredProducts.map((product) => {
+                  const raw = rawThresholdFor(product);
+                  const effective = effectiveLowStockThreshold(raw, systemDefault);
+                  const belowCombined = effective > 0 && product.totalStock <= effective;
                   const edit = edits[product.id];
-                  const combinedValue = edit?.combinedMin ?? product.combinedMinimum;
-                  const belowCombined = combinedValue > 0 && product.totalStock < combinedValue;
 
                   return (
                     <tr key={product.id} className="border-t border-border">
@@ -324,7 +390,7 @@ export default function MinimumSettingsPage() {
                           {belowCombined && (
                             <span
                               className="inline-block h-2 w-2 rounded-full bg-rose-400"
-                              aria-label="Below combined minimum"
+                              aria-label="Below alert threshold"
                             />
                           )}
                           {(edit?.combinedMin !== undefined ||
@@ -337,10 +403,10 @@ export default function MinimumSettingsPage() {
                       </td>
                       {showCombined && (
                         <td className="px-3 py-2 text-right">
-                          <NumericInput
-                            value={combinedValue}
-                            onChange={(val) => handleCombinedChange(product.id, val)}
-                            label={`Combined minimum for ${product.name}`}
+                          <ThresholdControl
+                            raw={raw}
+                            systemDefault={systemDefault}
+                            onChange={(value) => handleCombinedChange(product.id, value)}
                           />
                         </td>
                       )}
@@ -378,9 +444,10 @@ export default function MinimumSettingsPage() {
         ) : (
           <div className="divide-y divide-border rounded-lg border border-border bg-background/80">
             {filteredProducts.map((product) => {
+              const raw = rawThresholdFor(product);
+              const effective = effectiveLowStockThreshold(raw, systemDefault);
+              const belowCombined = effective > 0 && product.totalStock <= effective;
               const edit = edits[product.id];
-              const combinedValue = edit?.combinedMin ?? product.combinedMinimum;
-              const belowCombined = combinedValue > 0 && product.totalStock < combinedValue;
               const hasEdits =
                 edit?.combinedMin !== undefined || Object.keys(edit?.perLocation ?? {}).length > 0;
 
@@ -393,7 +460,7 @@ export default function MinimumSettingsPage() {
                         {belowCombined && (
                           <span
                             className="inline-block h-2 w-2 rounded-full bg-rose-400"
-                            aria-label="Below combined minimum"
+                            aria-label="Below alert threshold"
                           />
                         )}
                         {hasEdits && (
@@ -407,11 +474,11 @@ export default function MinimumSettingsPage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-xs text-muted-foreground">Combined</span>
-                      <StepperInput
-                        value={combinedValue}
-                        onChange={(val) => handleCombinedChange(product.id, String(val))}
-                        ariaLabel={`Combined minimum for ${product.name}`}
+                      <span className="text-xs text-muted-foreground">Alert</span>
+                      <ThresholdControl
+                        raw={raw}
+                        systemDefault={systemDefault}
+                        onChange={(value) => handleCombinedChange(product.id, value)}
                       />
                       <Button
                         variant="outline"
@@ -434,8 +501,9 @@ export default function MinimumSettingsPage() {
         <Drawer
           product={drawerProduct}
           edits={edits[drawerProduct.id]}
+          systemDefault={systemDefault}
           onClose={() => setDrawerProduct(null)}
-          onCombinedChange={(value) => handleCombinedChange(drawerProduct.id, String(value))}
+          onCombinedChange={(value) => handleCombinedChange(drawerProduct.id, value)}
           onLocationChange={(locationId, value) =>
             handleLocationChange(drawerProduct.id, locationId, String(value))
           }
@@ -451,6 +519,69 @@ export default function MinimumSettingsPage() {
         onReset={resetEdits}
         error={error}
       />
+    </div>
+  );
+}
+
+/**
+ * ONE tri-state alert-threshold control (D-L9), used in the matrix, the list, and
+ * the drawer. Mode select (Default / Custom / Off) + a value input for custom;
+ * the effective value is always shown inline, and a legacy `=1` row gets a
+ * "custom: 1" tag so its old-schema-default origin stays visible + hand-correctable.
+ */
+function ThresholdControl({
+  raw,
+  systemDefault,
+  onChange,
+}: {
+  raw: number | null;
+  systemDefault: number;
+  onChange: (value: number | null) => void;
+}) {
+  const mode: "inherit" | "custom" | "off" =
+    raw === null ? "inherit" : raw === 0 ? "off" : "custom";
+  const effective = effectiveLowStockThreshold(raw, systemDefault);
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex items-center gap-1">
+        <select
+          aria-label="Alert threshold mode"
+          className="h-8 rounded-md border border-border bg-background px-1 text-sm"
+          value={mode}
+          onChange={(e) => {
+            const next = e.target.value;
+            if (next === "inherit") onChange(null);
+            else if (next === "off") onChange(0);
+            else onChange(raw && raw > 0 ? raw : systemDefault);
+          }}
+        >
+          <option value="inherit">Use system default ({systemDefault})</option>
+          <option value="custom">Custom threshold</option>
+          <option value="off">Alerts off</option>
+        </select>
+        {mode === "custom" && (
+          <Input
+            type="number"
+            min={0}
+            aria-label="Custom threshold value"
+            className="h-8 w-16 text-right"
+            value={raw ?? 0}
+            onChange={(e) => {
+              const parsed = parseInt(e.target.value || "0", 10);
+              onChange(Number.isNaN(parsed) ? 0 : Math.max(0, parsed));
+            }}
+          />
+        )}
+      </div>
+      <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+        {raw === 1 && (
+          <Badge variant="outline" className="text-[10px]">
+            custom: 1
+          </Badge>
+        )}
+        <span>{effective > 0 ? `Effective: ${effective}` : "alerts off"}</span>
+      </div>
     </div>
   );
 }
@@ -527,52 +658,10 @@ function StickySaveBar({
   );
 }
 
-function StepperInput({
-  value,
-  onChange,
-  ariaLabel,
-}: {
-  value: number;
-  onChange: (val: number) => void;
-  ariaLabel: string;
-}) {
-  return (
-    <div className="flex items-center rounded-md border border-border">
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        className="h-8 w-8"
-        onClick={() => onChange(Math.max(0, value - 1))}
-        aria-label="Decrease"
-      >
-        -
-      </Button>
-      <Input
-        type="number"
-        min={0}
-        className="h-8 w-16 border-0 text-center"
-        value={value}
-        onChange={(event) => onChange(clampNumber(event.target.value))}
-        aria-label={ariaLabel}
-      />
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        className="h-8 w-8"
-        onClick={() => onChange(value + 1)}
-        aria-label="Increase"
-      >
-        +
-      </Button>
-    </div>
-  );
-}
-
 function Drawer({
   product,
   edits,
+  systemDefault,
   onClose,
   onCombinedChange,
   onLocationChange,
@@ -580,12 +669,13 @@ function Drawer({
 }: {
   product: ProductMinimum;
   edits?: MinEdit;
+  systemDefault: number;
   onClose: () => void;
-  onCombinedChange: (value: number) => void;
+  onCombinedChange: (value: number | null) => void;
   onLocationChange: (locationId: number, value: number) => void;
   onSetAll: (value: number) => void;
 }) {
-  const combinedValue = edits?.combinedMin ?? product.combinedMinimum;
+  const raw = edits?.combinedMin !== undefined ? edits.combinedMin : product.combinedMinimum;
   const perLocation = edits?.perLocation ?? {};
 
   return (
@@ -603,25 +693,10 @@ function Drawer({
         </div>
         <div className="space-y-4 overflow-y-auto px-4 py-3">
           <div className="space-y-2">
-            <label className="text-xs font-medium text-muted-foreground">Combined minimum</label>
-            <StepperInput
-              value={combinedValue}
-              onChange={(val) => onCombinedChange(val)}
-              ariaLabel={`Combined minimum for ${product.name}`}
-            />
-            <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-              {[0, 1, 5, 10, 25].map((chip) => (
-                <Button
-                  key={chip}
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => onCombinedChange(chip)}
-                  className="h-7"
-                >
-                  {chip}
-                </Button>
-              ))}
-            </div>
+            <label className="text-xs font-medium text-muted-foreground">
+              Low-stock alert threshold
+            </label>
+            <ThresholdControl raw={raw} systemDefault={systemDefault} onChange={onCombinedChange} />
           </div>
 
           <div className="space-y-2">
@@ -667,6 +742,49 @@ function Drawer({
         </div>
         <div className="h-4" />
       </div>
+    </div>
+  );
+}
+
+function StepperInput({
+  value,
+  onChange,
+  ariaLabel,
+}: {
+  value: number;
+  onChange: (val: number) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <div className="flex items-center rounded-md border border-border">
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8"
+        onClick={() => onChange(Math.max(0, value - 1))}
+        aria-label="Decrease"
+      >
+        -
+      </Button>
+      <Input
+        type="number"
+        min={0}
+        className="h-8 w-16 border-0 text-center"
+        value={value}
+        onChange={(event) => onChange(clampNumber(event.target.value))}
+        aria-label={ariaLabel}
+      />
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8"
+        onClick={() => onChange(value + 1)}
+        aria-label="Increase"
+      >
+        +
+      </Button>
     </div>
   );
 }

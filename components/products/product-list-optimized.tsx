@@ -13,6 +13,8 @@ import { cn } from "@/lib/utils";
 import { exportToCSV } from "@/lib/export-utils";
 import { useProducts } from "@/hooks/use-products";
 import { useIsMobile } from "@/hooks/use-is-mobile";
+import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
+import { useLowStockDefault } from "@/hooks/use-low-stock-default";
 
 interface ProductListProps {
   onEdit?: (product: ProductWithQuantity) => void;
@@ -38,6 +40,7 @@ export function ProductListOptimized({
   const [stockFilter, setStockFilter] = useState<StockFilter>("all");
   const [isScrolled, setIsScrolled] = useState(false);
   const isMobile = useIsMobile();
+  const lowStockDefault = useLowStockDefault();
   const pageSize = 25;
   
   const { data, isLoading, error } = useProducts({
@@ -78,14 +81,17 @@ export function ProductListOptimized({
         case "in-stock":
           return product.currentQuantity > 0;
         case "low-stock":
-          return product.currentQuantity > 0 && product.currentQuantity <= 10;
+          return isLowStock(
+            product.currentQuantity,
+            effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault)
+          );
         case "out-of-stock":
           return product.currentQuantity === 0;
         default:
           return true;
       }
     });
-  }, [data?.products, stockFilter]);
+  }, [data?.products, stockFilter, lowStockDefault]);
 
   // Memoize filtered categories (case-insensitive keys, preserving first label)
   const categories = useMemo(() => {

@@ -4,6 +4,8 @@ import { ProductWithQuantity } from "@/types/product";
 import { ValueChip } from "@/components/ui/value-chip";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { cn } from "@/lib/utils";
+import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
+import { useLowStockDefault } from "@/hooks/use-low-stock-default";
 
 interface ProductTileProps {
   product: ProductWithQuantity;
@@ -12,8 +14,12 @@ interface ProductTileProps {
 }
 
 export function ProductTile({ product, onClick, className }: ProductTileProps) {
+  const lowStockDefault = useLowStockDefault();
   const isOutOfStock = product.currentQuantity === 0;
-  const isLowStock = product.currentQuantity > 0 && product.currentQuantity <= 5;
+  const isLow = isLowStock(
+    product.currentQuantity,
+    effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault)
+  );
 
   return (
     <button
@@ -29,7 +35,7 @@ export function ProductTile({ product, onClick, className }: ProductTileProps) {
         // Urgency-based styling
         isOutOfStock
           ? "border-negative-border bg-negative-muted"
-          : isLowStock
+          : isLow
             ? "border-warning-border bg-warning-muted"
             : "border-border/70 bg-surface",
         className
@@ -54,7 +60,7 @@ export function ProductTile({ product, onClick, className }: ProductTileProps) {
           {isOutOfStock && (
             <StatusBadge tone="negative">Out</StatusBadge>
           )}
-          {!isOutOfStock && isLowStock && (
+          {!isOutOfStock && isLow && (
             <StatusBadge tone="warning">Low</StatusBadge>
           )}
         </div>
