@@ -3,6 +3,8 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { CompanyScopeSelect } from "@/components/analytics/company-scope-select";
+import { ViewToggle, type AnalyticsView } from "@/components/analytics/view-toggle";
+import { OperationsView } from "@/components/analytics/operations-view";
 import { useAnalyticsProducts } from "@/hooks/use-analytics-products";
 import { useAnalyticsRebuildState } from "@/hooks/use-analytics";
 import type { HubProductRow, HubSort, HubDir, HubFilter, StockTrend } from "@/lib/analytics/hub";
@@ -145,6 +147,9 @@ export function buildHubCsvColumns(): { key: string; label: string }[] {
 
 export function AnalyticsHub() {
   const initial = useMemo(() => defaultRange(), []);
+  // Segmented view (spec D6 / D-L3): the company-scoped Sales rollup vs the GLOBAL
+  // Operations view. Sales is the default so existing links land unchanged.
+  const [view, setView] = useState<AnalyticsView>("sales");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<HubFilter>("all");
   const [sort, setSort] = useState<HubSort>("units");
@@ -252,6 +257,11 @@ export function AnalyticsHub() {
 
   return (
     <div className="space-y-6">
+      <ViewToggle value={view} onChange={setView} />
+      {view === "operations" ? (
+        <OperationsView />
+      ) : (
+        <>
       {/* Controls */}
       <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
@@ -503,6 +513,8 @@ export function AnalyticsHub() {
               </Button>
             </div>
           )}
+        </>
+      )}
         </>
       )}
     </div>
