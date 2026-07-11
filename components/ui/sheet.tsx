@@ -32,19 +32,29 @@ SheetOverlay.displayName = SheetPrimitive.Overlay.displayName;
 interface SheetContentProps
   extends React.ComponentPropsWithoutRef<typeof SheetPrimitive.Content> {
   side?: "top" | "right" | "bottom" | "left";
+  /**
+   * Motion profile (Lane 3 D-L7, codex #11). `"default"` keeps the existing
+   * 300/500ms durations untouched so current consumers are unchanged. `"quick"`
+   * opts new overlays into the spec's 150-200ms disclosure/drawer motion with
+   * `motion-reduce:transition-none` for reduced-motion users.
+   */
+  motion?: "default" | "quick";
 }
 
 const SheetContent = React.forwardRef<
   React.ElementRef<typeof SheetPrimitive.Content>,
   SheetContentProps
->(({ side = "right", className, children, ...props }, ref) => (
+>(({ side = "right", motion = "default", className, children, ...props }, ref) => (
   <SheetPortal>
     <SheetOverlay />
     <SheetPrimitive.Content
       ref={ref}
       className={cn(
         "fixed z-50 gap-4 bg-background shadow-lg transition ease-in-out",
-        "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:duration-500",
+        "data-[state=open]:animate-in data-[state=closed]:animate-out",
+        motion === "quick"
+          ? "duration-150 data-[state=closed]:duration-150 data-[state=open]:duration-200 motion-reduce:transition-none motion-reduce:animate-none"
+          : "data-[state=closed]:duration-300 data-[state=open]:duration-500",
         side === "top" &&
           "inset-x-0 top-0 border-b data-[state=closed]:slide-out-to-top data-[state=open]:slide-in-from-top rounded-b-lg max-h-[85vh] overflow-y-auto p-4 sm:p-6",
         side === "bottom" &&
