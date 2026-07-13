@@ -121,15 +121,25 @@ jest.mock("@/lib/change-tracking", () => ({
   REDACTED_KEYS: [],
 }));
 
-// Lane 4: ai@7 is ESM-only ("type":"module") and resists the CJS require this
-// harness uses to load route modules. Mocking it lets app/api/assistant/route.ts
-// load and classify normally (its POST is PERMANENT_EXEMPT below).
+// Lane 4: ai@7 and the @ai-sdk/* providers are ESM-only ("type":"module") and
+// resist the CJS require this harness uses to load route modules. Mocking the
+// package AND the provider-resolution module (whose import chain reaches the
+// @ai-sdk packages) lets app/api/assistant/route.ts load and classify normally
+// (its POST is PERMANENT_EXEMPT below).
 jest.mock("ai", () => ({
   __esModule: true,
   streamText: jest.fn(),
   stepCountIs: jest.fn(() => () => false),
   convertToModelMessages: jest.fn(async () => []),
   tool: jest.fn((d: unknown) => d),
+}));
+jest.mock("@/lib/assistant/providers", () => ({
+  __esModule: true,
+  resolveSurfaceModel: jest.fn(async () => {
+    throw new Error("unconfigured (mock)");
+  }),
+  validateSurfaceConfig: jest.fn(async () => undefined),
+  PROVIDER_TIMEOUT_MS: 60_000,
 }));
 
 // ---------------------------------------------------------------------------
