@@ -66,6 +66,14 @@ export interface RenderableAuditEvent {
   meta: ActionMeta;
   actorKind: string;
   actorName: string | null;
+  /**
+   * Lane 4 spec §3 D9: for LLM-actor events, the approving human's username
+   * (the D9 envelope's approvedByUserId is the audit row's userId — the
+   * existing user join). Allowlisted: ONLY the username string, nothing else.
+   * Renderers show it muted after the kind label ("Assistant · approved by
+   * kris"). Always null for non-LLM events.
+   */
+  actorDetail: string | null;
   action: string;
   changes: Record<string, ChangePair> | null;
   snapshotFieldCount: number | null;
@@ -555,6 +563,7 @@ export async function getProductTimeline(opts: {
       meta,
       actorKind: e.actorKind,
       actorName: e.user?.username ?? null,
+      actorDetail: e.actorKind === 'LLM' ? e.user?.username ?? null : null,
       action: restricted ? `${meta.label} — company-scoped` : e.action,
       changes: restricted ? null : extractChanges(e.details),
       snapshotFieldCount: restricted ? null : snapshotFieldCount(details),

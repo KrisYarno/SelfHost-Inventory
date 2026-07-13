@@ -372,6 +372,49 @@ describe('getProductTimeline — multi-timestamp missing-summary batch at a page
   });
 });
 
+describe('getProductTimeline — LLM actorDetail projection (Lane 4 D9)', () => {
+  // For LLM-actor events the row's joined user IS the approving human (the D9
+  // envelope's approvedByUserId writes the audit row's userId). The timeline
+  // exposes it as the allowlisted `actorDetail` — ONLY the username string —
+  // so renderers can show "Assistant · approved by kris". Non-LLM events carry
+  // actorDetail: null.
+  function buildLlmDb() {
+    return {
+      audit: [
+        { id: 11, createdAt: T.t3, actionType: 'INVENTORY_ADJUSTMENT', entityType: 'INVENTORY', entityId: '7', actorKind: 'LLM', action: 'Adjusted inventory', companyId: null, batchId: null, affectedCount: 1, details: { envelope: { surface: 'assistant', approvedByUserId: 9 } }, ipAddress: 'x', userAgent: 'y', user: { id: 9, username: 'kris', email: 'secret@x.com' } },
+        { id: 12, createdAt: T.t2, actionType: 'PRODUCT_UPDATE', entityType: 'PRODUCT', entityId: '7', actorKind: 'USER', action: 'Updated product', companyId: null, batchId: null, affectedCount: 1, details: {}, ipAddress: 'x', userAgent: 'y', user: { id: 1, username: 'alice', email: 'secret@x.com' } },
+        { id: 13, createdAt: T.t1, actionType: 'EXTERNAL_ORDER_FULFILLMENT', entityType: 'INVENTORY', entityId: '7', actorKind: 'SYSTEM', action: 'Fulfilled order', companyId: null, batchId: null, affectedCount: 1, details: {}, ipAddress: 'x', userAgent: 'y', user: null },
+        // LLM event with NO joined user (defensive: no approver resolvable)
+        { id: 14, createdAt: T.t4, actionType: 'INVENTORY_ADJUSTMENT', entityType: 'INVENTORY', entityId: '7', actorKind: 'LLM', action: 'Adjusted inventory', companyId: null, batchId: null, affectedCount: 1, details: {}, ipAddress: 'x', userAgent: 'y', user: null },
+      ],
+      inv: [] as Row[],
+      memberships: [] as Row[],
+    };
+  }
+
+  it('exposes the approver username as actorDetail on LLM events only', async () => {
+    install(buildLlmDb());
+    const res = await getProductTimeline({ productId: 7, caller: ADMIN, limit: 50 });
+    const byId = new Map(
+      res.entries.filter((e) => e.kind === 'event').map((e) => [(e as any).event.id, (e as any).event]),
+    );
+    expect(byId.get(11).actorDetail).toBe('kris');
+    expect(byId.get(12).actorDetail).toBeNull(); // USER
+    expect(byId.get(13).actorDetail).toBeNull(); // SYSTEM
+    expect(byId.get(14).actorDetail).toBeNull(); // LLM without a resolvable approver
+  });
+
+  it('exposes ONLY the username string — nothing else from the join or envelope', async () => {
+    install(buildLlmDb());
+    const res = await getProductTimeline({ productId: 7, caller: ADMIN, limit: 50 });
+    const json = JSON.stringify(res);
+    expect(json).not.toContain('approvedByUserId');
+    expect(json).not.toContain('envelope');
+    expect(json).not.toContain('secret@x.com');
+    expect(json).toContain('"actorDetail":"kris"');
+  });
+});
+
 describe('getProductTimeline — authorization projection (R-L5)', () => {
   it('non-member caller: company-scoped events restricted, no ip/userAgent/email anywhere', async () => {
     install(buildDb()); // memberships empty => caller is a member of nothing

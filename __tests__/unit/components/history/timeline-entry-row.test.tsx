@@ -33,6 +33,7 @@ const evt = (over: Partial<RenderableAuditEvent> = {}): RenderableAuditEvent => 
   batchId: null,
   affectedCount: 1,
   restricted: false,
+  actorDetail: null,
   ...over,
 });
 
@@ -103,6 +104,30 @@ describe('TimelineEntryRow', () => {
     );
     expect(screen.getByText('→')).toBeInTheDocument();
     expect(screen.getByText('quantity')).toBeInTheDocument();
+  });
+
+  it('renders an LLM event as the kind label with the approver appended muted (Lane 4 D9)', () => {
+    render(
+      <TimelineEntryRow
+        entry={eventEntry(
+          evt({ actorKind: 'LLM', actorName: 'kris', actorDetail: 'kris' }),
+        )}
+      />,
+    );
+    // Kind label wins; the username never renders as the actor.
+    expect(screen.getByText('Assistant')).toBeInTheDocument();
+    expect(screen.queryByText(/^kris$/)).not.toBeInTheDocument();
+    expect(screen.getByText(/approved by kris/)).toBeInTheDocument();
+  });
+
+  it('renders no approver detail when actorDetail is null', () => {
+    render(
+      <TimelineEntryRow
+        entry={eventEntry(evt({ actorKind: 'LLM', actorName: null, actorDetail: null }))}
+      />,
+    );
+    expect(screen.getByText('Assistant')).toBeInTheDocument();
+    expect(screen.queryByText(/approved by/)).not.toBeInTheDocument();
   });
 
   it('puts the exact ms ISO timestamp in the title attribute', () => {

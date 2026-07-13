@@ -181,7 +181,11 @@ export function TimelineEntryRow({
         )}
 
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <ActorChip actorKind={event.actorKind} actorName={event.actorName} />
+          <ActorChip
+            actorKind={event.actorKind}
+            actorName={event.actorName}
+            detail={event.actorDetail ? `approved by ${event.actorDetail}` : undefined}
+          />
           <span aria-hidden>·</span>
           <time dateTime={event.ts} title={event.ts}>
             {relativeTime(event.ts)}

@@ -13,19 +13,35 @@ export const toneClasses: Record<StatusTone, string> = {
   neutral: "bg-muted text-muted-foreground border border-border",
 };
 
+export type StatusBadgeSize = "default" | "body";
+
+/**
+ * Size variants (Lane 4 spec §12 D-B8): the 11px default is for short
+ * REDUNDANT tags only (D-L7 type floor); `size="body"` (14px) is for badges
+ * that carry a load-bearing label — e.g. the chat ActorChip and provider-panel
+ * status, where the badge may be the effective label.
+ */
+const sizeClasses: Record<StatusBadgeSize, string> = {
+  default: "px-2.5 py-0.5 text-[11px]",
+  body: "px-3 py-1 text-sm",
+};
+
 export interface StatusBadgeProps extends BadgeProps {
   tone?: StatusTone;
+  size?: StatusBadgeSize;
 }
 
 export function StatusBadge({
   tone = "neutral",
+  size = "default",
   className,
   ...props
 }: StatusBadgeProps) {
   return (
     <Badge
       className={cn(
-        "rounded-full px-2.5 py-0.5 text-[11px] font-medium tracking-wide",
+        "rounded-full font-medium tracking-wide",
+        sizeClasses[size],
         toneClasses[tone],
         className
       )}
