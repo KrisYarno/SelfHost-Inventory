@@ -292,13 +292,15 @@ const HANDLER_EXEMPT: HandlerExemption[] = [];
 // Discovery + classification
 // ---------------------------------------------------------------------------
 
-// D12 (GET blind spot — documented, not closed): this gate classifies MUTATING
-// VERBS only. GET routes with side effects are invisible to it — known today:
-// cron/stock-check + admin/stock-check's delegation into lib/stock-checker
-// (notificationHistory rows), and the 3 DATA_EXPORT routes (inventory/export,
-// admin/logs/export, mass-update/export) whose recording is enforced by Task 3's
-// tests, not here. A verb-agnostic side-effect sweep is a Lane 5 roadmap item —
-// Task 11 registers it in deferred-work.md.
+// D12 (GET blind spot): the MUTATING-verb gate above classifies POST/PUT/PATCH/DELETE
+// only, so GET routes with side effects are invisible to IT — but they are now covered by
+// the GET_SIDE_EFFECT_REGISTRY gate at the bottom of this file (Lane 5 I7 + codex #13),
+// which closes the former roadmap item. NOTE (corrected): admin/stock-check is a POST
+// (a mutating trigger already handled by the verb gate + its PERMANENT_EXEMPT entry), NOT
+// a GET blind spot. The GET side-effect surface is the 4 cron GETs (stock-check, stock-sync,
+// weekly-report, analytics-rebuild) + the 4 DATA_EXPORT GETs (inventory/export,
+// admin/logs/export, admin/inventory/mass-update/export, and admin/audit-logs/export —
+// the 4th, previously omitted here). See the registry below for classifications.
 const MUTATING_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
 const REPO_ROOT = process.cwd();
 const API_DIR = path.join(REPO_ROOT, "app", "api");
@@ -532,5 +534,191 @@ describe("change-tracking route coverage (R-D9 / D10 enforcement gate)", () => {
       expect(c.reason).toMatch(/import|module|require/i);
     }
     expect(CARVE_OUTS.length).toBeLessThanOrEqual(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET side-effect registry (Lane 5 I7 + codex #13) — closes the D12 GET blind spot.
+//
+// The verb gate above ignores GET. A GET handler can still cause side effects (cron
+// triggers, DATA_EXPORT records). This registry names EVERY current side-effecting GET
+// with a classification, and a sweep guards FUTURE GETs:
+//
+//  - EXEMPT           : machine triggers whose effects are telemetry/plumbing, not audited
+//                       business state (the reason must say why).
+//  - RECORDS_REQUIRED : GETs that MUST recordChange (DATA_EXPORT); their recording is
+//                       characterized by change-tracking-admin-config.test.ts, not re-run here.
+//
+// Sweep heuristic (broadened per rev-2 — recordChange/recordIngestion + the side-effect lib
+// families @/lib/email, @/lib/stock-checker, @/lib/external-orders/stock-sync,
+// @/lib/analytics/rebuild-*). It is SEGMENT-AWARE: a side-effect signal only counts when it
+// appears inside the file's GET handler segment, so a route whose recordChange lives in its
+// POST/PUT/DELETE handler (the common GET+mutation route) is NOT a GET finding. Known limits:
+// (a) a GET that reaches a side effect through a NON-broadened helper import is not detected;
+// (b) segment slicing is export-boundary based (same limitation as the verb gate's
+// handlerSegments). Add new side-effecting GETs to the registry (with a classification) or
+// keep the side effect out of the GET handler.
+// ---------------------------------------------------------------------------
+
+interface GetSideEffect {
+  path: string;
+  kind: "EXEMPT" | "RECORDS_REQUIRED";
+  reason: string;
+}
+
+const GET_SIDE_EFFECT_REGISTRY: GetSideEffect[] = [
+  // --- the 4 cron GETs (machine triggers) ---
+  {
+    path: "app/api/cron/stock-check/route.ts",
+    kind: "EXEMPT",
+    reason:
+      "machine trigger; telemetry via NotificationHistory (low-stock / minimum dispatch rows) " +
+      "plus digest emails — plumbing, not audited business state",
+  },
+  {
+    path: "app/api/cron/stock-sync/route.ts",
+    kind: "EXEMPT",
+    reason:
+      "machine trigger (codex #13): external stock pushes + Integration telemetry fields " +
+      "(lastStockSyncAt / error / counters) — plumbing, not audited business state",
+  },
+  {
+    path: "app/api/cron/weekly-report/route.ts",
+    kind: "EXEMPT",
+    reason: "machine trigger; sends the weekly digest email — no persistent business mutation",
+  },
+  {
+    path: "app/api/cron/analytics-rebuild/route.ts",
+    kind: "EXEMPT",
+    reason:
+      "machine trigger; rebuilds analytics fact tables — run telemetry via " +
+      "analytics_rebuild_state / analytics_rebuild_runs, not audit events",
+  },
+  // --- the 4 DATA_EXPORT GETs (recordChange-required) ---
+  {
+    path: "app/api/inventory/export/route.ts",
+    kind: "RECORDS_REQUIRED",
+    reason: "recordChange-required (DATA_EXPORT); enforced by change-tracking-admin-config.test.ts",
+  },
+  {
+    path: "app/api/admin/logs/export/route.ts",
+    kind: "RECORDS_REQUIRED",
+    reason: "recordChange-required (DATA_EXPORT); enforced by change-tracking-admin-config.test.ts",
+  },
+  {
+    path: "app/api/admin/inventory/mass-update/export/route.ts",
+    kind: "RECORDS_REQUIRED",
+    reason: "recordChange-required (DATA_EXPORT); enforced by change-tracking-admin-config.test.ts",
+  },
+  {
+    path: "app/api/admin/audit-logs/export/route.ts",
+    kind: "RECORDS_REQUIRED",
+    reason:
+      "recordChange-required (DATA_EXPORT); the 4th export GET, previously omitted from the " +
+      "D12 comment — recording characterized alongside the other DATA_EXPORT routes",
+  },
+];
+
+// Broadened side-effect lib families (rev-2). A GET-segment reference to a binding imported
+// from one of these — or a direct recordChange/recordIngestion call — is a side-effect signal.
+const SIDE_EFFECT_MODULE = /^@\/lib\/(email|stock-checker|external-orders\/stock-sync|analytics\/rebuild-)/;
+
+/** Identifiers imported (named or default) from a broadened side-effect module. */
+function sideEffectBindings(source: string): string[] {
+  const ids: string[] = [];
+  const importRe = /import\s+([^;]+?)\s+from\s+["']([^"']+)["']/g;
+  let m: RegExpExecArray | null;
+  while ((m = importRe.exec(source)) !== null) {
+    if (!SIDE_EFFECT_MODULE.test(m[2])) continue;
+    const clause = m[1].trim();
+    const named = clause.match(/\{([^}]*)\}/);
+    if (named) {
+      for (const part of named[1].split(",")) {
+        const id = part.trim().split(/\s+as\s+/).pop()?.trim();
+        if (id) ids.push(id);
+      }
+    }
+    const withoutNamed = clause.replace(/\{[^}]*\}/, "").replace(/,/g, " ").trim();
+    const defaultId = withoutNamed.split(/\s+/)[0];
+    if (defaultId && /^[A-Za-z_$][\w$]*$/.test(defaultId)) ids.push(defaultId);
+  }
+  return ids;
+}
+
+// True if the file's GET handler segment carries a WRITE-shaped side-effect signal.
+// Write-shaped = a recordChange/recordIngestion call, a direct call of a function binding
+// imported from a side-effect family (syncStockToExternal(), rebuildStockSnapshots()...), or
+// a `.run` / `.send` dispatch method on such a binding (stockChecker.runDailyCheck(),
+// emailService.sendEmail()). READ-shaped accessors (stockChecker.checkMinimums(),
+// emailService.generateWeeklyReportHTML()) are intentionally NOT side effects — reports/
+// minimums and stocker/minimums are read-only stockChecker consumers, so the registry stays
+// at the eight genuinely-writing GETs (rev-2). Limit: a write method named outside the
+// run/send/direct-call shape would be missed — documented; add such a route to the registry.
+function getHandlerHasSideEffect(source: string): boolean {
+  const seg = handlerSegments(source).get("GET");
+  if (!seg) return false;
+  if (/\b(recordChange|recordIngestion)\s*\(/.test(seg)) return true;
+  for (const id of sideEffectBindings(source)) {
+    const directCall = new RegExp(`\\b${id}\\s*\\(`);
+    const writeMethod = new RegExp(`\\b${id}\\.(send|run)\\w*\\s*\\(`);
+    if (directCall.test(seg) || writeMethod.test(seg)) return true;
+  }
+  return false;
+}
+
+describe("GET side-effect registry gate (Lane 5 I7 / codex #13)", () => {
+  it("seeds all eight current side-effecting GET routes", () => {
+    expect(GET_SIDE_EFFECT_REGISTRY.length).toBe(8);
+    const exempt = GET_SIDE_EFFECT_REGISTRY.filter((e) => e.kind === "EXEMPT");
+    const records = GET_SIDE_EFFECT_REGISTRY.filter((e) => e.kind === "RECORDS_REQUIRED");
+    expect(exempt.length).toBe(4);
+    expect(records.length).toBe(4);
+  });
+
+  it("every registered GET route file exists and carries a non-empty reason", () => {
+    const seen = new Set<string>();
+    for (const e of GET_SIDE_EFFECT_REGISTRY) {
+      expect(seen.has(e.path)).toBe(false); // no duplicates
+      seen.add(e.path);
+      expect(fs.existsSync(path.join(REPO_ROOT, e.path))).toBe(true);
+      expect(e.reason.trim().length).toBeGreaterThan(0);
+      // Every registered entry must actually export a GET handler (stale registry guard).
+      const source = fs.readFileSync(path.join(REPO_ROOT, e.path), "utf8");
+      expect(handlerSegments(source).has("GET")).toBe(true);
+    }
+  });
+
+  it("no unregistered GET route has a side effect in its GET handler (guards future GETs)", () => {
+    const registered = new Set(GET_SIDE_EFFECT_REGISTRY.map((e) => e.path));
+    const unregistered: string[] = [];
+    for (const abs of discoverRouteFiles(API_DIR)) {
+      const source = fs.readFileSync(abs, "utf8");
+      if (!handlerSegments(source).has("GET")) continue; // only GET routes are candidates
+      if (!getHandlerHasSideEffect(source)) continue;
+      const repoPath = toRepoPath(abs);
+      if (!registered.has(repoPath)) unregistered.push(`  ${repoPath}`);
+    }
+    expect(
+      unregistered.length === 0
+        ? ""
+        : `GET routes whose GET handler has a side effect but are NOT in GET_SIDE_EFFECT_REGISTRY —\n` +
+            `classify each (EXEMPT-with-reason or RECORDS_REQUIRED) in change-tracking-coverage.test.ts,\n` +
+            `or keep the side effect out of the GET handler:\n` +
+            unregistered.join("\n")
+    ).toBe("");
+  });
+
+  it("the sweep is not vacuous — it detects the seeded routes", () => {
+    // Sanity: each registered route must itself trip the side-effect detector, otherwise the
+    // sweep above could pass while silently detecting nothing.
+    const undetected = GET_SIDE_EFFECT_REGISTRY.filter(
+      (e) => !getHandlerHasSideEffect(fs.readFileSync(path.join(REPO_ROOT, e.path), "utf8"))
+    ).map((e) => `  ${e.path}`);
+    expect(
+      undetected.length === 0
+        ? ""
+        : `Registered GET routes the side-effect detector no longer trips (detector rot):\n` +
+            undetected.join("\n")
+    ).toBe("");
   });
 });
