@@ -1,4 +1,4 @@
-import { Product as PrismaProduct, inventory_logs } from "@prisma/client";
+import { Product as PrismaProduct, inventory_logs, ProductApprovalStatus } from "@prisma/client";
 
 // Base product type from Prisma
 export type Product = PrismaProduct;
@@ -40,6 +40,10 @@ export interface ProductFilters {
   sortOrder?: "asc" | "desc";
   page?: number;
   pageSize?: number;
+  // Lane 4 (codex #4): optional approval-status scope. The assistant's
+  // find_product tool passes 'APPROVED' so provisional products never surface to
+  // the model. Omitted = no approval filter (existing callers unchanged).
+  approvalStatus?: ProductApprovalStatus;
 }
 
 // Create product request

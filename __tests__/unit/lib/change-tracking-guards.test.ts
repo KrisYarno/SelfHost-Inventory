@@ -61,7 +61,15 @@ const SECRET_SHAPED = /secret|password|token|key|hash/i;
  * "allowlist entries must be real matchers present in the schema" assertion
  * below enforces this permanently.
  */
-export const SAFE_FIELDS: readonly string[] = ['key', 'dayKey', 'externalStatusHash'];
+export const SAFE_FIELDS: readonly string[] = [
+  'key',
+  'dayKey',
+  'externalStatusHash',
+  // Lane 4 (R-A4): AssistantRun.tokenId is a cuid REFERENCE to api_tokens.id,
+  // not secret material (the secret's digest lives in tokenHash, which is
+  // denylisted). Safe to appear in telemetry rows.
+  'tokenId',
+];
 
 interface SchemaField {
   model: string;

@@ -1,9 +1,15 @@
 import prisma from "@/lib/prisma";
 import { requireCompanyMembership } from "@/lib/api-utils";
+import { serializeSalesRows } from "@/lib/analytics/serialize";
 
 // ER-D1: shared caller-company resolution + sales-row Decimal serialization for the
 // analytics routes (/api/analytics/sales, product/[id], products), which had all
 // duplicated this verbatim. Semantics are byte-identical to the prior inline code.
+//
+// Lane 4 (codex #4): serializeSalesRows now LIVES in lib/analytics/serialize.ts
+// (Next-free) so the assistant tool layer + MCP sidecar can reuse it; it is
+// re-exported here unchanged so existing route imports keep working.
+export { serializeSalesRows };
 
 /**
  * Resolve the set of companyIds a request is scoped to.
@@ -29,22 +35,4 @@ export async function resolveCallerCompanyIds(
     select: { companyId: true },
   });
   return memberships.map((m: { companyId: string }) => m.companyId);
-}
-
-/**
- * Serialize the Prisma Decimal `revenue` sum on each sales-groupBy row to a string,
- * leaving every other field untouched, so NextResponse.json never emits a raw
- * Decimal object. Rows without a revenue sum pass through unchanged.
- */
-export function serializeSalesRows<T extends object>(rows: T[]): T[] {
-  return rows.map((row) => {
-    const sum = (row as { _sum?: { revenue?: unknown } })._sum;
-    if (sum && sum.revenue != null) {
-      return {
-        ...row,
-        _sum: { ...sum, revenue: (sum.revenue as { toString(): string }).toString() },
-      } as T;
-    }
-    return row;
-  });
 }

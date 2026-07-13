@@ -25,7 +25,11 @@ const SCAN_DIRS = ['app', 'components', 'lib'];
 const HELPER_FILE = 'lib/stock-threshold.ts';
 
 const SIGNAL_PATTERNS: readonly RegExp[] = [
-  /low_stock/, // raw SQL status / notificationType
+  // Word-boundary bound (Lane 4): the raw SQL status / notificationType token is a
+  // STANDALONE `low_stock` ('low_stock', .low_stock). The bare substring form
+  // false-matched the Lane 4 `low_stock_report` assistant-tool NAME (a tool
+  // identifier, not a low-stock predicate site) in tools.ts/tool-presentation.ts.
+  /\blow_stock\b/, // raw SQL status / notificationType
   /LOW_STOCK_DEFAULT/, // module-level default const
   /isLowStock\s*=/, // local low-stock boolean recompute
   /showLowStockOnly/, // list filter using a literal compare

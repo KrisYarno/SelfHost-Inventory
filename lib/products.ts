@@ -92,13 +92,21 @@ export async function getProductsWithQuantities(
     sortOrder = "asc",
     page = 1,
     pageSize = 50,
+    approvalStatus,
   } = filters;
 
   // Build where clause - exclude soft deleted products
   const where: Prisma.ProductWhereInput = {
     deletedAt: null, // Only get non-deleted products
   };
-  
+
+  // Lane 4 (codex #4): honor an optional approval-status scope (the assistant
+  // find_product tool passes 'APPROVED'). Applied to BOTH count and findMany
+  // because they share this `where`.
+  if (approvalStatus) {
+    where.approvalStatus = approvalStatus;
+  }
+
   if (search) {
     where.OR = [
       { name: { contains: search } },

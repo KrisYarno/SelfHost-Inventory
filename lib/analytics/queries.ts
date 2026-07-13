@@ -32,8 +32,11 @@ export async function getSales(opts: { companyIds: string[]; productId?: number;
   });
 }
 
-/** GLOBAL stock-level series from snapshots (no company scoping — inventory is GLOBAL). */
-export async function getStockSeries(opts: { productId?: number; locationId?: number; from?: string; to?: string }) {
+/** GLOBAL stock-level series from snapshots (no company scoping — inventory is GLOBAL).
+ *  `take` (Lane 4, codex #4) caps the rows at the DB — the assistant/MCP tool layer
+ *  passes a bound so a wide window never returns an unbounded result set. Omitted =
+ *  unbounded (the existing analytics routes keep their current behavior). */
+export async function getStockSeries(opts: { productId?: number; locationId?: number; from?: string; to?: string; take?: number }) {
   const where: any = {};
   if (opts.productId) where.productId = opts.productId;
   if (opts.locationId) where.locationId = opts.locationId;
@@ -41,6 +44,7 @@ export async function getStockSeries(opts: { productId?: number; locationId?: nu
   return prisma.productStockSnapshot.findMany({
     where, orderBy: [{ dayKey: "asc" }, { locationId: "asc" }],
     select: { dayKey: true, locationId: true, quantity: true },
+    ...(opts.take != null ? { take: opts.take } : {}),
   });
 }
 

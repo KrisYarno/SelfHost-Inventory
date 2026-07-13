@@ -31,9 +31,15 @@
     "test:e2e": "node scripts/test-runner.js e2e",
     "test:watch": "node scripts/test-runner.js all --watch",
     "test:coverage": "node scripts/test-runner.js all --coverage",
-    "test:ci": "node scripts/test-runner.js all --coverage --ci"
+    "test:mcp": "jest -c mcp/jest.config.mjs",
+    "test:ci": "node scripts/test-runner.js all --coverage --ci && npm run test:mcp"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.12",
+    "@ai-sdk/google": "^4.0.12",
+    "@ai-sdk/openai": "^4.0.11",
+    "@ai-sdk/react": "^4.0.23",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@prisma/client": "^6.10.1",
     "@radix-ui/react-alert-dialog": "^1.1.14",
     "@radix-ui/react-avatar": "^1.1.10",
@@ -56,6 +62,8 @@
     "@tanstack/react-query-devtools": "^5.81.2",
     "@tanstack/react-virtual": "^3.13.11",
     "@types/uuid": "^10.0.0",
+    "ai": "7.0.22",
+    "ai-sdk-ollama": "4.0.0",
     "bcryptjs": "^3.0.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -70,7 +78,10 @@
     "react-day-picker": "^8.10.1",
     "react-dom": "^18",
     "react-hook-form": "^7.58.1",
+    "react-markdown": "^10.1.0",
     "recharts": "^3.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1",
     "sonner": "^2.0.5",
     "tailwind-merge": "^3.3.1",
     "uuid": "^11.1.0",
@@ -82,7 +93,7 @@
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
     "@types/jest": "^30.0.0",
-    "@types/node": "^20.19.37",
+    "@types/node": "^22",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "chalk": "^4.1.2",
@@ -97,6 +108,10 @@
     "postcss-load-config": "^6.0.1",
     "tailwindcss": "^3.4.1",
     "ts-jest": "^29.4.0",
+    "tsup": "^8",
     "typescript": "^5"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

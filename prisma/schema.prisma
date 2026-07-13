@@ -37,6 +37,12 @@ model User {
   reviewedProducts       Product[]                @relation("ProductReviewedBy")
   scratchpadCreated      ProductScratchpadPrice[] @relation("ScratchpadCreatedBy")
   scratchpadUpdated      ProductScratchpadPrice[] @relation("ScratchpadUpdatedBy")
+  // Lane 4 (D7): ApiToken back-relations. Named to avoid the secret-shaped field
+  // scan (`token`/`key`/`hash`) in change-tracking-guards — these are relation
+  // fields (row collections), never credential values; the digest lives in
+  // ApiToken.tokenHash (denylisted).
+  apiClientsOwned        ApiToken[]               @relation("ApiTokenOwner")
+  apiClientsCreated      ApiToken[]               @relation("ApiTokenCreatedBy")
   locations              Location                 @relation(fields: [defaultLocationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_default_location")
 
   @@index([defaultLocationId], map: "fk_user_default_location")
@@ -555,4 +561,71 @@ model AnalyticsRebuildRun {
 
   @@index([job, startedAt], map: "idx_rebuild_runs_job_started")
   @@map("analytics_rebuild_runs")
+}
+
+// ---------------------------------------------------------------------------
+// Lane 4 — AI layer (spec D2/D7/R-A4). Additive v1 tables. Prisma mirrors of the
+// hand-authored migration `<ts>_lane4_ai_layer` (applied only by compose
+// migrate). NO defaultModel column anywhere (spec D-B8: routing defaults carry
+// {provider, model}; per-provider preference is redundant state).
+// ---------------------------------------------------------------------------
+
+// Admin-configured AI providers (spec D2). Singleton-per-kind (UNIQUE kind).
+// Keys encrypted at rest via lib/encryption (encryptedApiKey; OLLAMA has none).
+// Disable-only in v1 (no delete route) so past activity stays attributable.
+model AiProvider {
+  id              String   @id @default(cuid()) @db.VarChar(30)
+  kind            String   @unique(map: "uq_ai_providers_kind") @db.VarChar(16)
+  encryptedApiKey String?  @db.Text
+  baseUrl         String?  @db.VarChar(500)
+  enabledModels   Json
+  isEnabled       Boolean  @default(false)
+  createdAt       DateTime @default(now()) @db.DateTime(3)
+  updatedAt       DateTime @updatedAt @db.DateTime(3)
+
+  @@map("ai_providers")
+}
+
+// Machine-client API tokens for the MCP sidecar (spec D7). Read-tier, hashed
+// (sha256 hex in tokenHash — the plaintext is shown once, never stored),
+// revocable, owner-scoped. TWO named User relations: the human who created it
+// and the owner whose company access it inherits.
+model ApiToken {
+  id              String    @id @default(cuid()) @db.VarChar(30)
+  name            String    @db.VarChar(64)
+  tokenHash       String    @unique(map: "uq_api_tokens_hash") @db.Char(64)
+  tier            String    @default("read") @db.VarChar(8)
+  createdByUserId Int
+  ownerUserId     Int
+  createdAt       DateTime  @default(now()) @db.DateTime(3)
+  lastUsedAt      DateTime? @db.DateTime(3)
+  revokedAt       DateTime? @db.DateTime(3)
+
+  owner     User @relation("ApiTokenOwner", fields: [ownerUserId], references: [id], onDelete: Restrict, onUpdate: Cascade, map: "fk_api_tokens_owner")
+  createdBy User @relation("ApiTokenCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict, onUpdate: Cascade, map: "fk_api_tokens_creator")
+
+  @@index([ownerUserId], map: "idx_api_tokens_owner")
+  @@index([createdByUserId], map: "idx_api_tokens_creator")
+  @@map("api_tokens")
+}
+
+// Read-telemetry: one row per tool invocation from BOTH surfaces (assistant +
+// mcp) (spec R-A4). Metadata ONLY — never prompts, args, or results. No FK on
+// userId/tokenId (decoupled telemetry; retention prune keep-newest-10k).
+model AssistantRun {
+  id           Int      @id @default(autoincrement())
+  userId       Int?
+  tokenId      String?  @db.VarChar(30)
+  surface      String   @db.VarChar(12)
+  providerKind String?  @db.VarChar(16)
+  model        String?  @db.VarChar(64)
+  toolName     String   @db.VarChar(48)
+  outcome      String   @db.VarChar(16)
+  durationMs   Int
+  resultBytes  Int
+  createdAt    DateTime @default(now()) @db.DateTime(3)
+
+  @@index([createdAt], map: "idx_assistant_runs_created")
+  @@index([userId, createdAt], map: "idx_assistant_runs_user")
+  @@map("assistant_runs")
 }

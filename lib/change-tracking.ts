@@ -83,7 +83,14 @@ export type AuditActionType =
   // --- Lane 3 additions (spec R-L14): the admin manual-rebuild action. Run
   // telemetry itself stays out of the audit log -- only the human TRIGGER is
   // recorded.
-  | 'ANALYTICS_REBUILD_TRIGGER';
+  | 'ANALYTICS_REBUILD_TRIGGER'
+  // --- Lane 4 additions (spec D2/D7): AI-provider config + API-token lifecycle.
+  // Key values diff as [REDACTED] via the deep scan; token/hash never enter
+  // payloads (details = name/tier only). Emitted by the T4 admin routes.
+  | 'AI_PROVIDER_CREATE'
+  | 'AI_PROVIDER_UPDATE'
+  | 'API_TOKEN_CREATE'
+  | 'API_TOKEN_REVOKE';
 
 export type EntityType =
   | 'USER'

@@ -17,7 +17,10 @@ const customJestConfig = {
   // that need jsdom can opt in per-file with `@jest-environment jsdom`.
   testEnvironment: "jest-environment-node",
   testMatch: ["**/__tests__/**/*.(ts|tsx|js|jsx)", "**/*.(test|spec).(ts|tsx|js|jsx)"],
-  testPathIgnorePatterns: ["/node_modules/", "/.next/", "/.claude/"],
+  // The MCP sidecar (mcp/) is an ESM package with its own jest project
+  // (mcp/jest.config.mjs, run via `npm run test:mcp`). Keep it out of the root
+  // run so each suite executes exactly once under `test:ci` (plan P-M6).
+  testPathIgnorePatterns: ["/node_modules/", "/.next/", "/.claude/", "<rootDir>/mcp/"],
   collectCoverageFrom: [
     "app/**/*.{js,jsx,ts,tsx}",
     "components/**/*.{js,jsx,ts,tsx}",
