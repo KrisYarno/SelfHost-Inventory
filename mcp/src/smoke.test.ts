@@ -5,6 +5,8 @@
  * replaces/extends this with the real sidecar suites (auth/lifecycle/rate/parity).
  */
 
+import { describe, it, expect, jest } from "@jest/globals";
+
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {

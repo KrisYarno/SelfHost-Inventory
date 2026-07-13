@@ -79,6 +79,31 @@ services:
     volumes:
       - db_backups:/backup
 
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    environment:
+      NODE_ENV: production
+      ENABLE_MCP: ${ENABLE_MCP:-0}
+      DATABASE_URL: mysql://inventory:${MYSQL_PASSWORD}@db:3306/inventory?connection_limit=20
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      MCP_PORT: 8080
+    expose:
+      - "8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 3s
+      retries: 5
+    networks:
+      - internal
+
   backup:
     image: fradelg/mysql-cron-backup
     environment:
