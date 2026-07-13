@@ -21,6 +21,7 @@ import {
   PackageOpen,
   Settings,
   ShoppingCart,
+  Sparkles,
   Tags,
   Truck,
   Warehouse,
@@ -124,6 +125,30 @@ export const navConfig: readonly NavItem[] = [
     icon: Settings,
     label: "Admin",
     adminOnly: true,
+  },
+] as const;
+
+// ---------------------------------------------------------------------------
+// Desktop-only leaves (Lane 4 spec §10 R-A3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Leaf links that appear ONLY in the desktop sidebar, appended after the shared
+ * {@link navConfig}. They are deliberately NOT part of the mobile 6-slot dock
+ * law: the dock stays EXACTLY the 6 `navConfig` slots (test-enforced), and the
+ * Assistant reaches mobile via URL / the analytics-hub link in v1. Dock
+ * promotion is a v2 decision gated on usage evidence.
+ *
+ * Consumed ONLY by {@link SidebarNav} — never by the mobile dock, never mixed
+ * into `navConfig`.
+ */
+export const desktopOnlyNav: readonly NavLink[] = [
+  {
+    kind: "link",
+    name: "Assistant",
+    href: "/assistant",
+    icon: Sparkles,
+    label: "Assistant",
   },
 ] as const;
 

@@ -10,6 +10,7 @@
 
 import {
   navConfig,
+  desktopOnlyNav,
   flattenNav,
   filterNav,
   type NavItem,
@@ -222,6 +223,31 @@ describe("filterNav", () => {
       "Workbench",
       "Orders",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Desktop-only nav (Lane 4 R-A3): Assistant is desktop-sidebar-only, the dock
+// stays exactly the 6 navConfig slots.
+// ---------------------------------------------------------------------------
+
+describe("desktopOnlyNav", () => {
+  it("keeps navConfig at EXACTLY 6 slots (Assistant is NOT a dock slot)", () => {
+    expect(navConfig).toHaveLength(6);
+    const names = flattenNav(navConfig, true).map((l) => l.name);
+    expect(names).not.toContain("Assistant");
+  });
+
+  it("carries the Assistant leaf pointing at /assistant, ungated", () => {
+    expect(desktopOnlyNav.map((l) => l.name)).toEqual(["Assistant"]);
+    const assistant = desktopOnlyNav.find((l) => l.name === "Assistant");
+    expect(assistant?.href).toBe("/assistant");
+    expect(assistant?.kind).toBe("link");
+    expect(assistant?.adminOnly).toBeFalsy();
+  });
+
+  it("is entirely link-shaped leaves", () => {
+    for (const link of desktopOnlyNav) expect(link.kind).toBe("link");
   });
 });
 

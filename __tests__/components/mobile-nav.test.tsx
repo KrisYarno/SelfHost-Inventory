@@ -55,6 +55,19 @@ test("admin dock renders the Admin link to /admin", () => {
   expect(screen.getByRole("link", { name: /admin/i })).toHaveAttribute("href", "/admin");
 });
 
+test("Assistant is desktop-only: never in the mobile dock (dock stays the 6 navConfig slots)", () => {
+  // non-admin
+  render(<MobileNav />);
+  expect(screen.queryByRole("link", { name: /assistant/i })).toBeNull();
+  expect(screen.queryByRole("button", { name: /assistant/i })).toBeNull();
+});
+
+test("Assistant absent from the admin dock too (dock law untouched by Lane 4)", () => {
+  mockSession = { data: { user: { isAdmin: true } } };
+  render(<MobileNav />);
+  expect(screen.queryByRole("link", { name: /assistant/i })).toBeNull();
+});
+
 test("Orders is reachable by a non-admin via the Fulfill group (ungate on mobile)", async () => {
   const user = userEvent.setup();
   render(<MobileNav />);

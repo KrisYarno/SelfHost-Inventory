@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/select";
 import { exportToCSV, generateExportFilename } from "@/lib/export-utils";
 import { cn } from "@/lib/utils";
-import { Search, X, Download, ArrowUp, ArrowDown, Minus, ArrowUpDown } from "lucide-react";
+import { Search, X, Download, ArrowUp, ArrowDown, Minus, ArrowUpDown, Sparkles } from "lucide-react";
 
 const PAGE_SIZE = 25;
 
@@ -257,7 +257,17 @@ export function AnalyticsHub() {
 
   return (
     <div className="space-y-6">
-      <ViewToggle value={view} onChange={setView} />
+      <div className="flex items-center justify-between gap-3">
+        <ViewToggle value={view} onChange={setView} />
+        {/* Desktop-only in the nav, but reachable here on any device (spec R-A3). */}
+        <Link
+          href="/assistant"
+          className="inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-3 text-body-sm font-medium text-primary transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
+          <Sparkles className="h-4 w-4" aria-hidden />
+          Ask the Assistant
+        </Link>
+      </div>
       {view === "operations" ? (
         <OperationsView />
       ) : (
