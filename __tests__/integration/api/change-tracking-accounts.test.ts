@@ -61,6 +61,8 @@ jest.mock("@/lib/prisma", () => {
       findUnique: jest.fn(),
       findUniqueOrThrow: jest.fn(),
     },
+    // Lane 4 (D7): user soft-delete revokes all owner tokens in the same tx.
+    apiToken: { updateMany: jest.fn() },
     auditLog: { create: jest.fn() },
   };
   const db = {
@@ -418,6 +420,13 @@ describe("DELETE admin/users/[userId] — USER_DELETION", () => {
     const updateArg = tx.user.update.mock.calls[0][0];
     expect(updateArg.data.deletedAt).toBeInstanceOf(Date);
     expect(tx.auditLog.create).toHaveBeenCalledTimes(1);
+
+    // Lane 4 (D7): every active token owned by the deleted user is revoked in
+    // the SAME transaction, stamped with the deletion timestamp.
+    expect(tx.apiToken.updateMany).toHaveBeenCalledTimes(1);
+    const revokeArg = tx.apiToken.updateMany.mock.calls[0][0];
+    expect(revokeArg.where).toEqual({ ownerUserId: 5, revokedAt: null });
+    expect(revokeArg.data.revokedAt).toBe(updateArg.data.deletedAt);
 
     const [row] = auditRows();
     expect(row.actionType).toBe("USER_DELETION");

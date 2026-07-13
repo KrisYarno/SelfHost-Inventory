@@ -121,6 +121,17 @@ jest.mock("@/lib/change-tracking", () => ({
   REDACTED_KEYS: [],
 }));
 
+// Lane 4: ai@7 is ESM-only ("type":"module") and resists the CJS require this
+// harness uses to load route modules. Mocking it lets app/api/assistant/route.ts
+// load and classify normally (its POST is PERMANENT_EXEMPT below).
+jest.mock("ai", () => ({
+  __esModule: true,
+  streamText: jest.fn(),
+  stepCountIs: jest.fn(() => () => false),
+  convertToModelMessages: jest.fn(async () => []),
+  tool: jest.fn((d: unknown) => d),
+}));
+
 // ---------------------------------------------------------------------------
 // Exemption registry
 // ---------------------------------------------------------------------------
@@ -235,6 +246,20 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
   // --- Task 11: users group — MIGRATED (all 6 admin/users routes now recordChange) ---
   // --- Task 12: orders group — MIGRATED (fulfill/unfulfill now recordChange) ---
   // --- Phase B: coverage closure (not in any A2 task group) ---
+  // --- Lane 4 (orchestrator, plan Global Constraints) ---
+  {
+    path: "app/api/assistant/route.ts",
+    reason:
+      "assistant chat POST — reads via the curated tool layer + assistant_runs " +
+      "telemetry only; mutates no business state (spec D5: reads are not audit " +
+      "events). v1.1 mutation tools will recordChange same-tx when they land.",
+  },
+  {
+    path: "app/api/admin/ai-providers/[kind]/test/route.ts",
+    reason:
+      "provider connectivity probe (verify-key / Ollama reachability) — POST by " +
+      "verb but writes nothing; result is ephemeral verified/failed (spec D12).",
+  },
 ];
 
 /**

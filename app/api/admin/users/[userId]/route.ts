@@ -308,6 +308,15 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: { para
       data: { deletedAt },
     });
 
+    // Lane 4 (D7): a soft-deleted user can no longer be a valid token owner
+    // (owner must be deletedAt IS NULL AND isApproved at every validation), so
+    // revoke every active token they own inside the SAME transaction — the
+    // deletion and the revocations commit together or not at all.
+    await tx.apiToken.updateMany({
+      where: { ownerUserId: userId, revokedAt: null },
+      data: { revokedAt: deletedAt },
+    });
+
     await recordChange(tx, {
       actor: { userId: adminUser.id },
       actionType: "USER_DELETION",

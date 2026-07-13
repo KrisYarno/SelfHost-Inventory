@@ -17,6 +17,7 @@ import {
   AlertTriangle,
   Mail,
   BarChart3,
+  Sparkles,
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -136,6 +137,22 @@ export default function AdminSettingsPage() {
               </CardDescription>
             </CardHeader>
           </Card>
+        </Link>
+      </div>
+
+      {/* AI providers — a FLAT row link (D-B8: not another shadowed card) */}
+      <div className="overflow-hidden rounded-lg border bg-surface">
+        <Link
+          href="/admin/settings/ai"
+          className="flex items-center gap-3 p-4 hover:bg-surface-hover"
+        >
+          <Sparkles className="h-5 w-5 shrink-0 text-muted-foreground" />
+          <div className="min-w-0">
+            <p className="font-medium">AI providers &amp; assistant</p>
+            <p className="text-sm text-muted-foreground">
+              Configure AI providers, routing defaults, and read-only API tokens.
+            </p>
+          </div>
         </Link>
       </div>
 
