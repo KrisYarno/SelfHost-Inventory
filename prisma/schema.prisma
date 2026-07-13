@@ -17,12 +17,8 @@ model User {
   deletedAt              DateTime?                @db.DateTime(0)
   defaultLocationId      Int                      @default(1)
   emailAlerts            Boolean?                 @default(false)
-  phoneNumber            String?                  @db.VarChar(20)
-  smsVerified            Boolean                  @default(false)
   minLocationEmailAlerts Boolean                  @default(false)
-  minLocationSmsAlerts   Boolean                  @default(false)
   minCombinedEmailAlerts Boolean                  @default(false)
-  minCombinedSmsAlerts   Boolean                  @default(false)
   failedLoginAttempts    Int                      @default(0)
   lockedUntil            DateTime?                @db.DateTime(0)
   inventory_logs         inventory_logs[]
@@ -96,6 +92,7 @@ model Product {
   @@index([baseName, variant, name], map: "idx_products_search_composite")
   @@index([deletedBy], map: "products_deletedBy_fkey")
   @@index([approvalStatus], map: "idx_product_approval_status")
+  @@index([id, baseName, variant, name], map: "idx_products_bulk_lookup")
   @@map("products")
 }
 
@@ -189,6 +186,7 @@ model inventory_logs {
   @@index([changeTime, productId, delta], map: "idx_logs_time_product_delta")
   @@index([productId, changeTime, delta], map: "idx_logs_product_time_delta")
   @@index([batchId], map: "idx_inventory_logs_batch")
+  @@index([changeTime, productId, userId], map: "idx_inventory_logs_recent_changes")
 }
 
 model product_locations {
@@ -207,6 +205,9 @@ model product_locations {
   @@index([locationId], map: "fk_pl_location")
   @@index([version, updatedAt], map: "idx_product_locations_version")
   @@index([updatedAt], map: "idx_product_locations_updated")
+  @@index([productId, locationId, quantity], map: "idx_product_locations_lookup_covering")
+  @@index([locationId, productId], map: "idx_product_locations_by_location")
+  @@index([quantity, productId], map: "idx_product_locations_low_stock")
 }
 
 model NotificationHistory {
@@ -345,14 +346,37 @@ model Integration {
   lastWebhookError      String?   @db.Text
   webhookFailureCount   Int       @default(0)
 
-  company      Company            @relation(fields: [companyId], references: [id])
-  orders       ExternalOrder[]
-  productLinks ProductLink[]
-  salesFacts   ProductSalesFact[]
+  company           Company            @relation(fields: [companyId], references: [id])
+  orders            ExternalOrder[]
+  productLinks      ProductLink[]
+  salesFacts        ProductSalesFact[]
+  webhookDeliveries WebhookDelivery[]
 
   @@index([companyId])
   @@index([platform])
   @@map("integrations")
+}
+
+enum WebhookDeliveryStatus {
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+model WebhookDelivery {
+  id            Int                   @id @default(autoincrement())
+  integrationId String
+  bodyDigest    String                @db.Char(64)
+  eventId       String?               @db.VarChar(128)
+  status        WebhookDeliveryStatus @default(PROCESSING)
+  claimedAt     DateTime              @default(now()) @db.DateTime(3)
+  processedAt   DateTime?             @db.DateTime(3)
+  receivedAt    DateTime              @default(now()) @db.DateTime(3)
+  integration   Integration           @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([integrationId, bodyDigest])
+  @@index([receivedAt])
+  @@map("webhook_deliveries")
 }
 
 // Product Linking Layer
@@ -445,6 +469,7 @@ model ExternalOrder {
   @@index([companyId, createdAt])
   @@index([integrationId, externalUpdatedAt])
   @@index([stockedOut], map: "idx_stocked_out")
+  @@index([updatedAt], map: "external_orders_updatedAt_idx")
   @@map("external_orders")
 }
 

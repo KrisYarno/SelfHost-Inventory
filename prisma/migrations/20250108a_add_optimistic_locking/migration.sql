@@ -1,13 +1,7 @@
--- Add optimistic locking support to product_locations table
--- This prevents race conditions when multiple users update inventory simultaneously
-
--- Add version column for optimistic locking
-ALTER TABLE product_locations 
-ADD COLUMN version INT NOT NULL DEFAULT 0;
-
--- Add timestamp column to track when records are updated
-ALTER TABLE product_locations 
-ADD COLUMN updatedAt DATETIME(0) NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
-
--- Add index on updatedAt for performance
-CREATE INDEX idx_product_locations_updated ON product_locations(updatedAt);
+-- Lane 5 chain repair (2026-07-13): this migration predates 20251103161510_init_baseline,
+-- whose generated DDL already contains its full effect. On existing databases this file is
+-- recorded as applied (never re-run); on FRESH databases the original content crashed the
+-- replay (it altered tables the baseline had not yet created). No-op'd so the chain replays.
+-- NEVER run `prisma migrate dev` against dev/staging/prod (deploy-only): dev would detect this
+-- file's modified checksum on retained databases and demand a reset.
+SELECT 1;
