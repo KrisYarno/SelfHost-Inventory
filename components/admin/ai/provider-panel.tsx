@@ -325,6 +325,11 @@ export function ProviderPanel({ provider, isRouted }: ProviderPanelProps) {
                   placeholder="Paste a new API key"
                   onChange={(e) => {
                     setKeyInput(e.target.value);
+                    // First-time configuration renders this branch with keyMode
+                    // still "keep" (no key exists to keep) — the save payload
+                    // gates apiKey on "replace", so typing must claim the mode
+                    // or the key is silently dropped from the request.
+                    setKeyMode("replace");
                     markDirty();
                   }}
                 />

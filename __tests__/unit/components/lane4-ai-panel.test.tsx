@@ -7,7 +7,7 @@
  * matrix (all four kinds render; routing/tokens empty copy).
  */
 import React from "react";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // --- sonner + clipboard ---
@@ -163,6 +163,26 @@ describe("ProviderPanel", () => {
     ).toBeInTheDocument();
     // Draft survives the error.
     expect(screen.getByText("m2")).toBeInTheDocument();
+  });
+
+  it("first-time key entry reaches the save payload (live-drive regression)", async () => {
+    // Drive finding 2026-07-13: with no key saved, the empty input renders
+    // while keyMode is still "keep"; the payload gates apiKey on "replace",
+    // so first-time keys were silently dropped (models/enable saved, key NULL).
+    const user = userEvent.setup();
+    mockSaveProviderMutate.mockResolvedValue({});
+    render(
+      <ProviderPanel
+        provider={provider({ hasKey: false, enabledModels: ["m1"] })}
+        isRouted={false}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("API key"), "sk-first-time-key");
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => expect(mockSaveProviderMutate).toHaveBeenCalledTimes(1));
+    expect(mockSaveProviderMutate.mock.calls[0][0].body.apiKey).toBe("sk-first-time-key");
   });
 
   it("read-state shows 'Key set' with Replace/Remove, no Eye toggle", () => {
