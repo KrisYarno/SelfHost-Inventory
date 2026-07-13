@@ -64,6 +64,7 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   REJECT: 'negative',
   REJECTION: 'negative',
   DISCARD: 'negative',
+  REVOKE: 'negative', // Lane 4: API_TOKEN_REVOKE
   // warning
   ADJUSTMENT: 'warning',
   BULK_UPDATE: 'warning',
@@ -112,6 +113,7 @@ const KNOWN_VERBS: readonly string[] = [
   'IMPORT',
   'EXPORT',
   'REJECT',
+  'REVOKE',
   'CHANGE',
   'CREATE',
   'DELETE',
@@ -144,6 +146,8 @@ const PREFIX_GROUP: Readonly<Record<string, ActionGroup>> = {
   BACKUP: 'SYSTEM', // BACKUP_CREATED
   ANALYTICS: 'SYSTEM', // ANALYTICS_REBUILD_TRIGGER
   SIGNUP: 'ACCOUNT',
+  AI: 'SETTINGS', // AI_PROVIDER_* (Lane 4 — provider configuration is settings)
+  API: 'SETTINGS', // API_TOKEN_* (Lane 4 — token administration is settings)
 };
 
 // Human labels. Default = Title Case of the tokens; overrides give the register
@@ -163,6 +167,10 @@ const LABEL_OVERRIDES: Readonly<Record<string, string>> = {
   BUNDLE_CHANGE: 'Bundle changed',
   INVENTORY_TRANSFER_AUTO_ADD: 'Transfer auto-add',
   INVENTORY_BULK_UPDATE: 'Inventory bulk update',
+  AI_PROVIDER_CREATE: 'AI provider created',
+  AI_PROVIDER_UPDATE: 'AI provider updated',
+  API_TOKEN_CREATE: 'API token created',
+  API_TOKEN_REVOKE: 'API token revoked',
 };
 
 function titleCase(actionType: string): string {

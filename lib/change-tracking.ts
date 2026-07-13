@@ -151,6 +151,10 @@ export const REDACTED_KEYS: readonly string[] = [
   'password',
   'newPassword',
   'currentPassword',
+  // Lane 4 (D7): API-token digests never enter audit payloads, but the
+  // schema-scan guard requires every secret-shaped Prisma field classified —
+  // tokenHash is denylisted defensively.
+  'tokenHash',
 ];
 
 const REDACTED_KEY_SET = new Set<string>(REDACTED_KEYS.map((k) => k.toLowerCase()));

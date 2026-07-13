@@ -180,6 +180,8 @@ const KNOWN_VERBS: readonly string[] = [
   'STOCK_IN',
   // Lane 3 (R-L14): ANALYTICS_REBUILD_TRIGGER -- the manual-rebuild admin action.
   'TRIGGER',
+  // Lane 4 (D7): API_TOKEN_REVOKE -- token administration.
+  'REVOKE',
 ];
 
 /**
