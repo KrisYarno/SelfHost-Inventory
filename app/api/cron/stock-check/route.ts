@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { apiHandler } from "@/lib/api-utils";
+import { bearerAuthorized } from "@/lib/security/secret-compare";
 import { stockChecker } from "@/lib/stock-checker";
 
 export const dynamic = "force-dynamic";
@@ -8,7 +9,7 @@ export const dynamic = "force-dynamic";
 export const GET = apiHandler(async (request: NextRequest) => {
   // Verify the request has a valid CRON_SECRET
   const authHeader = request.headers.get("authorization");
-  if (!process.env.CRON_SECRET || authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!bearerAuthorized(authHeader, process.env.CRON_SECRET)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

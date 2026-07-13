@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { apiHandler } from "@/lib/api-utils";
+import { bearerAuthorized } from "@/lib/security/secret-compare";
 import { syncStockToExternal } from "@/lib/external-orders/stock-sync";
 
 export const dynamic = "force-dynamic";
@@ -9,10 +10,7 @@ export const runtime = "nodejs";
 export const GET = apiHandler(async (request: NextRequest) => {
   // Verify CRON_SECRET (same pattern as stock-check cron)
   const authHeader = request.headers.get("authorization");
-  if (
-    !process.env.CRON_SECRET ||
-    authHeader !== `Bearer ${process.env.CRON_SECRET}`
-  ) {
+  if (!bearerAuthorized(authHeader, process.env.CRON_SECRET)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
