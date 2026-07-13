@@ -1,3 +1,7 @@
+// SINGLE-INSTANCE ASSUMPTION (Lane 5 X1): this limiter is an in-process Map. Counts are
+// per-instance and reset on process restart. It is correct only for a single-box deploy;
+// a multi-instance / horizontally-scaled deploy needs a shared store (e.g. Redis) — see the
+// deploy section of README.md. (Redis is intentionally out of scope: YAGNI for this stack.)
 import { NextRequest, NextResponse } from 'next/server';
 
 const DEFAULT_LIMIT = 30;
@@ -78,15 +82,10 @@ const getIdentifier = (req: NextRequest, explicitIdentifier?: string | number): 
   return 'unknown';
 };
 
-export function enforceRateLimit(
-  req: NextRequest,
-  scope: string,
-  options: EnforceRateLimitOptions = {}
-): RateLimitHeaders {
-  const limit = options.limit ?? DEFAULT_LIMIT;
-  const ttl = options.ttl ?? DEFAULT_TTL;
-  const identifier = getIdentifier(req, options.identifier);
-  const key = `${scope}:${identifier}`;
+// Shared store consumption: increments the counter for `key` within its ttl window and
+// returns the rate-limit headers, or throws RateLimitError when the limit is exceeded.
+// Both public entry points funnel through here so their semantics stay identical.
+function consume(key: string, limit: number, ttl: number): RateLimitHeaders {
   const now = Date.now();
 
   const existing = store.get(key);
@@ -111,6 +110,30 @@ export function enforceRateLimit(
   }
 
   return buildHeaders(limit, existing.count, existing.expiresAt);
+}
+
+export function enforceRateLimit(
+  req: NextRequest,
+  scope: string,
+  options: EnforceRateLimitOptions = {}
+): RateLimitHeaders {
+  const limit = options.limit ?? DEFAULT_LIMIT;
+  const ttl = options.ttl ?? DEFAULT_TTL;
+  const identifier = getIdentifier(req, options.identifier);
+  const key = `${scope}:${identifier}`;
+  return consume(key, limit, ttl);
+}
+
+// Headers-agnostic entry point (Lane 5 S3): callers that only have a derived key string
+// (e.g. NextAuth's authorize, which receives a partial request) throttle with the SAME
+// store and RateLimitError semantics as enforceRateLimit. Caller owns key namespacing.
+export function enforceRateLimitByKey(
+  key: string,
+  options: { limit?: number; ttl?: number } = {}
+): RateLimitHeaders {
+  const limit = options.limit ?? DEFAULT_LIMIT;
+  const ttl = options.ttl ?? DEFAULT_TTL;
+  return consume(key, limit, ttl);
 }
 
 export function getRateLimitStats(): Array<{
