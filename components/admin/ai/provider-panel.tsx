@@ -196,7 +196,7 @@ export function ProviderPanel({ provider, isRouted }: ProviderPanelProps) {
       setKeyInput("");
       setSaveError(null);
       setInlineError(null);
-    } catch (err) {
+    } catch (_err) {
       // Draft is preserved (D-B8): show the in-row save failure copy VERBATIM.
       setSaveError(`Could not save ${label} settings. Your changes are still here.`);
     }
