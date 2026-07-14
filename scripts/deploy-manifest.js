@@ -37,6 +37,10 @@ const PROTECT_LIST = [
   "*.log",
   "node_modules/**",
   ".next/**",
+  // Build/VCS metadata the deploy must never touch. `.git/**` matters when the
+  // target is a clone (the staging copy is): without it, every object and hook
+  // in .git/ reports as "stale" and drowns the real list.
+  ".git/**",
   "public/uploads/**",
   "backup/**",
 ];
