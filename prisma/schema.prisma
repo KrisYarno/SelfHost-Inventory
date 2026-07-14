@@ -86,6 +86,7 @@ model Product {
   scratchpadPrices    ProductScratchpadPrice[]
   stockSnapshots      ProductStockSnapshot[]
   salesFacts          ProductSalesFact[]
+  reorderConfig       ProductReorderConfig?
 
   @@index([priceSourceLinkId], map: "idx_price_source")
   @@index([baseName, numericValue, variant], map: "idx_product_sorting")
@@ -120,6 +121,43 @@ model ProductScratchpadPrice {
   @@index([productId, sortOrder], map: "idx_scratchpad_product_sort")
   @@index([label], map: "idx_scratchpad_label")
   @@map("product_scratchpad_prices")
+}
+
+// Reorder configuration (Lane "reorder-points"). ADOPTED from the orphaned
+// 20251204_add_reorder_config migration — the tables have shipped on every migrated
+// DB but were never in schema.prisma. Fields match that DDL exactly, plus the two
+// columns 20260714200000_lane_reorder_adopt_config adds (defaultTargetCoverageMultiple,
+// minEvidenceEvents). See lib/reorder-config.ts for the inheritance/resolver.
+model GlobalReorderSettings {
+  id                            Int      @id @default(1)
+  defaultLeadTimeDays           Int      @default(14)
+  // The flat policy-buffer default (bufferDays). Column name kept from the orphaned
+  // DDL; the domain renamed "safety stock" -> "bufferDays" (no service-level model).
+  defaultSafetyStockDays        Int      @default(7)
+  // NEW (D5 order-up-to multiple) — guarded-added by 20260714200000.
+  defaultTargetCoverageMultiple Int      @default(2)
+  // NEW (min-evidence gate) — guarded-added by 20260714200000.
+  minEvidenceEvents             Int      @default(3)
+  holdingCostRate               Decimal  @default(0.25) @db.Decimal(5, 4)
+  updatedBy                     Int?
+  updatedAt                     DateTime @default(now()) @db.DateTime(0)
+
+  @@map("global_reorder_settings")
+}
+
+model ProductReorderConfig {
+  id                    Int      @id @default(autoincrement())
+  productId             Int      @unique
+  leadTimeDays          Int? // NULL = inherit the global default
+  customSafetyStockDays Int? // NULL = inherit the global bufferDays default
+  minOrderQuantity      Int      @default(1)
+  reorderPointOverride  Int? // NULL = compute; else pin the reorder point
+  createdAt             DateTime @default(now()) @db.DateTime(0)
+  updatedAt             DateTime @updatedAt @db.DateTime(0)
+  product               Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId], map: "idx_reorder_config_product")
+  @@map("product_reorder_configs")
 }
 
 model StagingItem {
