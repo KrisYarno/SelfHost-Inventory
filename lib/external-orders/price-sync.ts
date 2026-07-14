@@ -1,5 +1,5 @@
 import prisma from "@/lib/prisma";
-import { getIntegrationClient } from "@/lib/external-orders/shared";
+import { platformRead } from "@/lib/platforms/egress";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
 
 // ---------------------------------------------------------------------------
@@ -29,28 +29,17 @@ export async function fetchExternalProductPrice(
   externalProductId: string,
   externalVariantId?: string | null
 ): Promise<{ regularPrice: number | null; error?: string }> {
-  const { storeUrl, credentials } = await getIntegrationClient(integrationId);
-
-  const auth = Buffer.from(
-    `${credentials.key}:${credentials.secret}`
-  ).toString("base64");
-
-  // Build the URL: simple product or specific variation
+  // Lane 6: the sixth egress path (codex #8). It used to hand-roll its own Basic
+  // auth header from `getIntegrationClient().credentials` and call fetch — one of
+  // three independent "authenticate and call the store" patterns. It now uses the
+  // READ credential through the chokepoint.
   const path = externalVariantId
-    ? `/wp-json/wc/v3/products/${externalProductId}/variations/${externalVariantId}`
-    : `/wp-json/wc/v3/products/${externalProductId}`;
-
-  const url = new URL(path, storeUrl).toString();
+    ? `/wp-json/wc/v3/products/${encodeURIComponent(externalProductId)}/variations/${encodeURIComponent(externalVariantId)}`
+    : `/wp-json/wc/v3/products/${encodeURIComponent(externalProductId)}`;
 
   try {
-    const resp = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/json",
-      },
-      signal: AbortSignal.timeout(10_000),
-      cache: "no-store",
+    const resp = await platformRead(integrationId, path, undefined, {
+      timeoutMs: 10_000,
     });
 
     if (!resp.ok) {

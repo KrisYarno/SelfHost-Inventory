@@ -465,23 +465,26 @@ export const POST = apiHandler(async (
   // Push status revert to external platform (best-effort, never fails the unfulfillment)
   if (orderIntegrationId && orderExternalId && restored.length > 0) {
     try {
-      const integration = await prisma.integration.findUnique({
-        where: { id: orderIntegrationId },
-        select: { fulfillmentPushEnabled: true },
-      });
+      // LANE 6: the caller-side `fulfillmentPushEnabled` check is gone. The gate
+      // now lives inside egress.pushOrderStatus (fresh DB read, ANDed with the
+      // master switch, capability allowlist, write credential, and kill switch),
+      // where no call site can forget it. See the note in fulfill/route.ts.
+      //
+      // Either way this reverts to 'processing' — WC has no 'pending'.
+      const wcStatus = 'processing';
 
-      if (integration?.fulfillmentPushEnabled) {
-        // If totalFulfilled became 0: push 'processing' (safe revert, WC doesn't have 'pending')
-        // Otherwise still partially fulfilled: push 'processing'
-        const wcStatus = 'processing';
+      const pushResult = await pushOrderStatusToExternal(
+        orderIntegrationId,
+        orderExternalId,
+        wcStatus
+      );
 
-        const pushResult = await pushOrderStatusToExternal(
-          orderIntegrationId,
-          orderExternalId,
-          wcStatus
-        );
-
-        if (!pushResult.success) {
+      if (!pushResult.success) {
+        if (pushResult.blockedReason) {
+          console.log(
+            `Order-status revert not sent for order ${params.orderId}: ${pushResult.blockedReason}`
+          );
+        } else {
           console.error(
             `Unfulfillment push failed for order ${params.orderId}:`,
             pushResult.error

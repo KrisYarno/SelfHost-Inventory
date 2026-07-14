@@ -1,7 +1,114 @@
 import prisma from "@/lib/prisma";
 import { getIntegrationClient } from "@/lib/external-orders/shared";
+import { pushStockStatus, type EgressResult } from "@/lib/platforms/egress";
 import { computeBundleStockStatus } from "@/lib/stock-sync/compute-bundle-status";
 import type { PlatformType } from "@/lib/platforms/core/types";
+
+/**
+ * Unpack WooCommerce's batch response into per-ITEM outcomes.
+ *
+ * WC answers a batch write with `{ update: [{ id, error? }, ...] }` and does NOT
+ * guarantee response order, so items are matched by id, never by index. An item
+ * omitted from the response entirely is a failure — we asked WC to change it and
+ * WC did not say it did.
+ */
+function unpackBatchBody(
+  body: unknown,
+  requested: Array<{ externalProductId: string; externalVariationId?: string }>
+): { succeeded: number; errors: Array<{ productId: string; error: string }> } | null {
+  const update = (body as { update?: unknown })?.update;
+  if (!Array.isArray(update)) return null;
+
+  const byId = new Map<string, { id?: number; error?: { message?: string } }>();
+  for (const row of update as Array<{ id?: number; error?: { message?: string } }>) {
+    if (row?.id != null) byId.set(String(row.id), row);
+  }
+
+  let succeeded = 0;
+  const errors: Array<{ productId: string; error: string }> = [];
+
+  for (const item of requested) {
+    // For a variation the WC batch is keyed on the VARIATION id; for a simple
+    // product, on the product id.
+    const wireId = item.externalVariationId ?? item.externalProductId;
+    const row = byId.get(wireId);
+    if (!row) {
+      errors.push({
+        productId: item.externalProductId,
+        error: "Missing from batch response",
+      });
+    } else if (row.error?.message) {
+      errors.push({ productId: item.externalProductId, error: row.error.message });
+    } else {
+      succeeded += 1;
+    }
+  }
+
+  return { succeeded, errors };
+}
+
+/**
+ * Lane 6: flatten an egress fan-out into this module's historical
+ * {succeeded, failed} shape.
+ *
+ * `pushStockStatus` returns one result PER WIRE REQUEST (REV-2 #5) precisely so
+ * that a partially-blocked push cannot be read as a success. We preserve that
+ * here: a BLOCKED batch is reported as an error with its named reason, never as
+ * a silent no-op, so `lastStockSyncError` tells the operator the truth ("blocked:
+ * master_off") instead of pretending the store is in sync.
+ *
+ * Per-item fidelity is preserved too: a `sent` batch is unpacked so that
+ * "WC rejected product 20" still reaches lastStockSyncError, exactly as it did
+ * when the adapter parsed the response itself.
+ */
+function summarizeEgress(
+  result: EgressResult,
+  requested: Array<{ externalProductId: string; externalVariationId?: string }>
+): {
+  succeeded: number;
+  errors: Array<{ productId: string; error: string }>;
+} {
+  const errors: Array<{ productId: string; error: string }> = [];
+  let succeeded = 0;
+
+  const walk = (r: EgressResult): void => {
+    switch (r.status) {
+      case "partial":
+        r.results.forEach(walk);
+        break;
+      case "sent": {
+        const unpacked = unpackBatchBody(r.body, requested);
+        if (unpacked) {
+          succeeded += unpacked.succeeded;
+          errors.push(...unpacked.errors);
+        } else {
+          // Not a batch-shaped body (or an empty one). We know the wire call
+          // succeeded; we cannot attribute it per item.
+          succeeded += 1;
+        }
+        break;
+      }
+      case "blocked":
+        errors.push({ productId: "*", error: `blocked: ${r.reason}` });
+        break;
+      case "dry_run":
+        errors.push({
+          productId: "*",
+          error: `dry-run (nothing sent): ${r.wouldSend.method} ${r.wouldSend.url}`,
+        });
+        break;
+      case "failed":
+        errors.push({
+          productId: "*",
+          error: `failed: ${r.reason}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ""}`,
+        });
+        break;
+    }
+  };
+
+  walk(result);
+  return { succeeded, errors };
+}
 
 
 // ---------------------------------------------------------------------------
@@ -24,20 +131,26 @@ export type StockSyncResult = {
  * Push internal stock quantities (as stock_status) to an external platform.
  *
  * Amendment 3:  Single Prisma query for all ProductLinks + product_locations.
- * Amendment 6:  batchUpdateProductStock on the adapter handles simple/variant split.
  * Amendment 8:  syncLocationId narrows stock to one location when set.
  * Amendment 11: Push stock_status only (instock/outofstock), never stock_quantity.
+ *
+ * Lane 6: this function computes WHAT the stock statuses are and hands them to
+ * `egress.pushStockStatus`, which decides whether a single byte may leave. The
+ * `stockSyncEnabled` check below is an EARLY EXIT for efficiency and a clearer
+ * error message — it is NOT the gate. The gate is inside egress and is
+ * re-evaluated from a fresh DB read before every wire request, so removing this
+ * check could not cause an unauthorized write.
  */
 export async function syncStockToExternal(
   integrationId: string
 ): Promise<StockSyncResult> {
-  // 1. Load integration + adapter via shared helper (Amendment 1)
-  const { adapter, storeUrl, credentials, integration } =
-    await getIntegrationClient(integrationId);
+  // 1. Load integration metadata (no credentials — REV-2 #9)
+  const { integration } = await getIntegrationClient(integrationId);
 
   const platform = integration.platform as PlatformType;
 
-  // 2. Check stockSyncEnabled — skip if false
+  // 2. Early exit when the integration's own flag is off. Not a security
+  //    boundary (egress re-checks it); just don't do the work.
   if (!integration.stockSyncEnabled) {
     return {
       integrationId,
@@ -93,11 +206,11 @@ export async function syncStockToExternal(
 
   // 4. Compute stock per single-product ProductLink
   //    Amendment 8: if syncLocationId is set, only count stock from that location.
-  //    Amendment 11: map to stock_status string (instock / outofstock).
+  //    Amendment 11: map to stock_status (instock / outofstock).
   const updates: Array<{
-    productId: string;
-    variantId?: string;
-    stockStatus: 'instock' | 'outofstock';
+    externalProductId: string;
+    externalVariationId?: string;
+    inStock: boolean;
   }> = [];
 
   for (const link of productLinks) {
@@ -115,9 +228,9 @@ export async function syncStockToExternal(
     }
 
     updates.push({
-      productId: link.externalProductId,
-      variantId: link.externalVariantId ?? undefined,
-      stockStatus: totalStock > 0 ? 'instock' : 'outofstock',
+      externalProductId: link.externalProductId,
+      externalVariationId: link.externalVariantId ?? undefined,
+      inStock: totalStock > 0,
     });
   }
 
@@ -129,9 +242,9 @@ export async function syncStockToExternal(
   for (const bl of bundleLinks) {
     const result = await computeBundleStockStatus(bl.id, integration.syncLocationId ?? null);
     updates.push({
-      productId: bl.externalProductId,
-      variantId: bl.externalVariantId ?? undefined,
-      stockStatus: result.status,
+      externalProductId: bl.externalProductId,
+      externalVariationId: bl.externalVariantId ?? undefined,
+      inStock: result.status === 'instock',
     });
     if (result.warning) {
       bundleHealthWarnings.push({ productLinkId: bl.id, warning: result.warning });
@@ -145,34 +258,16 @@ export async function syncStockToExternal(
     );
   }
 
-  // 5. Call adapter.batchUpdateProductStock (handles simple/variant split per Amendment 6)
-  if (!adapter.batchUpdateProductStock) {
-    const errorMsg = `Adapter for ${platform} does not support batchUpdateProductStock`;
-    await prisma.integration.update({
-      where: { id: integrationId },
-      data: { lastStockSyncError: errorMsg },
-    });
-
-    return {
-      integrationId,
-      platform,
-      synced: 0,
-      failed: updates.length,
-      errors: [{ productId: "*", error: errorMsg }],
-    };
-  }
-
+  // 5. Hand the computed statuses to the chokepoint. It gates, audits, and (only
+  //    if every gate passes) sends. A non-WooCommerce integration is blocked here
+  //    with `wrong_platform` rather than by a "not implemented" adapter stub.
   try {
-    const batchResult = await adapter.batchUpdateProductStock(
-      storeUrl,
-      credentials,
-      updates
-    );
+    const result = await pushStockStatus(integrationId, updates);
+    const { succeeded, errors } = summarizeEgress(result, updates);
 
-    // 6. Update integration timestamps
+    // 6. Update integration telemetry.
     const now = new Date();
-    if (batchResult.failed.length === 0) {
-      // Full success — clear error
+    if (errors.length === 0) {
       await prisma.integration.update({
         where: { id: integrationId },
         data: {
@@ -181,9 +276,8 @@ export async function syncStockToExternal(
         },
       });
     } else {
-      // Partial failure — record failed product IDs
       const errorJson = JSON.stringify({
-        failedProducts: batchResult.failed.slice(0, 50),
+        failedProducts: errors.slice(0, 50),
         timestamp: now.toISOString(),
       });
       await prisma.integration.update({
@@ -198,12 +292,9 @@ export async function syncStockToExternal(
     return {
       integrationId,
       platform,
-      synced: batchResult.succeeded,
-      failed: batchResult.failed.length,
-      errors: batchResult.failed.map((f) => ({
-        productId: f.productId,
-        error: f.error,
-      })),
+      synced: succeeded,
+      failed: errors.length,
+      errors,
     };
   } catch (error) {
     // 7. Total failure — store error on integration
@@ -248,11 +339,11 @@ export async function pushStockForProducts(
 ): Promise<void> {
   if (internalProductIds.length === 0) return;
 
-  const { adapter, storeUrl, credentials, integration } =
-    await getIntegrationClient(integrationId);
+  // Metadata only — no credentials (REV-2 #9).
+  const { integration } = await getIntegrationClient(integrationId);
 
+  // Early exit only. The real gate is inside egress (re-read per wire request).
   if (!integration.stockSyncEnabled) return;
-  if (!adapter.batchUpdateProductStock) return;
 
   // Find all ProductLinks for these products on this integration.
   // Provisional (PENDING_REVIEW) internal products are never pushed outward.
@@ -273,9 +364,9 @@ export async function pushStockForProducts(
 
   // Compute stock status per link, using the same logic as the full sync
   const updates: Array<{
-    productId: string;
-    variantId?: string;
-    stockStatus: 'instock' | 'outofstock';
+    externalProductId: string;
+    externalVariationId?: string;
+    inStock: boolean;
   }> = [];
 
   for (const link of links) {
@@ -294,9 +385,9 @@ export async function pushStockForProducts(
     }
 
     updates.push({
-      productId: link.externalProductId,
-      variantId: link.externalVariantId ?? undefined,
-      stockStatus: totalStock > 0 ? 'instock' : 'outofstock',
+      externalProductId: link.externalProductId,
+      externalVariationId: link.externalVariantId ?? undefined,
+      inStock: totalStock > 0,
     });
   }
 
@@ -338,9 +429,9 @@ export async function pushStockForProducts(
         integration.syncLocationId ?? null
       );
       updates.push({
-        productId: bundleLink.externalProductId,
-        variantId: bundleLink.externalVariantId ?? undefined,
-        stockStatus: bundleStatus.status,
+        externalProductId: bundleLink.externalProductId,
+        externalVariationId: bundleLink.externalVariantId ?? undefined,
+        inStock: bundleStatus.status === 'instock',
       });
       if (bundleStatus.warning) {
         console.warn(
@@ -361,26 +452,26 @@ export async function pushStockForProducts(
   const seenUpdates = new Set<string>();
   const deduped: typeof updates = [];
   for (const u of updates) {
-    const key = `${u.productId}::${u.variantId ?? ''}`;
+    const key = `${u.externalProductId}::${u.externalVariationId ?? ''}`;
     if (seenUpdates.has(key)) continue;
     seenUpdates.add(key);
     deduped.push(u);
   }
 
-  const result = await adapter.batchUpdateProductStock(
-    storeUrl,
-    credentials,
-    deduped
-  );
+  const result = await pushStockStatus(integrationId, deduped);
+  const { succeeded, errors } = summarizeEgress(result, deduped);
 
-  if (result.failed.length > 0) {
+  if (errors.length > 0) {
+    // Includes BLOCKED batches. This is a fire-and-forget path, so the log is the
+    // only surface — say plainly that nothing was sent rather than staying quiet
+    // and letting the operator assume WooCommerce is in sync.
     console.warn(
-      `[stock push] ${result.failed.length} product(s) failed for integration ${integrationId}:`,
-      result.failed.slice(0, 5)
+      `[stock push] ${errors.length} batch(es) did not reach integration ${integrationId}:`,
+      errors.slice(0, 5)
     );
   } else {
     console.log(
-      `[stock push] Pushed ${result.succeeded} stock status(es) for integration ${integrationId}`
+      `[stock push] Pushed ${succeeded} batch(es) of stock status for integration ${integrationId}`
     );
   }
 }

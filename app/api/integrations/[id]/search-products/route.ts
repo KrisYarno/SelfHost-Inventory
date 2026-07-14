@@ -4,7 +4,7 @@ import prisma from '@/lib/prisma';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { SearchProductsQuerySchema } from '@/lib/validation/product-links';
 import { ExternalProductSearchResult } from '@/types/product-links';
-import { decryptOrNull, hostFromStoreUrl } from '@/lib/external-orders/shared';
+import { platformRead } from '@/lib/platforms/egress';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,34 +13,15 @@ export const dynamic = 'force-dynamic';
 // ---------------------------------------------------------------------------
 
 async function searchWooCommerce(
-  storeUrl: string,
-  consumerKey: string,
-  consumerSecret: string,
+  integrationId: string,
   query: string,
 ): Promise<ExternalProductSearchResult[]> {
-  const url = new URL('/wp-json/wc/v3/products', storeUrl);
-  url.searchParams.set('search', query);
-  url.searchParams.set('per_page', '20');
-
-  const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
-
-  let resp: Response;
-  try {
-    resp = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        Authorization: `Basic ${auth}`,
-        'Content-Type': 'application/json',
-      },
-      signal: controller.signal,
-      cache: 'no-store',
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
+  const resp = await platformRead(
+    integrationId,
+    '/wp-json/wc/v3/products',
+    { search: query, per_page: '20' },
+    { timeoutMs: 10_000 },
+  );
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
@@ -67,37 +48,20 @@ async function searchWooCommerce(
 // ---------------------------------------------------------------------------
 
 async function searchShopify(
-  shopDomain: string,
-  accessToken: string,
+  integrationId: string,
   query: string,
 ): Promise<ExternalProductSearchResult[]> {
   const apiVersion = process.env.SHOPIFY_API_VERSION || '2025-10';
-  const url = new URL(
-    `https://${shopDomain}/admin/api/${apiVersion}/products.json`,
-  );
+
   // P1-11: Shopify REST Admin API supports `title` as a prefix match. Use it
   // for the authoritative search instead of fetching 50 and filtering
   // client-side, which silently truncated results for stores with >50 products.
-  url.searchParams.set('title', query);
-  url.searchParams.set('limit', '50');
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
-
-  let resp: Response;
-  try {
-    resp = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        'X-Shopify-Access-Token': accessToken,
-        'Content-Type': 'application/json',
-      },
-      signal: controller.signal,
-      cache: 'no-store',
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
+  const resp = await platformRead(
+    integrationId,
+    `/admin/api/${apiVersion}/products.json`,
+    { title: query, limit: '50' },
+    { timeoutMs: 10_000 },
+  );
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
@@ -172,40 +136,15 @@ export const GET = apiHandler(async (
     return NextResponse.json({ error: 'Integration is not active' }, { status: 400 });
   }
 
-  // Decrypt credentials
-  const apiKey = decryptOrNull(integration.encryptedApiKey);
-  const apiSecret = decryptOrNull(integration.encryptedApiSecret);
-
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: 'Integration credentials could not be decrypted' },
-      { status: 500 },
-    );
-  }
-
+  // Lane 6: credentials are resolved inside egress (READ scope) — this route
+  // never sees them, and this search cannot mutate the store.
   let products: ExternalProductSearchResult[];
 
   try {
     if (integration.platform === 'WOOCOMMERCE') {
-      if (!apiSecret) {
-        return NextResponse.json(
-          { error: 'WooCommerce requires both consumer key and consumer secret' },
-          { status: 500 },
-        );
-      }
-      products = await searchWooCommerce(
-        integration.storeUrl,
-        apiKey,
-        apiSecret,
-        queryValidation.q,
-      );
+      products = await searchWooCommerce(integrationId, queryValidation.q);
     } else if (integration.platform === 'SHOPIFY') {
-      const shopDomain = hostFromStoreUrl(integration.storeUrl);
-      products = await searchShopify(
-        shopDomain,
-        apiKey,
-        queryValidation.q,
-      );
+      products = await searchShopify(integrationId, queryValidation.q);
     } else {
       return NextResponse.json(
         { error: `Unsupported platform: ${integration.platform}` },

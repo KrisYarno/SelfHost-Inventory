@@ -11,10 +11,32 @@ import type {
   NormalizedOrder,
   NormalizedLineItem,
   NormalizedCustomer,
-  BatchStockUpdateResult,
-  OrderStatusUpdateResult,
 } from '../core/types';
 import { extractWooCommerceHeaders, verifyWooCommerceWebhook } from './webhooks';
+
+/**
+ * Lane 6: the SHAPE of a WooCommerce write, with no ability to perform one.
+ *
+ * These are inert descriptions. Turning one into an actual HTTP request requires
+ * lib/platforms/egress, which owns the credentials, the gate, the audit row, and
+ * the only fetch() permitted to reach a platform host.
+ */
+export type WooStockWriteRequest =
+  | {
+      op: 'products_batch';
+      updates: Array<{ id: string; stock_status: 'instock' | 'outofstock' }>;
+    }
+  | {
+      op: 'variations_batch';
+      parentId: string;
+      updates: Array<{ id: string; stock_status: 'instock' | 'outofstock' }>;
+    };
+
+export type WooOrderStatusWriteRequest = {
+  op: 'order_status';
+  externalOrderId: string;
+  status: 'processing' | 'completed';
+};
 
 /**
  * WooCommerce order webhook payload schemas
@@ -153,265 +175,89 @@ export class WooCommerceAdapter implements PlatformAdapter {
   }
 
   // ---------------------------------------------------------------------------
-  // Write methods (Phase D)
+  // Write REQUEST SHAPING (Lane 6). PURE — no I/O, no credentials, no fetch.
+  //
+  // This adapter used to OPEN THE SOCKET: it held `fetch(url, {method:'POST'})`
+  // and `fetch(url, {method:'PUT'})` with a Basic-auth header built from
+  // credentials passed in by any caller. Those two call sites were the entire
+  // write surface toward the live store, and nothing between a route and the wire
+  // could stop them.
+  //
+  // The adapter now only says WHAT a WooCommerce stock/order write LOOKS like.
+  // Whether it is permitted, whether it is audited, and whether a single byte
+  // leaves the process is decided exclusively by lib/platforms/egress — which is
+  // the only module in the codebase that may talk to a platform host.
   // ---------------------------------------------------------------------------
 
   /**
-   * Batch-update product stock status on WooCommerce.
+   * Shape a set of stock-status updates into WooCommerce wire requests.
    *
-   * Amendment 11: pushes stock_status only ("instock" | "outofstock"). Never
-   * sets manage_stock or stock_quantity.
-   *
-   * Amendment 6: splits updates into simple products (no variantId) and
-   * per-parent variation groups. Simple products go through
-   * POST /wp-json/wc/v3/products/batch, variations through
-   * POST /wp-json/wc/v3/products/{parentId}/variations/batch.
-   *
-   * Amendment 10: on 429, reads Retry-After header (default 5 s), waits, retries
-   * once. Continues remaining batches even if retry fails.
-   *
-   * Batch size: 50 max per request. 10-second timeout per request.
+   * Amendment 11: stock_status ONLY ("instock" | "outofstock"). Never
+   * manage_stock, never stock_quantity.
+   * Amendment 6: simple products batch through /products/batch; variations batch
+   * per-parent through /products/{parentId}/variations/batch.
+   * Batch size: 50 per request (WooCommerce's practical batch limit).
    */
-  async batchUpdateProductStock(
-    storeUrl: string,
-    credentials: { key: string; secret: string },
-    updates: Array<{ productId: string; variantId?: string; stockStatus: 'instock' | 'outofstock' }>
-  ): Promise<BatchStockUpdateResult> {
-    const auth = Buffer.from(`${credentials.key}:${credentials.secret}`).toString('base64');
-    let succeeded = 0;
-    const failed: Array<{ productId: string; variantId?: string; error: string }> = [];
+  buildStockStatusRequests(
+    updates: Array<{
+      externalProductId: string;
+      externalVariationId?: string;
+      inStock: boolean;
+    }>
+  ): WooStockWriteRequest[] {
+    const status = (inStock: boolean): 'instock' | 'outofstock' =>
+      inStock ? 'instock' : 'outofstock';
 
-    // Separate simple products from variations
-    const simpleUpdates: Array<{ productId: string; stockStatus: 'instock' | 'outofstock' }> = [];
-    const variationGroups = new Map<string, Array<{ variantId: string; stockStatus: 'instock' | 'outofstock' }>>();
+    const simple: Array<{ id: string; stock_status: 'instock' | 'outofstock' }> = [];
+    const byParent = new Map<
+      string,
+      Array<{ id: string; stock_status: 'instock' | 'outofstock' }>
+    >();
 
     for (const u of updates) {
-      if (u.variantId) {
-        // variantId is present — this is a variation; productId is the parent
-        const group = variationGroups.get(u.productId) || [];
-        group.push({ variantId: u.variantId, stockStatus: u.stockStatus });
-        variationGroups.set(u.productId, group);
-      } else {
-        simpleUpdates.push({ productId: u.productId, stockStatus: u.stockStatus });
-      }
-    }
-
-    // Helper: chunk an array into batches of `size`
-    const chunk = <T>(arr: T[], size: number): T[][] => {
-      const chunks: T[][] = [];
-      for (let i = 0; i < arr.length; i += size) {
-        chunks.push(arr.slice(i, i + size));
-      }
-      return chunks;
-    };
-
-    // Helper: make a WC API request with 429-retry
-    const wcFetch = async (url: string, body: unknown): Promise<Response> => {
-      const doFetch = () =>
-        fetch(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Basic ${auth}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(10_000),
+      if (u.externalVariationId) {
+        // A variation: externalProductId is the PARENT.
+        const group = byParent.get(u.externalProductId) ?? [];
+        group.push({
+          id: u.externalVariationId,
+          stock_status: status(u.inStock),
         });
-
-      let resp = await doFetch();
-
-      if (resp.status === 429) {
-        const retryAfter = parseInt(resp.headers.get('Retry-After') || '', 10);
-        const waitMs = (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 5) * 1000;
-        await new Promise(resolve => setTimeout(resolve, waitMs));
-        resp = await doFetch();
+        byParent.set(u.externalProductId, group);
+      } else {
+        simple.push({
+          id: u.externalProductId,
+          stock_status: status(u.inStock),
+        });
       }
+    }
 
-      return resp;
+    const chunk = <T>(arr: T[], size: number): T[][] => {
+      const out: T[][] = [];
+      for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+      return out;
     };
 
-    // --- Simple products: POST /wp-json/wc/v3/products/batch ---
     const BATCH_SIZE = 50;
-    for (const batch of chunk(simpleUpdates, BATCH_SIZE)) {
-      try {
-        const url = new URL('/wp-json/wc/v3/products/batch', storeUrl).toString();
-        const payload = {
-          update: batch.map(item => ({
-            id: parseInt(item.productId, 10),
-            stock_status: item.stockStatus,
-          })),
-        };
+    const requests: WooStockWriteRequest[] = [];
 
-        const resp = await wcFetch(url, payload);
-
-        if (!resp.ok) {
-          const body = await resp.text();
-          for (const item of batch) {
-            failed.push({ productId: item.productId, error: `HTTP ${resp.status}: ${body.slice(0, 200)}` });
-          }
-          continue;
-        }
-
-        const data = (await resp.json()) as { update?: Array<{ id?: number; error?: { message?: string } }> };
-        const results = data.update || [];
-
-        // P1-1: Match results back to batch items by ID, not array index.
-        // WooCommerce does not guarantee response order, and items that fail
-        // with errors may be omitted. Build a map keyed on the numeric ID.
-        const responseById = new Map<number, { id?: number; error?: { message?: string } }>();
-        for (const r of results) {
-          if (r?.id != null) {
-            responseById.set(r.id, r);
-          }
-        }
-
-        for (const item of batch) {
-          const numericId = parseInt(item.productId, 10);
-          const result = responseById.get(numericId);
-          if (!result) {
-            // Item missing from response entirely
-            failed.push({
-              productId: item.productId,
-              error: 'Missing from batch response',
-            });
-          } else if (result.error?.message) {
-            failed.push({
-              productId: item.productId,
-              error: result.error.message,
-            });
-          } else {
-            succeeded++;
-          }
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error';
-        for (const item of batch) {
-          failed.push({ productId: item.productId, error: message });
-        }
-      }
+    for (const batch of chunk(simple, BATCH_SIZE)) {
+      requests.push({ op: 'products_batch', updates: batch });
     }
-
-    // --- Variations: POST /wp-json/wc/v3/products/{parentId}/variations/batch ---
-    for (const [parentId, variations] of Array.from(variationGroups.entries())) {
+    for (const [parentId, variations] of Array.from(byParent.entries())) {
       for (const batch of chunk(variations, BATCH_SIZE)) {
-        try {
-          const url = new URL(`/wp-json/wc/v3/products/${parentId}/variations/batch`, storeUrl).toString();
-          const payload = {
-            update: batch.map(item => ({
-              id: parseInt(item.variantId, 10),
-              stock_status: item.stockStatus,
-            })),
-          };
-
-          const resp = await wcFetch(url, payload);
-
-          if (!resp.ok) {
-            const body = await resp.text();
-            for (const item of batch) {
-              // P1-7: Populate both productId (parent) and variantId so callers
-              // can locate the failure in logs and UI without a lookup.
-              failed.push({
-                productId: parentId,
-                variantId: item.variantId,
-                error: `HTTP ${resp.status}: ${body.slice(0, 200)}`,
-              });
-            }
-            continue;
-          }
-
-          const data = (await resp.json()) as { update?: Array<{ id?: number; error?: { message?: string } }> };
-          const results = data.update || [];
-
-          // P1-1: Match results by ID not index
-          const responseById = new Map<number, { id?: number; error?: { message?: string } }>();
-          for (const r of results) {
-            if (r?.id != null) {
-              responseById.set(r.id, r);
-            }
-          }
-
-          for (const item of batch) {
-            const numericVariantId = parseInt(item.variantId, 10);
-            const result = responseById.get(numericVariantId);
-            if (!result) {
-              failed.push({
-                productId: parentId,
-                variantId: item.variantId,
-                error: 'Missing from batch response',
-              });
-            } else if (result.error?.message) {
-              failed.push({
-                productId: parentId,
-                variantId: item.variantId,
-                error: result.error.message,
-              });
-            } else {
-              succeeded++;
-            }
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
-          for (const item of batch) {
-            failed.push({
-              productId: parentId,
-              variantId: item.variantId,
-              error: message,
-            });
-          }
-        }
+        requests.push({ op: 'variations_batch', parentId, updates: batch });
       }
     }
 
-    return { succeeded, failed };
+    return requests;
   }
 
-  /**
-   * Update an order's status on WooCommerce.
-   * PUT /wp-json/wc/v3/orders/{orderId} with { status }.
-   * 10-second timeout. Basic Auth. Honors Retry-After on 429 and retries once.
-   */
-  async updateOrderStatus(
-    storeUrl: string,
-    credentials: { key: string; secret: string },
-    orderId: string,
-    status: string
-  ): Promise<OrderStatusUpdateResult> {
-    const auth = Buffer.from(`${credentials.key}:${credentials.secret}`).toString('base64');
-
-    try {
-      const url = new URL(`/wp-json/wc/v3/orders/${orderId}`, storeUrl).toString();
-
-      const doFetch = () =>
-        fetch(url, {
-          method: 'PUT',
-          headers: {
-            Authorization: `Basic ${auth}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ status }),
-          signal: AbortSignal.timeout(10_000),
-        });
-
-      let resp = await doFetch();
-
-      // Honor Retry-After on 429 (matches batchUpdateProductStock behavior)
-      if (resp.status === 429) {
-        const retryAfter = parseInt(resp.headers.get('Retry-After') || '', 10);
-        const waitMs = (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 5) * 1000;
-        await new Promise(resolve => setTimeout(resolve, waitMs));
-        resp = await doFetch();
-      }
-
-      if (!resp.ok) {
-        const body = await resp.text();
-        return { success: false, error: `HTTP ${resp.status}: ${body.slice(0, 200)}` };
-      }
-
-      return { success: true };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      return { success: false, error: message };
-    }
+  /** Shape an order-status write. Pure. */
+  buildOrderStatusRequest(
+    externalOrderId: string,
+    status: 'processing' | 'completed'
+  ): WooOrderStatusWriteRequest {
+    return { op: 'order_status', externalOrderId, status };
   }
 
   // ---------------------------------------------------------------------------

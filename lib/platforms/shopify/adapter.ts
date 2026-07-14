@@ -11,8 +11,6 @@ import type {
   NormalizedOrder,
   NormalizedLineItem,
   NormalizedCustomer,
-  BatchStockUpdateResult,
-  OrderStatusUpdateResult,
 } from '../core/types';
 import { extractShopifyHeaders, verifyShopifyWebhook } from './webhooks';
 
@@ -118,25 +116,15 @@ export class ShopifyAdapter implements PlatformAdapter {
   }
 
   // ---------------------------------------------------------------------------
-  // Write methods — stubs (Shopify writes not implemented in this phase)
+  // Lane 6: the write stubs are GONE.
+  //
+  // They used to exist so `adapter.batchUpdateProductStock?.()` type-checked for
+  // both platforms. Now writes live only in lib/platforms/egress, which refuses
+  // any non-WooCommerce integration with reason `wrong_platform`. Shopify writes
+  // therefore fail CLOSED at the gate rather than returning a soft
+  // "not implemented" from a method that exists and could one day be filled in
+  // by accident.
   // ---------------------------------------------------------------------------
-
-  async batchUpdateProductStock(
-    _storeUrl: string,
-    _credentials: { key: string; secret: string },
-    _updates: Array<{ productId: string; variantId?: string; stockStatus: 'instock' | 'outofstock' }>
-  ): Promise<BatchStockUpdateResult> {
-    return { succeeded: 0, failed: [{ productId: 'all', error: 'Shopify write not implemented' }] };
-  }
-
-  async updateOrderStatus(
-    _storeUrl: string,
-    _credentials: { key: string; secret: string },
-    _orderId: string,
-    _status: string
-  ): Promise<OrderStatusUpdateResult> {
-    return { success: false, error: 'Shopify write not implemented' };
-  }
 
   // ---------------------------------------------------------------------------
   // Private helpers

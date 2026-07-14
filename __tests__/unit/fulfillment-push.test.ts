@@ -3,176 +3,167 @@
  */
 
 /**
- * Tests for the fulfillment push helper (pushOrderStatusToExternal).
+ * `pushOrderStatusToExternal` — the thin adapter onto the chokepoint.
  *
- * Since pushOrderStatusToExternal and getIntegrationClient live in the same
- * module, we mock the underlying dependencies (prisma, getPlatformAdapter,
- * encryption) so getIntegrationClient works naturally.
+ * LANE 6 REWRITE. This function used to resolve credentials and call
+ * `adapter.updateOrderStatus(storeUrl, credentials, id, status)` directly, with
+ * NO internal gate — the `fulfillmentPushEnabled` check lived only in its two
+ * callers, and nothing asserted it.
+ *
+ * It now delegates to `egress.pushOrderStatus`, which owns the gate. So this
+ * suite tests exactly one thing: that the delegation is faithful and that every
+ * EgressResult is mapped to an honest caller-facing shape — in particular that a
+ * BLOCKED push is never reported as a success.
+ *
+ * The gate ITSELF (master switch, capability allowlist, integration flag,
+ * credential, kill switch, retry policy, path templates) is tested in
+ * __tests__/unit/lib/platforms/egress-gates.test.ts.
  */
 
-import type { PlatformAdapter, OrderStatusUpdateResult } from '@/lib/platforms/core/types';
+import { pushOrderStatus } from '@/lib/platforms/egress';
 
-// ---------------------------------------------------------------------------
-// Mocks — must be declared before any imports that trigger the module
-// ---------------------------------------------------------------------------
-
-// Mock Prisma
-jest.mock('@/lib/prisma', () => {
-  const { mockDeep } = require('jest-mock-extended');
-  return { __esModule: true, default: mockDeep() };
-});
-
-// Mock encryption — always return decrypted values
-jest.mock('@/lib/encryption', () => ({
-  isEncrypted: jest.fn(() => false),
-  decryptValue: jest.fn((v: string) => v),
+jest.mock('@/lib/platforms/egress', () => ({
+  __esModule: true,
+  pushOrderStatus: jest.fn(),
 }));
 
-// Mock getPlatformAdapter — returns the adapter we configure in each test
-const mockAdapter: Record<string, jest.Mock | string> = {
-  platform: 'WOOCOMMERCE',
-  extractWebhookHeaders: jest.fn(),
-  verifyWebhook: jest.fn(),
-  parseOrderWebhook: jest.fn(),
-  updateOrderStatus: jest.fn(),
-};
-
-jest.mock('@/lib/platforms/core/registry', () => ({
-  getPlatformAdapter: jest.fn(() => mockAdapter),
-}));
-
-// Mock AppError so it behaves like a real error
-jest.mock('@/lib/error-handling', () => ({
-  AppError: class AppError extends Error {
-    code: string;
-    statusCode: number;
-    constructor(message: string, code: string, statusCode: number) {
-      super(message);
-      this.name = 'AppError';
-      this.code = code;
-      this.statusCode = statusCode;
-    }
-  },
-}));
-
-// Now import modules
 import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
-import mockPrismaDefault from '@/lib/prisma';
-import { mockReset } from 'jest-mock-extended';
 
-const mockPrisma = mockPrismaDefault as any;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeIntegration(overrides: Record<string, unknown> = {}) {
-  return {
-    id: 'int-1',
-    platform: 'WOOCOMMERCE',
-    storeUrl: 'https://store.test',
-    isActive: true,
-    encryptedApiKey: 'ck_test',
-    encryptedApiSecret: 'cs_test',
-    stockSyncEnabled: false,
-    fulfillmentPushEnabled: true,
-    ...overrides,
-  };
-}
+const mockPushOrderStatus = pushOrderStatus as jest.Mock;
 
 beforeEach(() => {
-  jest.restoreAllMocks();
-  mockReset(mockPrisma);
-
-  // Reset the mock adapter to default behavior
-  mockAdapter.updateOrderStatus = jest.fn().mockResolvedValue({ success: true });
-  mockAdapter.platform = 'WOOCOMMERCE';
-
-  // Default: prisma finds the integration
-  mockPrisma.integration.findUnique.mockResolvedValue(makeIntegration());
+  jest.clearAllMocks();
 });
 
-// ===========================================================================
-// Tests
-// ===========================================================================
+describe('delegation', () => {
+  it('routes the push through egress.pushOrderStatus', async () => {
+    mockPushOrderStatus.mockResolvedValue({
+      status: 'sent',
+      httpStatus: 200,
+      body: {},
+    });
 
-describe('pushOrderStatusToExternal', () => {
-  // 1. Push succeeds after full fulfillment -> 'completed'
-  it('pushes "completed" status on full fulfillment', async () => {
-    (mockAdapter.updateOrderStatus as jest.Mock).mockResolvedValue({ success: true });
-
-    const result = await pushOrderStatusToExternal('int-1', 'ext-order-123', 'completed');
-
-    expect(result.success).toBe(true);
-    expect(mockAdapter.updateOrderStatus).toHaveBeenCalledWith(
-      'https://store.test',
-      { key: 'ck_test', secret: 'cs_test' },
+    const result = await pushOrderStatusToExternal(
+      'int-1',
       'ext-order-123',
       'completed'
     );
+
+    expect(mockPushOrderStatus).toHaveBeenCalledWith(
+      'int-1',
+      'ext-order-123',
+      'completed'
+    );
+    expect(result.success).toBe(true);
   });
 
-  // 2. Push succeeds after partial fulfillment -> 'processing' (Amendment 7)
-  it('pushes "processing" status on partial fulfillment', async () => {
-    (mockAdapter.updateOrderStatus as jest.Mock).mockResolvedValue({ success: true });
+  it('passes "processing" through on a partial fulfillment (Amendment 7)', async () => {
+    mockPushOrderStatus.mockResolvedValue({
+      status: 'sent',
+      httpStatus: 200,
+      body: {},
+    });
 
-    const result = await pushOrderStatusToExternal('int-1', 'ext-order-123', 'processing');
+    await pushOrderStatusToExternal('int-1', 'ext-order-123', 'processing');
 
-    expect(result.success).toBe(true);
-    expect(mockAdapter.updateOrderStatus).toHaveBeenCalledWith(
-      'https://store.test',
-      { key: 'ck_test', secret: 'cs_test' },
+    expect(mockPushOrderStatus).toHaveBeenCalledWith(
+      'int-1',
       'ext-order-123',
       'processing'
     );
   });
 
-  // 3. Push fails: fulfillment still succeeds locally, error logged
-  it('returns error when push fails (fulfillment is not blocked)', async () => {
-    (mockAdapter.updateOrderStatus as jest.Mock).mockResolvedValue({
-      success: false,
-      error: 'WC store unreachable',
+  it('takes NO credentials and NO store URL — it cannot address a store', async () => {
+    // The old signature reached the network via (storeUrl, credentials). If this
+    // function ever regains either, the chokepoint has been bypassed.
+    expect(pushOrderStatusToExternal).toHaveLength(3);
+  });
+});
+
+describe('result mapping — a blocked push is NEVER a success', () => {
+  it.each([
+    ['master_off'],
+    ['capability_not_allowed'],
+    ['integration_flag_off'],
+    ['no_write_credential'],
+    ['kill_switch'],
+    ['invalid_env'],
+    ['integration_inactive'],
+    ['wrong_platform'],
+    ['invalid_target'],
+    ['config_changed'],
+  ])('maps blocked(%s) to success:false with the named reason', async (reason) => {
+    mockPushOrderStatus.mockResolvedValue({ status: 'blocked', reason });
+
+    const result = await pushOrderStatusToExternal('int-1', 'ext-1', 'completed');
+
+    expect(result.success).toBe(false);
+    expect(result.blockedReason).toBe(reason);
+    expect(result.error).toContain(reason);
+  });
+
+  it('maps dry_run to success:false (nothing was sent)', async () => {
+    mockPushOrderStatus.mockResolvedValue({
+      status: 'dry_run',
+      wouldSend: {
+        method: 'PUT',
+        url: 'https://store.test/wp-json/wc/v3/orders/9',
+        body: { status: 'completed' },
+      },
     });
 
-    const result = await pushOrderStatusToExternal('int-1', 'ext-order-123', 'completed');
+    const result = await pushOrderStatusToExternal('int-1', 'ext-1', 'completed');
+
+    // A dry run must never look like a completed push.
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('dry run');
+  });
+
+  it('maps a transport failure to success:false', async () => {
+    mockPushOrderStatus.mockResolvedValue({
+      status: 'failed',
+      reason: 'transport',
+    });
+
+    const result = await pushOrderStatusToExternal('int-1', 'ext-1', 'completed');
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('WC store unreachable');
+    expect(result.error).toContain('transport');
   });
 
-  // 4. fulfillmentPushEnabled = false: adapter does not support updateOrderStatus
-  // The toggle check happens at the caller (fulfill route). Here we test what
-  // happens when the adapter has no updateOrderStatus method.
-  it('returns error when adapter does not support updateOrderStatus', async () => {
-    // Remove updateOrderStatus from adapter
-    delete (mockAdapter as any).updateOrderStatus;
+  it('maps an http_error to success:false and surfaces the status', async () => {
+    mockPushOrderStatus.mockResolvedValue({
+      status: 'failed',
+      reason: 'http_error',
+      httpStatus: 401,
+    });
 
-    const result = await pushOrderStatusToExternal('int-1', 'ext-order-123', 'completed');
+    const result = await pushOrderStatusToExternal('int-1', 'ext-1', 'completed');
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('updateOrderStatus');
+    expect(result.error).toContain('401');
   });
 
-  // 5. Integration not found: getIntegrationClient throws (Prisma returns null)
-  it('returns error when integration is not found', async () => {
-    mockPrisma.integration.findUnique.mockResolvedValue(null);
+  it('maps outcome_unknown to success:false — we do NOT know the store applied it', async () => {
+    mockPushOrderStatus.mockResolvedValue({
+      status: 'failed',
+      reason: 'outcome_unknown',
+    });
 
-    await expect(
-      pushOrderStatusToExternal('nonexistent', 'ext-order-123', 'completed')
-    ).rejects.toThrow('Integration not found or inactive');
+    const result = await pushOrderStatusToExternal('int-1', 'ext-1', 'completed');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('outcome_unknown');
   });
 
-  // 6. Inactive integration: getIntegrationClient throws (P1 coverage gap)
-  it('rejects push when integration is inactive', async () => {
-    mockPrisma.integration.findUnique.mockResolvedValue(
-      makeIntegration({ isActive: false })
-    );
-
-    await expect(
-      pushOrderStatusToExternal('int-1', 'ext-order-123', 'completed')
-    ).rejects.toThrow('Integration not found or inactive');
-
-    // Adapter must NOT have been called for an inactive integration
-    expect(mockAdapter.updateOrderStatus).not.toHaveBeenCalled();
+  it('ONLY status:"sent" is a success', async () => {
+    mockPushOrderStatus.mockResolvedValue({
+      status: 'sent',
+      httpStatus: 200,
+      body: {},
+    });
+    expect(
+      (await pushOrderStatusToExternal('int-1', 'ext-1', 'completed')).success
+    ).toBe(true);
   });
 });

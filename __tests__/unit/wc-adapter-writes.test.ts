@@ -3,359 +3,153 @@
  */
 
 /**
- * Tests for WooCommerce adapter write methods (Phase D).
+ * WooCommerce adapter — WRITE REQUEST SHAPING.
  *
- * Mocks global.fetch to simulate WC REST API responses for:
- *   - batchUpdateProductStock
- *   - updateOrderStatus
+ * LANE 6 REWRITE. This suite used to drive `batchUpdateProductStock` and
+ * `updateOrderStatus` against a mocked `global.fetch`. Those two methods held the
+ * only `fetch()` calls that could mutate the live store, and they took
+ * `(storeUrl, credentials, ...)` from whoever called them — so every holder of an
+ * adapter was a write surface.
+ *
+ * They are GONE. The adapter now only DESCRIBES what a WooCommerce write looks
+ * like; lib/platforms/egress decides whether a single byte may leave (that half
+ * is covered by egress-gates.test.ts).
+ *
+ * These builders are PURE. There is nothing to mock here, because there is
+ * nothing here that can reach the network — which is the entire point.
  */
 
 import { WooCommerceAdapter } from '@/lib/platforms/woocommerce/adapter';
 
-// ---------------------------------------------------------------------------
-// Setup
-// ---------------------------------------------------------------------------
-
 const adapter = new WooCommerceAdapter();
-const storeUrl = 'https://store.test';
-const credentials = { key: 'ck_test', secret: 'cs_test' };
 
-const originalFetch = global.fetch;
-
-beforeEach(() => {
-  jest.restoreAllMocks();
-});
-
-afterAll(() => {
-  global.fetch = originalFetch;
-});
-
-// Helper to create a mock fetch Response
-function mockResponse(
-  status: number,
-  body: unknown,
-  headers?: Record<string, string>
-): Response {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    headers: new Headers(headers ?? {}),
-    text: async () => JSON.stringify(body),
-    json: async () => body,
-  } as unknown as Response;
-}
-
-// ===========================================================================
-// batchUpdateProductStock
-// ===========================================================================
-
-describe('batchUpdateProductStock', () => {
-  // 1. Full batch success (simple products)
-  it('full batch success for simple products', async () => {
-    global.fetch = jest.fn().mockResolvedValue(
-      mockResponse(200, {
-        update: [
-          { id: 10 },
-          { id: 20 },
-        ],
-      })
-    );
-
-    const result = await adapter.batchUpdateProductStock(storeUrl, credentials, [
-      { productId: '10', stockStatus: 'instock' },
-      { productId: '20', stockStatus: 'outofstock' },
+describe('buildStockStatusRequests', () => {
+  it('shapes simple products into ONE products/batch request', () => {
+    const requests = adapter.buildStockStatusRequests([
+      { externalProductId: '101', inStock: true },
+      { externalProductId: '102', inStock: false },
     ]);
 
-    expect(result.succeeded).toBe(2);
-    expect(result.failed).toHaveLength(0);
-    expect(global.fetch).toHaveBeenCalledTimes(1);
-
-    // Verify the URL is the products batch endpoint
-    const callUrl = (global.fetch as jest.Mock).mock.calls[0][0];
-    expect(callUrl).toContain('/wp-json/wc/v3/products/batch');
+    expect(requests).toEqual([
+      {
+        op: 'products_batch',
+        updates: [
+          { id: '101', stock_status: 'instock' },
+          { id: '102', stock_status: 'outofstock' },
+        ],
+      },
+    ]);
   });
 
-  // 2. Partial failure (some items fail in batch response)
-  it('partial failure from batch response', async () => {
-    global.fetch = jest.fn().mockResolvedValue(
-      mockResponse(200, {
-        update: [
-          { id: 10 },
-          { id: 20, error: { message: 'Product not found' } },
-        ],
-      })
-    );
-
-    const result = await adapter.batchUpdateProductStock(storeUrl, credentials, [
-      { productId: '10', stockStatus: 'instock' },
-      { productId: '20', stockStatus: 'outofstock' },
+  it('maps inStock -> stock_status and NOTHING else (Amendment 11)', () => {
+    const [req] = adapter.buildStockStatusRequests([
+      { externalProductId: '1', inStock: true },
     ]);
 
-    expect(result.succeeded).toBe(1);
-    expect(result.failed).toHaveLength(1);
-    expect(result.failed[0].productId).toBe('20');
-    expect(result.failed[0].error).toContain('Product not found');
+    // Never manage_stock, never stock_quantity. Pushing a quantity would make the
+    // app the source of truth for stock in a store that manages its own.
+    const update = req.updates[0] as unknown as Record<string, unknown>;
+    expect(Object.keys(update).sort()).toEqual(['id', 'stock_status']);
   });
 
-  // 3. Empty batch returns { succeeded: 0, failed: [] }
-  it('empty batch returns zero results', async () => {
-    global.fetch = jest.fn();
+  it('groups variations by PARENT into per-parent variations/batch requests', () => {
+    const requests = adapter.buildStockStatusRequests([
+      { externalProductId: '10', externalVariationId: '11', inStock: true },
+      { externalProductId: '10', externalVariationId: '12', inStock: false },
+      { externalProductId: '20', externalVariationId: '21', inStock: true },
+    ]);
 
-    const result = await adapter.batchUpdateProductStock(storeUrl, credentials, []);
-
-    expect(result.succeeded).toBe(0);
-    expect(result.failed).toHaveLength(0);
-    // No HTTP calls should be made for empty input
-    expect(global.fetch).not.toHaveBeenCalled();
+    expect(requests).toEqual([
+      {
+        op: 'variations_batch',
+        parentId: '10',
+        updates: [
+          { id: '11', stock_status: 'instock' },
+          { id: '12', stock_status: 'outofstock' },
+        ],
+      },
+      {
+        op: 'variations_batch',
+        parentId: '20',
+        updates: [{ id: '21', stock_status: 'instock' }],
+      },
+    ]);
   });
 
-  // 4. >50 items splits into multiple requests
-  it('>50 items splits into multiple batch requests', async () => {
-    // Create 75 items
+  it('separates simple products from variations (Amendment 6)', () => {
+    const requests = adapter.buildStockStatusRequests([
+      { externalProductId: '1', inStock: true },
+      { externalProductId: '10', externalVariationId: '11', inStock: false },
+    ]);
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0].op).toBe('products_batch');
+    expect(requests[1].op).toBe('variations_batch');
+  });
+
+  it('chunks simple products at 50 per request', () => {
+    const updates = Array.from({ length: 120 }, (_, i) => ({
+      externalProductId: String(i + 1),
+      inStock: true,
+    }));
+
+    const requests = adapter.buildStockStatusRequests(updates);
+
+    expect(requests).toHaveLength(3);
+    expect(requests[0].updates).toHaveLength(50);
+    expect(requests[1].updates).toHaveLength(50);
+    expect(requests[2].updates).toHaveLength(20);
+  });
+
+  it('chunks variations at 50 per parent', () => {
     const updates = Array.from({ length: 75 }, (_, i) => ({
-      productId: `${i + 1}`,
-      stockStatus: 'instock' as const,
+      externalProductId: '10',
+      externalVariationId: String(i + 100),
+      inStock: false,
     }));
 
-    // Mock: first call returns 50 successes, second call returns 25 successes
-    global.fetch = jest.fn()
-      .mockResolvedValueOnce(
-        mockResponse(200, {
-          update: Array.from({ length: 50 }, (_, i) => ({ id: i + 1 })),
-        })
-      )
-      .mockResolvedValueOnce(
-        mockResponse(200, {
-          update: Array.from({ length: 25 }, (_, i) => ({ id: i + 51 })),
-        })
-      );
+    const requests = adapter.buildStockStatusRequests(updates);
 
-    const result = await adapter.batchUpdateProductStock(storeUrl, credentials, updates);
-
-    expect(result.succeeded).toBe(75);
-    expect(result.failed).toHaveLength(0);
-    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(requests).toHaveLength(2);
+    expect(requests.every((r) => r.op === 'variations_batch')).toBe(true);
+    expect(requests[0].updates).toHaveLength(50);
+    expect(requests[1].updates).toHaveLength(25);
   });
 
-  // 5. Variant products use per-parent variation batch endpoint
-  it('variant products use per-parent variation batch endpoint', async () => {
-    // Mock: first call = simple product batch, second call = variation batch
-    global.fetch = jest.fn()
-      .mockResolvedValueOnce(
-        mockResponse(200, { update: [{ id: 10 }] })
-      )
-      .mockResolvedValueOnce(
-        mockResponse(200, { update: [{ id: 101 }, { id: 102 }] })
-      );
-
-    const result = await adapter.batchUpdateProductStock(storeUrl, credentials, [
-      { productId: '10', stockStatus: 'instock' },                         // simple
-      { productId: '50', variantId: '101', stockStatus: 'instock' },       // variation of parent 50
-      { productId: '50', variantId: '102', stockStatus: 'outofstock' },    // variation of parent 50
-    ]);
-
-    expect(result.succeeded).toBe(3);
-    expect(result.failed).toHaveLength(0);
-    expect(global.fetch).toHaveBeenCalledTimes(2);
-
-    // Check that the second call uses the variation endpoint
-    const secondCallUrl = (global.fetch as jest.Mock).mock.calls[1][0];
-    expect(secondCallUrl).toContain('/wp-json/wc/v3/products/50/variations/batch');
-  });
-
-  // 6. 429 response -> read Retry-After -> retry -> success
-  it('retries on 429 with Retry-After header', async () => {
-    global.fetch = jest.fn()
-      // First attempt: 429 with Retry-After: 1
-      .mockResolvedValueOnce(
-        mockResponse(429, { message: 'Rate limited' }, { 'Retry-After': '1' })
-      )
-      // Retry: success
-      .mockResolvedValueOnce(
-        mockResponse(200, { update: [{ id: 10 }] })
-      );
-
-    const result = await adapter.batchUpdateProductStock(storeUrl, credentials, [
-      { productId: '10', stockStatus: 'instock' },
-    ]);
-
-    expect(result.succeeded).toBe(1);
-    expect(result.failed).toHaveLength(0);
-    expect(global.fetch).toHaveBeenCalledTimes(2);
-  });
-
-  // 7. 429 retry also fails -> log and continue remaining batches
-  it('429 retry failure marks batch as failed and continues', async () => {
-    // Two batches of 50 each (100 items total to force 2 batches)
-    const updates = Array.from({ length: 100 }, (_, i) => ({
-      productId: `${i + 1}`,
-      stockStatus: 'instock' as const,
-    }));
-
-    global.fetch = jest.fn()
-      // First batch: 429
-      .mockResolvedValueOnce(
-        mockResponse(429, { message: 'Rate limited' }, { 'Retry-After': '1' })
-      )
-      // First batch retry: still 429
-      .mockResolvedValueOnce(
-        mockResponse(429, { message: 'Rate limited' }, { 'Retry-After': '1' })
-      )
-      // Second batch: success
-      .mockResolvedValueOnce(
-        mockResponse(200, {
-          update: Array.from({ length: 50 }, (_, i) => ({ id: i + 51 })),
-        })
-      );
-
-    const result = await adapter.batchUpdateProductStock(storeUrl, credentials, updates);
-
-    // First batch of 50 failed (429 persisted), second batch of 50 succeeded
-    expect(result.succeeded).toBe(50);
-    expect(result.failed).toHaveLength(50);
-    // Verify it continued to the second batch
-    expect(global.fetch).toHaveBeenCalledTimes(3);
-  });
-
-  // 8. Timeout -> error returned
-  it('timeout error is captured in failed results', async () => {
-    const timeoutError = new Error('The operation was aborted');
-    timeoutError.name = 'AbortError';
-
-    global.fetch = jest.fn().mockRejectedValue(timeoutError);
-
-    const result = await adapter.batchUpdateProductStock(storeUrl, credentials, [
-      { productId: '10', stockStatus: 'instock' },
-    ]);
-
-    expect(result.succeeded).toBe(0);
-    expect(result.failed).toHaveLength(1);
-    expect(result.failed[0].productId).toBe('10');
-    expect(result.failed[0].error).toContain('aborted');
-  });
-
-  // 9. Auth failure -> error returned
-  it('auth failure (401) marks all batch items as failed', async () => {
-    global.fetch = jest.fn().mockResolvedValue(
-      mockResponse(401, { message: 'Invalid consumer key' })
-    );
-
-    const result = await adapter.batchUpdateProductStock(storeUrl, credentials, [
-      { productId: '10', stockStatus: 'instock' },
-      { productId: '20', stockStatus: 'outofstock' },
-    ]);
-
-    expect(result.succeeded).toBe(0);
-    expect(result.failed).toHaveLength(2);
-    expect(result.failed[0].error).toContain('401');
+  it('returns NO requests for an empty update list', () => {
+    expect(adapter.buildStockStatusRequests([])).toEqual([]);
   });
 });
 
-// ===========================================================================
-// updateOrderStatus
-// ===========================================================================
+describe('buildOrderStatusRequest', () => {
+  it('shapes an order-status write', () => {
+    expect(adapter.buildOrderStatusRequest('123', 'completed')).toEqual({
+      op: 'order_status',
+      externalOrderId: '123',
+      status: 'completed',
+    });
+  });
 
-describe('updateOrderStatus', () => {
-  // 10. Success
-  it('returns success on 200 response', async () => {
-    global.fetch = jest.fn().mockResolvedValue(
-      mockResponse(200, { id: 123, status: 'completed' })
+  it('carries the status verbatim for the gate to validate', () => {
+    expect(adapter.buildOrderStatusRequest('9', 'processing').status).toBe(
+      'processing'
     );
+  });
+});
 
-    const result = await adapter.updateOrderStatus(storeUrl, credentials, '123', 'completed');
-
-    expect(result.success).toBe(true);
-    expect(result.error).toBeUndefined();
-
-    // Verify URL and body
-    const callUrl = (global.fetch as jest.Mock).mock.calls[0][0];
-    expect(callUrl).toContain('/wp-json/wc/v3/orders/123');
-    const callOpts = (global.fetch as jest.Mock).mock.calls[0][1];
-    expect(JSON.parse(callOpts.body)).toEqual({ status: 'completed' });
+describe('the write surface is closed', () => {
+  it('the adapter no longer exposes methods that perform I/O', () => {
+    // These two were the entire write surface toward the live store. Their
+    // absence is the structural guarantee this lane exists to create.
+    const surface = adapter as unknown as Record<string, unknown>;
+    expect(surface.batchUpdateProductStock).toBeUndefined();
+    expect(surface.updateOrderStatus).toBeUndefined();
   });
 
-  // 11. Timeout
-  it('returns error on timeout', async () => {
-    const timeoutError = new Error('The operation was aborted');
-    timeoutError.name = 'AbortError';
-
-    global.fetch = jest.fn().mockRejectedValue(timeoutError);
-
-    const result = await adapter.updateOrderStatus(storeUrl, credentials, '123', 'completed');
-
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('aborted');
-  });
-
-  // 12. 429 retry with Retry-After header (P1 coverage gap)
-  it('retries once on 429 with Retry-After header', async () => {
-    jest.useFakeTimers();
-    try {
-      const fetchMock = jest
-        .fn()
-        .mockResolvedValueOnce(
-          mockResponse(429, { message: 'Rate limited' }, { 'Retry-After': '1' })
-        )
-        .mockResolvedValueOnce(
-          mockResponse(200, { id: 123, status: 'completed' })
-        );
-      global.fetch = fetchMock;
-
-      const promise = adapter.updateOrderStatus(
-        storeUrl,
-        credentials,
-        '123',
-        'completed'
-      );
-
-      // Advance through the 1-second Retry-After wait
-      await jest.advanceTimersByTimeAsync(1100);
-
-      const result = await promise;
-
-      expect(result.success).toBe(true);
-      // Also verify it's a PUT, not a POST
-      expect((global.fetch as jest.Mock).mock.calls[0][1].method).toBe('PUT');
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
-  // 13. 429 retry fails a second time (P1 coverage gap)
-  it('returns error when 429 retry also fails', async () => {
-    jest.useFakeTimers();
-    try {
-      const fetchMock = jest
-        .fn()
-        .mockResolvedValueOnce(
-          mockResponse(429, { message: 'Rate limited' }, { 'Retry-After': '1' })
-        )
-        .mockResolvedValueOnce(
-          mockResponse(
-            429,
-            { message: 'Still rate limited' },
-            { 'Retry-After': '1' }
-          )
-        );
-      global.fetch = fetchMock;
-
-      const promise = adapter.updateOrderStatus(
-        storeUrl,
-        credentials,
-        '123',
-        'completed'
-      );
-
-      await jest.advanceTimersByTimeAsync(1100);
-
-      const result = await promise;
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain('429');
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-    } finally {
-      jest.useRealTimers();
-    }
+  it('the builders take no credential and no store URL', () => {
+    // If either signature ever grows one, the adapter has become able to address
+    // a store again — that is the regression this asserts against.
+    expect(adapter.buildStockStatusRequests).toHaveLength(1);
+    expect(adapter.buildOrderStatusRequest).toHaveLength(2);
   });
 });

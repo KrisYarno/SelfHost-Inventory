@@ -125,24 +125,37 @@ export const POST = apiHandler(async (
     result.failed.length === 0
   ) {
     try {
-      const integration = await prisma.integration.findUnique({
-        where: { id: result.integrationId },
-        select: { fulfillmentPushEnabled: true },
-      });
+      // LANE 6: the `if (integration.fulfillmentPushEnabled)` check that used to
+      // live HERE is gone — deliberately.
+      //
+      // It was the ONLY thing standing between this route and a live order-status
+      // write, no test asserted it, and deleting this one line passed CI green.
+      // That is the exact hazard the owner named. The flag is now checked INSIDE
+      // egress.pushOrderStatus, from a fresh DB read, alongside the master switch,
+      // the capability allowlist, the write credential, and the kill switch — and
+      // it cannot be forgotten by a call site, because no call site owns it.
+      //
+      // Amendment 7: full order totals decide completed vs processing.
+      const totalQuantity = result.totalQuantity ?? 0;
+      const totalFulfilled = result.totalFulfilled ?? 0;
+      const wcStatus =
+        totalFulfilled >= totalQuantity ? 'completed' : 'processing';
 
-      if (integration?.fulfillmentPushEnabled) {
-        // Amendment 7: Use full order totals for completed check
-        const totalQuantity = result.totalQuantity ?? 0;
-        const totalFulfilled = result.totalFulfilled ?? 0;
-        const wcStatus = totalFulfilled >= totalQuantity ? 'completed' : 'processing';
+      const pushResult = await pushOrderStatusToExternal(
+        result.integrationId,
+        result.externalId,
+        wcStatus
+      );
 
-        const pushResult = await pushOrderStatusToExternal(
-          result.integrationId,
-          result.externalId,
-          wcStatus
-        );
-
-        if (!pushResult.success) {
+      if (!pushResult.success) {
+        // A BLOCKED push is the expected steady state in production (the owner
+        // ships with order-status writes off). Log it as information, not as an
+        // error, so a normal deploy does not look like a fault.
+        if (pushResult.blockedReason) {
+          console.log(
+            `Order-status push not sent for order ${params.orderId}: ${pushResult.blockedReason}`
+          );
+        } else {
           console.error(
             `Fulfillment push failed for order ${params.orderId}:`,
             pushResult.error

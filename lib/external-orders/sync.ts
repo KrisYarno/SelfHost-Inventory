@@ -1,6 +1,7 @@
 import prisma from "@/lib/prisma";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
-import { decryptOrNull, hostFromStoreUrl, upsertOrderWithItems } from "@/lib/external-orders/shared";
+import { upsertOrderWithItems } from "@/lib/external-orders/shared";
+import { platformRead } from "@/lib/platforms/egress";
 import { recordIngestion } from "@/lib/change-tracking";
 import type { PlatformType } from "@/lib/platforms/core/types";
 
@@ -76,9 +77,12 @@ function parseShopifyLinkHeader(link: string | null): string | null {
   return null;
 }
 
+/**
+ * Lane 6: reads go through `platformRead`, which resolves the READ credential and
+ * pins the origin. This function no longer touches fetch or a credential.
+ */
 async function fetchShopifyOrders(params: {
-  shopDomain: string;
-  accessToken: string;
+  integrationId: string;
   since: Date;
   maxOrders: number;
 }): Promise<any[]> {
@@ -88,12 +92,10 @@ async function fetchShopifyOrders(params: {
   const results: any[] = [];
 
   while (results.length < params.maxOrders) {
-    const url = new URL(`https://${params.shopDomain}/admin/api/${apiVersion}/orders.json`);
-    url.searchParams.set("status", "any");
-    url.searchParams.set("limit", String(limit));
-    url.searchParams.set(
-      "fields",
-      [
+    const query: Record<string, string> = {
+      status: "any",
+      limit: String(limit),
+      fields: [
         "id",
         "name",
         "order_number",
@@ -106,23 +108,20 @@ async function fetchShopifyOrders(params: {
         "cancelled_at",
         "customer",
         "line_items",
-      ].join(",")
-    );
+      ].join(","),
+    };
     if (pageInfo) {
-      url.searchParams.set("page_info", pageInfo);
+      query.page_info = pageInfo;
     } else {
-      url.searchParams.set("updated_at_min", params.since.toISOString());
-      url.searchParams.set("order", "updated_at asc");
+      query.updated_at_min = params.since.toISOString();
+      query.order = "updated_at asc";
     }
 
-    const resp = await fetch(url.toString(), {
-      method: "GET",
-      headers: {
-        "X-Shopify-Access-Token": params.accessToken,
-        "Content-Type": "application/json",
-      },
-      cache: "no-store",
-    });
+    const resp = await platformRead(
+      params.integrationId,
+      `/admin/api/${apiVersion}/orders.json`,
+      query
+    );
 
     if (!resp.ok) {
       const body = await resp.text();
@@ -142,10 +141,11 @@ async function fetchShopifyOrders(params: {
   return results.slice(0, params.maxOrders);
 }
 
+/**
+ * Lane 6: reads go through `platformRead` (READ credential, origin-pinned).
+ */
 async function fetchWooOrders(params: {
-  baseUrl: string;
-  consumerKey: string;
-  consumerSecret: string;
+  integrationId: string;
   since: Date;
   maxOrders: number;
 }): Promise<any[]> {
@@ -153,32 +153,22 @@ async function fetchWooOrders(params: {
   let page = 1;
   const results: any[] = [];
 
-  const auth = Buffer.from(`${params.consumerKey}:${params.consumerSecret}`).toString("base64");
-
   while (results.length < params.maxOrders) {
-    const url = new URL("/wp-json/wc/v3/orders", params.baseUrl);
-    url.searchParams.set("per_page", String(perPage));
-    url.searchParams.set("page", String(page));
-    url.searchParams.set("orderby", "modified");
-    url.searchParams.set("order", "asc");
-    url.searchParams.set("modified_after", params.since.toISOString());
-    // CRITICAL: WC ignores the ISO `Z` suffix and interprets `modified_after`
-    // in the shop's local timezone by default, which caused orders to be
-    // silently dropped when the shop TZ was behind UTC. `dates_are_gmt=true`
-    // forces WC to parse the query as UTC, matching what we actually send.
-    url.searchParams.set("dates_are_gmt", "true");
-    // `status=any` ensures checkout-draft, on-hold, and other non-default
-    // statuses flow through — the default is `any` but we set it explicitly
-    // so a future WC default change can't silently narrow our sync window.
-    url.searchParams.set("status", "any");
-
-    const resp = await fetch(url.toString(), {
-      method: "GET",
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/json",
-      },
-      cache: "no-store",
+    const resp = await platformRead(params.integrationId, "/wp-json/wc/v3/orders", {
+      per_page: String(perPage),
+      page: String(page),
+      orderby: "modified",
+      order: "asc",
+      modified_after: params.since.toISOString(),
+      // CRITICAL: WC ignores the ISO `Z` suffix and interprets `modified_after`
+      // in the shop's local timezone by default, which caused orders to be
+      // silently dropped when the shop TZ was behind UTC. `dates_are_gmt=true`
+      // forces WC to parse the query as UTC, matching what we actually send.
+      dates_are_gmt: "true",
+      // `status=any` ensures checkout-draft, on-hold, and other non-default
+      // statuses flow through — the default is `any` but we set it explicitly
+      // so a future WC default change can't silently narrow our sync window.
+      status: "any",
     });
 
     if (!resp.ok) {
@@ -284,29 +274,18 @@ export async function syncIntegrationOrders(
     options.forceFullLookback === true
   );
 
-  const apiKey = decryptOrNull(integration.encryptedApiKey);
-  const apiSecret = decryptOrNull(integration.encryptedApiSecret);
-
+  // Lane 6: credentials are resolved inside egress (READ scope). This module can
+  // no longer see, decrypt, or misuse them.
   let remoteOrders: any[] = [];
   if (platform === "SHOPIFY") {
-    if (!apiKey) {
-      throw new Error("Shopify sync requires Admin API access token (API Key field)");
-    }
-    const shopDomain = hostFromStoreUrl(integration.storeUrl);
     remoteOrders = await fetchShopifyOrders({
-      shopDomain,
-      accessToken: apiKey,
+      integrationId,
       since: sinceDate,
       maxOrders,
     });
   } else if (platform === "WOOCOMMERCE") {
-    if (!apiKey || !apiSecret) {
-      throw new Error("WooCommerce sync requires consumer key + consumer secret");
-    }
     remoteOrders = await fetchWooOrders({
-      baseUrl: integration.storeUrl,
-      consumerKey: apiKey,
-      consumerSecret: apiSecret,
+      integrationId,
       since: sinceDate,
       maxOrders,
     });

@@ -1,4 +1,5 @@
 import type { CatalogRow, CatalogWarning } from '@/types/bulk-map';
+import { platformRead } from '@/lib/platforms/egress';
 import { isBundleType } from './bundle-detection';
 import { parseWoosbIds } from './parse-woosb-ids';
 
@@ -31,35 +32,23 @@ export interface FetchCatalogOptions {
   signal?: AbortSignal;
 }
 
-function authHeader(key: string, secret: string): string {
-  const token = Buffer.from(`${key}:${secret}`).toString('base64');
-  return `Basic ${token}`;
-}
-
-async function timedFetch(url: string, init: RequestInit): Promise<Response> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    return await fetch(url, { ...init, signal: controller.signal, cache: 'no-store' });
-  } finally {
-    clearTimeout(timeout);
-  }
-}
+// Lane 6: `authHeader` and `timedFetch` are GONE. This module used to build its own
+// Basic-auth header from credentials handed in by the route and call fetch directly
+// — the third of three independent "authenticate and call the store" patterns. It
+// now reads through the chokepoint, which resolves the READ credential itself.
 
 async function fetchAllProducts(
-  storeUrl: string,
-  auth: string,
+  integrationId: string,
   warnings: CatalogWarning[],
 ): Promise<RawProduct[]> {
   const out: RawProduct[] = [];
   for (let page = 1; page <= PAGE_CAP; page++) {
-    const url = new URL('/wp-json/wc/v3/products', storeUrl);
-    url.searchParams.set('per_page', String(PER_PAGE));
-    url.searchParams.set('page', String(page));
-    const resp = await timedFetch(url.toString(), {
-      method: 'GET',
-      headers: { Authorization: auth, 'Content-Type': 'application/json' },
-    });
+    const resp = await platformRead(
+      integrationId,
+      '/wp-json/wc/v3/products',
+      { per_page: String(PER_PAGE), page: String(page) },
+      { timeoutMs: REQUEST_TIMEOUT_MS },
+    );
     if (!resp.ok) {
       const body = await resp.text().catch(() => '');
       throw new Error(`WooCommerce products page ${page} failed (${resp.status}): ${body.slice(0, 200)}`);
@@ -76,19 +65,17 @@ async function fetchAllProducts(
 }
 
 async function fetchVariations(
-  storeUrl: string,
-  auth: string,
+  integrationId: string,
   productId: number,
 ): Promise<RawVariation[]> {
   const out: RawVariation[] = [];
   for (let page = 1; page <= PAGE_CAP; page++) {
-    const url = new URL(`/wp-json/wc/v3/products/${productId}/variations`, storeUrl);
-    url.searchParams.set('per_page', String(PER_PAGE));
-    url.searchParams.set('page', String(page));
-    const resp = await timedFetch(url.toString(), {
-      method: 'GET',
-      headers: { Authorization: auth, 'Content-Type': 'application/json' },
-    });
+    const resp = await platformRead(
+      integrationId,
+      `/wp-json/wc/v3/products/${encodeURIComponent(String(productId))}/variations`,
+      { per_page: String(PER_PAGE), page: String(page) },
+      { timeoutMs: REQUEST_TIMEOUT_MS },
+    );
     if (!resp.ok) {
       const body = await resp.text().catch(() => '');
       throw new Error(`variations ${productId} page ${page} failed (${resp.status}): ${body.slice(0, 200)}`);
@@ -128,17 +115,14 @@ function formatVariantTitle(attrs: Array<{ name?: string; option?: string }>): s
 }
 
 export async function fetchWooCatalog(
-  storeUrl: string,
-  consumerKey: string,
-  consumerSecret: string,
+  integrationId: string,
   options: FetchCatalogOptions = {},
 ): Promise<WooCatalogResult> {
   const deadlineMs = options.deadlineMs ?? 45_000;
   const deadline = Date.now() + deadlineMs;
   const warnings: CatalogWarning[] = [];
-  const auth = authHeader(consumerKey, consumerSecret);
 
-  const products = await fetchAllProducts(storeUrl, auth, warnings);
+  const products = await fetchAllProducts(integrationId, warnings);
 
   const simpleRows: CatalogRow[] = [];
   const variableProducts: RawProduct[] = [];
@@ -185,7 +169,7 @@ export async function fetchWooCatalog(
         (err as any).code = 'DEADLINE';
         throw err;
       }
-      return fetchVariations(storeUrl, auth, p.id);
+      return fetchVariations(integrationId, p.id);
     },
   );
 

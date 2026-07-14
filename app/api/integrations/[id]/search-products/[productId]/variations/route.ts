@@ -3,7 +3,7 @@ import { requireApproved, requireCompanyMembership, apiHandler } from '@/lib/api
 import prisma from '@/lib/prisma';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { ExternalProductSearchResult } from '@/types/product-links';
-import { decryptOrNull, hostFromStoreUrl } from '@/lib/external-orders/shared';
+import { platformRead } from '@/lib/platforms/egress';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,64 +12,44 @@ export const dynamic = 'force-dynamic';
 // ---------------------------------------------------------------------------
 
 async function fetchWooVariations(
-  storeUrl: string,
-  consumerKey: string,
-  consumerSecret: string,
+  integrationId: string,
   productId: string,
 ): Promise<{ variations: any[]; parentName: string }> {
-  const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString('base64');
-  const headers = {
-    Authorization: `Basic ${auth}`,
-    'Content-Type': 'application/json',
-  };
+  const encoded = encodeURIComponent(productId);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
+  // Fetch parent product name and variations in parallel, through the chokepoint.
+  const [parentResp, variationsResp] = await Promise.all([
+    platformRead(
+      integrationId,
+      `/wp-json/wc/v3/products/${encoded}`,
+      undefined,
+      { timeoutMs: 10_000 },
+    ),
+    platformRead(
+      integrationId,
+      `/wp-json/wc/v3/products/${encoded}/variations`,
+      { per_page: '100' },
+      { timeoutMs: 10_000 },
+    ),
+  ]);
 
-  try {
-    // Fetch parent product name and variations in parallel
-    const parentUrl = new URL(`/wp-json/wc/v3/products/${productId}`, storeUrl);
-    const variationsUrl = new URL(
-      `/wp-json/wc/v3/products/${productId}/variations`,
-      storeUrl,
+  if (!parentResp.ok) {
+    const body = await parentResp.text().catch(() => '');
+    throw new Error(
+      `WooCommerce API error ${parentResp.status}: ${body.slice(0, 300)}`,
     );
-    variationsUrl.searchParams.set('per_page', '100');
-
-    const [parentResp, variationsResp] = await Promise.all([
-      fetch(parentUrl.toString(), {
-        method: 'GET',
-        headers,
-        signal: controller.signal,
-        cache: 'no-store',
-      }),
-      fetch(variationsUrl.toString(), {
-        method: 'GET',
-        headers,
-        signal: controller.signal,
-        cache: 'no-store',
-      }),
-    ]);
-
-    if (!parentResp.ok) {
-      const body = await parentResp.text().catch(() => '');
-      throw new Error(
-        `WooCommerce API error ${parentResp.status}: ${body.slice(0, 300)}`,
-      );
-    }
-    if (!variationsResp.ok) {
-      const body = await variationsResp.text().catch(() => '');
-      throw new Error(
-        `WooCommerce API error ${variationsResp.status}: ${body.slice(0, 300)}`,
-      );
-    }
-
-    const parent = (await parentResp.json()) as any;
-    const variations = (await variationsResp.json()) as any[];
-
-    return { variations, parentName: parent.name ?? '' };
-  } finally {
-    clearTimeout(timeout);
   }
+  if (!variationsResp.ok) {
+    const body = await variationsResp.text().catch(() => '');
+    throw new Error(
+      `WooCommerce API error ${variationsResp.status}: ${body.slice(0, 300)}`,
+    );
+  }
+
+  const parent = (await parentResp.json()) as any;
+  const variations = (await variationsResp.json()) as any[];
+
+  return { variations, parentName: parent.name ?? '' };
 }
 
 // ---------------------------------------------------------------------------
@@ -77,32 +57,17 @@ async function fetchWooVariations(
 // ---------------------------------------------------------------------------
 
 async function fetchShopifyVariants(
-  shopDomain: string,
-  accessToken: string,
+  integrationId: string,
   productId: string,
 ): Promise<{ variants: any[]; parentName: string }> {
   const apiVersion = process.env.SHOPIFY_API_VERSION || '2025-10';
-  const url = new URL(
-    `https://${shopDomain}/admin/api/${apiVersion}/products/${productId}.json`,
+
+  const resp = await platformRead(
+    integrationId,
+    `/admin/api/${apiVersion}/products/${encodeURIComponent(productId)}.json`,
+    undefined,
+    { timeoutMs: 10_000 },
   );
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
-
-  let resp: Response;
-  try {
-    resp = await fetch(url.toString(), {
-      method: 'GET',
-      headers: {
-        'X-Shopify-Access-Token': accessToken,
-        'Content-Type': 'application/json',
-      },
-      signal: controller.signal,
-      cache: 'no-store',
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
@@ -160,32 +125,13 @@ export const GET = apiHandler(async (
     return NextResponse.json({ error: 'Integration is not active' }, { status: 400 });
   }
 
-  // Decrypt credentials
-  const apiKey = decryptOrNull(integration.encryptedApiKey);
-  const apiSecret = decryptOrNull(integration.encryptedApiSecret);
-
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: 'Integration credentials could not be decrypted' },
-      { status: 500 },
-    );
-  }
-
+  // Lane 6: credentials are resolved inside egress (READ scope).
   let results: ExternalProductSearchResult[];
 
   try {
     if (integration.platform === 'WOOCOMMERCE') {
-      if (!apiSecret) {
-        return NextResponse.json(
-          { error: 'WooCommerce requires both consumer key and consumer secret' },
-          { status: 500 },
-        );
-      }
-
       const { variations, parentName } = await fetchWooVariations(
-        integration.storeUrl,
-        apiKey,
-        apiSecret,
+        integrationId,
         productId,
       );
 
@@ -201,11 +147,8 @@ export const GET = apiHandler(async (
         type: 'variation',
       }));
     } else if (integration.platform === 'SHOPIFY') {
-      const shopDomain = hostFromStoreUrl(integration.storeUrl);
-
       const { variants, parentName } = await fetchShopifyVariants(
-        shopDomain,
-        apiKey,
+        integrationId,
         productId,
       );
 

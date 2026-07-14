@@ -5,7 +5,12 @@
 /**
  * Tests for the stock sync engine (lib/external-orders/stock-sync.ts).
  *
- * Mocks Prisma + adapter to verify:
+ * LANE 6: the adapter no longer performs I/O. stock-sync now COMPUTES the stock
+ * statuses and hands them to `egress.pushStockStatus`, which owns the gate. These
+ * tests therefore mock egress and assert on the UPDATES stock-sync computed —
+ * which is the logic that actually lives in this module.
+ *
+ * Mocks Prisma + egress to verify:
  *   - happy path, disabled integration, partial failure
  *   - empty ProductLinks, variant grouping
  *   - credential decryption failure
@@ -14,7 +19,8 @@
  *   - lastStockSyncError cleared on full success
  */
 
-import type { PlatformAdapter, BatchStockUpdateResult } from '@/lib/platforms/core/types';
+import type { PlatformAdapter } from '@/lib/platforms/core/types';
+import type { EgressResult } from '@/lib/platforms/egress';
 
 // ---------------------------------------------------------------------------
 // Mocks — jest.mock factories run before module-level `let` bindings,
@@ -34,6 +40,12 @@ jest.mock('@/lib/external-orders/shared', () => {
     getIntegrationClient: (...args: unknown[]) => mockGetIntegrationClient(...args),
   };
 });
+
+const mockPushStockStatus = jest.fn();
+jest.mock('@/lib/platforms/egress', () => ({
+  __esModule: true,
+  pushStockStatus: (...args: unknown[]) => mockPushStockStatus(...args),
+}));
 
 const mockComputeBundleStockStatus = jest.fn();
 jest.mock('@/lib/stock-sync/compute-bundle-status', () => ({
@@ -57,6 +69,7 @@ beforeEach(() => {
   mockReset(mockPrisma);
   mockGetIntegrationClient.mockReset();
   mockComputeBundleStockStatus.mockReset();
+  mockPushStockStatus.mockReset();
 });
 
 /** Build a mock integration record */
@@ -95,20 +108,55 @@ function makeProductLink(opts: {
   };
 }
 
-/** Create a mock adapter with batchUpdateProductStock */
-function makeAdapter(
-  batchResult: BatchStockUpdateResult = { succeeded: 0, failed: [] }
-): PlatformAdapter & { batchUpdateProductStock: jest.Mock } {
+/**
+ * A stand-in adapter. Carries NO write methods — the real one no longer has any.
+ */
+function makeAdapter(): PlatformAdapter {
   return {
     platform: 'WOOCOMMERCE',
     extractWebhookHeaders: jest.fn(),
     verifyWebhook: jest.fn(),
     parseOrderWebhook: jest.fn(),
-    batchUpdateProductStock: jest.fn().mockResolvedValue(batchResult),
-  } as unknown as PlatformAdapter & { batchUpdateProductStock: jest.Mock };
+  } as unknown as PlatformAdapter;
 }
 
-/** Wire up getIntegrationClient to return given adapter + integration */
+/**
+ * Program egress to answer "every requested id came back clean".
+ *
+ * `pushStockStatus` always returns a `partial` fan-out (one result per wire
+ * request) so a partially-blocked push can never be read as a success (REV-2 #5).
+ * The body is WC-shaped (`{update:[{id}]}`) because stock-sync unpacks it to
+ * attribute success/failure per item.
+ */
+function egressOk(...wireIds: string[]): EgressResult {
+  return {
+    status: 'partial',
+    results: [
+      {
+        status: 'sent',
+        httpStatus: 200,
+        body: { update: wireIds.map((id) => ({ id: Number(id) })) },
+      },
+    ],
+  };
+}
+
+/**
+ * A plain "the wire calls went through" fan-out with no per-item body. Used by
+ * the tests whose subject is the UPDATES stock-sync computed, not the counts.
+ */
+function egressSent(count: number): EgressResult {
+  return {
+    status: 'partial',
+    results: Array.from({ length: count }, () => ({
+      status: 'sent' as const,
+      httpStatus: 200,
+      body: {},
+    })),
+  };
+}
+
+/** Wire up getIntegrationClient (metadata only — no credentials, REV-2 #9). */
 function setupClient(
   adapter: PlatformAdapter,
   integrationOverrides: Record<string, unknown> = {}
@@ -116,8 +164,6 @@ function setupClient(
   const integration = makeIntegration(integrationOverrides);
   mockGetIntegrationClient.mockResolvedValue({
     adapter,
-    storeUrl: integration.storeUrl,
-    credentials: { key: 'ck_test', secret: 'cs_test' },
     integration,
   });
 }
@@ -129,7 +175,8 @@ function setupClient(
 describe('syncStockToExternal', () => {
   // 1. Happy path: all products synced, lastStockSyncAt updated
   it('syncs all products and clears lastStockSyncError on success', async () => {
-    const adapter = makeAdapter({ succeeded: 2, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressOk('10', '20'));
     setupClient(adapter);
 
     // First call: single-product links (isBundle:false). Second call: bundle links (isBundle:true).
@@ -147,8 +194,8 @@ describe('syncStockToExternal', () => {
     expect(result.failed).toBe(0);
     expect(result.errors).toHaveLength(0);
 
-    // Verify adapter was called
-    expect(adapter.batchUpdateProductStock).toHaveBeenCalledTimes(1);
+    // Verify egress was called
+    expect(mockPushStockStatus).toHaveBeenCalledTimes(1);
 
     // Verify integration was updated with cleared error
     expect(mockPrisma.integration.update).toHaveBeenCalledWith(
@@ -163,6 +210,7 @@ describe('syncStockToExternal', () => {
   // 2. Integration disabled: returns early, no API calls
   it('returns early when stockSyncEnabled is false', async () => {
     const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(0));
     setupClient(adapter, { stockSyncEnabled: false });
 
     const result = await syncStockToExternal('int-1');
@@ -170,16 +218,29 @@ describe('syncStockToExternal', () => {
     expect(result.synced).toBe(0);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].error).toContain('disabled');
-    expect(adapter.batchUpdateProductStock).not.toHaveBeenCalled();
+    expect(mockPushStockStatus).not.toHaveBeenCalled();
     expect(mockPrisma.productLink.findMany).not.toHaveBeenCalled();
   });
 
   // 3. Partial failure: some products fail, others succeed, lastStockSyncError set
   it('records partial failure with lastStockSyncError set', async () => {
-    const adapter = makeAdapter({
-      succeeded: 1,
-      failed: [{ productId: '20', error: 'Product not found' }],
-    });
+    const adapter = makeAdapter();
+    // WC accepted product 10 and rejected product 20 in the SAME batch response.
+    mockPushStockStatus.mockResolvedValue({
+      status: 'partial',
+      results: [
+        {
+          status: 'sent',
+          httpStatus: 200,
+          body: {
+            update: [
+              { id: 10 },
+              { id: 20, error: { message: 'Product not found' } },
+            ],
+          },
+        },
+      ],
+    } as EgressResult);
     setupClient(adapter);
 
     mockPrisma.productLink.findMany
@@ -209,6 +270,7 @@ describe('syncStockToExternal', () => {
   // 4. No ProductLinks: empty result, no API calls
   it('handles zero ProductLinks gracefully', async () => {
     const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(0));
     setupClient(adapter);
 
     // Both single and bundle queries return empty
@@ -222,7 +284,7 @@ describe('syncStockToExternal', () => {
     expect(result.synced).toBe(0);
     expect(result.failed).toBe(0);
     expect(result.errors).toHaveLength(0);
-    expect(adapter.batchUpdateProductStock).not.toHaveBeenCalled();
+    expect(mockPushStockStatus).not.toHaveBeenCalled();
 
     // Should still update lastStockSyncAt
     expect(mockPrisma.integration.update).toHaveBeenCalledWith(
@@ -236,8 +298,9 @@ describe('syncStockToExternal', () => {
   });
 
   // 5. Variant products: grouped by parent, uses variation endpoint
-  it('passes variant updates with variantId to adapter', async () => {
-    const adapter = makeAdapter({ succeeded: 3, failed: [] });
+  it('passes variation updates with externalVariationId to egress', async () => {
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(3));
     setupClient(adapter);
 
     mockPrisma.productLink.findMany
@@ -261,14 +324,14 @@ describe('syncStockToExternal', () => {
 
     expect(result.synced).toBe(3);
 
-    // Check adapter was called with correct updates including variantId
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    // Check the updates stock-sync computed carry the variation ids
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(3);
 
-    const variantUpdates = updates.filter((u: any) => u.variantId);
+    const variantUpdates = updates.filter((u: any) => u.externalVariationId);
     expect(variantUpdates).toHaveLength(2);
-    expect(variantUpdates[0].variantId).toBe('101');
-    expect(variantUpdates[1].variantId).toBe('102');
+    expect(variantUpdates[0].externalVariationId).toBe('101');
+    expect(variantUpdates[1].externalVariationId).toBe('102');
   });
 
   // 6. Credential decryption failure: throws, no API calls
@@ -285,7 +348,8 @@ describe('syncStockToExternal', () => {
 
   // 7. syncLocationId set: only counts stock from that location
   it('filters stock by syncLocationId when set', async () => {
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter, { syncLocationId: 2 });
 
     mockPrisma.productLink.findMany
@@ -305,9 +369,9 @@ describe('syncStockToExternal', () => {
     await syncStockToExternal('int-1');
 
     // Should only count stock from location 2 (quantity=5, which is > 0 -> instock)
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(1);
-    expect(updates[0].stockStatus).toBe('instock');
+    expect(updates[0].inStock).toBe(true);
   });
 
   // 7b. syncLocationId with zero stock at target (P1 coverage gap)
@@ -315,7 +379,8 @@ describe('syncStockToExternal', () => {
   // the sync location has zero, so we must push outofstock. If this test were
   // missing, a regression that fell back to summing all locations would ship.
   it('pushes outofstock when syncLocationId target has zero stock (other locations positive)', async () => {
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter, { syncLocationId: 2 });
 
     mockPrisma.productLink.findMany
@@ -334,14 +399,15 @@ describe('syncStockToExternal', () => {
 
     await syncStockToExternal('int-1');
 
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(1);
-    expect(updates[0].stockStatus).toBe('outofstock');
+    expect(updates[0].inStock).toBe(false);
   });
 
   // 7c. syncLocationId points to a location that has no row at all
   it('pushes outofstock when syncLocationId target has no product_locations row', async () => {
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter, { syncLocationId: 99 }); // non-existent location
 
     mockPrisma.productLink.findMany
@@ -359,14 +425,15 @@ describe('syncStockToExternal', () => {
 
     await syncStockToExternal('int-1');
 
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(1);
-    expect(updates[0].stockStatus).toBe('outofstock');
+    expect(updates[0].inStock).toBe(false);
   });
 
   // 8. syncLocationId null: sums all locations
   it('sums all location quantities when syncLocationId is null', async () => {
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter, { syncLocationId: null });
 
     mockPrisma.productLink.findMany
@@ -386,15 +453,16 @@ describe('syncStockToExternal', () => {
     await syncStockToExternal('int-1');
 
     // Should sum all: 10 + 20 + 30 = 60, which is > 0 -> instock
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(1);
-    expect(updates[0].stockStatus).toBe('instock');
+    expect(updates[0].inStock).toBe(true);
   });
 
   // 9. Stock > 0 -> instock, stock = 0 -> outofstock (Amendment 11)
   // The stock-sync engine now derives stockStatus directly from total quantity.
   it('maps stock > 0 to instock and stock = 0 to outofstock', async () => {
-    const adapter = makeAdapter({ succeeded: 2, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(2));
     setupClient(adapter);
 
     mockPrisma.productLink.findMany
@@ -407,18 +475,18 @@ describe('syncStockToExternal', () => {
 
     await syncStockToExternal('int-1');
 
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     // Product with stock 290 -> "instock"
-    expect(updates.find((u: any) => u.productId === '10').stockStatus).toBe('instock');
+    expect(updates.find((u: any) => u.externalProductId === '10').inStock).toBe(true);
     // Product with stock 0 -> "outofstock"
-    expect(updates.find((u: any) => u.productId === '20').stockStatus).toBe('outofstock');
+    expect(updates.find((u: any) => u.externalProductId === '20').inStock).toBe(false);
   });
 
   // 10. Adapter throws an Error: catch block stores error on integration
-  it('handles adapter.batchUpdateProductStock throwing an Error', async () => {
+  it('handles egress.pushStockStatus throwing an Error', async () => {
     const adapter = makeAdapter();
     // Make the adapter throw instead of returning gracefully
-    adapter.batchUpdateProductStock.mockRejectedValue(
+    mockPushStockStatus.mockRejectedValue(
       new Error('Connection refused')
     );
     setupClient(adapter);
@@ -456,7 +524,8 @@ describe('syncStockToExternal', () => {
 
   // 11. Updates lastStockSyncError to null on full success
   it('clears lastStockSyncError when all products succeed', async () => {
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter, { lastStockSyncError: 'previous error' });
 
     mockPrisma.productLink.findMany
@@ -479,7 +548,8 @@ describe('syncStockToExternal', () => {
 
   // 12. Bundle statuses are included in the push updates alongside single-product links
   it('includes bundle statuses in the push updates', async () => {
-    const adapter = makeAdapter({ succeeded: 2, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(2));
     setupClient(adapter);
 
     // Single-product link
@@ -500,14 +570,14 @@ describe('syncStockToExternal', () => {
     expect(result.synced).toBe(2);
 
     // Adapter should receive both the single-product update AND the bundle update
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(2);
 
-    const singleUpdate = updates.find((u: any) => u.productId === '10');
-    expect(singleUpdate?.stockStatus).toBe('instock');
+    const singleUpdate = updates.find((u: any) => u.externalProductId === '10');
+    expect(singleUpdate?.inStock).toBe(true);
 
-    const bundleUpdate = updates.find((u: any) => u.productId === '99');
-    expect(bundleUpdate?.stockStatus).toBe('outofstock');
+    const bundleUpdate = updates.find((u: any) => u.externalProductId === '99');
+    expect(bundleUpdate?.inStock).toBe(false);
 
     // computeBundleStockStatus was called with the correct productLinkId and syncLocationId
     expect(mockComputeBundleStockStatus).toHaveBeenCalledWith('bl-1', null);
@@ -516,7 +586,8 @@ describe('syncStockToExternal', () => {
   // 13. Bundle orphan warnings are logged but do not block the push
   it('logs orphan warnings for bundles with deleted components but still pushes', async () => {
     const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter);
 
     mockPrisma.productLink.findMany
@@ -534,10 +605,10 @@ describe('syncStockToExternal', () => {
     await syncStockToExternal('int-1');
 
     // Bundle is still pushed as outofstock
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(1);
-    expect(updates[0].productId).toBe('200');
-    expect(updates[0].stockStatus).toBe('outofstock');
+    expect(updates[0].externalProductId).toBe('200');
+    expect(updates[0].inStock).toBe(false);
 
     // Orphan warning is emitted to console
     expect(consoleSpy).toHaveBeenCalledWith(

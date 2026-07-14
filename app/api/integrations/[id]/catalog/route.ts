@@ -6,7 +6,6 @@ import {
 } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
-import { decryptOrNull } from '@/lib/external-orders/shared';
 import { fetchWooCatalog } from '@/lib/platforms/woocommerce/fetch-catalog';
 import type { CatalogResponse, CatalogRow, CatalogWarning } from '@/types/bulk-map';
 
@@ -44,19 +43,13 @@ export const GET = apiHandler(async (
     );
   }
 
-  const apiKey = decryptOrNull(integration.encryptedApiKey);
-  const apiSecret = decryptOrNull(integration.encryptedApiSecret);
-  if (!apiKey || !apiSecret) {
-    return NextResponse.json(
-      { error: 'Integration credentials could not be decrypted' },
-      { status: 500 },
-    );
-  }
-
+  // Lane 6: credentials are resolved inside egress (READ scope). This route no
+  // longer decrypts anything, and the catalog fetch it triggers is physically
+  // incapable of writing to the store.
   let rawRows: CatalogRow[];
   let warnings: CatalogWarning[];
   try {
-    const result = await fetchWooCatalog(integration.storeUrl, apiKey, apiSecret, {
+    const result = await fetchWooCatalog(integrationId, {
       deadlineMs: 45_000,
     });
     rawRows = result.rows;

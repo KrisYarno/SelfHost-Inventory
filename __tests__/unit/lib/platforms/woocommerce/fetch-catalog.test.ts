@@ -1,12 +1,24 @@
 // @jest-environment node
+
+/**
+ * LANE 6: fetch-catalog no longer calls fetch, and no longer takes a storeUrl or
+ * credentials. It reads through `egress.platformRead`, which resolves the READ
+ * credential and pins the origin — so a catalog fetch is now physically incapable
+ * of writing to the store. These tests therefore queue responses on platformRead.
+ */
+
+const mockPlatformRead = jest.fn();
+jest.mock('@/lib/platforms/egress', () => ({
+  __esModule: true,
+  platformRead: (...args: unknown[]) => mockPlatformRead(...args),
+}));
+
 import { fetchWooCatalog } from '@/lib/platforms/woocommerce/fetch-catalog';
 
-const STORE = 'https://store.example.com';
-const KEY = 'ck_x';
-const SECRET = 'cs_x';
+const INTEGRATION_ID = 'int-1';
 
 function mockResponseQueue(queue: Array<{ status: number; body: unknown }>) {
-  const fetchMock = jest.fn(async () => {
+  mockPlatformRead.mockImplementation(async () => {
     const next = queue.shift();
     if (!next) throw new Error('no more queued responses');
     return {
@@ -16,18 +28,17 @@ function mockResponseQueue(queue: Array<{ status: number; body: unknown }>) {
       text: async () => JSON.stringify(next.body),
     } as Response;
   });
-  global.fetch = fetchMock as unknown as typeof fetch;
-  return fetchMock;
+  return mockPlatformRead;
 }
 
 describe('fetchWooCatalog', () => {
   beforeEach(() => {
-    jest.resetAllMocks();
+    mockPlatformRead.mockReset();
   });
 
   it('returns empty rows for an empty store', async () => {
     mockResponseQueue([{ status: 200, body: [] }]);
-    const out = await fetchWooCatalog(STORE, KEY, SECRET);
+    const out = await fetchWooCatalog(INTEGRATION_ID);
     expect(out.rows).toEqual([]);
     expect(out.warnings).toEqual([]);
   });
@@ -43,7 +54,7 @@ describe('fetchWooCatalog', () => {
       },
       { status: 200, body: [] }, // page 2 returns empty -> stop
     ]);
-    const out = await fetchWooCatalog(STORE, KEY, SECRET);
+    const out = await fetchWooCatalog(INTEGRATION_ID);
     expect(out.rows).toHaveLength(2);
     expect(out.rows[0]).toMatchObject({
       externalProductId: '1',
@@ -69,7 +80,7 @@ describe('fetchWooCatalog', () => {
         ],
       },
     ]);
-    const out = await fetchWooCatalog(STORE, KEY, SECRET);
+    const out = await fetchWooCatalog(INTEGRATION_ID);
     expect(out.rows).toHaveLength(2);
     expect(out.rows.map((r) => r.externalVariantId)).toEqual(['101', '102']);
     expect(out.rows[0]).toMatchObject({
@@ -88,7 +99,7 @@ describe('fetchWooCatalog', () => {
       { status: 200, body: [] },
       { status: 500, body: { message: 'boom' } },
     ]);
-    const out = await fetchWooCatalog(STORE, KEY, SECRET);
+    const out = await fetchWooCatalog(INTEGRATION_ID);
     expect(out.rows).toEqual([]);
     expect(out.warnings).toHaveLength(1);
     expect(out.warnings[0]).toMatchObject({
@@ -108,7 +119,7 @@ describe('fetchWooCatalog', () => {
     mockResponseQueue(
       Array.from({ length: 105 }, () => ({ status: 200, body: fullPage })),
     );
-    const out = await fetchWooCatalog(STORE, KEY, SECRET);
+    const out = await fetchWooCatalog(INTEGRATION_ID);
     expect(out.rows).toHaveLength(100 * 100);
     expect(out.warnings).toContainEqual(
       expect.objectContaining({ kind: 'page-cap-reached' }),
@@ -132,7 +143,7 @@ describe('fetchWooCatalog', () => {
     // worker tick. With deadlineMs: 0, deadline = Date.now() and the worker's
     // Date.now() > deadline check is flaky inside a single ms tick — mocked
     // fetch can resolve before the clock advances. -1 is unambiguously past.
-    const out = await fetchWooCatalog(STORE, KEY, SECRET, { deadlineMs: -1 });
+    const out = await fetchWooCatalog(INTEGRATION_ID, { deadlineMs: -1 });
     const timeoutWarnings = out.warnings.filter((w) => w.kind === 'timeout-skipped');
     expect(timeoutWarnings.length).toBeGreaterThan(0);
   });
@@ -156,7 +167,7 @@ describe('fetchWooCatalog', () => {
       },
       { status: 200, body: [] },
     ]);
-    const out = await fetchWooCatalog(STORE, KEY, SECRET);
+    const out = await fetchWooCatalog(INTEGRATION_ID);
     expect(out.rows).toHaveLength(1);
     const row = out.rows[0];
     expect(row.isBundleCandidate).toBe(true);
@@ -175,7 +186,7 @@ describe('fetchWooCatalog', () => {
       },
       { status: 200, body: [] },
     ]);
-    const out = await fetchWooCatalog(STORE, KEY, SECRET);
+    const out = await fetchWooCatalog(INTEGRATION_ID);
     expect(out.rows[0].isBundleCandidate).toBe(true);
     expect(out.rows[0].wcBundledItems).toBeUndefined();
   });

@@ -92,27 +92,18 @@ export interface NormalizedOrder {
 }
 
 /**
- * Result of a batch stock update operation.
- * P1-7: `variantId` is populated when the failed row is a variation, so
- * callers can disambiguate which product/variant failed without having to
- * re-parse the original request batch.
- */
-export interface BatchStockUpdateResult {
-  succeeded: number;
-  failed: Array<{ productId: string; variantId?: string; error: string }>;
-}
-
-/**
- * Result of an order status update operation
- */
-export interface OrderStatusUpdateResult {
-  success: boolean;
-  error?: string;
-}
-
-/**
- * Platform adapter interface
- * Each platform (Shopify, WooCommerce) must implement this interface
+ * Platform adapter interface — INBOUND ONLY.
+ *
+ * Lane 6: `batchUpdateProductStock` and `updateOrderStatus` have been REMOVED
+ * from this interface. They took `(storeUrl, credentials, ...)` and issued the
+ * HTTP request themselves, which meant every adapter — present and future — was
+ * a write surface, and any code holding an adapter could reach the live store.
+ *
+ * Writes now exist in exactly two functions, in one module:
+ *   lib/platforms/egress -> pushStockStatus() / pushOrderStatus()
+ *
+ * A platform adapter's job is to UNDERSTAND the platform (parse its webhooks,
+ * verify its signatures, shape its requests). It is not to talk to it.
  */
 export interface PlatformAdapter {
   /** Platform identifier */
@@ -145,28 +136,4 @@ export interface PlatformAdapter {
    * @throws Error if parsing fails
    */
   parseOrderWebhook(rawBody: string): NormalizedOrder;
-
-  // Write methods (optional — not all platforms support writes)
-
-  /**
-   * Batch-update product stock status on the external platform.
-   * Amendment 11: pushes stock_status ("instock" | "outofstock") only, never
-   * manage_stock or stock_quantity.
-   * Amendment 6: splits updates into simple products and per-parent variation groups.
-   */
-  batchUpdateProductStock?(
-    storeUrl: string,
-    credentials: { key: string; secret: string },
-    updates: Array<{ productId: string; variantId?: string; stockStatus: 'instock' | 'outofstock' }>
-  ): Promise<BatchStockUpdateResult>;
-
-  /**
-   * Update an order's status on the external platform.
-   */
-  updateOrderStatus?(
-    storeUrl: string,
-    credentials: { key: string; secret: string },
-    orderId: string,
-    status: string
-  ): Promise<OrderStatusUpdateResult>;
 }

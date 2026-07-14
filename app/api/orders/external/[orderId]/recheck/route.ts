@@ -2,28 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler, requireCSRF, requireCompanyMembership } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
-import {
-  decryptOrNull,
-  hostFromStoreUrl,
-  upsertOrderWithItems,
-} from "@/lib/external-orders/shared";
+import { upsertOrderWithItems } from "@/lib/external-orders/shared";
+import { platformRead } from "@/lib/platforms/egress";
 import { recordChange } from "@/lib/change-tracking";
 import type { PlatformType } from "@/lib/platforms/core/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-async function fetchShopifyOrder(shopDomain: string, accessToken: string, externalId: string) {
+// Lane 6: both recheck fetches go through the chokepoint (READ credential,
+// origin-pinned, redirect-refusing). Neither can mutate the order it is checking.
+
+async function fetchShopifyOrder(integrationId: string, externalId: string) {
   const apiVersion = process.env.SHOPIFY_API_VERSION || "2025-10";
-  const url = `https://${shopDomain}/admin/api/${apiVersion}/orders/${externalId}.json`;
-  const resp = await fetch(url, {
-    method: "GET",
-    headers: {
-      "X-Shopify-Access-Token": accessToken,
-      "Content-Type": "application/json",
-    },
-    cache: "no-store",
-  });
+  const resp = await platformRead(
+    integrationId,
+    `/admin/api/${apiVersion}/orders/${encodeURIComponent(externalId)}.json`
+  );
   if (!resp.ok) {
     const body = await resp.text();
     throw new Error(`Shopify API error ${resp.status}: ${body.slice(0, 200)}`);
@@ -33,17 +28,11 @@ async function fetchShopifyOrder(shopDomain: string, accessToken: string, extern
   return data.order;
 }
 
-async function fetchWooOrder(baseUrl: string, consumerKey: string, consumerSecret: string, externalId: string) {
-  const url = new URL(`/wp-json/wc/v3/orders/${externalId}`, baseUrl);
-  const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString("base64");
-  const resp = await fetch(url.toString(), {
-    method: "GET",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/json",
-    },
-    cache: "no-store",
-  });
+async function fetchWooOrder(integrationId: string, externalId: string) {
+  const resp = await platformRead(
+    integrationId,
+    `/wp-json/wc/v3/orders/${encodeURIComponent(externalId)}`
+  );
   if (!resp.ok) {
     const body = await resp.text();
     throw new Error(`WooCommerce API error ${resp.status}: ${body.slice(0, 200)}`);
@@ -75,21 +64,12 @@ export const POST = apiHandler(async (
   await requireCompanyMembership(user.id, order.companyId, user.isAdmin);
 
   const platform = order.integration.platform as PlatformType;
-  const apiKey = decryptOrNull(order.integration.encryptedApiKey);
-  const apiSecret = decryptOrNull(order.integration.encryptedApiSecret);
 
   let remoteOrder: any;
   if (platform === "SHOPIFY") {
-    if (!apiKey) {
-      return NextResponse.json({ error: "Missing Shopify Admin API token" }, { status: 400 });
-    }
-    const shopDomain = hostFromStoreUrl(order.integration.storeUrl);
-    remoteOrder = await fetchShopifyOrder(shopDomain, apiKey, order.externalId);
+    remoteOrder = await fetchShopifyOrder(order.integration.id, order.externalId);
   } else if (platform === "WOOCOMMERCE") {
-    if (!apiKey || !apiSecret) {
-      return NextResponse.json({ error: "Missing WooCommerce API credentials" }, { status: 400 });
-    }
-    remoteOrder = await fetchWooOrder(order.integration.storeUrl, apiKey, apiSecret, order.externalId);
+    remoteOrder = await fetchWooOrder(order.integration.id, order.externalId);
   } else {
     return NextResponse.json({ error: "Unsupported platform" }, { status: 400 });
   }
