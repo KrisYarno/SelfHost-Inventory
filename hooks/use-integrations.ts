@@ -35,15 +35,38 @@ export interface Integration {
   company: {
     name: string;
   };
+  /**
+   * Lane 6 (R-E8): credential PRESENCE only. The API never ships key material —
+   * these booleans are derived server-side so the UI can say "write key on file"
+   * / "no read key yet" without the ciphertext crossing the wire.
+   */
+  credentials?: {
+    hasWriteCredential: boolean;
+    hasReadCredential: boolean;
+    hasWebhookSecret: boolean;
+  };
 }
 
+/**
+ * Lane 6 (R-E8): credentials are now two explicit pairs.
+ *
+ *   write* — the write-capable key. ONLY the two egress write functions can ever
+ *            resolve it. Absent => every platform write blocks.
+ *   read*  — a Woo READ-permission key. Used by every read path, which is
+ *            therefore physically incapable of mutating the store.
+ *
+ * On edit, an empty string means "leave unchanged" (the server only re-encrypts
+ * truthy values), which is why these are plain strings rather than optionals.
+ */
 export interface IntegrationFormData {
   companyId: string;
   platform: "SHOPIFY" | "WOOCOMMERCE";
   name: string;
   storeUrl: string;
-  apiKey: string;
-  apiSecret: string;
+  writeKey: string;
+  writeSecret: string;
+  readKey: string;
+  readSecret: string;
   webhookSecret: string;
 }
 

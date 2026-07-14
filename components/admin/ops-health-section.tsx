@@ -22,10 +22,13 @@ import { RebuildHistoryTable } from "@/components/admin/rebuild-history-table";
 import {
   useOpsHealth,
   useTriggerRebuild,
+  useSetPlatformWriteKillSwitch,
   type OpsHealthResponse,
   type AttentionItem,
   type RebuildJobHealth,
+  type PlatformWritesHealth,
 } from "@/hooks/use-admin";
+import { ShieldAlert, ShieldCheck, ShieldX } from "lucide-react";
 
 // Triage-first ops health (spec §11 D-L1/D-L4/D-L7): verdict strip -> needs-attention
 // list -> row-based workspaces separated by dividers (never a card mosaic) ->
@@ -284,6 +287,14 @@ export function OpsHealthSection() {
             })()
           )}
 
+          {/* Platform writes — posture tile + the emergency stop (R-E9) */}
+          <SectionHeading Icon={ShieldAlert}>Platform writes</SectionHeading>
+          {data.platformWrites.status === "unavailable" ? (
+            <HealthRow tone="warning" Icon={AlertTriangle} status="Unavailable" title="Platform-write posture could not be read." />
+          ) : (
+            <PlatformWritesRow health={data.platformWrites.data} />
+          )}
+
           {/* Analytics rebuild — current-health rows + Run-now on the job row */}
           <SectionHeading Icon={DatabaseZap}>Analytics rebuild</SectionHeading>
           {data.rebuild.status === "unavailable" ? (
@@ -313,6 +324,87 @@ export function OpsHealthSection() {
 
 function BackupLink() {
   return <LinkAction href="/admin/backup" label="Backups" />;
+}
+
+/**
+ * Platform-write posture + the emergency stop (R-E9).
+ *
+ * The tile copy is the operator language from DESIGN.md ("Platform writes: OFF" /
+ * "DRY RUN" / "ON — stock status only"; the invalid-env red state reads "OFF
+ * (configuration not understood)"). The "Block all platform writes now" control
+ * flips the kill switch instantly, no redeploy — and when it is engaged, a
+ * prominent lift control appears.
+ */
+function PlatformWritesRow({ health }: { health: PlatformWritesHealth }) {
+  const setKill = useSetPlatformWriteKillSwitch();
+
+  // Tone: red when the config is broken; also red when writes are ON (that is
+  // the state the owner most wants to notice on a live store). Kill-switch
+  // engaged is a deliberate, safe state → neutral. Off/dry-run → positive.
+  const tone: StatusTone = health.invalidEnv
+    ? "negative"
+    : health.effective === "on"
+      ? "warning"
+      : health.killSwitchEngaged
+        ? "neutral"
+        : "positive";
+  const Icon = health.invalidEnv
+    ? ShieldX
+    : health.effective === "on"
+      ? ShieldAlert
+      : ShieldCheck;
+  const status = health.invalidEnv
+    ? "Misconfigured"
+    : health.effective === "on"
+      ? "ON"
+      : health.effective === "dry-run"
+        ? "Dry run"
+        : "Off";
+
+  async function toggle(engage: boolean) {
+    try {
+      await setKill.mutateAsync(engage);
+      toast.success(engage ? "Platform writes blocked" : "Emergency stop lifted");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not update the emergency stop");
+    }
+  }
+
+  const action = health.killSwitchEngaged ? (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={setKill.isPending}
+      onClick={() => toggle(false)}
+    >
+      {setKill.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />}
+      Lift emergency stop
+    </Button>
+  ) : (
+    <Button
+      size="sm"
+      variant="destructive"
+      disabled={setKill.isPending}
+      onClick={() => toggle(true)}
+    >
+      {setKill.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldX className="mr-2 h-4 w-4" />}
+      Block all platform writes now
+    </Button>
+  );
+
+  const detail = health.killSwitchEngaged
+    ? "Emergency stop is engaged — every platform write is blocked."
+    : health.invalidEnv
+      ? `Configuration not understood (${health.invalidReasons.join(", ")}). Writes are off.`
+      : health.effective === "on"
+        ? `Writes are enabled for: ${health.capabilities.join(", ") || "no capabilities"}.`
+        : health.effective === "dry-run"
+          ? "Writes are logged but never sent."
+          : "No platform writes will be sent.";
+
+  return (
+    <HealthRow tone={tone} Icon={Icon} status={status} title={health.label} detail={detail} action={action} />
+  );
 }
 
 function LinkAction({ href, label }: { href: string; label: string }) {

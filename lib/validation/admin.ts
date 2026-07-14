@@ -57,6 +57,11 @@ export const SystemSettingsSchema = z.object({
   weeklyReportsEnabled: z.boolean().optional(),
   analyticsRebuildEnabled: z.boolean().optional(),
   lowStockDefaultThreshold: z.number().int().min(0).max(1_000_000).optional(),
+  // Lane 6 (R-E9, codex #24): the runtime emergency stop. WITHOUT this line the
+  // settings route validates against this allowlist and silently STRIPS the key,
+  // so the admin "Block all platform writes now" control would no-op. `true`
+  // blocks every platform write; it can only ever RESTRICT (egress ANDs it in).
+  platformWritesKillSwitch: z.boolean().optional(),
 });
 
 // PATCH /api/admin/products/thresholds — bulk minimum-quantity updates.

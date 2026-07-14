@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { listBackups } from "@/lib/backup/list";
+import { getPostureView } from "@/lib/platforms/egress";
 import type {
   Sub,
   IntegrationHealth,
@@ -12,6 +13,7 @@ import type {
   RebuildHealth,
   AttentionItem,
   OpsHealthResponse,
+  PlatformWritesHealth,
 } from "@/hooks/use-admin";
 
 export const dynamic = "force-dynamic";
@@ -209,21 +211,37 @@ function toSub<T>(r: PromiseSettledResult<T>, code: string): Sub<T> {
     : { status: "unavailable", errorCode: code };
 }
 
+/** Lane 6: the effective platform-write posture for the ops dashboard tile. */
+async function loadPlatformWrites(): Promise<PlatformWritesHealth> {
+  const view = await getPostureView();
+  return {
+    effective: view.effective,
+    capabilities: view.capabilities,
+    killSwitchEngaged: view.killSwitchEngaged,
+    invalidEnv: view.invalidEnv,
+    invalidReasons: view.invalidReasons,
+    label: view.label,
+  };
+}
+
 export const GET = apiHandler(async () => {
   await requireAdmin();
   const now = Date.now();
 
-  const [integrationsR, backupsR, pendingR, rebuildR] = await Promise.allSettled([
-    loadIntegrations(now),
-    loadBackups(now),
-    loadPendingReviews(),
-    loadRebuild(now),
-  ]);
+  const [integrationsR, backupsR, pendingR, rebuildR, platformWritesR] =
+    await Promise.allSettled([
+      loadIntegrations(now),
+      loadBackups(now),
+      loadPendingReviews(),
+      loadRebuild(now),
+      loadPlatformWrites(),
+    ]);
 
   const integrations = toSub(integrationsR, "INTEGRATIONS_UNAVAILABLE");
   const backups = toSub(backupsR, "BACKUPS_UNAVAILABLE");
   const pendingReviews = toSub(pendingR, "PENDING_REVIEWS_UNAVAILABLE");
   const rebuild = toSub(rebuildR, "REBUILD_UNAVAILABLE");
+  const platformWrites = toSub(platformWritesR, "PLATFORM_WRITES_UNAVAILABLE");
 
   const attention: AttentionItem[] = [];
 
@@ -320,6 +338,28 @@ export const GET = apiHandler(async () => {
     attention.push({ severity: "warning", system: "Analytics rebuild", message: "Rebuild status unavailable", href: "/admin/settings" });
   }
 
+  // Platform writes: an env we could NOT parse is a real red flag — writes fell
+  // closed to off, and the operator's intent did not take effect (codex #16). The
+  // emergency stop being engaged is surfaced as info (it is a deliberate act).
+  if (platformWrites.status === "ok") {
+    const p = platformWrites.data;
+    if (p.invalidEnv) {
+      attention.push({
+        severity: "negative",
+        system: "Platform writes",
+        message: `Platform-write config not understood (${p.invalidReasons.join(", ")}); writes are OFF.`,
+        href: "/admin/settings",
+      });
+    }
+  } else {
+    attention.push({
+      severity: "warning",
+      system: "Platform writes",
+      message: "Platform-write posture unavailable",
+      href: "/admin/settings",
+    });
+  }
+
   // Severity-then-insertion order (negative before warning); insertion is already recency-ish per system.
   attention.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "negative" ? -1 : 1));
 
@@ -329,5 +369,13 @@ export const GET = apiHandler(async () => {
       ? "degraded"
       : "ok";
 
-  return NextResponse.json({ verdict, attention, integrations, backups, pendingReviews, rebuild } satisfies OpsHealthResponse);
+  return NextResponse.json({
+    verdict,
+    attention,
+    integrations,
+    backups,
+    pendingReviews,
+    rebuild,
+    platformWrites,
+  } satisfies OpsHealthResponse);
 });

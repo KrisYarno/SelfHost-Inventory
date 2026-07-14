@@ -30,6 +30,11 @@ export const GET = apiHandler(async () => {
   const analyticsRebuildSetting = await prisma.systemSetting.findUnique({
     where: { key: "analyticsRebuildEnabled" },
   });
+  // Lane 6 (R-E9): the emergency stop's current state, so the admin control
+  // renders the true position.
+  const killSwitchSetting = await prisma.systemSetting.findUnique({
+    where: { key: "platformWritesKillSwitch" },
+  });
   // Resolved default (fallback 10 when unset) — the matrix header input edits it.
   const lowStockDefaultThreshold = await getLowStockDefault();
 
@@ -37,6 +42,7 @@ export const GET = apiHandler(async () => {
     locations,
     weeklyReportsEnabled: weeklyReportsSetting?.value === "true",
     analyticsRebuildEnabled: analyticsRebuildSetting?.value === "true",
+    platformWritesKillSwitch: killSwitchSetting?.value === "true",
     lowStockDefaultThreshold,
   });
 });
@@ -47,8 +53,12 @@ export const POST = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = await request.json();
-  const { weeklyReportsEnabled, analyticsRebuildEnabled, lowStockDefaultThreshold } =
-    SystemSettingsSchema.parse(body);
+  const {
+    weeklyReportsEnabled,
+    analyticsRebuildEnabled,
+    lowStockDefaultThreshold,
+    platformWritesKillSwitch,
+  } = SystemSettingsSchema.parse(body);
 
   // Only the keys actually present in the request are touched (ER-B9).
   const provided: Array<{ key: string; to: string }> = [];
@@ -60,6 +70,13 @@ export const POST = apiHandler(async (request: NextRequest) => {
   }
   if (lowStockDefaultThreshold !== undefined) {
     provided.push({ key: "lowStockDefaultThreshold", to: String(lowStockDefaultThreshold) });
+  }
+  if (platformWritesKillSwitch !== undefined) {
+    // "true" engages the emergency stop; egress reads this key on every attempt.
+    provided.push({
+      key: "platformWritesKillSwitch",
+      to: String(platformWritesKillSwitch),
+    });
   }
 
   // Nothing provided => nothing to write and no change to record (ER-B9).

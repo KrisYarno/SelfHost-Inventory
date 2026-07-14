@@ -181,6 +181,20 @@ export interface AttentionItem {
   href: string;
 }
 
+/**
+ * Lane 6: the effective platform-write posture, for the ops dashboard tile and
+ * the emergency-stop control. Read from the SAME source as the egress gate, so
+ * the tile can never disagree with what a write actually does.
+ */
+export interface PlatformWritesHealth {
+  effective: "off" | "dry-run" | "on";
+  capabilities: string[];
+  killSwitchEngaged: boolean;
+  invalidEnv: boolean;
+  invalidReasons: string[];
+  label: string;
+}
+
 export interface OpsHealthResponse {
   verdict: "ok" | "degraded" | "failing";
   attention: AttentionItem[];
@@ -188,6 +202,7 @@ export interface OpsHealthResponse {
   backups: Sub<BackupsHealth>;
   pendingReviews: Sub<PendingReviewsHealth>;
   rebuild: Sub<RebuildHealth>;
+  platformWrites: Sub<PlatformWritesHealth>;
 }
 
 /** Ops-health aggregate. 60s poll (slower than the 30s dashboard route). */
@@ -468,6 +483,8 @@ export interface SystemSettings {
   locations: SettingsLocation[];
   weeklyReportsEnabled: boolean;
   analyticsRebuildEnabled: boolean;
+  /** Lane 6 (R-E9): the runtime emergency stop for all platform writes. */
+  platformWritesKillSwitch: boolean;
   /** System-wide default low-stock threshold products inherit when NULL (R-L13). */
   lowStockDefaultThreshold: number;
 }
@@ -514,6 +531,32 @@ export function useToggleSetting(field: "weeklyReportsEnabled" | "analyticsRebui
       queryClient.setQueryData<SystemSettings>(["admin", "settings"], (prev) =>
         prev ? { ...prev, [field]: enabled } : prev,
       );
+    },
+  });
+}
+
+/**
+ * Lane 6 (R-E9): the emergency stop. `engage(true)` blocks EVERY platform write
+ * instantly, with no redeploy; `engage(false)` lifts the stop. It can only ever
+ * make the posture more restrictive — egress ANDs it with everything else.
+ *
+ * Invalidates both the settings cache and the ops-health cache so the posture
+ * tile reflects the new state on the next poll (or immediately on refetch).
+ */
+export function useSetPlatformWriteKillSwitch() {
+  const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
+  return useMutation({
+    mutationFn: (engaged: boolean) =>
+      mutateJSON(
+        "/api/admin/settings",
+        "POST",
+        { platformWritesKillSwitch: engaged },
+        csrfToken,
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "settings"] });
+      queryClient.invalidateQueries({ queryKey: ["admin", "ops-health"] });
     },
   });
 }

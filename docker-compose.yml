@@ -63,6 +63,13 @@ services:
       SHOPIFY_WEBHOOK_SECRET: ${SHOPIFY_WEBHOOK_SECRET}
       WOOCOMMERCE_WEBHOOK_SECRET: ${WOOCOMMERCE_WEBHOOK_SECRET}
       WEBHOOK_DEBUG_HEADERS: ${WEBHOOK_DEBUG_HEADERS:-0}
+      # Lane 6 egress lockdown. Default-deny: unset means OFF (the correct prod
+      # value). "off" | "dry-run" | "on" ONLY — any other value fails closed to OFF
+      # and turns healthz red. PLATFORM_WRITE_CAPABILITIES is a comma list of the
+      # capabilities allowed when writes are on (e.g. "stock_status"); one bad
+      # token empties the whole allowlist. Both are byte-exact.
+      PLATFORM_WRITES: ${PLATFORM_WRITES:-off}
+      PLATFORM_WRITE_CAPABILITIES: ${PLATFORM_WRITE_CAPABILITIES:-}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
