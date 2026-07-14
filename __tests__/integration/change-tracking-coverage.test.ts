@@ -214,12 +214,6 @@ const PERMANENT_EXEMPT: Exemption[] = [
       "dispatch rows (plumbing, not business state — R-D16 telemetry class)",
   },
   {
-    path: "app/api/auth/resend-notification/route.ts",
-    reason:
-      "mutates no persistent state (currently a stub that also sends nothing — " +
-      "registered in deferred-work.md)",
-  },
-  {
     path: "app/api/admin/integrations/[id]/price-sync/route.ts",
     reason:
       "trigger-only: delegates to lib/external-orders/price-sync, which records " +
