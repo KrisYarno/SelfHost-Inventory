@@ -20,7 +20,16 @@ const customJestConfig = {
   // The MCP sidecar (mcp/) is an ESM package with its own jest project
   // (mcp/jest.config.mjs, run via `npm run test:mcp`). Keep it out of the root
   // run so each suite executes exactly once under `test:ci` (plan P-M6).
-  testPathIgnorePatterns: ["/node_modules/", "/.next/", "/.claude/", "<rootDir>/mcp/"],
+  testPathIgnorePatterns: [
+    "/node_modules/",
+    "/.next/",
+    "/.claude/",
+    "<rootDir>/mcp/",
+    // Lane 6: support harness + bypass fixtures are imported BY tests, they are
+    // not test suites themselves (jest would otherwise fail them as "no tests").
+    "<rootDir>/__tests__/support/",
+    "<rootDir>/__tests__/fixtures/",
+  ],
   collectCoverageFrom: [
     "app/**/*.{js,jsx,ts,tsx}",
     "components/**/*.{js,jsx,ts,tsx}",
