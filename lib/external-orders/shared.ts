@@ -2,11 +2,11 @@ import { decryptValue, isEncrypted } from "@/lib/encryption";
 import { deriveExternalOrderMeta } from "@/lib/external-orders/meta";
 import { AppError } from "@/lib/error-handling";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
+import { pushOrderStatus } from "@/lib/platforms/egress";
 import prisma from "@/lib/prisma";
 import { diff } from "@/lib/change-tracking";
 import type { ChangeDiff } from "@/lib/change-tracking";
 import type { PlatformType, PlatformAdapter, NormalizedOrder } from "@/lib/platforms/core/types";
-import type { Integration } from "@prisma/client";
 import type { Prisma, PrismaClient } from "@prisma/client";
 
 // ---------------------------------------------------------------------------
@@ -571,48 +571,70 @@ export async function upsertOrderWithItems(
 // getIntegrationClient — Amendment 1
 // ---------------------------------------------------------------------------
 
+/**
+ * NON-SECRET integration metadata (REV-2 #9).
+ *
+ * This type is deliberately a hand-written allowlist rather than the Prisma
+ * `Integration` row. Returning the row handed every caller `encryptedWrite*` /
+ * `encryptedRead*` / `webhookSecret` and the `storeUrl` needed to build a
+ * request — i.e. everything required to talk to the store, from anywhere in the
+ * codebase. There is now no way to get credentials or a store origin out of this
+ * function; both are private to `lib/platforms/egress/`.
+ *
+ * If you find yourself wanting to add `storeUrl` back here: you want
+ * `platformRead` / `pushStockStatus` / `pushOrderStatus` instead.
+ */
+export type IntegrationMeta = {
+  id: string;
+  companyId: string;
+  platform: PlatformType;
+  name: string;
+  isActive: boolean;
+  stockSyncEnabled: boolean;
+  fulfillmentPushEnabled: boolean;
+  syncLocationId: number | null;
+};
+
 export type IntegrationClient = {
   adapter: PlatformAdapter;
-  storeUrl: string;
-  credentials: { key: string; secret: string };
-  integration: Integration;
+  integration: IntegrationMeta;
 };
 
 /**
- * Load an integration, decrypt its credentials, and return a ready-to-use
- * client bundle.  Used by stock sync, fulfillment push, and manual sync.
+ * Load an integration and its adapter. Returns NON-SECRET metadata only — no
+ * credentials, no storeUrl, no encrypted fields (REV-2 #9).
+ *
+ * Every path that needs to actually TALK to the platform goes through
+ * `lib/platforms/egress`, which owns credential resolution privately.
  */
 export async function getIntegrationClient(
   integrationId: string
 ): Promise<IntegrationClient> {
   const integration = await prisma.integration.findUnique({
     where: { id: integrationId },
+    select: {
+      id: true,
+      companyId: true,
+      platform: true,
+      name: true,
+      isActive: true,
+      stockSyncEnabled: true,
+      fulfillmentPushEnabled: true,
+      syncLocationId: true,
+    },
   });
   if (!integration || !integration.isActive) {
-    throw new AppError(
-      "Integration not found or inactive",
-      "NOT_FOUND",
-      404
-    );
+    throw new AppError("Integration not found or inactive", "NOT_FOUND", 404);
   }
 
   const adapter = getPlatformAdapter(integration.platform as PlatformType);
 
-  const key = decryptOrNull(integration.encryptedApiKey);
-  const secret = decryptOrNull(integration.encryptedApiSecret);
-  if (!key || !secret) {
-    throw new AppError(
-      "Failed to decrypt integration credentials",
-      "CREDENTIAL_ERROR",
-      500
-    );
-  }
-
   return {
     adapter,
-    storeUrl: integration.storeUrl,
-    credentials: { key, secret },
-    integration,
+    integration: {
+      ...integration,
+      platform: integration.platform as PlatformType,
+    },
   };
 }
 
@@ -622,24 +644,52 @@ export async function getIntegrationClient(
 
 /**
  * Push an order status update to an external platform.
- * Uses getIntegrationClient + adapter.updateOrderStatus().
- * Best-effort: callers should wrap in try/catch and never let failures
- * block local operations.
+ *
+ * LANE 6: this function no longer decides anything. It is a thin adapter onto
+ * `egress.pushOrderStatus`, which owns the gate.
+ *
+ * It used to resolve credentials and call the adapter directly, with NO internal
+ * gate — the `fulfillmentPushEnabled` check lived only in its two callers, and no
+ * test asserted it. Deleting the `if` in `fulfill/route.ts` passed CI green and
+ * wrote to the live store. Callers can no longer make that mistake, because there
+ * is nothing left here to bypass: the gate is inside egress and is re-evaluated
+ * from a fresh DB read immediately before every wire attempt.
+ *
+ * Still best-effort for callers (never throws) — but "best-effort" now means the
+ * push may be BLOCKED, which is a first-class, audited outcome rather than a
+ * silent success.
  */
 export async function pushOrderStatusToExternal(
   integrationId: string,
   externalOrderId: string,
-  status: string
-): Promise<{ success: boolean; error?: string }> {
-  const { adapter, storeUrl, credentials } =
-    await getIntegrationClient(integrationId);
+  status: "processing" | "completed"
+): Promise<{ success: boolean; error?: string; blockedReason?: string }> {
+  const result = await pushOrderStatus(integrationId, externalOrderId, status);
 
-  if (!adapter.updateOrderStatus) {
-    return {
-      success: false,
-      error: `Adapter for ${adapter.platform} does not support updateOrderStatus`,
-    };
+  switch (result.status) {
+    case "sent":
+      return { success: true };
+    case "blocked":
+      return {
+        success: false,
+        blockedReason: result.reason,
+        error: `Order-status push blocked: ${result.reason}`,
+      };
+    case "dry_run":
+      return {
+        success: false,
+        error: `Order-status push was a dry run (nothing sent): ${result.wouldSend.method} ${result.wouldSend.url}`,
+      };
+    case "failed":
+      return {
+        success: false,
+        error: `Order-status push failed: ${result.reason}${
+          result.httpStatus ? ` (HTTP ${result.httpStatus})` : ""
+        }`,
+      };
+    case "partial":
+      // pushOrderStatus never fans out; this is unreachable and typed only so the
+      // switch stays exhaustive if EgressResult grows.
+      return { success: false, error: "Unexpected partial result" };
   }
-
-  return adapter.updateOrderStatus(storeUrl, credentials, externalOrderId, status);
 }

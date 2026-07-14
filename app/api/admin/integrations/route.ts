@@ -4,39 +4,31 @@ import prisma from "@/lib/prisma";
 import { recordChange } from "@/lib/change-tracking";
 import { encryptValue } from "@/lib/encryption";
 import { CreateIntegrationSchema } from "@/lib/validation/integrations";
+import {
+  PUBLIC_INTEGRATION_SELECT,
+  CREDENTIAL_PRESENCE_SELECT,
+  credentialStatus,
+  toPublicIntegration,
+} from "@/lib/integrations/public-select";
 
 export const dynamic = "force-dynamic";
 
 /**
  * GET /api/admin/integrations
- * List all integrations (admin only)
+ * List all integrations (admin only).
+ *
+ * REV-2 #10: the field set is an explicit ALLOWLIST (PUBLIC_INTEGRATION_SELECT).
+ * Credential material is never selected; only presence BOOLEANS are derived, so
+ * the admin UI can show "write key on file / no read key yet" without the
+ * ciphertext ever crossing the wire.
  */
 export const GET = apiHandler(async (_request: NextRequest) => {
   await requireAdmin();
 
-  // Fetch all integrations with company info
-  const integrations = await prisma.integration.findMany({
+  const rows = await prisma.integration.findMany({
     select: {
-      id: true,
-      companyId: true,
-      platform: true,
-      name: true,
-      storeUrl: true,
-      isActive: true,
-      lastSyncAt: true,
-      createdAt: true,
-      updatedAt: true,
-      stockSyncEnabled: true,
-      fulfillmentPushEnabled: true,
-      lastStockSyncAt: true,
-      lastStockSyncError: true,
-      // R-D2 order-sync health (previously write-only) + the sync lock timestamp
-      // ops-health reads for >5min staleness.
-      lastSyncError: true,
-      syncLockedAt: true,
-      lastWebhookReceivedAt: true,
-      lastWebhookError: true,
-      webhookFailureCount: true,
+      ...PUBLIC_INTEGRATION_SELECT,
+      ...CREDENTIAL_PRESENCE_SELECT,
       company: {
         select: {
           name: true,
@@ -46,6 +38,12 @@ export const GET = apiHandler(async (_request: NextRequest) => {
     },
     orderBy: [{ company: { name: "asc" } }, { name: "asc" }],
   });
+
+  // Built by construction from the allowlist — never by stripping a full row.
+  const integrations = rows.map((row) => ({
+    ...toPublicIntegration(row),
+    credentials: credentialStatus(row),
+  }));
 
   return NextResponse.json({ integrations });
 });
@@ -60,15 +58,17 @@ export const POST = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = await request.json();
-  // Schema trims name/storeUrl/apiKey/apiSecret, enforces the platform enum, and
-  // validates the store URL (same "Invalid store URL" message as before).
+  // Schema trims the identity + credential fields, enforces the platform enum,
+  // and validates the store URL (same "Invalid store URL" message as before).
   const {
     companyId,
     platform,
     name,
     storeUrl: normalizedStoreUrl,
-    apiKey: normalizedApiKey,
-    apiSecret: normalizedApiSecret,
+    writeKey: normalizedWriteKey,
+    writeSecret: normalizedWriteSecret,
+    readKey: normalizedReadKey,
+    readSecret: normalizedReadSecret,
     webhookSecret,
   } = CreateIntegrationSchema.parse(body);
 
@@ -107,9 +107,17 @@ export const POST = apiHandler(async (request: NextRequest) => {
     }
   }
 
-  // Encrypt credentials before storing
-  const encryptedApiKey = encryptValue(normalizedApiKey);
-  const encryptedApiSecret = encryptValue(normalizedApiSecret);
+  // Encrypt credentials before storing (R-E8: two independent pairs).
+  const encryptedWriteKey = encryptValue(normalizedWriteKey);
+  const encryptedWriteSecret = encryptValue(normalizedWriteSecret);
+  // The read pair is optional at create — an absent one falls back to the write
+  // pair for reads (migration grace) and health warns until it is provisioned.
+  const encryptedReadKey = normalizedReadKey
+    ? encryptValue(normalizedReadKey)
+    : null;
+  const encryptedReadSecret = normalizedReadSecret
+    ? encryptValue(normalizedReadSecret)
+    : null;
   const encryptedWebhookSecret =
     typeof resolvedWebhookSecret === "string"
       ? encryptValue(resolvedWebhookSecret)
@@ -125,18 +133,18 @@ export const POST = apiHandler(async (request: NextRequest) => {
         platform,
         name,
         storeUrl: normalizedStoreUrl,
-        encryptedApiKey,
-        encryptedApiSecret,
+        encryptedWriteKey,
+        encryptedWriteSecret,
+        encryptedReadKey,
+        encryptedReadSecret,
         webhookSecret: encryptedWebhookSecret,
         isActive: true,
       },
-      include: {
-        company: {
-          select: {
-            name: true,
-            slug: true,
-          },
-        },
+      // Allowlist select: the created row that leaves this handler provably
+      // cannot carry the credentials we just encrypted (REV-2 #10).
+      select: {
+        ...PUBLIC_INTEGRATION_SELECT,
+        company: { select: { name: true, slug: true } },
       },
     });
 
@@ -153,5 +161,17 @@ export const POST = apiHandler(async (request: NextRequest) => {
     return created;
   });
 
-  return NextResponse.json({ integration }, { status: 201 });
+  return NextResponse.json(
+    {
+      integration: {
+        ...toPublicIntegration(integration),
+        credentials: {
+          hasWriteCredential: true,
+          hasReadCredential: !!encryptedReadKey && !!encryptedReadSecret,
+          hasWebhookSecret: !!encryptedWebhookSecret,
+        },
+      },
+    },
+    { status: 201 }
+  );
 });

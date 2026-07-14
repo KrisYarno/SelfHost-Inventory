@@ -73,8 +73,10 @@ export default function AdminIntegrationsPage() {
     platform: "SHOPIFY",
     name: "",
     storeUrl: "",
-    apiKey: "",
-    apiSecret: "",
+    writeKey: "",
+    writeSecret: "",
+    readKey: "",
+    readSecret: "",
     webhookSecret: "",
   });
   const [submitting, setSubmitting] = useState(false);
@@ -184,8 +186,10 @@ export default function AdminIntegrationsPage() {
       platform: integration.platform,
       name: integration.name,
       storeUrl: integration.storeUrl,
-      apiKey: "",
-      apiSecret: "",
+      writeKey: "",
+      writeSecret: "",
+      readKey: "",
+      readSecret: "",
       webhookSecret: "",
     });
     setIsEditDialogOpen(true);
@@ -197,8 +201,10 @@ export default function AdminIntegrationsPage() {
       platform: "SHOPIFY",
       name: "",
       storeUrl: "",
-      apiKey: "",
-      apiSecret: "",
+      writeKey: "",
+      writeSecret: "",
+      readKey: "",
+      readSecret: "",
       webhookSecret: "",
     });
   };
@@ -506,51 +512,110 @@ export default function AdminIntegrationsPage() {
                       />
                     </div>
 
+                    <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 space-y-1">
+                      <p className="text-sm font-medium">Write credential</p>
+                      <p className="text-xs text-muted-foreground">
+                        The only key that can change anything in your store. Used
+                        exclusively by stock-status and order-status pushes, and only
+                        when the platform-write posture allows them.
+                      </p>
+                    </div>
+
                     <div className="space-y-2">
-                      <label htmlFor="apiKey" className="text-sm font-medium">
+                      <label htmlFor="writeKey" className="text-sm font-medium">
                         {formData.platform === "SHOPIFY"
-                          ? "Admin API Access Token"
-                          : "API Key"}
+                          ? "Admin API Access Token (write)"
+                          : "Write Consumer Key"}
                       </label>
                       <Input
-                        id="apiKey"
+                        id="writeKey"
                         type="password"
-                        value={formData.apiKey}
+                        value={formData.writeKey}
                         onChange={(e) =>
-                          setFormData({ ...formData, apiKey: e.target.value })
+                          setFormData({ ...formData, writeKey: e.target.value })
                         }
                         placeholder={
                           formData.platform === "SHOPIFY"
                             ? "shpat_... (Admin API access token)"
-                            : formData.platform === "WOOCOMMERCE"
-                              ? "ck_... (WooCommerce consumer key)"
-                              : "Enter API key"
+                            : "ck_... (WooCommerce key with Write permission)"
                         }
                         required
                       />
                     </div>
 
                     <div className="space-y-2">
-                      <label htmlFor="apiSecret" className="text-sm font-medium">
+                      <label htmlFor="writeSecret" className="text-sm font-medium">
                         {formData.platform === "SHOPIFY"
-                          ? "API Secret Key"
-                          : "API Secret"}
+                          ? "API Secret Key (write)"
+                          : "Write Consumer Secret"}
                       </label>
                       <Input
-                        id="apiSecret"
+                        id="writeSecret"
                         type="password"
-                        value={formData.apiSecret}
+                        value={formData.writeSecret}
                         onChange={(e) =>
-                          setFormData({ ...formData, apiSecret: e.target.value })
+                          setFormData({ ...formData, writeSecret: e.target.value })
                         }
                         placeholder={
                           formData.platform === "SHOPIFY"
-                            ? "Your app's API secret key (used for webhook HMAC)"
-                            : formData.platform === "WOOCOMMERCE"
-                              ? "cs_... (WooCommerce consumer secret)"
-                              : "Enter API secret"
+                            ? "Your app's API secret key"
+                            : "cs_... (WooCommerce consumer secret)"
                         }
                         required
+                      />
+                    </div>
+
+                    <div className="rounded-md border border-border bg-surface p-3 space-y-1">
+                      <p className="text-sm font-medium">
+                        Read credential{" "}
+                        <span className="text-muted-foreground font-normal">
+                          (recommended)
+                        </span>
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        A <strong>Read</strong>-permission key. Every sync, catalog
+                        fetch, and product search uses this one — so none of them can
+                        alter your store even if something goes wrong. Leave blank to
+                        reuse the write key for reads; a health warning will remind you
+                        until you set it.
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label htmlFor="readKey" className="text-sm font-medium">
+                        {formData.platform === "SHOPIFY"
+                          ? "Admin API Access Token (read-only)"
+                          : "Read Consumer Key"}
+                      </label>
+                      <Input
+                        id="readKey"
+                        type="password"
+                        value={formData.readKey}
+                        onChange={(e) =>
+                          setFormData({ ...formData, readKey: e.target.value })
+                        }
+                        placeholder={
+                          formData.platform === "SHOPIFY"
+                            ? "shpat_... (read-only scopes)"
+                            : "ck_... (WooCommerce key with Read permission)"
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <label htmlFor="readSecret" className="text-sm font-medium">
+                        {formData.platform === "SHOPIFY"
+                          ? "API Secret Key (read-only)"
+                          : "Read Consumer Secret"}
+                      </label>
+                      <Input
+                        id="readSecret"
+                        type="password"
+                        value={formData.readSecret}
+                        onChange={(e) =>
+                          setFormData({ ...formData, readSecret: e.target.value })
+                        }
+                        placeholder="cs_... (paired with the read key)"
                       />
                     </div>
 
@@ -567,15 +632,16 @@ export default function AdminIntegrationsPage() {
                         }
                         placeholder={
                           formData.platform === "SHOPIFY"
-                            ? "Optional (defaults to API Secret)"
+                            ? "Your Shopify webhook signing secret"
                             : "Enter WooCommerce webhook secret"
                         }
                         required={formData.platform === "WOOCOMMERCE"}
                       />
                       <p className="text-xs text-muted-foreground">
-                        {formData.platform === "SHOPIFY"
-                          ? "Used to verify incoming webhooks (Shopify uses your app API Secret by default)."
-                          : "Used to verify incoming webhooks (matches the WooCommerce webhook secret)."}
+                        Used to verify incoming webhooks. This is a{" "}
+                        <strong>separate secret</strong> from the API credentials above
+                        — the app no longer falls back to the API secret for signature
+                        verification.
                       </p>
                     </div>
                   </div>
@@ -978,45 +1044,96 @@ export default function AdminIntegrationsPage() {
                 />
               </div>
 
+              {editingIntegration?.credentials && (
+                <div className="rounded-md border border-border bg-surface p-3 text-xs space-y-1">
+                  <p>
+                    Write key:{" "}
+                    <strong>
+                      {editingIntegration.credentials.hasWriteCredential
+                        ? "on file"
+                        : "NOT SET — all platform writes are blocked"}
+                    </strong>
+                  </p>
+                  <p>
+                    Read key:{" "}
+                    <strong>
+                      {editingIntegration.credentials.hasReadCredential
+                        ? "on file"
+                        : "not set — reads fall back to the write key"}
+                    </strong>
+                  </p>
+                </div>
+              )}
+
               <div className="space-y-2">
-                <label htmlFor="edit-apiKey" className="text-sm font-medium">
+                <label htmlFor="edit-writeKey" className="text-sm font-medium">
                   {formData.platform === "SHOPIFY"
-                    ? "Admin API Access Token"
-                    : "API Key"}
+                    ? "Admin API Access Token (write)"
+                    : "Write Consumer Key"}
                 </label>
                 <Input
-                  id="edit-apiKey"
+                  id="edit-writeKey"
                   type="password"
-                  value={formData.apiKey}
+                  value={formData.writeKey}
                   onChange={(e) =>
-                    setFormData({ ...formData, apiKey: e.target.value })
+                    setFormData({ ...formData, writeKey: e.target.value })
                   }
-                  placeholder={
-                    formData.platform === "SHOPIFY"
-                      ? "Leave blank to keep current token"
-                      : "Leave blank to keep current value"
-                  }
+                  placeholder="Leave blank to keep current value"
                 />
               </div>
 
               <div className="space-y-2">
-                <label htmlFor="edit-apiSecret" className="text-sm font-medium">
+                <label htmlFor="edit-writeSecret" className="text-sm font-medium">
                   {formData.platform === "SHOPIFY"
-                    ? "API Secret Key"
-                    : "API Secret"}
+                    ? "API Secret Key (write)"
+                    : "Write Consumer Secret"}
                 </label>
                 <Input
-                  id="edit-apiSecret"
+                  id="edit-writeSecret"
                   type="password"
-                  value={formData.apiSecret}
+                  value={formData.writeSecret}
                   onChange={(e) =>
-                    setFormData({ ...formData, apiSecret: e.target.value })
+                    setFormData({ ...formData, writeSecret: e.target.value })
                   }
-                  placeholder={
-                    formData.platform === "SHOPIFY"
-                      ? "Leave blank to keep current secret"
-                      : "Leave blank to keep current value"
+                  placeholder="Leave blank to keep current value"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label htmlFor="edit-readKey" className="text-sm font-medium">
+                  {formData.platform === "SHOPIFY"
+                    ? "Admin API Access Token (read-only)"
+                    : "Read Consumer Key"}
+                </label>
+                <Input
+                  id="edit-readKey"
+                  type="password"
+                  value={formData.readKey}
+                  onChange={(e) =>
+                    setFormData({ ...formData, readKey: e.target.value })
                   }
+                  placeholder="Leave blank to keep current value"
+                />
+                <p className="text-xs text-muted-foreground">
+                  A Read-permission key. Setting it makes every sync, catalog fetch,
+                  and search physically incapable of changing your store.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label htmlFor="edit-readSecret" className="text-sm font-medium">
+                  {formData.platform === "SHOPIFY"
+                    ? "API Secret Key (read-only)"
+                    : "Read Consumer Secret"}
+                </label>
+                <Input
+                  id="edit-readSecret"
+                  type="password"
+                  value={formData.readSecret}
+                  onChange={(e) =>
+                    setFormData({ ...formData, readSecret: e.target.value })
+                  }
+                  placeholder="Leave blank to keep current value"
                 />
               </div>
 
@@ -1033,6 +1150,10 @@ export default function AdminIntegrationsPage() {
                   }
                   placeholder="Leave blank to keep current value"
                 />
+                <p className="text-xs text-muted-foreground">
+                  A separate secret from the API credentials — the app no longer falls
+                  back to the API secret to verify webhook signatures.
+                </p>
               </div>
             </div>
             <DialogFooter>

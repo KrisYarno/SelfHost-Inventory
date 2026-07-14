@@ -4,6 +4,12 @@ import prisma from "@/lib/prisma";
 import { recordChange, diff, type ChangeDiff } from "@/lib/change-tracking";
 import { encryptValue } from "@/lib/encryption";
 import { UpdateIntegrationSchema } from "@/lib/validation/integrations";
+import {
+  PUBLIC_INTEGRATION_SELECT,
+  CREDENTIAL_PRESENCE_SELECT,
+  credentialStatus,
+  toPublicIntegration,
+} from "@/lib/integrations/public-select";
 
 // Only these three fields make an edit a "sync config change"; everything else
 // (name, storeUrl, isActive, credentials) is a plain INTEGRATION_UPDATE.
@@ -25,9 +31,15 @@ export const GET = apiHandler(async (
 ) => {
   await requireAdmin();
 
+  // REV-2 #10: allowlist select + build-by-construction. `include` used to pull
+  // the whole row (every encrypted column) and rely on a destructure to drop the
+  // three that existed at the time — which fails open for every column added
+  // since, and Lane 6 adds four.
   const integration = await prisma.integration.findUnique({
     where: { id: params.id },
-    include: {
+    select: {
+      ...PUBLIC_INTEGRATION_SELECT,
+      ...CREDENTIAL_PRESENCE_SELECT,
       company: {
         select: {
           name: true,
@@ -50,11 +62,12 @@ export const GET = apiHandler(async (
     );
   }
 
-  // Don't return encrypted credentials in GET
-  const { encryptedApiKey: _encryptedApiKey, encryptedApiSecret: _encryptedApiSecret, webhookSecret: _webhookSecret, ...safeData } =
-    integration;
-
-  return NextResponse.json({ integration: safeData });
+  return NextResponse.json({
+    integration: {
+      ...toPublicIntegration(integration),
+      credentials: credentialStatus(integration),
+    },
+  });
 });
 
 /**
@@ -76,8 +89,10 @@ export const PUT = apiHandler(async (
   const {
     name,
     storeUrl,
-    apiKey,
-    apiSecret,
+    writeKey,
+    writeSecret,
+    readKey,
+    readSecret,
     webhookSecret,
     isActive,
     stockSyncEnabled,
@@ -85,11 +100,12 @@ export const PUT = apiHandler(async (
     syncLocationId,
   } = UpdateIntegrationSchema.parse(body);
 
-  const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : apiKey;
-  const normalizedApiSecret =
-    typeof apiSecret === "string" ? apiSecret.trim() : apiSecret;
-  const normalizedWebhookSecret =
-    typeof webhookSecret === "string" ? webhookSecret.trim() : webhookSecret;
+  const trim = (v: string | undefined) => (typeof v === "string" ? v.trim() : v);
+  const normalizedWriteKey = trim(writeKey);
+  const normalizedWriteSecret = trim(writeSecret);
+  const normalizedReadKey = trim(readKey);
+  const normalizedReadSecret = trim(readSecret);
+  const normalizedWebhookSecret = trim(webhookSecret);
 
   // Build update data
   const updateData: any = {};
@@ -103,11 +119,17 @@ export const PUT = apiHandler(async (
 
   // Only update encrypted fields if new values are provided (empty string ==
   // "leave unchanged"). A rotation records ONLY that it happened — never values.
-  if (normalizedApiKey) {
-    updateData.encryptedApiKey = encryptValue(normalizedApiKey);
+  if (normalizedWriteKey) {
+    updateData.encryptedWriteKey = encryptValue(normalizedWriteKey);
   }
-  if (normalizedApiSecret) {
-    updateData.encryptedApiSecret = encryptValue(normalizedApiSecret);
+  if (normalizedWriteSecret) {
+    updateData.encryptedWriteSecret = encryptValue(normalizedWriteSecret);
+  }
+  if (normalizedReadKey) {
+    updateData.encryptedReadKey = encryptValue(normalizedReadKey);
+  }
+  if (normalizedReadSecret) {
+    updateData.encryptedReadSecret = encryptValue(normalizedReadSecret);
   }
   if (normalizedWebhookSecret) {
     updateData.webhookSecret = encryptValue(normalizedWebhookSecret);
@@ -155,16 +177,23 @@ export const PUT = apiHandler(async (
 
     // Credential rotations are recorded as denylisted keys — redactDeep collapses
     // each to "[REDACTED]"; no plaintext ever touches the event.
-    if (updateData.encryptedApiKey) changes.apiKey = { from: "[REDACTED]", to: "[REDACTED]" };
-    if (updateData.encryptedApiSecret)
-      changes.apiSecret = { from: "[REDACTED]", to: "[REDACTED]" };
+    if (updateData.encryptedWriteKey)
+      changes.writeKey = { from: "[REDACTED]", to: "[REDACTED]" };
+    if (updateData.encryptedWriteSecret)
+      changes.writeSecret = { from: "[REDACTED]", to: "[REDACTED]" };
+    if (updateData.encryptedReadKey)
+      changes.readKey = { from: "[REDACTED]", to: "[REDACTED]" };
+    if (updateData.encryptedReadSecret)
+      changes.readSecret = { from: "[REDACTED]", to: "[REDACTED]" };
     if (updateData.webhookSecret)
       changes.webhookSecret = { from: "[REDACTED]", to: "[REDACTED]" };
 
     const updated = await tx.integration.update({
       where: { id: params.id },
       data: updateData,
-      include: {
+      select: {
+        ...PUBLIC_INTEGRATION_SELECT,
+        ...CREDENTIAL_PRESENCE_SELECT,
         company: {
           select: {
             name: true,
@@ -193,11 +222,12 @@ export const PUT = apiHandler(async (
     return updated;
   });
 
-  // Don't return encrypted credentials
-  const { encryptedApiKey: _encryptedApiKey, encryptedApiSecret: _encryptedApiSecret, webhookSecret: _whs, ...safeData } =
-    integration;
-
-  return NextResponse.json({ integration: safeData });
+  return NextResponse.json({
+    integration: {
+      ...toPublicIntegration(integration),
+      credentials: credentialStatus(integration),
+    },
+  });
 });
 
 /**

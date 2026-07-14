@@ -490,11 +490,27 @@ export const POST = apiHandler(async (
     }
 });
 
+/**
+ * Resolve the webhook SIGNING secret.
+ *
+ * LANE 6 / REV-2 #11 — THE LANDMINE, DEFUSED. This function used to fall back to
+ * `integration.encryptedApiSecret` for Shopify. Lane 6 renames that column to
+ * `encryptedWriteSecret` (the write-capable API credential). Had the fallback
+ * survived the rename, the STORE-WRITE SECRET would have silently become the
+ * webhook-signing secret — conflating the two most sensitive values in the system
+ * and making the credential split meaningless.
+ *
+ * The API-credential fallback is REMOVED. A dedicated `webhookSecret` (or the
+ * platform's env secret) is now REQUIRED. If neither is present we fail closed:
+ * no secret, no verification, no ingestion — and a health warning names the
+ * integration. That is strictly correct anyway: a webhook-signing secret and an
+ * API credential are different secrets with different lifecycles, and Shopify's
+ * own docs treat them as such.
+ */
 function resolveWebhookSecret(
   integration: {
     platform: string;
     webhookSecret: string | null;
-    encryptedApiSecret: string | null;
   },
   platform: PlatformType
 ): { secret: string; source: string } | null {
@@ -520,38 +536,45 @@ function resolveWebhookSecret(
     }
   };
 
-  // Shopify: webhook HMAC uses the app API secret key; prefer api secret to avoid misconfiguration.
-  if (platform === "SHOPIFY") {
-    // If a Shopify-specific webhook signing secret is configured, use it (allows override when Shopify provides a dedicated signing secret).
-    const configuredWebhookSecret = tryDecryptOrPlain(integration.webhookSecret);
-    if (configuredWebhookSecret)
-      return { secret: normalizeSecret(configuredWebhookSecret), source: "integration.webhookSecret" };
-    const apiSecret = tryDecryptOrPlain(integration.encryptedApiSecret);
-    if (apiSecret) return { secret: normalizeSecret(apiSecret), source: "integration.apiSecret" };
-    if (process.env.SHOPIFY_WEBHOOK_SECRET) return { secret: normalizeSecret(process.env.SHOPIFY_WEBHOOK_SECRET), source: "env.SHOPIFY_WEBHOOK_SECRET" };
-  }
-
-  // Prefer per-integration secret from DB
+  // Prefer the per-integration dedicated signing secret, on BOTH platforms.
   const integrationSecret = tryDecryptOrPlain(integration.webhookSecret);
-  if (integrationSecret) return { secret: integrationSecret, source: "integration.webhookSecret" };
+  if (integrationSecret)
+    return { secret: normalizeSecret(integrationSecret), source: "integration.webhookSecret" };
 
-  // WooCommerce: allow global env secret fallback if not stored per-integration
-  if (platform === "WOOCOMMERCE") {
-    if (process.env.WOOCOMMERCE_WEBHOOK_SECRET)
-      return { secret: process.env.WOOCOMMERCE_WEBHOOK_SECRET, source: "env.WOOCOMMERCE_WEBHOOK_SECRET" };
+  // Platform-scoped env fallback. Still a DEDICATED signing secret — never an API credential.
+  if (platform === "SHOPIFY" && process.env.SHOPIFY_WEBHOOK_SECRET) {
+    return {
+      secret: normalizeSecret(process.env.SHOPIFY_WEBHOOK_SECRET),
+      source: "env.SHOPIFY_WEBHOOK_SECRET",
+    };
+  }
+  if (platform === "WOOCOMMERCE" && process.env.WOOCOMMERCE_WEBHOOK_SECRET) {
+    return {
+      secret: normalizeSecret(process.env.WOOCOMMERCE_WEBHOOK_SECRET),
+      source: "env.WOOCOMMERCE_WEBHOOK_SECRET",
+    };
   }
 
+  // Fail closed. No API-credential fallback (REV-2 #11).
+  console.error(
+    `[webhook] No dedicated webhook signing secret for integration ${integration.platform}. ` +
+      `Set integration.webhookSecret (or the platform env secret). ` +
+      `The API credential is NOT a valid signing secret and is no longer used as one.`
+  );
   return null;
 }
 
+/**
+ * REV-2 #11: the `integration.apiSecret` candidate is REMOVED. Only dedicated
+ * signing secrets are ever tried — the write-capable API credential is not one.
+ */
 function getShopifyCandidateSecretSources(
-  integration: { webhookSecret: string | null; encryptedApiSecret: string | null },
+  integration: { webhookSecret: string | null },
   currentSecret: string
 ): string[] {
   const sources: string[] = [];
   const candidates: Array<{ value: string | null; source: string }> = [
     { value: integration.webhookSecret, source: "integration.webhookSecret" },
-    { value: integration.encryptedApiSecret, source: "integration.apiSecret" },
     { value: process.env.SHOPIFY_WEBHOOK_SECRET ?? null, source: "env.SHOPIFY_WEBHOOK_SECRET" },
   ];
 
@@ -573,16 +596,20 @@ function getShopifyCandidateSecretSources(
   return sources;
 }
 
+/**
+ * REV-2 #11: the `integration.apiSecret` candidate is REMOVED here too. Verifying
+ * a webhook against the store-WRITE credential is exactly the conflation the
+ * credential split exists to prevent.
+ */
 function tryVerifyShopifyWithFallbackSecrets(
   adapter: { verifyWebhook: (rawBody: Buffer, headers: any, secret: string) => any },
   rawBodyBuffer: Buffer,
   webhookHeaders: any,
-  integration: { webhookSecret: string | null; encryptedApiSecret: string | null },
+  integration: { webhookSecret: string | null },
   currentSecret: string
 ): { verification: any; source: string } | null {
   const candidates: Array<{ value: string | null; source: string }> = [
     { value: integration.webhookSecret, source: "integration.webhookSecret" },
-    { value: integration.encryptedApiSecret, source: "integration.apiSecret" },
     { value: process.env.SHOPIFY_WEBHOOK_SECRET ?? null, source: "env.SHOPIFY_WEBHOOK_SECRET" },
   ];
 

@@ -316,9 +316,26 @@ model Integration {
   name      String @db.VarChar(255)
   storeUrl  String @db.VarChar(500)
 
-  encryptedApiKey    String? @db.Text
-  encryptedApiSecret String? @db.Text
-  webhookSecret      String? @db.Text
+  // R-E8 credential split. WooCommerce API keys carry Read / Write / Read-Write
+  // permission — NOT per-endpoint scope — so a write-capable key can write ORDERS.
+  // Splitting the pair is what makes ~95% of the code that touches the platform
+  // physically incapable of writing, regardless of any future bug or AI edit:
+  //
+  //   encryptedRead*  — a Woo READ-permission key. Used by every read path.
+  //   encryptedWrite* — the write-capable pair. Resolvable ONLY by the two egress
+  //                     write functions. Absent => every write blocks with
+  //                     reason "no_write_credential".
+  //
+  // The Write pair is the RENAME of the historical encryptedApiKey/Secret, so no
+  // key has to be re-entered on deploy.
+  encryptedWriteKey    String? @db.Text
+  encryptedWriteSecret String? @db.Text
+  encryptedReadKey     String? @db.Text
+  encryptedReadSecret  String? @db.Text
+
+  // Webhook SIGNING secret. Deliberately separate from the API credentials — see
+  // the REV-2 #11 landmine note in app/api/webhooks/[integrationId]/route.ts.
+  webhookSecret String? @db.Text
 
   isActive   Boolean   @default(true)
   lastSyncAt DateTime?
@@ -351,10 +368,66 @@ model Integration {
   productLinks      ProductLink[]
   salesFacts        ProductSalesFact[]
   webhookDeliveries WebhookDelivery[]
+  writeAttempts     PlatformWriteAttempt[]
 
   @@index([companyId])
   @@index([platform])
   @@map("integrations")
+}
+
+/**
+ * Lane 6 (T2) — the pre-send authorization record for EVERY attempted platform
+ * write: allowed, blocked, or dry-run. A row is COMMITTED before any byte leaves
+ * the process; if it cannot be written, the send is refused (codex #13).
+ *
+ * REV-2 #21: this table deliberately does NOT cascade-delete with Integration —
+ * deleting an integration must never destroy the safety record of what that
+ * integration was used to attempt. The FK is nullable + SetNull, and
+ * integrationLabel/platform are denormalized so a detached row is still legible.
+ *
+ * REV-2 #22: `state` is an explicit machine, not a nullable outcome. A nullable
+ * outcome cannot distinguish "crashed before send" from "crashed after send" —
+ * which is the first question anyone asks after an incident.
+ */
+model PlatformWriteAttempt {
+  id Int @id @default(autoincrement())
+
+  // Nullable + SetNull (REV-2 #21). Never `onDelete: Cascade`.
+  integrationId String?
+  // Denormalized, immutable identity — survives integration deletion.
+  integrationLabel String @db.VarChar(255)
+  platform         String @db.VarChar(32)
+
+  capability String  @db.VarChar(32) // stock_status | order_status
+  method     String  @db.VarChar(8)
+  url        String  @db.VarChar(500)
+  bodyDigest String  @db.Char(64) // sha256 — the body itself is NEVER stored
+  decision   String  @db.VarChar(16) // allow | block | dry_run
+  blockReason String? @db.VarChar(32)
+
+  // authorized | sent | response_received | outcome_unknown | blocked | dry_run
+  state      String @db.VarChar(24)
+  httpStatus Int?
+
+  /** 1 = first attempt, 2 = the single permitted 429 retry (REV-2 #6). */
+  attemptNo Int @default(1)
+
+  /**
+   * The exact config this attempt was authorized under (REV-2 #4). Re-derived
+   * from a fresh read immediately before the wire call; a mismatch aborts the
+   * send rather than letting it go out under a stale authorization.
+   */
+  configFingerprint String @db.Char(64)
+
+  createdAt DateTime @default(now()) @db.DateTime(3)
+  updatedAt DateTime @updatedAt @db.DateTime(3)
+
+  integration Integration? @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([integrationId, createdAt])
+  @@index([state, createdAt])
+  @@map("platform_write_attempts")
 }
 
 enum WebhookDeliveryStatus {
