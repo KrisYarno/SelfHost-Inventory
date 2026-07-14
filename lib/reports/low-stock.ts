@@ -21,9 +21,9 @@
  */
 
 import prisma from "@/lib/prisma";
-import { inventory_logs_logType } from "@prisma/client";
 import { LowStockResponse, LowStockAlert } from "@/types/reports";
 import { getLowStockDefault, effectiveLowStockThreshold } from "@/lib/stock-threshold";
+import { outboundVelocity } from "@/lib/reports/demand";
 
 /**
  * Shared reorder predicate. INCLUSIVE boundary (R-L13); a 0 effective threshold
@@ -72,42 +72,17 @@ export async function getLowStockReport(
     stockMap.set(product.id, totalQuantity);
   });
 
-  // Get activity from last 30 days to calculate usage
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-  // Usage = outbound consumption, which is NOT an internal transfer (Lane 6 /
-  // review M2 / D-T5). Counting the ~7,682 units/yr of TRANSFER movement as usage
-  // shortened every runway and inflated "days until empty" upstream.
-  const recentActivity = await prisma.inventory_logs.findMany({
-    where: {
-      changeTime: { gte: thirtyDaysAgo },
-      delta: { lt: 0 },
-      logType: { not: inventory_logs_logType.TRANSFER },
-    },
-    select: {
-      productId: true,
-      delta: true,
-      changeTime: true,
-    },
-  });
-
-  // Calculate average daily usage per product
-  const usageMap = new Map<number, number>();
-  const productUsage = new Map<number, number[]>();
-
-  recentActivity.forEach((log) => {
-    if (!productUsage.has(log.productId)) {
-      productUsage.set(log.productId, []);
-    }
-    productUsage.get(log.productId)!.push(Math.abs(log.delta));
-  });
-
-  productUsage.forEach((usages, productId) => {
-    const totalUsage = usages.reduce((sum: number, usage: number) => sum + usage, 0);
-    const avgDailyUsage = totalUsage / 30;
-    usageMap.set(productId, avgDailyUsage);
-  });
+  // Usage = the ONE shared units-out velocity (lib/reports/demand.ts): outbound that
+  // is NOT an internal transfer (Lane 6 / review M2 / D-T5 — counting the ~7,682
+  // units/yr of TRANSFER movement as usage shortened every runway), now with the
+  // truthful days-covered denominator + null-when-no-movement semantics (reorder-points
+  // Task 2, a DELIBERATE behavior change from the former flat /30: a product's velocity
+  // divides by the span since its first outbound in the window, not a fixed 30, and a
+  // product with no outbound reports no usage rather than a fabricated 0/day).
+  const velocityMap = await outboundVelocity(
+    products.map((p) => p.id),
+    30,
+  );
 
   // Build low stock alerts
   const alerts: LowStockAlert[] = [];
@@ -119,7 +94,9 @@ export async function getLowStockReport(
     // INCLUSIVE boundary (R-L13); a 0 effective threshold (disabled) never alerts.
     // Out-of-stock (0) stays in this reorder-oriented report as the most critical.
     if (needsReorderAttention(currentStock, productThreshold)) {
-      const avgDailyUsage = usageMap.get(product.id) || 0;
+      // null (no outbound movement) coerces to 0/day here, which the display rounding
+      // below turns into a null daysUntilEmpty — the same "unknown runway" outcome.
+      const avgDailyUsage = velocityMap.get(product.id)?.avgDailyDemand ?? 0;
       // Compute daysUntilEmpty from the SAME rounded figure the report displays
       // (Lane 6 / review M2): the TESA incoherence was 0.0667/day (unrounded) giving
       // 150 days next to a displayed "0.1/day" that implies 100. Round once, use it

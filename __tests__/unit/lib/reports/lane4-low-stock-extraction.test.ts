@@ -93,22 +93,30 @@ describe("getLowStockReport: qty-0 preserved + threshold override", () => {
 });
 
 describe("Lane 6 (review M2 / D-T5): transfers are not usage + display-consistent daysUntilEmpty", () => {
-  it("daysUntilEmpty is computed from the SAME rounded figure it displays (TESA shape)", async () => {
-    // TESA: 10 units on hand, 2 units of outflow over 30 days = 0.0667/day. Displayed
-    // rounded to 0.1/day. daysUntilEmpty must be floor(10 / 0.1) = 100 — reproducible
-    // from the displayed rate — NOT floor(10 / 0.0667) = 150.
-    db.product.findMany.mockResolvedValue([
-      { id: 1, name: "TESA", lowStockThreshold: 20, product_locations: [{ quantity: 10 }] },
-    ] as never);
-    db.systemSetting.findUnique.mockResolvedValue(null as never);
-    db.inventory_logs.findMany.mockResolvedValue([
-      { productId: 1, delta: -2, changeTime: new Date() },
-    ] as never);
+  it("daysUntilEmpty is computed from the SAME rounded figure it displays (days-covered)", async () => {
+    // reorder-points Task 2: usage now divides by DAYS COVERED (span from the first
+    // outbound in the window to now), not a fixed 30. TESA: 10 units on hand, 2 units
+    // of outflow whose first event is 20 days ago => 2/20 = 0.1/day. Displayed 0.1;
+    // daysUntilEmpty = floor(10 / 0.1) = 100 — reproducible from the displayed rate.
+    const now = new Date("2026-07-14T00:00:00.000Z");
+    jest.useFakeTimers();
+    jest.setSystemTime(now);
+    try {
+      db.product.findMany.mockResolvedValue([
+        { id: 1, name: "TESA", lowStockThreshold: 20, product_locations: [{ quantity: 10 }] },
+      ] as never);
+      db.systemSetting.findUnique.mockResolvedValue(null as never);
+      db.inventory_logs.findMany.mockResolvedValue([
+        { productId: 1, delta: -2, changeTime: new Date(now.getTime() - 20 * 86_400_000), reasonCode: null },
+      ] as never);
 
-    const report = await getLowStockReport({});
-    const row = report.alerts.find((a) => a.productId === 1)!;
-    expect(row.averageDailyUsage).toBe(0.1);
-    expect(row.daysUntilEmpty).toBe(100); // NOT 150
+      const report = await getLowStockReport({});
+      const row = report.alerts.find((a) => a.productId === 1)!;
+      expect(row.averageDailyUsage).toBe(0.1);
+      expect(row.daysUntilEmpty).toBe(100);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it("excludes internal TRANSFER movement from the usage query (only counts real consumption)", async () => {

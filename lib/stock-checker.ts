@@ -1,5 +1,4 @@
 import prisma from '@/lib/prisma';
-import { inventory_logs_logType } from '@prisma/client';
 import { emailService, LowStockItem } from '@/lib/email';
 import type { CombinedMinBreach, LocationMinBreach } from '@/types/inventory';
 import {
@@ -7,6 +6,7 @@ import {
   effectiveLowStockThreshold,
   isLowStock,
 } from '@/lib/stock-threshold';
+import { outboundVelocity } from '@/lib/reports/demand';
 
 export interface LowStockProduct {
   id: number;
@@ -206,34 +206,23 @@ export class StockChecker {
   }
 
   /**
-   * Batch the 30-day average daily OUTFLOW for many products in ONE groupBy, keyed
-   * productId -> avgDailyOutflow. Outflow = negative deltas that are NOT internal
-   * transfers (Lane 6 / review M2 / D-T5): a transfer between our own locations is
-   * not consumption, and counting it here (this method drives the low-stock ALERT
-   * EMAILS via checkLowStock) shortened every runway. Products with no outflow rows
-   * are absent from the map (callers treat that as "no usage" -> null days).
+   * Batch the 30-day average daily OUTFLOW for many products via the ONE shared
+   * units-out velocity (lib/reports/demand.ts). Outflow = negative deltas that are NOT
+   * internal transfers (Lane 6 / review M2 / D-T5): a transfer between our own
+   * locations is not consumption, and counting it here (this method drives the
+   * low-stock ALERT EMAILS via checkLowStock) shortened every runway. The shared
+   * definition also brings the truthful days-covered denominator (reorder-points Task 2
+   * — a DELIBERATE change from the former flat /30). Products with no outflow are absent
+   * from the map (callers treat that as "no usage" -> null days).
    */
   private async batchAvgDailyOutflow(productIds: number[]): Promise<Map<number, number>> {
     const map = new Map<number, number>();
     if (productIds.length === 0) return map;
 
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-    const rows = await prisma.inventory_logs.groupBy({
-      by: ['productId'],
-      where: {
-        productId: { in: productIds },
-        changeTime: { gte: thirtyDaysAgo },
-        delta: { lt: 0 }, // Only negative changes (outflow)
-        logType: { not: inventory_logs_logType.TRANSFER }, // exclude internal transfers
-      },
-      _sum: { delta: true },
+    const velocity = await outboundVelocity(productIds, 30);
+    velocity.forEach((demand, id) => {
+      if (demand.avgDailyDemand != null) map.set(id, demand.avgDailyDemand);
     });
-
-    for (const row of rows) {
-      map.set(row.productId, Math.abs(row._sum.delta ?? 0) / 30);
-    }
     return map;
   }
 

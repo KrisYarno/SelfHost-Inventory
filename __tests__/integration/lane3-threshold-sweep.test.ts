@@ -122,14 +122,17 @@ describe("stock-checker preserves the INCLUSIVE at-threshold alert", () => {
     expect(low[0].threshold).toBe(10);
   });
 
-  it("batches the outflow read into ONE groupBy (no per-product N+1)", async () => {
+  it("batches the outflow read into ONE query (no per-product N+1)", async () => {
+    // reorder-points Task 2: the outflow read moved from a bespoke groupBy to the ONE
+    // shared units-out velocity (lib/reports/demand.ts), which reads via a single
+    // findMany. The no-N+1 guarantee is preserved — it is still exactly one query.
     db.product.findMany.mockResolvedValue([
       { id: 1, name: "A", lowStockThreshold: 5, product_locations: [{ quantity: 3 }] },
       { id: 2, name: "B", lowStockThreshold: 5, product_locations: [{ quantity: 4 }] },
     ]);
     await new StockChecker().checkLowStock();
-    expect(db.inventory_logs.groupBy).toHaveBeenCalledTimes(1);
-    expect(db.inventory_logs.findMany).not.toHaveBeenCalled();
+    expect(db.inventory_logs.findMany).toHaveBeenCalledTimes(1);
+    expect(db.inventory_logs.groupBy).not.toHaveBeenCalled();
   });
 });
 

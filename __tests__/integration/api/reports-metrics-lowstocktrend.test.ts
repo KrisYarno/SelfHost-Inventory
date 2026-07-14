@@ -8,7 +8,7 @@ jest.mock("@/lib/prisma", () => ({
   default: {
     product: { count: jest.fn(), findMany: jest.fn() },
     product_locations: { findMany: jest.fn() },
-    inventory_logs: { groupBy: jest.fn(), count: jest.fn() },
+    inventory_logs: { groupBy: jest.fn(), count: jest.fn(), findMany: jest.fn() },
     productStockSnapshot: { groupBy: jest.fn(), aggregate: jest.fn() },
     systemSetting: { findUnique: jest.fn() },
   },
@@ -22,7 +22,7 @@ import prisma from "@/lib/prisma";
 const m = prisma as unknown as {
   product: { count: jest.Mock; findMany: jest.Mock };
   product_locations: { findMany: jest.Mock };
-  inventory_logs: { groupBy: jest.Mock; count: jest.Mock };
+  inventory_logs: { groupBy: jest.Mock; count: jest.Mock; findMany: jest.Mock };
   productStockSnapshot: { groupBy: jest.Mock; aggregate: jest.Mock };
   systemSetting: { findUnique: jest.Mock };
 };
@@ -41,10 +41,22 @@ beforeEach(() => {
   m.product_locations.findMany.mockResolvedValue([]);
   m.inventory_logs.groupBy.mockResolvedValue([]);
   m.inventory_logs.count.mockResolvedValue(0);
+  // The usage-velocity query (lib/reports/demand.ts) reads outbound rows via findMany.
+  m.inventory_logs.findMany.mockResolvedValue([]);
   // Latest snapshot day drives the trend-window floor; default to a fixed day so the
   // bounded groupBy runs. The "no snapshots" case overrides this to a null max.
   m.productStockSnapshot.aggregate.mockResolvedValue({ _max: { dayKey: "2026-06-08" } });
   m.productStockSnapshot.groupBy.mockResolvedValue([]);
+});
+
+test("usage-velocity query excludes internal transfers (live prod bug fix)", async () => {
+  // Before the demand-module migration this route's usage groupBy had `delta < 0` but
+  // NO `logType != TRANSFER` filter, so warehouse transfers inflated usage. Pin the fix.
+  m.inventory_logs.findMany.mockResolvedValue([]);
+  await GET(new NextRequest("http://x/api/reports/metrics"));
+  const where = m.inventory_logs.findMany.mock.calls[0][0].where;
+  expect(where.logType).toEqual({ not: "TRANSFER" });
+  expect(where.delta).toEqual({ lt: 0 });
 });
 
 test("no snapshots => lowStockTrend defaults to {value:0, direction:'stable'} (card never breaks)", async () => {

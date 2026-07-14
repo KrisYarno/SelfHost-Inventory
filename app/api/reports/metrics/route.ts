@@ -17,6 +17,7 @@ import {
   effectiveLowStockThreshold,
   isLowStock,
 } from "@/lib/stock-threshold";
+import { outboundVelocity } from "@/lib/reports/demand";
 
 export const dynamic = "force-dynamic";
 
@@ -92,24 +93,18 @@ export const GET = apiHandler(async (request: NextRequest) => {
     },
   });
 
-  // NEW: Query for average daily usage per product (last 30 days outbound)
-  const thirtyDaysAgo = subDays(new Date(), 30);
-  const usageByProduct = await prisma.inventory_logs.groupBy({
-    by: ["productId"],
-    where: {
-      changeTime: { gte: thirtyDaysAgo },
-      delta: { lt: 0 }, // Only outbound (negative deltas)
-      ...(locationId && { locationId: parseInt(locationId) }),
-    },
-    _sum: { delta: true },
-  });
-
-  // Convert to Map: productId -> avgDailyUsage
-  const avgDailyUsageMap = new Map<number, number>();
-  usageByProduct.forEach((item) => {
-    const totalOut = Math.abs(item._sum.delta || 0);
-    avgDailyUsageMap.set(item.productId, totalOut / 30);
-  });
+  // Average daily usage per product (last 30 days outbound) via the ONE shared
+  // units-out velocity (lib/reports/demand.ts). Migrating onto it FIXES a live prod
+  // bug: the former groupBy had `delta < 0` but NO `logType != TRANSFER` filter, so
+  // internal warehouse transfers were counted as usage — inflating order-now / stockout
+  // counts and shrinking days-of-supply. The shared definition excludes transfers and
+  // uses the truthful days-covered denominator (corrections stay counted here — this is
+  // units-out, not the reorder predicate).
+  const velocityMap = await outboundVelocity(
+    products.map((p) => p.id),
+    30,
+    locationId ? { locationId: parseInt(locationId) } : {},
+  );
 
   // NEW: Query for products with movement in last 90 days (to identify dead stock)
   const ninetyDaysAgo = subDays(new Date(), DEAD_STOCK_DAYS);
@@ -155,7 +150,7 @@ export const GET = apiHandler(async (request: NextRequest) => {
     totalInventoryRetailValue += quantity * retail;
 
     // NEW: Calculate days of supply and order status
-    const avgDailyUsage = avgDailyUsageMap.get(product.id) || 0;
+    const avgDailyUsage = velocityMap.get(product.id)?.avgDailyDemand ?? 0;
     const daysOfSupply = calculateDaysOfSupply(quantity, avgDailyUsage);
     const orderStatus = getOrderStatus(daysOfSupply);
 

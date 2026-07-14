@@ -1,13 +1,17 @@
 // Lane 6 (review M2 / D-T5): the low-stock ALERT-EMAIL path (StockChecker) must not
 // count internal TRANSFER movement as usage. On prod that was 7,682 units/yr of
-// warehouse-to-warehouse moves shortening every runway. The outflow groupBy that
-// drives daysUntilEmpty must exclude TRANSFER.
+// warehouse-to-warehouse moves shortening every runway. The outflow read that drives
+// daysUntilEmpty must exclude TRANSFER.
+//
+// reorder-points Task 2: StockChecker.batchAvgDailyOutflow now routes through the ONE
+// shared units-out velocity (lib/reports/demand.ts), which reads outbound rows via
+// findMany. This pins that the transfer exclusion survives the migration.
 
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {
     product: { findMany: jest.fn() },
-    inventory_logs: { groupBy: jest.fn() },
+    inventory_logs: { findMany: jest.fn() },
     systemSetting: { findUnique: jest.fn() },
   },
 }));
@@ -23,7 +27,7 @@ import { StockChecker } from "@/lib/stock-checker";
 
 const m = prisma as unknown as {
   product: { findMany: jest.Mock };
-  inventory_logs: { groupBy: jest.Mock };
+  inventory_logs: { findMany: jest.Mock };
   systemSetting: { findUnique: jest.Mock };
 };
 
@@ -41,12 +45,14 @@ test("checkLowStock's outflow query excludes internal transfers", async () => {
       product_locations: [{ quantity: 3 }],
     },
   ]);
-  m.inventory_logs.groupBy.mockResolvedValue([{ productId: 1, _sum: { delta: -30 } }]);
+  m.inventory_logs.findMany.mockResolvedValue([
+    { productId: 1, delta: -30, changeTime: new Date(), reasonCode: null },
+  ]);
 
   await new StockChecker().checkLowStock();
 
-  expect(m.inventory_logs.groupBy).toHaveBeenCalledTimes(1);
-  const where = m.inventory_logs.groupBy.mock.calls[0][0].where;
+  expect(m.inventory_logs.findMany).toHaveBeenCalledTimes(1);
+  const where = m.inventory_logs.findMany.mock.calls[0][0].where;
   expect(where.logType).toEqual({ not: "TRANSFER" });
   expect(where.delta).toEqual({ lt: 0 });
 });
