@@ -87,6 +87,12 @@ export type AuditActionType =
   // telemetry itself stays out of the audit log -- only the human TRIGGER is
   // recorded.
   | 'ANALYTICS_REBUILD_TRIGGER'
+  // --- Lane 6 (spec D-E5): EVERY attempted platform write -- sent, blocked, or
+  // dry-run -- records one of these. A blocked attempt is the interesting one,
+  // making a silent flip of the write posture visible in the activity feed. The
+  // hard record is the platform_write_attempts row and this event is its
+  // human-facing surface.
+  | 'PLATFORM_WRITE_ATTEMPT'
   // --- Lane 4 additions (spec D2/D7): AI-provider config + API-token lifecycle.
   // Key values diff as [REDACTED] via the deep scan; token/hash never enter
   // payloads (details = name/tier only). Emitted by the T4 admin routes.
@@ -153,8 +159,21 @@ export const COMPANY_SCOPED_ENTITY_TYPES: ReadonlySet<EntityType> = new Set<Enti
  */
 export const REDACTED_KEYS: readonly string[] = [
   'passwordHash',
+  // AiProvider.encryptedApiKey (Lane 4) — NOT renamed by Lane 6.
   'encryptedApiKey',
+  // Integration's historical pair. Kept denylisted so any legacy audit payload
+  // or stray reference still redacts.
   'encryptedApiSecret',
+  // Lane 6 (R-E8): the Integration credential split. Every one of these is
+  // secret material and must never reach an audit payload, even pre-redaction.
+  'encryptedWriteKey',
+  'encryptedWriteSecret',
+  'encryptedReadKey',
+  'encryptedReadSecret',
+  'writeKey',
+  'writeSecret',
+  'readKey',
+  'readSecret',
   'webhookSecret',
   'apiKey',
   'apiSecret',

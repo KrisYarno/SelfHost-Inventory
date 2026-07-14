@@ -190,6 +190,9 @@ const KNOWN_VERBS: readonly string[] = [
   'TRIGGER',
   // Lane 4 (D7): API_TOKEN_REVOKE -- token administration.
   'REVOKE',
+  // Lane 6 (D-E5): PLATFORM_WRITE_ATTEMPT -- every outbound platform write,
+  // sent / blocked / dry-run.
+  'ATTEMPT',
 ];
 
 /**

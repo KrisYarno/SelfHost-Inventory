@@ -69,6 +69,10 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   ADJUSTMENT: 'warning',
   BULK_UPDATE: 'warning',
   UNFULFILLMENT: 'warning',
+  // Lane 6: an outbound platform write was attempted. Warning tone by design —
+  // this is the event class the owner explicitly wants to be unmissable, and a
+  // BLOCKED attempt is exactly as noteworthy as a sent one.
+  ATTEMPT: 'warning',
   // info
   TRANSFER: 'info',
   FULFILLMENT: 'info',
@@ -97,6 +101,7 @@ const KNOWN_VERBS: readonly string[] = [
   'FULFILLMENT',
   'ADJUSTMENT',
   'DEDUCTION',
+  'ATTEMPT',
   'APPROVAL',
   'REJECTION',
   'DELETION',
@@ -148,6 +153,7 @@ const PREFIX_GROUP: Readonly<Record<string, ActionGroup>> = {
   SIGNUP: 'ACCOUNT',
   AI: 'SETTINGS', // AI_PROVIDER_* (Lane 4 — provider configuration is settings)
   API: 'SETTINGS', // API_TOKEN_* (Lane 4 — token administration is settings)
+  PLATFORM: 'SYSTEM', // PLATFORM_WRITE_ATTEMPT (Lane 6 — egress is a system event)
 };
 
 // Human labels. Default = Title Case of the tokens; overrides give the register
@@ -172,6 +178,7 @@ const LABEL_OVERRIDES: Readonly<Record<string, string>> = {
   AI_PROVIDER_UPDATE: 'AI provider updated',
   API_TOKEN_CREATE: 'API token created',
   API_TOKEN_REVOKE: 'API token revoked',
+  PLATFORM_WRITE_ATTEMPT: 'Platform write attempt',
 };
 
 function titleCase(actionType: string): string {
@@ -282,6 +289,7 @@ export const ALL_ACTION_TYPES: readonly AuditActionType[] = [
   'DATA_EXPORT',
   'BACKUP_CREATED',
   'ANALYTICS_REBUILD_TRIGGER',
+  'PLATFORM_WRITE_ATTEMPT',
 ];
 
 // Display order + labels for the non-UNKNOWN groups.
