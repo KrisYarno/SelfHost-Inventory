@@ -270,3 +270,85 @@ describe('PUT /api/products/[id] (creator-edit-own-pending guard)', () => {
     expect(db.product.update).not.toHaveBeenCalled();
   });
 });
+
+// Lane 6 (R-D3 / review B2): the writers must preserve NULL = "cost unknown" and keep
+// an explicit human-entered 0 = "genuinely free". A blank field must never become 0.
+describe('cost NULL preservation (R-D3)', () => {
+  it('POST with NO costPrice stores NULL, never 0', async () => {
+    setUser(ADMIN_USER);
+    db.product.create.mockImplementation(async ({ data }: any) => ({ id: 60, ...data }));
+
+    const resp = await createPOST(
+      mkReq('http://t/api/products', 'POST', { baseName: 'NC', variant: '5mg', locationId: 1 }),
+    );
+
+    expect(resp.status).toBe(201);
+    expect(db.product.create.mock.calls[0][0].data.costPrice).toBeNull();
+  });
+
+  it('POST with an explicit 0 keeps 0 (genuinely free)', async () => {
+    setUser(ADMIN_USER);
+    db.product.create.mockImplementation(async ({ data }: any) => ({ id: 61, ...data }));
+
+    const resp = await createPOST(
+      mkReq('http://t/api/products', 'POST', {
+        baseName: 'FREE',
+        variant: '5mg',
+        locationId: 1,
+        costPrice: 0,
+      }),
+    );
+
+    expect(resp.status).toBe(201);
+    expect(db.product.create.mock.calls[0][0].data.costPrice).toBe(0);
+  });
+
+  it('POST with a positive cost stores that cost', async () => {
+    setUser(ADMIN_USER);
+    db.product.create.mockImplementation(async ({ data }: any) => ({ id: 62, ...data }));
+
+    const resp = await createPOST(
+      mkReq('http://t/api/products', 'POST', {
+        baseName: 'PC',
+        variant: '5mg',
+        locationId: 1,
+        costPrice: 12.5,
+      }),
+    );
+
+    expect(resp.status).toBe(201);
+    expect(db.product.create.mock.calls[0][0].data.costPrice).toBe(12.5);
+  });
+
+  it('PUT with costPrice=null clears the cost back to unknown', async () => {
+    setUser(ADMIN_USER);
+    db.product.findUnique
+      .mockResolvedValueOnce({ createdBy: 999, approvalStatus: 'APPROVED' })
+      .mockResolvedValueOnce({ id: 5, baseName: 'BPC', variant: '5mg', lowStockThreshold: 10, costPrice: 7, retailPrice: 0 });
+    db.product.update.mockImplementation(async ({ data }: any) => ({ id: 5, name: 'BPC 5mg', ...data }));
+
+    const resp = await updatePUT(
+      mkReq('http://t/api/products/5', 'PUT', { costPrice: null }),
+      { params: { id: '5' } },
+    );
+
+    expect(resp.status).toBe(200);
+    expect(db.product.update.mock.calls[0][0].data.costPrice).toBeNull();
+  });
+
+  it('PUT with costPrice=0 stores an explicit free cost (kept distinct from NULL)', async () => {
+    setUser(ADMIN_USER);
+    db.product.findUnique
+      .mockResolvedValueOnce({ createdBy: 999, approvalStatus: 'APPROVED' })
+      .mockResolvedValueOnce({ id: 5, baseName: 'BPC', variant: '5mg', lowStockThreshold: 10, costPrice: null, retailPrice: 0 });
+    db.product.update.mockImplementation(async ({ data }: any) => ({ id: 5, name: 'BPC 5mg', ...data }));
+
+    const resp = await updatePUT(
+      mkReq('http://t/api/products/5', 'PUT', { costPrice: 0 }),
+      { params: { id: '5' } },
+    );
+
+    expect(resp.status).toBe(200);
+    expect(db.product.update.mock.calls[0][0].data.costPrice).toBe(0);
+  });
+});

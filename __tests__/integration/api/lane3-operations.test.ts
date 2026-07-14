@@ -31,21 +31,23 @@ function seedHappyPath() {
   (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 1, isAdmin: false } });
   getOperationsRowsMock.mockResolvedValue({
     rows: [{ productId: 1, name: "Widget", currentStock: 5, attention: "ok" }],
-    dataStarts: { sale: null, adjustment: null, receipt: null, snapshot: null },
+    dataStarts: { sale: null, outbound: null, adjustment: null, receipt: null, snapshot: null },
   });
   getShrinkageSummaryMock.mockResolvedValue({
     byReason: {
-      DAMAGE: { units: 0, valueAtCurrentCostCents: 0 },
-      THEFT: { units: 0, valueAtCurrentCostCents: 0 },
-      EXPIRY: { units: 0, valueAtCurrentCostCents: 0 },
-      COUNT: { units: 0, valueAtCurrentCostCents: 0 },
-      CORRECTION: { units: 0, valueAtCurrentCostCents: 0 },
-      UNCLASSIFIED: { units: 0, valueAtCurrentCostCents: 0 },
+      DAMAGE: { units: 0, valueAtCurrentCostCents: null },
+      THEFT: { units: 0, valueAtCurrentCostCents: null },
+      EXPIRY: { units: 0, valueAtCurrentCostCents: null },
+      COUNT: { units: 0, valueAtCurrentCostCents: null },
     },
+    totalUnits: 0,
+    totalValueAtCurrentCostCents: null,
+    coverage: { unclassifiedOutboundUnits: 0, reasonTrackingStartedAt: null },
     dataStart: null,
   });
   getValuationSummaryMock.mockResolvedValue({
     atCurrentCostCents: 3500,
+    costCoverage: { valued: 1, of: 1 },
     atReceiptCostCents: null,
     receiptCoverage: { have: 0, of: 1 },
   });
@@ -61,9 +63,17 @@ test("returns the aggregate Operations payload (rows + dataStarts + shrinkage + 
   expect(body.scope).toBe("global");
   expect(body.windowDays).toBe(90); // default
   expect(body.rows).toHaveLength(1);
-  expect(body.dataStarts).toEqual({ sale: null, adjustment: null, receipt: null, snapshot: null });
+  expect(body.dataStarts).toEqual({
+    sale: null,
+    outbound: null,
+    adjustment: null,
+    receipt: null,
+    snapshot: null,
+  });
   expect(body.shrinkage90.byReason.DAMAGE).toBeDefined();
+  expect(body.shrinkage90.coverage.unclassifiedOutboundUnits).toBe(0);
   expect(body.valuation.atCurrentCostCents).toBe(3500);
+  expect(body.valuation.costCoverage).toEqual({ valued: 1, of: 1 });
 });
 
 test("requireApproved gates the route", async () => {

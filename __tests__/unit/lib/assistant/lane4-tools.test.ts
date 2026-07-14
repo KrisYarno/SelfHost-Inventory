@@ -97,10 +97,17 @@ describe("find_product: APPROVED-only + caps", () => {
     }
   });
 
-  it("honors an explicit limit within the ≤20 cap", async () => {
-    mockGetProducts.mockResolvedValue({ products: [], total: 0 });
-    await assistantTools.find_product.run({ query: "abc", limit: 5 }, CTX);
-    expect(mockGetProducts.mock.calls[0][0]).toMatchObject({ pageSize: 5 });
+  it("honors an explicit limit within the ≤20 cap (paginated at the tool boundary)", async () => {
+    const many = Array.from({ length: 12 }, (_, i) => product({ id: i }));
+    mockGetProducts.mockResolvedValue({ products: many, total: 12 });
+    const result = await assistantTools.find_product.run({ query: "abc", limit: 5 }, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      const data = result.data as { products: unknown[]; returned: number; nextOffset: number | null };
+      expect(data.products).toHaveLength(5);
+      expect(data.returned).toBe(5);
+      expect(data.nextOffset).toBe(5);
+    }
   });
 
   it("rejects a limit above the cap (schema)", async () => {
@@ -111,7 +118,7 @@ describe("find_product: APPROVED-only + caps", () => {
     await expect(assistantTools.find_product.run({ query: "a" }, CTX)).rejects.toThrow();
   });
 
-  it("returns a >32KB result as a discriminated `truncated`, not `ok`", async () => {
+  it("paginates a large match set: a page of rows + nextOffset, never an empty truncation (D-T7)", async () => {
     const many = Array.from({ length: 4000 }, (_, i) =>
       product({ id: i, name: `Product-${i}-` + "x".repeat(40) }),
     );
@@ -119,12 +126,20 @@ describe("find_product: APPROVED-only + caps", () => {
 
     const result = await assistantTools.find_product.run({ query: "prod" }, CTX);
 
-    expect(result.status).toBe("truncated");
-    if (result.status === "truncated") {
-      expect(result.meta.bytes).toBeGreaterThan(TURN_RESULT_BUDGET_BYTES);
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      const data = result.data as {
+        products: unknown[];
+        returned: number;
+        totalRows: number;
+        nextOffset: number | null;
+      };
+      expect(data.products.length).toBeGreaterThan(0);
+      expect(data.products.length).toBeLessThanOrEqual(20); // FIND_PRODUCT_MAX
+      expect(data.returned).toBe(data.products.length);
+      expect(data.nextOffset).not.toBeNull();
+      expect(result.meta.bytes).toBeLessThanOrEqual(TURN_RESULT_BUDGET_BYTES);
       expect(result.meta.scope).toBe("global");
-      expect(typeof result.notice).toBe("string");
-      expect(result.notice.length).toBeGreaterThan(0);
     }
   });
 });
@@ -235,12 +250,16 @@ describe("get_operations: top-limit by attention", () => {
   });
 });
 
-describe("low_stock_report: passes the ≤50 limit through to the extraction", () => {
-  it("forwards a bounded limit and returns scope global", async () => {
+describe("low_stock_report: fetches the full report and paginates at the tool", () => {
+  it("fetches all alerts (no limit passed down) and surfaces systemDefaultThreshold", async () => {
     mockGetLowStock.mockResolvedValue({ alerts: [], threshold: 10 });
     const result = await assistantTools.low_stock_report.run({ limit: 25 }, CTX);
-    expect(mockGetLowStock).toHaveBeenCalledWith({ limit: 25 });
+    // Paging happens at the tool boundary now, so the full report is fetched.
+    expect(mockGetLowStock).toHaveBeenCalledWith({});
     expect(result.status).toBe("ok");
-    if (result.status === "ok") expect(result.meta.scope).toBe("global");
+    if (result.status === "ok") {
+      expect(result.meta.scope).toBe("global");
+      expect((result.data as { systemDefaultThreshold: number }).systemDefaultThreshold).toBe(10);
+    }
   });
 });

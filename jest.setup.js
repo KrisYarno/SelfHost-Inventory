@@ -118,6 +118,28 @@ jest.mock("@/lib/prisma", () => ({
       findMany: jest.fn(),
       count: jest.fn(),
     },
+    // Lane 6 (L-WOO): the read-only fulfillment observation feed. Present here so
+    // any suite that transitively reaches the webhook hint or the poll (e.g. the
+    // webhook route) sees a defined model rather than `undefined.upsert`.
+    fulfillmentObservation: {
+      findUnique: jest.fn(),
+      findMany: jest.fn(),
+      upsert: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+      aggregate: jest.fn(),
+    },
+    fulfillmentSyncState: {
+      findUnique: jest.fn(),
+      upsert: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    fulfillmentObservationHint: {
+      findMany: jest.fn(),
+      upsert: jest.fn(),
+      update: jest.fn(),
+    },
     $transaction: jest.fn(),
   },
 }));

@@ -1,7 +1,14 @@
-// Lane 3 (Task 5, W2-C): tier-1 Operations query math (spec D6 + R-L10/R-L11 +
-// R-L15 coverage fixtures). Pure-function tests over a mocked prisma: every
-// groupBy/aggregate call is dispatched by its `where`/aggregation shape so a
-// single mock drives the whole getOperationsRows fan-out.
+// Lane 3 (Task 5) + Lane 6 (Task 8 / L-TRUTH): tier-1 Operations query math over a
+// mocked prisma. Every groupBy/aggregate call is dispatched by its `where`/aggregation
+// shape so a single mock drives the whole getOperationsRows fan-out.
+//
+// Lane 6 truthfulness pins (review B1/B2/B3, spec D-T2/T3/T4):
+//   * cost null propagation + null valuation (not $0.00)
+//   * classified-only shrinkage; unclassified outbound is coverage, never loss
+//   * ONE outbound predicate (delta<0, non-TRANSFER); per-product null, never a 0
+//     fallback; velocity denominator clamped to the window actually covered
+//   * the live hazard is dead: one SALE row cannot flip other products to 0 nor
+//     collapse the denominator.
 
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
@@ -29,16 +36,17 @@ const daysAgo = (n: number) => new Date(Date.now() - n * DAY);
 interface OpsFixtures {
   products?: any[];
   systemSetting?: { value: string } | null;
-  sale30?: any[];
-  sale90?: any[];
+  outbound30?: any[];
+  outbound90?: any[];
   inbound?: any[];
-  outbound?: any[];
+  lastOutbound?: any[];
   shrink90?: any[];
   corrections90?: any[];
   snapshots?: any[];
   receiptMax?: any[];
   receiptRows?: any[];
   saleStart?: Date | null;
+  outboundStart?: Date | null;
   adjustmentStart?: Date | null;
   receiptStart?: Date | null;
   snapshotStart?: string | null;
@@ -54,26 +62,24 @@ function setupOps(f: OpsFixtures) {
   m.inventory_logs.groupBy.mockImplementation((args: any) => {
     const w = args.where ?? {};
     if (w.logType === "STOCK_IN" && args._max) return Promise.resolve(f.receiptMax ?? []);
-    if (w.logType === "SALE" && args._sum) {
-      const gte = w.changeTime?.gte?.getTime?.() ?? 0;
-      const sixtyAgo = Date.now() - 60 * DAY;
-      return Promise.resolve(gte > sixtyAgo ? f.sale30 ?? [] : f.sale90 ?? []);
-    }
-    if (w.logType === "ADJUSTMENT" && w.reasonCode?.in && args._sum) {
-      return Promise.resolve(f.shrink90 ?? []);
-    }
+    if (w.reasonCode?.in && args._sum) return Promise.resolve(f.shrink90 ?? []); // classified shrink90
     if (w.reasonCode === "CORRECTION" && args._count) return Promise.resolve(f.corrections90 ?? []);
     if (w.delta?.gt === 0 && args._max) return Promise.resolve(f.inbound ?? []);
-    if (w.delta?.lt === 0 && args._max) return Promise.resolve(f.outbound ?? []);
+    // OUTBOUND predicate = delta<0 AND logType != TRANSFER.
+    if (w.logType?.not === "TRANSFER" && args._max) return Promise.resolve(f.lastOutbound ?? []);
+    if (w.logType?.not === "TRANSFER" && args._sum) {
+      const gte = w.changeTime?.gte?.getTime?.() ?? 0;
+      const sixtyAgo = Date.now() - 60 * DAY;
+      return Promise.resolve(gte > sixtyAgo ? f.outbound30 ?? [] : f.outbound90 ?? []);
+    }
     return Promise.resolve([]);
   });
 
   m.inventory_logs.aggregate.mockImplementation((args: any) => {
     const w = args.where ?? {};
     if (w.logType === "SALE") return Promise.resolve({ _min: { changeTime: f.saleStart ?? null } });
-    if (w.logType === "STOCK_IN") {
-      return Promise.resolve({ _min: { changeTime: f.receiptStart ?? null } });
-    }
+    if (w.logType === "STOCK_IN") return Promise.resolve({ _min: { changeTime: f.receiptStart ?? null } });
+    if (w.logType?.not === "TRANSFER") return Promise.resolve({ _min: { changeTime: f.outboundStart ?? null } });
     if (w.logType?.in) return Promise.resolve({ _min: { changeTime: f.adjustmentStart ?? null } });
     return Promise.resolve({ _min: { changeTime: null } });
   });
@@ -90,52 +96,104 @@ const product = (over: Partial<any> = {}) => ({
 
 beforeEach(() => jest.clearAllMocks());
 
-describe("getOperationsRows — SALE velocity + gross semantics (R-L11)", () => {
-  test("unfulfillment leaves gross Units-out unchanged while the corrections counter moves", async () => {
-    // The fulfillment wrote a -10 SALE row; a later unfulfillment wrote a +N
-    // CORRECTION restock. Gross Units-out must stay 10 (never subtracted); the
-    // positive-CORRECTION count surfaces alongside it.
+describe("getOperationsRows — ONE outbound predicate + per-product null (review B3 / D-T4)", () => {
+  test("units-out is a product's summed non-transfer outflow; velocity divides by the covered window", async () => {
+    // Outbound data started ~10 days ago: 20 units / 10 days = 2.0/day (never a flat 30).
+    // +1min of slack keeps elapsed just under 10 full days so ceil() lands on 10
+    // deterministically (a bare daysAgo(10) sits exactly on the day boundary and is
+    // sub-ms-drift fragile under load).
     setupOps({
       products: [product()],
-      saleStart: daysAgo(45),
-      sale90: [{ productId: 1, _sum: { delta: -10 } }],
-      sale30: [{ productId: 1, _sum: { delta: -10 } }],
-      corrections90: [{ productId: 1, _count: { _all: 3 } }],
-    });
-    const { rows } = await getOperationsRows({ windowDays: 90 });
-    expect(rows[0].unitsOut90).toBe(10);
-    expect(rows[0].correctionsIn90).toBe(3);
-  });
-
-  test("velocity divides by min(30, days since SALE data started), never a flat 30", async () => {
-    // SALE data started 10 days ago: 20 units / 10 days = 2.0/day (not 20/30).
-    setupOps({
-      products: [product()],
-      saleStart: daysAgo(10),
-      sale30: [{ productId: 1, _sum: { delta: -20 } }],
-      sale90: [{ productId: 1, _sum: { delta: -20 } }],
+      outboundStart: new Date(Date.now() - 10 * DAY + 60_000),
+      outbound30: [{ productId: 1, _sum: { delta: -20 } }],
+      outbound90: [{ productId: 1, _sum: { delta: -20 } }],
     });
     const { rows } = await getOperationsRows({});
+    expect(rows[0].unitsOut30).toBe(20);
     expect(rows[0].avgDaily30).toBeCloseTo(2.0, 5);
-    // days of supply = 50 / 2.0 = 25
-    expect(rows[0].daysOfSupply).toBeCloseTo(25, 5);
+    expect(rows[0].daysOfSupply).toBeCloseTo(25, 5); // 50 / 2.0
   });
-});
 
-describe("getOperationsRows — accrual (zero SALE rows)", () => {
-  test("no SALE rows => dataStarts.sale null and SALE metrics are null, never 0", async () => {
+  test("a product with NO outbound row contributes null, not 0", async () => {
+    setupOps({
+      products: [product({ id: 1 }), product({ id: 2 })],
+      outboundStart: daysAgo(200),
+      outbound30: [{ productId: 1, _sum: { delta: -30 } }], // only product 1 moved
+      outbound90: [{ productId: 1, _sum: { delta: -30 } }],
+    });
+    const { rows } = await getOperationsRows({});
+    const byId = Object.fromEntries(rows.map((r) => [r.productId, r]));
+    expect(byId[1].unitsOut30).toBe(30);
+    expect(byId[2].unitsOut30).toBeNull();
+    expect(byId[2].unitsOut90).toBeNull();
+    expect(byId[2].avgDaily30).toBeNull();
+  });
+
+  test("HAZARD PINNED: one SALE row does NOT flip other products to 0 nor inflate the denominator", async () => {
+    // Prod shape: a year of negative ADJUSTMENT outflow already exists (outboundStart
+    // 365d ago), then a single SALE row lands for product 1 today. Under the old global
+    // `hasSaleData` flag, EVERY other product would flip null -> 0 and the denominator
+    // would collapse to 1 (velocity up to 30x). With the shared outbound predicate and
+    // per-product nulls, product 2 stays null and the denominator stays 30.
+    setupOps({
+      products: [product({ id: 1 }), product({ id: 2 })],
+      outboundStart: daysAgo(365),
+      outbound30: [{ productId: 1, _sum: { delta: -5 } }], // the lone SALE row, as outbound
+      outbound90: [{ productId: 1, _sum: { delta: -5 } }],
+    });
+    const { rows } = await getOperationsRows({});
+    const byId = Object.fromEntries(rows.map((r) => [r.productId, r]));
+    expect(byId[2].unitsOut30).toBeNull(); // NOT a confident 0
+    expect(byId[1].unitsOut30).toBe(5);
+    // Denominator is min(30, daysSinceOutboundStart=365) = 30, so 5/30, NOT 5/1.
+    expect(byId[1].avgDaily30).toBeCloseTo(5 / 30, 6);
+  });
+
+  test("no outbound data at all => every product's units-out is null", async () => {
     setupOps({
       products: [product()],
-      saleStart: null,
-      sale30: [],
-      sale90: [],
+      outboundStart: null,
+      outbound30: [],
+      outbound90: [],
     });
     const { rows, dataStarts } = await getOperationsRows({});
-    expect(dataStarts.sale).toBeNull();
+    expect(dataStarts.outbound).toBeNull();
     expect(rows[0].unitsOut30).toBeNull();
     expect(rows[0].unitsOut90).toBeNull();
     expect(rows[0].avgDaily30).toBeNull();
     expect(rows[0].daysOfSupply).toBeNull();
+  });
+
+  test("last-outbound uses the SAME predicate (transfers excluded from the _max query)", async () => {
+    setupOps({ products: [product()], outboundStart: daysAgo(30) });
+    await getOperationsRows({});
+    // The lastOutbound groupBy must carry the non-transfer filter.
+    const maxCalls = m.inventory_logs.groupBy.mock.calls.filter(
+      ([a]: any[]) => a._max && a.where?.logType?.not === "TRANSFER",
+    );
+    expect(maxCalls.length).toBeGreaterThan(0);
+  });
+});
+
+describe("getOperationsRows — cost null propagation (review B2 / D-T2)", () => {
+  test("a NULL-cost product yields a null shrinkage value, never units x $0", async () => {
+    setupOps({
+      products: [product({ costPrice: null })],
+      adjustmentStart: daysAgo(40),
+      shrink90: [{ productId: 1, _sum: { delta: -4 } }],
+    });
+    const { rows } = await getOperationsRows({ windowDays: 90 });
+    expect(rows[0].shrinkage90).toEqual({ units: 4, valueAtCurrentCostCents: null });
+  });
+
+  test("an explicit cost values shrinkage at current cost", async () => {
+    setupOps({
+      products: [product({ costPrice: 2.5 })], // 250 cents
+      adjustmentStart: daysAgo(40),
+      shrink90: [{ productId: 1, _sum: { delta: -4 } }],
+    });
+    const { rows } = await getOperationsRows({ windowDays: 90 });
+    expect(rows[0].shrinkage90).toEqual({ units: 4, valueAtCurrentCostCents: 1000 });
   });
 });
 
@@ -150,9 +208,9 @@ describe("getOperationsRows — turns coverage floor (R-L10)", () => {
   test("coverage < 80% of the window => turns90 null, but coverage days are reported", async () => {
     setupOps({
       products: [product()],
-      saleStart: daysAgo(90),
-      sale90: [{ productId: 1, _sum: { delta: -180 } }],
-      snapshots: snapshotDays(10), // 10 of 90 days ~ 11%
+      outboundStart: daysAgo(90),
+      outbound90: [{ productId: 1, _sum: { delta: -180 } }],
+      snapshots: snapshotDays(10),
       snapshotStart: "2026-05-01",
     });
     const { rows } = await getOperationsRows({ windowDays: 90 });
@@ -160,30 +218,17 @@ describe("getOperationsRows — turns coverage floor (R-L10)", () => {
     expect(rows[0].turnsCoverage).toEqual({ days: 10, windowDays: 90 });
   });
 
-  test("coverage >= 80% => turns90 = |SALE out window| / avg daily snapshot qty", async () => {
+  test("coverage >= 80% => turns90 = |outbound over window| / avg daily snapshot qty", async () => {
     setupOps({
       products: [product()],
-      saleStart: daysAgo(90),
-      sale90: [{ productId: 1, _sum: { delta: -200 } }],
-      snapshots: snapshotDays(80), // 80 of 90 days ~ 89%, avg qty 100
+      outboundStart: daysAgo(90),
+      outbound90: [{ productId: 1, _sum: { delta: -200 } }],
+      snapshots: snapshotDays(80),
       snapshotStart: "2026-05-01",
     });
     const { rows } = await getOperationsRows({ windowDays: 90 });
     expect(rows[0].turnsCoverage).toEqual({ days: 80, windowDays: 90 });
     expect(rows[0].turns90).toBeCloseTo(200 / 100, 5);
-  });
-
-  test("no snapshot data at all => turnsCoverage null and turns90 null", async () => {
-    setupOps({
-      products: [product()],
-      saleStart: daysAgo(90),
-      sale90: [{ productId: 1, _sum: { delta: -200 } }],
-      snapshots: [],
-      snapshotStart: null,
-    });
-    const { rows } = await getOperationsRows({ windowDays: 90 });
-    expect(rows[0].turnsCoverage).toBeNull();
-    expect(rows[0].turns90).toBeNull();
   });
 });
 
@@ -192,7 +237,6 @@ describe("getOperationsRows — latest receipt cost tie-break (R-L15)", () => {
     setupOps({
       products: [product()],
       receiptMax: [{ productId: 1, _max: { changeTime: daysAgo(2) } }],
-      // findMany returns id-desc; the highest id (11 -> 700) must win over 10 -> 500.
       receiptRows: [
         { id: 11, productId: 1, unitCostCents: 700 },
         { id: 10, productId: 1, unitCostCents: 500 },
@@ -200,9 +244,8 @@ describe("getOperationsRows — latest receipt cost tie-break (R-L15)", () => {
     });
     const { rows } = await getOperationsRows({});
     expect(rows[0].lastReceiptCostCents).toBe(700);
-    // Pin the IN-fetch ordering that guarantees the tie-break.
     expect(m.inventory_logs.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ orderBy: [{ id: "desc" }] })
+      expect.objectContaining({ orderBy: [{ id: "desc" }] }),
     );
   });
 
@@ -213,17 +256,17 @@ describe("getOperationsRows — latest receipt cost tie-break (R-L15)", () => {
   });
 });
 
-describe("getOperationsRows — attention triage + UTC boundaries", () => {
+describe("getOperationsRows — attention triage + data-starts", () => {
   test("out > low > stale > ok with the shared inclusive predicate", async () => {
     setupOps({
       products: [
         product({ id: 1, product_locations: [{ quantity: 0 }] }), // out
-        product({ id: 2, lowStockThreshold: 10, product_locations: [{ quantity: 10 }] }), // low (inclusive: qty==threshold)
-        product({ id: 3, lowStockThreshold: 10, product_locations: [{ quantity: 50 }] }), // stale (no outbound)
-        product({ id: 4, lowStockThreshold: 10, product_locations: [{ quantity: 50 }] }), // ok (recent outbound)
+        product({ id: 2, lowStockThreshold: 10, product_locations: [{ quantity: 10 }] }), // low
+        product({ id: 3, lowStockThreshold: 10, product_locations: [{ quantity: 50 }] }), // stale
+        product({ id: 4, lowStockThreshold: 10, product_locations: [{ quantity: 50 }] }), // ok
       ],
-      outbound: [{ productId: 4, _max: { changeTime: daysAgo(5) } }],
-      saleStart: daysAgo(30),
+      lastOutbound: [{ productId: 4, _max: { changeTime: daysAgo(5) } }],
+      outboundStart: daysAgo(30),
     });
     const { rows } = await getOperationsRows({});
     const byId = Object.fromEntries(rows.map((r) => [r.productId, r.attention]));
@@ -233,84 +276,145 @@ describe("getOperationsRows — attention triage + UTC boundaries", () => {
     expect(byId[4]).toBe("ok");
   });
 
-  test("snapshot window start is a UTC dayKey and dataStarts.snapshot is the min dayKey", async () => {
-    setupOps({ products: [product()], snapshotStart: "2026-04-15" });
+  test("dataStarts exposes both `outbound` (velocity source) and the narrower `sale`", async () => {
+    const outStart = daysAgo(200);
+    const saleStart = daysAgo(5);
+    setupOps({
+      products: [product()],
+      outboundStart: outStart,
+      saleStart,
+      snapshotStart: "2026-04-15",
+    });
     const { dataStarts } = await getOperationsRows({ windowDays: 90 });
+    expect(dataStarts.outbound).toBe(outStart.toISOString());
+    expect(dataStarts.sale).toBe(saleStart.toISOString());
     expect(dataStarts.snapshot).toBe("2026-04-15");
     const snapArg = m.productStockSnapshot.findMany.mock.calls[0][0];
-    // A UTC YYYY-MM-DD key (10 chars), never a raw Date.
     expect(snapArg.where.dayKey.gte).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
 
-describe("getShrinkageSummary — reason buckets (D6)", () => {
-  function setupShrink(grouped: any[], costs: any[], dataStart: Date | null) {
+describe("getShrinkageSummary — classified loss only + unclassified coverage (review B1 / D-T3)", () => {
+  function setupShrink(
+    grouped: any[],
+    costs: any[],
+    dataStart: Date | null,
+    reasonTrackingStart: Date | null = null,
+  ) {
     m.inventory_logs.groupBy.mockResolvedValue(grouped);
-    m.inventory_logs.aggregate.mockResolvedValue({ _min: { changeTime: dataStart } });
+    m.inventory_logs.aggregate.mockImplementation((args: any) => {
+      const w = args.where ?? {};
+      if (w.reasonCode && "not" in w.reasonCode) {
+        return Promise.resolve({ _min: { changeTime: reasonTrackingStart } });
+      }
+      return Promise.resolve({ _min: { changeTime: dataStart } });
+    });
     m.product.findMany.mockResolvedValue(costs);
   }
 
-  test("null reasonCode lands in the UNCLASSIFIED bucket; classes value at current cost", async () => {
-    const start = daysAgo(30);
+  test("THE 16k LIE IS DEAD: 16,138 unclassified units => shrinkage total 0 + coverage note", async () => {
+    // The prod shape: every legacy outbound ADJUSTMENT has a null reasonCode. None of
+    // it is classifiable loss — it is how the business ships product.
+    setupShrink(
+      [{ productId: 1, reasonCode: null, _sum: { delta: -16138 } }],
+      [{ id: 1, costPrice: null }],
+      daysAgo(365),
+      null, // no reason tracking has ever happened
+    );
+    const s = await getShrinkageSummary({ days: 365 });
+    expect(s.totalUnits).toBe(0);
+    expect(s.byReason.DAMAGE.units).toBe(0);
+    expect(s.coverage.unclassifiedOutboundUnits).toBe(16138);
+    expect(s.coverage.reasonTrackingStartedAt).toBeNull();
+  });
+
+  test("classified reasons (incl COUNT) bucket as loss; CORRECTION + null go to coverage", async () => {
+    const reasonStart = daysAgo(20);
     setupShrink(
       [
         { productId: 1, reasonCode: "DAMAGE", _sum: { delta: -4 } },
-        { productId: 1, reasonCode: null, _sum: { delta: -5 } },
-        { productId: 1, reasonCode: "CORRECTION", _sum: { delta: -2 } },
         { productId: 1, reasonCode: "COUNT", _sum: { delta: -3 } },
+        { productId: 1, reasonCode: "CORRECTION", _sum: { delta: -2 } },
+        { productId: 1, reasonCode: null, _sum: { delta: -5 } },
       ],
       [{ id: 1, costPrice: 2.5 }], // 250 cents
-      start
+      daysAgo(30),
+      reasonStart,
     );
-    const { byReason, dataStart } = await getShrinkageSummary({ days: 90 });
-    expect(byReason.DAMAGE).toEqual({ units: 4, valueAtCurrentCostCents: 1000 });
-    expect(byReason.UNCLASSIFIED).toEqual({ units: 5, valueAtCurrentCostCents: 1250 });
-    expect(byReason.CORRECTION.units).toBe(2);
-    expect(byReason.COUNT.units).toBe(3);
-    expect(byReason.THEFT).toEqual({ units: 0, valueAtCurrentCostCents: 0 });
-    expect(dataStart).toBe(start.toISOString());
+    const s = await getShrinkageSummary({ days: 90 });
+    expect(s.byReason.DAMAGE).toEqual({ units: 4, valueAtCurrentCostCents: 1000 });
+    expect(s.byReason.COUNT).toEqual({ units: 3, valueAtCurrentCostCents: 750 });
+    expect(s.byReason.THEFT).toEqual({ units: 0, valueAtCurrentCostCents: null });
+    expect((s.byReason as any).CORRECTION).toBeUndefined();
+    expect((s.byReason as any).UNCLASSIFIED).toBeUndefined();
+    expect(s.totalUnits).toBe(7); // 4 + 3, NOT the 2 CORRECTION or 5 null
+    expect(s.coverage.unclassifiedOutboundUnits).toBe(7); // 2 + 5
+    expect(s.coverage.reasonTrackingStartedAt).toBe(reasonStart.toISOString());
   });
 
-  test("empty ledger => all buckets zero and dataStart null", async () => {
+  test("no cost on file => bucket value is null, never units x $0 (B2)", async () => {
+    setupShrink(
+      [{ productId: 1, reasonCode: "DAMAGE", _sum: { delta: -4 } }],
+      [{ id: 1, costPrice: null }],
+      daysAgo(30),
+    );
+    const s = await getShrinkageSummary({ days: 90 });
+    expect(s.byReason.DAMAGE).toEqual({ units: 4, valueAtCurrentCostCents: null });
+    expect(s.totalValueAtCurrentCostCents).toBeNull();
+  });
+
+  test("empty ledger => all buckets zero, total 0, coverage empty, dataStart null", async () => {
     setupShrink([], [], null);
-    const { byReason, dataStart } = await getShrinkageSummary({ days: 90 });
-    expect(dataStart).toBeNull();
-    for (const k of Object.keys(byReason) as (keyof typeof byReason)[]) {
-      expect(byReason[k]).toEqual({ units: 0, valueAtCurrentCostCents: 0 });
+    const s = await getShrinkageSummary({ days: 90 });
+    expect(s.dataStart).toBeNull();
+    expect(s.totalUnits).toBe(0);
+    expect(s.coverage.unclassifiedOutboundUnits).toBe(0);
+    for (const k of Object.keys(s.byReason) as (keyof typeof s.byReason)[]) {
+      expect(s.byReason[k]).toEqual({ units: 0, valueAtCurrentCostCents: null });
     }
-    // No product cost fetch when there are no grouped rows.
     expect(m.product.findMany).not.toHaveBeenCalled();
   });
 });
 
-describe("getValuationSummary — coverage over in-stock only (D6)", () => {
-  test("value at current cost sums all stock; receipt value + coverage over in-stock", async () => {
+describe("getValuationSummary — null valuation + cost coverage (review B2 / D-T2)", () => {
+  test("NO cost on file (prod: 0 of N) => atCurrentCostCents null, costCoverage { valued: 0, of: N }", async () => {
+    m.product.findMany.mockResolvedValue([
+      { id: 1, costPrice: null, product_locations: [{ quantity: 10 }] },
+      { id: 2, costPrice: null, product_locations: [{ quantity: 5 }] },
+    ]);
+    m.inventory_logs.groupBy.mockResolvedValue([]);
+    m.inventory_logs.findMany.mockResolvedValue([]);
+
+    const v = await getValuationSummary();
+    expect(v.atCurrentCostCents).toBeNull(); // NOT $0.00
+    expect(v.costCoverage).toEqual({ valued: 0, of: 2 });
+  });
+
+  test("partial cost coverage sums only the valued products", async () => {
+    m.product.findMany.mockResolvedValue([
+      { id: 1, costPrice: 2.0, product_locations: [{ quantity: 10 }] }, // valued
+      { id: 2, costPrice: null, product_locations: [{ quantity: 5 }] }, // unknown
+    ]);
+    m.inventory_logs.groupBy.mockResolvedValue([]);
+    m.inventory_logs.findMany.mockResolvedValue([]);
+
+    const v = await getValuationSummary();
+    expect(v.atCurrentCostCents).toBe(2000); // 10 x 200; product 2 excluded
+    expect(v.costCoverage).toEqual({ valued: 1, of: 2 });
+  });
+
+  test("receipt cost + coverage over in-stock only (the D-T1 reference block)", async () => {
     m.product.findMany.mockResolvedValue([
       { id: 1, costPrice: 2.0, product_locations: [{ quantity: 10 }] }, // in stock, has receipt
       { id: 2, costPrice: 3.0, product_locations: [{ quantity: 5 }] }, // in stock, NO receipt
-      { id: 3, costPrice: 4.0, product_locations: [{ quantity: 0 }] }, // out of stock -> excluded from coverage
+      { id: 3, costPrice: 4.0, product_locations: [{ quantity: 0 }] }, // out of stock -> excluded
     ]);
-    // latestReceiptCostByProduct: product 1 only.
     m.inventory_logs.groupBy.mockResolvedValue([{ productId: 1, _max: { changeTime: daysAgo(3) } }]);
     m.inventory_logs.findMany.mockResolvedValue([{ id: 9, productId: 1, unitCostCents: 180 }]);
 
     const v = await getValuationSummary();
-    // current cost: 10*200 + 5*300 + 0 = 3500
-    expect(v.atCurrentCostCents).toBe(3500);
-    // receipt cost: only product 1 (has receipt) -> 10*180 = 1800
-    expect(v.atReceiptCostCents).toBe(1800);
-    // coverage over in-stock products only: 1 of 2 (product 3 is out of stock)
+    expect(v.atReceiptCostCents).toBe(1800); // 10 x 180
     expect(v.receiptCoverage).toEqual({ have: 1, of: 2 });
-  });
-
-  test("no receipt-cost data => atReceiptCostCents null with 0/N coverage", async () => {
-    m.product.findMany.mockResolvedValue([
-      { id: 1, costPrice: 2.0, product_locations: [{ quantity: 10 }] },
-    ]);
-    m.inventory_logs.groupBy.mockResolvedValue([]);
-    m.inventory_logs.findMany.mockResolvedValue([]);
-    const v = await getValuationSummary();
-    expect(v.atReceiptCostCents).toBeNull();
-    expect(v.receiptCoverage).toEqual({ have: 0, of: 1 });
+    expect(v.costCoverage).toEqual({ valued: 3, of: 3 });
   });
 });

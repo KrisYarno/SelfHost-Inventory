@@ -60,7 +60,7 @@ const createAiToolsSpy: jest.Mock = jest.fn(() => ({ find_product: {} }));
 jest.mock("@/lib/assistant/tool-adapters", () => ({
   createAiTools: (...a: unknown[]) => createAiToolsSpy(...a),
 }));
-jest.mock("@/lib/assistant/tools", () => ({ TURN_RESULT_BUDGET_BYTES: 32_768 }));
+jest.mock("@/lib/assistant/tools", () => ({ TURN_RESULT_BUDGET_BYTES: 131_072 }));
 const recordRunSpy: jest.Mock = jest.fn(() => Promise.resolve());
 jest.mock("@/lib/assistant/telemetry", () => ({ recordAssistantRun: (...a: unknown[]) => recordRunSpy(...a) }));
 
@@ -226,7 +226,12 @@ describe("streamText wiring", () => {
     expect(streamTextSpy).toHaveBeenCalledTimes(1);
     const opts = streamTextSpy.mock.calls[0][0] as Record<string, unknown>;
     expect(opts.model).toBe(MODEL.languageModel);
-    expect(opts.system).toBe(buildSystemPrompt());
+    // D-T6: the system prompt now carries today's UTC date (server-controlled). It
+    // is built from `new Date()` at request time, so assert its shape, not equality
+    // with a fresh call at a different instant.
+    expect(typeof opts.system).toBe("string");
+    expect(opts.system).toBe(buildSystemPrompt(new Date()));
+    expect(opts.system as string).toContain("Today is");
     expect(opts.stopWhen).toEqual({ __stepCountIs: 8 }); // stepCountIs(8)
     expect(opts.timeout).toBe(60_000);
     expect(opts.maxOutputTokens).toBe(2048);
@@ -244,7 +249,7 @@ describe("streamText wiring", () => {
       (row: Record<string, unknown>) => unknown,
     ];
     expect(ctx.surface).toBe("assistant");
-    expect(budget.remaining).toBe(32_768);
+    expect(budget.remaining).toBe(131_072);
 
     // The telemetry wrapper injects resolved kind/model into each row.
     onRun({ userId: 7, surface: "assistant", toolName: "find_product", outcome: "ok", durationMs: 1, resultBytes: 5 });

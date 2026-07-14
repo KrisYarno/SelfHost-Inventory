@@ -15,18 +15,20 @@ function renderWithClient(ui: React.ReactElement) {
 
 const emptyShrinkage = {
   byReason: {
-    DAMAGE: { units: 0, valueAtCurrentCostCents: 0 },
-    THEFT: { units: 0, valueAtCurrentCostCents: 0 },
-    EXPIRY: { units: 0, valueAtCurrentCostCents: 0 },
-    COUNT: { units: 0, valueAtCurrentCostCents: 0 },
-    CORRECTION: { units: 0, valueAtCurrentCostCents: 0 },
-    UNCLASSIFIED: { units: 0, valueAtCurrentCostCents: 0 },
+    DAMAGE: { units: 0, valueAtCurrentCostCents: null },
+    THEFT: { units: 0, valueAtCurrentCostCents: null },
+    EXPIRY: { units: 0, valueAtCurrentCostCents: null },
+    COUNT: { units: 0, valueAtCurrentCostCents: null },
   },
+  totalUnits: 0,
+  totalValueAtCurrentCostCents: null,
+  coverage: { unclassifiedOutboundUnits: 0, reasonTrackingStartedAt: null },
   dataStart: null,
 };
 
 const baseValuation = {
   atCurrentCostCents: 350000,
+  costCoverage: { valued: 2, of: 2 },
   atReceiptCostCents: 180000,
   receiptCoverage: { have: 1, of: 2 },
 };
@@ -57,7 +59,7 @@ function payload(over: Partial<any> = {}) {
     scope: "global",
     windowDays: 90,
     rows: [makeRow()],
-    dataStarts: { sale: "2026-06-01T00:00:00.000Z", adjustment: "2026-06-01T00:00:00.000Z", receipt: "2026-06-01T00:00:00.000Z", snapshot: "2026-05-01" },
+    dataStarts: { sale: "2026-06-01T00:00:00.000Z", outbound: "2026-06-01T00:00:00.000Z", adjustment: "2026-06-01T00:00:00.000Z", receipt: "2026-06-01T00:00:00.000Z", snapshot: "2026-05-01" },
     shrinkage90: emptyShrinkage,
     valuation: baseValuation,
     ...over,
@@ -94,7 +96,7 @@ describe("OperationsView", () => {
     mockFetch(
       payload({
         rows: [makeRow({ unitsOut30: null, unitsOut90: null, avgDaily30: null, daysOfSupply: null })],
-        dataStarts: { sale: null, adjustment: null, receipt: null, snapshot: null },
+        dataStarts: { sale: null, outbound: null, adjustment: null, receipt: null, snapshot: null },
       })
     );
     renderWithClient(<OperationsView />);

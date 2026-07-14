@@ -56,7 +56,11 @@ model Product {
   quantity          Int                   @default(0)
   location          Int                   @default(1)
   lowStockThreshold Int?
-  costPrice         Decimal               @default(0.00) @db.Decimal(10, 2)
+  // Lane 6 (R-D3 / review B2): NULL = cost unknown; an explicit 0 = genuinely free.
+  // The DB default is dropped so a create can no longer silently mint a "$0.00"
+  // valuation out of "we don't know". Legacy zeros are backfilled to NULL by
+  // migration 20260714130000_lane6_cost_nullable.
+  costPrice         Decimal?              @db.Decimal(10, 2)
   retailPrice       Decimal               @default(0.00) @db.Decimal(10, 2)
   deletedAt         DateTime?             @db.DateTime(0)
   deletedBy         Int?
@@ -369,6 +373,10 @@ model Integration {
   salesFacts        ProductSalesFact[]
   webhookDeliveries WebhookDelivery[]
   writeAttempts     PlatformWriteAttempt[]
+  // Lane 6 (L-WOO): the read-only fulfillment observation feed.
+  fulfillmentObservations FulfillmentObservation[]
+  fulfillmentSyncState    FulfillmentSyncState?
+  fulfillmentHints        FulfillmentObservationHint[]
 
   @@index([companyId])
   @@index([platform])
@@ -573,6 +581,118 @@ model ExternalOrderItem {
   @@index([orderId])
   @@index([externalVariantId])
   @@map("external_order_items")
+}
+
+// ---------------------------------------------------------------------------
+// Lane 6 — L-WOO: read-only WooCommerce fulfillment observation feed (spec §4).
+//
+// Woo core has NO per-item fulfillment quantity (the native Order Fulfillments
+// feature is beta + disabled by default — revisit at GA). So the ONLY thing we
+// can truthfully prove is "units on a COMPLETED order", attributed to
+// date_completed_gmt. This is NEVER "fulfilled quantity" — partial per-item
+// fulfillment stays null-with-reason until Woo GAs the feature.
+//
+// Grain is LINE ITEM (REV-2 #18): one row per (order, item), and a bundle line
+// expands into one row per FROZEN component. productId is resolved via
+// product_links (the mapping); null means UNMAPPED (coverage, NOT zero).
+// ---------------------------------------------------------------------------
+model FulfillmentObservation {
+  id              Int    @id @default(autoincrement())
+  integrationId   String
+  externalOrderId String @db.VarChar(64)
+  // Synthetic per-observation key. A simple line uses the Woo line-item id; a
+  // bundle component uses "<lineItemId>:c:<internalProductId>" so each frozen
+  // component is its own idempotent row under the unique constraint.
+  externalItemId String @db.VarChar(64)
+
+  // Resolved via product_links; null = unmapped (coverage, NOT zero).
+  productId Int?
+
+  // Sum of line_items[].quantity counted as ON A COMPLETED ORDER: 0 when the
+  // order is not currently `completed` (fully-refunded orders are `refunded`, so
+  // they resolve to 0 and drop out). For a bundle component this is
+  // lineQty * componentQty (the frozen expansion). NEVER "fulfilled quantity".
+  unitsOnCompletedOrder Int
+
+  orderStatus String    @db.VarChar(24)
+  completedAt DateTime? @db.DateTime(3) // date_completed_gmt (the GMT field, always)
+
+  // date_modified_gmt — THE watermark. An incoming observation is applied only
+  // when STRICTLY NEWER than the stored one (REV-2 #21) — so a late webhook hint
+  // or a slow poll can never overwrite fresher state.
+  sourceModifiedAt DateTime @db.DateTime(3)
+
+  // Refund posture (REV-2 #26). Derived from ORDER-LEVEL refund records + status,
+  // NEVER from Woo's documented-buggy per-line refund quantities.
+  hasPartialRefund Boolean @default(false)
+  isFullyRefunded  Boolean @default(false)
+
+  // Set when the order vanished from Woo (deleted/trashed): the seen-set
+  // reconciliation tombstones it and it drops out of totals (REV-2 #24). A later
+  // re-observation of a restored order clears it.
+  tombstonedAt DateTime? @db.DateTime(3)
+
+  // Telemetry drift, expected (REV-2 #27): bumped on every observation, never a
+  // business field. Idempotence is defined over the business columns only.
+  lastObservedAt DateTime @db.DateTime(3)
+
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([integrationId, externalOrderId, externalItemId])
+  @@index([completedAt])
+  @@index([integrationId, tombstonedAt])
+  @@index([productId])
+  @@map("fulfillment_observations")
+}
+
+// The durable per-integration fulfillment sync cursor + backfill job state
+// (REV-2 #22/#23/#28). Deliberately NOT Integration.lastSyncAt — webhooks
+// advance lastSyncAt to wall-clock, which would corrupt an incremental cursor.
+model FulfillmentSyncState {
+  integrationId String @id
+
+  // Incremental cursor: the frozen upper watermark of the last run in which
+  // EVERY page succeeded. Next run queries modified_after = cursor - overlap.
+  // Advanced ONLY after a fully-successful run; any error retains it.
+  cursorModifiedAt DateTime? @db.DateTime(3)
+
+  // Backfill (REV-2 #28) — resumable: a saved page + a FROZEN upper bound so
+  // pagination stays stable and a crash resumes without double-counting.
+  backfillPage     Int?
+  backfillBefore   DateTime? @db.DateTime(3)
+  backfillComplete Boolean   @default(false)
+
+  // Heartbeat lease — same shape as the analytics rebuild lock (lib/analytics).
+  // A live job heartbeats under the lease; a crashed job's lease expires and is
+  // re-acquirable.
+  lockedAt    DateTime? @db.DateTime(3)
+  heartbeatAt DateTime? @db.DateTime(3)
+
+  lastRunAt DateTime? @db.DateTime(3)
+  lastError String?   @db.Text
+  updatedAt DateTime  @default(now()) @updatedAt @db.DateTime(3)
+
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@map("fulfillment_sync_state")
+}
+
+// Webhook latency HINT (REV-2 #15). The webhook, AFTER verifying the signature,
+// upserts a hint and returns — it NEVER does a synchronous Woo GET (a GET
+// failure would count toward Woo's 5-strike webhook auto-disable). The poll is
+// the source of truth; it consumes unprocessed hints by GETting current state.
+model FulfillmentObservationHint {
+  id              Int       @id @default(autoincrement())
+  integrationId   String
+  externalOrderId String    @db.VarChar(64)
+  receivedAt      DateTime  @default(now()) @db.DateTime(3)
+  processedAt     DateTime? @db.DateTime(3)
+
+  integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([integrationId, externalOrderId])
+  @@index([processedAt])
+  @@map("fulfillment_observation_hints")
 }
 
 model ProductStockSnapshot {

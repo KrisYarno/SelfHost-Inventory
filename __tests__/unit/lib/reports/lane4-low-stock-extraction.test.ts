@@ -92,6 +92,39 @@ describe("getLowStockReport: qty-0 preserved + threshold override", () => {
   });
 });
 
+describe("Lane 6 (review M2 / D-T5): transfers are not usage + display-consistent daysUntilEmpty", () => {
+  it("daysUntilEmpty is computed from the SAME rounded figure it displays (TESA shape)", async () => {
+    // TESA: 10 units on hand, 2 units of outflow over 30 days = 0.0667/day. Displayed
+    // rounded to 0.1/day. daysUntilEmpty must be floor(10 / 0.1) = 100 — reproducible
+    // from the displayed rate — NOT floor(10 / 0.0667) = 150.
+    db.product.findMany.mockResolvedValue([
+      { id: 1, name: "TESA", lowStockThreshold: 20, product_locations: [{ quantity: 10 }] },
+    ] as never);
+    db.systemSetting.findUnique.mockResolvedValue(null as never);
+    db.inventory_logs.findMany.mockResolvedValue([
+      { productId: 1, delta: -2, changeTime: new Date() },
+    ] as never);
+
+    const report = await getLowStockReport({});
+    const row = report.alerts.find((a) => a.productId === 1)!;
+    expect(row.averageDailyUsage).toBe(0.1);
+    expect(row.daysUntilEmpty).toBe(100); // NOT 150
+  });
+
+  it("excludes internal TRANSFER movement from the usage query (only counts real consumption)", async () => {
+    db.product.findMany.mockResolvedValue([
+      { id: 1, name: "A", lowStockThreshold: 5, product_locations: [{ quantity: 3 }] },
+    ] as never);
+    db.systemSetting.findUnique.mockResolvedValue(null as never);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+
+    await getLowStockReport({});
+    const where = db.inventory_logs.findMany.mock.calls[0][0]!.where as Record<string, unknown>;
+    expect(where.logType).toEqual({ not: "TRANSFER" });
+    expect(where.delta).toEqual({ lt: 0 });
+  });
+});
+
 describe("route parity: GET /api/reports/low-stock is a thin caller", () => {
   it("returns the extraction's shape (no limit) with the system default threshold", async () => {
     seedProducts();

@@ -180,8 +180,10 @@ it("does NOT render a 'Fulfilled' column/metric (structurally 0), and notes its 
 
   await waitFor(() => expect(screen.getByTestId("line-chart")).toBeInTheDocument());
   // The Fulfilled column/metric is hidden entirely; only the omission note may mention it.
+  // Lane 6 (B5): the note now names WooCommerce as the system of record rather than
+  // implying the field is merely "not yet populated".
   expect(screen.queryByText(/^fulfilled units$/i)).not.toBeInTheDocument();
-  expect(screen.getByText(/fulfilled units are not yet populated/i)).toBeInTheDocument();
+  expect(screen.getByText(/this app does not track/i)).toBeInTheDocument();
 });
 
 it("renders the stock-trend sparkline when the stock series has >= 2 days", async () => {

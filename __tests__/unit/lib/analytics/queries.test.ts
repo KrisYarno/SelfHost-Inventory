@@ -26,19 +26,21 @@ describe("getSales (multi-company isolation)", () => {
     expect(out).toEqual([]);
     expect(m.productSalesFact.groupBy).not.toHaveBeenCalled();
   });
-  test("groupBy=product SUMS orderCount (orders containing that product)", async () => {
+  test("groupBy=product SUMS orderCount (orders containing that product); fulfilledQty is gone (B5)", async () => {
     m.productSalesFact.groupBy.mockResolvedValue([]);
     await getSales({ companyIds: ["c1"], groupBy: "product" });
     const _sum = m.productSalesFact.groupBy.mock.calls[0][0]._sum;
-    expect(_sum).toEqual({ orderedQty: true, fulfilledQty: true, revenue: true, orderCount: true });
+    expect(_sum).toEqual({ orderedQty: true, revenue: true, orderCount: true });
     expect(_sum.orderCount).toBe(true);
+    expect(_sum).not.toHaveProperty("fulfilledQty"); // Lane 6: never surfaced
   });
   test("groupBy=day OMITS orderCount from _sum (summing it cross-product double-counts)", async () => {
     m.productSalesFact.groupBy.mockResolvedValue([]);
     await getSales({ companyIds: ["c1"], groupBy: "day" });
     const _sum = m.productSalesFact.groupBy.mock.calls[0][0]._sum;
-    expect(_sum).toEqual({ orderedQty: true, fulfilledQty: true, revenue: true });
+    expect(_sum).toEqual({ orderedQty: true, revenue: true });
     expect(_sum).not.toHaveProperty("orderCount");
+    expect(_sum).not.toHaveProperty("fulfilledQty");
   });
   test("groupBy=integration and =company also OMIT orderCount (cross-product grains)", async () => {
     m.productSalesFact.groupBy.mockResolvedValue([]);
