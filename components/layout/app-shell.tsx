@@ -70,9 +70,14 @@ export function AppShell({ children }: AppShellProps) {
 
       {/* Mobile header (chrome; hidden at md+) */}
       <header className="shrink-0 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 md:hidden">
-        <div className="flex h-16 items-center justify-between px-4">
-          <div className="text-lg font-semibold">Inventory</div>
-          <div className="flex items-center gap-2">
+        {/* The right cluster must be allowed to shrink: its width scales with the
+            signed-in user's name, and without min-w-0 a long name pushes the whole
+            page wider than the viewport (found in the Lane 5 drive at 375px — the
+            "assistant overflow" logged in Lane 4 was really this header, on every
+            page). The title never shrinks below its text. */}
+        <div className="flex h-16 items-center justify-between gap-2 px-4">
+          <div className="shrink-0 text-lg font-semibold">Inventory</div>
+          <div className="flex min-w-0 items-center gap-2">
             <GlobalSearch />
             <LocationSwitcher />
             <UserMenu />

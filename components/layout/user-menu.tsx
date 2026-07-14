@@ -45,19 +45,23 @@ export function UserMenu() {
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
-          className="w-full justify-start gap-2 px-2 hover:bg-surface-hover"
+          className="w-full min-w-0 justify-start gap-2 px-2 hover:bg-surface-hover"
         >
           <Avatar className="h-8 w-8">
             <AvatarFallback className="bg-primary text-primary-foreground text-xs">
               {userInitials}
             </AvatarFallback>
           </Avatar>
-          <div className="flex flex-1 items-center justify-between">
-            <div className="flex flex-col items-start">
-              <span className="text-sm font-medium">{session.user.email?.split("@")[0]}</span>
+          <div className="flex min-w-0 flex-1 items-center justify-between gap-1">
+            <div className="flex min-w-0 flex-col items-start">
+              {/* The name is user data of unbounded length: truncate rather than
+                  widen the header past the viewport (Lane 5 drive). */}
+              <span className="max-w-full truncate text-sm font-medium">
+                {session.user.email?.split("@")[0]}
+              </span>
               <span className="text-xs text-muted-foreground">{session.user.isAdmin ? "Admin" : "User"}</span>
             </div>
-            <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
           </div>
         </Button>
       </DropdownMenuTrigger>
