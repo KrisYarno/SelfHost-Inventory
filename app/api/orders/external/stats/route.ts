@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, apiHandler } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCompanyMembership } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -15,15 +15,9 @@ export const GET = apiHandler(async (request: NextRequest) => {
   let companyIds: string[];
 
   if (companyId) {
-    // If companyId provided, verify user belongs to that company
-    if (!user.isAdmin) {
-      const membership = await prisma.userCompany.findFirst({
-        where: { userId: user.id, companyId },
-      });
-      if (!membership) {
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-      }
-    }
+    // If companyId provided, verify user belongs to that company. S6: anti-enumeration
+    // 404 (not 403) so the response doesn't leak whether the company exists.
+    await requireCompanyMembership(user.id, companyId, user.isAdmin);
     companyIds = [companyId];
   } else {
     // Scope to user's companies

@@ -3,6 +3,7 @@ import GoogleProvider from 'next-auth/providers/google';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import prisma from '@/lib/prisma';
 import { verifyPassword } from '@/lib/auth-helpers';
+import { enforceRateLimitByKey } from '@/lib/rateLimit';
 
 // Allowed email domains for authentication, comma-separated
 // e.g. "advancedresearchpep.com,artech.tools"
@@ -60,7 +61,7 @@ export const authOptions: NextAuthOptions = {
         email: { label: 'Email', type: 'email' },
         password: { label: 'Password', type: 'password' },
       },
-      async authorize(credentials, _req) {
+      async authorize(credentials, req) {
         if (!credentials?.email || !credentials?.password) {
           return null;
         }
@@ -70,6 +71,23 @@ export const authOptions: NextAuthOptions = {
         // Check domain restriction
         if (!isAllowedDomain(email)) {
           console.warn('[auth] Credentials sign-in blocked by domain policy', { email });
+          return null;
+        }
+
+        // S3: per-IP credentials-login rate limit. NextAuth's authorize receives only a
+        // partial request (plain lowercase headers object), so throttle by a derived key.
+        const fwd = req?.headers?.['x-forwarded-for'];
+        const ip =
+          (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim() ||
+          req?.headers?.['x-real-ip'] ||
+          'unknown';
+        try {
+          enforceRateLimitByKey(`auth-login:${ip}`, { limit: 20, ttl: 15 * 60_000 });
+        } catch {
+          // RETURN NULL, never throw — a thrown string would surface as a DISTINCT
+          // result.error, confirming the account exists. null keeps rate-limited
+          // rejections protocol-indistinguishable from wrong-password rejections
+          // (both produce CredentialsSignin).
           return null;
         }
 

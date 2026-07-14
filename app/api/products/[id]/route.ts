@@ -78,7 +78,8 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
     target?.createdBy === user.id &&
     target?.approvalStatus === "PENDING_REVIEW";
   if (!user.isAdmin && !isOwnPending) {
-    throw new AppError("Forbidden", "FORBIDDEN", 403);
+    // S6: anti-enumeration 404 (not 403) — do not leak that the product exists.
+    throw new AppError("Resource not found", "NOT_FOUND", 404);
   }
 
   const body = ProductUpdateSchema.parse(await request.json());

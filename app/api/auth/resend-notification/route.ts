@@ -3,6 +3,8 @@ import { getSession } from "@/lib/auth";
 import prisma from "@/lib/prisma";
 import { apiHandler } from "@/lib/api-utils";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
+import { emailService } from "@/lib/email";
+import { recordChange } from "@/lib/change-tracking";
 
 export const dynamic = "force-dynamic";
 
@@ -30,8 +32,40 @@ export const POST = apiHandler(async (request: NextRequest) => {
     identifier: session.user.id ?? session.user.email ?? undefined,
   });
 
+  // S5: actually notify the administrators (was a stub that claimed "sent" while
+  // sending nothing). Look up active admins and dispatch a reminder email.
+  const admins = await prisma.user.findMany({
+    where: { isAdmin: true, deletedAt: null },
+    select: { email: true },
+  });
+  const adminEmails = admins.map((a) => a.email).filter(Boolean);
+
+  const delivery = await emailService.sendApprovalReminderEmail(adminEmails, {
+    email: user.email,
+    username: user.username,
+  });
+
+  // Record a TRUTHFUL change-tracking event: details.delivered reflects whether
+  // the provider actually accepted the message (false when unconfigured or on a
+  // provider throw). Send-then-record ordering (codex #14/#20).
+  await prisma.$transaction(async (tx) => {
+    await recordChange(tx, {
+      actor: { kind: "USER", userId: user.id },
+      actionType: "USER_APPROVAL_REMINDER_SENT",
+      entityType: "USER",
+      entityId: user.id,
+      action: "Requested administrator review of a pending account",
+      details: {
+        attempted: delivery.attempted,
+        delivered: delivery.sent,
+        adminCount: adminEmails.length,
+      },
+    });
+  });
+
+  // Honest copy regardless of provider state — never a false "sent" claim.
   const response = NextResponse.json({
-    message: "Notification sent to administrators",
+    message: "Administrators will review your account",
   });
   return applyRateLimitHeaders(response, rateLimitHeaders);
 });

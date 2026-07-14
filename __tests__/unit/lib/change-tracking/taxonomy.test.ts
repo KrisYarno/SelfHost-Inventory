@@ -40,8 +40,9 @@ const unionMembers = parseAuditActionTypeMembers(fs.readFileSync(CHANGE_TRACKING
 
 describe('taxonomy completeness (writer-exhaustive)', () => {
   it('parses a plausible union (self-check) incl. the Lane 3 addition', () => {
-    expect(unionMembers.length).toBe(50);
+    expect(unionMembers.length).toBe(51); // Lane 5 S5 added USER_APPROVAL_REMINDER_SENT
     expect(unionMembers).toContain('ANALYTICS_REBUILD_TRIGGER');
+    expect(unionMembers).toContain('USER_APPROVAL_REMINDER_SENT');
     expect(new Set(unionMembers).size).toBe(unionMembers.length);
   });
 

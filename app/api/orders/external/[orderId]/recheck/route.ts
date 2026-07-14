@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF, requireCompanyMembership } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import {
@@ -70,15 +70,9 @@ export const POST = apiHandler(async (
     return NextResponse.json({ error: "Order not found" }, { status: 404 });
   }
 
-  // Ensure user is in the same company (admin can bypass)
-  if (!user.isAdmin) {
-    const membership = await prisma.userCompany.findFirst({
-      where: { userId: user.id, companyId: order.companyId },
-    });
-    if (!membership) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
-  }
+  // Ensure user is in the same company (admin can bypass). S6: anti-enumeration
+  // 404 (not 403) so the response doesn't leak whether the order exists.
+  await requireCompanyMembership(user.id, order.companyId, user.isAdmin);
 
   const platform = order.integration.platform as PlatformType;
   const apiKey = decryptOrNull(order.integration.encryptedApiKey);

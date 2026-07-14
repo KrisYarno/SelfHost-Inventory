@@ -35,6 +35,9 @@ export type AuditActionType =
   | 'USER_UPDATE'
   | 'USER_BULK_APPROVAL'
   | 'USER_BULK_REJECTION'
+  // Lane 5 S5: the pending user's resend-notification records that an approval
+  // reminder was dispatched to admins (verb SENT known, group USER via prefix).
+  | 'USER_APPROVAL_REMINDER_SENT'
   | 'PRODUCT_CREATE'
   | 'PRODUCT_UPDATE'
   | 'PRODUCT_DELETE'

@@ -50,6 +50,15 @@ jest.mock('@/lib/prisma', () => ({
     externalOrder: { findUnique: jest.fn() },
     userCompany: { findFirst: jest.fn() },
     auditLog: { create: jest.fn() },
+    // Lane 5 S2: the webhook route now takes a dedup claim; the manual mock must
+    // expose webhookDelivery or every pre-existing webhook case fails at the claim.
+    webhookDelivery: {
+      create: jest.fn(),
+      findUnique: jest.fn(),
+      updateMany: jest.fn(),
+      findMany: jest.fn(),
+      deleteMany: jest.fn(),
+    },
     $transaction: jest.fn(),
   },
 }));
@@ -59,6 +68,7 @@ jest.mock('@/lib/api-utils', () => ({
   apiHandler: (fn: any) => fn,
   requireApproved: jest.fn(),
   requireCSRF: jest.fn(),
+  requireCompanyMembership: jest.fn(),
 }));
 
 // Platform adapter — controllable fake (webhook + recheck + sync).
@@ -69,7 +79,8 @@ jest.mock('@/lib/platforms/core/registry', () => ({
 import { NextRequest } from 'next/server';
 import prisma from '@/lib/prisma';
 import { getPlatformAdapter } from '@/lib/platforms/core/registry';
-import { requireApproved, requireCSRF } from '@/lib/api-utils';
+import { requireApproved, requireCSRF, requireCompanyMembership } from '@/lib/api-utils';
+import { AppError } from '@/lib/error-handling';
 import { upsertOrderWithItems } from '@/lib/external-orders/shared';
 import { POST as WEBHOOK_POST } from '@/app/api/webhooks/[integrationId]/route';
 import { POST as RECHECK_POST } from '@/app/api/orders/external/[orderId]/recheck/route';
@@ -80,6 +91,13 @@ const db = prisma as unknown as {
   externalOrder: { findUnique: jest.Mock };
   userCompany: { findFirst: jest.Mock };
   auditLog: { create: jest.Mock };
+  webhookDelivery: {
+    create: jest.Mock;
+    findUnique: jest.Mock;
+    updateMany: jest.Mock;
+    findMany: jest.Mock;
+    deleteMany: jest.Mock;
+  };
   $transaction: jest.Mock;
 };
 
@@ -205,6 +223,11 @@ beforeEach(() => {
   db.integration.update.mockResolvedValue({});
   db.integration.updateMany.mockResolvedValue({ count: 1 });
   db.auditLog.create.mockResolvedValue({ id: 1 });
+  // S2 default: the claim succeeds (id 1 => no prune), finalization updates 1 row.
+  db.webhookDelivery.create.mockResolvedValue({ id: 1, claimedAt: new Date() });
+  db.webhookDelivery.updateMany.mockResolvedValue({ count: 1 });
+  db.webhookDelivery.findMany.mockResolvedValue([]);
+  db.webhookDelivery.deleteMany.mockResolvedValue({ count: 0 });
 });
 
 // ===========================================================================
@@ -505,8 +528,24 @@ describe('recheck route — USER-tier onRecorded joins the upsert tx', () => {
   beforeEach(() => {
     (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 7, isAdmin: true } });
     (requireCSRF as jest.Mock).mockResolvedValue(undefined);
+    (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
     global.fetch = jest.fn().mockResolvedValue(fetchResponse({ id: 'ext-1' }));
     fakeAdapter.parseOrderWebhook.mockReturnValue(buildNormalized({ financialStatus: 'paid' }));
+  });
+
+  it('S6: non-member (membership guard throws) → AppError 404, no remote fetch, no upsert', async () => {
+    (requireApproved as jest.Mock).mockResolvedValue({ user: { id: 7, isAdmin: false } });
+    db.externalOrder.findUnique.mockResolvedValue(recheckOrder());
+    (requireCompanyMembership as jest.Mock).mockRejectedValue(
+      new AppError('Resource not found', 'NOT_FOUND', 404)
+    );
+
+    await expect(
+      RECHECK_POST(recheckRequest(), { params: { orderId: ORDER_ID } } as any)
+    ).rejects.toMatchObject({ statusCode: 404, code: 'NOT_FOUND' });
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it('records EXTERNAL_ORDER_UPDATE on the SAME tx as the upsert (mock identity)', async () => {

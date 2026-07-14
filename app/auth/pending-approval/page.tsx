@@ -7,23 +7,32 @@ export default function PendingApprovalPage() {
   const router = useRouter();
   const [isResending, setIsResending] = useState(false);
   const [resendMessage, setResendMessage] = useState('');
+  const [resendOk, setResendOk] = useState<boolean | null>(null);
 
   const handleResendNotification = async () => {
     setIsResending(true);
     setResendMessage('');
-    
+    setResendOk(null);
+
     try {
       const response = await fetch('/api/auth/resend-notification', {
         method: 'POST',
       });
 
       if (response.ok) {
-        setResendMessage('Notification sent successfully! An administrator will review your application soon.');
+        // Show the server's honest copy (it never claims delivery it can't stand behind).
+        const data = await response.json().catch(() => ({}));
+        setResendMessage(
+          data?.message || 'Your request was received. An administrator will review your account.'
+        );
+        setResendOk(true);
       } else {
-        setResendMessage('Failed to send notification. Please try again later.');
+        setResendMessage('We could not submit your request right now. Please try again later.');
+        setResendOk(false);
       }
     } catch {
       setResendMessage('An error occurred. Please try again later.');
+      setResendOk(false);
     } finally {
       setIsResending(false);
     }
@@ -83,12 +92,12 @@ export default function PendingApprovalPage() {
               disabled={isResending}
               className="w-full sm:w-auto px-6 py-3 bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-all font-medium"
             >
-              {isResending ? 'Sending...' : 'Resend Notification to Admin'}
+              {isResending ? 'Sending...' : 'Notify an administrator'}
             </button>
-            
+
             {resendMessage && (
               <p className={`mt-3 text-sm ${
-                resendMessage.includes('successfully') ? 'text-success' : 'text-error'
+                resendOk ? 'text-success' : 'text-error'
               }`}>
                 {resendMessage}
               </p>

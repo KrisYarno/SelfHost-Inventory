@@ -80,6 +80,48 @@ export class EmailService {
     }
   }
 
+  /**
+   * S5: notify administrators that a pending user is awaiting approval. Returns a
+   * discriminated result so callers can record a TRUTHFUL change-tracking event:
+   *   - { attempted:false, sent:false } — SendGrid unconfigured or no admin recipients (skipped)
+   *   - { attempted:true,  sent:true }  — dispatched to the provider
+   *   - { attempted:true,  sent:false } — provider throw (caught here; caller stays honest)
+   */
+  async sendApprovalReminderEmail(
+    to: string | string[],
+    requestingUser: { email: string; username?: string | null }
+  ): Promise<{ attempted: boolean; sent: boolean }> {
+    const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
+    if (!process.env.SENDGRID_API_KEY || recipients.length === 0) {
+      console.warn(
+        'SendGrid not configured (or no admin recipients); approval reminder not sent'
+      );
+      return { attempted: false, sent: false };
+    }
+
+    const name = requestingUser.username || requestingUser.email;
+    const reviewUrl = process.env.NEXTAUTH_URL
+      ? `${process.env.NEXTAUTH_URL}/admin/users`
+      : null;
+    const subject = 'Account approval reminder';
+    const text = [
+      `${name} (${requestingUser.email}) is waiting for account approval.`,
+      reviewUrl ? `Review pending accounts: ${reviewUrl}` : 'Review pending accounts in the admin area.',
+    ].join('\n\n');
+    const html = `
+      <p>${name} (${requestingUser.email}) is waiting for account approval.</p>
+      <p>${reviewUrl ? `Review pending accounts at <a href="${reviewUrl}">${reviewUrl}</a>.` : 'Review pending accounts in the admin area.'}</p>
+    `;
+
+    try {
+      await this.sendEmail({ to: recipients, subject, text, html });
+      return { attempted: true, sent: true };
+    } catch (error) {
+      console.error('Failed to send approval reminder email:', error);
+      return { attempted: true, sent: false };
+    }
+  }
+
   async sendMinimumsDigest(
     to: string | string[],
     data: MinimumDigestData
@@ -203,16 +245,20 @@ export class EmailService {
               Hi ${data.recipientName},
             </p>
             
-            <p style="color: #4b5563; margin-bottom: 32px;">
-              The following ${data.items.length} product${data.items.length > 1 ? 's are' : ' is'} running low on stock:
+            <p style="color: #4b5563; margin-bottom: 12px;">
+              The following ${data.items.length} product${data.items.length > 1 ? 's are' : ' is'} at or below ${data.items.length > 1 ? 'their' : 'its'} alert threshold:
             </p>
-            
+
+            <p style="color: #6b7280; font-size: 13px; margin-bottom: 32px;">
+              The alert threshold shown is each product's effective value — its own setting, or the system default where no custom threshold is set.
+            </p>
+
             <table style="width: 100%; border-collapse: collapse; margin-bottom: 32px;">
               <thead>
                 <tr style="background-color: #f9fafb;">
                   <th style="padding: 12px; text-align: left; font-weight: 600; color: #374151;">Product</th>
                   <th style="padding: 12px; text-align: center; font-weight: 600; color: #374151;">Current Stock</th>
-                  <th style="padding: 12px; text-align: center; font-weight: 600; color: #374151;">Threshold</th>
+                  <th style="padding: 12px; text-align: center; font-weight: 600; color: #374151;">Alert threshold</th>
                   <th style="padding: 12px; text-align: center; font-weight: 600; color: #374151;">Days Until Empty</th>
                 </tr>
               </thead>
@@ -242,8 +288,8 @@ export class EmailService {
   }
 
   private generateLowStockText(data: LowStockEmailData): string {
-    const itemsList = data.items.map(item => 
-      `- ${item.productName}: ${item.currentStock} units (threshold: ${item.threshold}, days until empty: ${item.daysUntilEmpty || 'N/A'})`
+    const itemsList = data.items.map(item =>
+      `- ${item.productName}: ${item.currentStock} units (alert threshold: ${item.threshold}, days until empty: ${item.daysUntilEmpty || 'N/A'})`
     ).join('\n');
 
     return `
@@ -251,9 +297,11 @@ Low Stock Alert
 
 Hi ${data.recipientName},
 
-The following ${data.items.length} product${data.items.length > 1 ? 's are' : ' is'} running low on stock:
+The following ${data.items.length} product${data.items.length > 1 ? 's are' : ' is'} at or below ${data.items.length > 1 ? 'their' : 'its'} alert threshold:
 
 ${itemsList}
+
+The alert threshold shown is each product's effective value — its own setting, or the system default where no custom threshold is set.
 
 View inventory at: ${process.env.NEXTAUTH_URL}/inventory
 

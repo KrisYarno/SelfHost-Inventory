@@ -37,14 +37,25 @@ describe("escapeCSVCell (RFC 4180)", () => {
     expect(escapeCSVCell(null, true)).toBe(""); // ...but null/undefined stay empty
   });
 
-  test("formula-injection is NOT neutralized (documented non-behavior; leading =+-@ pass through)", () => {
-    // Intentional: consolidation preserved prior behavior; no formula guard added.
-    expect(escapeCSVCell("=1+1")).toBe("=1+1");
-    expect(escapeCSVCell("+cmd")).toBe("+cmd");
-    expect(escapeCSVCell("-2")).toBe("-2");
-    expect(escapeCSVCell("@ref")).toBe("@ref");
-    // only becomes quoted if it independently contains a comma/quote/newline
-    expect(escapeCSVCell("=1,2")).toBe('"=1,2"');
+  test("formula-injection IS neutralized (Lane 5 S7): leading =+-@ TAB CR get a ' prefix", () => {
+    expect(escapeCSVCell("=1+1")).toBe("'=1+1");
+    expect(escapeCSVCell("+cmd")).toBe("'+cmd");
+    expect(escapeCSVCell("-2")).toBe("'-2");
+    expect(escapeCSVCell("@ref")).toBe("'@ref");
+    expect(escapeCSVCell("\tnope")).toBe("'\tnope");
+    // A classic DDE payload is neutralized to inert text.
+    expect(escapeCSVCell('=cmd()|"/C calc"!A0')).toBe("\"'=cmd()|\"\"/C calc\"\"!A0\"");
+    // Prefix is applied BEFORE quoting: a value with both a lead char and a comma
+    // gets the ' prefix inside the quotes.
+    expect(escapeCSVCell("=1,2")).toBe("\"'=1,2\"");
+    // A leading CR is neutralized AND quoted (CR still triggers RFC 4180 quoting).
+    expect(escapeCSVCell("\rboom")).toBe("\"'\rboom\"");
+  });
+
+  test("safe leading characters are untouched", () => {
+    expect(escapeCSVCell("Widget")).toBe("Widget");
+    expect(escapeCSVCell("3.5mg")).toBe("3.5mg");
+    expect(escapeCSVCell("(paren)")).toBe("(paren)");
   });
 });
 

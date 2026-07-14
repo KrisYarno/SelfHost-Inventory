@@ -211,177 +211,283 @@ export const POST = apiHandler(async (
       return NextResponse.json({ success: true, ignored: true });
     }
 
-    // 3a. Handle delete events (payload may not match full order schema)
-    if (isDeleteWebhookEvent(platform, topic)) {
-      const externalId = extractExternalOrderId(rawBodyText);
-      if (!externalId) {
-        console.error(`Delete webhook missing order id for ${integrationId}`);
-        return NextResponse.json({ success: true, ignored: true });
+    // -----------------------------------------------------------------------
+    // S2 (codex #7/#8/#9): replay-dedup claim lifecycle. Taken AFTER the HMAC
+    // check AND the unsupported-topic gate so ignored/unsigned deliveries never
+    // strand a PROCESSING row. Dedup key = (integrationId, sha256(rawBody)) —
+    // NEVER the unauthenticated eventId header. Any dedup-infra failure is
+    // FAIL-OPEN (process without a claim) unless a duplicate was POSITIVELY
+    // established. The claim token (id + claimedAt) fences finalization so no two
+    // workers ever both process and a late loser can never overwrite the winner.
+    const bodyDigest = createHash("sha256").update(rawBodyBuffer).digest("hex");
+    const LEASE_MS = 5 * 60_000;
+    const myClaimedAt = new Date();
+    let claim: { id: number; claimedAt: Date } | null = null;
+    try {
+      claim = await prisma.webhookDelivery.create({
+        data: {
+          integrationId: integration.id,
+          bodyDigest,
+          eventId: webhookHeaders.eventId ?? null,
+          claimedAt: myClaimedAt,
+        },
+        select: { id: true, claimedAt: true },
+      });
+    } catch (e) {
+      if ((e as { code?: string })?.code === "P2002") {
+        try {
+          const existing = await prisma.webhookDelivery.findUnique({
+            where: { integrationId_bodyDigest: { integrationId: integration.id, bodyDigest } },
+            select: { id: true, status: true, claimedAt: true },
+          });
+          if (existing?.status === "PROCESSED") {
+            return NextResponse.json({ ok: true, duplicate: true });
+          }
+          if (
+            existing &&
+            existing.status === "PROCESSING" &&
+            Date.now() - existing.claimedAt.getTime() < LEASE_MS
+          ) {
+            // A live concurrent worker holds the lease.
+            return NextResponse.json({ ok: true, duplicate: true });
+          }
+          if (existing) {
+            // FAILED or stale PROCESSING: CONDITIONAL retake — only one concurrent
+            // retaker wins (the where pins the row's current status + claimedAt).
+            const won = await prisma.webhookDelivery.updateMany({
+              where: { id: existing.id, status: existing.status, claimedAt: existing.claimedAt },
+              data: { status: "PROCESSING", claimedAt: myClaimedAt },
+            });
+            if (won.count === 0) {
+              return NextResponse.json({ ok: true, duplicate: true }); // lost the retake race
+            }
+            claim = { id: existing.id, claimedAt: myClaimedAt };
+          }
+          // existing === null (pruned/rolled-back winner): fall through with claim=null -> fail-open.
+        } catch (inner) {
+          console.error("[webhook] dedup lookup/retake failed — FAIL-OPEN", inner);
+        }
+      } else {
+        console.error("[webhook] dedup claim failed — FAIL-OPEN", e);
       }
+    }
 
-      // Phase 7c: protect fulfilled orders from silent deletion.
-      // If any item on the order has been fulfilled locally (fulfilledQty > 0
-      // OR internalStatus is 'fulfilled'), refuse to delete and keep the audit
-      // trail intact. The inventory was already deducted — we need the order
-      // row to explain why. The WC side is now divergent; the operator must
-      // decide whether to unfulfill + delete manually, or accept divergence.
-      const deleteResult = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-        // R-D11: capture the FULL order + items snapshot inside the tx BEFORE
-        // deleting — destroyed state is otherwise unrecoverable.
-        const existing = await tx.externalOrder.findUnique({
-          where: {
-            integrationId_externalId: {
-              integrationId: integration.id,
-              externalId,
+    // Finalize the claim on a successful processing exit, fenced by the claim
+    // token so a late stale worker cannot overwrite a retaker's row, then run a
+    // bounded opportunistic prune. Best-effort — never fails the 200.
+    const finalizeProcessed = async (): Promise<void> => {
+      const c = claim;
+      if (!c) return;
+      try {
+        await prisma.webhookDelivery.updateMany({
+          where: { id: c.id, claimedAt: c.claimedAt },
+          data: { status: "PROCESSED", processedAt: new Date() },
+        });
+      } catch (err) {
+        console.error("[webhook] failed to finalize PROCESSED", err);
+      }
+      await pruneOldDeliveries(c.id);
+    };
+
+    // Mark the claim FAILED (same fence) so a provider retry retakes and reprocesses.
+    const finalizeFailed = async (): Promise<void> => {
+      const c = claim;
+      if (!c) return;
+      try {
+        await prisma.webhookDelivery.updateMany({
+          where: { id: c.id, claimedAt: c.claimedAt },
+          data: { status: "FAILED" },
+        });
+      } catch (err) {
+        console.error("[webhook] failed to finalize FAILED", err);
+      }
+    };
+
+    try {
+      // 3a. Handle delete events (payload may not match full order schema)
+      if (isDeleteWebhookEvent(platform, topic)) {
+        const externalId = extractExternalOrderId(rawBodyText);
+        if (!externalId) {
+          console.error(`Delete webhook missing order id for ${integrationId}`);
+          await finalizeProcessed();
+          return NextResponse.json({ success: true, ignored: true });
+        }
+
+        // Phase 7c: protect fulfilled orders from silent deletion.
+        // If any item on the order has been fulfilled locally (fulfilledQty > 0
+        // OR internalStatus is 'fulfilled'), refuse to delete and keep the audit
+        // trail intact. The inventory was already deducted — we need the order
+        // row to explain why. The WC side is now divergent; the operator must
+        // decide whether to unfulfill + delete manually, or accept divergence.
+        const deleteResult = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+          // R-D11: capture the FULL order + items snapshot inside the tx BEFORE
+          // deleting — destroyed state is otherwise unrecoverable.
+          const existing = await tx.externalOrder.findUnique({
+            where: {
+              integrationId_externalId: {
+                integrationId: integration.id,
+                externalId,
+              },
             },
-          },
-          include: { items: true },
+            include: { items: true },
+          });
+
+          if (!existing) {
+            return { action: "not_found" as const };
+          }
+
+          // stockedOut separation: one clean boolean check replaces the old
+          // fulfilledQty-arithmetic + internalStatus dual check.
+          if (existing.stockedOut) {
+            // Protected — keep the order, keep its items, keep the audit trail.
+            return {
+              action: "protected" as const,
+              orderNumber: existing.orderNumber,
+            };
+          }
+
+          // Safe to delete — no fulfillment work to preserve
+          await tx.externalOrderItem.deleteMany({ where: { orderId: existing.id } });
+          await tx.externalOrder.delete({ where: { id: existing.id } });
+          return {
+            action: "deleted" as const,
+            orderId: existing.id,
+            orderNumber: existing.orderNumber,
+            snapshot: existing,
+          };
         });
 
-        if (!existing) {
-          return { action: "not_found" as const };
+        // Phase 7c.3: all three delete outcomes count as successful webhook
+        // deliveries (signature passed, we processed the event). Record health.
+        // ER-B3 ORDER: recordWebhookSuccess FIRST, THEN the ingestion record —
+        // so an audit-write failure (recorded by onFailure) is never wiped by the
+        // success reset.
+        await recordWebhookSuccess(integration.id);
+
+        if (deleteResult.action === "not_found") {
+          // Idempotent: if we never had the order, delete is a no-op — records
+          // NOTHING (no state change).
+          await finalizeProcessed();
+          return NextResponse.json({ success: true, ignored: true });
         }
 
-        // stockedOut separation: one clean boolean check replaces the old
-        // fulfilledQty-arithmetic + internalStatus dual check.
-        if (existing.stockedOut) {
-          // Protected — keep the order, keep its items, keep the audit trail.
-          return {
-            action: "protected" as const,
-            orderNumber: existing.orderNumber,
-          };
+        if (deleteResult.action === "protected") {
+          console.warn(
+            `[webhook] REFUSED delete for fulfilled order ${deleteResult.orderNumber} (integration ${integrationId}, externalId ${externalId}). Order retained for audit trail; operator must reconcile manually.`
+          );
+          await finalizeProcessed();
+          return NextResponse.json({
+            success: true,
+            protected: true,
+            reason: "Order has fulfillment work; audit trail preserved",
+          });
         }
 
-        // Safe to delete — no fulfillment work to preserve
-        await tx.externalOrderItem.deleteMany({ where: { orderId: existing.id } });
-        await tx.externalOrder.delete({ where: { id: existing.id } });
-        return {
-          action: "deleted" as const,
-          orderId: existing.id,
-          orderNumber: existing.orderNumber,
-          snapshot: existing,
-        };
+        console.log(
+          `Deleted external order ${deleteResult.orderNumber} for integration ${integrationId}, externalId ${externalId}`
+        );
+
+        // R-D4/R-D11: record the delete as an ingestion event with the full
+        // pre-delete snapshot. Best-effort — a record failure bumps the webhook
+        // health counter but never fails the 200 (the row is already gone).
+        await recordIngestion(
+          {
+            actor: {
+              kind: "WEBHOOK",
+              envelope: { integrationId: integration.id, topic },
+            },
+            actionType: "EXTERNAL_ORDER_DELETE",
+            entityType: "ORDER",
+            entityId: deleteResult.orderId,
+            companyId: integration.companyId,
+            action: `Webhook deleted order ${deleteResult.orderNumber}`,
+            details: { platform, snapshot: deleteResult.snapshot },
+          },
+          {
+            onFailure: () =>
+              recordWebhookFailure(integration.id, "change-tracking write failed"),
+          }
+        );
+
+        await finalizeProcessed();
+        return NextResponse.json({ success: true, deleted: true });
+      }
+
+      // 3. Parse order using adapter.parseOrderWebhook()
+      let normalizedOrder;
+      try {
+        normalizedOrder = adapter.parseOrderWebhook(rawBodyText);
+      } catch (error) {
+        console.error(`Failed to parse webhook for ${integrationId}:`, error);
+        // Malformed payload: mark FAILED (not stranded PROCESSING) and answer 400.
+        await finalizeFailed();
+        return NextResponse.json(
+          { error: "Invalid webhook payload" },
+          { status: 400 }
+        );
+      }
+
+      // 4. Upsert ExternalOrder and ExternalOrderItem records (atomic transaction)
+      const summary = await upsertOrderWithItems(prisma, {
+        integrationId: integration.id,
+        companyId: integration.companyId,
+        storeUrl: integration.storeUrl,
+        normalized: normalizedOrder,
+        status: { statusMode: "compute", platform },
       });
 
-      // Phase 7c.3: all three delete outcomes count as successful webhook
-      // deliveries (signature passed, we processed the event). Record health.
-      // ER-B3 ORDER: recordWebhookSuccess FIRST, THEN the ingestion record —
-      // so an audit-write failure (recorded by onFailure) is never wiped by the
-      // success reset.
+      console.log(
+        `Successfully processed webhook for integration ${integrationId}, order ${normalizedOrder.externalOrderNumber}`
+      );
+
+      // Update lastSyncAt so the incremental poller can catch up from outages,
+      // and record webhook health for operator visibility.
+      // ER-B3 ORDER: recordWebhookSuccess (resets webhookFailureCount) FIRST,
+      // THEN the R-D4 ingestion record — so an audit-write failure signalled by
+      // onFailure survives instead of being wiped by the success reset.
       await recordWebhookSuccess(integration.id);
 
-      if (deleteResult.action === "not_found") {
-        // Idempotent: if we never had the order, delete is a no-op — records
-        // NOTHING (no state change).
-        return NextResponse.json({ success: true, ignored: true });
-      }
-
-      if (deleteResult.action === "protected") {
-        console.warn(
-          `[webhook] REFUSED delete for fulfilled order ${deleteResult.orderNumber} (integration ${integrationId}, externalId ${externalId}). Order retained for audit trail; operator must reconcile manually.`
+      // 5. R-D4: record ONLY an effective transition (gate on summary.changed).
+      // An unchanged re-delivery writes no event. Best-effort — a record failure
+      // bumps webhook health but never fails the 200 (the upsert already
+      // committed).
+      if (summary.changed) {
+        await recordIngestion(
+          {
+            actor: {
+              kind: "WEBHOOK",
+              envelope: { integrationId: integration.id, topic },
+            },
+            actionType: summary.created
+              ? "EXTERNAL_ORDER_CREATE"
+              : "EXTERNAL_ORDER_UPDATE",
+            entityType: "ORDER",
+            entityId: summary.orderId,
+            companyId: integration.companyId,
+            action: `Webhook ${summary.created ? "created" : "updated"} order ${summary.orderNumber ?? summary.orderId}`,
+            changes: summary.changes,
+            details: { platform, prunedItems: summary.prunedItems },
+          },
+          {
+            onFailure: () =>
+              recordWebhookFailure(integration.id, "change-tracking write failed"),
+          }
         );
-        return NextResponse.json({
-          success: true,
-          protected: true,
-          reason: "Order has fulfillment work; audit trail preserved",
-        });
       }
 
-      console.log(
-        `Deleted external order ${deleteResult.orderNumber} for integration ${integrationId}, externalId ${externalId}`
-      );
-
-      // R-D4/R-D11: record the delete as an ingestion event with the full
-      // pre-delete snapshot. Best-effort — a record failure bumps the webhook
-      // health counter but never fails the 200 (the row is already gone).
-      await recordIngestion(
-        {
-          actor: {
-            kind: "WEBHOOK",
-            envelope: { integrationId: integration.id, topic },
-          },
-          actionType: "EXTERNAL_ORDER_DELETE",
-          entityType: "ORDER",
-          entityId: deleteResult.orderId,
-          companyId: integration.companyId,
-          action: `Webhook deleted order ${deleteResult.orderNumber}`,
-          details: { platform, snapshot: deleteResult.snapshot },
-        },
-        {
-          onFailure: () =>
-            recordWebhookFailure(integration.id, "change-tracking write failed"),
-        }
-      );
-
-      return NextResponse.json({ success: true, deleted: true });
+      // 6. S2: finalize the claim PROCESSED, then return 200 OK.
+      await finalizeProcessed();
+      return NextResponse.json({
+        success: true,
+        orderId: summary.orderId,
+        orderNumber: normalizedOrder.externalOrderNumber,
+      });
+    } catch (err) {
+      // Any processing throw: mark the claim FAILED (best-effort) and rethrow so
+      // apiHandler answers non-2xx and the provider retries + reprocesses.
+      await finalizeFailed();
+      throw err;
     }
-
-    // 3. Parse order using adapter.parseOrderWebhook()
-    let normalizedOrder;
-    try {
-      normalizedOrder = adapter.parseOrderWebhook(rawBodyText);
-    } catch (error) {
-      console.error(`Failed to parse webhook for ${integrationId}:`, error);
-      return NextResponse.json(
-        { error: "Invalid webhook payload" },
-        { status: 400 }
-      );
-    }
-
-    // 4. Upsert ExternalOrder and ExternalOrderItem records (atomic transaction)
-    const summary = await upsertOrderWithItems(prisma, {
-      integrationId: integration.id,
-      companyId: integration.companyId,
-      storeUrl: integration.storeUrl,
-      normalized: normalizedOrder,
-      status: { statusMode: "compute", platform },
-    });
-
-    console.log(
-      `Successfully processed webhook for integration ${integrationId}, order ${normalizedOrder.externalOrderNumber}`
-    );
-
-    // Update lastSyncAt so the incremental poller can catch up from outages,
-    // and record webhook health for operator visibility.
-    // ER-B3 ORDER: recordWebhookSuccess (resets webhookFailureCount) FIRST,
-    // THEN the R-D4 ingestion record — so an audit-write failure signalled by
-    // onFailure survives instead of being wiped by the success reset.
-    await recordWebhookSuccess(integration.id);
-
-    // 5. R-D4: record ONLY an effective transition (gate on summary.changed).
-    // An unchanged re-delivery writes no event. Best-effort — a record failure
-    // bumps webhook health but never fails the 200 (the upsert already
-    // committed).
-    if (summary.changed) {
-      await recordIngestion(
-        {
-          actor: {
-            kind: "WEBHOOK",
-            envelope: { integrationId: integration.id, topic },
-          },
-          actionType: summary.created
-            ? "EXTERNAL_ORDER_CREATE"
-            : "EXTERNAL_ORDER_UPDATE",
-          entityType: "ORDER",
-          entityId: summary.orderId,
-          companyId: integration.companyId,
-          action: `Webhook ${summary.created ? "created" : "updated"} order ${summary.orderNumber ?? summary.orderId}`,
-          changes: summary.changes,
-          details: { platform, prunedItems: summary.prunedItems },
-        },
-        {
-          onFailure: () =>
-            recordWebhookFailure(integration.id, "change-tracking write failed"),
-        }
-      );
-    }
-
-  // 6. Return 200 OK
-  return NextResponse.json({
-    success: true,
-    orderId: summary.orderId,
-    orderNumber: normalizedOrder.externalOrderNumber,
-  });
 });
 
 function resolveWebhookSecret(
@@ -567,6 +673,32 @@ function extractExternalOrderId(rawBodyText: string): string | null {
     return String(id);
   } catch {
     return null;
+  }
+}
+
+/**
+ * S2 (codex #9): bounded opportunistic prune of the replay-dedup ledger. Runs
+ * only ~1% of the time (when the winning claim's id is a multiple of 100), so no
+ * new scheduler is needed. Deletes at most 500 rows older than the 30-day window,
+ * AWAITED with its own try/catch so it never surfaces an unhandled rejection or
+ * fails the webhook.
+ */
+async function pruneOldDeliveries(claimId: number): Promise<void> {
+  if (claimId % 100 !== 0) return;
+  try {
+    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const stale = await prisma.webhookDelivery.findMany({
+      where: { receivedAt: { lt: cutoff } },
+      select: { id: true },
+      take: 500,
+    });
+    if (stale.length > 0) {
+      await prisma.webhookDelivery.deleteMany({
+        where: { id: { in: stale.map((s) => s.id) } },
+      });
+    }
+  } catch (err) {
+    console.error("[webhook] delivery prune failed", err);
   }
 }
 

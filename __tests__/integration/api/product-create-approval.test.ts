@@ -181,7 +181,7 @@ describe('PUT /api/products/[id] (creator-edit-own-pending guard)', () => {
     expect(db.product.update).toHaveBeenCalled();
   });
 
-  it('returns 403 when the creator edits their own product after it is DECLINED/soft-deleted (P2-1)', async () => {
+  it('returns 404 (anti-enumeration) when the creator edits their own product after it is DECLINED/soft-deleted (P2-1)', async () => {
     setUser(APPROVED_USER);
     // Decline keeps approvalStatus PENDING_REVIEW but sets deletedAt; the guard must reject.
     db.product.findUnique.mockResolvedValueOnce({
@@ -195,11 +195,11 @@ describe('PUT /api/products/[id] (creator-edit-own-pending guard)', () => {
       { params: { id: '5' } }
     );
 
-    expect(resp.status).toBe(403);
+    expect(resp.status).toBe(404);
     expect(db.product.update).not.toHaveBeenCalled();
   });
 
-  it('returns 403 when a different non-admin edits a product they did not create', async () => {
+  it('returns 404 (anti-enumeration) when a different non-admin edits a product they did not create', async () => {
     setUser(APPROVED_USER);
     db.product.findUnique.mockResolvedValueOnce({
       createdBy: 999, // a different user
@@ -211,13 +211,13 @@ describe('PUT /api/products/[id] (creator-edit-own-pending guard)', () => {
       { params: { id: '5' } }
     );
 
-    expect(resp.status).toBe(403);
+    expect(resp.status).toBe(404);
     const body = await resp.json();
-    expect(body.error).toMatch(/forbidden/i);
+    expect(body.error).toMatch(/not found/i);
     expect(db.product.update).not.toHaveBeenCalled();
   });
 
-  it('returns 403 when the creator tries to edit their product after it is APPROVED', async () => {
+  it('returns 404 (anti-enumeration) when the creator tries to edit their product after it is APPROVED', async () => {
     setUser(APPROVED_USER);
     db.product.findUnique.mockResolvedValueOnce({
       createdBy: APPROVED_USER.id,
@@ -229,7 +229,7 @@ describe('PUT /api/products/[id] (creator-edit-own-pending guard)', () => {
       { params: { id: '5' } }
     );
 
-    expect(resp.status).toBe(403);
+    expect(resp.status).toBe(404);
     expect(db.product.update).not.toHaveBeenCalled();
   });
 

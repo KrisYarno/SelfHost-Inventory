@@ -9,7 +9,9 @@ export const dynamic = "force-dynamic";
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    if (!session?.user?.isApproved) {
+    // S4: admin-gate this diagnostic endpoint (mirrors app/api/test/email's isAdmin 401)
+    // so it is not reachable by any approved user in production.
+    if (!session?.user?.isAdmin) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
