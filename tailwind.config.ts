@@ -18,6 +18,13 @@ const config: Config = {
           hover: "hsl(var(--surface-hover))",
         },
         border: "hsl(var(--border))",
+        // U6: `--input` is defined in globals.css (light + dark) and used as the
+        // form-control border via `border-input` across the ui primitives, but
+        // the color key was never registered — so `border-input` was a silent
+        // no-op (borders fell back to currentColor). Registering it here fixes
+        // every consumer without touching out-of-fence files. (`card`/`popover`
+        // stay unregistered by DESIGN.md law — panels use `surface`.)
+        input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
 
         // UI colors

@@ -122,26 +122,22 @@ export default function AdminSettingsPage() {
         <h1 className="text-3xl font-bold">System Settings</h1>
       </div>
 
-      {/* Quick Actions */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <Link href="/admin/settings/thresholds">
-          <Card className="hover:shadow-md transition-shadow cursor-pointer">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <AlertTriangle className="h-5 w-5 text-warning" />
-                Low-stock alert thresholds
-              </CardTitle>
-              <CardDescription>
-                Set the system default threshold and per-product overrides that
-                trigger low-stock email alerts.
-              </CardDescription>
-            </CardHeader>
-          </Card>
+      {/* Quick actions — flat divide-y rows (D-B8: not shadowed cards; both
+          rows reuse the AI-providers entry-row classes verbatim). */}
+      <div className="divide-y divide-border overflow-hidden rounded-lg border bg-surface">
+        <Link
+          href="/admin/settings/thresholds"
+          className="flex items-center gap-3 p-4 hover:bg-surface-hover"
+        >
+          <AlertTriangle className="h-5 w-5 shrink-0 text-warning" />
+          <div className="min-w-0">
+            <p className="font-medium">Low-stock alert thresholds</p>
+            <p className="text-sm text-muted-foreground">
+              Set the system default threshold and per-product overrides that
+              trigger low-stock email alerts.
+            </p>
+          </div>
         </Link>
-      </div>
-
-      {/* AI providers — a FLAT row link (D-B8: not another shadowed card) */}
-      <div className="overflow-hidden rounded-lg border bg-surface">
         <Link
           href="/admin/settings/ai"
           className="flex items-center gap-3 p-4 hover:bg-surface-hover"

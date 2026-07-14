@@ -133,10 +133,10 @@ describe('ReviewChangesDialog', () => {
       />
     )
 
-    // The dialog renders two role="alert" nodes: the warning banner and the
-    // per-row "Negative Stock" badge. Assert an alert exists, then pin the banner
-    // via its heading text.
-    expect(screen.getAllByRole('alert').length).toBeGreaterThan(0)
+    // U7: exactly ONE role="alert" — the warning banner. The per-row "Negative
+    // Stock" badge is a plain Badge with no role, so the alert is not duplicated.
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(screen.getByRole('alert')).toHaveTextContent('Stock Warning')
     expect(screen.getByText('Stock Warning')).toBeInTheDocument()
     expect(screen.getByText('1 product(s) would have negative stock after these adjustments.')).toBeInTheDocument()
     
@@ -295,10 +295,8 @@ describe('ReviewChangesDialog', () => {
       />
     )
 
-    // The component maps quantityChange > 0 to an "Increase" icon and everything
-    // else (including a 0 change) to "Decrease", so Product 1's 0-change row also
-    // renders a "Decrease" label. Scope to the specific rows to assert the
-    // meaningful mapping: a positive change shows Increase, a negative shows Decrease.
+    // U7: positive => Increase, negative => Decrease, and a 0-change row buckets
+    // under a NEUTRAL "No change" (Minus icon), never "Decrease".
     const increaseRow = screen.getByRole('listitem', {
       name: /Product 2: changing from 50 to 60/i,
     })
@@ -308,5 +306,12 @@ describe('ReviewChangesDialog', () => {
       name: /Product 3: changing from 10 to 5/i,
     })
     expect(within(decreaseRow).getByLabelText('Decrease')).toBeInTheDocument()
+
+    const noChangeRow = screen.getByRole('listitem', {
+      name: /Product 1: changing from 100 to 100/i,
+    })
+    expect(within(noChangeRow).getByLabelText('No change')).toBeInTheDocument()
+    expect(within(noChangeRow).queryByLabelText('Decrease')).not.toBeInTheDocument()
+    expect(within(noChangeRow).getByText('No change')).toBeInTheDocument()
   })
 })

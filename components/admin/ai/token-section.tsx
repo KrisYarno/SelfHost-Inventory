@@ -148,7 +148,7 @@ export function TokenSection() {
         </div>
         <div className="space-y-2">
           <Label htmlFor="token-owner">Owner</Label>
-          <Select value={preselectId || undefined} onValueChange={setOwnerId}>
+          <Select value={preselectId || ""} onValueChange={setOwnerId}>
             <SelectTrigger id="token-owner">
               <SelectValue placeholder="Select an owner" />
             </SelectTrigger>

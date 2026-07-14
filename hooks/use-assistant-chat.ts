@@ -137,6 +137,13 @@ export interface UseAssistantChat {
   error: Error | undefined;
   conversationId: string;
   csrfReady: boolean;
+  /**
+   * Readiness probe result (U1): `false` once the GET /api/assistant probe
+   * reports the provider is unconfigured (lets the page fork the unconfigured
+   * panel BEFORE the first submit); `null` while the probe is pending or failed
+   * (the page falls back to the reactive 409 fork).
+   */
+  configured: boolean | null;
   stoppedIds: Set<string>;
   input: string;
   setInput: (v: string) => void;
@@ -172,6 +179,27 @@ export function useAssistantChat(): UseAssistantChat {
   const [input, setInput] = React.useState("");
   const [stoppedIds, setStoppedIds] = React.useState<Set<string>>(() => new Set());
 
+  // Readiness probe (U1): fetch the provider-configured signal on mount so the
+  // page can fork the unconfigured panel BEFORE the first submit. A failed probe
+  // leaves `configured` null and the reactive 409 fork remains the fallback.
+  const [configured, setConfigured] = React.useState<boolean | null>(null);
+  React.useEffect(() => {
+    let cancelled = false;
+    fetch("/api/assistant", { method: "GET", cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { configured?: boolean } | null) => {
+        if (!cancelled && data && typeof data.configured === "boolean") {
+          setConfigured(data.configured);
+        }
+      })
+      .catch(() => {
+        /* probe failed — keep null; the reactive 409 fork covers it */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const sendPrompt = React.useCallback(
     (text: string) => {
       const trimmed = text.trim();
@@ -205,6 +233,7 @@ export function useAssistantChat(): UseAssistantChat {
     error: chat.error,
     conversationId,
     csrfReady,
+    configured,
     stoppedIds,
     input,
     setInput,

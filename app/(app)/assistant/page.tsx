@@ -105,6 +105,7 @@ export default function AssistantPage() {
     status,
     error,
     csrfReady,
+    configured,
     stoppedIds,
     input,
     setInput,
@@ -116,12 +117,15 @@ export default function AssistantPage() {
   const errorInfo = classifyChatError(error);
   const rateLimited = errorInfo?.kind === "rate-limited";
   const streaming = status === "streaming" || status === "submitted";
+  // The readiness probe (configured === false) forks the panel BEFORE the first
+  // submit; the reactive 409 (errorInfo unconfigured) stays as the fallback.
+  const unconfigured = configured === false || errorInfo?.kind === "unconfigured";
 
   let body: React.ReactNode;
-  if (!csrfReady) {
-    body = <BootSkeleton />;
-  } else if (errorInfo?.kind === "unconfigured") {
+  if (unconfigured) {
     body = <UnconfiguredPanel isAdmin={isAdmin} />;
+  } else if (!csrfReady) {
+    body = <BootSkeleton />;
   } else if (rateLimited) {
     body = <RateLimitedPanel retryAt={errorInfo?.retryAt} />;
   } else if (messages.length === 0) {
@@ -139,7 +143,7 @@ export default function AssistantPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="relative min-h-0 flex-1">{body}</div>
+      <div className="relative min-h-0 min-w-0 flex-1">{body}</div>
       <div className="border-t border-border bg-background p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
         <div className="mx-auto w-full max-w-[52rem]">
           <Composer

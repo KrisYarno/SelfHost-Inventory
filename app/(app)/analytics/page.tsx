@@ -7,11 +7,12 @@ export default function AnalyticsPage() {
   return (
     <div className="flex flex-col h-full">
       <PageHeader title="Analytics" />
-      <main className="flex-1 overflow-auto p-[var(--card-padding)]">
+      {/* A section, not a page-level main landmark; the app shell owns the single page main (U4). */}
+      <section aria-label="Analytics" className="flex-1 overflow-auto p-[var(--card-padding)]">
         <div className="mx-auto max-w-7xl">
           <AnalyticsHub />
         </div>
-      </main>
+      </section>
     </div>
   );
 }

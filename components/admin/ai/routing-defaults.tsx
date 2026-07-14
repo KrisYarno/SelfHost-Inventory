@@ -90,7 +90,7 @@ export function RoutingDefaults({ providers, routing }: RoutingDefaultsProps) {
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="routing-provider">Provider</Label>
-          <Select value={kind ?? undefined} onValueChange={handleKindChange}>
+          <Select value={kind ?? ""} onValueChange={handleKindChange}>
             <SelectTrigger id="routing-provider">
               <SelectValue placeholder="Select a provider" />
             </SelectTrigger>
@@ -109,7 +109,7 @@ export function RoutingDefaults({ providers, routing }: RoutingDefaultsProps) {
           {modelOptions.length === 0 ? (
             <p className="text-body-sm text-warning-foreground">Add at least one model</p>
           ) : (
-            <Select value={model || undefined} onValueChange={setModel}>
+            <Select value={model || ""} onValueChange={setModel}>
               <SelectTrigger id="routing-model">
                 <SelectValue placeholder="Select a model" />
               </SelectTrigger>

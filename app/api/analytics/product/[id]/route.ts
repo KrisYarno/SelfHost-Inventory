@@ -3,6 +3,7 @@ import { requireApproved, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { getStockSeries, getSales } from "@/lib/analytics/queries";
 import { resolveCallerCompanyIds, serializeSalesRows } from "@/lib/analytics/company-scope";
+import { REVENUE_CAVEAT_NOTE } from "@/lib/analytics/constants";
 
 export const dynamic = "force-dynamic";
 
@@ -67,7 +68,7 @@ export const GET = apiHandler(
       sales: {
         series: sales,
         mode: "historical (your companies)",
-        note: "revenue = direct (non-bundle) sales only; bundle units are included, bundle revenue is not represented",
+        note: REVENUE_CAVEAT_NOTE,
       },
     });
   }

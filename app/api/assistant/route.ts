@@ -88,6 +88,36 @@ function maskStreamError(error: unknown): string {
   return "PROVIDER_ERROR";
 }
 
+/**
+ * GET /api/assistant — the page-load readiness probe (U1). Lets the surface fork
+ * the unconfigured panel BEFORE the first submit instead of only reactively on a
+ * 409. requireApproved gates it (same auth posture as POST); resolveSurfaceModel
+ * decides `configured`. AI_UNCONFIGURED is the ONLY non-error "unconfigured"
+ * signal — any other resolution failure surfaces as a guard error so the client
+ * falls back to the reactive 409 fork. Never cached (per-session, per-config).
+ */
+export async function GET(): Promise<Response> {
+  try {
+    await requireApproved();
+    let configured = true;
+    try {
+      await resolveSurfaceModel("assistant");
+    } catch (err) {
+      if (err instanceof AppError && err.code === "AI_UNCONFIGURED") {
+        configured = false;
+      } else {
+        throw err;
+      }
+    }
+    return NextResponse.json(
+      { configured },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  } catch (err) {
+    return guardError(err);
+  }
+}
+
 export async function POST(request: NextRequest): Promise<Response> {
   // --- Guards (BEFORE any model/stream work; fail as plain JSON) ---
   let userId: number;

@@ -65,7 +65,7 @@ const recordRunSpy: jest.Mock = jest.fn(() => Promise.resolve());
 jest.mock("@/lib/assistant/telemetry", () => ({ recordAssistantRun: (...a: unknown[]) => recordRunSpy(...a) }));
 
 import { NextRequest } from "next/server";
-import { POST } from "@/app/api/assistant/route";
+import { GET, POST } from "@/app/api/assistant/route";
 import { buildSystemPrompt } from "@/lib/assistant/prompt";
 import { AppError } from "@/lib/error-handling";
 import { RateLimitError } from "@/lib/rateLimit";
@@ -173,6 +173,43 @@ describe("guards fail as JSON before the model runs", () => {
     });
     await POST(req(validBody));
     expect(calls).toEqual(["approved", "csrf", "rate"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/assistant — the U1 readiness probe
+// ---------------------------------------------------------------------------
+
+describe("GET readiness probe (U1)", () => {
+  test("configured:true when the surface model resolves; never cached", async () => {
+    resolveMock.mockResolvedValue(MODEL);
+    const res = await GET();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({ configured: true });
+  });
+
+  test("configured:false on AI_UNCONFIGURED — a 200, never an error status", async () => {
+    resolveMock.mockRejectedValue(new AppError("Assistant is not configured", "AI_UNCONFIGURED", 409));
+    const res = await GET();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({ configured: false });
+  });
+
+  test("unapproved => guard error (403), no provider resolution, no configured payload", async () => {
+    approvedMock.mockRejectedValue(new AppError("Account pending approval", "FORBIDDEN", 403));
+    const res = await GET();
+    expect(res.status).toBe(403);
+    expect((await res.json()).configured).toBeUndefined();
+    expect(resolveMock).not.toHaveBeenCalled();
+  });
+
+  test("an unexpected resolution failure surfaces as a guard error (client keeps the reactive fork)", async () => {
+    resolveMock.mockRejectedValue(new Error("db down"));
+    const res = await GET();
+    expect(res.status).toBe(500);
+    expect((await res.json()).configured).toBeUndefined();
   });
 });
 

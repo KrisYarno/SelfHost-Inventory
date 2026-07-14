@@ -100,7 +100,10 @@ export function Composer({
         aria-label="Message the assistant"
         aria-describedby={hintId}
         className={cn(
-          "min-h-[40px] max-h-[200px] flex-1 resize-none bg-transparent px-1 py-2 text-body",
+          // `min-w-0` lets the flex-1 textarea shrink below its intrinsic
+          // content width — without it a long unbroken string forces the
+          // composer wider than the 375px viewport (U2 horizontal overflow).
+          "min-h-[40px] max-h-[200px] min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-body",
           "placeholder:text-muted-foreground focus-visible:outline-none",
           "disabled:cursor-not-allowed disabled:opacity-60",
         )}

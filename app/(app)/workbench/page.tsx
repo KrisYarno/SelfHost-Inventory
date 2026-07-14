@@ -325,8 +325,9 @@ export default function WorkbenchPage() {
       {/* Header */}
       <PageHeader title="Workbench" description="Quick order processing" />
 
-      {/* Main Content - Two Column Layout */}
-      <main className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+      {/* Main Content - Two Column Layout. A section, not a page-level main
+          landmark; the app shell owns the single page main (U4). */}
+      <section aria-label="Order workbench" className="flex-1 flex flex-col lg:flex-row overflow-hidden">
         {/* Left Side - Product Grid */}
         <div className="flex-1 p-4 sm:p-6 overflow-y-auto">
           <div className="max-w-6xl mx-auto">
@@ -619,7 +620,7 @@ export default function WorkbenchPage() {
             </div>
           </div>
         )}
-      </main>
+      </section>
 
       {/* Quantity Picker Dialog */}
       <QuantityPicker

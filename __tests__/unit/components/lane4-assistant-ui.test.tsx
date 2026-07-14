@@ -445,6 +445,12 @@ describe("AssistantPage states (D-B7)", () => {
   beforeEach(() => {
     useSessionMock.mockReturnValue({ data: { user: { isAdmin: false } } });
     useChatMock.mockReturnValue(chatReturn());
+    // Default: the U1 readiness probe fails silently so `configured` stays null
+    // and these synchronous state assertions are unaffected (the reactive fork
+    // still drives the unconfigured/rate-limited cases).
+    global.fetch = jest
+      .fn()
+      .mockRejectedValue(new Error("probe disabled")) as unknown as typeof fetch;
   });
 
   test("empty state: capability line + three tap-to-POPULATE prompts (not tap-to-send)", () => {
@@ -490,5 +496,40 @@ describe("AssistantPage states (D-B7)", () => {
     render(<AssistantPage />);
     expect(screen.getByText(/Assistant is temporarily rate-limited\. Try again at/)).toBeInTheDocument();
     expect(screen.getByLabelText("Message the assistant")).toBeDisabled();
+  });
+
+  // U1: the GET readiness probe forks the unconfigured panel BEFORE any submit,
+  // with NO reactive error present (proactive fork, not the 409 fallback).
+  test("page-fork: probe reporting configured:false forks the unconfigured panel proactively", async () => {
+    useSessionMock.mockReturnValue({ data: { user: { isAdmin: false } } });
+    useChatMock.mockReturnValue(chatReturn()); // no error
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ configured: false }),
+    }) as unknown as typeof fetch;
+    render(<AssistantPage />);
+    expect(
+      await screen.findByText("The assistant isn’t set up yet. Ask an admin to configure an AI provider."),
+    ).toBeInTheDocument();
+  });
+
+  // U2: class-invariant — no page container declares a fixed min-width wider than
+  // the 375px viewport (the behavioral 375px overflow check is the W3 drive).
+  test("no page container has a fixed min-width wider than the 375px viewport", () => {
+    useChatMock.mockReturnValue(chatReturn());
+    const { container } = render(<AssistantPage />);
+    const VIEWPORT = 375;
+    const offenders: string[] = [];
+    container.querySelectorAll<HTMLElement>("*").forEach((el) => {
+      const cls = el.className;
+      if (typeof cls !== "string") return; // SVG className is not a string
+      const m = cls.match(/min-w-\[(\d+(?:\.\d+)?)(px|rem)\]/);
+      if (m) {
+        const px = m[2] === "rem" ? parseFloat(m[1]) * 16 : parseFloat(m[1]);
+        if (px > VIEWPORT) offenders.push(`${m[0]} (${px}px)`);
+      }
+      if (/\bw-screen\b/.test(cls)) offenders.push("w-screen");
+    });
+    expect(offenders).toEqual([]);
   });
 });
