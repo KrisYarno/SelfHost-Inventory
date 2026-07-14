@@ -611,6 +611,13 @@ const GET_SIDE_EFFECT_REGISTRY: GetSideEffect[] = [
       "recordChange-required (DATA_EXPORT); the 4th export GET, previously omitted from the " +
       "D12 comment — recording characterized alongside the other DATA_EXPORT routes",
   },
+  {
+    path: "app/api/reports/reorder-recommendations/export/route.ts",
+    kind: "RECORDS_REQUIRED",
+    reason:
+      "recordChange-required (DATA_EXPORT); the reorder report CSV export (Lane reorder-points) " +
+      "records a DATA_EXPORT before streaming — enforced by reorder-export-route.test.ts",
+  },
 ];
 
 // Broadened side-effect lib families (rev-2). A GET-segment reference to a binding imported
@@ -661,12 +668,13 @@ function getHandlerHasSideEffect(source: string): boolean {
 }
 
 describe("GET side-effect registry gate (Lane 5 I7 / codex #13)", () => {
-  it("seeds all eight current side-effecting GET routes", () => {
-    expect(GET_SIDE_EFFECT_REGISTRY.length).toBe(8);
+  it("seeds all nine current side-effecting GET routes", () => {
+    expect(GET_SIDE_EFFECT_REGISTRY.length).toBe(9);
     const exempt = GET_SIDE_EFFECT_REGISTRY.filter((e) => e.kind === "EXEMPT");
     const records = GET_SIDE_EFFECT_REGISTRY.filter((e) => e.kind === "RECORDS_REQUIRED");
     expect(exempt.length).toBe(4);
-    expect(records.length).toBe(4);
+    // 4 admin/inventory DATA_EXPORT GETs + the reorder report CSV export (Lane reorder-points).
+    expect(records.length).toBe(5);
   });
 
   it("every registered GET route file exists and carries a non-empty reason", () => {

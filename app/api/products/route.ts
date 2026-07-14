@@ -125,13 +125,30 @@ export const POST = apiHandler(async (request: NextRequest) => {
       },
     });
 
+    // Per-product reorder config (Lane reorder-points). Only written when the client
+    // actually sent config fields — otherwise the product inherits every global
+    // default (no row = inherit-all).
+    const rc = body.reorderConfig;
+    const hasConfig = rc && Object.values(rc).some((v) => v !== undefined);
+    if (hasConfig) {
+      await tx.productReorderConfig.create({
+        data: {
+          productId: created.id,
+          leadTimeDays: rc!.leadTimeDays ?? null,
+          customSafetyStockDays: rc!.customSafetyStockDays ?? null,
+          minOrderQuantity: rc!.minOrderQuantity ?? 1,
+          reorderPointOverride: rc!.reorderPointOverride ?? null,
+        },
+      });
+    }
+
     await recordChange(tx, {
       actor: { userId: user.id },
       actionType: "PRODUCT_CREATE",
       entityType: "PRODUCT",
       entityId: created.id,
       action: `Created product "${created.name}"`,
-      details: { productName: created.name },
+      details: { productName: created.name, ...(hasConfig ? { reorderConfig: rc } : {}) },
     });
 
     return created;

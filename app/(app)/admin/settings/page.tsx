@@ -27,6 +27,7 @@ import {
   useToggleSetting,
   type SettingsLocation,
 } from "@/hooks/use-admin";
+import { ReorderSettingsSection } from "@/components/admin/reorder-settings-section";
 
 export default function AdminSettingsPage() {
   const [newLocationName, setNewLocationName] = useState("");
@@ -211,6 +212,9 @@ export default function AdminSettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Global reorder defaults */}
+      <ReorderSettingsSection />
 
       {/* Location Management */}
       <div className="grid gap-6">

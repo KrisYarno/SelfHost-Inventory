@@ -28,6 +28,7 @@ export const GET = apiHandler(async (request: NextRequest, { params }: RoutePara
   const product = await prisma.product.findFirst({
     where: { id: productId, deletedAt: null },
     include: {
+      reorderConfig: true,
       inventory_logs: {
         include: {
           users: { select: { id: true, username: true } },
@@ -86,6 +87,7 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
 
   const existingProduct = await prisma.product.findUnique({
     where: { id: productId },
+    include: { reorderConfig: true },
   });
 
   if (!existingProduct) {
@@ -177,12 +179,47 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
     changes.retailPrice = { from: Number(existingProduct.retailPrice), to: body.retailPrice };
   }
 
+  // Per-product reorder config (Lane reorder-points). Build the (partial) config
+  // update from the provided fields only, and diff each against the existing row so
+  // the change is auditable. NULL is a meaningful value here (inherit the default) and
+  // is persisted distinctly from an omitted field.
+  const existingConfig = existingProduct.reorderConfig;
+  const configUpdate: Record<string, number | null> = {};
+  const rc = body.reorderConfig;
+  if (rc) {
+    const fields = ["leadTimeDays", "customSafetyStockDays", "minOrderQuantity", "reorderPointOverride"] as const;
+    for (const field of fields) {
+      if (rc[field] === undefined) continue;
+      const to = rc[field] as number | null;
+      const from = existingConfig ? (existingConfig[field] as number | null) : null;
+      configUpdate[field] = to;
+      if (from !== to) changes[`reorderConfig.${field}`] = { from, to };
+    }
+  }
+  const hasConfigUpdate = Object.keys(configUpdate).length > 0;
+
   // Update + record atomically (spec D4): fetch/parse/diff above stay outside the tx.
   const product = await prisma.$transaction(async (tx) => {
-    const updated = await tx.product.update({
-      where: { id: productId },
-      data: updateData,
-    });
+    // A config-only edit (reorderConfig with no product fields) leaves updateData
+    // empty; skip the product update in that case rather than issue an empty-SET.
+    const updated =
+      Object.keys(updateData).length > 0
+        ? await tx.product.update({ where: { id: productId }, data: updateData })
+        : existingProduct;
+
+    if (hasConfigUpdate) {
+      await tx.productReorderConfig.upsert({
+        where: { productId },
+        create: {
+          productId,
+          leadTimeDays: rc!.leadTimeDays ?? null,
+          customSafetyStockDays: rc!.customSafetyStockDays ?? null,
+          minOrderQuantity: rc!.minOrderQuantity ?? 1,
+          reorderPointOverride: rc!.reorderPointOverride ?? null,
+        },
+        update: configUpdate,
+      });
+    }
 
     await recordChange(tx, {
       actor: { userId: user.id },

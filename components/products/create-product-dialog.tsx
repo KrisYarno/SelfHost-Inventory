@@ -78,6 +78,7 @@ export function CreateProductDialog({
           locationId: data.locationId || 1, // Default to location 1 if not specified
           costPrice: data.costPrice ?? null,
           retailPrice: data.retailPrice ?? 0,
+          ...(data.reorderConfig ? { reorderConfig: data.reorderConfig } : {}),
         }),
       });
 

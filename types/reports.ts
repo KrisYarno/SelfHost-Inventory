@@ -179,43 +179,11 @@ export interface ProductMovementSummaryResponse {
 }
 
 // ============================================
-// Reorder Recommendations Types (Simplified)
+// Reorder report types
 // ============================================
-
-// Reorder recommendation for a product (based on user-set minimums)
-export interface ReorderRecommendation {
-  productId: number;
-  productName: string;
-
-  // Variant fields for sorting
-  baseName: string | null;           // Base product name (e.g., "T-Shirt")
-  variant: string | null;            // Variant descriptor (e.g., "Large", "Red")
-  numericValue: number | null;       // Numeric value for size sorting (e.g., 1.5, 3.0)
-
-  // Simple status based on minimum threshold
-  status: StockStatus;
-
-  // Stock info
-  currentStock: number;
-  minimum: number | null;            // lowStockThreshold value
-  stockToMinimumRatio: number;       // currentStock / minimum (Infinity if no minimum)
-
-  // For display
-  costPrice: number;
-  estimatedOrderValue: number;       // (minimum - currentStock) * costPrice if below minimum
-}
-
-// Summary of reorder recommendations
-export interface ReorderSummary {
-  criticalCount: number;
-  needOrderCount: number;
-  runningLowCount: number;
-  okayCount: number;
-  totalOrderValue: number;           // Sum for CRITICAL + NEED_ORDER
-}
-
-// Response from reorder recommendations API
-export interface ReorderRecommendationsResponse {
-  recommendations: ReorderRecommendation[];
-  summary: ReorderSummary;
-}
+//
+// The demand-based reorder report supersedes the old threshold-based
+// ReorderRecommendation shape (which converted unknown cost to $0). Its
+// discriminated-row + coverage types live with the computation in
+// `lib/reports/reorder.ts`; consumers `import type { ReorderRow, ReorderReport }`
+// from there.

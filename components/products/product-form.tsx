@@ -22,6 +22,11 @@ interface ProductFormInputs {
   // submit handler maps NaN -> null so the distinction survives to the API.
   costPrice: number | null;
   retailPrice: number;
+  // Lane reorder-points: per-product overrides. Blank = inherit the global default.
+  leadTimeDays: number | null;
+  bufferDays: number | null;
+  minOrderQuantity: number | null;
+  reorderPointOverride: number | null;
 }
 
 // R-L13/D-L9 tri-state: inherit the system default (NULL) / explicit custom value
@@ -79,6 +84,17 @@ export function ProductForm({
       : lowStockDefault
   );
 
+  // Per-product reorder config for edit-mode pre-fill (present only when the product
+  // was fetched with its config relation included).
+  const reorderCfg = (product as unknown as {
+    reorderConfig?: {
+      leadTimeDays: number | null;
+      customSafetyStockDays: number | null;
+      minOrderQuantity: number | null;
+      reorderPointOverride: number | null;
+    } | null;
+  })?.reorderConfig ?? null;
+
   const {
     register,
     handleSubmit,
@@ -100,6 +116,12 @@ export function ProductForm({
           ? Number(product.costPrice)
           : null,
       retailPrice: product ? Number(product.retailPrice ?? 0) : 0,
+      // Reorder overrides pre-filled from the product's config when present (edit
+      // mode); blank means inherit the global default.
+      leadTimeDays: reorderCfg?.leadTimeDays ?? null,
+      bufferDays: reorderCfg?.customSafetyStockDays ?? null,
+      minOrderQuantity: reorderCfg?.minOrderQuantity ?? null,
+      reorderPointOverride: reorderCfg?.reorderPointOverride ?? null,
     },
   });
 
@@ -201,6 +223,27 @@ export function ProductForm({
           : null;
       const sanitizedRetailPrice = Number.isFinite(data.retailPrice) ? data.retailPrice : 0;
 
+      // Reorder overrides: blank -> inherit the global default (omitted). Only send the
+      // config when at least one real override is set. leadTime is always positive
+      // (>= 1); buffer allows 0 (no buffer); MOQ floors at 1; override pins the point.
+      const reorderConfig: NonNullable<import("@/types/product").ProductFormData["reorderConfig"]> = {};
+      if (typeof data.leadTimeDays === "number" && Number.isFinite(data.leadTimeDays) && data.leadTimeDays >= 1) {
+        reorderConfig.leadTimeDays = Math.floor(data.leadTimeDays);
+      }
+      if (typeof data.bufferDays === "number" && Number.isFinite(data.bufferDays) && data.bufferDays >= 0) {
+        reorderConfig.customSafetyStockDays = Math.floor(data.bufferDays);
+      }
+      if (typeof data.minOrderQuantity === "number" && Number.isFinite(data.minOrderQuantity) && data.minOrderQuantity >= 1) {
+        reorderConfig.minOrderQuantity = Math.floor(data.minOrderQuantity);
+      }
+      if (
+        typeof data.reorderPointOverride === "number" &&
+        Number.isFinite(data.reorderPointOverride) &&
+        data.reorderPointOverride >= 0
+      ) {
+        reorderConfig.reorderPointOverride = Math.floor(data.reorderPointOverride);
+      }
+
       const productData = {
         name,
         baseName: data.baseName,
@@ -212,6 +255,7 @@ export function ProductForm({
         locationId: data.locationId,
         costPrice: sanitizedCostPrice,
         retailPrice: sanitizedRetailPrice,
+        ...(Object.keys(reorderConfig).length > 0 ? { reorderConfig } : {}),
       };
 
       await onSubmit(productData);
@@ -471,6 +515,64 @@ export function ProductForm({
           )}
         </div>
       </div>
+
+      <fieldset className="space-y-3 rounded-md border p-3" disabled={isSubmitting}>
+        <legend className="text-sm font-medium px-1">Reorder overrides (optional)</legend>
+        <p className="text-xs text-muted-foreground">
+          Leave blank to inherit the shop defaults. Lead time is always a positive number
+          (there is no &ldquo;disabled&rdquo;); buffer may be 0 (no buffer).
+        </p>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="leadTimeDays">Lead time (days)</Label>
+            <Input
+              id="leadTimeDays"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="Default"
+              {...register("leadTimeDays", { valueAsNumber: true, min: { value: 1, message: "Lead time must be at least 1" } })}
+            />
+            {errors.leadTimeDays && <p className="text-sm text-destructive">{errors.leadTimeDays.message}</p>}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="bufferDays">Buffer (days)</Label>
+            <Input
+              id="bufferDays"
+              type="number"
+              min="0"
+              step="1"
+              placeholder="Default"
+              {...register("bufferDays", { valueAsNumber: true, min: { value: 0, message: "Buffer must be 0 or greater" } })}
+            />
+            {errors.bufferDays && <p className="text-sm text-destructive">{errors.bufferDays.message}</p>}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="minOrderQuantity">Min order quantity</Label>
+            <Input
+              id="minOrderQuantity"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="1"
+              {...register("minOrderQuantity", { valueAsNumber: true, min: { value: 1, message: "Minimum order quantity must be at least 1" } })}
+            />
+            {errors.minOrderQuantity && <p className="text-sm text-destructive">{errors.minOrderQuantity.message}</p>}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="reorderPointOverride">Reorder point override</Label>
+            <Input
+              id="reorderPointOverride"
+              type="number"
+              min="0"
+              step="1"
+              placeholder="Computed"
+              {...register("reorderPointOverride", { valueAsNumber: true, min: { value: 0, message: "Override must be 0 or greater" } })}
+            />
+            {errors.reorderPointOverride && <p className="text-sm text-destructive">{errors.reorderPointOverride.message}</p>}
+          </div>
+        </div>
+      </fieldset>
 
       <div className="flex justify-end gap-3 pt-4">
         <Button

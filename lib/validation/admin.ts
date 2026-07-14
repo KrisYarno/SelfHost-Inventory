@@ -92,5 +92,20 @@ export const ThresholdsUpdateSchema = z.object({
   updates: z.array(ThresholdUpdateSchema).min(1, 'No updates provided'),
 });
 
+// PUT /api/admin/reorder-settings — the global reorder defaults (the singleton
+// global_reorder_settings row). All optional; the handler updates only provided keys.
+// leadTime default is always positive (>= 1). bufferDays default allows 0 (no buffer).
+// targetCoverageMultiple >= 1; minEvidenceEvents >= 0. Allowlisted so a field is not
+// silently stripped (codex #13).
+export const GlobalReorderSettingsSchema = z.object({
+  defaultLeadTimeDays: z.number().int().min(1).max(3650).optional(),
+  defaultSafetyStockDays: z.number().int().min(0).max(3650).optional(),
+  defaultTargetCoverageMultiple: z.number().int().min(1).max(100).optional(),
+  minEvidenceEvents: z.number().int().min(0).max(1000).optional(),
+}).refine((data) => Object.values(data).some((v) => v !== undefined), {
+  message: 'At least one field must be provided',
+});
+
+export type GlobalReorderSettingsInput = z.infer<typeof GlobalReorderSettingsSchema>;
 export type SystemSettingsInput = z.infer<typeof SystemSettingsSchema>;
 export type ThresholdsUpdateInput = z.infer<typeof ThresholdsUpdateSchema>;

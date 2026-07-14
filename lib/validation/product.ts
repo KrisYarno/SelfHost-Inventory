@@ -7,6 +7,21 @@ const optionalTrimmedString = z
   .optional()
   .transform((value) => (value === undefined ? value : value));
 
+// Per-product reorder config (Lane reorder-points). Allowlisted onto BOTH the create
+// and update product schemas so these fields are not silently stripped (codex #13).
+// Tri-state, mirroring the low-stock threshold model: NULL = inherit the global
+// default; a positive value overrides. leadTimeDays is always positive (>= 1) or NULL
+// (there is NO "disabled" semantic — unlike a threshold's 0). bufferDays (customSafety
+// StockDays) legitimately allows 0 (no buffer). MOQ floors at 1. reorderPointOverride
+// NULL = compute; a value (>= 0) pins the point.
+export const ReorderConfigInputSchema = z.object({
+  leadTimeDays: z.number().int().min(1).max(3650).nullable().optional(),
+  customSafetyStockDays: z.number().int().min(0).max(3650).nullable().optional(),
+  minOrderQuantity: z.number().int().min(1).max(1_000_000).optional(),
+  reorderPointOverride: z.number().int().min(0).max(1_000_000).nullable().optional(),
+});
+export type ReorderConfigInput = z.infer<typeof ReorderConfigInputSchema>;
+
 const allowedUnits = ['mg', 'ml', 'mcg', 'iu'] as const;
 type AllowedUnit = (typeof allowedUnits)[number];
 
@@ -43,6 +58,8 @@ export const ProductCreateUISchema = z.object({
   costPrice: z.number().min(0, 'Cost must be >= 0').nullable().optional(),
   retailPrice: z.number().min(0, 'Retail must be >= 0').optional(),
   locationId: z.number().int().positive().optional(),
+  // Per-product reorder config (allowlisted; codex #13).
+  reorderConfig: ReorderConfigInputSchema.optional(),
 }).superRefine((data, ctx) => {
   const hasNumeric = data.numericValue !== undefined && data.numericValue !== null;
   const hasUnit = !!data.unit;
@@ -83,6 +100,8 @@ export const ProductUpdateSchema = z
       .max(1_000_000)
       .nullable()
       .optional(),
+    // Per-product reorder config (allowlisted; codex #13).
+    reorderConfig: ReorderConfigInputSchema.optional(),
   })
   .refine(
     (data) => Object.values(data).some((value) => value !== undefined),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
   Table,
@@ -11,6 +11,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import {
   Select,
   SelectContent,
@@ -20,79 +21,77 @@ import {
 } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { StockStatus } from "@/types/reports";
-import { AlertTriangle, Package, ShoppingCart, TrendingDown, CheckCircle } from "lucide-react";
+import { AlertTriangle, Package, Download, Info } from "lucide-react";
 import { useReportsReorder } from "@/hooks/use-reports";
+import type { ReorderRow, ReorderUrgency } from "@/lib/reports/reorder";
 
-interface ReorderRecommendationsProps {
-  statusFilter?: string;
-}
-
-const STATUS_CONFIG: Record<
-  StockStatus,
-  { label: string; variant: "destructive" | "warning" | "secondary" | "default"; icon: React.ReactNode }
+const URGENCY_CONFIG: Record<
+  ReorderUrgency,
+  { label: string; variant: "destructive" | "warning" | "secondary" | "default"; rank: number }
 > = {
-  CRITICAL: {
-    label: "Critical!",
-    variant: "destructive",
-    icon: <AlertTriangle className="h-3 w-3" />,
-  },
-  NEED_ORDER: {
-    label: "Need Order",
-    variant: "warning",
-    icon: <ShoppingCart className="h-3 w-3" />,
-  },
-  RUNNING_LOW: {
-    label: "Running Low",
-    variant: "secondary",
-    icon: <TrendingDown className="h-3 w-3" />,
-  },
-  OKAY: {
-    label: "Okay",
-    variant: "default",
-    icon: <CheckCircle className="h-3 w-3" />,
-  },
+  OUT: { label: "Out of stock", variant: "destructive", rank: 4 },
+  CRITICAL: { label: "Critical", variant: "destructive", rank: 3 },
+  REORDER_NOW: { label: "Reorder now", variant: "warning", rank: 2 },
+  APPROACHING: { label: "Approaching", variant: "secondary", rank: 1 },
 };
 
-// Color dot for mobile status indicator
-function StatusDot({ status, className }: { status: StockStatus; className?: string }) {
-  return (
-    <span
-      className={cn(
-        "h-2 w-2 rounded-full",
-        status === "CRITICAL" && "bg-negative",
-        status === "NEED_ORDER" && "bg-warning",
-        status === "RUNNING_LOW" && "bg-info",
-        status === "OKAY" && "bg-positive",
-        className
-      )}
-    />
-  );
+const REASON_LABEL: Record<"no_demand_signal" | "insufficient_history", string> = {
+  no_demand_signal: "No demand signal — no outbound movement to base a suggestion on",
+  insufficient_history: "Insufficient history — too few movements to stand behind a number",
+};
+
+const currency = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  maximumFractionDigits: 2,
+});
+
+function num(n: number, digits = 1): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(digits);
 }
 
-export function ReorderRecommendations({ statusFilter: externalStatusFilter }: ReorderRecommendationsProps) {
-  const [statusFilter, setStatusFilter] = useState(externalStatusFilter || "all");
-  const [sortBy, setSortBy] = useState<"alphabetical" | "status">("alphabetical");
-
-  // Filter/sort are in the query key, so a change refetches naturally and a
-  // previously-viewed filter returns instantly from cache.
-  const { data, isLoading: loading, error: queryError } = useReportsReorder({ sortBy, statusFilter });
-  const recommendations = data?.recommendations ?? [];
-  const summary = data?.summary ?? null;
+export function ReorderRecommendations() {
+  const [urgencyFilter, setUrgencyFilter] = useState<"all" | ReorderUrgency>("all");
+  const { data, isLoading, error: queryError } = useReportsReorder({ includeOkay: true });
   const error = queryError instanceof Error ? queryError.message : null;
 
-  // Update internal filter when external prop changes
-  useEffect(() => {
-    if (externalStatusFilter) {
-      setStatusFilter(externalStatusFilter);
-    }
-  }, [externalStatusFilter]);
+  const suggested = useMemo(
+    () =>
+      (data?.rows ?? []).filter(
+        (r): r is Extract<ReorderRow, { status: "suggested" }> => r.status === "suggested",
+      ),
+    [data],
+  );
+  const unavailable = useMemo(
+    () =>
+      (data?.rows ?? []).filter(
+        (r): r is Extract<ReorderRow, { status: "unavailable" }> => r.status === "unavailable",
+      ),
+    [data],
+  );
 
-  if (loading) {
+  const filteredSuggested = useMemo(
+    () => (urgencyFilter === "all" ? suggested : suggested.filter((r) => r.urgency === urgencyFilter)),
+    [suggested, urgencyFilter],
+  );
+
+  const counts = useMemo(() => {
+    const c: Record<ReorderUrgency, number> = { OUT: 0, CRITICAL: 0, REORDER_NOW: 0, APPROACHING: 0 };
+    for (const r of suggested) c[r.urgency] += 1;
+    return c;
+  }, [suggested]);
+
+  const orderValueTotal = useMemo(
+    () => suggested.reduce((sum, r) => sum + (r.orderValue ?? 0), 0),
+    [suggested],
+  );
+  const uncostedCount = suggested.filter((r) => r.orderValue === null).length;
+
+  if (isLoading) {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Reorder Recommendations</CardTitle>
+          <CardTitle>Reorder report</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
@@ -108,7 +107,7 @@ export function ReorderRecommendations({ statusFilter: externalStatusFilter }: R
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Reorder Recommendations</CardTitle>
+          <CardTitle>Reorder report</CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">Error: {error}</p>
@@ -117,140 +116,133 @@ export function ReorderRecommendations({ statusFilter: externalStatusFilter }: R
     );
   }
 
-  const formatCurrency = (value: number) =>
-    new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      maximumFractionDigits: 0,
-    }).format(value);
+  const assumptions = data?.assumptions;
 
   return (
     <div className="space-y-6">
       {/* Summary Cards */}
-      {summary && (
-        <div className="grid gap-4 grid-cols-2 sm:grid-cols-4">
-          <Card className={cn(summary.criticalCount > 0 && "border-negative bg-negative-muted/30")}>
-            <CardContent className="p-4">
-              <div className="text-2xl font-bold">{summary.criticalCount}</div>
-              <div className="text-xs text-muted-foreground">Critical!</div>
-            </CardContent>
-          </Card>
-          <Card className={cn(summary.needOrderCount > 0 && "border-warning bg-warning-muted/30")}>
-            <CardContent className="p-4">
-              <div className="text-2xl font-bold">{summary.needOrderCount}</div>
-              <div className="text-xs text-muted-foreground">Need Order</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <div className="text-2xl font-bold">{summary.runningLowCount}</div>
-              <div className="text-xs text-muted-foreground">Running Low</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-4">
-              <div className="text-2xl font-bold">{formatCurrency(summary.totalOrderValue)}</div>
-              <div className="text-xs text-muted-foreground">Est. Order Value</div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
+      <div className="grid gap-4 grid-cols-2 sm:grid-cols-4">
+        <Card className={cn(counts.OUT + counts.CRITICAL > 0 && "border-negative bg-negative-muted/30")}>
+          <CardContent className="p-4">
+            <div className="text-2xl font-bold">{counts.OUT + counts.CRITICAL}</div>
+            <div className="text-xs text-muted-foreground">Out / Critical</div>
+          </CardContent>
+        </Card>
+        <Card className={cn(counts.REORDER_NOW > 0 && "border-warning bg-warning-muted/30")}>
+          <CardContent className="p-4">
+            <div className="text-2xl font-bold">{counts.REORDER_NOW}</div>
+            <div className="text-xs text-muted-foreground">Reorder now</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <div className="text-2xl font-bold">{counts.APPROACHING}</div>
+            <div className="text-xs text-muted-foreground">Approaching</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <div className="text-2xl font-bold">{currency.format(orderValueTotal)}</div>
+            <div className="text-xs text-muted-foreground">
+              Order value{uncostedCount > 0 ? ` (${uncostedCount} uncosted)` : ""}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
 
+      {/* Suggested worklist */}
       <Card>
         <CardHeader>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
               <CardTitle className="flex items-center gap-2">
                 <Package className="h-5 w-5" />
-                Reorder Recommendations
+                Reorder report
               </CardTitle>
               <CardDescription>
-                Products sorted by {sortBy === "alphabetical" ? "name" : "status urgency"}
+                Suggested order quantities from demand — every input shown so you can audit the number.
               </CardDescription>
             </div>
             <div className="flex flex-col sm:flex-row gap-2">
-              <Select value={statusFilter} onValueChange={setStatusFilter}>
-                <SelectTrigger className="w-full sm:w-[150px]">
-                  <SelectValue placeholder="All Products" />
+              <Select value={urgencyFilter} onValueChange={(v) => setUrgencyFilter(v as "all" | ReorderUrgency)}>
+                <SelectTrigger className="w-full sm:w-[170px]">
+                  <SelectValue placeholder="All urgencies" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">All Products</SelectItem>
-                  <SelectItem value="critical">Critical!</SelectItem>
-                  <SelectItem value="need_order">Need Order+</SelectItem>
-                  <SelectItem value="running_low">Running Low+</SelectItem>
+                  <SelectItem value="all">All urgencies</SelectItem>
+                  <SelectItem value="OUT">Out of stock</SelectItem>
+                  <SelectItem value="CRITICAL">Critical</SelectItem>
+                  <SelectItem value="REORDER_NOW">Reorder now</SelectItem>
+                  <SelectItem value="APPROACHING">Approaching</SelectItem>
                 </SelectContent>
               </Select>
-              <Select value={sortBy} onValueChange={(v) => setSortBy(v as "alphabetical" | "status")}>
-                <SelectTrigger className="w-full sm:w-[140px]">
-                  <SelectValue placeholder="Sort by" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="alphabetical">A-Z (Name)</SelectItem>
-                  <SelectItem value="status">By Status</SelectItem>
-                </SelectContent>
-              </Select>
+              <Button variant="outline" size="sm" asChild>
+                <a href="/api/reports/reorder-recommendations/export">
+                  <Download className="h-4 w-4 mr-2" />
+                  Export CSV
+                </a>
+              </Button>
             </div>
           </div>
         </CardHeader>
         <CardContent>
+          <div className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 mb-4 text-xs text-muted-foreground">
+            <Info className="h-4 w-4 shrink-0 mt-0.5" />
+            <span>
+              Suggested quantities are <strong>gross</strong> — they do not subtract stock already on
+              order (no purchase-order tracking yet). Order value is blank when a product&apos;s cost is
+              unknown; it is never shown as $0.
+            </span>
+          </div>
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Product</TableHead>
-                  <TableHead className="text-center">Status</TableHead>
+                  <TableHead className="text-center">Urgency</TableHead>
                   <TableHead className="text-right hidden sm:table-cell">Stock</TableHead>
-                  <TableHead className="text-right hidden sm:table-cell">Minimum</TableHead>
-                  <TableHead className="text-right hidden md:table-cell">Est. Value</TableHead>
+                  <TableHead className="text-right hidden md:table-cell">Avg/day</TableHead>
+                  <TableHead className="text-right hidden lg:table-cell">Lead</TableHead>
+                  <TableHead className="text-right hidden lg:table-cell">Buffer</TableHead>
+                  <TableHead className="text-right hidden sm:table-cell">Reorder pt</TableHead>
+                  <TableHead className="text-right">Suggest qty</TableHead>
+                  <TableHead className="text-right hidden md:table-cell">Order value</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {recommendations.length === 0 ? (
+                {filteredSuggested.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
-                      No products match the selected filters
+                    <TableCell colSpan={9} className="text-center py-8 text-muted-foreground">
+                      No products match the selected urgency.
                     </TableCell>
                   </TableRow>
                 ) : (
-                  recommendations.map((rec) => {
-                    const statusConfig = STATUS_CONFIG[rec.status];
-                    const isBelowMinimum = rec.minimum && rec.currentStock < rec.minimum;
+                  filteredSuggested.map((r) => {
+                    const cfg = URGENCY_CONFIG[r.urgency];
                     return (
-                      <TableRow key={rec.productId}>
+                      <TableRow key={r.productId}>
                         <TableCell className="font-medium">
-                          <div className="flex items-center gap-2">
-                            {/* Mobile: status dot indicator */}
-                            <StatusDot status={rec.status} className="sm:hidden" />
-                            <span className="truncate max-w-[200px]">{rec.productName}</span>
-                          </div>
+                          <span className="truncate max-w-[200px] inline-block align-middle">{r.productName}</span>
                         </TableCell>
                         <TableCell className="text-center">
-                          <Badge variant={statusConfig.variant} className="gap-1">
-                            {statusConfig.icon}
-                            <span className="hidden sm:inline">{statusConfig.label}</span>
-                          </Badge>
+                          <Badge variant={cfg.variant}>{cfg.label}</Badge>
                         </TableCell>
-                        <TableCell className="text-right hidden sm:table-cell">
-                          <span
-                            className={cn(
-                              isBelowMinimum && "text-negative font-medium"
-                            )}
-                          >
-                            {rec.currentStock}
+                        <TableCell className="text-right hidden sm:table-cell">{r.currentStock}</TableCell>
+                        <TableCell className="text-right hidden md:table-cell">{num(r.avgDailyDemand)}</TableCell>
+                        <TableCell className="text-right hidden lg:table-cell">
+                          {r.leadTimeDays}
+                          <span className="text-muted-foreground text-xs ml-1">
+                            {r.leadTimeSource === "product" ? "(set)" : "(dflt)"}
                           </span>
                         </TableCell>
-                        <TableCell className="text-right hidden sm:table-cell">
-                          {rec.minimum ? (
-                            rec.minimum
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </TableCell>
+                        <TableCell className="text-right hidden lg:table-cell">{r.bufferDays}</TableCell>
+                        <TableCell className="text-right hidden sm:table-cell">{r.reorderPoint}</TableCell>
+                        <TableCell className="text-right font-medium">{r.grossReplenishmentNeed}</TableCell>
                         <TableCell className="text-right hidden md:table-cell">
-                          {rec.estimatedOrderValue > 0 ? (
-                            formatCurrency(rec.estimatedOrderValue)
-                          ) : (
+                          {r.orderValue === null ? (
                             <span className="text-muted-foreground">—</span>
+                          ) : (
+                            currency.format(r.orderValue)
                           )}
                         </TableCell>
                       </TableRow>
@@ -260,14 +252,51 @@ export function ReorderRecommendations({ statusFilter: externalStatusFilter }: R
               </TableBody>
             </Table>
           </div>
-
-          {recommendations.length > 0 && (
-            <div className="text-center p-4 text-sm text-muted-foreground">
-              Showing {recommendations.length} products
-            </div>
+          {assumptions && (
+            <p className="text-xs text-muted-foreground mt-4">
+              Demand window: {assumptions.windowDays} days · default buffer: {assumptions.bufferDaysDefault} days ·
+              target: {assumptions.targetCoverageMultiple}× lead time. {assumptions.demandDefinition}
+            </p>
           )}
         </CardContent>
       </Card>
+
+      {/* Unavailable — truthful "we can't suggest" section */}
+      {unavailable.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <AlertTriangle className="h-4 w-4" />
+              Not enough signal to suggest an order ({unavailable.length})
+            </CardTitle>
+            <CardDescription>
+              These products have no reliable demand signal, so no quantity is invented for them.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Product</TableHead>
+                    <TableHead className="text-right">Stock</TableHead>
+                    <TableHead>Why</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {unavailable.map((r) => (
+                    <TableRow key={r.productId}>
+                      <TableCell className="font-medium">{r.productName}</TableCell>
+                      <TableCell className="text-right">{r.currentStock}</TableCell>
+                      <TableCell className="text-muted-foreground text-sm">{REASON_LABEL[r.reason]}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

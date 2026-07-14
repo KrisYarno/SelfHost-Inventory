@@ -24,6 +24,14 @@ export interface ProductFormData {
   // Lane 6 (R-D3): NULL = cost unknown; an explicit 0 = genuinely free.
   costPrice?: number | null;
   retailPrice?: number;
+  // Lane reorder-points: per-product reorder overrides (all optional; NULL = inherit
+  // the global default). Only sent when the user set at least one override.
+  reorderConfig?: {
+    leadTimeDays?: number | null;
+    customSafetyStockDays?: number | null;
+    minOrderQuantity?: number;
+    reorderPointOverride?: number | null;
+  };
 }
 
 // API response types

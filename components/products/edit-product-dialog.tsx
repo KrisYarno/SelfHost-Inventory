@@ -42,6 +42,7 @@ export function EditProductDialog({
           lowStockThreshold: data.lowStockThreshold,
           costPrice: data.costPrice,
           retailPrice: data.retailPrice,
+          ...(data.reorderConfig ? { reorderConfig: data.reorderConfig } : {}),
         }),
       });
 

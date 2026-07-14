@@ -160,6 +160,17 @@ describe('EXCLUDE route: GET /api/reports/reorder-recommendations', () => {
   it('selects only APPROVED, non-deleted products as reorder candidates', async () => {
     db.product.findMany.mockResolvedValue([] as any);
     db.product_locations.findMany.mockResolvedValue([] as any);
+    // The demand-based report seeds/reads the global reorder settings singleton.
+    db.globalReorderSettings.upsert.mockResolvedValue({
+      id: 1,
+      defaultLeadTimeDays: 14,
+      defaultSafetyStockDays: 7,
+      defaultTargetCoverageMultiple: 2,
+      minEvidenceEvents: 3,
+      holdingCostRate: '0.2500',
+      updatedBy: null,
+      updatedAt: new Date(),
+    } as any);
 
     const resp = await reorderGET(
       mkReq('http://t/api/reports/reorder-recommendations')

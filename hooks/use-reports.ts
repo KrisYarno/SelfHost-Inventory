@@ -8,11 +8,10 @@ import type {
   DashboardMetrics,
   LowStockAlert,
   ProductMovementSummary,
-  ReorderRecommendation,
-  ReorderSummary,
   StockLevelChartData,
   UserActivitySummary,
 } from "@/types/reports";
+import type { ReorderReport } from "@/lib/reports/reorder";
 import type { CombinedMinBreach } from "@/types/inventory";
 
 /**
@@ -151,31 +150,23 @@ export function useReportsUserActivity() {
 }
 
 // ---------------------------------------------------------------------------
-// Reorder recommendations (filter/sort in the key -> natural refetch)
+// Reorder report (demand-based; the whole worklist is fetched, the client filters)
 // ---------------------------------------------------------------------------
 
 export interface ReorderFilters {
-  sortBy: "alphabetical" | "status";
-  statusFilter: string; // "all" | "critical" | "need_order" | "running_low"
+  /** Include the APPROACHING band (near, not yet at, the reorder point). */
+  includeOkay?: boolean;
 }
 
-interface ReorderResult {
-  recommendations: ReorderRecommendation[];
-  summary: ReorderSummary | null;
-}
-
-export function useReportsReorder(filters: ReorderFilters) {
+export function useReportsReorder(filters: ReorderFilters = {}) {
+  const includeOkay = filters.includeOkay ?? true;
   return useQuery({
-    queryKey: reportsKey("reorder-recommendations", { ...filters }),
+    queryKey: reportsKey("reorder-recommendations", { includeOkay }),
     queryFn: async ({ signal }) => {
-      const params = new URLSearchParams({
-        sortBy: filters.sortBy,
-        limit: "100",
-        ...(filters.statusFilter !== "all" && { statusFilter: filters.statusFilter }),
-      });
+      const params = new URLSearchParams({ includeOkay: String(includeOkay) });
       const res = await fetch(`/api/reports/reorder-recommendations?${params}`, { signal });
-      if (!res.ok) throw new Error("Failed to fetch reorder recommendations");
-      return (await res.json()) as ReorderResult;
+      if (!res.ok) throw new Error("Failed to fetch the reorder report");
+      return (await res.json()) as ReorderReport;
     },
   });
 }
