@@ -19,13 +19,13 @@
  * and inject a per-product failure; Prisma + the WC price fetch are mocked too.
  */
 
-jest.mock("@/lib/external-orders/shared", () => ({
-  getIntegrationClient: jest.fn(async () => ({
-    adapter: {},
-    storeUrl: "https://shop.example",
-    credentials: { key: "k", secret: "s" },
-    integration: { platform: "WOOCOMMERCE" },
-  })),
+// Lane 6: fetchExternalProductPrice now reads through egress.platformRead — it no
+// longer resolves credentials or calls fetch itself. Mock platformRead and queue
+// responses on it.
+const mockPlatformRead = jest.fn();
+jest.mock("@/lib/platforms/egress", () => ({
+  __esModule: true,
+  platformRead: (...args: unknown[]) => mockPlatformRead(...args),
 }));
 
 jest.mock("@/lib/change-tracking", () => ({
@@ -87,13 +87,12 @@ function driveTx() {
 beforeEach(() => {
   jest.clearAllMocks();
   db.integration.findUnique.mockResolvedValue({ platform: "WOOCOMMERCE" });
-  // Fresh fetch mock each test — no leaked once-queue.
-  (global as any).fetch = jest.fn();
+  mockPlatformRead.mockReset();
 });
 
 test("ER-B9 no-op: an unchanged price does NO update and writes NO event", async () => {
   db.product.findMany.mockResolvedValue([makeProduct(1, 10)] as any);
-  (global.fetch as jest.Mock).mockResolvedValueOnce(fetchOk("10")); // same price
+  mockPlatformRead.mockResolvedValueOnce(fetchOk("10")); // same price
 
   const result = await syncPricesForIntegration("int-1", { userId: 42 });
 
@@ -104,7 +103,7 @@ test("ER-B9 no-op: an unchanged price does NO update and writes NO event", async
 
 test("changed price: updates retailPrice AND records PRODUCT_UPDATE on the SAME tx (USER actor / manual trigger)", async () => {
   db.product.findMany.mockResolvedValue([makeProduct(1, 10)] as any);
-  (global.fetch as jest.Mock).mockResolvedValueOnce(fetchOk("15"));
+  mockPlatformRead.mockResolvedValueOnce(fetchOk("15"));
   const tx = driveTx();
 
   const result = await syncPricesForIntegration("int-1", { userId: 42 });
@@ -136,7 +135,7 @@ test("changed price: updates retailPrice AND records PRODUCT_UPDATE on the SAME 
 
 test("no actor -> SYSTEM actor / cron trigger", async () => {
   db.product.findMany.mockResolvedValue([makeProduct(7, 20)] as any);
-  (global.fetch as jest.Mock).mockResolvedValueOnce(fetchOk("25"));
+  mockPlatformRead.mockResolvedValueOnce(fetchOk("25"));
   driveTx();
 
   await syncPricesForIntegration("int-1");
@@ -152,7 +151,7 @@ test("one shared batchId groups every changed product in the run", async () => {
     makeProduct(1, 10),
     makeProduct(2, 20),
   ] as any);
-  (global.fetch as jest.Mock)
+  mockPlatformRead
     .mockResolvedValueOnce(fetchOk("11"))
     .mockResolvedValueOnce(fetchOk("21"));
   driveTx();
@@ -173,7 +172,7 @@ test("a record failure fails ONLY that product; the loop continues (per-product 
     makeProduct(1, 10),
     makeProduct(2, 20),
   ] as any);
-  (global.fetch as jest.Mock)
+  mockPlatformRead
     .mockResolvedValueOnce(fetchOk("15")) // product 1 changed
     .mockResolvedValueOnce(fetchOk("25")); // product 2 changed
   driveTx();

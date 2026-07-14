@@ -357,7 +357,11 @@ function wooIntegration(overrides: Record<string, unknown> = {}) {
     platform: 'WOOCOMMERCE',
     storeUrl: 'https://store.test',
     webhookSecret: 'shh',
-    encryptedApiSecret: null,
+    // Lane 6: read paths resolve the READ credential inside egress.
+    encryptedReadKey: 'rk',
+    encryptedReadSecret: 'rs',
+    encryptedWriteKey: 'wk',
+    encryptedWriteSecret: 'ws',
     company: { id: COMPANY_ID },
     ...overrides,
   };
@@ -518,8 +522,10 @@ function recheckOrder() {
       platform: 'WOOCOMMERCE',
       storeUrl: 'https://store.test',
       companyId: COMPANY_ID,
-      encryptedApiKey: 'key',
-      encryptedApiSecret: 'secret',
+      encryptedReadKey: 'rk',
+      encryptedReadSecret: 'rs',
+      encryptedWriteKey: 'wk',
+      encryptedWriteSecret: 'ws',
     },
   };
 }
@@ -595,8 +601,10 @@ describe('cron sync — run-level lastSyncError (R-D2)', () => {
       platform: 'SHOPIFY',
       storeUrl: 'https://shop.myshopify.com',
       lastSyncAt: new Date('2025-06-01T00:00:00Z'),
-      encryptedApiKey: 'token',
-      encryptedApiSecret: 'sec',
+      encryptedReadKey: 'token',
+      encryptedReadSecret: 'sec',
+      encryptedWriteKey: 'token',
+      encryptedWriteSecret: 'sec',
       company: { id: COMPANY_ID },
     };
   }

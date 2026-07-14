@@ -8,7 +8,8 @@
  * individual component links.
  */
 
-import type { PlatformAdapter, BatchStockUpdateResult } from '@/lib/platforms/core/types';
+import type { PlatformAdapter } from '@/lib/platforms/core/types';
+import type { EgressResult } from '@/lib/platforms/egress';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -27,6 +28,12 @@ jest.mock('@/lib/external-orders/shared', () => {
     getIntegrationClient: (...args: unknown[]) => mockGetIntegrationClient(...args),
   };
 });
+
+const mockPushStockStatus = jest.fn();
+jest.mock('@/lib/platforms/egress', () => ({
+  __esModule: true,
+  pushStockStatus: (...args: unknown[]) => mockPushStockStatus(...args),
+}));
 
 const mockComputeBundleStockStatus = jest.fn();
 jest.mock('@/lib/stock-sync/compute-bundle-status', () => ({
@@ -48,6 +55,7 @@ beforeEach(() => {
   mockReset(mockPrisma);
   mockGetIntegrationClient.mockReset();
   mockComputeBundleStockStatus.mockReset();
+  mockPushStockStatus.mockReset();
 });
 
 function makeIntegration(overrides: Record<string, unknown> = {}) {
@@ -67,16 +75,26 @@ function makeIntegration(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function makeAdapter(
-  batchResult: BatchStockUpdateResult = { succeeded: 0, failed: [] }
-): PlatformAdapter & { batchUpdateProductStock: jest.Mock } {
+/** Lane 6: the adapter carries no write methods; egress does the sending. */
+function makeAdapter(): PlatformAdapter {
   return {
     platform: 'WOOCOMMERCE',
     extractWebhookHeaders: jest.fn(),
     verifyWebhook: jest.fn(),
     parseOrderWebhook: jest.fn(),
-    batchUpdateProductStock: jest.fn().mockResolvedValue(batchResult),
-  } as unknown as PlatformAdapter & { batchUpdateProductStock: jest.Mock };
+  } as unknown as PlatformAdapter;
+}
+
+/** A "the wire calls went through" fan-out (REV-2 #5 partial shape). */
+function egressSent(count: number): EgressResult {
+  return {
+    status: 'partial',
+    results: Array.from({ length: count }, () => ({
+      status: 'sent' as const,
+      httpStatus: 200,
+      body: {},
+    })),
+  };
 }
 
 function setupClient(
@@ -84,10 +102,9 @@ function setupClient(
   integrationOverrides: Record<string, unknown> = {}
 ) {
   const integration = makeIntegration(integrationOverrides);
+  // Lane 6: metadata only — no credentials, no storeUrl (REV-2 #9).
   mockGetIntegrationClient.mockResolvedValue({
     adapter,
-    storeUrl: integration.storeUrl,
-    credentials: { key: 'ck_test', secret: 'cs_test' },
     integration,
   });
 }
@@ -120,7 +137,8 @@ describe('pushStockForProducts — bundles', () => {
   // 1. When a component is below its required quantity-per-bundle, the bundle
   //    should go outofstock in WC immediately.
   it('pushes outofstock to bundle when any component is below minimum', async () => {
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter);
 
     // First findMany: single-product links for the deducted component IDs.
@@ -136,12 +154,12 @@ describe('pushStockForProducts — bundles', () => {
 
     await pushStockForProducts('int-1', [1, 2]);
 
-    expect(adapter.batchUpdateProductStock).toHaveBeenCalledTimes(1);
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    expect(mockPushStockStatus).toHaveBeenCalledTimes(1);
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({
-      productId: '200',
-      stockStatus: 'outofstock',
+      externalProductId: '200',
+      inStock: false,
     });
 
     // computeBundleStockStatus was called with the bundle link id and null syncLocationId
@@ -150,7 +168,8 @@ describe('pushStockForProducts — bundles', () => {
 
   // 2. When all components have sufficient stock, the bundle should go instock.
   it('pushes instock to bundle when all components have sufficient stock', async () => {
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter);
 
     mockPrisma.productLink.findMany
@@ -163,17 +182,18 @@ describe('pushStockForProducts — bundles', () => {
 
     await pushStockForProducts('int-1', [10, 20]);
 
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({
-      productId: '300',
-      stockStatus: 'instock',
+      externalProductId: '300',
+      inStock: true,
     });
   });
 
   // 3. Bundles whose components were NOT in the deducted set must NOT be pushed.
   it('does not push for bundles unrelated to the deducted productIds', async () => {
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter);
 
     // B1 contains C1+C2 (deducted). B2 contains C3+C4 (not deducted).
@@ -189,12 +209,12 @@ describe('pushStockForProducts — bundles', () => {
 
     await pushStockForProducts('int-1', [1, 2]);
 
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(1);
-    expect(updates[0].productId).toBe('400');
+    expect(updates[0].externalProductId).toBe('400');
 
     // B2 (externalProductId '500') was never pushed
-    expect(updates.find((u: any) => u.productId === '500')).toBeUndefined();
+    expect(updates.find((u: any) => u.externalProductId === '500')).toBeUndefined();
 
     // computeBundleStockStatus was only called for B1
     expect(mockComputeBundleStockStatus).toHaveBeenCalledTimes(1);
@@ -203,7 +223,8 @@ describe('pushStockForProducts — bundles', () => {
 
   // 4. Both single-product links AND bundle links are pushed in the same batch.
   it('pushes both single-product links and bundle links in one batch', async () => {
-    const adapter = makeAdapter({ succeeded: 2, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(2));
     setupClient(adapter);
 
     // Single-product link for component C1
@@ -219,20 +240,21 @@ describe('pushStockForProducts — bundles', () => {
 
     await pushStockForProducts('int-1', [1, 2]);
 
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(2);
 
-    const singleUpdate = updates.find((u: any) => u.productId === '10');
-    expect(singleUpdate?.stockStatus).toBe('instock');
+    const singleUpdate = updates.find((u: any) => u.externalProductId === '10');
+    expect(singleUpdate?.inStock).toBe(true);
 
-    const bundleUpdate = updates.find((u: any) => u.productId === '99');
-    expect(bundleUpdate?.stockStatus).toBe('outofstock');
+    const bundleUpdate = updates.find((u: any) => u.externalProductId === '99');
+    expect(bundleUpdate?.inStock).toBe(false);
   });
 
   // 5. The -1 sentinel (bundle placeholder) is ignored when no real component
   //    IDs are present — nothing gets pushed.
   it('does nothing when only the -1 sentinel is passed (no positive component IDs)', async () => {
-    const adapter = makeAdapter({ succeeded: 0, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(0));
     setupClient(adapter);
 
     // Even if findMany were to return something, the guard prevents the call
@@ -241,13 +263,14 @@ describe('pushStockForProducts — bundles', () => {
     await pushStockForProducts('int-1', [-1]);
 
     // No single-product links found, bundle query not attempted (positiveIds is empty)
-    // and no updates accumulated → batchUpdateProductStock never called
-    expect(adapter.batchUpdateProductStock).not.toHaveBeenCalled();
+    // and no updates accumulated → egress.pushStockStatus never called
+    expect(mockPushStockStatus).not.toHaveBeenCalled();
   });
 
   // 6. syncLocationId is forwarded to computeBundleStockStatus for bundles.
   it('passes syncLocationId to computeBundleStockStatus', async () => {
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter, { syncLocationId: 3 });
 
     mockPrisma.productLink.findMany
@@ -266,18 +289,20 @@ describe('pushStockForProducts — bundles', () => {
   // 7. stockSyncEnabled=false: function returns early, no bundles pushed.
   it('returns early without pushing bundles when stockSyncEnabled is false', async () => {
     const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(0));
     setupClient(adapter, { stockSyncEnabled: false });
 
     await pushStockForProducts('int-1', [1, 2]);
 
     expect(mockPrisma.productLink.findMany).not.toHaveBeenCalled();
-    expect(adapter.batchUpdateProductStock).not.toHaveBeenCalled();
+    expect(mockPushStockStatus).not.toHaveBeenCalled();
   });
 
   // 8. Orphan component warning is logged but does not prevent the push.
   it('logs orphan warning and still pushes outofstock for bundle with deleted component', async () => {
     const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter);
 
     mockPrisma.productLink.findMany
@@ -293,10 +318,10 @@ describe('pushStockForProducts — bundles', () => {
 
     await pushStockForProducts('int-1', [1]);
 
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(1);
-    expect(updates[0].productId).toBe('888');
-    expect(updates[0].stockStatus).toBe('outofstock');
+    expect(updates[0].externalProductId).toBe('888');
+    expect(updates[0].inStock).toBe(false);
 
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining('orphan'),
@@ -307,11 +332,12 @@ describe('pushStockForProducts — bundles', () => {
   });
 
   // FIX I (P2): dedup updates by (externalProductId, externalVariantId) before
-  // calling batchUpdateProductStock. A single-product link AND a bundle link
+  // calling egress.pushStockStatus. A single-product link AND a bundle link
   // pointing at the same WC product, OR two components mapping to the same
   // bundle, would otherwise produce duplicate updates and redundant API calls.
   it('dedups duplicate (externalProductId, externalVariantId) updates before sending', async () => {
-    const adapter = makeAdapter({ succeeded: 1, failed: [] });
+    const adapter = makeAdapter();
+    mockPushStockStatus.mockResolvedValue(egressSent(1));
     setupClient(adapter);
 
     // Two single-product links pointing at the SAME externalProductId '999'
@@ -336,8 +362,8 @@ describe('pushStockForProducts — bundles', () => {
 
     // Without dedup the adapter would receive 2 updates for productId 999;
     // with dedup it should receive only 1.
-    const updates = adapter.batchUpdateProductStock.mock.calls[0][2];
+    const updates = mockPushStockStatus.mock.calls[0][1];
     expect(updates).toHaveLength(1);
-    expect(updates[0].productId).toBe('999');
+    expect(updates[0].externalProductId).toBe('999');
   });
 });

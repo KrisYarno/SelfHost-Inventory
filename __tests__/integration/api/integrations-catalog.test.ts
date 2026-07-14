@@ -17,10 +17,6 @@ jest.mock('@/lib/rateLimit', () => ({
   enforceRateLimit: jest.fn(() => ({})),
   applyRateLimitHeaders: jest.fn((resp: any) => resp),
 }));
-jest.mock('@/lib/external-orders/shared', () => ({
-  decryptOrNull: jest.fn((v: string) => v),
-  hostFromStoreUrl: jest.fn((u: string) => u.replace(/^https?:\/\//, '')),
-}));
 jest.mock('@/lib/platforms/woocommerce/fetch-catalog', () => ({
   fetchWooCatalog: jest.fn(),
 }));
@@ -36,8 +32,6 @@ describe('GET /api/integrations/[id]/catalog', () => {
     // Restore the identity implementations that the module-factory set up.
     // jest.resetAllMocks() clears implementations created in the factory; we
     // re-install them here so each test starts with a working mock.
-    const { decryptOrNull } = require('@/lib/external-orders/shared');
-    (decryptOrNull as jest.Mock).mockImplementation((v: string) => v);
     const { applyRateLimitHeaders } = require('@/lib/rateLimit');
     (applyRateLimitHeaders as jest.Mock).mockImplementation((resp: any) => resp);
   });
@@ -106,21 +100,25 @@ describe('GET /api/integrations/[id]/catalog', () => {
     expect([400, 501]).toContain(resp.status);
   });
 
-  it('returns 500 when credentials cannot be decrypted', async () => {
+  it('surfaces a credential/read failure as a 502 (egress now owns decryption)', async () => {
+    // LANE 6: the route no longer decrypts credentials — egress.platformRead does,
+    // privately. An unresolvable credential therefore throws from inside
+    // fetchWooCatalog and the route answers 502 ("Store fetch failed"), not 500.
     (requireAdmin as jest.Mock).mockResolvedValue({ user: { id: '1', isAdmin: true } });
     (requireCompanyMembership as jest.Mock).mockResolvedValue(undefined);
     (prisma.integration.findUnique as jest.Mock).mockResolvedValue({
       id: 'x', isActive: true, companyId: 'co', platform: 'WOOCOMMERCE',
-      storeUrl: 'https://s', name: 'Main', encryptedApiKey: 'k', encryptedApiSecret: 's',
+      storeUrl: 'https://s', name: 'Main',
     });
-    const { decryptOrNull } = require('@/lib/external-orders/shared');
-    (decryptOrNull as jest.Mock).mockReturnValue(null);
+    (fetchWooCatalog as jest.Mock).mockRejectedValue(
+      new Error('Failed to resolve integration read credentials')
+    );
 
     const req = new NextRequest('http://t/api/integrations/x/catalog');
     const resp = await GET(req, { params: { id: 'x' } });
-    expect(resp.status).toBe(500);
+    expect(resp.status).toBe(502);
     const body = await resp.json();
-    expect(body.error).toMatch(/credentials could not be decrypted/i);
+    expect(body.error).toMatch(/Store fetch failed/);
   });
 
   it('existingMapping is always uniform — isBundle bool + componentCount nullable [P2]', async () => {

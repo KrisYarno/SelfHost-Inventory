@@ -29,6 +29,8 @@ const mutateAsync = jest.fn().mockResolvedValue({});
 jest.mock("@/hooks/use-admin", () => ({
   useOpsHealth: () => useOpsHealthMock(),
   useTriggerRebuild: () => ({ mutateAsync }),
+  // Lane 6: the platform-writes tile uses the emergency-stop mutation.
+  useSetPlatformWriteKillSwitch: () => ({ mutateAsync: jest.fn(), isPending: false }),
 }));
 
 import { OpsHealthSection } from "@/components/admin/ops-health-section";
@@ -48,6 +50,18 @@ function makeData(overrides: Partial<OpsHealthResponse> = {}): OpsHealthResponse
         runs: [],
         sidecarSeenAt: nowIso,
         heartbeatStale: false,
+      },
+    },
+    // Lane 6: the ops-health response gained a platform-writes posture block.
+    platformWrites: {
+      status: "ok",
+      data: {
+        effective: "off",
+        capabilities: [],
+        killSwitchEngaged: false,
+        invalidEnv: false,
+        invalidReasons: [],
+        label: "Platform writes: OFF",
       },
     },
     ...overrides,

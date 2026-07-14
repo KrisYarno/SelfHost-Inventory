@@ -328,8 +328,8 @@ describe("POST integrations — INTEGRATION_CREATE", () => {
         platform: "SHOPIFY",
         name: "My Shop",
         storeUrl: "https://shop.example.com",
-        apiKey: "key-123",
-        apiSecret: "secret-456",
+        writeKey: "key-123",
+        writeSecret: "secret-456",
       })
     );
 
@@ -349,7 +349,7 @@ describe("POST integrations — INTEGRATION_CREATE", () => {
       storeUrl: "https://shop.example.com",
     });
     // Absolutely no credential material — even pre-redaction.
-    expect(JSON.stringify(row.details.snapshot)).not.toMatch(/key-123|secret-456|apiKey|apiSecret/);
+    expect(JSON.stringify(row.details.snapshot)).not.toMatch(/key-123|secret-456|writeKey|writeSecret|apiKey|apiSecret/);
   });
 });
 
@@ -420,18 +420,18 @@ describe("PUT integrations/[id] — branch rule + credential redaction", () => {
     expect(row.actionType).toBe("INTEGRATION_UPDATE");
   });
 
-  it("credential rotation -> changes.apiKey is post-redaction '[REDACTED]', UPDATE", async () => {
-    const resp = await put({ apiKey: "brand-new-key" });
+  it("credential rotation -> changes.writeKey is post-redaction '[REDACTED]', UPDATE", async () => {
+    const resp = await put({ writeKey: "brand-new-key" });
     expect(resp.status).toBe(200);
     const [row] = auditRows();
     expect(row.actionType).toBe("INTEGRATION_UPDATE");
-    expect(row.details.changes.apiKey).toBe("[REDACTED]");
+    expect(row.details.changes.writeKey).toBe("[REDACTED]");
     // Plaintext must never appear anywhere in the recorded payload.
     expect(JSON.stringify(row)).not.toMatch(/brand-new-key/);
   });
 
   it("empty-string credential = leave unchanged -> no changes entry, no event", async () => {
-    const resp = await put({ apiKey: "" });
+    const resp = await put({ writeKey: "" });
     expect(resp.status).toBe(200);
     expect(tx.integration.update).toHaveBeenCalledTimes(1);
     expect(tx.auditLog.create).not.toHaveBeenCalled();
@@ -454,8 +454,10 @@ describe("DELETE integrations/[id] — INTEGRATION_DELETE", () => {
     platform: "SHOPIFY",
     name: "Store",
     storeUrl: "https://s.example.com",
-    encryptedApiKey: "enc(key)",
-    encryptedApiSecret: "enc(secret)",
+    encryptedWriteKey: "enc(key)",
+    encryptedWriteSecret: "enc(secret)",
+    encryptedReadKey: "enc(rkey)",
+    encryptedReadSecret: "enc(rsecret)",
     webhookSecret: "enc(hook)",
     isActive: true,
   };
@@ -511,8 +513,10 @@ describe("DELETE integrations/[id] — INTEGRATION_DELETE", () => {
     // R-D11 full redacted snapshot.
     expect(row.details.snapshot.name).toBe("Store");
     expect(row.details.snapshot.platform).toBe("SHOPIFY");
-    expect(row.details.snapshot.encryptedApiKey).toBe("[REDACTED]");
-    expect(row.details.snapshot.encryptedApiSecret).toBe("[REDACTED]");
+    expect(row.details.snapshot.encryptedWriteKey).toBe("[REDACTED]");
+    expect(row.details.snapshot.encryptedWriteSecret).toBe("[REDACTED]");
+    expect(row.details.snapshot.encryptedReadKey).toBe("[REDACTED]");
+    expect(row.details.snapshot.encryptedReadSecret).toBe("[REDACTED]");
     expect(row.details.snapshot.webhookSecret).toBe("[REDACTED]");
     // Cascade id + identity arrays + counts.
     expect(row.details.cascade.orders).toEqual([
