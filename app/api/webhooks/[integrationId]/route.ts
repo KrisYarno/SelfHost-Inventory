@@ -4,6 +4,7 @@ import prisma from "@/lib/prisma";
 import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import { decryptValue, isEncrypted } from "@/lib/encryption";
 import { upsertOrderWithItems } from "@/lib/external-orders/shared";
+import { persistFulfillmentHint } from "@/lib/external-orders/fulfillment-observations";
 import { recordIngestion } from "@/lib/change-tracking";
 import type { PlatformType } from "@/lib/platforms/core/types";
 import type { Prisma } from "@prisma/client";
@@ -446,6 +447,15 @@ export const POST = apiHandler(async (
       // THEN the R-D4 ingestion record — so an audit-write failure signalled by
       // onFailure survives instead of being wiped by the success reset.
       await recordWebhookSuccess(integration.id);
+
+      // Lane 6 (L-WOO, REV-2 #15): fulfillment latency HINT ONLY. After the
+      // signature has verified, persist a hint and move on — the fulfillment poll
+      // (never this handler) will later GET the order's CURRENT state and apply it
+      // under the watermark rule. A synchronous Woo GET here is forbidden: a GET
+      // failure would count toward Woo's 5-strike webhook auto-disable, and the
+      // webhook must never be able to break its own delivery. persistFulfillmentHint
+      // is best-effort and swallows its own errors, so it can never fail the 200.
+      await persistFulfillmentHint(integration.id, platform, normalizedOrder.externalId);
 
       // 5. R-D4: record ONLY an effective transition (gate on summary.changed).
       // An unchanged re-delivery writes no event. Best-effort — a record failure
