@@ -4,6 +4,7 @@ services:
     command: >-
       --character-set-server=utf8mb4
       --collation-server=utf8mb4_unicode_ci
+      --log-bin-trust-function-creators=1
     environment:
       MYSQL_DATABASE: inventory
       MYSQL_USER: inventory
@@ -20,17 +21,18 @@ services:
       - internal
 
   migrate:
-    image: node:22-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
     working_dir: /app
-    volumes:
-      - .:/app
     environment:
       NODE_ENV: production
       DATABASE_URL: mysql://inventory:${MYSQL_PASSWORD}@db:3306/inventory?connection_limit=20
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       SHOPIFY_WEBHOOK_SECRET: ${SHOPIFY_WEBHOOK_SECRET}
       WOOCOMMERCE_WEBHOOK_SECRET: ${WOOCOMMERCE_WEBHOOK_SECRET}
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
@@ -39,10 +41,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: >-
-      sh -lc "npm ci --ignore-scripts && ./node_modules/.bin/prisma generate && ./node_modules/.bin/prisma migrate deploy && node scripts/migrate-to-multitenant.js && node scripts/seed-default-location.js"
     networks:
       - internal
+    # BUILD CONTRACT (codex #4): `docker compose build app migrate` before every `up` —
+    # building only `app` does NOT retag this image; a stale migrate image runs old migrations.
+    command: >-
+      sh -lc "./node_modules/.bin/prisma migrate deploy && node scripts/migrate-to-multitenant.js && node scripts/seed-default-location.js"
 
   app:
     build:
@@ -59,13 +63,22 @@ services:
       SHOPIFY_WEBHOOK_SECRET: ${SHOPIFY_WEBHOOK_SECRET}
       WOOCOMMERCE_WEBHOOK_SECRET: ${WOOCOMMERCE_WEBHOOK_SECRET}
       WEBHOOK_DEBUG_HEADERS: ${WEBHOOK_DEBUG_HEADERS:-0}
-      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
       ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-advancedresearchpep.com}
       INTERNAL_SYNC_TOKEN: ${INTERNAL_SYNC_TOKEN}
       CRON_SECRET: ${CRON_SECRET}
+      # I3: forward SendGrid + analytics tunables the APP reads (lib/email.ts,
+      # app/api/cron/analytics-rebuild + app/api/admin/analytics-rebuild). Passthrough
+      # (empty default) so an unset value stays unset rather than erroring compose.
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-}
+      TEMPLATE_ID: ${TEMPLATE_ID:-}
+      ANALYTICS_SNAPSHOT_NIGHTLY_DAYS: ${ANALYTICS_SNAPSHOT_NIGHTLY_DAYS:-}
+      ANALYTICS_SALES_NIGHTLY_ROLLING_DAYS: ${ANALYTICS_SALES_NIGHTLY_ROLLING_DAYS:-}
+      ANALYTICS_SALES_NIGHTLY_LOOKBACK_HOURS: ${ANALYTICS_SALES_NIGHTLY_LOOKBACK_HOURS:-}
     expose:
       - "3000"
     depends_on:

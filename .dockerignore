@@ -1,0 +1,19 @@
+# Build-context exclusions (Lane 5 I4/codex #5).
+# The Dockerfile builder does `COPY . .`; without this file the host's
+# node_modules (~1.1GB), .next, git history, dumps and secrets all enter the
+# build context — slow, and `COPY . .` could overwrite container-installed deps.
+# Keep this list in sync with what the build genuinely needs (source + prisma +
+# scripts + public); everything below is regenerated in-image or never used at build.
+node_modules
+mcp/node_modules
+.next
+.git
+.env*
+*.log
+dumps
+staging-initdb
+*.sql
+*.sql.gz
+backup
+.claude
+docs
