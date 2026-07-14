@@ -134,14 +134,19 @@ async function loadRebuild(now: number): Promise<RebuildHealth> {
   ]);
   const enabled = enabledSetting?.value === "true";
 
-  // Heartbeat: { at, envEnabled } JSON; tolerate malformed / missing.
+  // Heartbeat: { at, envEnabled } JSON; tolerate malformed / missing. envEnabled is
+  // the sidecar's own ENABLE_ANALYTICS_REBUILD flag; null for pre-P5 payloads that
+  // never carried it or for malformed JSON (so the mismatch check stays inert).
   let sidecarSeenAt: string | null = null;
+  let envEnabled: boolean | null = null;
   if (heartbeatSetting?.value) {
     try {
-      const hb = JSON.parse(heartbeatSetting.value) as { at?: unknown };
+      const hb = JSON.parse(heartbeatSetting.value) as { at?: unknown; envEnabled?: unknown };
       if (typeof hb.at === "string") sidecarSeenAt = hb.at;
+      if (typeof hb.envEnabled === "boolean") envEnabled = hb.envEnabled;
     } catch {
       sidecarSeenAt = null;
+      envEnabled = null;
     }
   }
   const heartbeatStale =
@@ -193,7 +198,7 @@ async function loadRebuild(now: number): Promise<RebuildHealth> {
     error: r.error,
   }));
 
-  return { jobs, runs, sidecarSeenAt, heartbeatStale };
+  return { jobs, runs, sidecarSeenAt, heartbeatStale, envEnabled };
 }
 
 // --- assembly ---
@@ -298,6 +303,17 @@ export const GET = apiHandler(async () => {
         attention.push({ severity: "warning", system: "Analytics rebuild", message: `${j.job} has no successful rebuild in over a day`, href: "/admin/settings" });
       } else if (j.lockStale) {
         attention.push({ severity: "warning", system: "Analytics rebuild", message: `${j.job} rebuild lock is stale`, href: "/admin/settings" });
+      }
+    }
+    // Two-flag misconfig (spec P5, codex #12). Only trust a FRESH heartbeat carrying
+    // a parsed boolean envEnabled: a stale/absent/pre-P5 heartbeat leaves this inert
+    // (the heartbeat-stale item above already covers a down sidecar). `anyEnabled` is
+    // the admin/DB toggle (every job shares it); env is the environment flag.
+    if (!r.heartbeatStale && typeof r.envEnabled === "boolean") {
+      if (r.envEnabled && !anyEnabled) {
+        attention.push({ severity: "warning", system: "Analytics rebuild", message: "Analytics rebuild is enabled in the environment but the admin toggle is off.", href: "/admin/settings" });
+      } else if (!r.envEnabled && anyEnabled) {
+        attention.push({ severity: "warning", system: "Analytics rebuild", message: "Analytics rebuild admin toggle is on but the environment flag is off.", href: "/admin/settings" });
       }
     }
   } else {

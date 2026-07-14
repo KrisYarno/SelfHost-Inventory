@@ -60,14 +60,31 @@ export async function rebuildStockSnapshots(opts: { from?: string; to?: string; 
       const from = nullLocationCutoff && nullLocationCutoff > baseFrom ? nullLocationCutoff : baseFrom;
       const r = reconstructLevels({ current: pair.quantity, deltas: logs, fromDayKey: from, toDayKey: to });
       if (!r.ok) { flaggedPairs++; console.warn(`[snapshots] flagged pair product=${pair.productId} loc=${pair.locationId}: negative reconstruction`); continue; }
-      for (const lvl of r.levels) {
-        await prisma.productStockSnapshot.upsert({
-          where: { productId_locationId_dayKey: { productId: pair.productId, locationId: pair.locationId, dayKey: lvl.dayKey } },
-          update: { quantity: lvl.quantity },
-          create: { productId: pair.productId, locationId: pair.locationId, dayKey: lvl.dayKey, quantity: lvl.quantity },
-        });
-        rowsInserted++; // counts rows upserted (touched), including updates of existing rows — not strictly net-new
+      // P3 (Lane 5): batch the per-pair write. Old path did one upsert per (pair×day)
+      // — O(pairs×days) round trips (~11min on the staging dataset). New path mirrors
+      // rebuild-sales: per pair, one array-form $transaction that deletes the recompute
+      // window then createMany's the reconstructed days in chunks of 500. Delete-scope ==
+      // recompute-scope ([from..to]); flagged (negative) pairs already `continue`d above,
+      // so they are NEVER deleted. Empty range (from > to) writes nothing (no delete).
+      if (r.levels.length === 0) continue;
+      const rows = r.levels.map((lvl) => ({
+        productId: pair.productId,
+        locationId: pair.locationId,
+        dayKey: lvl.dayKey,
+        quantity: lvl.quantity,
+      }));
+      const CHUNK = 500;
+      const createChunks = [];
+      for (let j = 0; j < rows.length; j += CHUNK) {
+        createChunks.push(prisma.productStockSnapshot.createMany({ data: rows.slice(j, j + CHUNK) }));
       }
+      await prisma.$transaction([
+        prisma.productStockSnapshot.deleteMany({
+          where: { productId: pair.productId, locationId: pair.locationId, dayKey: { gte: from, lte: to } },
+        }),
+        ...createChunks,
+      ]);
+      rowsInserted += rows.length; // rows written for this pair (delete+recreate => all net-new within the window)
     }
     // Finalize: terminal run row + state mirror + retention + fenced release, atomically.
     // Record the EFFECTIVE floor (the applied cutoff) so the run reflects the actual backfill start.

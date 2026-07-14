@@ -10,6 +10,7 @@ const {
   allOk,
   runJob,
   sendHeartbeat,
+  tickOnce,
 } = require("../../../scripts/scheduled-analytics-rebuild");
 
 // Cadence used across cases: nightly at 03:00 UTC, weekly full on Sunday (DOW 0)
@@ -321,5 +322,83 @@ describe("sendHeartbeat (liveness ping)", () => {
       throw new Error("ECONNREFUSED");
     });
     expect(await sendHeartbeat(URL, "sek", true)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tickOnce — the extracted single-tick body (spec P5, codex #12). Disabled ticks
+// heartbeat env=0 and dispatch NO jobs; enabled ticks heartbeat env=1 then run
+// due jobs. Both use `fetch` (heartbeat + runJob), so a mocked fetch proves the
+// heartbeat body AND that no job URL is ever hit while disabled.
+// ---------------------------------------------------------------------------
+describe("tickOnce (heartbeat + optional dispatch)", () => {
+  const URL = "http://app:3000/api/cron/analytics-rebuild";
+  let origFetch;
+  let logSpy;
+  let errSpy;
+  let warnSpy;
+  beforeEach(() => {
+    origFetch = global.fetch;
+    logSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+    errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    global.fetch = origFetch;
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  test("disabled: heartbeats env=0 and dispatches NO jobs (decideJobs skipped)", async () => {
+    global.fetch = jest.fn(async () => ({ ok: true, status: 200, text: async () => "{}" }));
+    const state = { lastNightlyDay: undefined, lastFullWeek: undefined };
+    // now = full day at full hour: a job WOULD be due if enabled — proves the guard.
+    const res = await tickOnce({ url: URL, secret: "sek", enabled: false, state, cfg, now: SUN_0400 });
+
+    expect(res.disabled).toBe(true);
+    expect(res.statuses).toEqual([]);
+    // Exactly one fetch: the heartbeat, with env=0.
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch).toHaveBeenCalledWith(
+      `${URL}?op=heartbeat&env=0`,
+      expect.objectContaining({ method: "GET", headers: { authorization: "Bearer sek" } })
+    );
+    // No job dispatch at all.
+    expect(global.fetch.mock.calls.some((c) => String(c[0]).includes("job="))).toBe(false);
+    // Dedup state untouched.
+    expect(state).toEqual({ lastNightlyDay: undefined, lastFullWeek: undefined });
+  });
+
+  test("enabled: heartbeats env=1, dispatches the due jobs, advances state on all-ok", async () => {
+    global.fetch = jest.fn(async (target) => {
+      if (String(target).includes("op=heartbeat")) return { ok: true, status: 200 };
+      return { ok: true, status: 200, text: async () => JSON.stringify({ skipped: false, result: {} }) };
+    });
+    const state = { lastNightlyDay: undefined, lastFullWeek: undefined };
+    const res = await tickOnce({ url: URL, secret: "sek", enabled: true, state, cfg, now: WED_0300 });
+
+    expect(res.heartbeat).toBe(true);
+    expect(res.statuses).toEqual(["ok", "ok"]);
+    expect(global.fetch).toHaveBeenCalledWith(`${URL}?op=heartbeat&env=1`, expect.anything());
+    const jobCalls = global.fetch.mock.calls.filter((c) => String(c[0]).includes("job="));
+    expect(jobCalls.length).toBe(2);
+    expect(state.lastNightlyDay).toBe("2026-06-03"); // advanced (all ok)
+  });
+
+  test("enabled but nothing due: heartbeats env=1 and dispatches no jobs", async () => {
+    global.fetch = jest.fn(async () => ({ ok: true, status: 200 }));
+    const state = { lastNightlyDay: undefined, lastFullWeek: undefined };
+    const res = await tickOnce({ url: URL, secret: "sek", enabled: true, state, cfg, now: WED_0200 });
+    expect(res.statuses).toEqual([]);
+    expect(global.fetch).toHaveBeenCalledTimes(1); // heartbeat only
+    expect(global.fetch).toHaveBeenCalledWith(`${URL}?op=heartbeat&env=1`, expect.anything());
+  });
+
+  test("no secret: skips both heartbeat and dispatch", async () => {
+    global.fetch = jest.fn();
+    const res = await tickOnce({ url: URL, secret: "", enabled: true, state: {}, cfg });
+    expect(res.heartbeat).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });

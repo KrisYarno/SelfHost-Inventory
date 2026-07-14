@@ -165,6 +165,13 @@ export interface RebuildHealth {
   runs: RebuildRunRow[];
   sidecarSeenAt: string | null;
   heartbeatStale: boolean;
+  /**
+   * The sidecar's own ENABLE_ANALYTICS_REBUILD flag, as reported in its most
+   * recent heartbeat (P5). null for pre-P5 / malformed heartbeats; the two-flag
+   * mismatch attention items fire only when this is a boolean from a FRESH
+   * heartbeat.
+   */
+  envEnabled?: boolean | null;
 }
 
 export interface AttentionItem {

@@ -169,6 +169,51 @@ async function sendHeartbeat(url, secret, enabled) {
   }
 }
 
+/**
+ * ONE loop tick. Heartbeats first, then (only when enabled) decides + dispatches
+ * jobs. When DISABLED this stays in heartbeat-only mode: it still emits an
+ * `envEnabled:false` heartbeat every tick (so ops-health can tell env-OFF/DB-ON
+ * apart from a crashed sidecar — spec P5, codex #12) and dispatches NO jobs
+ * (decideJobs is skipped entirely). Exported so the disabled/enabled tick paths
+ * are unit-testable without starting the interval loop.
+ *
+ * @param {{url:string, secret:string, enabled:boolean,
+ *          state:{lastNightlyDay?:string,lastFullWeek?:string},
+ *          cfg:{nightlyHourUtc:number,fullDow:number,fullHourUtc:number},
+ *          now?:Date}} deps
+ * @returns {Promise<{heartbeat:boolean, statuses:string[], disabled?:boolean}>}
+ */
+async function tickOnce({ url, secret, enabled, state, cfg, now = new Date() }) {
+  if (!secret) {
+    console.error("[analytics-rebuild] CRON_SECRET is not set. Skipping run.");
+    return { heartbeat: false, statuses: [] };
+  }
+  // Heartbeat FIRST, on every tick — including idle AND disabled ticks — so
+  // ops-health always sees a live sidecar and its reported envEnabled flag.
+  const heartbeat = await sendHeartbeat(url, secret, enabled);
+
+  // Disabled = heartbeat-only. Never decide or dispatch jobs.
+  if (!enabled) return { heartbeat, statuses: [], disabled: true };
+
+  const decision = decideJobs(now, state, cfg);
+  if (decision.jobs.length === 0) return { heartbeat, statuses: [] };
+  // Run every due job and collect outcomes. Do NOT advance the dedup marker up front: if a job is
+  // a no-op (lock held => "skipped") or fails ("error"), we must leave state unadvanced so the next
+  // tick retries. Only when EVERY job truly did its work do we record the period as done.
+  const statuses = [];
+  for (const { job, mode } of decision.jobs) {
+    statuses.push(await runJob(url, secret, job, mode));
+  }
+  if (allOk(statuses)) {
+    Object.assign(state, decision.state);
+  } else {
+    console.warn(
+      `[analytics-rebuild] not advancing dedup state — statuses: ${statuses.join(", ")} (will retry next tick)`
+    );
+  }
+  return { heartbeat, statuses };
+}
+
 async function main() {
   const enabledRaw = process.env.ENABLE_ANALYTICS_REBUILD || "0";
   const enabled = enabledRaw === "1" || enabledRaw === "true";
@@ -186,57 +231,39 @@ async function main() {
     fullHourUtc: parseInt(process.env.ANALYTICS_FULL_HOUR_UTC || "4", 10),
   };
 
+  // NOTE (spec P5): a DISABLED sidecar no longer returns early. It stays in the
+  // tick loop in heartbeat-only mode so ops-health can distinguish env-OFF/DB-ON
+  // (fresh heartbeat, envEnabled:false) from a crashed sidecar (no heartbeat).
   if (!enabled) {
-    // Match the `sync` sidecar's gating posture: idle quietly rather than crash
-    // the container, so the service can sit dormant until flipped on.
     console.log(
-      "[analytics-rebuild] disabled (set ENABLE_ANALYTICS_REBUILD=1 to enable). Idling."
+      "[analytics-rebuild] disabled (set ENABLE_ANALYTICS_REBUILD=1 to enable). Heartbeat-only mode."
     );
-    return;
+  } else {
+    console.log(
+      `[analytics-rebuild] starting: tick ${tickMinutes}m, nightly ${cfg.nightlyHourUtc}:00 UTC, ` +
+        `full DOW ${cfg.fullDow} ${cfg.fullHourUtc}:00 UTC, url ${url}`
+    );
   }
-
-  console.log(
-    `[analytics-rebuild] starting: tick ${tickMinutes}m, nightly ${cfg.nightlyHourUtc}:00 UTC, ` +
-      `full DOW ${cfg.fullDow} ${cfg.fullHourUtc}:00 UTC, url ${url}`
-  );
 
   // In-memory dedup state (see header: not persisted, restart-tolerant).
   const state = { lastNightlyDay: undefined, lastFullWeek: undefined };
 
-  async function tick() {
-    if (!secret) {
-      console.error("[analytics-rebuild] CRON_SECRET is not set. Skipping run.");
-      return;
-    }
-    // Heartbeat FIRST, on every tick — including idle ticks with no job due — so
-    // ops-health always sees a live, running sidecar (that IS the "sidecar on" signal).
-    await sendHeartbeat(url, secret, enabled);
-    const decision = decideJobs(new Date(), state, cfg);
-    if (decision.jobs.length === 0) return;
-    // Run every due job and collect outcomes. Do NOT advance the dedup marker up front: if a job is
-    // a no-op (lock held => "skipped") or fails ("error"), we must leave state unadvanced so the next
-    // tick retries. Only when EVERY job truly did its work do we record the period as done.
-    const statuses = [];
-    for (const { job, mode } of decision.jobs) {
-      statuses.push(await runJob(url, secret, job, mode));
-    }
-    if (allOk(statuses)) {
-      Object.assign(state, decision.state);
-    } else {
-      console.warn(
-        `[analytics-rebuild] not advancing dedup state — statuses: ${statuses.join(", ")} (will retry next tick)`
-      );
-    }
-  }
+  const runTick = () =>
+    tickOnce({ url, secret, enabled, state, cfg }).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[analytics-rebuild] tick failed: ${message}`);
+    });
 
-  await tick();
-  setInterval(tick, tickMinutes * 60 * 1000);
+  await runTick();
+  setInterval(runTick, tickMinutes * 60 * 1000);
 }
 
 // Exports for unit tests. decideJobs + allOk are pure; runJob is exported so its HTTP-outcome
-// classification ("ok"/"skipped"/"error") can be tested with a mocked fetch. Importing this file
-// must NOT start the loop — only direct execution does (mirrors scripts/analytics-rebuild.ts).
-module.exports = { decideJobs, dayKey, weekKey, allOk, runJob, sendHeartbeat };
+// classification ("ok"/"skipped"/"error") can be tested with a mocked fetch; tickOnce is exported
+// so the disabled (heartbeat-only) and enabled tick paths can be driven with a mocked fetch.
+// Importing this file must NOT start the loop — only direct execution does (mirrors
+// scripts/analytics-rebuild.ts).
+module.exports = { decideJobs, dayKey, weekKey, allOk, runJob, sendHeartbeat, tickOnce };
 
 if (require.main === module) {
   main().catch((err) => {

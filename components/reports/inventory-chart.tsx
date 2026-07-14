@@ -1,173 +1,33 @@
-"use client";
+import dynamic from "next/dynamic";
 
-import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  PieChart,
-  Pie,
-  Cell
-} from "recharts";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+// P1 (Lane 5): the recharts implementations live in ./inventory-chart-impl and
+// are loaded lazily + client-only, so recharts never chains into the initial JS
+// of /admin/reports or /analytics/product/[id]. Each public export is a
+// next/dynamic wrapper around one named impl export; consumers import the same
+// names as before and are untouched.
 
-interface ChartProps {
-  data: any[];
-  title: string;
-  description?: string;
-  onClick?: (data: any) => void;
-}
+const ChartSkeleton = () => (
+  <div aria-hidden className="h-[360px] w-full animate-pulse rounded-lg bg-surface" />
+);
 
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8'];
+export const LineChartComponent = dynamic(
+  () => import("./inventory-chart-impl").then((m) => m.LineChartComponent),
+  { ssr: false, loading: ChartSkeleton },
+);
 
-export function LineChartComponent({ data, title, description, onClick }: ChartProps) {
-  const handleClick = (data: any) => {
-    if (onClick && data && data.activePayload && data.activePayload[0]) {
-      onClick(data.activePayload[0].payload);
-    }
-  };
+export const BarChartComponent = dynamic(
+  () => import("./inventory-chart-impl").then((m) => m.BarChartComponent),
+  { ssr: false, loading: ChartSkeleton },
+);
 
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        {description && (
-          <p className="text-sm text-muted-foreground">{description}</p>
-        )}
-      </CardHeader>
-      <CardContent>
-        <ResponsiveContainer width="100%" height={300}>
-          <LineChart data={data} onClick={handleClick}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis 
-              dataKey="date" 
-              style={{ fontSize: '12px' }}
-            />
-            <YAxis style={{ fontSize: '12px' }} />
-            <Tooltip />
-            <Legend />
-            <Line 
-              type="monotone" 
-              dataKey="quantity" 
-              stroke="#8884d8" 
-              strokeWidth={2}
-              name="Stock Level"
-              cursor="pointer"
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      </CardContent>
-    </Card>
-  );
-}
+export const PieChartComponent = dynamic(
+  () => import("./inventory-chart-impl").then((m) => m.PieChartComponent),
+  { ssr: false, loading: ChartSkeleton },
+);
 
-export function BarChartComponent({ data, title, description }: ChartProps) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        {description && (
-          <p className="text-sm text-muted-foreground">{description}</p>
-        )}
-      </CardHeader>
-      <CardContent>
-        <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis 
-              dataKey="product" 
-              style={{ fontSize: '12px' }}
-              angle={-45}
-              textAnchor="end"
-              height={100}
-            />
-            <YAxis style={{ fontSize: '12px' }} />
-            <Tooltip />
-            <Legend />
-            <Bar dataKey="stockIn" fill="#00C49F" name="Stock In" />
-            <Bar dataKey="stockOut" fill="#FF8042" name="Stock Out" />
-          </BarChart>
-        </ResponsiveContainer>
-      </CardContent>
-    </Card>
-  );
-}
+export const ActivityBarChart = dynamic(
+  () => import("./inventory-chart-impl").then((m) => m.ActivityBarChart),
+  { ssr: false, loading: ChartSkeleton },
+);
 
-export function PieChartComponent({ data, title, description }: ChartProps) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        {description && (
-          <p className="text-sm text-muted-foreground">{description}</p>
-        )}
-      </CardHeader>
-      <CardContent>
-        <ResponsiveContainer width="100%" height={300}>
-          <PieChart>
-            <Pie
-              data={data}
-              cx="50%"
-              cy="50%"
-              labelLine={false}
-              label={({name, percent}) => {
-                const p = typeof percent === 'number' ? percent : 0;
-                return `${name} ${(p * 100).toFixed(0)}%`;
-              }}
-              outerRadius={80}
-              fill="#8884d8"
-              dataKey="value"
-            >
-              {data.map((entry, index) => (
-                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-              ))}
-            </Pie>
-            <Tooltip />
-          </PieChart>
-        </ResponsiveContainer>
-      </CardContent>
-    </Card>
-  );
-}
-
-export function ActivityBarChart({ data, title, description, onClick }: ChartProps) {
-  const handleClick = (data: any) => {
-    if (onClick && data && data.activePayload && data.activePayload[0]) {
-      onClick(data.activePayload[0].payload);
-    }
-  };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        {description && (
-          <p className="text-sm text-muted-foreground">{description}</p>
-        )}
-      </CardHeader>
-      <CardContent>
-        <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={data} onClick={handleClick}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis 
-              dataKey="date" 
-              style={{ fontSize: '12px' }}
-            />
-            <YAxis style={{ fontSize: '12px' }} />
-            <Tooltip />
-            <Legend />
-            <Bar dataKey="stockIn" stackId="a" fill="#00C49F" name="Stock In" cursor="pointer" />
-            <Bar dataKey="stockOut" stackId="a" fill="#FF8042" name="Stock Out" cursor="pointer" />
-            <Bar dataKey="adjustments" stackId="a" fill="#0088FE" name="Adjustments" cursor="pointer" />
-          </BarChart>
-        </ResponsiveContainer>
-      </CardContent>
-    </Card>
-  );
-}
+export type { ChartProps } from "./inventory-chart-impl";

@@ -64,16 +64,23 @@ export function LocationProvider({ children }: { children: ReactNode }) {
 
   const selectedLocation = locations.find(loc => loc.id === selectedLocationId) || null;
 
+  // P2 (Lane 5): memoize the context value so an unrelated parent re-render does
+  // not hand every consumer a fresh object literal (which forced a needless
+  // re-render on every render of the provider's parent). setSelectedLocationId is
+  // the stable useState setter, so it is intentionally out of the dep list.
+  const value = React.useMemo(
+    () => ({
+      locations,
+      selectedLocation,
+      selectedLocationId,
+      setSelectedLocationId,
+      isLoading,
+    }),
+    [locations, selectedLocation, selectedLocationId, isLoading],
+  );
+
   return (
-    <LocationContext.Provider 
-      value={{
-        locations,
-        selectedLocation,
-        selectedLocationId,
-        setSelectedLocationId,
-        isLoading,
-      }}
-    >
+    <LocationContext.Provider value={value}>
       {children}
     </LocationContext.Provider>
   );
