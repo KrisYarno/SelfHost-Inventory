@@ -45,6 +45,7 @@ import {
 import { serializeSalesRows } from "@/lib/analytics/serialize";
 import { toDayKey } from "@/lib/analytics/dates";
 import { getLowStockReport } from "@/lib/reports/low-stock";
+import { getReorderReport } from "@/lib/reports/reorder";
 import {
   effectiveLowStockThreshold,
   getLowStockDefault,
@@ -90,6 +91,7 @@ export const TOOL_SCOPES: Record<string, "company" | "global"> = {
   get_shrinkage: "global",
   get_valuation: "global",
   low_stock_report: "global",
+  reorder_report: "global",
 };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +103,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const FIND_PRODUCT_MAX = 20;
 const OPERATIONS_MAX = 50;
 const LOW_STOCK_MAX = 50;
+const REORDER_MAX = 50;
 const SALES_ROWS_MAX = 500;
 const DEFAULT_RELATIVE_DAYS = 30;
 // DB-level `take` for the snapshot series. Reconciled with the budget (D-T7): a
@@ -433,6 +436,12 @@ const lowStockSchema = z.object({
   offset: nonNegInt.optional(),
 });
 
+const reorderSchema = z.object({
+  includeOkay: z.boolean().optional(),
+  limit: z.number().int().positive().max(REORDER_MAX).optional(),
+  offset: nonNegInt.optional(),
+});
+
 // ---------------------------------------------------------------------------
 // Tool definitions (spec D4). Descriptions embed the truthfulness + D13 posture.
 // ---------------------------------------------------------------------------
@@ -660,10 +669,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
 
   low_stock_report: {
     description:
-      `Reorder report: products at or below their effective low-stock threshold, ` +
-      `INCLUDING out-of-stock items, sorted most-critical first. Top-level ` +
-      `systemDefaultThreshold is the shop default; each row's effectiveThreshold + ` +
-      `thresholdSource is the value that actually applied. ${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `Low-stock ALERT report (threshold-based) — NOT the demand-based reorder_report. ` +
+      `Products at or below their effective low-stock threshold, INCLUDING out-of-stock ` +
+      `items, sorted most-critical first. This flags what is LOW against a fixed ` +
+      `threshold; for demand-based suggested ORDER QUANTITIES use reorder_report instead. ` +
+      `Top-level systemDefaultThreshold is the shop default; each row's effectiveThreshold ` +
+      `+ thresholdSource is the value that actually applied. ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: lowStockSchema,
     run: async (input) => {
       const args = lowStockSchema.parse(input);
@@ -696,6 +707,44 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           returned: page.returned,
           totalRows: page.totalRows,
           nextOffset: page.nextOffset,
+        },
+        "global",
+        null,
+      );
+    },
+  },
+
+  reorder_report: {
+    description:
+      `Reorder report: DEMAND-based suggested order quantities (distinct from ` +
+      `low_stock_report, which is threshold-based). Each 'suggested' row shows every ` +
+      `input so the number is auditable: avgDailyDemand, daysCovered, leadTimeDays + ` +
+      `leadTimeSource, bufferDays, reorderPoint, targetLevel, grossReplenishmentNeed, ` +
+      `minOrderQuantity, urgency (OUT/CRITICAL/REORDER_NOW/APPROACHING), and cost. ` +
+      `'unavailable' rows carry NO numbers — only a reason (no_demand_signal | ` +
+      `insufficient_history). Quantities are GROSS: inventoryPositionKnown is false, so ` +
+      `they do NOT subtract stock already on order. costPrice/orderValue are null when ` +
+      `unknown (NEVER shown as $0). 'assumptions' states the demand window, default ` +
+      `bufferDays, targetCoverageMultiple, and demand definition — relay them. 'coverage' ` +
+      `counts total/suggested/unavailable/costed. ${PAGING_POSTURE} ${DATA_POSTURE}`,
+    inputSchema: reorderSchema,
+    run: async (input) => {
+      const args = reorderSchema.parse(input);
+      const limit = args.limit ?? REORDER_MAX;
+      const offset = args.offset ?? 0;
+      // Fetch the whole report (worklist + approaching + excluded) so offset paging is
+      // meaningful; the shop's approved set is small, so this stays cheap.
+      const report = await getReorderReport({ includeOkay: args.includeOkay ?? true });
+      const page = paginate(report.rows, offset, limit, ROW_PAGE_BYTE_BUDGET);
+      return ok(
+        {
+          rows: page.rows,
+          returned: page.returned,
+          totalRows: page.totalRows,
+          nextOffset: page.nextOffset,
+          inventoryPositionKnown: report.inventoryPositionKnown,
+          assumptions: report.assumptions,
+          coverage: report.coverage,
         },
         "global",
         null,

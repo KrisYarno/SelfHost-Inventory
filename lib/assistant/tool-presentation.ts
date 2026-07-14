@@ -118,4 +118,11 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     emptyCopy: "Nothing is low on stock right now.",
     summarizeArgs: () => "",
   },
+  reorder_report: {
+    pendingLabel: "Building the reorder report…",
+    successLabel: "Built the reorder report",
+    failureNoun: "reorder report",
+    emptyCopy: "Nothing needs reordering right now.",
+    summarizeArgs: () => "",
+  },
 };
