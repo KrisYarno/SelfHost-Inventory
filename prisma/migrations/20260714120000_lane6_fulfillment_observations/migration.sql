@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS `fulfillment_observations` (
   `tombstonedAt` DATETIME(3) NULL,
   `lastObservedAt` DATETIME(3) NOT NULL,
 
-  UNIQUE INDEX `fulfillment_observations_integrationId_externalOrderId_externalItemId_key`(`integrationId`, `externalOrderId`, `externalItemId`),
+  UNIQUE INDEX `fulfillment_obs_integration_order_item_key`(`integrationId`, `externalOrderId`, `externalItemId`),
   INDEX `fulfillment_observations_completedAt_idx`(`completedAt`),
   INDEX `fulfillment_observations_integrationId_tombstonedAt_idx`(`integrationId`, `tombstonedAt`),
   INDEX `fulfillment_observations_productId_idx`(`productId`),

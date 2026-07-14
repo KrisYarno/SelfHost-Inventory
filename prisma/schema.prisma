@@ -638,7 +638,7 @@ model FulfillmentObservation {
 
   integration Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
 
-  @@unique([integrationId, externalOrderId, externalItemId])
+  @@unique([integrationId, externalOrderId, externalItemId], map: "fulfillment_obs_integration_order_item_key")
   @@index([completedAt])
   @@index([integrationId, tombstonedAt])
   @@index([productId])
