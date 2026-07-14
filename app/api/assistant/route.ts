@@ -178,7 +178,9 @@ export async function POST(request: NextRequest): Promise<Response> {
   // --- Stream ---
   const result = streamText({
     model: resolved.languageModel,
-    system: buildSystemPrompt(),
+    // Server-controlled context: today's UTC date (D-T6). `new Date()` is trusted
+    // server state, never tool or user data — the injection posture is preserved.
+    system: buildSystemPrompt(new Date()),
     messages: await convertToModelMessages(body.messages as UIMessage[]),
     tools: createAiTools(ctx, budget, wrappedRecordRun),
     stopWhen: stepCountIs(STEP_LIMIT),

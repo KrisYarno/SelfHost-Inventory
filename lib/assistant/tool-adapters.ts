@@ -13,7 +13,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   assistantTools,
   TOOL_SCOPES,
-  TURN_RESULT_BUDGET_BYTES,
+  PER_TOOL_RESULT_CAP_BYTES,
   type ToolResult,
 } from "@/lib/assistant/tools";
 import type { ToolContext } from "@/lib/assistant/context";
@@ -72,8 +72,9 @@ export function createAiTools(
 }
 
 /**
- * Register the shared tools on an MCP server (stateless): a FRESH context and a
- * per-CALL 32KB budget per invocation. Read-only — no mutation tools exist in v1.
+ * Register the shared tools on an MCP server (stateless): a FRESH context per
+ * invocation and the per-tool single-result cap (list tools already paginate to
+ * fit it, so this is only a last-resort guard). Read-only — no mutation tools in v1.
  */
 export function registerMcpTools(
   server: McpServer,
@@ -95,7 +96,7 @@ export function registerMcpTools(
           result = errorResult(name);
         }
 
-        if (result.status === "ok" && result.meta.bytes > TURN_RESULT_BUDGET_BYTES) {
+        if (result.status === "ok" && result.meta.bytes > PER_TOOL_RESULT_CAP_BYTES) {
           result = {
             status: "truncated",
             notice: TURN_BUDGET_NOTICE,

@@ -34,6 +34,7 @@ export type TurnStatus =
   | "failed-before-content"
   | "failed-after-content"
   | "step-capped"
+  | "length-capped"
   | "truncated";
 
 /** An assistant turn has content once it has any non-empty text or any tool. */
@@ -84,7 +85,11 @@ export function deriveTurnStatus(args: {
   // Terminal: a completed active turn OR any historical turn.
   if (assistantHasTruncatedTool(assistant)) return "truncated";
   const fr = finishReasonOf(assistant);
-  if (fr === "tool-calls" || fr === "length") return "step-capped";
+  // Two DISTINCT failures (review M3): "tool-calls" = the model hit the step cap
+  // before finishing its work; "length" = the model's own ANSWER was cut off at the
+  // output-token ceiling. They need different copy, so they are different states.
+  if (fr === "tool-calls") return "step-capped";
+  if (fr === "length") return "length-capped";
   return "completed";
 }
 

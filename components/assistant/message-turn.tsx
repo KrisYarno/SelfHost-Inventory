@@ -155,6 +155,11 @@ function AssistantBody({
             continue from the result above.
           </AmberBanner>
         )}
+        {status === "length-capped" && (
+          <AmberBanner>
+            The answer was cut off. Ask for a shorter summary or a narrower slice.
+          </AmberBanner>
+        )}
         {status === "truncated" && (
           <AmberBanner>
             Some results were omitted because this request was broad. Narrow the product or
