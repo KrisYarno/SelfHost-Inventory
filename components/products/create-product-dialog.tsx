@@ -76,7 +76,7 @@ export function CreateProductDialog({
           numericValue: data.numericValue,
           lowStockThreshold: data.lowStockThreshold,
           locationId: data.locationId || 1, // Default to location 1 if not specified
-          costPrice: data.costPrice ?? 0,
+          costPrice: data.costPrice ?? null,
           retailPrice: data.retailPrice ?? 0,
         }),
       });

@@ -89,7 +89,8 @@ export async function graduateStagingItem(
       // Phase C (P-C3): the frozen "cost at receipt" for the STOCK_IN row, captured
       // from whichever branch's product row is in scope BEFORE the stock write (no
       // single `product` variable spans both branches).
-      let costPriceAtGraduation: Prisma.Decimal | number;
+      // Lane 6 (R-D3): nullable so an unknown cost graduates as NULL, not 0.
+      let costPriceAtGraduation: Prisma.Decimal | number | null;
 
       if (body.mode === 'existing') {
         const target = await tx.product.findFirst({
@@ -113,7 +114,14 @@ export async function graduateStagingItem(
         const unit = f.unit ? f.unit.trim().toLowerCase() : null;
         const numericValue = f.numericValue ?? null;
         const name = formatProductName({ baseName, variant });
-        const costPrice = Number(f.costPrice ?? 0);
+        // R-D3: preserve NULL = "cost unknown" (mirror POST /api/products); an
+        // explicit 0 = free is kept; negative defended to null.
+        const costPrice =
+          f.costPrice === undefined || f.costPrice === null
+            ? null
+            : f.costPrice >= 0
+              ? f.costPrice
+              : null;
         const retailPrice = Number(f.retailPrice ?? 0);
 
         const created_ = await tx.product.create({
@@ -129,7 +137,7 @@ export async function graduateStagingItem(
             // — stop materializing 10 so the configurable default governs. An
             // omitted field writes NULL explicitly (no low-stock predicate here).
             lowStockThreshold: f.lowStockThreshold === undefined ? null : f.lowStockThreshold,
-            costPrice: costPrice >= 0 ? costPrice : 0,
+            costPrice,
             retailPrice: retailPrice >= 0 ? retailPrice : 0,
             approvalStatus: actor.isAdmin ? 'APPROVED' : 'PENDING_REVIEW',
             createdBy: actor.id,

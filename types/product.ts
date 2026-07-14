@@ -21,7 +21,8 @@ export interface ProductFormData {
   numericValue?: number;
   // NULL = inherit the system default (spec R-L13); undefined = field omitted.
   lowStockThreshold?: number | null;
-  costPrice?: number;
+  // Lane 6 (R-D3): NULL = cost unknown; an explicit 0 = genuinely free.
+  costPrice?: number | null;
   retailPrice?: number;
 }
 

@@ -1,4 +1,5 @@
 import prisma from '@/lib/prisma';
+import { inventory_logs_logType } from '@prisma/client';
 import { emailService, LowStockItem } from '@/lib/email';
 import type { CombinedMinBreach, LocationMinBreach } from '@/types/inventory';
 import {
@@ -205,11 +206,12 @@ export class StockChecker {
   }
 
   /**
-   * Batch the 30-day average daily OUTFLOW (all negative deltas: sales, transfers,
-   * corrections — outflow-based, includes transfers and corrections) for many
-   * products in ONE groupBy, keyed productId -> avgDailyOutflow. Replaces the
-   * former per-product findMany (R-L12 N+1 fix). Products with no outflow rows are
-   * absent from the map (callers treat that as "no usage" -> null days).
+   * Batch the 30-day average daily OUTFLOW for many products in ONE groupBy, keyed
+   * productId -> avgDailyOutflow. Outflow = negative deltas that are NOT internal
+   * transfers (Lane 6 / review M2 / D-T5): a transfer between our own locations is
+   * not consumption, and counting it here (this method drives the low-stock ALERT
+   * EMAILS via checkLowStock) shortened every runway. Products with no outflow rows
+   * are absent from the map (callers treat that as "no usage" -> null days).
    */
   private async batchAvgDailyOutflow(productIds: number[]): Promise<Map<number, number>> {
     const map = new Map<number, number>();
@@ -224,6 +226,7 @@ export class StockChecker {
         productId: { in: productIds },
         changeTime: { gte: thirtyDaysAgo },
         delta: { lt: 0 }, // Only negative changes (outflow)
+        logType: { not: inventory_logs_logType.TRANSFER }, // exclude internal transfers
       },
       _sum: { delta: true },
     });

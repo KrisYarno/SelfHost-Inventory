@@ -27,11 +27,13 @@ export function useAnalyticsRebuildState() {
 // Shape of GET /api/analytics/product/[id]. revenue is serialized to a string per-row
 // by the API (Prisma Decimal -> string); other _sum fields are numbers.
 export type StockPoint = { dayKey: string; locationId: number; quantity: number };
+// Lane 6 (review B5 / D-W5): fulfilledQty is gone from the sales payload — nothing
+// writes it on this deployment, so surfacing it emitted a confident 0 read as
+// "fulfillment sync is broken". Ordered units + revenue are authoritative.
 export type SalesRow = {
   productId?: number;
   _sum?: {
     orderedQty?: number | null;
-    fulfilledQty?: number | null;
     revenue?: string | null;
     orderCount?: number | null;
   };

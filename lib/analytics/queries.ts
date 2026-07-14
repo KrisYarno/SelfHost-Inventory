@@ -1,6 +1,7 @@
 import prisma from "@/lib/prisma";
 import { inventory_logs_logType } from "@prisma/client";
 import { toDayKey } from "@/lib/analytics/dates";
+import { centsFromCostPrice } from "@/lib/inventory";
 import { effectiveLowStockThreshold, getLowStockDefault, isLowStock } from "@/lib/stock-threshold";
 
 export type SalesGroupBy = "product" | "day" | "integration" | "company";
@@ -21,8 +22,13 @@ export async function getSales(opts: { companyIds: string[]; productId?: number;
   // and the correct value can't be recomputed from the fact (no distinct order IDs). So only
   // sum orderCount when grouping BY product (where every summed row shares the same product =
   // "orders containing this product"); OMIT it otherwise so we never emit a wrong number.
-  const _sum: { orderedQty: true; fulfilledQty: true; revenue: true; orderCount?: true } = {
-    orderedQty: true, fulfilledQty: true, revenue: true,
+  // Lane 6 (review B5 / D-W5): fulfilledQty is DROPPED from every sales payload.
+  // Nothing writes ExternalOrderItem.fulfilledQty on this deployment (the business
+  // fulfills in WooCommerce), so summing it emitted a confident 0 that a model read
+  // as "fulfillment sync is broken". Ordered units + revenue are authoritative; the
+  // fact column may persist until a later cleanup cycle but is never surfaced.
+  const _sum: { orderedQty: true; revenue: true; orderCount?: true } = {
+    orderedQty: true, revenue: true,
   };
   if (groupBy === "product") _sum.orderCount = true;
   return prisma.productSalesFact.groupBy({
@@ -62,9 +68,29 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const TURNS_COVERAGE_FLOOR = 0.8; // R-L10: turns null below 80% snapshot coverage.
 const AGING_OUTLIER_DAYS = 90; // aligns with DEAD_STOCK_DAYS.
 
-/** Reason-code buckets for shrinkage reporting (spec D6). null reasonCode -> UNCLASSIFIED. */
-export type ShrinkageReason = "DAMAGE" | "THEFT" | "EXPIRY" | "COUNT" | "CORRECTION" | "UNCLASSIFIED";
-const SHRINKAGE_CLASS_REASONS = ["DAMAGE", "THEFT", "EXPIRY"] as const; // the true shrinkage classes.
+/**
+ * Classified shrinkage reasons (Lane 6 / review B1 / D-T3). ONLY a row that
+ * carries one of these reason codes is loss. Every other negative movement —
+ * a null reasonCode, a bare CORRECTION, and above all the negative ADJUSTMENT
+ * rows this business uses to SHIP product — is unclassified outbound, surfaced
+ * as a coverage figure and NEVER bucketed as shrinkage.
+ */
+export type ShrinkageReason = "DAMAGE" | "THEFT" | "EXPIRY" | "COUNT";
+const SHRINKAGE_CLASS_REASONS = ["DAMAGE", "THEFT", "EXPIRY", "COUNT"] as const;
+
+/**
+ * The ONE outbound predicate (Lane 6 / review B3 / D-T4): stock physically
+ * leaving the shelf = a negative delta that is NOT an internal transfer. Shared
+ * verbatim by units-out, last-outbound, and the low-stock velocity so the three
+ * can never disagree (the bug the review caught: units-out counted SALE-only
+ * while last-outbound counted any negative delta). SALE stays available as an
+ * optional sub-breakdown ("attributed to an in-app order"), never as the whole
+ * definition of outbound.
+ */
+const OUTBOUND_WHERE = {
+  delta: { lt: 0 },
+  logType: { not: inventory_logs_logType.TRANSFER },
+} as const;
 
 export interface OperationsRow {
   productId: number;
@@ -85,15 +111,18 @@ export interface OperationsRow {
 }
 
 // Per-SOURCE data-starts (codex #9): each Operations metric labels its own source.
+// `outbound` (Lane 6 / D-T4) is the velocity source of truth — the first negative
+// non-transfer movement. `sale` is retained as the narrower "in-app order" sub-signal
+// but no longer governs whether units-out is null (that was the review-B3 hazard).
 export interface OperationsDataStarts {
   sale: string | null;
+  outbound: string | null;
   adjustment: string | null;
   receipt: string | null;
   snapshot: string | null;
 }
 
 const toIso = (d: Date | null | undefined): string | null => (d ? d.toISOString() : null);
-const centsOf = (costPrice: unknown): number => Math.round(Number(costPrice) * 100);
 
 /**
  * Latest STOCK_IN unit cost per product (R-L15 receipt-cost tie-break). groupBy
@@ -138,9 +167,16 @@ function absOutByProduct(rows: { productId: number; _sum: { delta: number | null
 /**
  * Tier-1 per-product Operations rows + per-source data-starts. `windowDays`
  * (default 90) sets the turns window; unitsOut30/unitsOut90 are always both
- * computed. SALE predicate = `logType='SALE' AND delta<0` (R-L11 gross
- * fulfillment outflow — later un-fulfillments are NOT subtracted; they surface
- * as positive CORRECTION restocks in `correctionsIn90`).
+ * computed. Units-out uses the shared OUTBOUND predicate (`delta<0 AND logType !=
+ * TRANSFER`, Lane 6 / review B3) — every physical shipment, however it was booked,
+ * not `SALE`-only. Later un-fulfillments are NOT subtracted; they surface as
+ * positive CORRECTION restocks in `correctionsIn90`.
+ *
+ * Per-product truthfulness (review B3): a product with NO outbound row in the
+ * window contributes `null`, never a `0` fallback — there is no global "has any
+ * sale data" flag that could flip every product to a confident zero the instant
+ * one SALE row lands. The velocity denominator is clamped to the window actually
+ * covered by outbound data, so a freshly-started data source cannot inflate it.
  */
 export async function getOperationsRows(
   opts: { windowDays?: 30 | 90 } = {}
@@ -156,15 +192,16 @@ export async function getOperationsRows(
   const [
     products,
     systemDefault,
-    sale30,
-    sale90,
+    outbound30,
+    outbound90,
     inbound,
-    outbound,
+    lastOutbound,
     shrink90,
     corrections90,
     snapshots,
     receiptMap,
     saleStart,
+    outboundStart,
     adjustmentStart,
     receiptStart,
     snapshotStart,
@@ -182,12 +219,12 @@ export async function getOperationsRows(
     getLowStockDefault(),
     prisma.inventory_logs.groupBy({
       by: ["productId"],
-      where: { logType: inventory_logs_logType.SALE, delta: { lt: 0 }, changeTime: { gte: start30 } },
+      where: { ...OUTBOUND_WHERE, changeTime: { gte: start30 } },
       _sum: { delta: true },
     }),
     prisma.inventory_logs.groupBy({
       by: ["productId"],
-      where: { logType: inventory_logs_logType.SALE, delta: { lt: 0 }, changeTime: { gte: start90 } },
+      where: { ...OUTBOUND_WHERE, changeTime: { gte: start90 } },
       _sum: { delta: true },
     }),
     prisma.inventory_logs.groupBy({
@@ -197,13 +234,13 @@ export async function getOperationsRows(
     }),
     prisma.inventory_logs.groupBy({
       by: ["productId"],
-      where: { delta: { lt: 0 } },
+      where: OUTBOUND_WHERE,
       _max: { changeTime: true },
     }),
     prisma.inventory_logs.groupBy({
       by: ["productId"],
       where: {
-        logType: inventory_logs_logType.ADJUSTMENT,
+        logType: { in: [inventory_logs_logType.ADJUSTMENT, inventory_logs_logType.CORRECTION] },
         delta: { lt: 0 },
         reasonCode: { in: SHRINKAGE_CLASS_REASONS as unknown as string[] },
         changeTime: { gte: start90 },
@@ -225,6 +262,10 @@ export async function getOperationsRows(
       _min: { changeTime: true },
     }),
     prisma.inventory_logs.aggregate({
+      where: OUTBOUND_WHERE,
+      _min: { changeTime: true },
+    }),
+    prisma.inventory_logs.aggregate({
       where: {
         logType: { in: [inventory_logs_logType.ADJUSTMENT, inventory_logs_logType.CORRECTION] },
         delta: { lt: 0 },
@@ -240,25 +281,30 @@ export async function getOperationsRows(
 
   const dataStarts: OperationsDataStarts = {
     sale: toIso(saleStart._min.changeTime),
+    outbound: toIso(outboundStart._min.changeTime),
     adjustment: toIso(adjustmentStart._min.changeTime),
     receipt: toIso(receiptStart._min.changeTime),
     snapshot: snapshotStart._min.dayKey ?? null,
   };
-  const hasSaleData = dataStarts.sale !== null;
   const hasAdjustmentData = dataStarts.adjustment !== null;
   const hasSnapshotData = dataStarts.snapshot !== null;
 
-  // Velocity denominator: min(window, days since SALE data started) — never a flat 30.
-  const daysSinceSaleStart = dataStarts.sale
-    ? Math.max(1, Math.ceil((now.getTime() - new Date(dataStarts.sale).getTime()) / DAY_MS))
+  // Velocity denominator (review B3 / D-T4): clamp to the window ACTUALLY covered by
+  // outbound data. If outbound movement only began 3 days ago, dividing 30 days of a
+  // window we don't have would inflate velocity up to ~10x. Prod has a year of
+  // negative ADJUSTMENT outflow, so this resolves to 30 — the hazard the review
+  // pinned (a lone fresh SALE row collapsing the denominator to 1) cannot occur,
+  // because outbound is not SALE-scoped.
+  const daysSinceOutboundStart = dataStarts.outbound
+    ? Math.max(1, Math.ceil((now.getTime() - new Date(dataStarts.outbound).getTime()) / DAY_MS))
     : 0;
-  const velocityDenom = Math.max(1, Math.min(30, daysSinceSaleStart || 30));
+  const velocityDenom = Math.max(1, Math.min(30, daysSinceOutboundStart || 30));
 
-  const out30 = absOutByProduct(sale30);
-  const out90 = absOutByProduct(sale90);
+  const out30 = absOutByProduct(outbound30);
+  const out90 = absOutByProduct(outbound90);
   const shrinkUnits = absOutByProduct(shrink90);
   const inboundAt = new Map<number, Date | null>(inbound.map((r) => [r.productId, r._max.changeTime]));
-  const outboundAt = new Map<number, Date | null>(outbound.map((r) => [r.productId, r._max.changeTime]));
+  const outboundAt = new Map<number, Date | null>(lastOutbound.map((r) => [r.productId, r._max.changeTime]));
   const correctionsCount = new Map<number, number>(
     corrections90.map((r) => [r.productId, r._count._all])
   );
@@ -274,10 +320,15 @@ export async function getOperationsRows(
 
   const rows: OperationsRow[] = products.map((p) => {
     const currentStock = p.product_locations.reduce((a, l) => a + l.quantity, 0);
-    const costCents = centsOf(p.costPrice);
+    // centsFromCostPrice: NULL/0 cost -> null (never a phantom $0.00 valuation, B2).
+    const costCents = centsFromCostPrice(p.costPrice);
 
-    const unitsOut30 = hasSaleData ? out30.get(p.id) ?? 0 : null;
-    const unitsOut90 = hasSaleData ? out90.get(p.id) ?? 0 : null;
+    // Per-product null, NOT a 0 fallback (review B3): a product absent from the
+    // outbound map has no measured outbound in the window -> null. Present -> its
+    // real summed outflow. No global flag, so a SALE row landing for one product
+    // never flips another product's honest null to a confident 0.
+    const unitsOut30 = out30.has(p.id) ? out30.get(p.id)! : null;
+    const unitsOut90 = out90.has(p.id) ? out90.get(p.id)! : null;
     const avgDaily30 = unitsOut30 === null ? null : unitsOut30 / velocityDenom;
     const daysOfSupply =
       avgDaily30 === null || avgDaily30 <= 0 ? null : currentStock / avgDaily30;
@@ -305,8 +356,13 @@ export async function getOperationsRows(
     }
 
     const lastOut = outboundAt.get(p.id) ?? null;
+    const shrinkUnitsForProduct = shrinkUnits.get(p.id) ?? 0;
     const shrinkage90 = hasAdjustmentData
-      ? { units: shrinkUnits.get(p.id) ?? 0, valueAtCurrentCostCents: (shrinkUnits.get(p.id) ?? 0) * costCents }
+      ? {
+          units: shrinkUnitsForProduct,
+          // Value is null when the product carries no cost (B2) — never units x $0.
+          valueAtCurrentCostCents: costCents === null ? null : shrinkUnitsForProduct * costCents,
+        }
       : null;
 
     // Attention: out > low > stale > ok. Stale = aging outlier (in-stock, no
@@ -340,77 +396,137 @@ export async function getOperationsRows(
   return { rows, dataStarts };
 }
 
+export interface ShrinkageSummary {
+  byReason: Record<ShrinkageReason, { units: number; valueAtCurrentCostCents: number | null }>;
+  totalUnits: number;
+  totalValueAtCurrentCostCents: number | null;
+  // Coverage (D-T1 / review B1): outbound movement in the ADJUSTMENT/CORRECTION
+  // domain that carries NO classified reason code. On this deployment that is the
+  // ~16k units the business SHIPPED as negative ADJUSTMENTs — reported here as a
+  // coverage figure, never as loss. `reasonTrackingStartedAt` is the first instant
+  // any such row carried a reason code; movement before it is unclassifiable.
+  coverage: { unclassifiedOutboundUnits: number; reasonTrackingStartedAt: string | null };
+  dataStart: string | null;
+}
+
 /**
- * Shrinkage bucketed by reasonCode over negative-delta ADJUSTMENT/CORRECTION
- * rows in the window (spec D6). DAMAGE/THEFT/EXPIRY are the shrinkage classes;
- * COUNT is count variance (separate); CORRECTION is excluded from the shrinkage
- * total but still counted; UNCLASSIFIED (null reasonCode) is always shown.
- * Units are absolute; value = units x CURRENT costPrice, labeled at-current-cost.
+ * Classified-loss shrinkage over negative-delta ADJUSTMENT/CORRECTION rows in the
+ * window (Lane 6 / review B1 / D-T3). ONLY DAMAGE/THEFT/EXPIRY/COUNT count as
+ * shrinkage; every other negative movement — a null reasonCode, a bare CORRECTION,
+ * and the negative ADJUSTMENTs this business ships product with — is reported as
+ * `coverage.unclassifiedOutboundUnits`, explicitly NOT as loss. This is what kills
+ * the "16,138 units of unclassified shrinkage" lie: on prod, totalUnits is 0 and
+ * the 16k lands in coverage. Value = units x CURRENT costPrice; a product with no
+ * cost on file contributes null, so a bucket with no known cost reports null (B2),
+ * never units x $0.00.
  */
 export async function getShrinkageSummary(
   opts: { days: 30 | 90 | 365 }
-): Promise<{
-  byReason: Record<ShrinkageReason, { units: number; valueAtCurrentCostCents: number | null }>;
-  dataStart: string | null;
-}> {
+): Promise<ShrinkageSummary> {
   const now = new Date();
   const start = new Date(now.getTime() - opts.days * DAY_MS);
-  const predicate = {
+  const domain = {
     logType: { in: [inventory_logs_logType.ADJUSTMENT, inventory_logs_logType.CORRECTION] },
     delta: { lt: 0 },
   };
 
-  const [grouped, dataStartAgg] = await Promise.all([
+  const [grouped, dataStartAgg, reasonTrackingAgg] = await Promise.all([
     prisma.inventory_logs.groupBy({
       by: ["productId", "reasonCode"],
-      where: { ...predicate, changeTime: { gte: start } },
+      where: { ...domain, changeTime: { gte: start } },
       _sum: { delta: true },
     }),
-    prisma.inventory_logs.aggregate({ where: predicate, _min: { changeTime: true } }),
+    prisma.inventory_logs.aggregate({ where: domain, _min: { changeTime: true } }),
+    // First instant ANY outbound row in the domain carried a reason code (all-time).
+    prisma.inventory_logs.aggregate({
+      where: { ...domain, reasonCode: { not: null } },
+      _min: { changeTime: true },
+    }),
   ]);
 
-  const byReason: Record<ShrinkageReason, { units: number; valueAtCurrentCostCents: number }> = {
-    DAMAGE: { units: 0, valueAtCurrentCostCents: 0 },
-    THEFT: { units: 0, valueAtCurrentCostCents: 0 },
-    EXPIRY: { units: 0, valueAtCurrentCostCents: 0 },
-    COUNT: { units: 0, valueAtCurrentCostCents: 0 },
-    CORRECTION: { units: 0, valueAtCurrentCostCents: 0 },
-    UNCLASSIFIED: { units: 0, valueAtCurrentCostCents: 0 },
+  const CLASSIFIED = SHRINKAGE_CLASS_REASONS as unknown as string[];
+  const acc: Record<ShrinkageReason, { units: number; value: number; hasCost: boolean }> = {
+    DAMAGE: { units: 0, value: 0, hasCost: false },
+    THEFT: { units: 0, value: 0, hasCost: false },
+    EXPIRY: { units: 0, value: 0, hasCost: false },
+    COUNT: { units: 0, value: 0, hasCost: false },
   };
+  let unclassifiedOutboundUnits = 0;
 
   const productIds = Array.from(new Set(grouped.map((g) => g.productId)));
-  const costByProduct = new Map<number, number>();
+  const costByProduct = new Map<number, number | null>();
   if (productIds.length > 0) {
     const costs = await prisma.product.findMany({
       where: { id: { in: productIds } },
       select: { id: true, costPrice: true },
     });
-    for (const c of costs) costByProduct.set(c.id, centsOf(c.costPrice));
+    for (const c of costs) costByProduct.set(c.id, centsFromCostPrice(c.costPrice));
   }
 
   for (const g of grouped) {
-    const raw = (g.reasonCode ?? "UNCLASSIFIED") as string;
-    const key: ShrinkageReason = raw in byReason ? (raw as ShrinkageReason) : "UNCLASSIFIED";
     const units = Math.abs(g._sum?.delta ?? 0);
-    byReason[key].units += units;
-    byReason[key].valueAtCurrentCostCents += units * (costByProduct.get(g.productId) ?? 0);
+    const rc = g.reasonCode;
+    if (rc !== null && CLASSIFIED.includes(rc)) {
+      const bucket = acc[rc as ShrinkageReason];
+      bucket.units += units;
+      const cost = costByProduct.get(g.productId);
+      if (cost != null) {
+        bucket.value += units * cost;
+        bucket.hasCost = true;
+      }
+    } else {
+      unclassifiedOutboundUnits += units;
+    }
   }
 
-  return { byReason, dataStart: toIso(dataStartAgg._min?.changeTime) };
+  const byReason = {} as ShrinkageSummary["byReason"];
+  let totalUnits = 0;
+  let totalValue = 0;
+  let totalHasCost = false;
+  for (const key of Object.keys(acc) as ShrinkageReason[]) {
+    const b = acc[key];
+    byReason[key] = {
+      units: b.units,
+      valueAtCurrentCostCents: b.hasCost ? b.value : null,
+    };
+    totalUnits += b.units;
+    if (b.hasCost) {
+      totalValue += b.value;
+      totalHasCost = true;
+    }
+  }
+
+  return {
+    byReason,
+    totalUnits,
+    totalValueAtCurrentCostCents: totalHasCost ? totalValue : null,
+    coverage: {
+      unclassifiedOutboundUnits,
+      reasonTrackingStartedAt: toIso(reasonTrackingAgg._min?.changeTime),
+    },
+    dataStart: toIso(dataStartAgg._min?.changeTime),
+  };
+}
+
+export interface ValuationSummary {
+  atCurrentCostCents: number | null;
+  costCoverage: { valued: number; of: number };
+  atReceiptCostCents: number | null;
+  receiptCoverage: { have: number; of: number };
 }
 
 /**
- * Inventory valuation tier 1 (spec D6). (a) value at CURRENT cost = SUM(current
- * stock x costPrice); (b) value at last-receipt cost = SUM over in-stock products
- * that HAVE receipt-cost data of stock x latest STOCK_IN unitCostCents (products
- * without receipt cost are EXCLUDED, surfaced via the coverage chip — never
- * blended silently). Coverage is counted over IN-STOCK products only.
+ * Inventory valuation tier 1 (spec D6 / Lane 6 review B2 / D-T2).
+ * (a) value at CURRENT cost = SUM(current stock x costPrice) over products with a
+ *     KNOWN cost. `costCoverage` reports how many of the products carry a cost;
+ *     when NONE do (prod today: 0 of 80) `atCurrentCostCents` is `null` — the
+ *     honest "no cost data on file", never "$0.00" for a stocked warehouse.
+ * (b) value at last-receipt cost = SUM over in-stock products that HAVE receipt-cost
+ *     data (products without it are EXCLUDED, surfaced via `receiptCoverage` — never
+ *     blended silently). Receipt coverage is counted over IN-STOCK products only;
+ *     `getValuationSummary`'s coverage blocks are the reference for the D-T1 contract.
  */
-export async function getValuationSummary(): Promise<{
-  atCurrentCostCents: number;
-  atReceiptCostCents: number | null;
-  receiptCoverage: { have: number; of: number };
-}> {
+export async function getValuationSummary(): Promise<ValuationSummary> {
   const [products, receiptMap] = await Promise.all([
     prisma.product.findMany({
       where: { deletedAt: null, approvalStatus: "APPROVED" },
@@ -420,14 +536,19 @@ export async function getValuationSummary(): Promise<{
   ]);
 
   let atCurrentCostCents = 0;
+  let valued = 0; // products carrying a known cost
   let atReceiptCostCents = 0;
   let have = 0;
-  let of = 0;
+  let receiptOf = 0;
   for (const p of products) {
     const currentStock = p.product_locations.reduce((a, l) => a + l.quantity, 0);
-    atCurrentCostCents += currentStock * centsOf(p.costPrice);
+    const costCents = centsFromCostPrice(p.costPrice);
+    if (costCents !== null) {
+      valued += 1;
+      atCurrentCostCents += currentStock * costCents;
+    }
     if (currentStock > 0) {
-      of += 1;
+      receiptOf += 1;
       const receiptCents = receiptMap.get(p.id);
       if (receiptCents != null) {
         have += 1;
@@ -437,8 +558,9 @@ export async function getValuationSummary(): Promise<{
   }
 
   return {
-    atCurrentCostCents,
+    atCurrentCostCents: valued > 0 ? atCurrentCostCents : null,
+    costCoverage: { valued, of: products.length },
     atReceiptCostCents: have > 0 ? atReceiptCostCents : null,
-    receiptCoverage: { have, of },
+    receiptCoverage: { have, of: receiptOf },
   };
 }

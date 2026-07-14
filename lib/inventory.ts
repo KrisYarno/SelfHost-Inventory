@@ -64,13 +64,16 @@ export async function createInventoryLog(
  * that stamps `unitCostCents` (stock-in route + graduation import Tasks 2/4 — they
  * MUST call this, never re-derive it).
  *
- * `costPrice` is a NON-NULL Decimal @default(0.00); a value of 0 means "unset" and
- * yields null (NULL truthfully = no cost). Negative is impossible in real data but
- * defended (→ null). The signed-INT `unitCostCents` column caps at 2147483647, i.e.
- * a cost of 21474836.47; ABOVE that we cannot represent the value, so we return null
- * AND console.error — writing a truncated number would be a lie (truthful-data).
+ * `costPrice` is a NULLABLE Decimal (Lane 6 / R-D3): NULL = cost unknown, an
+ * explicit 0 = genuinely free. Both a NULL and a 0 yield null here (NULL truthfully
+ * = no cost; a receipt frozen at "free" carries no representable unit cost either).
+ * Negative is impossible in real data but defended (→ null). The signed-INT
+ * `unitCostCents` column caps at 2147483647, i.e. a cost of 21474836.47; ABOVE that
+ * we cannot represent the value, so we return null AND console.error — writing a
+ * truncated number would be a lie (truthful-data).
  */
-export function centsFromCostPrice(costPrice: Prisma.Decimal | number): number | null {
+export function centsFromCostPrice(costPrice: Prisma.Decimal | number | null): number | null {
+  if (costPrice === null) return null;
   const n = Number(costPrice);
   if (n > 21474836.47) {
     console.error(

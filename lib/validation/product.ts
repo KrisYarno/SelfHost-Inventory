@@ -38,7 +38,9 @@ export const ProductCreateUISchema = z.object({
     .max(1_000_000)
     .nullable()
     .optional(),
-  costPrice: z.number().min(0, 'Cost must be >= 0').optional(),
+  // Lane 6 (R-D3): NULL = cost unknown; an explicit 0 = genuinely free. Both are
+  // honored — the writers preserve null distinctly from 0. undefined = field omitted.
+  costPrice: z.number().min(0, 'Cost must be >= 0').nullable().optional(),
   retailPrice: z.number().min(0, 'Retail must be >= 0').optional(),
   locationId: z.number().int().positive().optional(),
 }).superRefine((data, ctx) => {
@@ -69,7 +71,8 @@ export const ProductUpdateSchema = z
     variant: optionalTrimmedString,
     unit: optionalTrimmedString,
     numericValue: z.number().nonnegative().optional(),
-    costPrice: z.number().min(0, 'Cost must be >= 0').optional(),
+    // Lane 6 (R-D3): NULL = cost unknown (clears it); an explicit 0 = genuinely free.
+    costPrice: z.number().min(0, 'Cost must be >= 0').nullable().optional(),
     retailPrice: z.number().min(0, 'Retail must be >= 0').optional(),
     // NULL = inherit the system default (spec R-L13); the PUT diffs and persists
     // null distinctly from 0 (disabled) and from an explicit override.

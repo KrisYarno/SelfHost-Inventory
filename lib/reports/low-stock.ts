@@ -21,6 +21,7 @@
  */
 
 import prisma from "@/lib/prisma";
+import { inventory_logs_logType } from "@prisma/client";
 import { LowStockResponse, LowStockAlert } from "@/types/reports";
 import { getLowStockDefault, effectiveLowStockThreshold } from "@/lib/stock-threshold";
 
@@ -75,10 +76,14 @@ export async function getLowStockReport(
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
+  // Usage = outbound consumption, which is NOT an internal transfer (Lane 6 /
+  // review M2 / D-T5). Counting the ~7,682 units/yr of TRANSFER movement as usage
+  // shortened every runway and inflated "days until empty" upstream.
   const recentActivity = await prisma.inventory_logs.findMany({
     where: {
       changeTime: { gte: thirtyDaysAgo },
       delta: { lt: 0 },
+      logType: { not: inventory_logs_logType.TRANSFER },
     },
     select: {
       productId: true,
@@ -115,7 +120,13 @@ export async function getLowStockReport(
     // Out-of-stock (0) stays in this reorder-oriented report as the most critical.
     if (needsReorderAttention(currentStock, productThreshold)) {
       const avgDailyUsage = usageMap.get(product.id) || 0;
-      const daysUntilEmpty = avgDailyUsage > 0 ? Math.floor(currentStock / avgDailyUsage) : null;
+      // Compute daysUntilEmpty from the SAME rounded figure the report displays
+      // (Lane 6 / review M2): the TESA incoherence was 0.0667/day (unrounded) giving
+      // 150 days next to a displayed "0.1/day" that implies 100. Round once, use it
+      // for both, so a reader can reproduce the number.
+      const displayedDailyUsage = Math.round(avgDailyUsage * 10) / 10;
+      const daysUntilEmpty =
+        displayedDailyUsage > 0 ? Math.floor(currentStock / displayedDailyUsage) : null;
       const percentageRemaining = productThreshold > 0 ? (currentStock / productThreshold) * 100 : 0;
 
       alerts.push({
@@ -124,7 +135,7 @@ export async function getLowStockReport(
         currentStock,
         threshold: productThreshold,
         percentageRemaining: Math.round(percentageRemaining),
-        averageDailyUsage: Math.round(avgDailyUsage * 10) / 10,
+        averageDailyUsage: displayedDailyUsage,
         daysUntilEmpty,
       });
     }

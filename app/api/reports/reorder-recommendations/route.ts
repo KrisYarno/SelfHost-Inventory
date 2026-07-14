@@ -33,7 +33,7 @@ interface ProductRecord {
   variant: string | null;
   numericValue: Decimal | null;
   lowStockThreshold: number | null;
-  costPrice: Decimal;
+  costPrice: Decimal | null;
 }
 
 /**

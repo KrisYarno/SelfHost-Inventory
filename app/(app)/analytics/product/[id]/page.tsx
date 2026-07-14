@@ -374,8 +374,9 @@ export default function ProductAnalyticsPage() {
                   )}
                 </div>
 
-                {/* Sales totals for the selected scope/range. Fulfilled is structurally 0 and is
-                    omitted entirely (truthful-data); we surface a one-line note instead. */}
+                {/* Sales totals for the selected scope/range. Fulfilled quantity is NOT
+                    tracked on this platform (the business fulfills in WooCommerce), so it
+                    is omitted entirely rather than reported as a false 0 (Lane 6 / B5). */}
                 <Card>
                   <CardHeader>
                     <CardTitle>Sales totals</CardTitle>
@@ -413,7 +414,9 @@ export default function ProductAnalyticsPage() {
                       </div>
                     )}
                     <p className="text-xs text-muted-foreground">
-                      Fulfilled units are not yet populated in source data and are omitted.
+                      Fulfillment is recorded in WooCommerce; this app does not track
+                      fulfilled quantities here, so they are omitted. Ordered units and
+                      revenue are authoritative.
                     </p>
                   </CardContent>
                 </Card>

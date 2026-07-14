@@ -2,7 +2,12 @@
 
 import { Fragment, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { OperationsRow, OperationsDataStarts, ShrinkageReason } from "@/lib/analytics/queries";
+import type {
+  OperationsRow,
+  OperationsDataStarts,
+  ShrinkageSummary,
+  ValuationSummary,
+} from "@/lib/analytics/queries";
 import { OperationsTiles } from "@/components/analytics/operations-tiles";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -25,22 +30,13 @@ import {
   PackageX,
 } from "lucide-react";
 
-type ShrinkageByReason = Record<
-  ShrinkageReason,
-  { units: number; valueAtCurrentCostCents: number | null }
->;
-
 interface OperationsPayload {
   scope: string;
   windowDays: number;
   rows: OperationsRow[];
   dataStarts: OperationsDataStarts;
-  shrinkage90: { byReason: ShrinkageByReason; dataStart: string | null };
-  valuation: {
-    atCurrentCostCents: number;
-    atReceiptCostCents: number | null;
-    receiptCoverage: { have: number; of: number };
-  };
+  shrinkage90: ShrinkageSummary;
+  valuation: ValuationSummary;
 }
 
 async function fetchOperations(signal?: AbortSignal): Promise<OperationsPayload> {
@@ -205,7 +201,7 @@ export function OperationsView() {
                   <TableHead className="text-right">Current stock</TableHead>
                   <TableHead className="text-right">Days of supply</TableHead>
                   <TableHead className="text-right" title={UNITS_OUT_TOOLTIP}>
-                    Units out (fulfilled) · 30 days
+                    Units out · 30 days
                   </TableHead>
                   <TableHead className="text-right">Turns · 90 days</TableHead>
                   <TableHead className="text-right">Shrinkage · 90 days</TableHead>

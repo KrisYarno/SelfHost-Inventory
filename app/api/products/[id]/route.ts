@@ -129,9 +129,12 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
       body.lowStockThreshold === null ? null : Math.max(0, body.lowStockThreshold);
   }
 
+  // Lane 6 (R-D3): preserve NULL = "cost unknown". An explicit null clears the cost
+  // back to unknown; an explicit 0 means genuinely free (kept); a negative value is
+  // defended to null. Undefined leaves the existing value untouched.
   if (body.costPrice !== undefined) {
-    const sanitizedCost = Number(body.costPrice);
-    updateData.costPrice = sanitizedCost >= 0 ? sanitizedCost : 0;
+    updateData.costPrice =
+      body.costPrice === null ? null : body.costPrice >= 0 ? body.costPrice : null;
   }
 
   if (body.retailPrice !== undefined) {
@@ -164,8 +167,11 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
   if (body.lowStockThreshold !== undefined && body.lowStockThreshold !== existingProduct.lowStockThreshold) {
     changes.lowStockThreshold = { from: existingProduct.lowStockThreshold, to: body.lowStockThreshold };
   }
-  if (body.costPrice !== undefined && Number(body.costPrice) !== Number(existingProduct.costPrice)) {
-    changes.costPrice = { from: Number(existingProduct.costPrice), to: body.costPrice };
+  if (body.costPrice !== undefined) {
+    const fromCost = existingProduct.costPrice === null ? null : Number(existingProduct.costPrice);
+    if (fromCost !== body.costPrice) {
+      changes.costPrice = { from: fromCost, to: body.costPrice };
+    }
   }
   if (body.retailPrice !== undefined && Number(body.retailPrice) !== Number(existingProduct.retailPrice)) {
     changes.retailPrice = { from: Number(existingProduct.retailPrice), to: body.retailPrice };

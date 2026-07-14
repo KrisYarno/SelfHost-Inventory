@@ -1,24 +1,16 @@
 "use client";
 
-import type { OperationsRow, ShrinkageReason } from "@/lib/analytics/queries";
-
-type ShrinkageByReason = Record<
-  ShrinkageReason,
-  { units: number; valueAtCurrentCostCents: number | null }
->;
+import type { OperationsRow, ShrinkageSummary, ValuationSummary } from "@/lib/analytics/queries";
 
 export interface OperationsTilesData {
   rows: OperationsRow[];
-  shrinkage90: { byReason: ShrinkageByReason };
-  valuation: {
-    atCurrentCostCents: number;
-    atReceiptCostCents: number | null;
-    receiptCoverage: { have: number; of: number };
-  };
+  shrinkage90: ShrinkageSummary;
+  valuation: ValuationSummary;
 }
 
 const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
-const money = (cents: number) => usd.format(cents / 100);
+// Lane 6 (B2): a null cost figure is "no cost data on file", not "$0.00".
+const money = (cents: number | null) => (cents === null ? "No cost data" : usd.format(cents / 100));
 const numberFmt = new Intl.NumberFormat("en-US");
 
 // One summary tile. Flat surface + divider hierarchy (D-L7): bg-surface, no
@@ -69,24 +61,26 @@ export function OperationsTiles({ data }: { data: OperationsTilesData }) {
   const blendedTurns =
     turnsVals.length > 0 ? turnsVals.reduce((a, b) => a + b, 0) / turnsVals.length : null;
 
-  const sh = shrinkage90.byReason;
-  const shrinkUnits = sh.DAMAGE.units + sh.THEFT.units + sh.EXPIRY.units;
-  const shrinkValue =
-    (sh.DAMAGE.valueAtCurrentCostCents ?? 0) +
-    (sh.THEFT.valueAtCurrentCostCents ?? 0) +
-    (sh.EXPIRY.valueAtCurrentCostCents ?? 0);
+  // Classified loss only (Lane 6 / B1): damage, theft, expiry, count. Unclassified
+  // outbound (the negative ADJUSTMENTs this business ships with) is a coverage note,
+  // never bucketed as shrinkage.
+  const shrinkUnits = shrinkage90.totalUnits;
+  const shrinkValue = shrinkage90.totalValueAtCurrentCostCents;
+  const unclassified = shrinkage90.coverage.unclassifiedOutboundUnits;
 
   const agingOutliers = rows.filter((r) => r.attention === "stale").length;
 
-  const cov = valuation.receiptCoverage;
+  const costCov = valuation.costCoverage;
+  const receiptCov = valuation.receiptCoverage;
 
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
       <Tile
         label="Inventory value"
         value={money(valuation.atCurrentCostCents)}
-        caption={`At current cost · receipt cost for ${cov.have} of ${cov.of}`}
-        captionTitle="Valued at each product's current cost price. The receipt-cost figure covers only products with a recorded stock-in cost."
+        muted={valuation.atCurrentCostCents === null}
+        caption={`Cost on file for ${costCov.valued} of ${costCov.of} · receipt cost for ${receiptCov.have} of ${receiptCov.of}`}
+        captionTitle="Valued at each product's current cost price, over products with a cost on file. No cost on file means the value is not shown rather than counted as $0.00."
       />
       <Tile
         label="Blended turns (90 days)"
@@ -101,7 +95,13 @@ export function OperationsTiles({ data }: { data: OperationsTilesData }) {
       <Tile
         label="Shrinkage (90 days)"
         value={numberFmt.format(shrinkUnits)}
-        caption={`${money(shrinkValue)} at current cost · damage, theft, expiry`}
+        caption={
+          unclassified > 0
+            ? `${money(shrinkValue)} · classified loss only. ${numberFmt.format(
+                unclassified,
+              )} outbound units carry no reason code and are not counted as loss.`
+            : `${money(shrinkValue)} · damage, theft, expiry, count`
+        }
       />
       <Tile
         label="Aging outliers"

@@ -90,7 +90,15 @@ export const POST = apiHandler(async (request: NextRequest) => {
     return NextResponse.json({ error: "Invalid location ID" }, { status: 400 });
   }
 
-  const costPrice = Number(body.costPrice ?? 0);
+  // Lane 6 (R-D3): preserve NULL = "cost unknown". A blank field arrives as
+  // null/undefined and is stored NULL (never coerced to 0); an explicit human 0
+  // means genuinely free and is kept. A negative value is clamped away to null.
+  const costPrice =
+    body.costPrice === undefined || body.costPrice === null
+      ? null
+      : body.costPrice >= 0
+        ? body.costPrice
+        : null;
   const retailPrice = Number(body.retailPrice ?? 0);
 
   // Create + record atomically: the audit row is written in the SAME transaction
@@ -110,7 +118,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
         // field writes NULL explicitly (no low-stock predicate here — this route
         // resolves nothing against the threshold, so it needs no shared helper).
         lowStockThreshold: body.lowStockThreshold === undefined ? null : body.lowStockThreshold,
-        costPrice: costPrice >= 0 ? costPrice : 0,
+        costPrice,
         retailPrice: retailPrice >= 0 ? retailPrice : 0,
         approvalStatus: user.isAdmin ? "APPROVED" : "PENDING_REVIEW",
         createdBy: user.id,
