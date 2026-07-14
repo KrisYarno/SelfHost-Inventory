@@ -186,6 +186,27 @@ services:
     networks:
       - internal
 
+  fulfillment-sync:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      NODE_ENV: production
+      ENABLE_FULFILLMENT_SYNC: ${ENABLE_FULFILLMENT_SYNC:-0}
+      FULFILLMENT_SYNC_URL: ${FULFILLMENT_SYNC_URL:-http://app:3000/api/cron/fulfillment-sync}
+      CRON_SECRET: ${CRON_SECRET}
+      FULFILLMENT_INCREMENTAL_MINUTES: ${FULFILLMENT_INCREMENTAL_MINUTES:-10}
+      FULFILLMENT_BACKFILL_MINUTES: ${FULFILLMENT_BACKFILL_MINUTES:-30}
+      FULFILLMENT_RECONCILE_HOURS: ${FULFILLMENT_RECONCILE_HOURS:-24}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: >-
+      sh -lc "node scripts/scheduled-fulfillment-sync.js"
+    networks:
+      - internal
+
 networks:
   internal:
     driver: bridge
