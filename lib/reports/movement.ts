@@ -1,0 +1,225 @@
+/**
+ * lib/reports/movement.ts — the ONE movement-series module: an EXHAUSTIVE,
+ * MUTUALLY-EXCLUSIVE partition of the inventory ledger (assistant toolsuite
+ * breadth, spec §5 T-MOVE REV-2 buckets; W1-MOVE, W2-RCPT extends).
+ *
+ * Every `inventory_logs` row in the window lands in EXACTLY ONE bucket, keyed by
+ * logType × sign:
+ *   inbound   { stockIn, correctionIn, adjustmentIn, countIn }        (delta > 0)
+ *   outbound  { sale, classifiedLoss, adjustmentUnclassified,
+ *               correctionUnclassified, countOut }                    (delta < 0)
+ *   transfers { transferIn, transferOut }                             (kept separate)
+ *
+ * `classifiedLoss` is the reason-coded subset of NEGATIVE ADJUSTMENT/CORRECTION
+ * whose reasonCode is in SHRINKAGE_CLASS_REASONS (DAMAGE/THEFT/EXPIRY/COUNT — the
+ * shared shrinkage set from lib/analytics/queries). A DAMAGE-reasoned negative
+ * ADJUSTMENT is classifiedLoss ONLY — never also adjustmentUnclassified.
+ *
+ * NORMATIVE INVARIANT (reconciliation test): `net === SUM(delta)` over EVERY
+ * bucket including transfers. Because the partition is total and each bucket is a
+ * signed sum of deltas, the 11 buckets always re-add to the window's true net
+ * inventory change.
+ *
+ * STOCK_IN / SALE are keyed by logType alone (their natural direction). A rare
+ * wrong-signed row (a receipt reversal posted as negative STOCK_IN, a return
+ * posted as positive SALE) folds into the SAME bucket rather than becoming
+ * homeless — a deliberate choice so `net === SUM(delta)` stays exact. Zero-delta
+ * rows count NOWHERE: they add 0 to net, so excluding them honors the "count
+ * nowhere" rule literally without disturbing the invariant.
+ *
+ * Transfers are NOT netted locally: transferIn and transferOut are always
+ * reported separately, so a location-scoped read shows a lone leg (not a cancelled
+ * 0) and an unscoped read shows +N/-N (not one collapsed 0). Only a caller may
+ * choose to net them at the global grain.
+ *
+ * MUST stay Next-free (imported by report + assistant-tool layers): no `next/*`,
+ * no `@/lib/api-utils`.
+ */
+
+import prisma from "@/lib/prisma";
+import { dayKeyStart, nextDayStart, toDayKey } from "@/lib/analytics/dates";
+import type { ResolvedWindow } from "@/lib/assistant/window";
+import { SHRINKAGE_CLASS_REASONS } from "@/lib/analytics/queries";
+
+const DAY_MS = 86_400_000;
+
+export interface MovementBuckets {
+  stockIn: number;
+  correctionIn: number;
+  adjustmentIn: number;
+  countIn: number;
+  sale: number;
+  classifiedLoss: number;
+  adjustmentUnclassified: number;
+  correctionUnclassified: number;
+  countOut: number;
+  transferIn: number;
+  transferOut: number;
+  net: number;
+}
+
+export interface MovementSeriesResult {
+  grain: "day" | "week" | "month";
+  window: ResolvedWindow;
+  points: Array<{ key: string } & MovementBuckets>;
+  totals: MovementBuckets;
+  coverage: { unclassifiedLegacyNote: string; reasonCodeNullRows: number };
+}
+
+/** Fixed coverage note: legacy negative ADJUSTMENT is this shop's pre-Lane-4
+ *  shipping record — unclassified outbound, NOT sales (spec §5 T-MOVE). */
+const UNCLASSIFIED_LEGACY_NOTE =
+  "Legacy negative ADJUSTMENT is how this shop shipped product pre-Lane-4 — " +
+  "unclassified outbound, not classifiable as sales.";
+
+/** Shrinkage-class reasons as a membership set (shared with queries.ts). */
+const SHRINKAGE_SET: ReadonlySet<string> = new Set(SHRINKAGE_CLASS_REASONS as readonly string[]);
+
+/** The 11 signed-sum buckets (everything except the derived `net`). */
+const BUCKET_KEYS = [
+  "stockIn", "correctionIn", "adjustmentIn", "countIn",
+  "sale", "classifiedLoss", "adjustmentUnclassified", "correctionUnclassified", "countOut",
+  "transferIn", "transferOut",
+] as const;
+type BucketKey = (typeof BUCKET_KEYS)[number];
+
+function emptyBuckets(): MovementBuckets {
+  return {
+    stockIn: 0, correctionIn: 0, adjustmentIn: 0, countIn: 0,
+    sale: 0, classifiedLoss: 0, adjustmentUnclassified: 0, correctionUnclassified: 0, countOut: 0,
+    transferIn: 0, transferOut: 0, net: 0,
+  };
+}
+
+/** `net` is DERIVED — the sum of the 11 buckets — so it can never disagree. */
+function finalizeNet(b: MovementBuckets): void {
+  b.net = BUCKET_KEYS.reduce((s, k) => s + b[k], 0);
+}
+
+/**
+ * ISO-week bucket key: the Monday (UTC) of the week `dayKey` falls in.
+ *
+ * SEAM (W1-INT): duplicated VERBATIM from the PRIVATE `weekStartKey` in
+ * lib/assistant/tools.ts. A shared date-grain helper (shared with the sales
+ * roll-up) is registered for dedup — see the report SEAMS section.
+ */
+function weekStartKey(dayKey: string): string {
+  const d = new Date(`${dayKey}T00:00:00.000Z`);
+  const daysSinceMonday = (d.getUTCDay() + 6) % 7; // getUTCDay: 0=Sun..6=Sat
+  return toDayKey(new Date(d.getTime() - daysSinceMonday * DAY_MS));
+}
+
+/** Grain bucket key for a row's timestamp: day 'YYYY-MM-DD', week Monday key,
+ *  month 'YYYY-MM'. */
+function grainKey(grain: MovementSeriesResult["grain"], changeTime: Date): string {
+  const dayKey = toDayKey(changeTime);
+  if (grain === "week") return weekStartKey(dayKey);
+  if (grain === "month") return dayKey.slice(0, 7);
+  return dayKey;
+}
+
+/**
+ * Total classifier: every non-zero row maps to EXACTLY ONE bucket. logType is the
+ * primary key; sign splits the four sign-ambiguous logTypes; the reason lookup
+ * only runs for negative ADJUSTMENT/CORRECTION (so a negative ADJUSTMENT reasoned
+ * 'COUNT' is classifiedLoss, while a COUNT-logType row is always count*).
+ */
+function classify(logType: string, delta: number, reasonCode: string | null): BucketKey {
+  switch (logType) {
+    case "STOCK_IN":
+      return "stockIn";
+    case "SALE":
+      return "sale";
+    case "TRANSFER":
+      return delta > 0 ? "transferIn" : "transferOut";
+    case "COUNT":
+      return delta > 0 ? "countIn" : "countOut";
+    case "ADJUSTMENT":
+      if (delta > 0) return "adjustmentIn";
+      return reasonCode != null && SHRINKAGE_SET.has(reasonCode) ? "classifiedLoss" : "adjustmentUnclassified";
+    case "CORRECTION":
+      if (delta > 0) return "correctionIn";
+      return reasonCode != null && SHRINKAGE_SET.has(reasonCode) ? "classifiedLoss" : "correctionUnclassified";
+    default:
+      // Unreachable (logType is enum-constrained). Fold into the adjustment
+      // buckets rather than drop the row, so `net === SUM(delta)` still holds.
+      return delta > 0 ? "adjustmentIn" : "adjustmentUnclassified";
+  }
+}
+
+/**
+ * Movement series over a RESOLVED window. The tool layer parses from/to/
+ * relativeDays and validates productId; this reads the ledger and partitions.
+ *
+ * @param opts.window  already-resolved day-key window (lib/assistant/window).
+ * @param opts.grain   day | week | month bucketing.
+ * @param opts.productId  optional single-product scope (pre-validated).
+ * @param opts.locationId optional location scope.
+ */
+export async function getMovementSeries(opts: {
+  productId?: number;
+  locationId?: number;
+  window: ResolvedWindow;
+  grain: "day" | "week" | "month";
+}): Promise<MovementSeriesResult> {
+  const { productId, locationId, window, grain } = opts;
+
+  // Map the inclusive day-key window to a half-open timestamp range
+  // [start of `from`, start of the day after `to`). Same select/where shape as
+  // lib/reports/demand.ts, but with NO delta/logType narrowing — the partition
+  // is exhaustive, so every row in the window must be read.
+  const rows = await prisma.inventory_logs.findMany({
+    where: {
+      changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
+      ...(productId != null ? { productId } : {}),
+      ...(locationId != null ? { locationId } : {}),
+    },
+    select: { delta: true, changeTime: true, logType: true, reasonCode: true },
+  });
+
+  const pointMap = new Map<string, MovementBuckets>();
+  const totals = emptyBuckets();
+  let reasonCodeNullRows = 0;
+
+  for (const row of rows) {
+    // Zero-delta rows count NOWHERE: 0 into any bucket and 0 into net, so
+    // skipping them keeps net === SUM(delta) exact and honors "count nowhere".
+    if (row.delta === 0) continue;
+
+    // Coverage: negative ADJUSTMENT/CORRECTION with no reasonCode — the legacy
+    // unclassified-outbound rows (row COUNT, independent of bucketing).
+    if (
+      row.delta < 0 &&
+      (row.logType === "ADJUSTMENT" || row.logType === "CORRECTION") &&
+      row.reasonCode == null
+    ) {
+      reasonCodeNullRows += 1;
+    }
+
+    const bucket = classify(row.logType, row.delta, row.reasonCode);
+    const key = grainKey(grain, row.changeTime);
+    let point = pointMap.get(key);
+    if (point == null) {
+      point = emptyBuckets();
+      pointMap.set(key, point);
+    }
+    point[bucket] += row.delta;
+    totals[bucket] += row.delta;
+  }
+
+  finalizeNet(totals);
+  const points = Array.from(pointMap.entries())
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, b]) => {
+      finalizeNet(b);
+      return { key, ...b };
+    });
+
+  return {
+    grain,
+    window,
+    points,
+    totals,
+    coverage: { unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE, reasonCodeNullRows },
+  };
+}
