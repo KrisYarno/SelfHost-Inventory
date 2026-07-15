@@ -139,9 +139,12 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
       body.costPrice === null ? null : body.costPrice >= 0 ? body.costPrice : null;
   }
 
+  // W0-RETAIL (spec §4): preserve NULL = "retail unknown" (mirror costPrice). An
+  // explicit null clears the retail back to unknown; an explicit 0 means genuinely
+  // free (kept); a negative is defended to null. Undefined leaves it untouched.
   if (body.retailPrice !== undefined) {
-    const sanitizedRetail = Number(body.retailPrice);
-    updateData.retailPrice = sanitizedRetail >= 0 ? sanitizedRetail : 0;
+    updateData.retailPrice =
+      body.retailPrice === null ? null : body.retailPrice >= 0 ? body.retailPrice : null;
   }
 
   // Field-level diff already in {field:{from,to}} shape — flows straight through
@@ -175,8 +178,14 @@ export const PUT = apiHandler(async (request: NextRequest, { params }: RoutePara
       changes.costPrice = { from: fromCost, to: body.costPrice };
     }
   }
-  if (body.retailPrice !== undefined && Number(body.retailPrice) !== Number(existingProduct.retailPrice)) {
-    changes.retailPrice = { from: Number(existingProduct.retailPrice), to: body.retailPrice };
+  // W0-RETAIL: NULL-safe diff (mirror costPrice). Number(null)=0 would false-equal a
+  // real 0 and drop the from-null audit; compare the true null distinctly instead.
+  if (body.retailPrice !== undefined) {
+    const fromRetail =
+      existingProduct.retailPrice === null ? null : Number(existingProduct.retailPrice);
+    if (fromRetail !== body.retailPrice) {
+      changes.retailPrice = { from: fromRetail, to: body.retailPrice };
+    }
   }
 
   // Per-product reorder config (Lane reorder-points). Build the (partial) config

@@ -13,7 +13,11 @@ export interface DashboardMetrics {
   activeProducts: number;
   totalInventoryValue: number;
   totalInventoryCostValue: number;
+  // W0-RETAIL: totalInventoryRetailValue is a KNOWN-retail subtotal (products with a
+  // real retail price only). `retailCoverage` names it — `priced of N` — so a
+  // NULL-priced product is never silently folded in at $0.
   totalInventoryRetailValue: number;
+  retailCoverage: { priced: number; of: number };
   totalStockQuantity: number;
   lowStockProducts: number;
   recentActivityCount: number;

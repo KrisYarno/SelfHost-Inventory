@@ -131,7 +131,8 @@ export interface GraduateNewProductFields {
   numericValue?: number;
   lowStockThreshold?: number;
   costPrice?: number;
-  retailPrice?: number;
+  // W0-RETAIL: NULL = retail unknown (never coerced to 0 downstream).
+  retailPrice?: number | null;
   locationId: number;
 }
 

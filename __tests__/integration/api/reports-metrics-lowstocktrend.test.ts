@@ -114,6 +114,45 @@ test("no locationId => snapshot groupBy is GLOBAL (no locationId in where)", asy
   expect(arg.where).not.toHaveProperty("locationId");
 });
 
+// W0-RETAIL: the retail total is a KNOWN-retail subtotal (products with a real
+// price only) + a `retailCoverage` block; a NULL retail is UNKNOWN and excluded,
+// never folded in at $0. An explicit 0 = genuinely free counts as priced.
+describe("retail coverage (W0-RETAIL)", () => {
+  it("excludes NULL-retail products from the subtotal and the priced count", async () => {
+    m.product.count.mockResolvedValue(2);
+    m.product.findMany.mockResolvedValue([
+      { id: 1, costPrice: 0, retailPrice: 10, lowStockThreshold: 10 }, // priced
+      { id: 2, costPrice: 0, retailPrice: null, lowStockThreshold: 10 }, // unknown
+    ]);
+    m.product_locations.findMany.mockResolvedValue([
+      { productId: 1, quantity: 5 },
+      { productId: 2, quantity: 3 },
+    ]);
+
+    const res = await GET(new NextRequest("http://x/api/reports/metrics"));
+    const body = await res.json();
+
+    // 5 units * $10 = 50; product 2 (unknown price) contributes nothing.
+    expect(body.metrics.totalInventoryRetailValue).toBe(50);
+    expect(body.metrics.retailCoverage).toEqual({ priced: 1, of: 2 });
+  });
+
+  it("counts an explicit 0 retail as priced (genuinely free is a known price)", async () => {
+    m.product.count.mockResolvedValue(2);
+    m.product.findMany.mockResolvedValue([
+      { id: 1, costPrice: 0, retailPrice: 0, lowStockThreshold: 10 }, // free (known)
+      { id: 2, costPrice: 0, retailPrice: null, lowStockThreshold: 10 }, // unknown
+    ]);
+    m.product_locations.findMany.mockResolvedValue([{ productId: 1, quantity: 5 }]);
+
+    const res = await GET(new NextRequest("http://x/api/reports/metrics"));
+    const body = await res.json();
+
+    expect(body.metrics.retailCoverage).toEqual({ priced: 1, of: 2 });
+    expect(body.metrics.totalInventoryRetailValue).toBe(0); // free * qty = 0, but priced
+  });
+});
+
 test("snapshot groupBy is bounded to a trailing window floored on the latest snapshot day", async () => {
   // Latest snapshot day 2026-06-08 => floor = 2026-06-08 minus the 30-day window = 2026-05-09.
   m.productStockSnapshot.aggregate.mockResolvedValue({ _max: { dayKey: "2026-06-08" } });

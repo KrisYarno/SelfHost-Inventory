@@ -99,7 +99,15 @@ export const POST = apiHandler(async (request: NextRequest) => {
       : body.costPrice >= 0
         ? body.costPrice
         : null;
-  const retailPrice = Number(body.retailPrice ?? 0);
+  // W0-RETAIL (spec §4): preserve NULL = "retail unknown" (mirror costPrice). A
+  // blank field arrives as null/undefined and is stored NULL (never coerced to 0);
+  // an explicit human 0 means genuinely free and is kept. A negative is clamped to null.
+  const retailPrice =
+    body.retailPrice === undefined || body.retailPrice === null
+      ? null
+      : body.retailPrice >= 0
+        ? body.retailPrice
+        : null;
 
   // Create + record atomically: the audit row is written in the SAME transaction
   // as the product insert, so an unrecordable create never commits (spec D4).
@@ -119,7 +127,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
         // resolves nothing against the threshold, so it needs no shared helper).
         lowStockThreshold: body.lowStockThreshold === undefined ? null : body.lowStockThreshold,
         costPrice,
-        retailPrice: retailPrice >= 0 ? retailPrice : 0,
+        retailPrice,
         approvalStatus: user.isAdmin ? "APPROVED" : "PENDING_REVIEW",
         createdBy: user.id,
       },

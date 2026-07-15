@@ -192,7 +192,7 @@ export function GraduateDialog({
     numericValue?: number;
     lowStockThreshold?: number;
     costPrice?: number;
-    retailPrice?: number;
+    retailPrice?: number | null;
   }) => {
     if (!item || !countedValid || !locationId) return;
     try {

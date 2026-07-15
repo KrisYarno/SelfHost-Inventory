@@ -61,7 +61,11 @@ model Product {
   // valuation out of "we don't know". Legacy zeros are backfilled to NULL by
   // migration 20260714130000_lane6_cost_nullable.
   costPrice         Decimal?              @db.Decimal(10, 2)
-  retailPrice       Decimal               @default(0.00) @db.Decimal(10, 2)
+  // W0-RETAIL (spec §4): NULL = retail unknown; an explicit 0 = genuinely free.
+  // The DB default is dropped so a create can no longer silently mint a "$0.00"
+  // valuation out of "we don't know" (mirrors costPrice). Legacy zeros are
+  // backfilled to NULL by migration 20260714210000_retail_price_nullable.
+  retailPrice       Decimal?              @db.Decimal(10, 2)
   deletedAt         DateTime?             @db.DateTime(0)
   deletedBy         Int?
   approvalStatus    ProductApprovalStatus @default(APPROVED)

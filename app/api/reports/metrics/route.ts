@@ -121,7 +121,12 @@ export const GET = apiHandler(async (request: NextRequest) => {
   let lowStockProducts = 0;
   let healthyProducts = 0;
   let totalInventoryCostValue = 0;
+  // W0-RETAIL: a known-retail SUBTOTAL (products with a real retail price only),
+  // reported alongside `retailCoverage` so the figure is never read as if every
+  // product were priced. A NULL-retail product contributes nothing (it used to be
+  // coerced to $0 and folded into a bare total — the exact lie removed here).
   let totalInventoryRetailValue = 0;
+  let retailPricedProducts = 0;
   let orderNowCount = 0;
   let orderSoonCount = 0;
   let _watchCount = 0;
@@ -135,7 +140,9 @@ export const GET = apiHandler(async (request: NextRequest) => {
     const quantity = productStockMap.get(product.id) || 0;
     const threshold = effectiveLowStockThreshold(product.lowStockThreshold, lowStockDefault);
     const cost = Number(product.costPrice ?? 0);
-    const retail = Number(product.retailPrice ?? 0);
+    // W0-RETAIL: NULL retail = "unknown", excluded from the known-retail subtotal
+    // and the coverage count (an explicit 0 = free is a KNOWN price and counts).
+    const retail = product.retailPrice === null ? null : Number(product.retailPrice);
     const productCostValue = quantity * cost;
 
     // Low-stock count uses the shared INCLUSIVE predicate (R-L13) so this metric
@@ -147,44 +154,61 @@ export const GET = apiHandler(async (request: NextRequest) => {
       healthyProducts++;
     }
     totalInventoryCostValue += productCostValue;
-    totalInventoryRetailValue += quantity * retail;
-
-    // NEW: Calculate days of supply and order status
-    const avgDailyUsage = velocityMap.get(product.id)?.avgDailyDemand ?? 0;
-    const daysOfSupply = calculateDaysOfSupply(quantity, avgDailyUsage);
-    const orderStatus = getOrderStatus(daysOfSupply);
-
-    // Count by order status
-    switch (orderStatus) {
-      case "CRITICAL":
-        orderNowCount++;
-        break;
-      case "NEED_ORDER":
-        orderSoonCount++;
-        break;
-      case "RUNNING_LOW":
-        _watchCount++;
-        break;
-      case "OKAY":
-        _okCount++;
-        break;
+    if (retail !== null) {
+      totalInventoryRetailValue += quantity * retail;
+      retailPricedProducts++;
     }
 
-    // Track days of supply for average (exclude infinite/dead stock)
-    if (daysOfSupply !== Infinity && daysOfSupply > 0) {
-      daysOfSupplySum += daysOfSupply;
-      productsWithMovement++;
+    // TRUTHFUL NULL PROPAGATION (spec §2 D4 / W0-1): a product with NO qualifying
+    // outbound movement has an UNKNOWN daily-usage rate — null, never a fabricated
+    // 0/day. The old `?? 0` collapsed "unknown" into "measured zero", which
+    // calculateDaysOfSupply then read as Infinity ("dead stock, never order"). We
+    // keep the null and skip the days-of-supply classification when the rate is
+    // unknown, so an un-measured product is neither counted as OKAY nor as needing
+    // an order (an out-of-stock product is still a certain stockout regardless).
+    const avgDailyUsage = velocityMap.get(product.id)?.avgDailyDemand ?? null;
+    const daysOfSupply =
+      avgDailyUsage !== null ? calculateDaysOfSupply(quantity, avgDailyUsage) : null;
+
+    if (daysOfSupply !== null) {
+      const orderStatus = getOrderStatus(daysOfSupply);
+
+      // Count by order status
+      switch (orderStatus) {
+        case "CRITICAL":
+          orderNowCount++;
+          break;
+        case "NEED_ORDER":
+          orderSoonCount++;
+          break;
+        case "RUNNING_LOW":
+          _watchCount++;
+          break;
+        case "OKAY":
+          _okCount++;
+          break;
+      }
+
+      // Track days of supply for average (exclude infinite/dead stock)
+      if (daysOfSupply !== Infinity && daysOfSupply > 0) {
+        daysOfSupplySum += daysOfSupply;
+        productsWithMovement++;
+      }
+
+      // Count stockout risk (usage known -> days-of-supply drives it)
+      if (isStockoutRisk(quantity, daysOfSupply)) {
+        stockoutRiskCount++;
+      }
+    } else if (quantity <= 0) {
+      // Usage unknown: days-of-supply is unknown, but being out of stock is a
+      // certain stockout independent of the (unknown) rate.
+      stockoutRiskCount++;
     }
 
     // NEW: Calculate dead stock value
     const hasRecentMovement = activeProductSet.has(product.id);
     if (isDeadStock(hasRecentMovement, quantity)) {
       deadStockValue += productCostValue;
-    }
-
-    // NEW: Count stockout risk
-    if (isStockoutRisk(quantity, daysOfSupply)) {
-      stockoutRiskCount++;
     }
   });
 
@@ -287,6 +311,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
       totalInventoryValue,
       totalInventoryCostValue,
       totalInventoryRetailValue,
+      // W0-RETAIL: how many products actually carry a retail price. Names the
+      // known-retail subtotal honestly — `priced of N` — so the value is never
+      // read as if every product were priced.
+      retailCoverage: { priced: retailPricedProducts, of: totalProducts },
       totalStockQuantity,
       lowStockProducts,
       recentActivityCount,

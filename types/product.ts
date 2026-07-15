@@ -23,7 +23,8 @@ export interface ProductFormData {
   lowStockThreshold?: number | null;
   // Lane 6 (R-D3): NULL = cost unknown; an explicit 0 = genuinely free.
   costPrice?: number | null;
-  retailPrice?: number;
+  // W0-RETAIL: NULL = retail unknown; an explicit 0 = genuinely free.
+  retailPrice?: number | null;
   // Lane reorder-points: per-product reorder overrides (all optional; NULL = inherit
   // the global default). Only sent when the user set at least one override.
   reorderConfig?: {
@@ -66,7 +67,8 @@ export interface CreateProductRequest {
   lowStockThreshold?: number | null;
   locationId?: number;
   costPrice?: number;
-  retailPrice?: number;
+  // W0-RETAIL: NULL = retail unknown; an explicit 0 = genuinely free.
+  retailPrice?: number | null;
 }
 
 // Update product request
@@ -79,7 +81,8 @@ export interface UpdateProductRequest {
   // NULL = inherit the system default (spec R-L13).
   lowStockThreshold?: number | null;
   costPrice?: number;
-  retailPrice?: number;
+  // W0-RETAIL: NULL = retail unknown; an explicit 0 = genuinely free.
+  retailPrice?: number | null;
 }
 
 // Product with inventory logs for detailed view

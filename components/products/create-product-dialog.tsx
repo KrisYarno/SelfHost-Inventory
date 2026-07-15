@@ -77,7 +77,8 @@ export function CreateProductDialog({
           lowStockThreshold: data.lowStockThreshold,
           locationId: data.locationId || 1, // Default to location 1 if not specified
           costPrice: data.costPrice ?? null,
-          retailPrice: data.retailPrice ?? 0,
+          // W0-RETAIL: unknown retail persists NULL, never a phantom 0.
+          retailPrice: data.retailPrice ?? null,
           ...(data.reorderConfig ? { reorderConfig: data.reorderConfig } : {}),
         }),
       });

@@ -133,6 +133,21 @@ test("changed price: updates retailPrice AND records PRODUCT_UPDATE on the SAME 
   expect(result).toEqual({ synced: 1, skipped: 0, failed: [] });
 });
 
+test("W0-RETAIL: a product with NULL (unknown) retail syncing to a real price records from:null, never the string 'null'", async () => {
+  db.product.findMany.mockResolvedValue([makeProduct(1, null)] as any);
+  mockPlatformRead.mockResolvedValueOnce(fetchOk("15"));
+  driveTx();
+
+  const result = await syncPricesForIntegration("int-1", { userId: 42 });
+
+  expect(recordChange).toHaveBeenCalledTimes(1);
+  const event = (recordChange as jest.Mock).mock.calls[0][1];
+  // The prior retail is UNKNOWN — represented as an actual null (matching costPrice
+  // change-tracking), never String(null) === "null".
+  expect(event.changes).toEqual({ retailPrice: { from: null, to: "15" } });
+  expect(result).toEqual({ synced: 1, skipped: 0, failed: [] });
+});
+
 test("no actor -> SYSTEM actor / cron trigger", async () => {
   db.product.findMany.mockResolvedValue([makeProduct(7, 20)] as any);
   mockPlatformRead.mockResolvedValueOnce(fetchOk("25"));

@@ -122,7 +122,14 @@ export async function graduateStagingItem(
             : f.costPrice >= 0
               ? f.costPrice
               : null;
-        const retailPrice = Number(f.retailPrice ?? 0);
+        // W0-RETAIL: preserve NULL = "retail unknown" (mirror POST /api/products);
+        // an explicit 0 = free is kept; negative defended to null.
+        const retailPrice =
+          f.retailPrice === undefined || f.retailPrice === null
+            ? null
+            : f.retailPrice >= 0
+              ? f.retailPrice
+              : null;
 
         const created_ = await tx.product.create({
           data: {
@@ -138,7 +145,7 @@ export async function graduateStagingItem(
             // omitted field writes NULL explicitly (no low-stock predicate here).
             lowStockThreshold: f.lowStockThreshold === undefined ? null : f.lowStockThreshold,
             costPrice,
-            retailPrice: retailPrice >= 0 ? retailPrice : 0,
+            retailPrice,
             approvalStatus: actor.isAdmin ? 'APPROVED' : 'PENDING_REVIEW',
             createdBy: actor.id,
           },

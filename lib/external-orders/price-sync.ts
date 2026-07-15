@@ -159,8 +159,12 @@ export async function syncPricesForIntegration(
 
       // ER-B9 no-op rule: if the retail price already matches, skip entirely —
       // no update, no event. Normalize both sides via String() so a Prisma
-      // Decimal never false-differs from the parsed number.
-      const fromValue = String(product.retailPrice);
+      // Decimal never false-differs from the parsed number. W0-RETAIL: a NULL
+      // (unknown) prior retail is represented as an actual `null` (matching how
+      // costPrice change-tracking records a cleared value), never the string
+      // "null" — and null never equals a real fetched price, so an unknown-priced
+      // product always proceeds to the update.
+      const fromValue = product.retailPrice === null ? null : String(product.retailPrice);
       const toValue = String(regularPrice);
       if (fromValue === toValue) {
         skipped++;

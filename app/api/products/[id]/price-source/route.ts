@@ -82,7 +82,8 @@ export const POST = apiHandler(
       return NextResponse.json({
         success: true,
         priceSourceLinkId: null,
-        retailPrice: Number(product.retailPrice),
+        // W0-RETAIL: Number(null)=0 would report a phantom $0 for an unknown price.
+        retailPrice: product.retailPrice === null ? null : Number(product.retailPrice),
       });
     }
 
@@ -115,7 +116,10 @@ export const POST = apiHandler(
       user.isAdmin
     );
 
-    let newRetailPrice = Number(product.retailPrice);
+    // W0-RETAIL: null when the retail is unknown (Number(null)=0 would lie a $0 to
+    // the client at line ~180); a successful sync below replaces it with a real price.
+    let newRetailPrice: number | null =
+      product.retailPrice === null ? null : Number(product.retailPrice);
     let syncError: string | undefined;
     let fetchedPrice: number | null = null;
 

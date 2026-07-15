@@ -30,6 +30,7 @@ import {
   applyStockDelta,
   createInventoryAdjustment,
   centsFromCostPrice,
+  centsFromRetailPrice,
   OptimisticLockError,
 } from '@/lib/inventory';
 
@@ -192,6 +193,51 @@ describe('centsFromCostPrice — ER-C2 money conversion (never lie)', () => {
 
   it('30000000 -> null + console.error (INT-cents overflow)', () => {
     expect(centsFromCostPrice(30000000)).toBeNull();
+    expect(errSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('centsFromRetailPrice — W0-RETAIL money conversion (never lie)', () => {
+  let errSpy: jest.SpyInstance;
+  beforeEach(() => {
+    errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+  });
+
+  it('null -> null (retail unknown)', () => {
+    expect(centsFromRetailPrice(null)).toBeNull();
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('Decimal("24.99") -> 2499', () => {
+    expect(centsFromRetailPrice(new Prisma.Decimal('24.99'))).toBe(2499);
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('number 24.99 -> 2499', () => {
+    expect(centsFromRetailPrice(24.99)).toBe(2499);
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('numeric string "24.99" -> 2499', () => {
+    expect(centsFromRetailPrice('24.99')).toBe(2499);
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('0 -> null (0-and-null both mean unknown, matching cost)', () => {
+    expect(centsFromRetailPrice(0)).toBeNull();
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('-5 -> null (never negative)', () => {
+    expect(centsFromRetailPrice(-5)).toBeNull();
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('30000000 -> null + console.error (INT-cents overflow)', () => {
+    expect(centsFromRetailPrice(30000000)).toBeNull();
     expect(errSpy).toHaveBeenCalledTimes(1);
   });
 });

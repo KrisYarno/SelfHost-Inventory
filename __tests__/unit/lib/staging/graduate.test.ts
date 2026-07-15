@@ -242,7 +242,7 @@ describe('graduateStagingItem — new product (provisional)', () => {
     expect(result.approvalStatus).toBe('APPROVED');
   });
 
-  it('writes NULL lowStockThreshold (inherit default), NULL cost (R-D3: unknown), retail 0 when omitted', async () => {
+  it('writes NULL lowStockThreshold (inherit default), NULL cost (R-D3: unknown), NULL retail (W0-RETAIL: unknown) when omitted', async () => {
     mockTx.product.create.mockResolvedValue({
       id: 103,
       approvalStatus: 'PENDING_REVIEW',
@@ -262,8 +262,29 @@ describe('graduateStagingItem — new product (provisional)', () => {
     const data = (mockTx.product.create.mock.calls[0][0] as any).data;
     expect(data.lowStockThreshold).toBeNull();
     expect(data.costPrice).toBeNull(); // R-D3: omitted cost = unknown, never 0
-    expect(data.retailPrice).toBe(0);
+    expect(data.retailPrice).toBeNull(); // W0-RETAIL: omitted retail = unknown, never 0
     expect(data.unit).toBeNull();
     expect(data.numericValue).toBeNull();
+  });
+
+  it('keeps an explicit retail 0 (genuinely free, distinct from NULL/unknown)', async () => {
+    mockTx.product.create.mockResolvedValue({
+      id: 104,
+      approvalStatus: 'PENDING_REVIEW',
+    } as any);
+
+    await graduateStagingItem(
+      55,
+      {
+        mode: 'new',
+        productFields: { baseName: 'Free', variant: 'x', retailPrice: 0, locationId: 1 } as any,
+        countedQuantity: 1,
+        locationId: 1,
+      },
+      { id: 42, isAdmin: false }
+    );
+
+    const data = (mockTx.product.create.mock.calls[0][0] as any).data;
+    expect(data.retailPrice).toBe(0);
   });
 });

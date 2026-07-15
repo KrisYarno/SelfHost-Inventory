@@ -85,6 +85,34 @@ export function centsFromCostPrice(costPrice: Prisma.Decimal | number | null): n
 }
 
 /**
+ * W0-RETAIL (spec §4): frozen retail-price → INT-cents conversion, the canonical
+ * money converter for every retail-valuation surface (mirrors `centsFromCostPrice`).
+ *
+ * `retailPrice` is a NULLABLE Decimal: NULL = retail unknown, an explicit 0 =
+ * genuinely free. Both a NULL and a 0 yield null here (NULL truthfully = no price;
+ * a "free" product carries no representable retail cents either), so a value is
+ * emitted only for a real positive price. A numeric string is accepted (some price
+ * paths carry the value as a string) and parsed the same way; a non-numeric string
+ * parses to NaN → null. Negative is impossible in real data but defended (→ null).
+ * The signed-INT cents bound caps at 2147483647 (a price of 21474836.47); ABOVE that
+ * we cannot represent the value, so we return null AND console.error — writing a
+ * truncated number would be a lie (truthful-data).
+ */
+export function centsFromRetailPrice(
+  v: Prisma.Decimal | number | string | null
+): number | null {
+  if (v === null) return null;
+  const n = Number(v);
+  if (n > 21474836.47) {
+    console.error(
+      `centsFromRetailPrice: retailPrice ${n} exceeds the INT-cents bound (21474836.47); storing null instead of a truncated value`
+    );
+    return null;
+  }
+  return n > 0 ? Math.round(n * 100) : null;
+}
+
+/**
  * Validates if sufficient stock is available
  */
 export async function validateStockAvailability(

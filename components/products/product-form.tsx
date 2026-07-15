@@ -21,7 +21,10 @@ interface ProductFormInputs {
   // explicit 0 means genuinely free. `valueAsNumber` yields NaN for blank; the
   // submit handler maps NaN -> null so the distinction survives to the API.
   costPrice: number | null;
-  retailPrice: number;
+  // W0-RETAIL: a blank retail field = null ("unknown"), never coerced to 0. An
+  // explicit 0 means genuinely free. `valueAsNumber` yields NaN for blank; the
+  // submit handler maps NaN -> null so the distinction survives to the API.
+  retailPrice: number | null;
   // Lane reorder-points: per-product overrides. Blank = inherit the global default.
   leadTimeDays: number | null;
   bufferDays: number | null;
@@ -115,7 +118,12 @@ export function ProductForm({
         product && product.costPrice !== null && product.costPrice !== undefined
           ? Number(product.costPrice)
           : null,
-      retailPrice: product ? Number(product.retailPrice ?? 0) : 0,
+      // Unknown retail -> blank (null), so editing a product without a retail price
+      // does not re-save a phantom 0. An existing explicit price (incl. 0 = free) shows as-is.
+      retailPrice:
+        product && product.retailPrice !== null && product.retailPrice !== undefined
+          ? Number(product.retailPrice)
+          : null,
       // Reorder overrides pre-filled from the product's config when present (edit
       // mode); blank means inherit the global default.
       leadTimeDays: reorderCfg?.leadTimeDays ?? null,
@@ -221,7 +229,12 @@ export function ProductForm({
         typeof data.costPrice === "number" && Number.isFinite(data.costPrice) && data.costPrice >= 0
           ? data.costPrice
           : null;
-      const sanitizedRetailPrice = Number.isFinite(data.retailPrice) ? data.retailPrice : 0;
+      // Blank / non-finite retail -> null ("unknown"); an explicit >= 0 (incl. 0 =
+      // free) is kept; a negative is defended to null (W0-RETAIL). Mirrors cost.
+      const sanitizedRetailPrice =
+        typeof data.retailPrice === "number" && Number.isFinite(data.retailPrice) && data.retailPrice >= 0
+          ? data.retailPrice
+          : null;
 
       // Reorder overrides: blank -> inherit the global default (omitted). Only send the
       // config when at least one real override is set. leadTime is always positive
