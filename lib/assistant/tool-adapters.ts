@@ -8,7 +8,7 @@
  */
 
 import { tool, type ToolSet } from "ai";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   assistantTools,
@@ -21,12 +21,30 @@ import {
 // this adapter builds per call.
 import type { ToolContext as ResolvedContext } from "@/lib/assistant/context";
 import type { RecordRun } from "@/lib/assistant/telemetry";
+import { AppError } from "@/lib/error-handling";
 
 const TURN_BUDGET_NOTICE =
   "The combined results for this turn are too large. Ask a narrower question.";
 
-function errorResult(name: string): ToolResult {
-  return { status: "error", code: "TOOL_ERROR", meta: { scope: TOOL_SCOPES[name] ?? "global" } };
+/**
+ * Tool-error result. When the failure is OUR OWN validation text (AppError from
+ * resolveWindow/assertWindow/etc., or a zod issue message), relay it as `hint` so
+ * a model can SELF-CORRECT its arguments — without it, models that send rejected
+ * arg combinations (live-drive 2026-07-15: gpt-5.6-luna sending from+to AND
+ * relativeDays) retry identical args with no corrective signal. Provider/internal
+ * errors stay masked: only AppError/ZodError messages (server-authored, safe) are
+ * ever surfaced; nothing from a provider payload.
+ */
+function errorResult(name: string, err?: unknown): ToolResult {
+  let hint: string | undefined;
+  if (err instanceof AppError) hint = err.message;
+  else if (err instanceof ZodError) hint = err.errors[0]?.message;
+  return {
+    status: "error",
+    code: "TOOL_ERROR",
+    ...(hint ? { hint } : {}),
+    meta: { scope: TOOL_SCOPES[name] ?? "global" },
+  };
 }
 
 /**
@@ -56,8 +74,8 @@ export function createAiTools(
             companyIds: ctx.companyIds,
             remainingBytes: Math.min(PER_TOOL_RESULT_CAP_BYTES, budget.remaining),
           });
-        } catch {
-          result = errorResult(name);
+        } catch (err) {
+          result = errorResult(name, err);
         }
 
         if (result.status === "ok") {
@@ -106,8 +124,8 @@ export function registerMcpTools(
             companyIds: ctx.companyIds,
             remainingBytes: PER_TOOL_RESULT_CAP_BYTES,
           });
-        } catch {
-          result = errorResult(name);
+        } catch (err) {
+          result = errorResult(name, err);
         }
 
         if (result.status === "ok" && result.meta.bytes > PER_TOOL_RESULT_CAP_BYTES) {

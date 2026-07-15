@@ -45,7 +45,14 @@ describe("createAiTools — get_stock_asof AppError is masked to a generic TOOL_
     const result = await tool.execute({ dayKey: "2099-01-01" });
 
     // The generic, documented masking shape — no AppError code/message/status leaks.
-    expect(result).toEqual({ status: "error", code: "TOOL_ERROR", meta: { scope: "global" } });
+    // Since the live drive (2026-07-15), OUR OWN AppError text rides as `hint` so
+    // models can self-correct rejected arguments; provider errors stay fully masked.
+    expect(result).toEqual({
+      status: "error",
+      code: "TOOL_ERROR",
+      hint: "snapshots cover completed days only",
+      meta: { scope: "global" },
+    });
     // Telemetry still records the run as an error (0 result bytes).
     expect(runs).toHaveLength(1);
     expect(runs[0].outcome).toBe("error");

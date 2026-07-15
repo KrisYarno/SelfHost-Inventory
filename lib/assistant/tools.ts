@@ -83,7 +83,7 @@ export type ToolScope = "company" | "global" | "mixed";
 export type ToolResult =
   | { status: "ok"; data: unknown; meta: { dataStart?: string; scope: ToolScope; bytes: number } }
   | { status: "truncated"; notice: string; meta: { scope: ToolScope; bytes: number } }
-  | { status: "error"; code: "TOOL_ERROR"; meta: { scope: ToolScope } }
+  | { status: "error"; code: "TOOL_ERROR"; hint?: string; meta: { scope: ToolScope } }
   | { status: "error"; error: { code: "NOT_FOUND"; message: string } };
 
 /**

@@ -41,7 +41,12 @@ function shiftDays(dayKey: string, deltaDays: number): string {
 /**
  * Resolve an explicit / relative / default window.
  *
- *  - `from` + `relativeDays` together THROWS (they are mutually exclusive).
+ *  - `from` + `relativeDays` together: EXPLICIT DATES WIN and `relativeDays` is
+ *    ignored (`source: "explicit"` discloses which path resolved). The original
+ *    REV-2 choice was to THROW, but the live drive (2026-07-15) showed real models
+ *    (gpt-5.6-luna) belt-and-suspenders BOTH forms and retry the rejection blindly
+ *    to the step cap — tolerant precedence with an honest source echo is truthful
+ *    AND model-robust.
  *  - `from` present ⇒ explicit (`to` defaults to today when absent).
  *  - `relativeDays: N` present ⇒ N day-keys ending at `to` (or today): `from = to − (N−1)`.
  *  - neither ⇒ `defaultRelativeDays` day-keys ending at `to` (or today); `source: "default"`.
@@ -51,10 +56,6 @@ export function resolveWindow(
   now: Date,
   defaultRelativeDays?: number,
 ): ResolvedWindow {
-  if (args.from != null && args.relativeDays != null) {
-    throw new AppError("from and relativeDays are mutually exclusive", "VALIDATION", 400);
-  }
-
   const to = args.to ?? toDayKey(now);
 
   if (args.from != null) {

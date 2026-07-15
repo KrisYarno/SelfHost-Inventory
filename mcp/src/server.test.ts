@@ -481,13 +481,16 @@ describe("POST /mcp — Wave-2 tool round-trips assert REAL payload values (item
   });
 
   it("get_stock_asof (future dayKey): the module's AppError is masked to a generic TOOL_ERROR (item 7)", async () => {
-    // getStockAsOf throws AppError(VALIDATION,400) on a future day; registerMcpTools must
-    // catch it and return the generic TOOL_ERROR result — never the 400/message on the wire.
+    // getStockAsOf throws AppError(VALIDATION,400) on a future day. Since the live
+    // drive (2026-07-15) our OWN AppError text rides as `hint` (self-correction
+    // signal for models); the CODE and status stay masked/generic and no status
+    // code or error-class name leaks.
     const toolResult = await roundTrip("get_stock_asof", { dayKey: "2099-01-01" });
     expect(toolResult.status).toBe("error");
     expect(toolResult.code).toBe("TOOL_ERROR");
-    // No AppError detail (status code / validation message) leaks into the payload.
-    expect(JSON.stringify(toolResult)).not.toMatch(/VALIDATION|completed days only|400/);
+    expect(toolResult.hint).toBe("snapshots cover completed days only");
+    // No AppError internals (status code / class name) leak into the payload.
+    expect(JSON.stringify(toolResult)).not.toMatch(/VALIDATION|"400"|AppError/);
   });
 
   it("compare_periods (outbound_units): server-computed a/b/delta/pctChange + mixed scope", async () => {

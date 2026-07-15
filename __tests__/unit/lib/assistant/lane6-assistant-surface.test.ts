@@ -208,10 +208,15 @@ describe("get_sales: relativeDays default + returned window (review B4; W0-WIN r
     }
   });
 
-  it("rejects from + relativeDays together (resolveWindow throws AppError)", async () => {
-    await expect(
-      assistantTools.get_sales.run({ from: "2026-01-01", relativeDays: 5 }, CTX),
-    ).rejects.toThrow();
+  it("from + relativeDays together resolves with EXPLICIT dates winning (drive-hardened precedence)", async () => {
+    const result = await assistantTools.get_sales.run(
+      { from: "2026-07-01", to: "2026-07-10", relativeDays: 30, groupBy: "day" },
+      CTX,
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as { window: { from: string; to: string; days: number; source: string } };
+    expect(data.window).toEqual({ from: "2026-07-01", to: "2026-07-10", days: 10, source: "explicit" });
   });
 });
 

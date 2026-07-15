@@ -66,16 +66,8 @@ describe("resolveWindow (spec §4 W0-WIN)", () => {
     });
   });
 
-  it("from + relativeDays together THROWS AppError(VALIDATION, 400)", () => {
-    expect(() => resolveWindow({ from: "2026-01-01", relativeDays: 5 }, NOW)).toThrow(AppError);
-    try {
-      resolveWindow({ from: "2026-01-01", relativeDays: 5 }, NOW);
-      throw new Error("expected resolveWindow to throw");
-    } catch (e) {
-      expect(e).toBeInstanceOf(AppError);
-      expect((e as AppError).code).toBe("VALIDATION");
-      expect((e as AppError).statusCode).toBe(400);
-      expect((e as AppError).message).toBe("from and relativeDays are mutually exclusive");
-    }
+  it("from + relativeDays together: explicit dates WIN, relativeDays ignored (drive-hardened precedence)", () => {
+    const w = resolveWindow({ from: "2026-07-01", to: "2026-07-10", relativeDays: 30 }, NOW);
+    expect(w).toEqual({ from: "2026-07-01", to: "2026-07-10", days: 10, source: "explicit" });
   });
 });
