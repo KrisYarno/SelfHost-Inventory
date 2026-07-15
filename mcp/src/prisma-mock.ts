@@ -54,6 +54,8 @@ const prismaMock: any = {
     findMany: async () => [],
     groupBy: async () => [],
     aggregate: async () => ({ _min: {}, _max: {}, _sum: {}, _count: {} }),
+    // Wave-2: getReceipts (get_movement_series receipts:true) counts before paging.
+    count: async () => 0,
   },
   analyticsRebuildState: {
     findUnique: async () => null,
@@ -62,13 +64,24 @@ const prismaMock: any = {
     findMany: async () => [],
   },
   productStockSnapshot: {
-    aggregate: async () => ({ _min: {} }),
+    // Wave-2: get_stock_asof reads _min AND _max for dataStart + watermark.
+    aggregate: async () => ({ _min: {}, _max: {} }),
     groupBy: async () => [],
     findMany: async () => [],
+  },
+  // Wave-2: compare_periods sales metrics read ProductSalesFact aggregates.
+  productSalesFact: {
+    aggregate: async () => ({ _min: {}, _max: {}, _sum: {}, _count: {} }),
   },
   externalOrder: {
     findFirst: async () => null,
     count: async () => 0,
+    // Wave-2: get_order_pipeline reads orders through the PII allowlist.
+    findMany: async () => [],
+  },
+  // Wave-2: get_order_pipeline reads order items through the PII allowlist.
+  externalOrderItem: {
+    findMany: async () => [],
   },
   globalReorderSettings: {
     findUnique: async () => null,

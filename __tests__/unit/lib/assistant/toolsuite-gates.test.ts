@@ -105,6 +105,7 @@ import {
 import { TOOL_PRESENTATION } from "@/lib/assistant/tool-presentation";
 import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
 import { STATIC_WRITE_ALLOWLIST } from "./static-write-allowlist";
+import { ORDER_PIPELINE_SELECT, ORDER_ITEM_UNITS_SELECT } from "@/lib/reports/order-pipeline";
 
 const prismaCtl = jest.requireMock("@/lib/prisma") as {
   __calls: Array<{ model: string; method: string; args: unknown }>;
@@ -171,6 +172,8 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
     { groupBy: "week" },
     { groupBy: "month" },
     { relativeDays: 7 },
+    // W2-RCPT: the receipts-detail branch (getReceipts DB-side paging).
+    { receipts: true },
     { productId: PENDING_REVIEW_FIXTURE_ID },
   ],
   get_inventory_summary: [
@@ -184,6 +187,32 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
   get_data_freshness: [{}],
   low_stock_report: [{}],
   reorder_report: [{}, { includeOkay: false }],
+  // Wave-2 breadth. fixture[0] is the HAPPY path (coverage/definition gates) — a
+  // COMPLETED past dayKey / argless case that reaches an OK result; the pending-review
+  // productId case is a LATER fixture (read-only gate only), returning the notFound shape.
+  get_stock_asof: [
+    { dayKey: "2026-01-01" },
+    { dayKey: "2026-01-01", productId: PENDING_REVIEW_FIXTURE_ID },
+  ],
+  compare_periods: [
+    { metric: "outbound_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 } },
+    { metric: "sales_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 14 } },
+    { metric: "sales_revenue", periodA: { relativeDays: 30 }, periodB: { relativeDays: 30 } },
+    { metric: "inbound_units", periodA: { relativeDays: 30 }, periodB: { relativeDays: 30 } },
+    {
+      metric: "sales_units",
+      periodA: { relativeDays: 7 },
+      periodB: { relativeDays: 7 },
+      productId: PENDING_REVIEW_FIXTURE_ID,
+    },
+  ],
+  get_order_pipeline: [
+    {},
+    { groupBy: "status" },
+    { groupBy: "integration" },
+    { groupBy: "day" },
+    { relativeDays: 7 },
+  ],
 };
 
 /**
@@ -287,6 +316,37 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(mv).toContain("get_operations");
     expect(mv).toMatch(/contradiction/i);
   });
+
+  it("get_movement_series names the receipts:true detail affordance (W2-RCPT)", () => {
+    const d = desc("get_movement_series");
+    expect(d).toMatch(/receipts:true/i);
+    expect(d).toMatch(/unitCostCents/); // frozen per-receipt cost surfaced
+  });
+
+  it("get_stock_asof labels possiblyStale a heuristic and rejects today/future (completed days only)", () => {
+    const d = desc("get_stock_asof");
+    expect(d).toMatch(/possiblyStale/);
+    expect(d).toMatch(/heuristic/i); // labeled, never a certainty
+    expect(d).toMatch(/completed days only/i);
+    expect(d).toMatch(/never a fabricated 0/i); // null-with-reason, not a manufactured zero
+  });
+
+  it("compare_periods discloses mixed scope, zero-vs-unknown, and its reasons-key mapping", () => {
+    const d = desc("compare_periods");
+    expect(d).toMatch(/mixed/i); // mixed-scope tool
+    expect(d).toMatch(/your companies/i); // sales metrics = caller companies
+    expect(d).toMatch(/global/i); // ledger metrics = global
+    expect(d).toMatch(/growth from zero/i); // the zero-vs-unknown honesty rule
+    expect(d).toMatch(/a = periodA/); // reasons-key mapping
+  });
+
+  it("get_order_pipeline discloses company scope, gross/refunds, and the no-PII posture", () => {
+    const d = desc("get_order_pipeline");
+    expect(d).toMatch(/company-scoped/i);
+    expect(d).toMatch(/refunds are not netted/i);
+    expect(d).toMatch(/PII/); // customer PII never returned
+    expect(d).toMatch(/aging/i); // open-order aging buckets
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -366,6 +426,10 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
     "lib/reports/inventory-summary.ts",
     "lib/reports/policy.ts",
     "lib/assistant/freshness.ts",
+    // Wave-2 breadth modules wired into the read path by W2-INT (all read-only).
+    "lib/analytics/stock-asof.ts",
+    "lib/reports/compare-periods.ts",
+    "lib/reports/order-pipeline.ts",
     // reorder-config.ts is the read-path config dependency (reorder.ts imports it) and
     // is where the R2-B1 write lives — scanned so the allowlist can name it.
     "lib/reorder-config.ts",
@@ -501,6 +565,73 @@ describe("DEFINITION gate (spec §7 — rate field ⇒ definition string)", () =
 });
 
 // ---------------------------------------------------------------------------
+// PII PROJECTION GATE (spec §7 — allowlist, fail-closed). get_order_pipeline (and
+// any tool touching ExternalOrder) must read through the exported allowlisted
+// `select`s: the gate REJECTS an absent select or any `include`, and asserts the
+// serialized result's key set carries NONE of the named non-selectable PII columns.
+// ---------------------------------------------------------------------------
+
+const PII_FIELD_NAMES = new Set([
+  "customerEmail",
+  "customerName",
+  "rawPayload",
+  "platformStatusRaw",
+  "externalOrderUrl",
+]);
+
+describe("PII PROJECTION gate (spec §7 — get_order_pipeline)", () => {
+  // Seed the proxy so BOTH the order read AND the item read fire (an empty order set
+  // would skip the item query and leave the item allowlist un-exercised).
+  const ORDER = {
+    id: "o1",
+    companyId: "c1",
+    integrationId: "i1",
+    internalStatus: "pending",
+    nativeStatus: "processing",
+    total: "10.00",
+    currency: "USD",
+    externalCreatedAt: new Date("2026-07-01T00:00:00.000Z"),
+    createdAt: new Date("2026-07-01T00:00:00.000Z"),
+  };
+  const ITEM = { id: "it1", orderId: "o1", quantity: 3, isMapped: true };
+
+  async function runSeeded(args: Record<string, unknown>): Promise<ToolResult> {
+    prismaCtl.__reset();
+    prismaCtl.__overrides["externalOrder.findMany"] = [ORDER];
+    prismaCtl.__overrides["externalOrderItem.findMany"] = [ITEM];
+    return assistantTools.get_order_pipeline.run(args, CTX);
+  }
+
+  const externalCalls = () =>
+    prismaCtl.__calls.filter((c) => c.model === "externalOrder" || c.model === "externalOrderItem");
+
+  it("every ExternalOrder/ExternalOrderItem read uses the exported allowlist select and NO include", async () => {
+    await runSeeded({});
+    const calls = externalCalls();
+    // Both reads happened (order read + the dependent item read).
+    expect(calls.some((c) => c.model === "externalOrder")).toBe(true);
+    expect(calls.some((c) => c.model === "externalOrderItem")).toBe(true);
+    for (const c of calls) {
+      const a = c.args as { select?: unknown; include?: unknown };
+      expect(a.include).toBeUndefined(); // fail-closed: an include is REJECTED
+      expect(a.select).toBeDefined(); // fail-closed: an absent select is REJECTED
+      const expected = c.model === "externalOrder" ? ORDER_PIPELINE_SELECT : ORDER_ITEM_UNITS_SELECT;
+      expect(a.select).toEqual(expected);
+    }
+  });
+
+  it("the serialized result key set carries NONE of the non-selectable PII columns (catches spread-leaks)", async () => {
+    // Grouping by integration surfaces the widest coverage block (nativeStatusByIntegration)
+    // — the most likely spread-leak path.
+    const result = await runSeeded({ groupBy: "integration" });
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const piiKeys = collectKeys(result.data, (k) => PII_FIELD_NAMES.has(k));
+    expect(piiKeys).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // W0-PROD — the shared resolver + the ONE not-found shape.
 // ---------------------------------------------------------------------------
 
@@ -570,4 +701,29 @@ describe("universal productId not-found fixture (spec §4 W0-PROD)", () => {
       expect(result).toEqual(NOT_FOUND);
     },
   );
+
+  // Wave-2 productId tools need their required args alongside productId (dayKey /
+  // metric+periods), so they can't share the argless it.each above.
+  it("get_stock_asof returns notFound for a pending-review productId (resolved BEFORE the module call)", async () => {
+    prismaCtl.__reset();
+    const result = await assistantTools.get_stock_asof.run(
+      { dayKey: "2026-01-01", productId: PENDING_REVIEW_FIXTURE_ID },
+      CTX,
+    );
+    expect(result).toEqual(NOT_FOUND);
+  });
+
+  it("compare_periods returns notFound for a pending-review productId", async () => {
+    prismaCtl.__reset();
+    const result = await assistantTools.compare_periods.run(
+      {
+        metric: "sales_units",
+        periodA: { relativeDays: 7 },
+        periodB: { relativeDays: 7 },
+        productId: PENDING_REVIEW_FIXTURE_ID,
+      },
+      CTX,
+    );
+    expect(result).toEqual(NOT_FOUND);
+  });
 });

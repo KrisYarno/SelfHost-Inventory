@@ -4,8 +4,10 @@
  * Two fixed windows enforced together per tool-call:
  *   - per-token: 60 tool-calls / token / minute
  *   - global:    300 tool-calls / minute across all tokens
- * A handful of expensive tools count more than 1x (weighted): `get_operations` 5x,
- * `reorder_report` 3x, `get_valuation` 2x. Weights are keyed by tool NAME only —
+ * A handful of expensive tools count more than 1x (weighted): `get_operations` 5x;
+ * `reorder_report` / `get_movement_series` / `get_inventory_summary` /
+ * `get_order_pipeline` 3x; `get_valuation` / `compare_periods` / `get_stock_asof` 2x.
+ * Weights are keyed by tool NAME only —
  * no argument inspection. When either window is exceeded the request is denied
  * with a Retry-After (seconds until the blocking window rolls over). Only
  * `tools/call` JSON-RPC messages consume budget; initialize / tools/list /
@@ -21,9 +23,19 @@ export const DEFAULT_PER_TOKEN_PER_MIN = 60;
 export const DEFAULT_GLOBAL_PER_MIN = 300;
 export const RATE_WINDOW_MS = 60_000;
 
-/** Weighted tool cost against the budget (spec D8). Per tool NAME only — no
- *  argument inspection. */
-const TOOL_WEIGHTS: Record<string, number> = { get_operations: 5, reorder_report: 3, get_valuation: 2 };
+/** Weighted tool cost against the budget (spec D8 + §6 priors — assigned from actual
+ *  query shapes, not names). Per tool NAME only — no argument inspection. */
+const TOOL_WEIGHTS: Record<string, number> = {
+  get_operations: 5,
+  reorder_report: 3,
+  get_valuation: 2,
+  // Wave-2 breadth (spec §6): the heavy list/aggregate reads.
+  get_movement_series: 3,
+  get_inventory_summary: 3,
+  get_order_pipeline: 3,
+  compare_periods: 2,
+  get_stock_asof: 2,
+};
 
 export function toolWeight(toolName: string): number {
   return TOOL_WEIGHTS[toolName] ?? 1;

@@ -18,10 +18,15 @@ describe("toolWeight", () => {
     expect(toolWeight("anything")).toBe(1);
   });
 
-  it("registers the full weighted-tool table (spec D8): get_operations 5x, reorder_report 3x, get_valuation 2x, everything else 1x by default", () => {
+  it("registers the full weighted-tool table (spec D8 + §6): get_operations 5x; reorder_report/get_movement_series/get_inventory_summary/get_order_pipeline 3x; get_valuation/compare_periods/get_stock_asof 2x; everything else 1x by default", () => {
     expect(toolWeight("get_operations")).toBe(5);
     expect(toolWeight("reorder_report")).toBe(3);
+    expect(toolWeight("get_movement_series")).toBe(3);
+    expect(toolWeight("get_inventory_summary")).toBe(3);
+    expect(toolWeight("get_order_pipeline")).toBe(3);
     expect(toolWeight("get_valuation")).toBe(2);
+    expect(toolWeight("compare_periods")).toBe(2);
+    expect(toolWeight("get_stock_asof")).toBe(2);
     expect(toolWeight("find_product")).toBe(1);
     expect(toolWeight("anything-else")).toBe(1);
   });

@@ -56,10 +56,15 @@ import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
 // Wave-1 breadth modules (W1-VAL/MOVE/SUM/POL/FRESH) — each is a self-contained,
 // Next-free data layer; this file is the ONLY place they are wired into a tool.
 import { getValuation } from "@/lib/analytics/valuation";
-import { getMovementSeries } from "@/lib/reports/movement";
+import { getMovementSeries, getReceipts } from "@/lib/reports/movement";
 import { getInventorySummary } from "@/lib/reports/inventory-summary";
 import { getPolicy } from "@/lib/reports/policy";
 import { getFreshness } from "@/lib/assistant/freshness";
+// Wave-2 breadth modules (W2-ASOF/CMP/ORD, + W2-RCPT extends movement above) — each
+// is a self-contained, Next-free data layer wired into a tool ONLY here.
+import { getStockAsOf } from "@/lib/analytics/stock-asof";
+import { comparePeriods } from "@/lib/reports/compare-periods";
+import { getOrderPipeline, type OrderPipelineGroupBy } from "@/lib/reports/order-pipeline";
 
 // ---------------------------------------------------------------------------
 // Result contract (spec D4 / §3 E1). Discriminated union so consumers branch on
@@ -153,6 +158,14 @@ export const TOOL_SCOPES: Record<string, "company" | "global"> = {
   get_inventory_summary: "global",
   get_inventory_policy: "global",
   get_data_freshness: "global",
+  // Wave 2 breadth tools (spec §6). get_stock_asof reads the GLOBAL snapshot table;
+  // get_order_pipeline is COMPANY-scoped (order-derived). compare_periods is the
+  // MIXED-scope tool — its STATIC entry is "global" (the outer physical-pool label);
+  // its RESULT carries meta.scope "mixed" and each section labels its own scope
+  // (sales = your companies, ledger = global). "mixed" is NEVER a TOOL_SCOPES value.
+  get_stock_asof: "global",
+  compare_periods: "global",
+  get_order_pipeline: "company",
 };
 
 // ---------------------------------------------------------------------------
@@ -171,6 +184,10 @@ const DEFAULT_RELATIVE_DAYS = 30;
 // inventory-summary ranked page — both paginated at the tool boundary.
 const VALUATION_MAX = 100;
 const SUMMARY_RANK_MAX = 50;
+// get_stock_asof catalog page (~80-product catalog fits in one page) and the
+// get_movement_series receipts-detail page — both paginated at the tool boundary.
+const STOCK_ASOF_MAX = 100;
+const RECEIPTS_MAX = 100;
 // DB-level `take` for the snapshot series rows. Reconciled with the budget (D-T7): a
 // point serializes to ~52 bytes, so 1000 points ≈ 51 KiB < ROW_PAGE_BYTE_BUDGET
 // (~56 KiB) < the per-tool cap (64 KiB) < the turn budget (128 KiB). The series is
@@ -617,8 +634,9 @@ const getValuationSchema = z.object({
   offset: nonNegInt.optional(),
 });
 
-// get_movement_series (spec §5 T-MOVE): windowed ledger partition; groupBy maps to the
-// module's day|week|month grain.
+// get_movement_series (spec §5 T-MOVE + T-RCPT): windowed ledger partition; groupBy
+// maps to the module's day|week|month grain. `receipts: true` switches to the STOCK_IN
+// receipts-DETAIL listing (W2-RCPT), paginated via limit/offset.
 const getMovementSeriesSchema = z.object({
   productId: positiveInt.optional(),
   locationId: positiveInt.optional(),
@@ -626,6 +644,43 @@ const getMovementSeriesSchema = z.object({
   to: isoDay.optional(),
   relativeDays: z.number().int().min(1).max(MAX_WINDOW_DAYS).optional(),
   groupBy: z.enum(["day", "week", "month"]).optional(),
+  receipts: z.boolean().optional(),
+  limit: z.number().int().positive().max(RECEIPTS_MAX).optional(),
+  offset: nonNegInt.optional(),
+});
+
+// get_stock_asof (spec §5 T-ASOF): as-of stock on a completed day; catalog (paginated)
+// or single product. dayKey validated by the SHARED isoDay refine at the boundary; the
+// module additionally rejects today/future with an AppError (surfaced by the adapter).
+const getStockAsofSchema = z.object({
+  dayKey: isoDay,
+  productId: positiveInt.optional(),
+  limit: z.number().int().positive().max(STOCK_ASOF_MAX).optional(),
+  offset: nonNegInt.optional(),
+});
+
+// compare_periods (spec §5 T-CMP): one metric across TWO windows. Each period takes the
+// same from/to/relativeDays shape the shared resolver understands — TWO independent
+// resolveWindow calls at the tool boundary (the module takes two ResolvedWindows).
+const periodSchema = z.object({
+  from: isoDay.optional(),
+  to: isoDay.optional(),
+  relativeDays: z.number().int().min(1).max(MAX_WINDOW_DAYS).optional(),
+});
+const comparePeriodsSchema = z.object({
+  metric: z.enum(["sales_units", "sales_revenue", "outbound_units", "inbound_units"]),
+  periodA: periodSchema,
+  periodB: periodSchema,
+  productId: positiveInt.optional(),
+});
+
+// get_order_pipeline (spec §5 T-ORD): company-scoped order-pipeline aggregate over a
+// window, grouped status|integration|day.
+const getOrderPipelineSchema = z.object({
+  from: isoDay.optional(),
+  to: isoDay.optional(),
+  relativeDays: z.number().int().min(1).max(MAX_WINDOW_DAYS).optional(),
+  groupBy: z.enum(["status", "integration", "day"]).optional(),
 });
 
 // get_inventory_summary (spec §5 T-SUM): catalog totals + optional ranked page.
@@ -1121,9 +1176,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `CALENDAR DAY (a wrong-signed row folds into its natural bucket to keep net exact); ` +
       `get_operations instead sums ALL negative non-transfer deltas over a ROLLING instant ` +
       `window, so a small divergence from that tool is the two DEFINITIONS, not a ` +
-      `contradiction. Omitting dates uses relativeDays (default 30). ${DATA_POSTURE}`,
+      `contradiction. Pass receipts:true for the STOCK_IN RECEIPTS DETAIL instead of the ` +
+      `partition — individual receipt events (delta > 0) with frozen unitCostCents/batchId, ` +
+      `newest-first and paginated via limit/offset. Omitting dates uses relativeDays ` +
+      `(default 30). ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getMovementSeriesSchema,
-    run: async (input) => {
+    run: async (input, ctx) => {
       const args = getMovementSeriesSchema.parse(input);
       // Shared window resolver (W0-WIN): from/to/relativeDays -> N day-keys; throws on
       // the from+relativeDays contradiction; echoes its source.
@@ -1136,6 +1194,38 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       if (args.productId != null) {
         const product = await resolveAssistantProduct(args.productId);
         if (!product) return notFound("product", args.productId);
+      }
+      // W2-RCPT: receipts:true switches to the STOCK_IN receipts-DETAIL listing —
+      // DB-side skip/take paging inside getReceipts (never materialize the full event
+      // history). Byte-reserve pattern (W1 seam-fix): the row page is fit into
+      // `budget − ENVELOPE_RESERVE_BYTES` so the added window/coverage/counts envelope
+      // cannot push the completed result past the threaded budget and get it discarded.
+      if (args.receipts) {
+        const page = await getReceipts({
+          window,
+          productId: args.productId,
+          limit: args.limit,
+          offset: args.offset,
+          byteBudget: Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
+        });
+        return ok(
+          {
+            mode: "receipts",
+            window,
+            rows: page.rows,
+            returned: page.returned,
+            totalRows: page.totalRows,
+            nextOffset: page.nextOffset,
+            coverage: {
+              mode: "receipts",
+              note:
+                "STOCK_IN receipts only (delta > 0); a wrong-signed STOCK_IN reversal is " +
+                "excluded here (it folds into the partition's stockIn bucket instead). " +
+                "unitCostCents/batchId are frozen at receipt — null when not recorded, never 0.",
+            },
+          },
+          { scope: "global" },
+        );
       }
       // Map the tool's groupBy -> the module's grain (default day).
       const grain = args.groupBy ?? "day";
@@ -1334,6 +1424,148 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         },
         { scope: "global" },
       );
+    },
+  },
+
+  get_stock_asof: {
+    description:
+      `As-of stock on a COMPLETED past day (dayKey, YYYY-MM-DD) from the nightly ` +
+      `snapshot table — answers "what was my stock on day D?". Catalog-wide ` +
+      `(paginated) or one product via productId. 'units' is null with reason "no ` +
+      `snapshot recorded for that day" when no row exists for that (product, day) — ` +
+      `NEVER a fabricated 0 (a genuine 0-on-hand day has a real row summing to 0, kept ` +
+      `distinct). Each row carries seriesEndsAt (the product's last snapshot day) and ` +
+      `possiblyStale — a LABELED READ-TIME HEURISTIC (true when the product's series ` +
+      `lags coverage.snapshotWatermark), never a certainty. Today and future days are ` +
+      `rejected: snapshots cover completed days only. ${PAGING_POSTURE} ${DATA_POSTURE}`,
+    inputSchema: getStockAsofSchema,
+    run: async (input, ctx) => {
+      const args = getStockAsofSchema.parse(input);
+      // W0-PROD: an explicit productId resolves through the shared approved-product
+      // resolver BEFORE the module call — a pending-review / soft-deleted / absent id
+      // returns notFound, never provisional data (the module itself would just yield an
+      // empty page for an out-of-scope id, mirroring valuation.ts).
+      if (args.productId != null) {
+        const product = await resolveAssistantProduct(args.productId);
+        if (!product) return notFound("product", args.productId);
+      }
+      // getStockAsOf self-validates dayKey and THROWS AppError(VALIDATION,400) on
+      // today/future/malformed — that propagates to the adapter, which surfaces the
+      // adapter's error result. byteBudget(ctx) is threaded into the module's DB paging.
+      const page = await getStockAsOf({
+        dayKey: args.dayKey,
+        productId: args.productId,
+        limit: args.limit,
+        offset: args.offset,
+        byteBudget: byteBudget(ctx),
+      });
+      return ok(
+        {
+          dayKey: args.dayKey,
+          rows: page.rows,
+          returned: page.returned,
+          totalRows: page.totalRows,
+          nextOffset: page.nextOffset,
+          coverage: page.coverage,
+        },
+        { scope: "global" },
+      );
+    },
+  },
+
+  compare_periods: {
+    description:
+      `Compare ONE metric across TWO periods, with the absolute delta and percent ` +
+      `change computed SERVER-SIDE (the model never does this arithmetic). metric: ` +
+      `sales_units | sales_revenue (scoped to YOUR companies) | outbound_units | ` +
+      `inbound_units (GLOBAL physical ledger). This is a MIXED-scope tool: sales ` +
+      `metrics filter by the companies you can access, ledger metrics are global. ` +
+      `periodA/periodB each take {from,to} or relativeDays. A period with NO rows ` +
+      `counts as 0 ONLY when the metric's data covers the whole interval; a period ` +
+      `that predates (or straddles) the data reads as null + a reason — growth from a ` +
+      `pre-history period is UNKNOWN, never "growth from zero". pctChange is null when ` +
+      `period A is zero. reasons keys: a = periodA, b = periodB, pctChange = percent ` +
+      `change. unequalLengths flags mismatched window lengths (comparison still runs). ` +
+      `${DATA_POSTURE}`,
+    inputSchema: comparePeriodsSchema,
+    run: async (input, ctx) => {
+      const args = comparePeriodsSchema.parse(input);
+      // TWO independent window resolutions (W0-WIN): the module takes two already-
+      // resolved windows; either resolve() throws on the from+relativeDays contradiction.
+      const now = new Date();
+      const periodA = resolveWindow(args.periodA, now, DEFAULT_RELATIVE_DAYS);
+      const periodB = resolveWindow(args.periodB, now, DEFAULT_RELATIVE_DAYS);
+      assertWindow(periodA.from, periodA.to);
+      assertWindow(periodB.from, periodB.to);
+      // W0-PROD: an explicit productId narrows both sources; resolve it first.
+      if (args.productId != null) {
+        const product = await resolveAssistantProduct(args.productId);
+        if (!product) return notFound("product", args.productId);
+      }
+      const isSales = args.metric === "sales_units" || args.metric === "sales_revenue";
+      // Sales metrics are company-scoped INSIDE the module (mandatory) — pass ctx.companyIds;
+      // ledger metrics ignore it (no company dimension).
+      const result = await comparePeriods({
+        metric: args.metric,
+        periodA,
+        periodB,
+        productId: args.productId,
+        companyIds: ctx.companyIds,
+      });
+      // Mixed-scope result envelope (spec §6): meta.scope "mixed"; coverage labels the
+      // metric's real scope so a consumer never reads a global ledger number as
+      // company-scoped (or vice versa).
+      return ok(
+        {
+          metric: args.metric,
+          a: result.a,
+          b: result.b,
+          delta: result.delta,
+          pctChange: result.pctChange,
+          reasons: result.reasons,
+          unequalLengths: result.unequalLengths,
+          periodA,
+          periodB,
+          coverage: {
+            metricScope: isSales
+              ? "sales metric — scoped to your companies"
+              : "physical-ledger metric — global (inventory has no company dimension)",
+            reasonsKeys: "a = periodA, b = periodB, pctChange = percent change",
+            unequalLengths: result.unequalLengths,
+          },
+        },
+        { scope: "mixed" },
+      );
+    },
+  },
+
+  get_order_pipeline: {
+    description:
+      `Order pipeline (Woo/Shopify orders), COMPANY-SCOPED and aggregate-only: order ` +
+      `counts + GROSS revenue (a SEPARATE section from item units, so a multi-item ` +
+      `order never triples its revenue), plus aging of OPEN orders — pending|processing ` +
+      `bucketed 0-7 / 8-30 / 31+ elapsed days (final fulfilled|cancelled are excluded). ` +
+      `groupBy status | integration | day, split by currency. Timestamp is ` +
+      `externalCreatedAt ?? createdAt (fallback count disclosed in coverage). ` +
+      `coverage.refundsNote: refunds are NOT netted (revenue is gross ordered); ` +
+      `nativeStatus is platform-verbatim and only surfaced when grouping by integration. ` +
+      `Customer PII is never returned. Omitting dates uses relativeDays (default 30). ` +
+      `${DATA_POSTURE}`,
+    inputSchema: getOrderPipelineSchema,
+    run: async (input, ctx) => {
+      const args = getOrderPipelineSchema.parse(input);
+      const window = resolveWindow(
+        { from: args.from, to: args.to, relativeDays: args.relativeDays },
+        new Date(),
+        DEFAULT_RELATIVE_DAYS,
+      );
+      assertWindow(window.from, window.to);
+      const groupBy = (args.groupBy ?? "status") as OrderPipelineGroupBy;
+      // Company-scoped (spec §6): ctx.companyIds is passed straight through; the module
+      // returns an empty result (no query) for an empty scope. coverage comes from the
+      // module and validates the §7 CoverageSchema.
+      const result = await getOrderPipeline({ window, groupBy, companyIds: ctx.companyIds });
+      return ok(result, { scope: "company" });
     },
   },
 };

@@ -127,7 +127,48 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
       const id = num(input, "productId");
       const range = dateRangePhrase(input);
       const groupBy = str(input, "groupBy");
-      const parts = [id ? `product #${id}` : "", range, groupBy ? `by ${groupBy}` : ""].filter(Boolean);
+      const receipts = (input as Record<string, unknown> | null | undefined)?.receipts === true;
+      const parts = [
+        id ? `product #${id}` : "",
+        range,
+        receipts ? "receipts" : groupBy ? `by ${groupBy}` : "",
+      ].filter(Boolean);
+      return parts.join(", ");
+    },
+  },
+  get_stock_asof: {
+    pendingLabel: "Looking up as-of stock…",
+    successLabel: "Looked up as-of stock",
+    failureNoun: "as-of stock",
+    emptyCopy: "No snapshot for that day.",
+    summarizeArgs: (input) => {
+      const day = str(input, "dayKey");
+      const id = num(input, "productId");
+      const parts = [day ? `on ${day}` : "", id ? `product #${id}` : ""].filter(Boolean);
+      return parts.join(", ");
+    },
+  },
+  compare_periods: {
+    pendingLabel: "Comparing periods…",
+    successLabel: "Compared periods",
+    failureNoun: "period comparison",
+    emptyCopy: "Nothing to compare in those periods.",
+    summarizeArgs: (input) => {
+      const metric = str(input, "metric");
+      const id = num(input, "productId");
+      const parts = [metric ? metric.replace(/_/g, " ") : "", id ? `product #${id}` : ""].filter(Boolean);
+      return parts.join(", ");
+    },
+  },
+  get_order_pipeline: {
+    pendingLabel: "Reviewing the order pipeline…",
+    successLabel: "Reviewed the order pipeline",
+    failureNoun: "order pipeline",
+    emptyCopy: "No orders in this range.",
+    summarizeArgs: (input) => {
+      const range = dateRangePhrase(input);
+      const groupBy = str(input, "groupBy");
+      const parts = [range, groupBy ? `by ${groupBy}` : ""].filter(Boolean);
       return parts.join(", ");
     },
   },

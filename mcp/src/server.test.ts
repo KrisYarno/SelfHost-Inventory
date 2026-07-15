@@ -38,15 +38,27 @@ jest.mock("@/lib/prisma", () => ({
       findMany: jest.fn(async () => []),
       groupBy: jest.fn(async () => []),
       aggregate: jest.fn(async () => ({ _min: {}, _max: {}, _sum: {}, _count: {} })),
+      // Wave-2: getReceipts (get_movement_series receipts:true) counts before paging.
+      count: jest.fn(async () => 0),
     },
     analyticsRebuildState: { findUnique: jest.fn(async () => null) },
     fulfillmentSyncState: { findMany: jest.fn(async () => []) },
     productStockSnapshot: {
-      aggregate: jest.fn(async () => ({ _min: {} })),
+      // Wave-2: get_stock_asof reads _min AND _max for dataStart + watermark.
+      aggregate: jest.fn(async () => ({ _min: {}, _max: {} })),
       groupBy: jest.fn(async () => []),
       findMany: jest.fn(async () => []),
     },
-    externalOrder: { findFirst: jest.fn(async () => null), count: jest.fn(async () => 0) },
+    // Wave-2: compare_periods sales metrics read ProductSalesFact aggregates.
+    productSalesFact: { aggregate: jest.fn(async () => ({ _min: {}, _max: {}, _sum: {}, _count: {} })) },
+    externalOrder: {
+      findFirst: jest.fn(async () => null),
+      count: jest.fn(async () => 0),
+      // Wave-2: get_order_pipeline reads orders through the PII allowlist.
+      findMany: jest.fn(async () => []),
+    },
+    // Wave-2: get_order_pipeline reads order items through the PII allowlist.
+    externalOrderItem: { findMany: jest.fn(async () => []) },
     globalReorderSettings: { findUnique: jest.fn(async () => null) },
     location: { findMany: jest.fn(async () => []) },
     $queryRaw: jest.fn(async () => [{ ok: 1 }]),
@@ -372,6 +384,163 @@ describe("POST /mcp — Wave-1 tool round-trips assert REAL payload values (item
     // Enablement is never observable from this process; the suffix discloses the store count.
     expect(toolResult.data.fulfillmentSync.enabled).toBeNull();
     expect(toolResult.data.fulfillmentSync.cursor).toContain("(oldest of 2 integrations)");
+  });
+});
+
+describe("POST /mcp — Wave-2 tool round-trips assert REAL payload values (item 6)", () => {
+  // Each Wave-2 tool executes end-to-end over MCP Streamable HTTP against a SEEDED mock
+  // and asserts the real payload values on the wire (seed mock, assert real values — the
+  // W1 seam-fix standard). Restore benign defaults so each seeded round-trip is
+  // order-independent.
+  beforeEach(() => {
+    p.userCompany.findMany.mockReset();
+    p.userCompany.findMany.mockResolvedValue([]);
+    p.product.count.mockReset();
+    p.product.count.mockResolvedValue(0);
+    p.product.findMany.mockReset();
+    p.product.findMany.mockResolvedValue([]);
+    p.productStockSnapshot.aggregate.mockReset();
+    p.productStockSnapshot.aggregate.mockResolvedValue({ _min: {}, _max: {} });
+    p.productStockSnapshot.groupBy.mockReset();
+    p.productStockSnapshot.groupBy.mockResolvedValue([]);
+    p.analyticsRebuildState.findUnique.mockReset();
+    p.analyticsRebuildState.findUnique.mockResolvedValue(null);
+    p.inventory_logs.aggregate.mockReset();
+    p.inventory_logs.aggregate.mockResolvedValue({ _min: {}, _max: {}, _sum: {}, _count: {} });
+    p.inventory_logs.count.mockReset();
+    p.inventory_logs.count.mockResolvedValue(0);
+    p.inventory_logs.findMany.mockReset();
+    p.inventory_logs.findMany.mockResolvedValue([]);
+    p.externalOrder.findMany.mockReset();
+    p.externalOrder.findMany.mockResolvedValue([]);
+    p.externalOrderItem.findMany.mockReset();
+    p.externalOrderItem.findMany.mockResolvedValue([]);
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function roundTrip(name: string, args: Record<string, unknown>): Promise<any> {
+    const server = createMcpHttpServer();
+    const port = await listen(server);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: MCP_HEADERS,
+        body: toolCall(1, name, args),
+      });
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rpc = (await res.json()) as any;
+      expect(rpc.result).toBeDefined();
+      return JSON.parse(rpc.result.content[0].text as string);
+    } finally {
+      await close(server);
+    }
+  }
+
+  it("get_stock_asof: exact-day units + real coverage watermark (global)", async () => {
+    p.product.count.mockResolvedValueOnce(1);
+    p.product.findMany.mockResolvedValueOnce([{ id: 1, name: "TIRZ" }]);
+    p.productStockSnapshot.aggregate.mockResolvedValueOnce({
+      _min: { dayKey: "2026-06-01" },
+      _max: { dayKey: "2026-06-30" },
+    });
+    // groupBy is called twice inside the page fetch: day-sum (_sum) then series-end (_max).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    p.productStockSnapshot.groupBy.mockImplementation(async (args: any) =>
+      args._sum
+        ? [{ productId: 1, _sum: { quantity: 42 } }]
+        : [{ productId: 1, _max: { dayKey: "2026-06-30" } }],
+    );
+
+    const toolResult = await roundTrip("get_stock_asof", { dayKey: "2026-06-15" });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.dayKey).toBe("2026-06-15");
+    expect(toolResult.data.totalRows).toBe(1);
+    // Real exact-day on-hand + the pair's series end.
+    expect(toolResult.data.rows[0].productId).toBe(1);
+    expect(toolResult.data.rows[0].units).toBe(42);
+    expect(toolResult.data.rows[0].seriesEndsAt).toBe("2026-06-30");
+    // Coverage watermark = later of MAX(dayKey) and lastWindowTo (null here) → 2026-06-30.
+    expect(toolResult.data.coverage.snapshotWatermark).toBe("2026-06-30");
+    expect(toolResult.data.coverage.snapshotDataStart).toBe("2026-06-01");
+  });
+
+  it("compare_periods (outbound_units): server-computed a/b/delta/pctChange + mixed scope", async () => {
+    // Call order inside comparePeriods: dataStart (_min), value(periodA) (_sum), value(periodB).
+    p.inventory_logs.aggregate
+      .mockResolvedValueOnce({ _min: { changeTime: new Date("2026-01-01T00:00:00.000Z") } })
+      .mockResolvedValueOnce({ _sum: { delta: -100 } })
+      .mockResolvedValueOnce({ _sum: { delta: -150 } });
+
+    const toolResult = await roundTrip("compare_periods", {
+      metric: "outbound_units",
+      periodA: { relativeDays: 30 },
+      periodB: { relativeDays: 30 },
+    });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.meta.scope).toBe("mixed");
+    expect(toolResult.data.metric).toBe("outbound_units");
+    // |−100| and |−150|, delta and pctChange computed server-side (never by the model).
+    expect(toolResult.data.a).toBe(100);
+    expect(toolResult.data.b).toBe(150);
+    expect(toolResult.data.delta).toBe(50);
+    expect(toolResult.data.pctChange).toBe(0.5);
+  });
+
+  it("get_order_pipeline: SEPARATE order revenue vs item units, company-scoped", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]); // ctx.companyIds
+    p.externalOrder.findMany.mockResolvedValueOnce([
+      {
+        id: "o1",
+        companyId: "c1",
+        integrationId: "i1",
+        internalStatus: "pending",
+        nativeStatus: "processing",
+        total: "12.50",
+        currency: "USD",
+        externalCreatedAt: new Date("2026-07-01T00:00:00.000Z"),
+        createdAt: new Date("2026-07-01T00:00:00.000Z"),
+      },
+    ]);
+    p.externalOrderItem.findMany.mockResolvedValueOnce([
+      { id: "it1", orderId: "o1", quantity: 4, isMapped: true },
+    ]);
+
+    const toolResult = await roundTrip("get_order_pipeline", {});
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.meta.scope).toBe("company");
+    expect(toolResult.data.groupBy).toBe("status");
+    // ORDER section: one pending order at 1250 cents (SUM(total) never joined to items).
+    expect(toolResult.data.orders[0].key).toBe("pending");
+    expect(toolResult.data.orders[0].orderCount).toBe(1);
+    expect(toolResult.data.orders[0].totalCents).toBe(1250);
+    // ITEM section: 4 units, a SEPARATE aggregate (a multi-item order never triples revenue).
+    expect(toolResult.data.items[0].units).toBe(4);
+    expect(toolResult.data.coverage.refundsNote).toBe("refunds are not netted");
+  });
+
+  it("get_movement_series receipts:true: STOCK_IN detail rows with frozen cost (global)", async () => {
+    p.inventory_logs.count.mockResolvedValueOnce(1);
+    p.inventory_logs.findMany.mockResolvedValueOnce([
+      {
+        productId: 1,
+        locationId: 2,
+        delta: 20,
+        unitCostCents: 500,
+        batchId: "B1",
+        changeTime: new Date("2026-07-01T00:00:00.000Z"),
+      },
+    ]);
+
+    const toolResult = await roundTrip("get_movement_series", { receipts: true });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.mode).toBe("receipts");
+    expect(toolResult.data.totalRows).toBe(1);
+    // Real receipt detail: positive delta as quantity, frozen unitCostCents/batchId relayed.
+    expect(toolResult.data.rows[0].quantity).toBe(20);
+    expect(toolResult.data.rows[0].unitCostCents).toBe(500);
+    expect(toolResult.data.rows[0].batchId).toBe("B1");
+    expect(toolResult.data.rows[0].locationId).toBe(2);
   });
 });
 
