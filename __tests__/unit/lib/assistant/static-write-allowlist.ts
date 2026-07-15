@@ -8,10 +8,10 @@
  * legitimate shared-module write reachable only from web routes, NEVER from a tool's
  * `def.run`.
  *
- * TODAY: exactly ONE entry — lib/reorder-config.ts's getGlobalReorderSettings() upsert
- * (the R2-B1 write). W0-4 replaces that upsert with findUnique + a defaults constant and
- * REMOVES this entry. The companion assertion below pins the length at <= 1 so the
- * allowlist can only ever SHRINK.
+ * TODAY: EMPTY. W0-4 closed R2-B1 (getGlobalReorderSettings() is findUnique + a defaults
+ * constant; the admin PUT is the only authorized write path). The companion assertion
+ * pins the length at <= 1 so the allowlist can only ever SHRINK — any new entry is a
+ * deliberate, reviewed exception.
  *
  * (This module is also matched by jest's testMatch, so the shrink-only invariant lives
  * here as its own assertion rather than as a bare data file with no tests.)
@@ -26,15 +26,7 @@ export interface StaticWriteAllowlistEntry {
   note: string;
 }
 
-export const STATIC_WRITE_ALLOWLIST: StaticWriteAllowlistEntry[] = [
-  {
-    file: "lib/reorder-config.ts",
-    method: "upsert",
-    note:
-      "REMOVED BY W0-4 — getGlobalReorderSettings() upsert (R2-B1) becomes findUnique + " +
-      "REORDER_GLOBAL_DEFAULTS; the admin PUT keeps the only authorized write path.",
-  },
-];
+export const STATIC_WRITE_ALLOWLIST: StaticWriteAllowlistEntry[] = [];
 
 /** Baseline ceiling: the allowlist can only shrink from here. */
 export const STATIC_WRITE_ALLOWLIST_MAX = 1;

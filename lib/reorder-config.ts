@@ -16,11 +16,37 @@
  */
 
 import prisma from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import type { GlobalReorderSettings } from "@prisma/client";
 
 /** Hard fallback if even the global default lead time is misconfigured (<= 0). Mirrors
  *  warehouse-metrics DEFAULT_LEAD_TIME_DAYS so the two never diverge. */
 export const DEFAULT_LEAD_TIME_DAYS = 14;
+
+/**
+ * The ONE authoritative in-memory fallback for the singleton global settings row
+ * (spec §4 W0-RO / R2-B1). Full domain shape, mirroring the `@default(...)` tokens on
+ * schema.prisma's `GlobalReorderSettings` model — the source of truth. Prisma does NOT
+ * expose column defaults at runtime, so a schema-TEXT drift guard (in the reorder-config
+ * unit test) parses those tokens and asserts they still match this constant.
+ *
+ * Used when the row is absent (a restored/pruned DB where the 20251204 seed was lost;
+ * the 20260714220000 repair migration backfills it). Reading this constant is
+ * SIDE-EFFECT-FREE: the read path issues ZERO writes.
+ */
+export const REORDER_GLOBAL_DEFAULTS: GlobalReorderSettings = {
+  id: 1,
+  defaultLeadTimeDays: 14,
+  defaultSafetyStockDays: 7,
+  defaultTargetCoverageMultiple: 2,
+  minEvidenceEvents: 3,
+  holdingCostRate: new Prisma.Decimal("0.25"),
+  updatedBy: null,
+  // Synthetic sentinel: the row is absent, so there is no real persisted timestamp.
+  // The schema default is `now()` (a runtime function), which has no fixed value to
+  // mirror; the epoch marks "these are the built-in defaults, never a saved state".
+  updatedAt: new Date(0),
+};
 
 /** A stored lead time above this is treated as data corruption and coerced to the
  *  default (10 years — no legitimate procurement lead time approaches it). */
@@ -56,15 +82,16 @@ function isPositiveInt(v: number | null | undefined): v is number {
 }
 
 /**
- * Read the singleton global settings row (id = 1), seeding it with schema defaults
- * when absent. Upsert (not findOrCreate) so a race can't 500 on a duplicate id.
+ * Read the singleton global settings row (id = 1). READ-ONLY (spec §4 W0-RO / R2-B1):
+ * a plain `findUnique` with an in-memory fallback to `REORDER_GLOBAL_DEFAULTS` when the
+ * row is absent. This path is reachable from the assistant/MCP `reorder_report` tool, so
+ * it MUST NOT write — the earlier `upsert` (which seeded the row on every read) was the
+ * R2-B1 blocker. The only authorized seed is the admin PUT's upsert and the
+ * 20260714220000 repair migration.
  */
 export async function getGlobalReorderSettings(): Promise<GlobalReorderSettings> {
-  return prisma.globalReorderSettings.upsert({
-    where: { id: 1 },
-    update: {},
-    create: { id: 1 },
-  });
+  const row = await prisma.globalReorderSettings.findUnique({ where: { id: 1 } });
+  return row ?? REORDER_GLOBAL_DEFAULTS;
 }
 
 /**

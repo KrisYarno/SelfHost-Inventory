@@ -10,7 +10,10 @@
  *    leadTimeSource:"default" (codex #11 — distinct from threshold's 0=disabled).
  *  - bufferDays 0 is VALID (no buffer) and does NOT coerce.
  *  - MOQ floors at 1; targetCoverageMultiple floors at 1.
- *  - getGlobalReorderSettings seeds the singleton (id=1) when the row is missing.
+ *  - getGlobalReorderSettings reads the singleton (id=1) READ-ONLY: findUnique + an
+ *    in-memory fallback to REORDER_GLOBAL_DEFAULTS, ZERO writes (spec §4 W0-RO / R2-B1).
+ *  - REORDER_GLOBAL_DEFAULTS mirrors schema.prisma's @default(...) tokens — pinned by a
+ *    schema-TEXT drift guard (Prisma hides column defaults at runtime).
  */
 
 import { mockDeep, mockReset, type DeepMockProxy } from "jest-mock-extended";
@@ -21,11 +24,14 @@ jest.mock("@/lib/prisma", () => {
   return { __esModule: true, default: md() };
 });
 
+import fs from "fs";
+import path from "path";
 import type { GlobalReorderSettings } from "@prisma/client";
 import prisma from "@/lib/prisma";
 import {
   resolveReorderConfig,
   getGlobalReorderSettings,
+  REORDER_GLOBAL_DEFAULTS,
 } from "@/lib/reorder-config";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
@@ -168,13 +174,96 @@ describe("resolveReorderConfig — bufferDays 0 is valid; MOQ + multiple floor",
   });
 });
 
-describe("getGlobalReorderSettings — singleton seeding", () => {
-  it("returns the existing singleton row", async () => {
-    db.globalReorderSettings.upsert.mockResolvedValue(GLOBALS);
+describe("getGlobalReorderSettings — findUnique + defaults fallback, ZERO writes (R2-B1)", () => {
+  it("returns the existing singleton row verbatim", async () => {
+    db.globalReorderSettings.findUnique.mockResolvedValue(GLOBALS);
     const g = await getGlobalReorderSettings();
-    expect(g.id).toBe(1);
-    const arg = db.globalReorderSettings.upsert.mock.calls[0][0];
+    expect(g).toBe(GLOBALS);
+    const arg = db.globalReorderSettings.findUnique.mock.calls[0][0];
     expect(arg.where).toEqual({ id: 1 });
-    expect(arg.create).toEqual({ id: 1 });
+  });
+
+  it("falls back to REORDER_GLOBAL_DEFAULTS when the row is absent", async () => {
+    db.globalReorderSettings.findUnique.mockResolvedValue(null);
+    const g = await getGlobalReorderSettings();
+    expect(g).toBe(REORDER_GLOBAL_DEFAULTS);
+    expect(g.id).toBe(1);
+    expect(g.defaultLeadTimeDays).toBe(14);
+    expect(g.defaultSafetyStockDays).toBe(7);
+    expect(g.defaultTargetCoverageMultiple).toBe(2);
+    expect(g.minEvidenceEvents).toBe(3);
+    expect(g.holdingCostRate.toString()).toBe("0.25");
+    expect(g.updatedBy).toBeNull();
+  });
+
+  it("issues NO write calls on the read path (the R2-B1 upsert is gone)", async () => {
+    db.globalReorderSettings.findUnique.mockResolvedValue(null);
+    await getGlobalReorderSettings();
+    expect(db.globalReorderSettings.upsert).not.toHaveBeenCalled();
+    expect(db.globalReorderSettings.create).not.toHaveBeenCalled();
+    expect(db.globalReorderSettings.update).not.toHaveBeenCalled();
+    expect(db.globalReorderSettings.findUnique).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("REORDER_GLOBAL_DEFAULTS — schema-text drift guard (spec §4 W0-RO)", () => {
+  // Prisma does not expose column defaults at runtime, so the ONLY reliable guard is to
+  // parse schema.prisma's model block and compare each @default(...) token to the
+  // constant. A default drifting apart in schema vs. code fails here.
+  const schemaPath = path.resolve(__dirname, "../../../prisma/schema.prisma");
+  const block =
+    fs.readFileSync(schemaPath, "utf8").match(/model GlobalReorderSettings \{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+  // Captures a @default argument, tolerating one level of nested parens (e.g. now()).
+  const DEFAULT_ARG = "@default\\(([^()]*(?:\\([^)]*\\))?[^)]*)\\)";
+  const defaultTokenFor = (field: string): string | null => {
+    const m = block.match(new RegExp(`\\n\\s*${field}\\s+\\S+\\??[^\\n]*${DEFAULT_ARG}`));
+    return m ? m[1].trim() : null;
+  };
+
+  it("finds the model block", () => {
+    expect(block).toContain("defaultLeadTimeDays");
+  });
+
+  const NUMERIC_DEFAULTS: Record<string, number> = {
+    id: 1,
+    defaultLeadTimeDays: 14,
+    defaultSafetyStockDays: 7,
+    defaultTargetCoverageMultiple: 2,
+    minEvidenceEvents: 3,
+  };
+
+  it.each(Object.entries(NUMERIC_DEFAULTS))(
+    "%s: schema @default matches REORDER_GLOBAL_DEFAULTS (%d)",
+    (field, expected) => {
+      expect(defaultTokenFor(field)).toBe(String(expected));
+      expect((REORDER_GLOBAL_DEFAULTS as unknown as Record<string, number>)[field]).toBe(expected);
+    },
+  );
+
+  it("holdingCostRate: schema @default(0.25) matches the Decimal constant", () => {
+    expect(defaultTokenFor("holdingCostRate")).toBe("0.25");
+    expect(REORDER_GLOBAL_DEFAULTS.holdingCostRate.toString()).toBe("0.25");
+  });
+
+  it("updatedAt default is the runtime now() fn ⇒ constant is a synthetic epoch sentinel", () => {
+    expect(defaultTokenFor("updatedAt")).toBe("now()");
+    expect(REORDER_GLOBAL_DEFAULTS.updatedAt.getTime()).toBe(0);
+  });
+
+  it("updatedBy has no @default (nullable) ⇒ constant is null", () => {
+    expect(defaultTokenFor("updatedBy")).toBeNull();
+    expect(REORDER_GLOBAL_DEFAULTS.updatedBy).toBeNull();
+  });
+
+  it("every fixed-literal @default field in the model is pinned above (a new one forces an update)", () => {
+    const fixedDefaultFields = Array.from(
+      block.matchAll(new RegExp(`\\n\\s*(\\w+)\\s+\\S+\\??[^\\n]*${DEFAULT_ARG}`, "g")),
+    )
+      .filter((m) => m[2].trim() !== "now()")
+      .map((m) => m[1]);
+    expect(fixedDefaultFields.sort()).toEqual(
+      [...Object.keys(NUMERIC_DEFAULTS), "holdingCostRate"].sort(),
+    );
   });
 });

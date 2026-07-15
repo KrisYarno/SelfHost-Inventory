@@ -14,7 +14,7 @@ import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { recordChange, type ChangeDiff } from "@/lib/change-tracking";
 import { GlobalReorderSettingsSchema } from "@/lib/validation/admin";
-import { getGlobalReorderSettings } from "@/lib/reorder-config";
+import { getGlobalReorderSettings, REORDER_GLOBAL_DEFAULTS } from "@/lib/reorder-config";
 
 export const dynamic = "force-dynamic";
 
@@ -34,7 +34,13 @@ export const PUT = apiHandler(async (request: NextRequest) => {
   await requireCSRF(request);
 
   const body = GlobalReorderSettingsSchema.parse(await request.json());
-  const existing = await getGlobalReorderSettings();
+
+  // The read path (getGlobalReorderSettings) no longer seeds the row, so detect presence
+  // here to keep the audit baseline honest: when the singleton is absent the "from"
+  // values are the schema defaults (REORDER_GLOBAL_DEFAULTS), not a persisted state, and
+  // the diff says so via details.baselineSource.
+  const existingRow = await prisma.globalReorderSettings.findUnique({ where: { id: 1 } });
+  const baseline = existingRow ?? REORDER_GLOBAL_DEFAULTS;
 
   const fields = [
     "defaultLeadTimeDays",
@@ -49,14 +55,26 @@ export const PUT = apiHandler(async (request: NextRequest) => {
     const to = body[field];
     if (to === undefined) continue;
     data[field] = to;
-    const from = existing[field] as number;
+    const from = baseline[field] as number;
     if (from !== to) changes[field] = { from, to };
   }
 
   const updated = await prisma.$transaction(async (tx) => {
-    const row = await tx.globalReorderSettings.update({
+    // Upsert (authorized write path): seed the singleton from the schema defaults +
+    // the submitted values when the row is absent, else patch the existing row.
+    const row = await tx.globalReorderSettings.upsert({
       where: { id: 1 },
-      data: { ...data, updatedBy: user.id },
+      update: { ...data, updatedBy: user.id },
+      create: {
+        id: 1,
+        defaultLeadTimeDays: REORDER_GLOBAL_DEFAULTS.defaultLeadTimeDays,
+        defaultSafetyStockDays: REORDER_GLOBAL_DEFAULTS.defaultSafetyStockDays,
+        defaultTargetCoverageMultiple: REORDER_GLOBAL_DEFAULTS.defaultTargetCoverageMultiple,
+        minEvidenceEvents: REORDER_GLOBAL_DEFAULTS.minEvidenceEvents,
+        holdingCostRate: REORDER_GLOBAL_DEFAULTS.holdingCostRate,
+        ...data,
+        updatedBy: user.id,
+      },
     });
     await recordChange(tx, {
       actor: { userId: user.id },
@@ -65,7 +83,10 @@ export const PUT = apiHandler(async (request: NextRequest) => {
       entityId: null,
       action: "Updated global reorder settings",
       changes,
-      details: { settings: "global-reorder" },
+      details: {
+        settings: "global-reorder",
+        baselineSource: existingRow ? "row" : "schema_defaults",
+      },
     });
     return row;
   });

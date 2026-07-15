@@ -8,7 +8,7 @@
  *  1. FAIL-CLOSED Prisma proxy — every registered tool is run through a per-tool fixture
  *     matrix against a proxy that returns shape-correct benign values (so every read
  *     path COMPLETES) and RECORDS every call. Each tool must (a) not throw and (b) issue
- *     zero business writes. ONLY `reorder_report`'s write assertion is `test.failing`
+ *     zero business writes across EVERY tool (R2-B1 closed by W0-4; no expected-fails)
  *     (the known R2-B1 upsert; W0-4's acceptance flips it).
  *  2. STATIC source check — no un-allowlisted Prisma write tokens in the read-path source
  *     (allowlist in ./static-write-allowlist).
@@ -218,7 +218,7 @@ describe("READ-ONLY gate — every tool completes without throwing (fail-closed 
 });
 
 // ---------------------------------------------------------------------------
-// (1b) Zero business writes. reorder_report is the ONE isolated `test.failing`.
+// (1b) Zero business writes — every tool, no exceptions (R2-B1 closed by W0-4).
 // ---------------------------------------------------------------------------
 
 describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)", () => {
@@ -233,10 +233,9 @@ describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)
     },
   );
 
-  // KNOWN R2-B1: reorder_report -> getReorderReport -> getGlobalReorderSettings() still
-  // UPSERTs the singleton settings row. W0-4 replaces it with findUnique + defaults; the
-  // orchestrator flips this to a normal (passing) assertion at W0-4 acceptance.
-  it.failing("reorder_report issues zero write calls (known R2-B1 upsert — W0-4)", async () => {
+  // R2-B1 CLOSED by W0-4: getGlobalReorderSettings() is findUnique + in-memory defaults.
+  // This is the permanent zero-writes assertion for the reorder read path.
+  it("reorder_report issues zero write calls (R2-B1 closed by W0-4)", async () => {
     prismaCtl.__reset();
     await assistantTools.reorder_report.run({}, CTX);
     expect(writeCalls()).toEqual([]);
@@ -281,10 +280,8 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
     expect(unexpected).toEqual([]);
   });
 
-  it("the one allowlisted write (reorder-config upsert) is really present (allowlist not stale)", () => {
-    const repoRoot = path.resolve(__dirname, "../../../..");
-    const src = fs.readFileSync(path.join(repoRoot, "lib/reorder-config.ts"), "utf8");
-    expect(/\.\s*upsert\s*\(/.test(src)).toBe(true);
+  it("the allowlist is EMPTY — the read path carries zero writes (W0-4 closed R2-B1)", () => {
+    expect(STATIC_WRITE_ALLOWLIST).toEqual([]);
   });
 });
 

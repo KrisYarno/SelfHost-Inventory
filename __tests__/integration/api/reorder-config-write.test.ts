@@ -40,8 +40,8 @@ jest.mock("@/lib/prisma", () => {
     },
     productReorderConfig: { upsert: jest.fn(() => Promise.resolve({})) },
     globalReorderSettings: {
+      findUnique: jest.fn(),
       upsert: jest.fn(),
-      update: jest.fn(),
     },
   };
   db.$transaction = jest.fn(async (fn: any) => fn(db));
@@ -92,15 +92,16 @@ test("product PUT upserts the reorder config and audits the diff", async () => {
   expect(changes["reorderConfig.minOrderQuantity"]).toEqual({ from: 1, to: 12 });
 });
 
-test("global reorder-settings PUT updates the singleton with an audit diff", async () => {
-  db.globalReorderSettings.upsert.mockResolvedValue({
+test("global reorder-settings PUT upserts the singleton with an audit diff (row present)", async () => {
+  // Present row → findUnique returns it; upsert patches via its update branch.
+  db.globalReorderSettings.findUnique.mockResolvedValue({
     id: 1,
     defaultLeadTimeDays: 14,
     defaultSafetyStockDays: 7,
     defaultTargetCoverageMultiple: 2,
     minEvidenceEvents: 3,
   });
-  db.globalReorderSettings.update.mockResolvedValue({
+  db.globalReorderSettings.upsert.mockResolvedValue({
     id: 1,
     defaultLeadTimeDays: 30,
     defaultSafetyStockDays: 7,
@@ -117,11 +118,42 @@ test("global reorder-settings PUT updates the singleton with an audit diff", asy
   const body = await res.json();
   expect(body.defaultLeadTimeDays).toBe(30);
 
-  const updateArg = db.globalReorderSettings.update.mock.calls[0][0];
-  expect(updateArg.where).toEqual({ id: 1 });
-  expect(updateArg.data).toMatchObject({ defaultLeadTimeDays: 30, updatedBy: 9 });
+  const upsertArg = db.globalReorderSettings.upsert.mock.calls[0][0];
+  expect(upsertArg.where).toEqual({ id: 1 });
+  expect(upsertArg.update).toMatchObject({ defaultLeadTimeDays: 30, updatedBy: 9 });
 
   const call = mockRecord.mock.calls[0][1];
   expect(call.actionType).toBe("SETTINGS_UPDATE");
   expect(call.changes.defaultLeadTimeDays).toEqual({ from: 14, to: 30 });
+  // Baseline is the persisted row, not the schema defaults.
+  expect(call.details.baselineSource).toBe("row");
+});
+
+test("global reorder-settings PUT seeds via upsert.create with a schema-defaults baseline when the row is absent", async () => {
+  // Absent row → findUnique returns null; the audit "from" is the schema-defaults
+  // constant (defaultLeadTimeDays = 14) and the diff labels the baseline as such.
+  db.globalReorderSettings.findUnique.mockResolvedValue(null);
+  db.globalReorderSettings.upsert.mockResolvedValue({
+    id: 1,
+    defaultLeadTimeDays: 30,
+    defaultSafetyStockDays: 7,
+    defaultTargetCoverageMultiple: 2,
+    minEvidenceEvents: 3,
+  });
+
+  const req = new NextRequest("http://x/api/admin/reorder-settings", {
+    method: "PUT",
+    body: JSON.stringify({ defaultLeadTimeDays: 30 }),
+  });
+  const res = await reorderSettingsPut(req);
+  expect(res.status).toBe(200);
+
+  const upsertArg = db.globalReorderSettings.upsert.mock.calls[0][0];
+  expect(upsertArg.where).toEqual({ id: 1 });
+  // create carries the submitted value over the schema defaults + updatedBy.
+  expect(upsertArg.create).toMatchObject({ id: 1, defaultLeadTimeDays: 30, updatedBy: 9 });
+
+  const call = mockRecord.mock.calls[0][1];
+  expect(call.changes.defaultLeadTimeDays).toEqual({ from: 14, to: 30 });
+  expect(call.details.baselineSource).toBe("schema_defaults");
 });
