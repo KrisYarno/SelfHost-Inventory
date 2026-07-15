@@ -50,7 +50,9 @@ function toToolView(part: UIMessage["parts"][number]): ToolInvocationView {
     output?: {
       status?: "ok" | "truncated" | "error";
       data?: unknown;
-      meta?: { scope?: "company" | "global"; dataStart?: string | null };
+      // "mixed" (spec §6 REV-2): composites + compare_periods carry a per-section scope
+      // in data.coverage.{sectionScopes|metricScopes}; the disclosure labels each one.
+      meta?: { scope?: "company" | "global" | "mixed"; dataStart?: string | null };
     };
   };
   const input = tp.input;

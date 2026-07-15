@@ -79,6 +79,61 @@ describe("buildSystemPrompt: today's UTC date (review B4)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// W3-PROMPT (spec §5 T-PROMPT) — what-we-track paragraph + routing map, ADDED
+// alongside the unchanged date rule + truthfulness laws.
+// ---------------------------------------------------------------------------
+
+describe("buildSystemPrompt: what-we-track + routing map (W3-PROMPT, spec §5 T-PROMPT)", () => {
+  const PROMPT = buildSystemPrompt(new Date("2026-07-15T12:00:00.000Z"));
+
+  it("what-we-track: fulfillment lives in Woo, two fact families, no PO/on-order, retail via valuation, no history", () => {
+    expect(PROMPT).toContain("WooCommerce");
+    expect(PROMPT).toContain("physical ledger");
+    expect(PROMPT.toLowerCase()).toContain("two fact families");
+    // retail + margin now come from get_valuation.
+    expect(PROMPT).toContain("get_valuation");
+    // no purchase-order / on-order tracking.
+    expect(PROMPT.toLowerCase()).toMatch(/purchase-order|on-order/);
+    // historical cost/retail/policy are not stored (only current values).
+    expect(PROMPT.toLowerCase()).toContain("historical");
+  });
+
+  it("routing map: every route target tool is named", () => {
+    for (const tool of [
+      "get_sales",
+      "get_valuation",
+      "reorder_report",
+      "low_stock_report",
+      "get_product_overview",
+      "get_business_snapshot",
+      "compare_periods",
+      "get_movement_series",
+      "get_stock_asof",
+      "get_data_freshness",
+      "get_inventory_policy",
+      "get_order_pipeline",
+    ]) {
+      expect(PROMPT).toContain(tool);
+    }
+    // trend questions route to get_sales groupBy day/week/month (productId optional).
+    expect(PROMPT.toLowerCase()).toMatch(/day\/week\/month|groupby/);
+  });
+
+  it("keeps the never-compute law verbatim; compare_periods is the sanctioned delta path", () => {
+    // The absolute never-compute rule is UNCHANGED (only added to).
+    expect(PROMPT).toContain("You never compute or guess inventory numbers yourself.");
+    // compare_periods computes the delta server-side — the model must not do arithmetic.
+    expect(PROMPT.toLowerCase()).toContain("server-side");
+  });
+
+  it("still carries the date rule and stays pure/deterministic (now-only)", () => {
+    expect(PROMPT).toContain("Today is 2026-07-15 (UTC).");
+    const now = new Date("2026-07-15T12:00:00.000Z");
+    expect(buildSystemPrompt(now)).toBe(buildSystemPrompt(now));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // D-T6 — relativeDays + returned window (omitting dates is never all-time)
 // ---------------------------------------------------------------------------
 

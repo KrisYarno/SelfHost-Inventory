@@ -294,6 +294,173 @@ describe("ToolDisclosure", () => {
 });
 
 // ---------------------------------------------------------------------------
+// ToolDisclosure — MIXED scope chip + per-section legend (spec §6 REV-2, W3-UI)
+//
+// THREE tools emit meta.scope "mixed" with the per-section scope in TWO shapes:
+//   - composites (get_product_overview, get_business_snapshot) carry
+//     data.coverage.sectionScopes (name -> scope);
+//   - compare_periods carries data.coverage.metricScopes { sales, ledger }.
+// The disclosure renders one "Mixed scope" chip and, when expanded, labels each
+// section/metric's own scope from whichever map exists (sectionScopes ?? metricScopes).
+// ---------------------------------------------------------------------------
+
+// Composite overview fixture (7 sections; sales30 = company, rest global).
+const overviewMixed = {
+  name: "get_product_overview" as const,
+  status: "success" as const,
+  input: { productId: 1 },
+  scope: "mixed" as const,
+  data: {
+    found: true,
+    productId: 1,
+    identity: { scope: "global", status: "ok", name: "TIRZ 10mg" },
+    sales30: { scope: "company", status: "ok", orderedUnits: 5 },
+    coverage: {
+      productId: 1,
+      sectionScopes: {
+        identity: "global",
+        stockByLocation: "global",
+        velocity: "global",
+        valuation: "global",
+        policy: "global",
+        movement30: "global",
+        sales30: "company",
+      },
+      degradedSections: [],
+    },
+  },
+};
+
+// Composite snapshot fixture (5 sections; sales + orderPipeline = company).
+const snapshotMixed = {
+  name: "get_business_snapshot" as const,
+  status: "success" as const,
+  input: {},
+  scope: "mixed" as const,
+  data: {
+    inventory: { scope: "global", status: "ok", unitsOnHand: 100 },
+    sales: { scope: "company", status: "ok", units30d: 42 },
+    coverage: {
+      sectionScopes: {
+        inventory: "global",
+        reorderNow: "global",
+        sales: "company",
+        orderPipeline: "company",
+        freshness: "global",
+      },
+      degradedSections: [],
+    },
+  },
+};
+
+// compare_periods fixture — no per-section objects; scope in coverage.metricScopes.
+const comparePeriodsMixed = {
+  name: "compare_periods" as const,
+  status: "success" as const,
+  input: { metric: "sales_units" },
+  scope: "mixed" as const,
+  data: {
+    metric: "sales_units",
+    a: 10,
+    b: 20,
+    delta: 10,
+    pctChange: 100,
+    coverage: {
+      metricScope: "sales metric — scoped to your companies",
+      metricScopes: { sales: "company", ledger: "global" },
+    },
+  },
+};
+
+describe("ToolDisclosure — mixed scope (spec §6 REV-2)", () => {
+  test("renders a distinct 'Mixed scope' chip for each of the three mixed tools", () => {
+    for (const fixture of [overviewMixed, snapshotMixed, comparePeriodsMixed]) {
+      const { unmount } = render(<ToolDisclosure tool={fixture} />);
+      expect(screen.getByText("Mixed scope")).toBeInTheDocument();
+      // The mixed chip REPLACES the binary chip — never shows a single global/company label.
+      expect(screen.queryByText("All companies")).toBeNull();
+      expect(screen.queryByText("Your companies")).toBeNull();
+      unmount();
+    }
+  });
+
+  test("composite (overview): expanded body labels each section's own scope from sectionScopes", () => {
+    render(<ToolDisclosure tool={overviewMixed} />);
+    fireEvent.click(screen.getByRole("button"));
+    const legend = screen.getByTestId("scope-legend");
+    // The company-scoped section reads "Your companies"; a global one reads "All companies".
+    expect(within(legend).getByText("sales30")).toBeInTheDocument();
+    expect(within(legend).getByText("identity")).toBeInTheDocument();
+    expect(within(legend).getAllByText("Your companies").length).toBe(1);
+    expect(within(legend).getAllByText("All companies").length).toBe(6);
+  });
+
+  test("composite (snapshot): expanded body labels each section's own scope", () => {
+    render(<ToolDisclosure tool={snapshotMixed} />);
+    fireEvent.click(screen.getByRole("button"));
+    const legend = screen.getByTestId("scope-legend");
+    expect(within(legend).getByText("sales")).toBeInTheDocument();
+    expect(within(legend).getByText("orderPipeline")).toBeInTheDocument();
+    // sales + orderPipeline = company; inventory/reorderNow/freshness = global.
+    expect(within(legend).getAllByText("Your companies").length).toBe(2);
+    expect(within(legend).getAllByText("All companies").length).toBe(3);
+  });
+
+  test("compare_periods: expanded body labels each metric's scope from metricScopes", () => {
+    render(<ToolDisclosure tool={comparePeriodsMixed} />);
+    fireEvent.click(screen.getByRole("button"));
+    const legend = screen.getByTestId("scope-legend");
+    expect(within(legend).getByText("sales")).toBeInTheDocument();
+    expect(within(legend).getByText("ledger")).toBeInTheDocument();
+    expect(within(legend).getAllByText("Your companies").length).toBe(1); // sales
+    expect(within(legend).getAllByText("All companies").length).toBe(1); // ledger
+  });
+
+  test("mixed with NO scope map (found:false overview): chip only, no legend", () => {
+    render(
+      <ToolDisclosure
+        tool={{
+          name: "get_product_overview",
+          status: "success",
+          input: { productId: 999 },
+          scope: "mixed",
+          data: { found: false, productId: 999 },
+        }}
+      />,
+    );
+    expect(screen.getByText("Mixed scope")).toBeInTheDocument();
+    // Expand if expandable; either way, no per-section legend without a map.
+    const btn = screen.queryByRole("button");
+    if (btn) fireEvent.click(btn);
+    expect(screen.queryByTestId("scope-legend")).toBeNull();
+  });
+});
+
+describe("ToolDisclosure — global/company chips unchanged by the mixed addition", () => {
+  test("global tool still renders 'All companies', no mixed chip or legend", () => {
+    render(
+      <ToolDisclosure
+        tool={{ name: "find_product", status: "success", input: { query: "x" }, data: { products: [{ id: 1, name: "A" }] }, scope: "global" }}
+      />,
+    );
+    expect(screen.getByText("All companies")).toBeInTheDocument();
+    expect(screen.queryByText("Mixed scope")).toBeNull();
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.queryByTestId("scope-legend")).toBeNull();
+  });
+
+  test("company tool still renders 'Your companies'", () => {
+    render(
+      <ToolDisclosure
+        tool={{ name: "get_sales", status: "success", input: {}, data: { rows: [{ day: "d", units: 1 }] }, scope: "company" }}
+      />,
+    );
+    expect(screen.getByText("Your companies")).toBeInTheDocument();
+    expect(screen.queryByText("Mixed scope")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ToolResultTable — array/object rendering + D13 inertness
 // ---------------------------------------------------------------------------
 

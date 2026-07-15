@@ -232,12 +232,24 @@ describe("streamText wiring", () => {
     expect(typeof opts.system).toBe("string");
     expect(opts.system).toBe(buildSystemPrompt(new Date()));
     expect(opts.system as string).toContain("Today is");
-    expect(opts.stopWhen).toEqual({ __stepCountIs: 8 }); // stepCountIs(8)
+    expect(opts.stopWhen).toEqual({ __stepCountIs: 10 }); // stepCountIs(STEP_LIMIT), W3-TUNE
     expect(opts.timeout).toBe(60_000);
-    expect(opts.maxOutputTokens).toBe(2048);
+    expect(opts.maxOutputTokens).toBe(3072); // W3-TUNE (spec §5 T-TUNE REV-2)
     expect(opts.abortSignal).toBeInstanceOf(AbortSignal); // request.signal (codex F18)
     expect(opts.tools).toEqual({ find_product: {} });
     expect(typeof opts.onFinish).toBe("function");
+  });
+
+  // W3-TUNE (spec §5 T-TUNE REV-2) — PINNED cost math: the per-step MAX_OUTPUT_TOKENS
+  // cap applies PER STEP, so 10 steps x 4096 would have raised worst-case generation
+  // ~2.5x; 10 x 3072 keeps it ~1.9x and the 60s provider timeout still stands. STEP_LIMIT
+  // 8 -> 10 and MAX_OUTPUT_TOKENS 2048 -> 3072 are pinned here; changing either must
+  // re-derive that cost math (and revisit after live-drive latency/cost data).
+  test("STEP_LIMIT is 10 and MAX_OUTPUT_TOKENS is 3072 (pinned cost math)", async () => {
+    await POST(req(validBody));
+    const opts = streamTextSpy.mock.calls[0][0] as Record<string, unknown>;
+    expect(opts.stopWhen).toEqual({ __stepCountIs: 10 });
+    expect(opts.maxOutputTokens).toBe(3072);
   });
 
   test("createAiTools bound to the resolved ctx + a byte budget + telemetry wrapper", async () => {

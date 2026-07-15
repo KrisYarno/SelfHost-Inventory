@@ -36,8 +36,13 @@ import { buildSystemPrompt } from "@/lib/assistant/prompt";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const STEP_LIMIT = 8;
-const MAX_OUTPUT_TOKENS = 2048;
+// W3-TUNE (spec §5 T-TUNE REV-2). STEP_LIMIT 8 -> 10 (composites cut multi-call
+// choreography but wider breadth needs headroom). MAX_OUTPUT_TOKENS 2048 -> 3072:
+// the cap applies PER STEP, so 10x4096 would have raised worst-case generation ~2.5x;
+// 10x3072 keeps it ~1.9x and the 60s provider timeout stands. Revisit after live-drive
+// cost/latency data. Pinned in __tests__/integration/api/lane4-assistant.test.ts.
+const STEP_LIMIT = 10;
+const MAX_OUTPUT_TOKENS = 3072;
 const RATE_LIMIT = { limit: 30, ttl: 60 * 60 * 1000 } as const;
 
 /**
