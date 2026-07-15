@@ -43,6 +43,7 @@ import {
 } from "@/lib/analytics/queries";
 import { serializeSalesRows } from "@/lib/analytics/serialize";
 import { toDayKey } from "@/lib/analytics/dates";
+import { weekStartKey, monthKey, byStringKey } from "@/lib/analytics/date-grain";
 import { getLowStockReport } from "@/lib/reports/low-stock";
 import { getReorderReport } from "@/lib/reports/reorder";
 import {
@@ -65,6 +66,10 @@ import { getFreshness } from "@/lib/assistant/freshness";
 import { getStockAsOf } from "@/lib/analytics/stock-asof";
 import { comparePeriods } from "@/lib/reports/compare-periods";
 import { getOrderPipeline, type OrderPipelineGroupBy } from "@/lib/reports/order-pipeline";
+// Wave-3 composites (W3-A): server-side composition over the W1/W2 module functions.
+// TOOL_SCOPES stays "global"; each result carries meta.scope "mixed" (its sales/order
+// sections are company-scoped, its physical sections global — spec §6).
+import { getProductOverview, getBusinessSnapshot } from "@/lib/assistant/composites";
 
 // ---------------------------------------------------------------------------
 // Result contract (spec D4 / §3 E1). Discriminated union so consumers branch on
@@ -166,6 +171,12 @@ export const TOOL_SCOPES: Record<string, "company" | "global"> = {
   get_stock_asof: "global",
   compare_periods: "global",
   get_order_pipeline: "company",
+  // Wave 3 composites (spec §6). Like compare_periods these are MIXED-scope tools: the
+  // STATIC entry is "global" (the outer physical-pool label), while the RESULT carries
+  // meta.scope "mixed" and each SECTION labels its own scope (sales/order sections =
+  // your companies, physical sections = global). "mixed" is NEVER a TOOL_SCOPES value.
+  get_product_overview: "global",
+  get_business_snapshot: "global",
 };
 
 // ---------------------------------------------------------------------------
@@ -491,13 +502,6 @@ function reaggregate(rows: RawSalesRow[]): RawSum {
   return out;
 }
 
-/** ISO-week bucket key: the Monday (UTC) of the week the dayKey falls in. */
-function weekStartKey(dayKey: string): string {
-  const d = new Date(`${dayKey}T00:00:00.000Z`);
-  const daysSinceMonday = (d.getUTCDay() + 6) % 7; // getUTCDay: 0=Sun..6=Sat
-  return toDayKey(new Date(d.getTime() - daysSinceMonday * DAY_MS));
-}
-
 function bucketBy(rows: RawSalesRow[], keyOf: (r: RawSalesRow) => string): Map<string, RawSalesRow[]> {
   const m = new Map<string, RawSalesRow[]>();
   for (const r of rows) {
@@ -508,8 +512,6 @@ function bucketBy(rows: RawSalesRow[], keyOf: (r: RawSalesRow) => string): Map<s
   }
   return m;
 }
-
-const byStringKey = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * Shape raw getSales rows for the requested tool grain: resolve names, roll up
@@ -550,7 +552,7 @@ async function shapeSalesRows(
     case "month": {
       const keyOf = groupBy === "week"
         ? (r: RawSalesRow) => weekStartKey(r.dayKey as string)
-        : (r: RawSalesRow) => (r.dayKey as string).slice(0, 7);
+        : (r: RawSalesRow) => monthKey(r.dayKey as string);
       const buckets = bucketBy(raw, keyOf);
       const rows = Array.from(buckets.entries())
         .sort(([a], [b]) => byStringKey(a, b))
@@ -699,6 +701,16 @@ const getInventoryPolicySchema = z.object({
 
 // get_data_freshness (spec §5 T-FRESH): no args — companies come from the run ctx.
 const getDataFreshnessSchema = z.object({});
+
+// get_product_overview (spec §5 T-360): ONE product, resolved through the shared
+// approved-product resolver -> notFound. Server-side composition; no paging args (the
+// sections are summaries).
+const getProductOverviewSchema = z.object({
+  productId: positiveInt,
+});
+
+// get_business_snapshot (spec §5 T-SNAP): no args — companies come from the run ctx.
+const getBusinessSnapshotSchema = z.object({});
 
 const lowStockSchema = z.object({
   limit: z.number().int().positive().max(LOW_STOCK_MAX).optional(),
@@ -1586,6 +1598,69 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // module and validates the §7 CoverageSchema.
       const result = await getOrderPipeline({ window, groupBy, companyIds: ctx.companyIds });
       return ok(result, { scope: "company" });
+    },
+  },
+
+  get_product_overview: {
+    description:
+      `ONE-CALL overview of a single product — use this instead of chaining get_stock + ` +
+      `get_valuation + get_inventory_policy + get_movement_series + get_sales for a ` +
+      `product question. Sections: identity (name/state/on-hand + stockState), ` +
+      `stockByLocation (top 3 locations), velocity (physical-outbound units/day + ` +
+      `definition), valuation (cost/receipt/retail/margin + coverage), policy ` +
+      `(effective threshold/lead time + true per-field source), movement30 (30-day ` +
+      `ledger TOTALS in/out/net), and sales30 (30-day ordered units/revenue). Each ` +
+      `section is a SUMMARY — go deeper with the per-topic tools (get_stock, ` +
+      `get_valuation, get_inventory_policy, get_movement_series, get_sales). This is a ` +
+      `MIXED-scope tool: sales30 is scoped to YOUR companies; every other section is ` +
+      `the GLOBAL physical pool. Each section degrades INDEPENDENTLY — a section that ` +
+      `can't be built is status 'unavailable' with a reason and NEVER blanks the rest; ` +
+      `velocity with no outbound is avgDailyOutbound null (never a fabricated 0/day). ` +
+      `${DATA_POSTURE}`,
+    inputSchema: getProductOverviewSchema,
+    run: async (input, ctx) => {
+      const args = getProductOverviewSchema.parse(input);
+      // Byte-reserve pattern: the composite's ranked/paged inner calls are fit into
+      // `budget − ENVELOPE_RESERVE_BYTES` so the composed envelope never pushes the
+      // completed result past the threaded budget and gets it discarded at the margin.
+      const overview = await getProductOverview(args.productId, {
+        companyIds: ctx.companyIds,
+        byteBudget: Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
+      });
+      // Resolution is the tool's job (spec §4 W0-PROD): the composite returns
+      // { found: false } for a pending-review / soft-deleted / absent id.
+      if (!overview.found) return notFound("product", args.productId);
+      const { found: _found, ...data } = overview;
+      void _found;
+      // meta.scope "mixed" (spec §6): sales30 is company-scoped, the rest global; each
+      // section labels its own scope and the top-level coverage maps them.
+      return ok(data, { scope: "mixed" });
+    },
+  },
+
+  get_business_snapshot: {
+    description:
+      `The "how's everything looking?" opener — ONE call for a whole-business snapshot ` +
+      `instead of chaining get_inventory_summary + reorder_report + get_sales + ` +
+      `get_order_pipeline + get_data_freshness. Sections: inventory (catalog units, ` +
+      `productCount, stockStateCounts in/low/out, valuation totals + coverage), ` +
+      `reorderNow (count of products on the buying worklist), sales (7-day and 30-day ` +
+      `ordered units/revenue), orderPipeline (order counts + revenue by status + ` +
+      `open-order aging), and freshness (rebuild recency + the fulfillment-sync note). ` +
+      `Each section is a SUMMARY — go deeper with get_inventory_summary, reorder_report, ` +
+      `get_sales, get_order_pipeline, get_data_freshness. This is a MIXED-scope tool: ` +
+      `the sales and orderPipeline sections are scoped to YOUR companies; inventory, ` +
+      `reorderNow, and freshness are GLOBAL. Each section degrades INDEPENDENTLY — a ` +
+      `section that can't be built is status 'unavailable' with a reason and NEVER ` +
+      `blanks the rest. ${DATA_POSTURE}`,
+    inputSchema: getBusinessSnapshotSchema,
+    run: async (input, ctx) => {
+      getBusinessSnapshotSchema.parse(input);
+      const snapshot = await getBusinessSnapshot({
+        companyIds: ctx.companyIds,
+        byteBudget: Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
+      });
+      return ok(snapshot, { scope: "mixed" });
     },
   },
 };

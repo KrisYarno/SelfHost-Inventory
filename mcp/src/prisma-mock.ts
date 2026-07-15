@@ -89,6 +89,12 @@ const prismaMock: any = {
   location: {
     findMany: async () => [],
   },
+  // Wave-3 composites (get_product_overview / get_business_snapshot) fan out to the
+  // module reads ALREADY covered above (product / product_locations / inventory_logs /
+  // productSalesFact / externalOrder(+Item) / analyticsRebuildState / fulfillmentSyncState
+  // / productStockSnapshot / globalReorderSettings / systemSetting / location), so the
+  // mock build serves both composites end-to-end with the benign shapes above — no new
+  // delegate is required.
   $queryRaw: async () => [{ ok: 1 }],
 };
 

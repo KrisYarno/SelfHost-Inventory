@@ -38,11 +38,10 @@
 
 import prisma from "@/lib/prisma";
 import { dayKeyStart, nextDayStart, toDayKey } from "@/lib/analytics/dates";
+import { weekStartKey, monthKey, byStringKey } from "@/lib/analytics/date-grain";
 import type { ResolvedWindow } from "@/lib/assistant/window";
 import { SHRINKAGE_CLASS_REASONS } from "@/lib/analytics/queries";
 import { pageFromDb, type DbPage } from "@/lib/assistant/tools";
-
-const DAY_MS = 86_400_000;
 
 /** getReceipts default page size when the caller omits `limit` (spec §5 T-RCPT). */
 const RECEIPTS_DEFAULT_LIMIT = 50;
@@ -100,25 +99,14 @@ function finalizeNet(b: MovementBuckets): void {
   b.net = BUCKET_KEYS.reduce((s, k) => s + b[k], 0);
 }
 
-/**
- * ISO-week bucket key: the Monday (UTC) of the week `dayKey` falls in.
- *
- * SEAM (W1-INT): duplicated VERBATIM from the PRIVATE `weekStartKey` in
- * lib/assistant/tools.ts. A shared date-grain helper (shared with the sales
- * roll-up) is registered for dedup — see the report SEAMS section.
- */
-function weekStartKey(dayKey: string): string {
-  const d = new Date(`${dayKey}T00:00:00.000Z`);
-  const daysSinceMonday = (d.getUTCDay() + 6) % 7; // getUTCDay: 0=Sun..6=Sat
-  return toDayKey(new Date(d.getTime() - daysSinceMonday * DAY_MS));
-}
-
 /** Grain bucket key for a row's timestamp: day 'YYYY-MM-DD', week Monday key,
- *  month 'YYYY-MM'. */
+ *  month 'YYYY-MM'. weekStartKey/monthKey are the SHARED date-grain helpers
+ *  (lib/analytics/date-grain) — the PRE-W3 dedup replaced this module's verbatim
+ *  weekStartKey copy and inline month slice with those imports. */
 function grainKey(grain: MovementSeriesResult["grain"], changeTime: Date): string {
   const dayKey = toDayKey(changeTime);
   if (grain === "week") return weekStartKey(dayKey);
-  if (grain === "month") return dayKey.slice(0, 7);
+  if (grain === "month") return monthKey(dayKey);
   return dayKey;
 }
 
@@ -213,7 +201,7 @@ export async function getMovementSeries(opts: {
 
   finalizeNet(totals);
   const points = Array.from(pointMap.entries())
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .sort(([a], [b]) => byStringKey(a, b))
     .map(([key, b]) => {
       finalizeNet(b);
       return { key, ...b };

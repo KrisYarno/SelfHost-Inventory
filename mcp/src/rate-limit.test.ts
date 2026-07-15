@@ -18,8 +18,11 @@ describe("toolWeight", () => {
     expect(toolWeight("anything")).toBe(1);
   });
 
-  it("registers the full weighted-tool table (spec D8 + §6): get_operations 5x; reorder_report/get_movement_series/get_inventory_summary/get_order_pipeline 3x; get_valuation/compare_periods/get_stock_asof 2x; everything else 1x by default", () => {
+  it("registers the full weighted-tool table (spec D8 + §6): get_operations/get_product_overview/get_business_snapshot 5x; reorder_report/get_movement_series/get_inventory_summary/get_order_pipeline 3x; get_valuation/compare_periods/get_stock_asof 2x; everything else 1x by default", () => {
     expect(toolWeight("get_operations")).toBe(5);
+    // Wave-3 composites — the heaviest tools (fan out to many module reads per call).
+    expect(toolWeight("get_product_overview")).toBe(5);
+    expect(toolWeight("get_business_snapshot")).toBe(5);
     expect(toolWeight("reorder_report")).toBe(3);
     expect(toolWeight("get_movement_series")).toBe(3);
     expect(toolWeight("get_inventory_summary")).toBe(3);

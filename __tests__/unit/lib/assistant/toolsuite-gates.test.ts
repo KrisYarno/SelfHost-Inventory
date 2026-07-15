@@ -213,6 +213,12 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
     { groupBy: "day" },
     { relativeDays: 7 },
   ],
+  // Wave-3 composites. fixture[0] is the HAPPY path (coverage/definition gates): a valid
+  // productId that resolves via the coverage-gate's product.findFirst override to an OK
+  // overview; the pending-review productId case is a LATER fixture (read-only gate only),
+  // returning the notFound shape. get_business_snapshot is argless.
+  get_product_overview: [{ productId: 1 }, { productId: PENDING_REVIEW_FIXTURE_ID }],
+  get_business_snapshot: [{}],
 };
 
 /**
@@ -362,6 +368,29 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d).toMatch(/PII/); // customer PII never returned
     expect(d).toMatch(/aging/i); // open-order aging buckets
   });
+
+  it("get_product_overview frames itself as one-call, names the section tools, and discloses mixed scope + independent degradation", () => {
+    const d = desc("get_product_overview");
+    expect(d).toMatch(/one-call/i); // the choreography-killer framing
+    // Names the per-topic tools a deep dive routes to.
+    for (const t of ["get_stock", "get_valuation", "get_inventory_policy", "get_movement_series", "get_sales"]) {
+      expect(d).toContain(t);
+    }
+    expect(d).toMatch(/mixed/i); // mixed-scope tool
+    expect(d).toMatch(/your companies/i); // sales section = caller companies
+    expect(d).toMatch(/independently/i); // sections degrade independently
+  });
+
+  it("get_business_snapshot frames itself as one-call, names the section tools, and discloses mixed scope + independent degradation", () => {
+    const d = desc("get_business_snapshot");
+    expect(d).toMatch(/one call/i);
+    for (const t of ["get_inventory_summary", "reorder_report", "get_sales", "get_order_pipeline", "get_data_freshness"]) {
+      expect(d).toContain(t);
+    }
+    expect(d).toMatch(/mixed/i);
+    expect(d).toMatch(/your companies/i);
+    expect(d).toMatch(/independently/i);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -445,6 +474,10 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
     "lib/analytics/stock-asof.ts",
     "lib/reports/compare-periods.ts",
     "lib/reports/order-pipeline.ts",
+    // Wave-3 composite + the PRE-W3 shared date-grain helper, both wired into the read
+    // path by W3-A (composites compose the W1/W2 modules; date-grain has no data access).
+    "lib/assistant/composites.ts",
+    "lib/analytics/date-grain.ts",
     // reorder-config.ts is the read-path config dependency (reorder.ts imports it) and
     // is where the R2-B1 write lives — scanned so the allowlist can name it.
     "lib/reorder-config.ts",
@@ -748,9 +781,10 @@ describe("universal productId not-found fixture (spec §4 W0-PROD)", () => {
     expect(result).toEqual(NOT_FOUND);
   });
 
-  // Wave-1 productId tools (spec §4 W0-PROD): each resolves through the shared resolver,
-  // so a guessed pending-review id returns the SAME notFound shape — never provisional data.
-  it.each(["get_operations", "get_valuation", "get_movement_series", "get_inventory_policy"])(
+  // Wave-1 productId tools + the Wave-3 product composite (spec §4 W0-PROD): each resolves
+  // through the shared resolver, so a guessed pending-review id returns the SAME notFound
+  // shape — never provisional data. get_product_overview resolves BEFORE any section work.
+  it.each(["get_operations", "get_valuation", "get_movement_series", "get_inventory_policy", "get_product_overview"])(
     "%s returns notFound for a pending-review productId",
     async (name) => {
       prismaCtl.__reset();

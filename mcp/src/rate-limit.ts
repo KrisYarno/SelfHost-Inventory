@@ -4,10 +4,11 @@
  * Two fixed windows enforced together per tool-call:
  *   - per-token: 60 tool-calls / token / minute
  *   - global:    300 tool-calls / minute across all tokens
- * A handful of expensive tools count more than 1x (weighted): `get_operations` 5x;
- * `reorder_report` / `get_movement_series` / `get_inventory_summary` /
- * `get_order_pipeline` 3x; `get_valuation` / `compare_periods` / `get_stock_asof` 2x.
- * Weights are keyed by tool NAME only —
+ * A handful of expensive tools count more than 1x (weighted): `get_operations` /
+ * `get_product_overview` / `get_business_snapshot` 5x (the composites fan out to many
+ * module reads in one call); `reorder_report` / `get_movement_series` /
+ * `get_inventory_summary` / `get_order_pipeline` 3x; `get_valuation` / `compare_periods`
+ * / `get_stock_asof` 2x. Weights are keyed by tool NAME only —
  * no argument inspection. When either window is exceeded the request is denied
  * with a Retry-After (seconds until the blocking window rolls over). Only
  * `tools/call` JSON-RPC messages consume budget; initialize / tools/list /
@@ -35,6 +36,10 @@ const TOOL_WEIGHTS: Record<string, number> = {
   get_order_pipeline: 3,
   compare_periods: 2,
   get_stock_asof: 2,
+  // Wave-3 composites (spec §6): each fans out to many module reads in ONE call, so they
+  // are the heaviest tools on the surface — weighted 5x, level with get_operations.
+  get_product_overview: 5,
+  get_business_snapshot: 5,
 };
 
 export function toolWeight(toolName: string): number {

@@ -213,4 +213,21 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     emptyCopy: "Nothing needs reordering right now.",
     summarizeArgs: () => "",
   },
+  get_product_overview: {
+    pendingLabel: "Building the product overview…",
+    successLabel: "Built the product overview",
+    failureNoun: "product overview",
+    emptyCopy: "No overview available for that product.",
+    summarizeArgs: (input) => {
+      const id = num(input, "productId");
+      return id ? `product #${id}` : "";
+    },
+  },
+  get_business_snapshot: {
+    pendingLabel: "Building the business snapshot…",
+    successLabel: "Built the business snapshot",
+    failureNoun: "business snapshot",
+    emptyCopy: "No snapshot data available yet.",
+    summarizeArgs: () => "",
+  },
 };

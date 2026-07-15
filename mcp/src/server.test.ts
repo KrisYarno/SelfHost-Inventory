@@ -560,6 +560,148 @@ describe("POST /mcp — Wave-2 tool round-trips assert REAL payload values (item
   });
 });
 
+describe("POST /mcp — Wave-3 composite round-trips assert REAL section values", () => {
+  // The two composites fan out to many module reads in ONE call; each round-trip seeds
+  // those reads and asserts the real composed SECTION values on the wire (seed mock,
+  // assert real values — the W1/W2 seam-fix standard) plus meta.scope "mixed".
+  beforeEach(() => {
+    p.userCompany.findMany.mockReset();
+    p.userCompany.findMany.mockResolvedValue([{ companyId: "c1" }]); // ctx.companyIds
+    p.product.findFirst.mockReset();
+    p.product.findFirst.mockResolvedValue(null);
+    p.product.findUnique.mockReset();
+    p.product.findUnique.mockResolvedValue(null);
+    p.product.findMany.mockReset();
+    p.product.findMany.mockResolvedValue([]);
+    p.product.count.mockReset();
+    p.product.count.mockResolvedValue(0);
+    p.product_locations.findMany.mockReset();
+    p.product_locations.findMany.mockResolvedValue([]);
+    p.location.findMany.mockReset();
+    p.location.findMany.mockResolvedValue([]);
+    p.inventory_logs.aggregate.mockReset();
+    p.inventory_logs.aggregate.mockResolvedValue({ _min: {}, _max: {}, _sum: {}, _count: {} });
+    p.inventory_logs.groupBy.mockReset();
+    p.inventory_logs.groupBy.mockResolvedValue([]);
+    p.inventory_logs.findMany.mockReset();
+    p.inventory_logs.findMany.mockResolvedValue([]);
+    p.productSalesFact.aggregate.mockReset();
+    p.productSalesFact.aggregate.mockResolvedValue({ _sum: {} });
+    p.globalReorderSettings.findUnique.mockReset();
+    p.globalReorderSettings.findUnique.mockResolvedValue(null);
+    p.analyticsRebuildState.findUnique.mockReset();
+    p.analyticsRebuildState.findUnique.mockResolvedValue(null);
+    p.fulfillmentSyncState.findMany.mockReset();
+    p.fulfillmentSyncState.findMany.mockResolvedValue([]);
+    p.productStockSnapshot.aggregate.mockReset();
+    p.productStockSnapshot.aggregate.mockResolvedValue({ _min: {}, _max: {} });
+    p.externalOrder.findFirst.mockReset();
+    p.externalOrder.findFirst.mockResolvedValue(null);
+    p.externalOrder.count.mockReset();
+    p.externalOrder.count.mockResolvedValue(0);
+    p.externalOrder.findMany.mockReset();
+    p.externalOrder.findMany.mockResolvedValue([]);
+    p.externalOrderItem.findMany.mockReset();
+    p.externalOrderItem.findMany.mockResolvedValue([]);
+    p.systemSetting.findUnique.mockReset();
+    p.systemSetting.findUnique.mockResolvedValue(null);
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function roundTrip(name: string, args: Record<string, unknown>): Promise<any> {
+    const server = createMcpHttpServer();
+    const port = await listen(server);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: MCP_HEADERS,
+        body: toolCall(1, name, args),
+      });
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rpc = (await res.json()) as any;
+      expect(rpc.result).toBeDefined();
+      return JSON.parse(rpc.result.content[0].text as string);
+    } finally {
+      await close(server);
+    }
+  }
+
+  it("get_product_overview: composed sections + mixed scope + company-scoped sales section", async () => {
+    p.product.findFirst.mockResolvedValueOnce({ id: 1, name: "TIRZ 30" }); // resolveAssistantProduct
+    // identity + getPolicy both read product.findUnique; one shape satisfies both selects.
+    p.product.findUnique.mockResolvedValue({
+      id: 1, name: "TIRZ 30", baseName: "TIRZ", variant: "30", lowStockThreshold: null,
+      reorderConfig: null, product_locations: [{ quantity: 12 }],
+    });
+    p.product_locations.findMany.mockResolvedValue([{ locationId: 1, quantity: 12 }]);
+    p.location.findMany.mockResolvedValue([{ id: 1, name: "Main" }]);
+    // velocity: |−60| over ~20 covered days => a positive units/day rate.
+    p.inventory_logs.aggregate.mockResolvedValueOnce({
+      _sum: { delta: -60 },
+      _min: { changeTime: new Date(Date.now() - 20 * 86_400_000) },
+    });
+    p.productSalesFact.aggregate.mockResolvedValue({ _sum: { orderedQty: 40, revenue: "1234.50" } });
+
+    const toolResult = await roundTrip("get_product_overview", { productId: 1 });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.meta.scope).toBe("mixed"); // spec §6 — sales section company-scoped
+    expect(toolResult.data.productId).toBe(1);
+    // identity: 12 on hand, in_stock (null threshold => system default).
+    expect(toolResult.data.identity.currentStock).toBe(12);
+    expect(toolResult.data.identity.stockState).toBe("in_stock");
+    // velocity: real outbound units + a positive contract rate + the definition string.
+    expect(toolResult.data.velocity.unitsOut30).toBe(60);
+    expect(toolResult.data.velocity.usageKnown).toBe(true);
+    expect(toolResult.data.velocity.avgDailyOutbound).toBeGreaterThan(0);
+    expect(typeof toolResult.data.velocity.velocityDefinition).toBe("string");
+    // sales30 is COMPANY-scoped and carries the seeded ordered units.
+    expect(toolResult.data.sales30.scope).toBe("company");
+    expect(toolResult.data.sales30.orderedUnits).toBe(40);
+    // top-level coverage maps each section's scope; nothing degraded here.
+    expect(toolResult.data.coverage.sectionScopes.sales30).toBe("company");
+    expect(toolResult.data.coverage.sectionScopes.velocity).toBe("global");
+    expect(toolResult.data.coverage.degradedSections).toEqual([]);
+  });
+
+  it("get_business_snapshot: KPIs + reorder-now + company-scoped sales/pipeline + mixed scope", async () => {
+    // One catalog product read shared by inventory-summary + valuation + reorder.
+    p.product.findMany.mockResolvedValue([
+      {
+        id: 1, name: "A", lowStockThreshold: null, costPrice: null, retailPrice: null,
+        reorderConfig: null, product_locations: [{ locationId: 1, quantity: 30, locations: { name: "Main" } }],
+      },
+    ]);
+    p.productSalesFact.aggregate.mockResolvedValue({ _sum: { orderedQty: 40, revenue: "500.00" } });
+    p.externalOrder.findMany.mockResolvedValue([
+      {
+        id: "o1", companyId: "c1", integrationId: "i1", internalStatus: "pending",
+        nativeStatus: "processing", total: "12.50", currency: "USD",
+        externalCreatedAt: new Date("2026-07-01T00:00:00.000Z"), createdAt: new Date("2026-07-01T00:00:00.000Z"),
+      },
+    ]);
+    p.externalOrderItem.findMany.mockResolvedValue([{ id: "it1", orderId: "o1", quantity: 9, isMapped: true }]);
+
+    const toolResult = await roundTrip("get_business_snapshot", {});
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.meta.scope).toBe("mixed");
+    // inventory KPIs (global): 30 on hand, in_stock census.
+    expect(toolResult.data.inventory.scope).toBe("global");
+    expect(toolResult.data.inventory.unitsOnHand).toBe(30);
+    expect(toolResult.data.inventory.stockStateCounts.in_stock).toBe(1);
+    // reorder-now count comes from the worklist coverage (no demand => 0 suggested).
+    expect(toolResult.data.reorderNow.reorderNowCount).toBe(0);
+    // sales (company-scoped): the seeded 30d ordered units.
+    expect(toolResult.data.sales.scope).toBe("company");
+    expect(toolResult.data.sales.last30d.orderedUnits).toBe(40);
+    // order pipeline (company-scoped): one pending order at 1250 cents, 9 item units separate.
+    expect(toolResult.data.orderPipeline.scope).toBe("company");
+    expect(toolResult.data.orderPipeline.byStatus[0].orderCount).toBe(1);
+    expect(toolResult.data.orderPipeline.byStatus[0].totalCents).toBe(1250);
+    expect(toolResult.data.coverage.sectionScopes.sales).toBe("company");
+  });
+});
+
 describe("POST /mcp — tools/list advertised schema shape (item 8)", () => {
   it("compare_periods advertises nested periodA/periodB object schemas with from/to/relativeDays", async () => {
     const server = createMcpHttpServer();
