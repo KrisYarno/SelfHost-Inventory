@@ -340,6 +340,21 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d).toMatch(/a = periodA/); // reasons-key mapping
   });
 
+  it("compare_periods cross-references the two documented ledger divergences (W2 seam-fix item 3)", () => {
+    const d = desc("compare_periods");
+    // NEW-1: get_operations sums outbound over a ROLLING-INSTANT window ending now;
+    // compare_periods uses CALENDAR-DAY windows — a small gap is the window definition.
+    expect(d).toContain("get_operations");
+    expect(d).toMatch(/rolling/i);
+    expect(d).toMatch(/calendar-day/i);
+    // M4: the outbound wrong-signed FOLD — get_movement_series folds a wrong-signed
+    // SALE/STOCK_IN into its natural logType bucket, so its outbound family diverges.
+    expect(d).toContain("get_movement_series");
+    expect(d).toMatch(/wrong-signed/i);
+    // Both framed as the DEFINITIONS, never a contradiction (same posture as ops↔movement).
+    expect(d).toMatch(/contradiction/i);
+  });
+
   it("get_order_pipeline discloses company scope, gross/refunds, and the no-PII posture", () => {
     const d = desc("get_order_pipeline");
     expect(d).toMatch(/company-scoped/i);
@@ -595,6 +610,27 @@ describe("PII PROJECTION gate (spec §7 — get_order_pipeline)", () => {
   };
   const ITEM = { id: "it1", orderId: "o1", quantity: 3, isMapped: true };
 
+  // W2 seam-fix item 5: INDEPENDENT literal snapshots of the two allowlists. The gate
+  // no longer trusts the exported const as its own oracle — a silent widening of the
+  // export (e.g. adding customerEmail) is caught because the RECORDED select would no
+  // longer deep-equal these frozen literals.
+  const EXPECTED_ORDER_SELECT = {
+    id: true,
+    companyId: true,
+    integrationId: true,
+    internalStatus: true,
+    nativeStatus: true,
+    total: true,
+    currency: true,
+    externalCreatedAt: true,
+    createdAt: true,
+  };
+  const EXPECTED_ITEM_SELECT = { id: true, orderId: true, quantity: true, isMapped: true };
+
+  // Every get_order_pipeline fixture (incl. groupBy:"day") — the PII assertions run
+  // across ALL of them, not just the argless case.
+  const PIPELINE_FIXTURES = TOOL_GATE_FIXTURES.get_order_pipeline;
+
   async function runSeeded(args: Record<string, unknown>): Promise<ToolResult> {
     prismaCtl.__reset();
     prismaCtl.__overrides["externalOrder.findMany"] = [ORDER];
@@ -605,30 +641,51 @@ describe("PII PROJECTION gate (spec §7 — get_order_pipeline)", () => {
   const externalCalls = () =>
     prismaCtl.__calls.filter((c) => c.model === "externalOrder" || c.model === "externalOrderItem");
 
-  it("every ExternalOrder/ExternalOrderItem read uses the exported allowlist select and NO include", async () => {
-    await runSeeded({});
-    const calls = externalCalls();
-    // Both reads happened (order read + the dependent item read).
-    expect(calls.some((c) => c.model === "externalOrder")).toBe(true);
-    expect(calls.some((c) => c.model === "externalOrderItem")).toBe(true);
-    for (const c of calls) {
-      const a = c.args as { select?: unknown; include?: unknown };
-      expect(a.include).toBeUndefined(); // fail-closed: an include is REJECTED
-      expect(a.select).toBeDefined(); // fail-closed: an absent select is REJECTED
-      const expected = c.model === "externalOrder" ? ORDER_PIPELINE_SELECT : ORDER_ITEM_UNITS_SELECT;
-      expect(a.select).toEqual(expected);
-    }
+  it("the exported allowlist selects are deep-frozen and match the independent snapshot", () => {
+    expect(Object.isFrozen(ORDER_PIPELINE_SELECT)).toBe(true);
+    expect(Object.isFrozen(ORDER_ITEM_UNITS_SELECT)).toBe(true);
+    expect(ORDER_PIPELINE_SELECT).toEqual(EXPECTED_ORDER_SELECT);
+    expect(ORDER_ITEM_UNITS_SELECT).toEqual(EXPECTED_ITEM_SELECT);
   });
 
-  it("the serialized result key set carries NONE of the non-selectable PII columns (catches spread-leaks)", async () => {
-    // Grouping by integration surfaces the widest coverage block (nativeStatusByIntegration)
-    // — the most likely spread-leak path.
-    const result = await runSeeded({ groupBy: "integration" });
-    expect(result.status).toBe("ok");
-    if (result.status !== "ok") return;
-    const piiKeys = collectKeys(result.data, (k) => PII_FIELD_NAMES.has(k));
-    expect(piiKeys).toEqual([]);
-  });
+  it.each(PIPELINE_FIXTURES.map((f, i) => [i, f as Record<string, unknown>]))(
+    "fixture[%#] every ExternalOrder/ExternalOrderItem read uses the allowlist select (vs an INDEPENDENT literal) and NO include",
+    async (_i, fixture) => {
+      await runSeeded(fixture);
+      const calls = externalCalls();
+      // Both reads happened (order read + the dependent item read).
+      expect(calls.some((c) => c.model === "externalOrder")).toBe(true);
+      expect(calls.some((c) => c.model === "externalOrderItem")).toBe(true);
+      for (const c of calls) {
+        const a = c.args as { select?: unknown; include?: unknown };
+        expect(a.include).toBeUndefined(); // fail-closed: an include is REJECTED
+        expect(a.select).toBeDefined(); // fail-closed: an absent select is REJECTED
+        // Compare against the INDEPENDENT literal, never the imported object.
+        const expected = c.model === "externalOrder" ? EXPECTED_ORDER_SELECT : EXPECTED_ITEM_SELECT;
+        expect(a.select).toEqual(expected);
+      }
+    },
+  );
+
+  it.each(PIPELINE_FIXTURES.map((f, i) => [i, f as Record<string, unknown>]))(
+    "fixture[%#] touches EXACTLY the {externalOrder, externalOrderItem} model set (any new delegate FAILS)",
+    async (_i, fixture) => {
+      await runSeeded(fixture);
+      const models = new Set(prismaCtl.__calls.map((c) => c.model));
+      expect(models).toEqual(new Set(["externalOrder", "externalOrderItem"]));
+    },
+  );
+
+  it.each(PIPELINE_FIXTURES.map((f, i) => [i, f as Record<string, unknown>]))(
+    "fixture[%#] serialized result key set carries NONE of the non-selectable PII columns (catches spread-leaks)",
+    async (_i, fixture) => {
+      const result = await runSeeded(fixture);
+      expect(result.status).toBe("ok");
+      if (result.status !== "ok") return;
+      const piiKeys = collectKeys(result.data, (k) => PII_FIELD_NAMES.has(k));
+      expect(piiKeys).toEqual([]);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

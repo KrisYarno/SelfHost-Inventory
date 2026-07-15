@@ -260,19 +260,25 @@ export interface ReceiptRow {
 export async function getReceipts(opts: {
   window: ResolvedWindow;
   productId?: number;
+  locationId?: number;
   limit?: number;
   offset?: number;
   byteBudget: number;
 }): Promise<DbPage<ReceiptRow>> {
-  const { window, productId, byteBudget } = opts;
+  const { window, productId, locationId, byteBudget } = opts;
   const limit = opts.limit ?? RECEIPTS_DEFAULT_LIMIT;
   const offset = opts.offset ?? 0;
 
+  // W2 seam-fix item 2: `locationId` is threaded into the where clause so a
+  // location-scoped receipts request is actually narrowed (it was silently
+  // dropped before, returning the global receipt list). `count` and `findMany`
+  // share this one `where`, so both are narrowed identically.
   const where = {
     logType: "STOCK_IN" as const,
     delta: { gt: 0 },
     changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
     ...(productId != null ? { productId } : {}),
+    ...(locationId != null ? { locationId } : {}),
   };
 
   return pageFromDb<ReceiptRow>({

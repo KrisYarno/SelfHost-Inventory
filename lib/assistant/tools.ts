@@ -1204,6 +1204,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         const page = await getReceipts({
           window,
           productId: args.productId,
+          // W2 seam-fix item 2: thread locationId so `receipts:true` honors the
+          // location filter the schema already accepts (it was silently ignored).
+          locationId: args.locationId,
           limit: args.limit,
           offset: args.offset,
           byteBudget: Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
@@ -1434,9 +1437,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `(paginated) or one product via productId. 'units' is null with reason "no ` +
       `snapshot recorded for that day" when no row exists for that (product, day) — ` +
       `NEVER a fabricated 0 (a genuine 0-on-hand day has a real row summing to 0, kept ` +
-      `distinct). Each row carries seriesEndsAt (the product's last snapshot day) and ` +
-      `possiblyStale — a LABELED READ-TIME HEURISTIC (true when the product's series ` +
-      `lags coverage.snapshotWatermark), never a certainty. Today and future days are ` +
+      `distinct). When only SOME of a product's known locations have a row for day D, ` +
+      `'units' is the REAL but PARTIAL sum, disclosed via reason + pairsPresentOnDay/ ` +
+      `knownPairs. Each row carries seriesEndsAt (a CONSERVATIVE floor — the earliest of ` +
+      `its locations' last snapshot days, so a fresh location never masks a stale one) ` +
+      `and possiblyStale — a LABELED READ-TIME HEURISTIC (true when that floor lags ` +
+      `coverage.snapshotWatermark), never a certainty. Today and future days are ` +
       `rejected: snapshots cover completed days only. ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getStockAsofSchema,
     run: async (input, ctx) => {
@@ -1451,13 +1457,19 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       }
       // getStockAsOf self-validates dayKey and THROWS AppError(VALIDATION,400) on
       // today/future/malformed — that propagates to the adapter, which surfaces the
-      // adapter's error result. byteBudget(ctx) is threaded into the module's DB paging.
+      // adapter's error result. The reserved byte budget (below) is threaded into the
+      // module's DB paging so the envelope never pushes the result past the budget.
       const page = await getStockAsOf({
         dayKey: args.dayKey,
         productId: args.productId,
         limit: args.limit,
         offset: args.offset,
-        byteBudget: byteBudget(ctx),
+        // Byte-reserve pattern (W1 seam-fix, applied here in W2 seam-fix item 6): the
+        // result wraps the row page in a dayKey + coverage envelope, so the PAGE is fit
+        // into `budget − ENVELOPE_RESERVE_BYTES`. Without the reserve a full-budget page
+        // plus the envelope pushes the COMPLETED result past the threaded budget and the
+        // adapter discards the whole thing at the margin (a truncation notice, not a page).
+        byteBudget: Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
       });
       return ok(
         {
@@ -1486,7 +1498,11 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `pre-history period is UNKNOWN, never "growth from zero". pctChange is null when ` +
       `period A is zero. reasons keys: a = periodA, b = periodB, pctChange = percent ` +
       `change. unequalLengths flags mismatched window lengths (comparison still runs). ` +
-      `${DATA_POSTURE}`,
+      `outbound_units/inbound_units use a SIGN-FIRST ledger predicate over CALENDAR-DAY ` +
+      `windows; a small gap from get_operations is that tool's ROLLING-INSTANT window ` +
+      `(ending now), and a gap from get_movement_series is that movement FOLDS a ` +
+      `wrong-signed SALE/STOCK_IN into its natural logType bucket — both are the ` +
+      `DEFINITIONS diverging, never a contradiction. ${DATA_POSTURE}`,
     inputSchema: comparePeriodsSchema,
     run: async (input, ctx) => {
       const args = comparePeriodsSchema.parse(input);
@@ -1530,6 +1546,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             metricScope: isSales
               ? "sales metric — scoped to your companies"
               : "physical-ledger metric — global (inventory has no company dimension)",
+            // W2 seam-fix item 3: machine-readable scopes alongside the prose above, so a
+            // consumer never has to parse the sentence to learn which pool each metric
+            // reads (sales metrics = your companies; ledger metrics = the global pool).
+            metricScopes: { sales: "company", ledger: "global" },
             reasonsKeys: "a = periodA, b = periodB, pctChange = percent change",
             unequalLengths: result.unequalLengths,
           },

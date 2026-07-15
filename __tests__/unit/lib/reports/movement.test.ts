@@ -371,6 +371,32 @@ describe("getReceipts -- DB-side paged STOCK_IN receipts detail", () => {
     expect(where.productId).toBeUndefined();
   });
 
+  // W2 seam-fix item 2: locationId was silently ignored — the tool advertised a
+  // locationId arg but getReceipts never threaded it into the where clause, so a
+  // location-scoped receipts request returned the GLOBAL receipt list. Both the
+  // count and the findMany must be narrowed by locationId.
+  it("locationId filter narrows BOTH the count and findMany where clauses", async () => {
+    db.inventory_logs.count.mockResolvedValue(0);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+
+    await getReceipts({ window: win("2026-07-01", "2026-07-31"), locationId: 7, byteBudget: 100_000 });
+
+    const findWhere = db.inventory_logs.findMany.mock.calls[0][0]!.where as Record<string, unknown>;
+    const countWhere = db.inventory_logs.count.mock.calls[0][0]!.where as Record<string, unknown>;
+    expect(findWhere.locationId).toBe(7);
+    expect(countWhere.locationId).toBe(7);
+  });
+
+  it("omitting locationId leaves it out of the where clause (no accidental narrowing)", async () => {
+    db.inventory_logs.count.mockResolvedValue(0);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+
+    await getReceipts({ window: win("2026-07-01", "2026-07-31"), byteBudget: 100_000 });
+
+    const where = db.inventory_logs.findMany.mock.calls[0][0]!.where as Record<string, unknown>;
+    expect(where.locationId).toBeUndefined();
+  });
+
   it(
     "is scoped to STOCK_IN with delta > 0 -- wrong-signed STOCK_IN (a receipt reversal) is EXCLUDED " +
       "(a detail listing must be real receipts; contrast getMovementSeries, which folds a wrong-signed " +

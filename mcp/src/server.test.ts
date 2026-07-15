@@ -444,25 +444,39 @@ describe("POST /mcp — Wave-2 tool round-trips assert REAL payload values (item
       _min: { dayKey: "2026-06-01" },
       _max: { dayKey: "2026-06-30" },
     });
-    // groupBy is called twice inside the page fetch: day-sum (_sum) then series-end (_max).
+    // groupBy is called twice inside the page fetch: day-sum (_sum + _count) then the
+    // per-pair span (_max + _min). W2 seam-fix item 1: series-end is the MIN over pairs'
+    // maxes, and _count = locations present on day D.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     p.productStockSnapshot.groupBy.mockImplementation(async (args: any) =>
       args._sum
-        ? [{ productId: 1, _sum: { quantity: 42 } }]
-        : [{ productId: 1, _max: { dayKey: "2026-06-30" } }],
+        ? [{ productId: 1, _sum: { quantity: 42 }, _count: 1 }]
+        : [{ productId: 1, locationId: 1, _max: { dayKey: "2026-06-30" }, _min: { dayKey: "2026-06-01" } }],
     );
 
     const toolResult = await roundTrip("get_stock_asof", { dayKey: "2026-06-15" });
     expect(toolResult.status).toBe("ok");
     expect(toolResult.data.dayKey).toBe("2026-06-15");
     expect(toolResult.data.totalRows).toBe(1);
-    // Real exact-day on-hand + the pair's series end.
+    // Real exact-day on-hand + the pair's series end (single location present, no partial).
     expect(toolResult.data.rows[0].productId).toBe(1);
     expect(toolResult.data.rows[0].units).toBe(42);
     expect(toolResult.data.rows[0].seriesEndsAt).toBe("2026-06-30");
+    expect(toolResult.data.rows[0].pairsPresentOnDay).toBe(1);
+    expect(toolResult.data.rows[0].knownPairs).toBe(1);
     // Coverage watermark = later of MAX(dayKey) and lastWindowTo (null here) → 2026-06-30.
     expect(toolResult.data.coverage.snapshotWatermark).toBe("2026-06-30");
     expect(toolResult.data.coverage.snapshotDataStart).toBe("2026-06-01");
+  });
+
+  it("get_stock_asof (future dayKey): the module's AppError is masked to a generic TOOL_ERROR (item 7)", async () => {
+    // getStockAsOf throws AppError(VALIDATION,400) on a future day; registerMcpTools must
+    // catch it and return the generic TOOL_ERROR result — never the 400/message on the wire.
+    const toolResult = await roundTrip("get_stock_asof", { dayKey: "2099-01-01" });
+    expect(toolResult.status).toBe("error");
+    expect(toolResult.code).toBe("TOOL_ERROR");
+    // No AppError detail (status code / validation message) leaks into the payload.
+    expect(JSON.stringify(toolResult)).not.toMatch(/VALIDATION|completed days only|400/);
   });
 
   it("compare_periods (outbound_units): server-computed a/b/delta/pctChange + mixed scope", async () => {
@@ -485,6 +499,8 @@ describe("POST /mcp — Wave-2 tool round-trips assert REAL payload values (item
     expect(toolResult.data.b).toBe(150);
     expect(toolResult.data.delta).toBe(50);
     expect(toolResult.data.pctChange).toBe(0.5);
+    // W2 seam-fix item 3: machine-readable scopes alongside the prose metricScope.
+    expect(toolResult.data.coverage.metricScopes).toEqual({ sales: "company", ledger: "global" });
   });
 
   it("get_order_pipeline: SEPARATE order revenue vs item units, company-scoped", async () => {
@@ -541,6 +557,55 @@ describe("POST /mcp — Wave-2 tool round-trips assert REAL payload values (item
     expect(toolResult.data.rows[0].unitCostCents).toBe(500);
     expect(toolResult.data.rows[0].batchId).toBe("B1");
     expect(toolResult.data.rows[0].locationId).toBe(2);
+  });
+});
+
+describe("POST /mcp — tools/list advertised schema shape (item 8)", () => {
+  it("compare_periods advertises nested periodA/periodB object schemas with from/to/relativeDays", async () => {
+    const server = createMcpHttpServer();
+    const port = await listen(server);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: MCP_HEADERS,
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rpc = (await res.json()) as any;
+      const tools = rpc.result.tools as Array<{ name: string; inputSchema: any }>;
+      const cmp = tools.find((t) => t.name === "compare_periods");
+      expect(cmp).toBeDefined();
+      const root = cmp!.inputSchema;
+      const props = root.properties;
+      // The JSON-Schema converter dedups identical sub-schemas into a local `$ref`
+      // (periodB → periodA), so resolve a `{ $ref: "#/a/b" }` node against the root.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resolve = (node: any): any => {
+        if (node && node.$ref) {
+          const segs = String(node.$ref).replace(/^#\//, "").split("/");
+          let cur = root;
+          for (const s of segs) cur = cur[s];
+          return cur;
+        }
+        return node;
+      };
+      // metric + the two nested period objects are advertised at the top level.
+      expect(props.metric).toBeDefined();
+      // periodA/periodB are NESTED object schemas, not scalars — the shape pin: a
+      // consumer (or the model) sees the {from,to,relativeDays} structure it must fill.
+      for (const key of ["periodA", "periodB"]) {
+        expect(props[key]).toBeDefined();
+        const period = resolve(props[key]);
+        expect(period.type).toBe("object");
+        expect(period.properties).toBeDefined();
+        expect(period.properties.from).toBeDefined();
+        expect(period.properties.to).toBeDefined();
+        expect(period.properties.relativeDays).toBeDefined();
+      }
+    } finally {
+      await close(server);
+    }
   });
 });
 

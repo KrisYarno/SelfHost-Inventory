@@ -482,6 +482,49 @@ describe("get_inventory_summary: reserves envelope bytes so a tight budget still
   });
 });
 
+describe("get_stock_asof: reserves envelope bytes so a tight budget still returns a page (item 6)", () => {
+  it("a tight remainingBytes returns a small OK page whose TOTAL bytes fit the budget — never a truncation notice", async () => {
+    // 100 compact rows so the byte-fit lands TIGHT against the budget (per-row slack is
+    // small). If the page were given the FULL remaining budget it would fill it, and the
+    // added dayKey + coverage envelope (larger than one row) would push the COMPLETED
+    // result OVER the budget the adapter threaded in — the residual-discard bug. Reserving
+    // envelope bytes keeps the whole result under the budget (a smaller page, never a notice).
+    const many = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, name: `P${i}` }));
+    db.product.count.mockResolvedValue(many.length as never);
+    db.product.findMany.mockImplementation((async (args: { skip?: number; take?: number }) => {
+      const skip = args?.skip ?? 0;
+      const take = args?.take ?? many.length;
+      return many.slice(skip, skip + take);
+    }) as never);
+    db.productStockSnapshot.aggregate.mockResolvedValue({ _min: { dayKey: "2026-01-01" }, _max: { dayKey: "2026-06-30" } } as never);
+    db.productStockSnapshot.groupBy.mockImplementation((async (args: { _sum?: unknown }) =>
+      args._sum
+        ? many.map((p) => ({ productId: p.id, _sum: { quantity: 5 }, _count: 1 }))
+        : many.map((p) => ({ productId: p.id, locationId: 1, _max: { dayKey: "2026-06-30" }, _min: { dayKey: "2026-01-01" } }))) as never);
+    db.analyticsRebuildState.findUnique.mockResolvedValue({ lastWindowTo: "2026-06-30", flaggedPairs: 0 } as never);
+
+    // Small enough that the 100 rows overflow it (so the page is genuinely bounded by
+    // bytes, not row count) — the residual-discard fires exactly at this margin.
+    const TIGHT = 6_000;
+    const result = await assistantTools.get_stock_asof.run(
+      { dayKey: "2026-06-15", limit: 100 },
+      testCtx({ companyIds: ["c1"], remainingBytes: TIGHT }),
+    );
+
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    // The COMPLETED result (page + dayKey + coverage) fits under the threaded budget, so
+    // the adapter keeps it instead of downgrading to a truncation notice.
+    expect(result.meta.bytes).toBeLessThanOrEqual(TIGHT);
+    // Still a real page (degrade to a SMALLER page, never nothing) and byte-bounded (the
+    // full 100-row catalog did not fit, so nextOffset advances).
+    const data = result.data as { returned: number; totalRows: number; nextOffset: number | null };
+    expect(data.returned).toBeGreaterThan(0);
+    expect(data.totalRows).toBe(100);
+    expect(data.nextOffset).not.toBeNull();
+  });
+});
+
 describe("low_stock_report: fetches the full report and paginates at the tool", () => {
   it("fetches all alerts (no limit passed down) and surfaces systemDefaultThreshold", async () => {
     mockGetLowStock.mockResolvedValue({ alerts: [], threshold: 10 });
