@@ -29,7 +29,7 @@ jest.mock("@/lib/prisma", () => {
 });
 
 import prisma from "@/lib/prisma";
-import { getMovementSeries } from "@/lib/reports/movement";
+import { getMovementSeries, getReceipts } from "@/lib/reports/movement";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 
@@ -246,5 +246,155 @@ describe("empty window & query shape", () => {
     const res = await getMovementSeries({ window, grain: "month" });
     expect(res.grain).toBe("month");
     expect(res.window).toBe(window);
+  });
+});
+
+/**
+ * getReceipts (W2-RCPT, spec §5 T-RCPT): STOCK_IN receipts DETAIL, DB-side
+ * skip/take + count paging via `pageFromDb` — never a full-history in-memory
+ * fetch. A receipt-DETAIL row must be a REAL receipt: delta > 0 is a where-clause
+ * filter (server-side), unlike getMovementSeries's stockIn bucket, which folds a
+ * wrong-signed row into the same logType-keyed signed sum so `net === SUM(delta)`
+ * holds. Those are two different jobs -- a totals partition vs. a detail listing --
+ * so the two functions disagree on purpose.
+ */
+describe("getReceipts -- DB-side paged STOCK_IN receipts detail", () => {
+  /** Minimal fixture-row shape the module selects: productId/locationId/delta/
+   *  unitCostCents/batchId/changeTime. */
+  const receiptRow = (
+    over: Partial<{
+      productId: number;
+      locationId: number | null;
+      delta: number;
+      unitCostCents: number | null;
+      batchId: string | null;
+      changeTime: Date;
+    }> = {},
+  ) => ({
+    productId: 1,
+    locationId: 2,
+    delta: 5,
+    unitCostCents: 350,
+    batchId: "batch-1",
+    changeTime: at("2026-07-10"),
+    ...over,
+  });
+
+  it("pages DB-side: count() is a separate exact query under the SAME where as fetch's skip/take (never a full-history fetch)", async () => {
+    db.inventory_logs.count.mockResolvedValue(37);
+    db.inventory_logs.findMany.mockResolvedValue([receiptRow(), receiptRow({ productId: 2 })] as never);
+
+    const res = await getReceipts({
+      window: win("2026-07-01", "2026-07-31"),
+      limit: 2,
+      offset: 10,
+      byteBudget: 100_000,
+    });
+
+    expect(res.totalRows).toBe(37);
+    expect(res.returned).toBe(2);
+    expect(res.nextOffset).toBe(12); // 10 consumed-before + 2 returned, 12 < 37 total
+
+    expect(db.inventory_logs.count).toHaveBeenCalledTimes(1);
+    const findManyArgs = db.inventory_logs.findMany.mock.calls[0][0]!;
+    const countArgs = db.inventory_logs.count.mock.calls[0][0]!;
+    expect(findManyArgs.skip).toBe(10);
+    expect(findManyArgs.take).toBe(2);
+    expect(countArgs.where).toEqual(findManyArgs.where);
+  });
+
+  it("orders NEWEST-first: changeTime desc, then id desc for determinism", async () => {
+    db.inventory_logs.count.mockResolvedValue(1);
+    db.inventory_logs.findMany.mockResolvedValue([receiptRow()] as never);
+
+    await getReceipts({ window: win("2026-07-01", "2026-07-31"), byteBudget: 100_000 });
+
+    const findManyArgs = db.inventory_logs.findMany.mock.calls[0][0]!;
+    expect(findManyArgs.orderBy).toEqual([{ changeTime: "desc" }, { id: "desc" }]);
+  });
+
+  it("relays null unitCostCents, null locationId, and null batchId AS NULL -- never coerced to 0", async () => {
+    db.inventory_logs.count.mockResolvedValue(1);
+    db.inventory_logs.findMany.mockResolvedValue([
+      receiptRow({ unitCostCents: null, locationId: null, batchId: null }),
+    ] as never);
+
+    const res = await getReceipts({ window: win("2026-07-01", "2026-07-31"), byteBudget: 100_000 });
+
+    expect(res.rows[0].unitCostCents).toBeNull();
+    expect(res.rows[0].locationId).toBeNull();
+    expect(res.rows[0].batchId).toBeNull();
+  });
+
+  it("quantity is the positive delta; changeTime is relayed as an ISO string", async () => {
+    db.inventory_logs.count.mockResolvedValue(1);
+    db.inventory_logs.findMany.mockResolvedValue([
+      receiptRow({ delta: 42, changeTime: at("2026-07-05") }),
+    ] as never);
+
+    const res = await getReceipts({ window: win("2026-07-01", "2026-07-31"), byteBudget: 100_000 });
+
+    expect(res.rows[0].quantity).toBe(42);
+    expect(res.rows[0].changeTime).toBe(at("2026-07-05").toISOString());
+  });
+
+  it("scopes to the window's half-open changeTime range -- same boundary convention as getMovementSeries", async () => {
+    db.inventory_logs.count.mockResolvedValue(0);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+
+    await getReceipts({ window: win("2026-07-06", "2026-07-14"), byteBudget: 100_000 });
+
+    const where = db.inventory_logs.findMany.mock.calls[0][0]!.where as Record<string, unknown>;
+    expect(where.changeTime).toEqual({
+      gte: new Date("2026-07-06T00:00:00.000Z"),
+      lt: new Date("2026-07-15T00:00:00.000Z"), // exclusive upper: start of the day AFTER `to`
+    });
+  });
+
+  it("productId filter narrows the where clause", async () => {
+    db.inventory_logs.count.mockResolvedValue(0);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+
+    await getReceipts({ window: win("2026-07-01", "2026-07-31"), productId: 42, byteBudget: 100_000 });
+
+    const where = db.inventory_logs.findMany.mock.calls[0][0]!.where as Record<string, unknown>;
+    expect(where.productId).toBe(42);
+  });
+
+  it("omitting productId leaves it out of the where clause (no accidental narrowing)", async () => {
+    db.inventory_logs.count.mockResolvedValue(0);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+
+    await getReceipts({ window: win("2026-07-01", "2026-07-31"), byteBudget: 100_000 });
+
+    const where = db.inventory_logs.findMany.mock.calls[0][0]!.where as Record<string, unknown>;
+    expect(where.productId).toBeUndefined();
+  });
+
+  it(
+    "is scoped to STOCK_IN with delta > 0 -- wrong-signed STOCK_IN (a receipt reversal) is EXCLUDED " +
+      "(a detail listing must be real receipts; contrast getMovementSeries, which folds a wrong-signed " +
+      "STOCK_IN into the same logType-keyed stockIn sum to keep net === SUM(delta))",
+    async () => {
+      db.inventory_logs.count.mockResolvedValue(0);
+      db.inventory_logs.findMany.mockResolvedValue([] as never);
+
+      await getReceipts({ window: win("2026-07-01", "2026-07-31"), byteBudget: 100_000 });
+
+      const where = db.inventory_logs.findMany.mock.calls[0][0]!.where as Record<string, unknown>;
+      expect(where.logType).toBe("STOCK_IN");
+      expect(where.delta).toEqual({ gt: 0 });
+    },
+  );
+
+  it("defaults offset to 0 and take to a fixed default limit when omitted", async () => {
+    db.inventory_logs.count.mockResolvedValue(0);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+
+    await getReceipts({ window: win("2026-07-01", "2026-07-31"), byteBudget: 100_000 });
+
+    const findManyArgs = db.inventory_logs.findMany.mock.calls[0][0]!;
+    expect(findManyArgs.skip).toBe(0);
+    expect(findManyArgs.take).toBe(50);
   });
 });

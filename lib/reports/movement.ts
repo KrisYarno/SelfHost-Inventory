@@ -40,8 +40,12 @@ import prisma from "@/lib/prisma";
 import { dayKeyStart, nextDayStart, toDayKey } from "@/lib/analytics/dates";
 import type { ResolvedWindow } from "@/lib/assistant/window";
 import { SHRINKAGE_CLASS_REASONS } from "@/lib/analytics/queries";
+import { pageFromDb, type DbPage } from "@/lib/assistant/tools";
 
 const DAY_MS = 86_400_000;
+
+/** getReceipts default page size when the caller omits `limit` (spec §5 T-RCPT). */
+const RECEIPTS_DEFAULT_LIMIT = 50;
 
 export interface MovementBuckets {
   stockIn: number;
@@ -222,4 +226,83 @@ export async function getMovementSeries(opts: {
     totals,
     coverage: { unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE, reasonCodeNullRows },
   };
+}
+
+/** One STOCK_IN receipt row (W2-RCPT, spec §5 T-RCPT). `unitCostCents`/`batchId`
+ *  relayed as-is — null means "no frozen cost/batch on this row", NEVER coerced
+ *  to 0; `locationId` is nullable too (legacy null-location receipts exist). */
+export interface ReceiptRow {
+  productId: number;
+  locationId: number | null;
+  quantity: number;
+  unitCostCents: number | null;
+  batchId: string | null;
+  changeTime: string;
+}
+
+/**
+ * Receipts DETAIL over a resolved window: STOCK_IN rows with delta > 0 (a REAL
+ * receipt — the where clause excludes wrong-signed STOCK_IN server-side, unlike
+ * getMovementSeries's stockIn bucket, which folds a wrong-signed row into the
+ * same logType-keyed signed sum so its `net === SUM(delta)` invariant holds. A
+ * detail listing has no such invariant to protect, so it filters to the real
+ * thing instead).
+ *
+ * DB-side skip/take + count paging via the shared `pageFromDb` (spec §5 T-RCPT
+ * REV-2 — never materialize the full event history to slice in memory): `count`
+ * runs an exact `prisma.inventory_logs.count` under the SAME where as `fetch`'s
+ * `findMany({ skip, take })`, ordered NEWEST-first (`changeTime desc, id desc`
+ * for determinism when many rows share a changeTime).
+ *
+ * Same half-open changeTime boundary convention as getMovementSeries:
+ * [start of `from`, start of the day after `to`).
+ */
+export async function getReceipts(opts: {
+  window: ResolvedWindow;
+  productId?: number;
+  limit?: number;
+  offset?: number;
+  byteBudget: number;
+}): Promise<DbPage<ReceiptRow>> {
+  const { window, productId, byteBudget } = opts;
+  const limit = opts.limit ?? RECEIPTS_DEFAULT_LIMIT;
+  const offset = opts.offset ?? 0;
+
+  const where = {
+    logType: "STOCK_IN" as const,
+    delta: { gt: 0 },
+    changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
+    ...(productId != null ? { productId } : {}),
+  };
+
+  return pageFromDb<ReceiptRow>({
+    count: () => prisma.inventory_logs.count({ where }),
+    fetch: async (skip, take) => {
+      const rows = await prisma.inventory_logs.findMany({
+        where,
+        orderBy: [{ changeTime: "desc" }, { id: "desc" }],
+        skip,
+        take,
+        select: {
+          productId: true,
+          locationId: true,
+          delta: true,
+          unitCostCents: true,
+          batchId: true,
+          changeTime: true,
+        },
+      });
+      return (rows ?? []).map((row) => ({
+        productId: row.productId,
+        locationId: row.locationId,
+        quantity: row.delta,
+        unitCostCents: row.unitCostCents,
+        batchId: row.batchId,
+        changeTime: row.changeTime.toISOString(),
+      }));
+    },
+    offset,
+    limit,
+    byteBudget,
+  });
 }
