@@ -97,7 +97,7 @@ describe("built artifact", () => {
       const rpc = (await res.json()) as any;
       const toolResult = JSON.parse(rpc.result.content[0].text);
       expect(toolResult.status).toBe("ok");
-      expect(toolResult.data).toEqual({ products: [] });
+      expect(toolResult.data).toEqual({ products: [], returned: 0, totalRows: 0, nextOffset: null });
     },
     30_000,
   );

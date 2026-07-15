@@ -204,7 +204,7 @@ describe("POST /mcp — tool round-trip", () => {
       const text = rpc.result.content[0].text as string;
       const toolResult = JSON.parse(text);
       expect(toolResult.status).toBe("ok");
-      expect(toolResult.data).toEqual({ products: [] });
+      expect(toolResult.data).toEqual({ products: [], returned: 0, totalRows: 0, nextOffset: null });
       // context was resolved from the token owner + telemetry recorded
       expect(p.userCompany.findMany).toHaveBeenCalled();
       expect(p.assistantRun.create).toHaveBeenCalled();

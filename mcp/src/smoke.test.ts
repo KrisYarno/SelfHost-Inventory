@@ -33,7 +33,7 @@ describe("mcp skeleton: shared tool runs via the @ alias", () => {
     );
     expect(result.status).toBe("ok");
     if (result.status === "ok") {
-      expect(result.data).toEqual({ products: [] });
+      expect(result.data).toEqual({ products: [], returned: 0, totalRows: 0, nextOffset: null });
       expect(result.meta.scope).toBe("global");
     }
   });
