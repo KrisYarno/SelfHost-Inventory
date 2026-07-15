@@ -24,6 +24,7 @@ import prisma from "@/lib/prisma";
 import { LowStockResponse, LowStockAlert } from "@/types/reports";
 import { getLowStockDefault, effectiveLowStockThreshold } from "@/lib/stock-threshold";
 import { outboundVelocity } from "@/lib/reports/demand";
+import { OUTBOUND_USAGE_DEFINITION } from "@/lib/reports/metrics-contract";
 
 /**
  * Shared reorder predicate. INCLUSIVE boundary (R-L13); a 0 effective threshold
@@ -94,16 +95,21 @@ export async function getLowStockReport(
     // INCLUSIVE boundary (R-L13); a 0 effective threshold (disabled) never alerts.
     // Out-of-stock (0) stays in this reorder-oriented report as the most critical.
     if (needsReorderAttention(currentStock, productThreshold)) {
-      // null (no outbound movement) coerces to 0/day here, which the display rounding
-      // below turns into a null daysUntilEmpty — the same "unknown runway" outcome.
-      const avgDailyUsage = velocityMap.get(product.id)?.avgDailyDemand ?? 0;
+      // TRUTHFUL NULL PROPAGATION (spec §2 D4): a product with NO qualifying outbound
+      // movement has an UNKNOWN daily usage — `null`, never a fabricated 0/day. The old
+      // `?? 0` collapsed "unknown" into "measured zero"; now `usageKnown` records which
+      // it is and daysUntilEmpty stays null when the rate is unknown.
+      const rawDailyUsage = velocityMap.get(product.id)?.avgDailyDemand ?? null;
+      const usageKnown = rawDailyUsage !== null;
       // Compute daysUntilEmpty from the SAME rounded figure the report displays
       // (Lane 6 / review M2): the TESA incoherence was 0.0667/day (unrounded) giving
       // 150 days next to a displayed "0.1/day" that implies 100. Round once, use it
       // for both, so a reader can reproduce the number.
-      const displayedDailyUsage = Math.round(avgDailyUsage * 10) / 10;
+      const averageDailyUsage = usageKnown ? Math.round(rawDailyUsage! * 10) / 10 : null;
       const daysUntilEmpty =
-        displayedDailyUsage > 0 ? Math.floor(currentStock / displayedDailyUsage) : null;
+        averageDailyUsage !== null && averageDailyUsage > 0
+          ? Math.floor(currentStock / averageDailyUsage)
+          : null;
       const percentageRemaining = productThreshold > 0 ? (currentStock / productThreshold) * 100 : 0;
 
       alerts.push({
@@ -112,19 +118,26 @@ export async function getLowStockReport(
         currentStock,
         threshold: productThreshold,
         percentageRemaining: Math.round(percentageRemaining),
-        averageDailyUsage: displayedDailyUsage,
+        averageDailyUsage,
+        usageKnown,
         daysUntilEmpty,
       });
     }
   });
 
-  // Sort by percentage remaining (most critical first)
-  alerts.sort((a, b) => a.percentageRemaining - b.percentageRemaining);
+  // Deterministic order (W0-SORT): percentage remaining (most critical first), then
+  // productId as a stable tie-break so equal-% rows page consistently.
+  alerts.sort(
+    (a, b) => a.percentageRemaining - b.percentageRemaining || a.productId - b.productId,
+  );
 
   const limited = opts.limit != null ? alerts.slice(0, opts.limit) : alerts;
 
   return {
     alerts: limited,
     threshold: defaultThreshold,
+    // Report-level definition of the usage rate (spec §2 D3): units/day = physical
+    // outbound over the days actually covered, null when there is no movement.
+    velocityDefinition: OUTBOUND_USAGE_DEFINITION,
   };
 }

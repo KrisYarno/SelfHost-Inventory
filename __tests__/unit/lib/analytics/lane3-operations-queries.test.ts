@@ -98,27 +98,49 @@ beforeEach(() => jest.clearAllMocks());
 
 describe("getOperationsRows — ONE outbound predicate + per-product null (review B3 / D-T4)", () => {
   test("units-out is a product's summed non-transfer outflow; velocity divides by the covered window", async () => {
-    // Outbound data started ~10 days ago: 20 units / 10 days = 2.0/day (never a flat 30).
-    // +1min of slack keeps elapsed just under 10 full days so ceil() lands on 10
-    // deterministically (a bare daysAgo(10) sits exactly on the day boundary and is
-    // sub-ms-drift fragile under load).
+    // The product's OWN first in-window outbound was ~10 days ago: 20 units / 10 days =
+    // 2.0/day (never a flat 30). +1min of slack keeps elapsed just under 10 full days so
+    // ceil() lands on 10 deterministically (a bare daysAgo(10) sits exactly on the day
+    // boundary and is sub-ms-drift fragile under load).
     setupOps({
       products: [product()],
       outboundStart: new Date(Date.now() - 10 * DAY + 60_000),
-      outbound30: [{ productId: 1, _sum: { delta: -20 } }],
+      outbound30: [
+        { productId: 1, _sum: { delta: -20 }, _min: { changeTime: new Date(Date.now() - 10 * DAY + 60_000) } },
+      ],
       outbound90: [{ productId: 1, _sum: { delta: -20 } }],
     });
     const { rows } = await getOperationsRows({});
     expect(rows[0].unitsOut30).toBe(20);
-    expect(rows[0].avgDaily30).toBeCloseTo(2.0, 5);
+    expect(rows[0].avgDailyOutbound30).toBeCloseTo(2.0, 5);
     expect(rows[0].daysOfSupply).toBeCloseTo(25, 5); // 50 / 2.0
+  });
+
+  test("PER-PRODUCT DENOMINATOR (spec §2 D2): 19 units in the last 5 days of a 30-day window => 3.8/day, not 19/30", async () => {
+    // The whole point of the per-product days-covered denominator: a product whose
+    // outbound all landed recently divides by the days it ACTUALLY covered (5), not the
+    // flat window (30). 19/5 = 3.8 (the truthful recent-onset velocity); 19/30 = 0.633
+    // would understate it. +1min slack so ceil() lands on 5 deterministically.
+    setupOps({
+      products: [product()], // 50 on hand
+      outboundStart: daysAgo(200),
+      outbound30: [
+        { productId: 1, _sum: { delta: -19 }, _min: { changeTime: new Date(Date.now() - 5 * DAY + 60_000) } },
+      ],
+      outbound90: [{ productId: 1, _sum: { delta: -19 } }],
+    });
+    const { rows } = await getOperationsRows({});
+    expect(rows[0].unitsOut30).toBe(19);
+    expect(rows[0].avgDailyOutbound30).toBeCloseTo(3.8, 5); // 19 / 5, NOT 19 / 30
+    expect(rows[0].daysOfSupply).toBeCloseTo(50 / 3.8, 5);
   });
 
   test("a product with NO outbound row contributes null, not 0", async () => {
     setupOps({
       products: [product({ id: 1 }), product({ id: 2 })],
       outboundStart: daysAgo(200),
-      outbound30: [{ productId: 1, _sum: { delta: -30 } }], // only product 1 moved
+      // only product 1 moved
+      outbound30: [{ productId: 1, _sum: { delta: -30 }, _min: { changeTime: daysAgo(25) } }],
       outbound90: [{ productId: 1, _sum: { delta: -30 } }],
     });
     const { rows } = await getOperationsRows({});
@@ -126,27 +148,29 @@ describe("getOperationsRows — ONE outbound predicate + per-product null (revie
     expect(byId[1].unitsOut30).toBe(30);
     expect(byId[2].unitsOut30).toBeNull();
     expect(byId[2].unitsOut90).toBeNull();
-    expect(byId[2].avgDaily30).toBeNull();
+    expect(byId[2].avgDailyOutbound30).toBeNull();
   });
 
   test("HAZARD PINNED: one SALE row does NOT flip other products to 0 nor inflate the denominator", async () => {
-    // Prod shape: a year of negative ADJUSTMENT outflow already exists (outboundStart
-    // 365d ago), then a single SALE row lands for product 1 today. Under the old global
-    // `hasSaleData` flag, EVERY other product would flip null -> 0 and the denominator
-    // would collapse to 1 (velocity up to 30x). With the shared outbound predicate and
-    // per-product nulls, product 2 stays null and the denominator stays 30.
+    // Prod shape: a year of negative ADJUSTMENT outflow already exists, then a single
+    // SALE row lands for product 1. Under the old global `hasSaleData` flag, EVERY other
+    // product would flip null -> 0 and the denominator would collapse to 1 (velocity up
+    // to 30x). With the shared outbound predicate and per-product nulls, product 2 stays
+    // null; product 1's OWN first in-window event predates the window edge, so its
+    // days-covered clamps to 30 => 5/30, NOT 5/1.
     setupOps({
       products: [product({ id: 1 }), product({ id: 2 })],
       outboundStart: daysAgo(365),
-      outbound30: [{ productId: 1, _sum: { delta: -5 } }], // the lone SALE row, as outbound
+      // the lone SALE row, as outbound; first in-window movement clamps to the 30d edge
+      outbound30: [{ productId: 1, _sum: { delta: -5 }, _min: { changeTime: daysAgo(60) } }],
       outbound90: [{ productId: 1, _sum: { delta: -5 } }],
     });
     const { rows } = await getOperationsRows({});
     const byId = Object.fromEntries(rows.map((r) => [r.productId, r]));
     expect(byId[2].unitsOut30).toBeNull(); // NOT a confident 0
     expect(byId[1].unitsOut30).toBe(5);
-    // Denominator is min(30, daysSinceOutboundStart=365) = 30, so 5/30, NOT 5/1.
-    expect(byId[1].avgDaily30).toBeCloseTo(5 / 30, 6);
+    // daysCovered clamps to windowDays=30 (first event predates the window), so 5/30.
+    expect(byId[1].avgDailyOutbound30).toBeCloseTo(5 / 30, 6);
   });
 
   test("no outbound data at all => every product's units-out is null", async () => {
@@ -160,7 +184,7 @@ describe("getOperationsRows — ONE outbound predicate + per-product null (revie
     expect(dataStarts.outbound).toBeNull();
     expect(rows[0].unitsOut30).toBeNull();
     expect(rows[0].unitsOut90).toBeNull();
-    expect(rows[0].avgDaily30).toBeNull();
+    expect(rows[0].avgDailyOutbound30).toBeNull();
     expect(rows[0].daysOfSupply).toBeNull();
   });
 
@@ -205,7 +229,7 @@ describe("getOperationsRows — turns coverage floor (R-L10)", () => {
       quantity: 100,
     }));
 
-  test("coverage < 80% of the window => turns90 null, but coverage days are reported", async () => {
+  test("coverage < 80% of the window => turns null, but coverage days + window are reported", async () => {
     setupOps({
       products: [product()],
       outboundStart: daysAgo(90),
@@ -214,11 +238,12 @@ describe("getOperationsRows — turns coverage floor (R-L10)", () => {
       snapshotStart: "2026-05-01",
     });
     const { rows } = await getOperationsRows({ windowDays: 90 });
-    expect(rows[0].turns90).toBeNull();
+    expect(rows[0].turns).toBeNull();
+    expect(rows[0].turnsWindowDays).toBe(90); // always known, even when turns is null
     expect(rows[0].turnsCoverage).toEqual({ days: 10, windowDays: 90 });
   });
 
-  test("coverage >= 80% => turns90 = |outbound over window| / avg daily snapshot qty", async () => {
+  test("coverage >= 80% => turns = |outbound over window| / avg daily snapshot qty", async () => {
     setupOps({
       products: [product()],
       outboundStart: daysAgo(90),
@@ -228,7 +253,8 @@ describe("getOperationsRows — turns coverage floor (R-L10)", () => {
     });
     const { rows } = await getOperationsRows({ windowDays: 90 });
     expect(rows[0].turnsCoverage).toEqual({ days: 80, windowDays: 90 });
-    expect(rows[0].turns90).toBeCloseTo(200 / 100, 5);
+    expect(rows[0].turnsWindowDays).toBe(90);
+    expect(rows[0].turns).toBeCloseTo(200 / 100, 5);
   });
 });
 
@@ -285,10 +311,13 @@ describe("getOperationsRows — attention triage + data-starts", () => {
       saleStart,
       snapshotStart: "2026-04-15",
     });
-    const { dataStarts } = await getOperationsRows({ windowDays: 90 });
+    const { dataStarts, velocityDefinition } = await getOperationsRows({ windowDays: 90 });
     expect(dataStarts.outbound).toBe(outStart.toISOString());
     expect(dataStarts.sale).toBe(saleStart.toISOString());
     expect(dataStarts.snapshot).toBe("2026-04-15");
+    // Result-level velocity definition (spec §2 D3): the physicalOutbound prose that
+    // must accompany avgDailyOutbound30 wherever it is surfaced.
+    expect(velocityDefinition).toContain("Physical outbound");
     const snapArg = m.productStockSnapshot.findMany.mock.calls[0][0];
     expect(snapArg.where.dayKey.gte).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
@@ -324,6 +353,8 @@ describe("getShrinkageSummary — classified loss only + unclassified coverage (
     const s = await getShrinkageSummary({ days: 365 });
     expect(s.totalUnits).toBe(0);
     expect(s.byReason.DAMAGE.units).toBe(0);
+    // Classified loss is 0, so its cost-coverage is 0/0; the 16,138 lives in coverage.
+    expect(s.costCoverage).toEqual({ costedUnits: 0, totalUnits: 0 });
     expect(s.coverage.unclassifiedOutboundUnits).toBe(16138);
     expect(s.coverage.reasonTrackingStartedAt).toBeNull();
   });
@@ -342,12 +373,26 @@ describe("getShrinkageSummary — classified loss only + unclassified coverage (
       reasonStart,
     );
     const s = await getShrinkageSummary({ days: 90 });
-    expect(s.byReason.DAMAGE).toEqual({ units: 4, valueAtCurrentCostCents: 1000 });
-    expect(s.byReason.COUNT).toEqual({ units: 3, valueAtCurrentCostCents: 750 });
-    expect(s.byReason.THEFT).toEqual({ units: 0, valueAtCurrentCostCents: null });
+    expect(s.byReason.DAMAGE).toEqual({
+      units: 4,
+      valueAtCurrentCostCents: 1000,
+      costCoverage: { costedUnits: 4, totalUnits: 4 },
+    });
+    expect(s.byReason.COUNT).toEqual({
+      units: 3,
+      valueAtCurrentCostCents: 750,
+      costCoverage: { costedUnits: 3, totalUnits: 3 },
+    });
+    expect(s.byReason.THEFT).toEqual({
+      units: 0,
+      valueAtCurrentCostCents: null,
+      costCoverage: { costedUnits: 0, totalUnits: 0 },
+    });
     expect((s.byReason as any).CORRECTION).toBeUndefined();
     expect((s.byReason as any).UNCLASSIFIED).toBeUndefined();
     expect(s.totalUnits).toBe(7); // 4 + 3, NOT the 2 CORRECTION or 5 null
+    // Total cost-coverage (spec §3 E4): all 7 classified units carried a known cost.
+    expect(s.costCoverage).toEqual({ costedUnits: 7, totalUnits: 7 });
     expect(s.coverage.unclassifiedOutboundUnits).toBe(7); // 2 + 5
     expect(s.coverage.reasonTrackingStartedAt).toBe(reasonStart.toISOString());
   });
@@ -359,8 +404,14 @@ describe("getShrinkageSummary — classified loss only + unclassified coverage (
       daysAgo(30),
     );
     const s = await getShrinkageSummary({ days: 90 });
-    expect(s.byReason.DAMAGE).toEqual({ units: 4, valueAtCurrentCostCents: null });
+    expect(s.byReason.DAMAGE).toEqual({
+      units: 4,
+      valueAtCurrentCostCents: null,
+      // no cost on file: 0 of the 4 units are costed (spec §3 E4).
+      costCoverage: { costedUnits: 0, totalUnits: 4 },
+    });
     expect(s.totalValueAtCurrentCostCents).toBeNull();
+    expect(s.costCoverage).toEqual({ costedUnits: 0, totalUnits: 4 });
   });
 
   test("empty ledger => all buckets zero, total 0, coverage empty, dataStart null", async () => {
@@ -368,9 +419,14 @@ describe("getShrinkageSummary — classified loss only + unclassified coverage (
     const s = await getShrinkageSummary({ days: 90 });
     expect(s.dataStart).toBeNull();
     expect(s.totalUnits).toBe(0);
+    expect(s.costCoverage).toEqual({ costedUnits: 0, totalUnits: 0 });
     expect(s.coverage.unclassifiedOutboundUnits).toBe(0);
     for (const k of Object.keys(s.byReason) as (keyof typeof s.byReason)[]) {
-      expect(s.byReason[k]).toEqual({ units: 0, valueAtCurrentCostCents: null });
+      expect(s.byReason[k]).toEqual({
+        units: 0,
+        valueAtCurrentCostCents: null,
+        costCoverage: { costedUnits: 0, totalUnits: 0 },
+      });
     }
     expect(m.product.findMany).not.toHaveBeenCalled();
   });

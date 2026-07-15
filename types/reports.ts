@@ -87,7 +87,10 @@ export interface LowStockAlert {
   currentStock: number;
   threshold: number;
   percentageRemaining: number;
-  averageDailyUsage: number;
+  // null = usage UNKNOWN (no qualifying outbound movement), never a fabricated 0/day
+  // (spec §2 D4). `usageKnown` distinguishes a measured 0 from an unknown rate.
+  averageDailyUsage: number | null;
+  usageKnown: boolean;
   daysUntilEmpty: number | null;
 }
 
@@ -136,6 +139,8 @@ export interface ActivityResponse {
 export interface LowStockResponse {
   alerts: LowStockAlert[];
   threshold: number;
+  // Definition of the per-row usage rate (spec §2 D3 = OUTBOUND_USAGE_DEFINITION).
+  velocityDefinition: string;
 }
 
 export interface UserActivityResponse {

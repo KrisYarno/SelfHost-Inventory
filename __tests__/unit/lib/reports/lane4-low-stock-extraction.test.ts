@@ -23,6 +23,7 @@ jest.mock("@/lib/api-utils", () => {
 
 import prisma from "@/lib/prisma";
 import { needsReorderAttention, getLowStockReport } from "@/lib/reports/low-stock";
+import { OUTBOUND_USAGE_DEFINITION } from "@/lib/reports/metrics-contract";
 import { requireApproved } from "@/lib/api-utils";
 import { GET as lowStockGET } from "@/app/api/reports/low-stock/route";
 
@@ -113,6 +114,7 @@ describe("Lane 6 (review M2 / D-T5): transfers are not usage + display-consisten
       const report = await getLowStockReport({});
       const row = report.alerts.find((a) => a.productId === 1)!;
       expect(row.averageDailyUsage).toBe(0.1);
+      expect(row.usageKnown).toBe(true); // measured movement, not an unknown rate
       expect(row.daysUntilEmpty).toBe(100);
     } finally {
       jest.useRealTimers();
@@ -140,6 +142,8 @@ describe("route parity: GET /api/reports/low-stock is a thin caller", () => {
     expect(resp.status).toBe(200);
     const body = await resp.json();
 
+    // Null propagation (spec §2 D4): no outbound movement => averageDailyUsage null +
+    // usageKnown false (NOT a fabricated 0). Report carries the usage-rate definition.
     expect(body).toEqual({
       alerts: [
         {
@@ -148,7 +152,8 @@ describe("route parity: GET /api/reports/low-stock is a thin caller", () => {
           currentStock: 0,
           threshold: 5,
           percentageRemaining: 0,
-          averageDailyUsage: 0,
+          averageDailyUsage: null,
+          usageKnown: false,
           daysUntilEmpty: null,
         },
         {
@@ -157,11 +162,13 @@ describe("route parity: GET /api/reports/low-stock is a thin caller", () => {
           currentStock: 8,
           threshold: 10,
           percentageRemaining: 80,
-          averageDailyUsage: 0,
+          averageDailyUsage: null,
+          usageKnown: false,
           daysUntilEmpty: null,
         },
       ],
       threshold: 10,
+      velocityDefinition: OUTBOUND_USAGE_DEFINITION,
     });
   });
 

@@ -53,7 +53,11 @@ const fmtDate = (iso: string | null) =>
 
 // D-L6 operator copy — an unfulfilled order does NOT subtract the original sale.
 const UNITS_OUT_TOOLTIP = "Later un-fulfillments are not subtracted";
+// The SaleDataNotice panel is keyed off the SALE ledger start, so it keeps its sale copy.
 const NO_SALE_HISTORY = "No fulfilled-order history yet";
+// Per-cell velocity metrics are PHYSICAL OUTBOUND, not fulfilled orders (spec §2 D2):
+// their "no data" tooltip must speak to outbound movement, not order fulfillment.
+const NO_OUTBOUND_HISTORY = "No outbound movement recorded yet";
 
 const ATTENTION: Record<OperationsRow["attention"], { tone: StatusTone; label: string; Icon: typeof Info }> = {
   ok: { tone: "positive", label: "OK", Icon: CircleCheck },
@@ -73,17 +77,18 @@ function AttentionBadge({ attention }: { attention: OperationsRow["attention"] }
 }
 
 function turnsTitle(row: OperationsRow): string | undefined {
-  if (row.turns90 !== null) return undefined;
+  if (row.turns !== null) return undefined;
   if (row.turnsCoverage) {
     return `Turns unavailable — stock snapshots cover ${row.turnsCoverage.days} of ${row.turnsCoverage.windowDays} days`;
   }
   return "Turns unavailable — no stock snapshots yet";
 }
 
-// The muted, per-cell honesty value for a SALE-derived metric that has no data yet.
+// The muted, per-cell honesty value for an outbound-derived metric that has no
+// movement yet (defaults to the outbound-based copy, not fulfilled orders).
 function Accrued({ title }: { title?: string }) {
   return (
-    <span className="text-muted-foreground" title={title ?? NO_SALE_HISTORY}>
+    <span className="text-muted-foreground" title={title ?? NO_OUTBOUND_HISTORY}>
       —
     </span>
   );
@@ -97,12 +102,12 @@ function DetailGrid({ row }: { row: OperationsRow }) {
     {
       label: "Units out (90 days)",
       value: row.unitsOut90 === null ? "—" : numberFmt.format(row.unitsOut90),
-      title: row.unitsOut90 === null ? NO_SALE_HISTORY : UNITS_OUT_TOOLTIP,
+      title: row.unitsOut90 === null ? NO_OUTBOUND_HISTORY : UNITS_OUT_TOOLTIP,
     },
     {
-      label: "Avg daily (30 days)",
-      value: row.avgDaily30 === null ? "—" : row.avgDaily30.toFixed(2),
-      title: row.avgDaily30 === null ? NO_SALE_HISTORY : undefined,
+      label: "Avg daily outbound (30 days)",
+      value: row.avgDailyOutbound30 === null ? "—" : row.avgDailyOutbound30.toFixed(2),
+      title: row.avgDailyOutbound30 === null ? NO_OUTBOUND_HISTORY : undefined,
     },
     { label: "Corrections (90 days)", value: numberFmt.format(row.correctionsIn90) },
   ];
@@ -244,12 +249,12 @@ export function OperationsView() {
                           )}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
-                          {row.turns90 === null ? (
+                          {row.turns === null ? (
                             <span className="text-muted-foreground" title={turnsTitle(row)}>
                               —
                             </span>
                           ) : (
-                            `${row.turns90.toFixed(1)}x`
+                            `${row.turns.toFixed(1)}x`
                           )}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">

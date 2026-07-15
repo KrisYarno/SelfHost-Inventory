@@ -40,9 +40,10 @@ function makeRow(over: Partial<any> = {}) {
     currentStock: 50,
     unitsOut30: 20,
     unitsOut90: 60,
-    avgDaily30: 2,
+    avgDailyOutbound30: 2,
     daysOfSupply: 25,
-    turns90: 1.5,
+    turns: 1.5,
+    turnsWindowDays: 90,
     turnsCoverage: { days: 85, windowDays: 90 },
     lastInboundAt: "2026-06-01T00:00:00.000Z",
     lastOutboundAt: "2026-07-05T00:00:00.000Z",
@@ -95,7 +96,7 @@ describe("OperationsView", () => {
   test("shows the designed accrual panel (not a 0 wall) when no SALE data exists", async () => {
     mockFetch(
       payload({
-        rows: [makeRow({ unitsOut30: null, unitsOut90: null, avgDaily30: null, daysOfSupply: null })],
+        rows: [makeRow({ unitsOut30: null, unitsOut90: null, avgDailyOutbound30: null, daysOfSupply: null })],
         dataStarts: { sale: null, outbound: null, adjustment: null, receipt: null, snapshot: null },
       })
     );
@@ -116,7 +117,7 @@ describe("OperationsView", () => {
   });
 
   test("turns cell carries the D-L6 coverage tooltip when turns are unavailable", async () => {
-    mockFetch(payload({ rows: [makeRow({ turns90: null, turnsCoverage: { days: 10, windowDays: 90 } })] }));
+    mockFetch(payload({ rows: [makeRow({ turns: null, turnsCoverage: { days: 10, windowDays: 90 } })] }));
     renderWithClient(<OperationsView />);
     await screen.findByText("Inventory value");
     expect(

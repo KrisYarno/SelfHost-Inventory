@@ -25,6 +25,7 @@
 
 import prisma from "@/lib/prisma";
 import { reorderDemand } from "@/lib/reports/demand";
+import { REORDER_DEMAND_DEFINITION } from "@/lib/reports/metrics-contract";
 import {
   getGlobalReorderSettings,
   resolveReorderConfig,
@@ -77,11 +78,9 @@ export interface ReorderReport {
   coverage: { total: number; suggested: number; unavailable: number; costed: number };
 }
 
-const DEMAND_DEFINITION =
-  "Outbound depletion excluding internal transfers and CORRECTION reversals " +
-  "(sales plus genuine losses — damage/theft/expiry). avgDailyDemand = units out / " +
-  "days covered since the first such movement in the window (never a flat window, " +
-  "never 0-as-measurement).";
+// The reorder-demand definition prose now lives in the metrics contract (spec §2 D3)
+// so reorder, low-stock, ops, and every tool draw the same text. The duplicate string
+// that used to live here is deleted — `REORDER_DEMAND_DEFINITION` is the canonical text.
 
 const URGENCY_RANK: Record<ReorderUrgency, number> = {
   OUT: 4,
@@ -277,7 +276,7 @@ export async function getReorderReport(
       windowDays: REORDER_WINDOW_DAYS,
       bufferDaysDefault: globals.defaultSafetyStockDays,
       targetCoverageMultiple: globals.defaultTargetCoverageMultiple,
-      demandDefinition: DEMAND_DEFINITION,
+      demandDefinition: REORDER_DEMAND_DEFINITION,
     },
     coverage: {
       total,

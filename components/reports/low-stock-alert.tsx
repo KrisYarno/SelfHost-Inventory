@@ -127,11 +127,13 @@ export function LowStockAlert() {
                       className="h-1.5"
                     />
                   </div>
-                  {alert.averageDailyUsage > 0 && (
+                  {alert.averageDailyUsage === null ? (
+                    <p className="text-xs opacity-75">Average daily usage: unknown</p>
+                  ) : alert.averageDailyUsage > 0 ? (
                     <p className="text-xs opacity-75">
                       Average daily usage: {alert.averageDailyUsage} units
                     </p>
-                  )}
+                  ) : null}
                 </div>
               );
             })}

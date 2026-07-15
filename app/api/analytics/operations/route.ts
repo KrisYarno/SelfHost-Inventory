@@ -48,6 +48,9 @@ export const GET = apiHandler(async (request: NextRequest) => {
     windowDays,
     rows: operations.rows,
     dataStarts: operations.dataStarts,
+    // The physicalOutbound velocity definition (spec §2 D3) travels with the rows'
+    // avgDailyOutbound30 so the web surface can state what the rate means.
+    velocityDefinition: operations.velocityDefinition,
     shrinkage90,
     valuation,
   });

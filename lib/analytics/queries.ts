@@ -3,6 +3,11 @@ import { inventory_logs_logType } from "@prisma/client";
 import { toDayKey } from "@/lib/analytics/dates";
 import { centsFromCostPrice } from "@/lib/inventory";
 import { effectiveLowStockThreshold, getLowStockDefault, isLowStock } from "@/lib/stock-threshold";
+import {
+  PHYSICAL_OUTBOUND_WHERE,
+  daysCovered,
+  PHYSICAL_OUTBOUND_DEFINITION,
+} from "@/lib/reports/metrics-contract";
 
 export type SalesGroupBy = "product" | "day" | "integration" | "company";
 
@@ -78,19 +83,30 @@ const AGING_OUTLIER_DAYS = 90; // aligns with DEAD_STOCK_DAYS.
 export type ShrinkageReason = "DAMAGE" | "THEFT" | "EXPIRY" | "COUNT";
 const SHRINKAGE_CLASS_REASONS = ["DAMAGE", "THEFT", "EXPIRY", "COUNT"] as const;
 
-/**
- * The ONE outbound predicate (Lane 6 / review B3 / D-T4): stock physically
- * leaving the shelf = a negative delta that is NOT an internal transfer. Shared
- * verbatim by units-out, last-outbound, and the low-stock velocity so the three
- * can never disagree (the bug the review caught: units-out counted SALE-only
- * while last-outbound counted any negative delta). SALE stays available as an
- * optional sub-breakdown ("attributed to an in-app order"), never as the whole
- * definition of outbound.
- */
-const OUTBOUND_WHERE = {
-  delta: { lt: 0 },
-  logType: { not: inventory_logs_logType.TRANSFER },
-} as const;
+// The ONE outbound (units-out / velocity) predicate now lives in the metrics
+// contract (spec §2 D1): `PHYSICAL_OUTBOUND_WHERE` = delta<0 AND logType != TRANSFER
+// (corrections INCLUDED — they deplete). Shared verbatim by units-out, last-outbound,
+// the low-stock velocity, and demand.ts so the definitions can never disagree. No
+// caller defines its own copy any more.
+
+// Attention triage rank for the deterministic operations sort (W0-SORT): out is most
+// urgent, ok least. The get_operations tool re-sorts by attention (stably), so the
+// secondary ordering established here survives to both the web view and the tool.
+const ATTENTION_SORT_RANK: Record<OperationsRow["attention"], number> = {
+  out: 3,
+  low: 2,
+  stale: 1,
+  ok: 0,
+};
+
+/** daysOfSupply ascending, NULLS LAST (W0-SORT): a shorter runway is more urgent; a
+ *  product with no measurable runway (null) sorts after every product that has one. */
+function compareDaysOfSupplyAscNullsLast(a: number | null, b: number | null): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return a - b;
+}
 
 export interface OperationsRow {
   productId: number;
@@ -98,9 +114,16 @@ export interface OperationsRow {
   currentStock: number;
   unitsOut30: number | null;
   unitsOut90: number | null;
-  avgDaily30: number | null;
+  // Per-product velocity (spec §2 D2): units out over the last 30 days divided by that
+  // product's OWN days-covered (span from its first qualifying outbound in the window),
+  // NEVER a flat /30. Renamed from avgDaily30 so every consumer re-reads the meaning.
+  avgDailyOutbound30: number | null;
   daysOfSupply: number | null;
-  turns90: number | null;
+  // Stock turns over `turnsWindowDays` (W0-TURNS): null below the snapshot-coverage
+  // floor or with no snapshot inventory to divide by. `turnsWindowDays` is the window
+  // the turns figure is measured over (always known — 30 or 90).
+  turns: number | null;
+  turnsWindowDays: number;
   turnsCoverage: { days: number; windowDays: number } | null;
   lastInboundAt: string | null;
   lastOutboundAt: string | null;
@@ -180,7 +203,7 @@ function absOutByProduct(rows: { productId: number; _sum: { delta: number | null
  */
 export async function getOperationsRows(
   opts: { windowDays?: 30 | 90 } = {}
-): Promise<{ rows: OperationsRow[]; dataStarts: OperationsDataStarts }> {
+): Promise<{ rows: OperationsRow[]; dataStarts: OperationsDataStarts; velocityDefinition: string }> {
   const windowDays = opts.windowDays === 30 ? 30 : 90;
   const now = new Date();
   const start30 = new Date(now.getTime() - 30 * DAY_MS);
@@ -219,12 +242,15 @@ export async function getOperationsRows(
     getLowStockDefault(),
     prisma.inventory_logs.groupBy({
       by: ["productId"],
-      where: { ...OUTBOUND_WHERE, changeTime: { gte: start30 } },
+      where: { ...PHYSICAL_OUTBOUND_WHERE, changeTime: { gte: start30 } },
       _sum: { delta: true },
+      // Per-product FIRST qualifying outbound IN the 30-day window (spec §2 D2): the
+      // velocity denominator is this product's own days-covered, not a global dataStart.
+      _min: { changeTime: true },
     }),
     prisma.inventory_logs.groupBy({
       by: ["productId"],
-      where: { ...OUTBOUND_WHERE, changeTime: { gte: start90 } },
+      where: { ...PHYSICAL_OUTBOUND_WHERE, changeTime: { gte: start90 } },
       _sum: { delta: true },
     }),
     prisma.inventory_logs.groupBy({
@@ -234,7 +260,7 @@ export async function getOperationsRows(
     }),
     prisma.inventory_logs.groupBy({
       by: ["productId"],
-      where: OUTBOUND_WHERE,
+      where: PHYSICAL_OUTBOUND_WHERE,
       _max: { changeTime: true },
     }),
     prisma.inventory_logs.groupBy({
@@ -262,7 +288,7 @@ export async function getOperationsRows(
       _min: { changeTime: true },
     }),
     prisma.inventory_logs.aggregate({
-      where: OUTBOUND_WHERE,
+      where: PHYSICAL_OUTBOUND_WHERE,
       _min: { changeTime: true },
     }),
     prisma.inventory_logs.aggregate({
@@ -289,19 +315,18 @@ export async function getOperationsRows(
   const hasAdjustmentData = dataStarts.adjustment !== null;
   const hasSnapshotData = dataStarts.snapshot !== null;
 
-  // Velocity denominator (review B3 / D-T4): clamp to the window ACTUALLY covered by
-  // outbound data. If outbound movement only began 3 days ago, dividing 30 days of a
-  // window we don't have would inflate velocity up to ~10x. Prod has a year of
-  // negative ADJUSTMENT outflow, so this resolves to 30 — the hazard the review
-  // pinned (a lone fresh SALE row collapsing the denominator to 1) cannot occur,
-  // because outbound is not SALE-scoped.
-  const daysSinceOutboundStart = dataStarts.outbound
-    ? Math.max(1, Math.ceil((now.getTime() - new Date(dataStarts.outbound).getTime()) / DAY_MS))
-    : 0;
-  const velocityDenom = Math.max(1, Math.min(30, daysSinceOutboundStart || 30));
-
   const out30 = absOutByProduct(outbound30);
   const out90 = absOutByProduct(outbound90);
+
+  // PER-PRODUCT velocity denominator (spec §2 D2): each product's own first qualifying
+  // outbound WITHIN the 30-day window drives its days-covered — NEVER a global flat /30
+  // and never the global outbound dataStart. A product whose only movement is a burst in
+  // the last few days divides by those few days, not by 30 (which would understate its
+  // real velocity). Corrections are included (physicalOutbound predicate).
+  const firstOutbound30 = new Map<number, Date>();
+  for (const r of outbound30 as { productId: number; _min?: { changeTime: Date | null } }[]) {
+    if (r._min?.changeTime) firstOutbound30.set(r.productId, r._min.changeTime);
+  }
   const shrinkUnits = absOutByProduct(shrink90);
   const inboundAt = new Map<number, Date | null>(inbound.map((r) => [r.productId, r._max.changeTime]));
   const outboundAt = new Map<number, Date | null>(lastOutbound.map((r) => [r.productId, r._max.changeTime]));
@@ -329,13 +354,22 @@ export async function getOperationsRows(
     // never flips another product's honest null to a confident 0.
     const unitsOut30 = out30.has(p.id) ? out30.get(p.id)! : null;
     const unitsOut90 = out90.has(p.id) ? out90.get(p.id)! : null;
-    const avgDaily30 = unitsOut30 === null ? null : unitsOut30 / velocityDenom;
+    // Per-product days-covered denominator (spec §2 D2): span from THIS product's first
+    // in-window outbound to now, clamped [1, 30]. Null when it has no outbound at all.
+    const firstMs = firstOutbound30.get(p.id);
+    const avgDailyOutbound30 =
+      unitsOut30 === null || firstMs === undefined
+        ? null
+        : unitsOut30 / daysCovered(firstMs.getTime(), now.getTime(), 30);
     const daysOfSupply =
-      avgDaily30 === null || avgDaily30 <= 0 ? null : currentStock / avgDaily30;
+      avgDailyOutbound30 === null || avgDailyOutbound30 <= 0
+        ? null
+        : currentStock / avgDailyOutbound30;
 
-    // Turns: |SALE out over window| / avg daily snapshot qty; null below the
-    // coverage floor or with no snapshot inventory to divide by.
-    let turns90: number | null = null;
+    // Turns: |outbound over window| / avg daily snapshot qty; null below the coverage
+    // floor or with no snapshot inventory to divide by. `turnsWindowDays` is the window
+    // the figure is measured over (always known, even when turns itself is null).
+    let turns: number | null = null;
     let turnsCoverage: { days: number; windowDays: number } | null = null;
     if (hasSnapshotData) {
       const byDay = snapByProduct.get(p.id);
@@ -351,7 +385,7 @@ export async function getOperationsRows(
         avgQty > 0 &&
         coverageDays / windowDays >= TURNS_COVERAGE_FLOOR
       ) {
-        turns90 = unitsOutWindow / avgQty;
+        turns = unitsOutWindow / avgQty;
       }
     }
 
@@ -380,9 +414,10 @@ export async function getOperationsRows(
       currentStock,
       unitsOut30,
       unitsOut90,
-      avgDaily30,
+      avgDailyOutbound30,
       daysOfSupply,
-      turns90,
+      turns,
+      turnsWindowDays: windowDays,
       turnsCoverage,
       lastInboundAt: toIso(inboundAt.get(p.id) ?? null),
       lastOutboundAt: toIso(lastOut),
@@ -393,13 +428,36 @@ export async function getOperationsRows(
     };
   });
 
-  return { rows, dataStarts };
+  // Deterministic order (W0-SORT): attention rank desc, then daysOfSupply asc nulls-last,
+  // then productId. Both the web view and the get_operations tool render this order (the
+  // tool's attention-only re-sort is stable, so the secondary keys survive).
+  rows.sort(
+    (a, b) =>
+      ATTENTION_SORT_RANK[b.attention] - ATTENTION_SORT_RANK[a.attention] ||
+      compareDaysOfSupplyAscNullsLast(a.daysOfSupply, b.daysOfSupply) ||
+      a.productId - b.productId,
+  );
+
+  return { rows, dataStarts, velocityDefinition: PHYSICAL_OUTBOUND_DEFINITION };
 }
 
 export interface ShrinkageSummary {
-  byReason: Record<ShrinkageReason, { units: number; valueAtCurrentCostCents: number | null }>;
+  byReason: Record<
+    ShrinkageReason,
+    {
+      units: number;
+      valueAtCurrentCostCents: number | null;
+      // Cost-coverage (spec §3 E4): how many of the bucket's units carry a known cost.
+      // valueAtCurrentCostCents is a KNOWN-COST SUBTOTAL — check this before treating it
+      // as the whole bucket's value (one costed unit among many must not read "valued").
+      costCoverage: { costedUnits: number; totalUnits: number };
+    }
+  >;
   totalUnits: number;
   totalValueAtCurrentCostCents: number | null;
+  // Cost-coverage across ALL classified loss (spec §3 E4): costedUnits/totalUnits so
+  // totalValueAtCurrentCostCents is read as the known-cost subtotal, not a bare total.
+  costCoverage: { costedUnits: number; totalUnits: number };
   // Coverage (D-T1 / review B1): outbound movement in the ADJUSTMENT/CORRECTION
   // domain that carries NO classified reason code. On this deployment that is the
   // ~16k units the business SHIPPED as negative ADJUSTMENTs — reported here as a
@@ -445,11 +503,14 @@ export async function getShrinkageSummary(
   ]);
 
   const CLASSIFIED = SHRINKAGE_CLASS_REASONS as unknown as string[];
-  const acc: Record<ShrinkageReason, { units: number; value: number; hasCost: boolean }> = {
-    DAMAGE: { units: 0, value: 0, hasCost: false },
-    THEFT: { units: 0, value: 0, hasCost: false },
-    EXPIRY: { units: 0, value: 0, hasCost: false },
-    COUNT: { units: 0, value: 0, hasCost: false },
+  const acc: Record<
+    ShrinkageReason,
+    { units: number; value: number; hasCost: boolean; costedUnits: number }
+  > = {
+    DAMAGE: { units: 0, value: 0, hasCost: false, costedUnits: 0 },
+    THEFT: { units: 0, value: 0, hasCost: false, costedUnits: 0 },
+    EXPIRY: { units: 0, value: 0, hasCost: false, costedUnits: 0 },
+    COUNT: { units: 0, value: 0, hasCost: false, costedUnits: 0 },
   };
   let unclassifiedOutboundUnits = 0;
 
@@ -473,6 +534,7 @@ export async function getShrinkageSummary(
       if (cost != null) {
         bucket.value += units * cost;
         bucket.hasCost = true;
+        bucket.costedUnits += units;
       }
     } else {
       unclassifiedOutboundUnits += units;
@@ -483,13 +545,16 @@ export async function getShrinkageSummary(
   let totalUnits = 0;
   let totalValue = 0;
   let totalHasCost = false;
+  let totalCostedUnits = 0;
   for (const key of Object.keys(acc) as ShrinkageReason[]) {
     const b = acc[key];
     byReason[key] = {
       units: b.units,
       valueAtCurrentCostCents: b.hasCost ? b.value : null,
+      costCoverage: { costedUnits: b.costedUnits, totalUnits: b.units },
     };
     totalUnits += b.units;
+    totalCostedUnits += b.costedUnits;
     if (b.hasCost) {
       totalValue += b.value;
       totalHasCost = true;
@@ -500,6 +565,7 @@ export async function getShrinkageSummary(
     byReason,
     totalUnits,
     totalValueAtCurrentCostCents: totalHasCost ? totalValue : null,
+    costCoverage: { costedUnits: totalCostedUnits, totalUnits },
     coverage: {
       unclassifiedOutboundUnits,
       reasonTrackingStartedAt: toIso(reasonTrackingAgg._min?.changeTime),

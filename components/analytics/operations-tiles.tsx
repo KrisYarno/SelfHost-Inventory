@@ -56,7 +56,7 @@ export function OperationsTiles({ data }: { data: OperationsTilesData }) {
   const { rows, shrinkage90, valuation } = data;
 
   const turnsVals = rows
-    .map((r) => r.turns90)
+    .map((r) => r.turns)
     .filter((t): t is number => t !== null && Number.isFinite(t));
   const blendedTurns =
     turnsVals.length > 0 ? turnsVals.reduce((a, b) => a + b, 0) / turnsVals.length : null;
