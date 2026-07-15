@@ -277,6 +277,16 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     const d = desc("get_data_freshness");
     expect(d).toMatch(/notTracked|do you track|what do you track/i);
   });
+
+  it("get_operations and get_movement_series each disclose the ops-vs-movement formula difference (item 3 — no false contradiction)", () => {
+    const ops = desc("get_operations");
+    const mv = desc("get_movement_series");
+    // Each names the OTHER tool and frames a divergence as the two definitions, not a bug.
+    expect(ops).toContain("get_movement_series");
+    expect(ops).toMatch(/contradiction/i);
+    expect(mv).toContain("get_operations");
+    expect(mv).toMatch(/contradiction/i);
+  });
 });
 
 // ---------------------------------------------------------------------------

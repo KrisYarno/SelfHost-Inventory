@@ -194,6 +194,36 @@ describe("getFreshness", () => {
     }
   });
 
+  it("computes ordersFirstSeen's fallback as MIN(createdAt WHERE externalCreatedAt IS NULL), not MIN(createdAt) overall (item 5)", async () => {
+    wireRebuildState({ sales: null, snapshots: null });
+    mockSyncFindMany.mockResolvedValue([]);
+    wireEmptyLedgerAggregate();
+    mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
+    mockCoverage.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "x", lastRebuildAt: null });
+
+    // Candidate 1 (earliest non-null externalCreatedAt): a row whose createdAt is Jan1
+    // but whose external order date is Feb1 — its TRUE contribution is Feb1. Candidate 2
+    // must be the earliest createdAt among rows WITH NO external date (Jan2) -> Jan2.
+    // The correct MIN(externalCreatedAt ?? createdAt) is Jan2. The OLD MIN(createdAt)
+    // overall picks the Jan1 row, coalesces through its non-null externalCreatedAt back
+    // to Feb1, and hides the earlier null-external row entirely.
+    mockOrderFindFirst.mockImplementation(async ({ where }: { where: { externalCreatedAt?: unknown } }) => {
+      if (where.externalCreatedAt && (where.externalCreatedAt as { not?: unknown }).not === null) {
+        return {
+          externalCreatedAt: new Date("2026-02-01T00:00:00.000Z"),
+          createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        };
+      }
+      if (where.externalCreatedAt === null) {
+        return { externalCreatedAt: null, createdAt: new Date("2026-01-02T00:00:00.000Z") };
+      }
+      throw new Error("second ordersFirstSeen candidate must filter externalCreatedAt IS NULL");
+    });
+
+    const report = await getFreshness(["company-1"]);
+    expect(report.dataStarts.ordersFirstSeen).toBe("2026-01-02T00:00:00.000Z");
+  });
+
   it("short-circuits order-derived fields for empty companyIds WITHOUT querying ExternalOrder", async () => {
     wireRebuildState({ sales: null, snapshots: null });
     mockSyncFindMany.mockResolvedValue([]);
@@ -344,6 +374,51 @@ describe("getFreshness", () => {
         `in progress — page 3, before ${older.toISOString()} (oldest of 2 integrations)`,
       );
       expect(report.fulfillmentSync.enabled).toBeNull();
+    });
+
+    it("does NOT hide a never-cursored store behind a fresh one — cursor discloses the null (item 2a)", async () => {
+      wireRebuildState({ sales: null, snapshots: null });
+      const fresh = new Date("2026-07-14T00:00:00.000Z");
+      // Store A has a fresh cursor; store B has NEVER cursored (null). Filtering the null
+      // out and taking min would report A's fresh cursor as "the" freshness floor,
+      // silently hiding a store that has never synced.
+      mockSyncFindMany.mockResolvedValue([
+        { cursorModifiedAt: fresh, backfillComplete: true, backfillPage: null, backfillBefore: null },
+        { cursorModifiedAt: null, backfillComplete: true, backfillPage: null, backfillBefore: null },
+      ]);
+      wireEmptyLedgerAggregate();
+      mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
+      mockOrderFindFirst.mockResolvedValue(null);
+      mockCoverage.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "x", lastRebuildAt: null });
+
+      const report = await getFreshness(["company-1"]);
+      // The fresh ISO date must NOT be presented as the freshness floor.
+      expect(report.fulfillmentSync.cursor).not.toContain(fresh.toISOString());
+      // It discloses HOW MANY stores have no cursor yet.
+      expect(report.fulfillmentSync.cursor).toContain("1 of 2 integrations have no cursor yet");
+      expect(report.fulfillmentSync.enabled).toBeNull();
+    });
+
+    it("breaks a backfill tie between two in-progress stores by LOWEST page, deterministic — not arbitrary row order (item 2b)", async () => {
+      wireRebuildState({ sales: null, snapshots: null });
+      const before = new Date("2026-06-01T00:00:00.000Z");
+      const c1 = new Date("2026-07-01T00:00:00.000Z");
+      const c2 = new Date("2026-07-02T00:00:00.000Z");
+      // Two in-progress stores (same backfillRank). Least-progressed = LOWEST page (2)
+      // must set the floor even though it is SECOND in the array — the OLD `<=` reduce
+      // kept the first row (page 5) arbitrarily.
+      const storeHighPage = { cursorModifiedAt: c1, backfillComplete: false, backfillPage: 5, backfillBefore: before };
+      const storeLowPage = { cursorModifiedAt: c2, backfillComplete: false, backfillPage: 2, backfillBefore: before };
+      mockSyncFindMany.mockResolvedValue([storeHighPage, storeLowPage]);
+      wireEmptyLedgerAggregate();
+      mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
+      mockOrderFindFirst.mockResolvedValue(null);
+      mockCoverage.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "x", lastRebuildAt: null });
+
+      const report = await getFreshness(["company-1"]);
+      expect(report.fulfillmentSync.backfill).toBe(
+        `in progress — page 2, before ${before.toISOString()} (oldest of 2 integrations)`,
+      );
     });
 
     it("is null (not 'not started') when there is no sync-state row at all", async () => {

@@ -39,6 +39,14 @@ jest.mock("@/lib/reports/low-stock", () => ({
   getLowStockReport: jest.fn(),
 }));
 
+// get_inventory_summary delegates valuation to getValuation (which itself reads prisma).
+// Mock it so the summary byte-budget test drives the REAL inventory-summary module over
+// deep-mocked prisma without recomputing valuation.
+jest.mock("@/lib/analytics/valuation", () => ({
+  __esModule: true,
+  getValuation: jest.fn(),
+}));
+
 import prisma from "@/lib/prisma";
 import { assistantTools, TURN_RESULT_BUDGET_BYTES, testCtx } from "@/lib/assistant/tools";
 import { getProductsWithQuantities } from "@/lib/products";
@@ -48,6 +56,7 @@ import {
   getOperationsRows,
 } from "@/lib/analytics/queries";
 import { getLowStockReport } from "@/lib/reports/low-stock";
+import { getValuation } from "@/lib/analytics/valuation";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 const mockGetProducts = getProductsWithQuantities as jest.Mock;
@@ -55,6 +64,7 @@ const mockGetSales = getSales as jest.Mock;
 const mockGetStockSeries = getStockSeries as jest.Mock;
 const mockGetOperations = getOperationsRows as jest.Mock;
 const mockGetLowStock = getLowStockReport as jest.Mock;
+const mockGetValuation = getValuation as jest.Mock;
 
 const CTX = testCtx({ companyIds: ["c1"] });
 const CTX_NO_COMPANY = testCtx({ companyIds: [] });
@@ -425,6 +435,50 @@ describe("get_operations: top-limit by attention", () => {
 
   it("rejects a limit above the ≤50 cap", async () => {
     await expect(assistantTools.get_operations.run({ limit: 51 }, CTX)).rejects.toThrow();
+  });
+});
+
+describe("get_inventory_summary: reserves envelope bytes so a tight budget still returns a page (item 1)", () => {
+  it("a tight remainingBytes returns a small OK page whose TOTAL bytes fit the budget — never discarded at the margin", async () => {
+    // 50 products with long names: if the ranked page were given the FULL remaining
+    // budget, it would fill it and the added valuation/totals/coverage envelope would push
+    // the COMPLETED result OVER the budget the adapter threaded in — the residual-discard
+    // bug. Reserving envelope bytes keeps the whole result under the budget.
+    const many = Array.from({ length: 50 }, (_, i) => ({
+      id: i + 1,
+      name: `Product-${i}-` + "x".repeat(300),
+      lowStockThreshold: null,
+      costPrice: null,
+      retailPrice: null,
+      product_locations: [{ locationId: 1, quantity: 100 - i, locations: { name: "Main" } }],
+    }));
+    db.product.findMany.mockResolvedValue(many as never);
+    mockGetValuation.mockResolvedValue({
+      groupBy: "total",
+      rows: [
+        { units: 999, atCurrentCostCents: null, atReceiptCostCents: null, atRetailCents: null, marginCents: null },
+      ],
+      coverage: {
+        costedProducts: 0, ofProducts: 50, costedUnits: 0, ofUnits: 999,
+        retailPricedProducts: 0, retailPricedUnits: 0,
+        receiptCostedProducts: 0, receiptCostedUnits: 0, marginProducts: 0, marginUnits: 0,
+      },
+    });
+
+    const TIGHT = 12_000;
+    const result = await assistantTools.get_inventory_summary.run(
+      { rankBy: "onHand", limit: 50 },
+      testCtx({ companyIds: ["c1"], remainingBytes: TIGHT }),
+    );
+
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    // The COMPLETED result (ranked page + valuation + totals + coverage) fits under the
+    // budget the adapter threaded in, so the adapter keeps it instead of discarding it.
+    expect(result.meta.bytes).toBeLessThanOrEqual(TIGHT);
+    // Still a real page (degrade to a SMALLER page, never nothing).
+    const data = result.data as { ranked: { rows: unknown[]; returned: number } };
+    expect(data.ranked.returned).toBeGreaterThan(0);
   });
 });
 

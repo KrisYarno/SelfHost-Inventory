@@ -108,6 +108,15 @@ export const PER_TOOL_RESULT_CAP_BYTES = 65_536;
  *  cap for the wrapper fields (window, coverage, counts, notes). */
 const ROW_PAGE_BYTE_BUDGET = PER_TOOL_RESULT_CAP_BYTES - 8_192;
 
+/** Envelope reserve for get_inventory_summary (W1 seam-fix). Its result wraps the ranked
+ *  page in catalog totals + valuation + coverage, so the RANKED PAGE must be fit into
+ *  `budget − this reserve` — otherwise a full-budget page plus the added envelope pushes
+ *  the COMPLETED result past the budget the adapter threaded in and the whole result is
+ *  discarded at the margin. ~8 KiB comfortably covers stockStateCounts + valuation totals
+ *  + coverage. Floored at 4 KiB so a very tight late-turn budget still returns a page. */
+const ENVELOPE_RESERVE_BYTES = 8_192;
+const MIN_RANK_PAGE_BYTES = 4_096;
+
 /**
  * The byte budget available for THIS tool result: never more than the per-tool cap,
  * and never more than the turn budget the adapter threaded in (spec §5 T-TUNE — a
@@ -974,6 +983,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `Global physical pool. freshness.ledgerSaleStart ` +
       `is the first in-platform SALE ledger row — NOT the start of order/sales history ` +
       `(see get_sales). velocityDefinition states how avgDailyOutbound30 is computed. ` +
+      `Outbound/velocity here count ALL negative non-transfer deltas over a ROLLING ` +
+      `window ending now; get_movement_series instead partitions the ledger into ` +
+      `CALENDAR-DAY buckets (wrong-signed rows folded into their natural bucket), so a ` +
+      `small divergence between the two tools is the two DEFINITIONS, not a contradiction. ` +
       `${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getOperationsSchema,
     run: async (input) => {
@@ -1057,8 +1070,19 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // coverage travels verbatim (its unit+product counts ARE the completeness
       // disclosure) and satisfies the §7 COVERAGE GATE's CoverageSchema.
       if (groupBy === "total") {
+        // Envelope consistency (W1 seam-fix): the total grain emits the SAME
+        // returned/totalRows/nextOffset paging shape as the product/location grains (the
+        // aggregate is a single, un-paginated row), so a consumer branches on ONE shape
+        // across every grain instead of special-casing total.
         return ok(
-          { groupBy: result.groupBy, rows: result.rows, coverage: result.coverage },
+          {
+            groupBy: result.groupBy,
+            rows: result.rows,
+            returned: result.rows.length,
+            totalRows: result.rows.length,
+            nextOffset: null,
+            coverage: result.coverage,
+          },
           { scope: "global" },
         );
       }
@@ -1093,8 +1117,11 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `had ZERO movement (points are sparse — only active periods appear). coverage ` +
       `relays the legacy note (pre-Lane-4 negative ADJUSTMENT is how this shop shipped ` +
       `— unclassified outbound, NOT sales) and the reasonCode-null count. The honest ` +
-      `home for "outbound as demand" while SALE history is thin. Omitting dates uses ` +
-      `relativeDays (default 30). ${DATA_POSTURE}`,
+      `home for "outbound as demand" while SALE history is thin. Buckets are keyed by ` +
+      `CALENDAR DAY (a wrong-signed row folds into its natural bucket to keep net exact); ` +
+      `get_operations instead sums ALL negative non-transfer deltas over a ROLLING instant ` +
+      `window, so a small divergence from that tool is the two DEFINITIONS, not a ` +
+      `contradiction. Omitting dates uses relativeDays (default 30). ${DATA_POSTURE}`,
     inputSchema: getMovementSeriesSchema,
     run: async (input) => {
       const args = getMovementSeriesSchema.parse(input);
@@ -1143,7 +1170,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         limit: args.limit,
         offset: args.offset,
         // byteBudget from ctx (spec §5 T-TUNE): a late-turn read fits a smaller page.
-        byteBudget: byteBudget(ctx),
+        // RESERVE envelope bytes (W1 seam-fix): the ranked page is fit into
+        // `budget − ENVELOPE_RESERVE_BYTES` so the added totals/valuation/coverage cannot
+        // push the completed result past the budget and get it discarded at the margin.
+        byteBudget: Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
       });
       // Explicit top-level coverage (spec §3 E1) beside the nested valuation.coverage:
       // stockStateCounts is a full census (no unknowns); the valuation counts disclose

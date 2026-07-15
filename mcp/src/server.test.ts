@@ -257,18 +257,30 @@ describe("POST /mcp — tool round-trip", () => {
   });
 });
 
-describe("POST /mcp — Wave-1 tool round-trips (parity per new tool, spec §7)", () => {
-  // Each new tool executes end-to-end over MCP Streamable HTTP against the benign mock
-  // and returns an ok ToolResult carrying a coverage/freshness block on the wire.
-  const CASES: Array<[string, Record<string, unknown>]> = [
-    ["get_valuation", {}],
-    ["get_movement_series", {}],
-    ["get_inventory_summary", {}],
-    ["get_inventory_policy", {}],
-    ["get_data_freshness", {}],
-  ];
+describe("POST /mcp — Wave-1 tool round-trips assert REAL payload values (item 4)", () => {
+  // Each new tool executes end-to-end over MCP Streamable HTTP against a SEEDED mock and
+  // the REAL payload values are asserted on the wire — not just status + a coverage regex.
+  // These Wave-1 read delegates carry no per-test reset above, so restore benign defaults
+  // here so each seeded round-trip is order-independent.
+  beforeEach(() => {
+    p.product.findMany.mockReset();
+    p.product.findMany.mockResolvedValue([]);
+    p.product.findFirst.mockReset();
+    p.product.findFirst.mockResolvedValue(null);
+    p.product.findUnique.mockReset();
+    p.product.findUnique.mockResolvedValue(null);
+    p.inventory_logs.findMany.mockReset();
+    p.inventory_logs.findMany.mockResolvedValue([]);
+    p.inventory_logs.groupBy.mockReset();
+    p.inventory_logs.groupBy.mockResolvedValue([]);
+    p.fulfillmentSyncState.findMany.mockReset();
+    p.fulfillmentSyncState.findMany.mockResolvedValue([]);
+    p.product_locations.findMany.mockReset();
+    p.product_locations.findMany.mockResolvedValue([]);
+  });
 
-  it.each(CASES)("executes %s and returns an ok ToolResult with a coverage block", async (name, args) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function roundTrip(name: string, args: Record<string, unknown>): Promise<any> {
     const server = createMcpHttpServer();
     const port = await listen(server);
     try {
@@ -281,13 +293,85 @@ describe("POST /mcp — Wave-1 tool round-trips (parity per new tool, spec §7)"
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rpc = (await res.json()) as any;
       expect(rpc.result).toBeDefined();
-      const toolResult = JSON.parse(rpc.result.content[0].text as string);
-      expect(toolResult.status).toBe("ok");
-      // a coverage/freshness block reached the wire (spec §7 coverage gate parity)
-      expect(JSON.stringify(toolResult.data)).toMatch(/coverage|freshness/);
+      return JSON.parse(rpc.result.content[0].text as string);
     } finally {
       await close(server);
     }
+  }
+
+  it("get_valuation (total): returned/totalRows/nextOffset envelope (item 6) + a real coverage count", async () => {
+    p.product.findMany.mockResolvedValueOnce([
+      { id: 1, name: "A", costPrice: null, retailPrice: null, product_locations: [{ locationId: 1, quantity: 10, locations: { name: "Main" } }] },
+      { id: 2, name: "B", costPrice: null, retailPrice: null, product_locations: [{ locationId: 1, quantity: 5, locations: { name: "Main" } }] },
+    ]);
+
+    const toolResult = await roundTrip("get_valuation", {});
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.groupBy).toBe("total");
+    // Envelope consistency (item 6): total carries the same paging shape as other grains.
+    expect(toolResult.data.returned).toBe(1);
+    expect(toolResult.data.totalRows).toBe(1);
+    expect(toolResult.data.nextOffset).toBeNull();
+    // Real payload values.
+    expect(toolResult.data.rows[0].units).toBe(15);
+    expect(toolResult.data.coverage.ofProducts).toBe(2);
+    expect(toolResult.data.coverage.ofUnits).toBe(15);
+  });
+
+  it("get_movement_series: grain + window.days + one bucket value + net", async () => {
+    const when = new Date(Date.now() - 2 * 86_400_000); // inside the default 30-day window
+    p.inventory_logs.findMany.mockResolvedValueOnce([
+      { delta: -5, changeTime: when, logType: "SALE", reasonCode: null },
+    ]);
+
+    const toolResult = await roundTrip("get_movement_series", {});
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.grain).toBe("day");
+    expect(toolResult.data.window.days).toBe(30);
+    // One bucket value + the derived net (net === SUM of every bucket).
+    expect(toolResult.data.totals.sale).toBe(-5);
+    expect(toolResult.data.totals.net).toBe(-5);
+  });
+
+  it("get_inventory_summary: stockStateCounts census + a ranked metric", async () => {
+    // qty 30 => in_stock for any sane default; qty 0 => always out (threshold-independent).
+    p.product.findMany.mockResolvedValue([
+      { id: 1, name: "A", lowStockThreshold: null, costPrice: null, retailPrice: null, product_locations: [{ locationId: 1, quantity: 30, locations: { name: "Main" } }] },
+      { id: 2, name: "B", lowStockThreshold: null, costPrice: null, retailPrice: null, product_locations: [{ locationId: 1, quantity: 0, locations: { name: "Main" } }] },
+    ]);
+
+    const toolResult = await roundTrip("get_inventory_summary", { rankBy: "onHand" });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.stockStateCounts).toEqual({ in_stock: 1, low: 0, out: 1 });
+    // onHand ranked leaderboard: product 1 (30) leads product 2 (0).
+    expect(toolResult.data.ranked.rows[0].metric).toBe(30);
+  });
+
+  it("get_inventory_policy: a per-field source value (raw override => product_override)", async () => {
+    p.product.findFirst.mockResolvedValueOnce({ id: 1, name: "TIRZ" }); // resolveAssistantProduct
+    p.product.findUnique.mockResolvedValueOnce({ id: 1, name: "TIRZ", lowStockThreshold: 7, reorderConfig: null });
+
+    const toolResult = await roundTrip("get_inventory_policy", { productId: 1 });
+    expect(toolResult.status).toBe("ok");
+    // Source is decided from raw-column presence, never equality with the default.
+    expect(toolResult.data.product.lowStockThreshold.source).toBe("product_override");
+    expect(toolResult.data.product.lowStockThreshold.raw).toBe(7);
+    expect(toolResult.data.product.lowStockThreshold.effective).toBe(7);
+  });
+
+  it("get_data_freshness: enabled null + the aggregated-integration suffix", async () => {
+    const c1 = new Date("2026-07-01T00:00:00.000Z");
+    const c2 = new Date("2026-07-10T00:00:00.000Z");
+    p.fulfillmentSyncState.findMany.mockResolvedValueOnce([
+      { cursorModifiedAt: c2, backfillComplete: true, backfillPage: null, backfillBefore: null },
+      { cursorModifiedAt: c1, backfillComplete: false, backfillPage: 3, backfillBefore: c1 },
+    ]);
+
+    const toolResult = await roundTrip("get_data_freshness", {});
+    expect(toolResult.status).toBe("ok");
+    // Enablement is never observable from this process; the suffix discloses the store count.
+    expect(toolResult.data.fulfillmentSync.enabled).toBeNull();
+    expect(toolResult.data.fulfillmentSync.cursor).toContain("(oldest of 2 integrations)");
   });
 });
 

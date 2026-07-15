@@ -92,6 +92,27 @@ function backfillRank(row: SyncRow): number {
 }
 
 /**
+ * The backfill floor across integrations: the LEAST-progressed row (lowest rank). A tie
+ * between two IN-PROGRESS rows (same rank 1) is broken DETERMINISTICALLY by page number —
+ * least-progressed = LOWEST page — never by arbitrary array order (the old `<=` reduce
+ * silently kept whichever row came first). A null page (progress tracked only by the
+ * before-date) sorts LAST so a known low page wins; genuinely equal pages keep the first.
+ */
+function backfillFloorRow(rows: SyncRow[]): SyncRow {
+  return rows.reduce((a, b) => {
+    const ra = backfillRank(a);
+    const rb = backfillRank(b);
+    if (ra !== rb) return ra < rb ? a : b;
+    if (ra === 1) {
+      const pa = a.backfillPage ?? Number.POSITIVE_INFINITY;
+      const pb = b.backfillPage ?? Number.POSITIVE_INFINITY;
+      return pa <= pb ? a : b;
+    }
+    return a;
+  });
+}
+
+/**
  * IN-WAVE FIX (W1-INT): prod runs TWO WooCommerce stores, so fulfillment freshness
  * must aggregate across ALL FulfillmentSyncState rows — never one store's row read as
  * "the" state (which would silently hide a lagging second store). The OLDEST cursor
@@ -113,17 +134,29 @@ function aggregateFulfillmentSync(rows: SyncRow[]): {
   }
   const suffix = ` (oldest of ${n} integration${n === 1 ? "" : "s"})`;
 
-  // Oldest cursor across integrations (nulls excluded — a store with no cursor yet
-  // does not pull the floor to null; but if EVERY store lacks a cursor, cursor is null).
-  const cursors = rows.map((r) => r.cursorModifiedAt).filter((c): c is Date => c != null);
-  const oldestCursor = cursors.length ? cursors.reduce((a, b) => (a < b ? a : b)) : null;
+  // Cursor floor across integrations. A never-cursored store must NOT be hidden behind a
+  // fresher one: filtering the nulls out and taking min would let a fresh cursor read as
+  // "the" floor, silently concealing a store that has never synced. So if ANY row lacks a
+  // cursor, refuse the misleading date and disclose the count; only when EVERY store has a
+  // cursor is the oldest a truthful freshness floor.
+  const nullCursorCount = rows.filter((r) => r.cursorModifiedAt == null).length;
+  let cursor: string | null;
+  if (nullCursorCount > 0) {
+    cursor = `no reliable cursor (${nullCursorCount} of ${n} integration${n === 1 ? "" : "s"} have no cursor yet)`;
+  } else {
+    const oldestCursor = rows
+      .map((r) => r.cursorModifiedAt as Date)
+      .reduce((a, b) => (a < b ? a : b));
+    cursor = oldestCursor.toISOString() + suffix;
+  }
 
-  // Least-progressed backfill across integrations sets the aggregate floor.
-  const floorRow = rows.reduce((a, b) => (backfillRank(a) <= backfillRank(b) ? a : b));
+  // Least-progressed backfill across integrations sets the aggregate floor (ties between
+  // in-progress stores broken by lowest page — see backfillFloorRow).
+  const floorRow = backfillFloorRow(rows);
 
   return {
     ...base,
-    cursor: oldestCursor ? oldestCursor.toISOString() + suffix : null,
+    cursor,
     backfill: summarizeBackfill(floorRow) + suffix,
   };
 }
@@ -190,9 +223,14 @@ export async function getFreshness(companyIds: string[]): Promise<FreshnessRepor
     prisma.productStockSnapshot.aggregate({ _min: { dayKey: true } }),
     // dataStarts.ordersFirstSeen (CALLER-SCOPED): MIN over externalCreatedAt ??
     // createdAt, mirroring lib/analytics/rebuild-sales.ts's full-rebuild floor
-    // computation — Prisma has no coalesce-aggregate, so two candidate rows (the
-    // earliest non-null externalCreatedAt, and the earliest createdAt as the
-    // fallback floor) are compared in JS. Empty companyIds -> no query at all.
+    // computation — Prisma has no coalesce-aggregate, so two candidate rows are compared
+    // in JS. Candidate 1 = the earliest non-null externalCreatedAt (rows with an external
+    // date contribute THAT). Candidate 2 = the earliest createdAt among rows that have NO
+    // external date (`externalCreatedAt IS NULL`) — those, and only those, contribute
+    // their createdAt. A plain MIN(createdAt) OVERALL would wrongly pick a row whose
+    // externalCreatedAt is non-null (its true, later contribution is that external date,
+    // already covered by candidate 1), hiding the genuinely-earliest null-external row.
+    // Empty companyIds -> no query at all.
     scoped
       ? Promise.all([
           prisma.externalOrder.findFirst({
@@ -201,7 +239,7 @@ export async function getFreshness(companyIds: string[]): Promise<FreshnessRepor
             select: { externalCreatedAt: true, createdAt: true },
           }),
           prisma.externalOrder.findFirst({
-            where: { companyId: { in: companyIds } },
+            where: { companyId: { in: companyIds }, externalCreatedAt: null },
             orderBy: { createdAt: "asc" },
             select: { externalCreatedAt: true, createdAt: true },
           }),
