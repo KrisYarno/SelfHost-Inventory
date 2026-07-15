@@ -60,7 +60,22 @@ describe("getPolicy — global-only call (no productId)", () => {
 
     expect(result.product).toBeUndefined();
     expect(result.global.lowStockDefault).toBe(LOW_STOCK_DEFAULT);
-    expect(result.global.reorder).toBe(GLOBALS);
+    // PLAIN-JSON projection (drive-caught 2026-07-15): the raw Prisma row's live
+    // Decimal/Date instances broke ai-sdk in-call message validation. The policy
+    // module must emit JSON primitives only — pinned by round-trip equality.
+    expect(result.global.reorder).toEqual({
+      id: GLOBALS.id,
+      defaultLeadTimeDays: GLOBALS.defaultLeadTimeDays,
+      defaultSafetyStockDays: GLOBALS.defaultSafetyStockDays,
+      defaultTargetCoverageMultiple: GLOBALS.defaultTargetCoverageMultiple,
+      minEvidenceEvents: GLOBALS.minEvidenceEvents,
+      holdingCostRate: String(GLOBALS.holdingCostRate),
+      updatedBy: GLOBALS.updatedBy,
+      updatedAt: new Date(GLOBALS.updatedAt).toISOString(),
+    });
+    // No live class instances anywhere in the payload (Date/Decimal would differ
+    // under a JSON round-trip via reference-free deep equality).
+    expect(JSON.parse(JSON.stringify(result.global))).toEqual(result.global);
     expect(result.global.minEvidenceEvents).toBe(3);
     expect(db.product.findFirst).not.toHaveBeenCalled();
     expect(db.product.findUnique).not.toHaveBeenCalled();

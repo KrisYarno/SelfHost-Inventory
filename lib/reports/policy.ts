@@ -51,7 +51,7 @@
  */
 
 import prisma from "@/lib/prisma";
-import type { GlobalReorderSettings } from "@prisma/client";
+
 import { getGlobalReorderSettings, resolveReorderConfig } from "@/lib/reorder-config";
 import { getLowStockDefault, effectiveLowStockThreshold } from "@/lib/stock-threshold";
 import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
@@ -79,9 +79,28 @@ export interface ProductPolicy {
   locationMinimums: Array<{ locationId: number; minQuantity: number }>;
 }
 
+/**
+ * PLAIN-JSON projection of the global reorder settings row. The raw Prisma row
+ * carries LIVE `Prisma.Decimal` (holdingCostRate) and `Date` (updatedAt) instances;
+ * relaying those through an assistant tool breaks the ai-sdk's in-call ModelMessage
+ * validation (JSON.stringify masks it via toJSON — only the live in-process step
+ * sees the instances; caught by the toolsuite live drive 2026-07-15). Every value
+ * here is a JSON primitive.
+ */
+export interface GlobalReorderPolicy {
+  id: number;
+  defaultLeadTimeDays: number;
+  defaultSafetyStockDays: number;
+  defaultTargetCoverageMultiple: number;
+  minEvidenceEvents: number;
+  holdingCostRate: string;
+  updatedBy: number | null;
+  updatedAt: string;
+}
+
 export interface GlobalPolicy {
   lowStockDefault: number;
-  reorder: GlobalReorderSettings;
+  reorder: GlobalReorderPolicy;
   minEvidenceEvents: number;
 }
 
@@ -109,7 +128,16 @@ export async function getPolicy(opts: {
 
   const global: GlobalPolicy = {
     lowStockDefault,
-    reorder: globalReorder,
+    reorder: {
+      id: globalReorder.id,
+      defaultLeadTimeDays: globalReorder.defaultLeadTimeDays,
+      defaultSafetyStockDays: globalReorder.defaultSafetyStockDays,
+      defaultTargetCoverageMultiple: globalReorder.defaultTargetCoverageMultiple,
+      minEvidenceEvents: globalReorder.minEvidenceEvents,
+      holdingCostRate: String(globalReorder.holdingCostRate),
+      updatedBy: globalReorder.updatedBy,
+      updatedAt: new Date(globalReorder.updatedAt).toISOString(),
+    },
     minEvidenceEvents: globalResolved.minEvidenceEvents,
   };
 
