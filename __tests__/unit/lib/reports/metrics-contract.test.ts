@@ -63,11 +63,14 @@ describe("predicates — Prisma-where variants (spec §2 D1)", () => {
     expect(PHYSICAL_OUTBOUND_WHERE).toEqual({ delta: { lt: 0 }, logType: { not: "TRANSFER" } });
   });
 
-  it("REORDER_DEMAND_WHERE adds a null-INCLUSIVE NOT CORRECTION (keeps null-reasonCode rows)", () => {
+  it("REORDER_DEMAND_WHERE keeps null-reasonCode rows via OR (bare NOT excludes nulls — Prisma SQL 3VL)", () => {
+    // Prisma docs: `not` on a NULLABLE column does NOT return NULL rows; you must add an
+    // OR to include them. A bare `NOT: { reasonCode: "CORRECTION" }` therefore drops every
+    // null-reason sale — the exact rows demand MUST count. The OR restores null-inclusion.
     expect(REORDER_DEMAND_WHERE).toEqual({
       delta: { lt: 0 },
       logType: { not: "TRANSFER" },
-      NOT: { reasonCode: "CORRECTION" },
+      OR: [{ reasonCode: null }, { NOT: { reasonCode: "CORRECTION" } }],
     });
   });
 
@@ -79,7 +82,11 @@ describe("predicates — Prisma-where variants (spec §2 D1)", () => {
       where: { delta: { lt: 0 }, logType: { not: "TRANSFER" } },
     });
     expect(db.inventory_logs.findMany).toHaveBeenNthCalledWith(2, {
-      where: { delta: { lt: 0 }, logType: { not: "TRANSFER" }, NOT: { reasonCode: "CORRECTION" } },
+      where: {
+        delta: { lt: 0 },
+        logType: { not: "TRANSFER" },
+        OR: [{ reasonCode: null }, { NOT: { reasonCode: "CORRECTION" } }],
+      },
     });
   });
 });

@@ -114,25 +114,25 @@ export const TURN_RESULT_BUDGET_BYTES = 131_072;
  *  has room for at least one more call. List tools PAGINATE to fit it (never discard). */
 export const PER_TOOL_RESULT_CAP_BYTES = 65_536;
 
-/** Byte budget a paginated ROW ARRAY is fit into, leaving headroom under the per-tool
- *  cap for the wrapper fields (window, coverage, counts, notes). */
-const ROW_PAGE_BYTE_BUDGET = PER_TOOL_RESULT_CAP_BYTES - 8_192;
-
-/** Envelope reserve for get_inventory_summary (W1 seam-fix). Its result wraps the ranked
- *  page in catalog totals + valuation + coverage, so the RANKED PAGE must be fit into
- *  `budget − this reserve` — otherwise a full-budget page plus the added envelope pushes
- *  the COMPLETED result past the budget the adapter threaded in and the whole result is
- *  discarded at the margin. ~8 KiB comfortably covers stockStateCounts + valuation totals
- *  + coverage. Floored at 4 KiB so a very tight late-turn budget still returns a page. */
+/** Envelope reserve for EVERY paginated list tool (W1 seam-fix; generalized to all
+ *  seven residual call sites in W3 seam-fix item 1). A list result wraps its row page
+ *  in an envelope (window, coverage, counts, totals, notes), so the PAGE itself must be
+ *  fit into `byteBudget(ctx) − this reserve` — otherwise a full-budget page plus the
+ *  added envelope pushes the COMPLETED result past the budget the adapter threaded in and
+ *  the whole thing is discarded at the margin (a truncation notice instead of a page).
+ *  ~8 KiB comfortably covers the heaviest envelope (stockStateCounts + valuation totals +
+ *  coverage). Floored at MIN_RANK_PAGE_BYTES so a very tight late-turn budget still
+ *  returns at least a small page rather than truncating. */
 const ENVELOPE_RESERVE_BYTES = 8_192;
 const MIN_RANK_PAGE_BYTES = 4_096;
 
 /**
  * The byte budget available for THIS tool result: never more than the per-tool cap,
  * and never more than the turn budget the adapter threaded in (spec §5 T-TUNE — a
- * late-turn read returns a SMALLER page instead of being discarded whole). Wave-0
- * tools still page against ROW_PAGE_BYTE_BUDGET; the ctx-aware page-shrink wiring is
- * W3-TUNE. Exported for the list tools + the W3-TUNE page-shrink test.
+ * late-turn read returns a SMALLER page instead of being discarded whole). EVERY list
+ * tool now pages against `byteBudget(ctx) − ENVELOPE_RESERVE_BYTES` (W3 seam-fix item 1
+ * completed the residual call sites); the fixed row budget is gone. Exported for the
+ * list tools + the W3-TUNE page-shrink test.
  */
 export function byteBudget(ctx: ToolContext): number {
   return Math.min(PER_TOOL_RESULT_CAP_BYTES, ctx.remainingBytes);
@@ -200,8 +200,9 @@ const SUMMARY_RANK_MAX = 50;
 const STOCK_ASOF_MAX = 100;
 const RECEIPTS_MAX = 100;
 // DB-level `take` for the snapshot series rows. Reconciled with the budget (D-T7): a
-// point serializes to ~52 bytes, so 1000 points ≈ 51 KiB < ROW_PAGE_BYTE_BUDGET
-// (~56 KiB) < the per-tool cap (64 KiB) < the turn budget (128 KiB). The series is
+// point serializes to ~52 bytes, so 1000 points ≈ 51 KiB < the reserved row-page budget
+// (per-tool cap − envelope reserve ≈ 56 KiB) < the per-tool cap (64 KiB) < the turn
+// budget (128 KiB). The series is
 // ALSO paged by whole days + byte-fit at the boundary below, so a pathologically wide
 // window can never blow the cap — older days are omitted with a coverage flag instead.
 const STOCK_SERIES_MAX_ROWS = 1000;
@@ -744,7 +745,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `(in_stock | low | out — out means stock 0, low means at/below its alert ` +
       `threshold). ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: findProductSchema,
-    run: async (input) => {
+    run: async (input, ctx) => {
       const args = findProductSchema.parse(input);
       const limit = args.limit ?? FIND_PRODUCT_MAX;
       const offset = args.offset ?? 0;
@@ -780,7 +781,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       });
       // Byte-fit the page (the DB already returned <= limit rows in production; the byte
       // cap only bites a pathologically wide row). totalRows stays the HONEST full count.
-      const page = paginate(rows, 0, limit, ROW_PAGE_BYTE_BUDGET);
+      // W3 seam-fix item 1: page against the ctx-aware reserved budget so a tight late-turn
+      // read shrinks the page instead of the completed result being discarded whole.
+      const page = paginate(rows, 0, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
       const consumed = offset + page.returned;
       return ok(
         {
@@ -807,7 +810,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `the cap, the OLDEST whole days of the page are dropped (seriesCoverage.pointsNote ` +
       `names them) and complete is false. ${DATA_POSTURE}`,
     inputSchema: getStockSchema,
-    run: async (input) => {
+    run: async (input, ctx) => {
       const args = getStockSchema.parse(input);
       assertWindow(args.from, args.to);
       // W0-PROD: resolve through the shared approved-product resolver. A pending-review
@@ -900,7 +903,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         },
         offset,
         limit: STOCK_SERIES_MAX_DAYS,
-        byteBudget: ROW_PAGE_BYTE_BUDGET,
+        // W3 seam-fix item 1: ctx-aware reserved budget (was the fixed row budget).
+        byteBudget: Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
       });
 
       // Points-cap honesty (W0-STOCK REV-2 (d)): if this page's per-location points exceed
@@ -1023,7 +1027,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
 
       const shaped = await shapeSalesRows(raw, groupBy);
       const serialized = serializeSalesRows(shaped.rows as object[]);
-      const page = paginate(serialized, offset, limit, ROW_PAGE_BYTE_BUDGET);
+      // W3 seam-fix item 1: ctx-aware reserved budget so a tight late-turn read shrinks
+      // the page instead of the completed result being discarded whole.
+      const page = paginate(serialized, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
       // Caller-scoped coverage (spec §3 E2): live unattributed-order count for THIS
       // caller's companies (never the global rebuild count), the bundle-revenue
       // disclosure, and the (global) rebuild recency.
@@ -1056,7 +1062,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `small divergence between the two tools is the two DEFINITIONS, not a contradiction. ` +
       `${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getOperationsSchema,
-    run: async (input) => {
+    run: async (input, ctx) => {
       const args = getOperationsSchema.parse(input);
       const windowDays = args.windowDays ?? 90;
       const limit = args.limit ?? OPERATIONS_MAX;
@@ -1073,7 +1079,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         args.productId != null
           ? rows.filter((r) => r.productId === args.productId)
           : [...rows].sort((a, b) => ATTENTION_RANK[b.attention] - ATTENTION_RANK[a.attention]);
-      const page = paginate(ranked, offset, limit, ROW_PAGE_BYTE_BUDGET);
+      // W3 seam-fix item 1: ctx-aware reserved budget (was the fixed row budget).
+      const page = paginate(ranked, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
       const data: Record<string, unknown> = {
         rows: page.rows,
         returned: page.returned,
@@ -1124,7 +1131,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `rows carry atReceiptCostCents null with a reason. Answers "what is my inventory ` +
       `worth?" / "cost vs retail value". ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getValuationSchema,
-    run: async (input) => {
+    run: async (input, ctx) => {
       const args = getValuationSchema.parse(input);
       // W0-PROD: a provided productId resolves through the shared approved-product
       // resolver — pending-review / soft-deleted / absent -> notFound.
@@ -1157,7 +1164,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // returns the full arrays; the ~80-product catalog stays cheap).
       const limit = args.limit ?? VALUATION_MAX;
       const offset = args.offset ?? 0;
-      const page = paginate(result.rows, offset, limit, ROW_PAGE_BYTE_BUDGET);
+      // W3 seam-fix item 1: ctx-aware reserved budget (was the fixed row budget).
+      const page = paginate(result.rows, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
       return ok(
         {
           groupBy: result.groupBy,
@@ -1329,20 +1337,37 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `data-start dates (ledger/snapshot GLOBAL; order dates scoped to your companies), ` +
       `snapshot flagged-pair count, and an explicit notTracked list (fulfillment ` +
       `quantities live in WooCommerce; no PO/on-order, supplier, lot/expiry, or ` +
-      `historical cost/retail/policy). Answers "how fresh is this data?" / "do you ` +
-      `track fulfillment?". ${DATA_POSTURE}`,
+      `historical cost/retail/policy). This is a MIXED-scope read: rebuild, ledger, ` +
+      `snapshot, and fulfillment-sync state are GLOBAL, while the sales unattributed ` +
+      `count and first-order date are scoped to YOUR companies (coverage.sectionScopes ` +
+      `labels each). Answers "how fresh is this data?" / "do you track fulfillment?". ` +
+      `${DATA_POSTURE}`,
     inputSchema: getDataFreshnessSchema,
     run: async (input, ctx) => {
       getDataFreshnessSchema.parse(input);
       // Order-derived fields are caller-scoped (spec §3 E2) — pass the run ctx's
       // companyIds; the rest is the global physical/analytics state.
       const report = await getFreshness(ctx.companyIds);
+      // W3 seam-fix item 4 (codex M5): the result is genuinely MIXED-scope, so meta.scope
+      // is "mixed" (was mislabeled "global") and coverage.sectionScopes labels each
+      // section so the UI mixed-scope legend renders. rebuild/fulfillmentSync/snapshots
+      // are global; sales (unattributed count) is company; dataStarts is itself mixed —
+      // ledger/snapshot starts are global, ordersFirstSeen is company-scoped.
       const coverage = {
-        scope: "global freshness; order-derived fields caller-scoped to your companies",
+        scope:
+          "mixed: rebuild/ledger/snapshot/fulfillment-sync are GLOBAL; the sales " +
+          "unattributed count and ordersFirstSeen are scoped to your companies",
+        sectionScopes: {
+          rebuild: "global",
+          sales: "company",
+          fulfillmentSync: "global",
+          dataStarts: "mixed",
+          snapshots: "global",
+        },
         fulfillmentEnablement: report.fulfillmentSync.reason,
         notTrackedCount: report.notTracked.length,
       };
-      return ok({ ...report, coverage }, { scope: "global" });
+      return ok({ ...report, coverage }, { scope: "mixed" });
     },
   },
 
@@ -1358,7 +1383,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `(usageKnown false) when a product has no measured outbound — never a fabricated ` +
       `0/day; velocityDefinition states the rate math. ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: lowStockSchema,
-    run: async (input) => {
+    run: async (input, ctx) => {
       const args = lowStockSchema.parse(input);
       const limit = args.limit ?? LOW_STOCK_MAX;
       const offset = args.offset ?? 0;
@@ -1381,7 +1406,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           thresholdSource: threshold === systemDefaultThreshold ? "system_default" : "product_override",
         };
       });
-      const page = paginate(alerts, offset, limit, ROW_PAGE_BYTE_BUDGET);
+      // W3 seam-fix item 1: ctx-aware reserved budget (was the fixed row budget).
+      const page = paginate(alerts, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
       // Coverage envelope (spec §3 E1 / §7): how many alerts carry a KNOWN usage rate
       // (the rest are usage-unknown — never a fabricated 0/day) + the shop default.
       const usageKnownCount = report.alerts.filter((a) => a.usageKnown === true).length;
@@ -1419,14 +1445,15 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `bufferDays, targetCoverageMultiple, and demand definition — relay them. 'coverage' ` +
       `counts total/suggested/unavailable/costed. ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: reorderSchema,
-    run: async (input) => {
+    run: async (input, ctx) => {
       const args = reorderSchema.parse(input);
       const limit = args.limit ?? REORDER_MAX;
       const offset = args.offset ?? 0;
       // Fetch the whole report (worklist + approaching + excluded) so offset paging is
       // meaningful; the shop's approved set is small, so this stays cheap.
       const report = await getReorderReport({ includeOkay: args.includeOkay ?? true });
-      const page = paginate(report.rows, offset, limit, ROW_PAGE_BYTE_BUDGET);
+      // W3 seam-fix item 1: ctx-aware reserved budget (was the fixed row budget).
+      const page = paginate(report.rows, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
       return ok(
         {
           rows: page.rows,

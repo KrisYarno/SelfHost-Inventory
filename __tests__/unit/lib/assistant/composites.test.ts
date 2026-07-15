@@ -222,14 +222,70 @@ describe("getProductOverview — composition (spec §5 T-360)", () => {
     expect(typeof r.stockByLocation.note).toBe("string");
   });
 
-  it("ONE failing section degrades independently — the rest still resolve", async () => {
-    mVal.mockRejectedValue(new Error("valuation exploded"));
+  it("policy section caps locationMinimums at 3 rows + a note when more exist (item 3)", async () => {
+    // A product with FIVE per-location minimums — the overview is a SUMMARY, so the policy
+    // section relays only the top MAX_LOCATION_ROWS and notes the rest (mirrors
+    // stockByLocation); the full list stays behind get_inventory_policy.
+    mPolicy.mockResolvedValue({
+      global: { lowStockDefault: 10, reorder: { defaultLeadTimeDays: 7 }, minEvidenceEvents: 3 },
+      product: {
+        productId: 1,
+        name: "TIRZ 30",
+        lowStockThreshold: { effective: 10, raw: null, source: "system_default" },
+        locationMinimums: [
+          { locationId: 1, minQuantity: 5 },
+          { locationId: 2, minQuantity: 4 },
+          { locationId: 3, minQuantity: 3 },
+          { locationId: 4, minQuantity: 2 },
+          { locationId: 5, minQuantity: 1 },
+        ],
+      },
+    });
     const r = await getProductOverview(1, CTX, NOW);
     expect(r.found).toBe(true);
     if (!r.found) return;
-    // The failing section is unavailable + carries a reason; NO throw.
+    expect(r.policy.status).toBe("ok");
+    const product = r.policy.product as { locationMinimums: unknown[] };
+    expect(product.locationMinimums.length).toBe(3);
+    // The note discloses the TRUE total so the cap is never silent.
+    expect(typeof r.policy.note).toBe("string");
+    expect(r.policy.note as string).toContain("5");
+  });
+
+  it("policy section leaves locationMinimums untouched (no note) when <= 3 exist", async () => {
+    mPolicy.mockResolvedValue({
+      global: { lowStockDefault: 10, reorder: { defaultLeadTimeDays: 7 }, minEvidenceEvents: 3 },
+      product: {
+        productId: 1,
+        name: "TIRZ 30",
+        lowStockThreshold: { effective: 10, raw: null, source: "system_default" },
+        locationMinimums: [
+          { locationId: 1, minQuantity: 5 },
+          { locationId: 2, minQuantity: 4 },
+        ],
+      },
+    });
+    const r = await getProductOverview(1, CTX, NOW);
+    expect(r.found).toBe(true);
+    if (!r.found) return;
+    const product = r.policy.product as { locationMinimums: unknown[] };
+    expect(product.locationMinimums.length).toBe(2);
+    expect(r.policy.note).toBeUndefined();
+  });
+
+  it("ONE failing section degrades independently — the rest still resolve", async () => {
+    mVal.mockRejectedValue(new Error("valuation exploded at db.example-host:5432/secret_schema"));
+    const r = await getProductOverview(1, CTX, NOW);
+    expect(r.found).toBe(true);
+    if (!r.found) return;
+    // The failing section is unavailable + carries a FIXED reason; NO throw.
     expect(r.valuation.status).toBe("unavailable");
-    expect(typeof r.valuation.reason).toBe("string");
+    // W3 seam-fix item 2: the reason is the fixed string, NOT err.message — a Prisma error
+    // can embed connection hosts / schema names, so nothing from the message leaks.
+    expect(r.valuation.reason).toBe("section unavailable");
+    expect(r.valuation.reason).not.toMatch(/example-host|secret_schema|exploded/);
+    // Only the constructor NAME is surfaced (enough to tell error kinds apart).
+    expect(r.valuation.errorKind).toBe("Error");
     // Siblings are unaffected.
     expect(r.identity.status).toBe("ok");
     expect(r.movement30.status).toBe("ok");
@@ -295,9 +351,13 @@ describe("getBusinessSnapshot — composition (spec §5 T-SNAP)", () => {
   });
 
   it("ONE failing section (pipeline) degrades independently; the rest resolve", async () => {
-    mPipeline.mockRejectedValue(new Error("pipeline down"));
+    mPipeline.mockRejectedValue(new Error("pipeline down at db.internal-host:5432"));
     const s = await getBusinessSnapshot(CTX, NOW);
     expect(s.orderPipeline.status).toBe("unavailable");
+    // W3 seam-fix item 2: fixed reason + constructor-name only, never the message.
+    expect(s.orderPipeline.reason).toBe("section unavailable");
+    expect(s.orderPipeline.reason).not.toMatch(/internal-host|pipeline down/);
+    expect(s.orderPipeline.errorKind).toBe("Error");
     expect(s.inventory.status).toBe("ok");
     expect(s.coverage.degradedSections).toContain("orderPipeline");
   });

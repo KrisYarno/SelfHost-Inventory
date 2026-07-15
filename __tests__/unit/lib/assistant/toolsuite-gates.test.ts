@@ -443,6 +443,54 @@ describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)
 });
 
 // ---------------------------------------------------------------------------
+// (1c) VALID-product post-resolution branch (W3 seam-fix item 6). The pending-review
+// productId fixtures above short-circuit at resolution (notFound), so they never
+// exercise a tool's POST-resolution read path under the zero-writes assertion. Here
+// product.findFirst AND product.findUnique resolve to a VALID product (id 1), so every
+// productId-taking tool runs its full post-resolution branch — which must ALSO be
+// write-free.
+// ---------------------------------------------------------------------------
+
+describe("READ-ONLY gate — the VALID-product post-resolution branch is write-free (item 6)", () => {
+  const VALID_PRODUCT = { id: 1, name: "Valid Gate Product" };
+
+  // Every productId-taking tool (each resolves through resolveAssistantProduct), with a
+  // VALID id and its other required args so it reaches the post-resolution path.
+  const PRODUCT_ID_TOOL_FIXTURES: Array<[string, Record<string, unknown>]> = [
+    ["get_stock", { productId: 1 }],
+    ["get_sales", { productId: 1, groupBy: "product" }],
+    ["get_operations", { productId: 1 }],
+    ["get_valuation", { productId: 1, groupBy: "product" }],
+    ["get_movement_series", { productId: 1 }],
+    ["get_movement_series", { productId: 1, receipts: true }],
+    ["get_inventory_policy", { productId: 1 }],
+    ["get_stock_asof", { dayKey: "2026-01-01", productId: 1 }],
+    [
+      "compare_periods",
+      { metric: "sales_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 }, productId: 1 },
+    ],
+    ["get_product_overview", { productId: 1 }],
+  ];
+
+  it.each(PRODUCT_ID_TOOL_FIXTURES)(
+    "%s resolves a VALID product (post-resolution branch) and still issues zero write calls",
+    async (name, fixture) => {
+      prismaCtl.__reset();
+      prismaCtl.__overrides["product.findFirst"] = VALID_PRODUCT; // resolveAssistantProduct
+      prismaCtl.__overrides["product.findUnique"] = VALID_PRODUCT; // identity/policy detail reads
+      const result = await assistantTools[name].run(fixture, CTX);
+      // The tool actually reached its post-resolution branch — NOT the notFound shape.
+      const isNotFound =
+        (result as { status?: string }).status === "error" &&
+        (result as { error?: { code?: string } }).error?.code === "NOT_FOUND";
+      expect(isNotFound).toBe(false);
+      // ...and that branch still wrote nothing.
+      expect(writeCalls()).toEqual([]);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
 // (2) STATIC source check — no un-allowlisted write tokens in the read path.
 // ---------------------------------------------------------------------------
 

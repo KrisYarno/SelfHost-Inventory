@@ -26,14 +26,24 @@ jest.mock("ai", () => ({ __esModule: true, tool: (def: unknown) => def }));
 jest.mock("@/lib/prisma", () => ({ __esModule: true, default: {} }));
 jest.mock("@/lib/analytics/stock-asof", () => ({ __esModule: true, getStockAsOf: jest.fn() }));
 jest.mock("@/lib/reports/inventory-summary", () => ({ __esModule: true, getInventorySummary: jest.fn() }));
+// W3 seam-fix item 1: get_sales byte-fits IN-MEMORY via paginate (no module byteBudget
+// arg), so its page-shrink pin mocks the sales query + coverage + an identity serialize
+// and drives the tool's own paginate. groupBy:"day" avoids any prisma name-resolution.
+jest.mock("@/lib/analytics/queries", () => ({ __esModule: true, getSales: jest.fn() }));
+jest.mock("@/lib/analytics/serialize", () => ({ __esModule: true, serializeSalesRows: (rows: unknown[]) => rows }));
+jest.mock("@/lib/assistant/sales-coverage", () => ({ __esModule: true, callerScopedSalesCoverage: jest.fn() }));
 
 import { createAiTools } from "@/lib/assistant/tool-adapters";
 import { getStockAsOf } from "@/lib/analytics/stock-asof";
 import { getInventorySummary } from "@/lib/reports/inventory-summary";
+import { getSales } from "@/lib/analytics/queries";
+import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
 import type { ToolContext as ResolvedContext } from "@/lib/assistant/context";
 
 const asOfMock = getStockAsOf as jest.Mock;
 const summaryMock = getInventorySummary as jest.Mock;
+const salesMock = getSales as jest.Mock;
+const salesCoverageMock = callerScopedSalesCoverage as jest.Mock;
 
 const CTX: ResolvedContext = {
   userId: 1,
@@ -47,6 +57,7 @@ const CTX: ResolvedContext = {
 const TIGHT = 16_384;
 const LARGE = 65_536;
 const TOTAL = 3_000; // far more rows than either budget can hold => nextOffset always set
+const SALES_TOTAL = 3_000; // ditto for the get_sales in-memory paginate pin
 
 /** Mirror the real byte-fit paginate: add rows until the next would exceed byteBudget. */
 function fitPage<T>(byteBudget: number, total: number, makeRow: (i: number) => T) {
@@ -65,6 +76,17 @@ function fitPage<T>(byteBudget: number, total: number, makeRow: (i: number) => T
 beforeEach(() => {
   asOfMock.mockReset();
   summaryMock.mockReset();
+  salesMock.mockReset();
+  salesCoverageMock.mockReset();
+  salesCoverageMock.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "excluded", lastRebuildAt: null });
+  // Day-grain raw rows, each padded so BOTH budgets are byte-bound (page < the 500-row
+  // limit), proving the byte budget — not the row limit — shrinks the tight page.
+  salesMock.mockImplementation(async () =>
+    Array.from({ length: SALES_TOTAL }, (_v, i) => ({
+      dayKey: "2020-01-01",
+      _sum: { orderedQty: i, revenue: "1234.50", pad: "x".repeat(150) },
+    })),
+  );
   asOfMock.mockImplementation(async (opts: { dayKey: string; byteBudget: number }) => {
     const page = fitPage(opts.byteBudget, TOTAL, (i) => ({
       productId: i,
@@ -133,6 +155,24 @@ describe("createAiTools — a tight remainingBytes shrinks the page, never trunc
     expect(tight.data!.ranked!.rows.length).toBeLessThan(tight.data!.ranked!.totalRows);
     expect(tight.data!.ranked!.nextOffset).not.toBeNull();
     expect(tight.data!.ranked!.rows.length).toBeLessThan(large.data!.ranked!.rows.length);
+  });
+
+  it("get_sales (W3 seam-fix item 1 — in-memory paginate): tight budget -> smaller page + nextOffset, status ok", async () => {
+    const tight = await runOnce("get_sales", { groupBy: "day" }, TIGHT);
+    const large = await runOnce("get_sales", { groupBy: "day" }, LARGE);
+
+    // A completed, byte-fit page — NOT the turn-budget truncation notice.
+    expect(tight.status).toBe("ok");
+    expect(tight.notice).toBeUndefined();
+    expect(tight.data!.rows!.length).toBeLessThan(tight.data!.totalRows!);
+    expect(tight.data!.nextOffset).not.toBeNull();
+    // Genuinely SMALLER than a comfortable-budget read of the same data — the byte budget
+    // binds before the 500-row limit for BOTH, so this proves the ctx page-shrink wiring.
+    expect(tight.data!.rows!.length).toBeLessThan(large.data!.rows!.length);
+    // Pin the fixed ROW budget removal: with the OLD constant both reads would return the
+    // SAME page (limit-bound), never a tighter one.
+    expect(large.status).toBe("ok");
+    expect(large.data!.nextOffset).not.toBeNull();
   });
 
   it("the ctx budget is threaded through with the envelope reserve subtracted (both tools)", async () => {

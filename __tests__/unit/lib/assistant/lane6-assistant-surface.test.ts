@@ -126,6 +126,19 @@ describe("buildSystemPrompt: what-we-track + routing map (W3-PROMPT, spec §5 T-
     expect(PROMPT.toLowerCase()).toContain("server-side");
   });
 
+  it("softens the overview + compare_periods overclaims (W3 seam-fix item 5, codex M4)", () => {
+    const lower = PROMPT.toLowerCase();
+    // get_product_overview is CURRENT-state + last-30d only; history/as-of routes elsewhere.
+    expect(lower).toContain("current state + last-30d");
+    expect(lower).toContain("as-of past day");
+    // compare_periods is narrowed to its REAL metrics — no longer "any period-over-period".
+    expect(lower).toContain("sales units/revenue or physical in/out units only");
+    // For other comparisons the model fetches each period and never computes the delta.
+    expect(lower).toContain("do not compute the difference yourself");
+    // The old universal-comparison overclaim is gone.
+    expect(lower).not.toContain("any period-over-period comparison");
+  });
+
   it("still carries the date rule and stays pure/deterministic (now-only)", () => {
     expect(PROMPT).toContain("Today is 2026-07-15 (UTC).");
     const now = new Date("2026-07-15T12:00:00.000Z");

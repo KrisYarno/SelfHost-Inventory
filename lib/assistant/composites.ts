@@ -90,8 +90,14 @@ async function runSection(
     const data = await produce();
     return { scope, status: "ok", ...data };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { scope, status: "unavailable", reason: `section unavailable: ${message}` };
+    // W3 seam-fix item 2 (codex M3): do NOT serialize err.message. A Prisma error can
+    // embed connection hosts, database names, or schema identifiers in its message —
+    // relaying that verbatim through a composite section would leak infrastructure
+    // internals to the model (and any downstream surface). The reason is therefore a
+    // FIXED, non-sensitive string; only the constructor NAME is surfaced (enough to tell
+    // an AppError from a PrismaClientKnownRequestError without exposing the message body).
+    const errorKind = err instanceof Error ? err.constructor.name : typeof err;
+    return { scope, status: "unavailable", reason: "section unavailable", errorKind };
   }
 }
 
@@ -244,9 +250,25 @@ export async function getProductOverview(
     }),
 
     // policy (global): effective + raw + per-field source (get_inventory_policy math).
+    // W3 seam-fix item 3 (codex M2): the overview is a SUMMARY, so per-location minimums
+    // are BOUNDED to the top MAX_LOCATION_ROWS with a "N more" note (mirrors
+    // stockByLocation) — an unbounded relay could balloon the section on a product with
+    // many locations. The full list stays behind get_inventory_policy.
     runSection("global", async () => {
       const result = await getPolicy({ productId });
-      return { product: result.product ?? null, global: result.global };
+      const rawProduct = result.product ?? null;
+      if (!rawProduct) return { product: null, global: result.global };
+      const mins = rawProduct.locationMinimums ?? [];
+      const out: Record<string, unknown> = { global: result.global };
+      if (mins.length > MAX_LOCATION_ROWS) {
+        out.product = { ...rawProduct, locationMinimums: mins.slice(0, MAX_LOCATION_ROWS) };
+        out.note =
+          `Showing the top ${MAX_LOCATION_ROWS} of ${mins.length} per-location minimums — ` +
+          `use get_inventory_policy for the full list.`;
+      } else {
+        out.product = rawProduct;
+      }
+      return out;
     }),
 
     // movement30 (global): 30-day ledger partition TOTALS only (a summary — the point

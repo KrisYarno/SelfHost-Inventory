@@ -384,6 +384,17 @@ describe("POST /mcp — Wave-1 tool round-trips assert REAL payload values (item
     // Enablement is never observable from this process; the suffix discloses the store count.
     expect(toolResult.data.fulfillmentSync.enabled).toBeNull();
     expect(toolResult.data.fulfillmentSync.cursor).toContain("(oldest of 2 integrations)");
+    // W3 seam-fix item 4: freshness is a MIXED-scope read (global rebuild/ledger/snapshot
+    // + company-scoped sales/order dates), so meta.scope is "mixed" and coverage carries a
+    // machine-readable per-section scope map for the UI legend.
+    expect(toolResult.meta.scope).toBe("mixed");
+    expect(toolResult.data.coverage.sectionScopes).toEqual({
+      rebuild: "global",
+      sales: "company",
+      fulfillmentSync: "global",
+      dataStarts: "mixed",
+      snapshots: "global",
+    });
   });
 });
 

@@ -63,15 +63,24 @@ export const PHYSICAL_OUTBOUND_WHERE: Prisma.inventory_logsWhereInput = {
 };
 
 /**
- * Prisma WHERE for reorderDemand. `NOT: { reasonCode: 'CORRECTION' }` is Prisma's
- * null-INCLUSIVE negation: a row with reasonCode IS NULL is KEPT (it is not equal to
- * 'CORRECTION'), matching the JS predicate. A row with reasonCode = 'CORRECTION' is
- * excluded. Pinned by the contract test.
+ * Prisma WHERE for reorderDemand: `delta < 0 AND logType != TRANSFER AND (reasonCode IS
+ * NULL OR reasonCode != 'CORRECTION')`.
+ *
+ * PRISMA GOTCHA (SQL three-valued logic): a bare `NOT: { reasonCode: 'CORRECTION' }` is
+ * NOT null-inclusive. Prisma's docs are explicit — "`not` will return all items that do
+ * not match a given value. However, if the column is nullable, `NULL` values will not be
+ * returned. If you require null values to be returned, use an `OR` operator to include
+ * `NULL` values." reasonCode IS nullable, and a null reason is exactly a plain sale/loss
+ * demand MUST count, so the bare NOT would silently drop every null-reason outbound. The
+ * `OR: [{ reasonCode: null }, { NOT: { reasonCode: 'CORRECTION' } }]` restores the
+ * null-INCLUSIVE intent and matches isReorderDemandRow (`reasonCode !== 'CORRECTION'`).
+ * The base delta/logType conditions stay top-level (AND-composed with the OR). Pinned by
+ * the contract test.
  */
 export const REORDER_DEMAND_WHERE: Prisma.inventory_logsWhereInput = {
   delta: { lt: 0 },
   logType: { not: inventory_logs_logType.TRANSFER },
-  NOT: { reasonCode: "CORRECTION" },
+  OR: [{ reasonCode: null }, { NOT: { reasonCode: "CORRECTION" } }],
 };
 
 /**
