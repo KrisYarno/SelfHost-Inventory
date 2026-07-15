@@ -204,7 +204,14 @@ describe("POST /mcp — tool round-trip", () => {
       const text = rpc.result.content[0].text as string;
       const toolResult = JSON.parse(text);
       expect(toolResult.status).toBe("ok");
-      expect(toolResult.data).toEqual({ products: [], returned: 0, totalRows: 0, nextOffset: null });
+      // find_product now carries a caller-honest coverage block (W0-2 / spec §7).
+      expect(toolResult.data).toEqual({
+        products: [],
+        returned: 0,
+        totalRows: 0,
+        nextOffset: null,
+        coverage: { matched: 0, scope: "approved products; name/baseName/variant match" },
+      });
       // context was resolved from the token owner + telemetry recorded
       expect(p.userCompany.findMany).toHaveBeenCalled();
       expect(p.assistantRun.create).toHaveBeenCalled();

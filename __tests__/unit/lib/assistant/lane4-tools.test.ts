@@ -79,6 +79,14 @@ beforeEach(() => {
   db.systemSetting.findUnique.mockResolvedValue(null as never);
   db.product_locations.findMany.mockResolvedValue([] as never);
   mockGetStockSeries.mockResolvedValue([]);
+  // W0-PROD: get_stock now resolves productId via resolveAssistantProduct
+  // (prisma.product.findFirst). Default to an approved product so the happy paths
+  // reach the series read; the schema-rejection tests throw before this is hit.
+  db.product.findFirst.mockResolvedValue({ id: 1, name: "TIRZ 10mg" } as never);
+  // W0-STOCK: the series is paged on DISTINCT DAYS (productStockSnapshot.groupBy) and
+  // location names come from the locations table. Benign empties by default.
+  db.productStockSnapshot.groupBy.mockResolvedValue([] as never);
+  db.location.findMany.mockResolvedValue([] as never);
 });
 
 describe("find_product: APPROVED-only + caps", () => {
@@ -149,6 +157,12 @@ describe("get_stock: DB-level take + window validation", () => {
       { locationId: 1, quantity: 30 },
       { locationId: 2, quantity: 12 },
     ] as never);
+    // >= 1 distinct day so the day-grouped page actually fetches series rows.
+    db.productStockSnapshot.groupBy.mockResolvedValue([{ dayKey: "2026-01-01" }] as never);
+    db.location.findMany.mockResolvedValue([
+      { id: 1, name: "Main" },
+      { id: 2, name: "Back" },
+    ] as never);
 
     const result = await assistantTools.get_stock.run({ productId: 1 }, CTX);
 
@@ -163,8 +177,59 @@ describe("get_stock: DB-level take + window validation", () => {
     }
   });
 
+  it("returns notFound (never currentStock:0) for a non-approved / absent productId (W0-PROD)", async () => {
+    db.product.findFirst.mockResolvedValue(null as never);
+    const result = await assistantTools.get_stock.run({ productId: 424242 }, CTX);
+    expect(result).toEqual({
+      status: "error",
+      error: { code: "NOT_FOUND", message: expect.stringContaining("424242") },
+    });
+    // The series/stock reads never ran — the id was rejected up front.
+    expect(mockGetStockSeries).not.toHaveBeenCalled();
+  });
+
+  it("names the scalar 'locationStock' (not currentStock) on a location-scoped read", async () => {
+    db.product_locations.findMany.mockResolvedValue([{ locationId: 2, quantity: 9 }] as never);
+    const result = await assistantTools.get_stock.run({ productId: 1, locationId: 2 }, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      const data = result.data as Record<string, unknown>;
+      expect(data.locationStock).toBe(9);
+      expect(data).not.toHaveProperty("currentStock");
+      expect(data.locationId).toBe(2);
+    }
+  });
+
+  it("seriesCoverage.complete is false + omitted>0 when older days overflow the day cap", async () => {
+    db.product_locations.findMany.mockResolvedValue([{ locationId: 1, quantity: 5 }] as never);
+    // 400 distinct days: the DISTINCT-day count drives totalDays; the paged fetch honors
+    // skip/take (max 366 days), so 34 older days are omitted with complete:false.
+    const manyDays = Array.from({ length: 400 }, (_, i) => ({ dayKey: `2020-01-${i}` }));
+    db.productStockSnapshot.groupBy.mockImplementation((arg: unknown) => {
+      const a = arg as { skip?: number; take?: number };
+      return Promise.resolve(
+        a && a.take != null ? manyDays.slice(a.skip ?? 0, (a.skip ?? 0) + a.take) : manyDays,
+      ) as never;
+    });
+    mockGetStockSeries.mockResolvedValue([]);
+
+    const result = await assistantTools.get_stock.run({ productId: 1 }, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      const cov = (result.data as { seriesCoverage: Record<string, unknown> }).seriesCoverage;
+      expect(cov.totalDays).toBe(400);
+      expect(cov.returnedDays).toBe(366);
+      expect(cov.complete).toBe(false);
+      expect(cov.omitted).toBe(34);
+    }
+  });
+
   it("rejects a non-ISO date (schema)", async () => {
     await expect(assistantTools.get_stock.run({ productId: 1, from: "2026-13-40" }, CTX)).rejects.toThrow();
+  });
+
+  it("rejects an impossible calendar day 2026-02-30 (isoDay round-trip, W0-ISO)", async () => {
+    await expect(assistantTools.get_stock.run({ productId: 1, from: "2026-02-30" }, CTX)).rejects.toThrow();
   });
 
   it("rejects a non-positive / non-integer id (schema)", async () => {

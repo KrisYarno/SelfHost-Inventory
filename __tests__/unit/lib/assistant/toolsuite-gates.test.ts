@@ -152,16 +152,11 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
 
 /**
  * Temporary, SHRINKING coverage/definition exemptions (spec §7). Each W0 task removes
- * its entries (W0-1: operations + low_stock; W0-2: the rest). The baseline snapshot pins
- * that the table can only shrink.
+ * its entries; W0-2 empties the table — every one of the 8 tools now carries a
+ * coverage/freshness block (and a definition string where it emits a rate), so nothing
+ * is exempt. The baseline snapshot below pins that the table can only shrink.
  */
-const GATE_EXEMPTIONS: Record<string, string[]> = {
-  find_product: ["coverage"],
-  get_sales: ["coverage"],
-  get_operations: ["coverage", "definition"],
-  low_stock_report: ["coverage", "definition"],
-  get_stock: ["coverage"],
-};
+const GATE_EXEMPTIONS: Record<string, string[]> = {};
 const GATE_EXEMPTIONS_BASELINE: Record<string, string[]> = {
   find_product: ["coverage"],
   get_sales: ["coverage"],
@@ -317,6 +312,11 @@ describe("COVERAGE gate (spec §7 — validates CoverageSchema)", () => {
   const coverageTools = TOOL_NAMES.filter((n) => !isExempt(n, "coverage"));
   it.each(coverageTools)("%s carries a coverage/freshness block validating CoverageSchema", async (name) => {
     prismaCtl.__reset();
+    // Happy-path fixture: a productId-taking tool (get_stock) resolves through
+    // resolveAssistantProduct — override findFirst so the fixture id resolves to an
+    // approved product and the tool reaches its coverage-bearing OK result (rather than
+    // notFound). Harmless for tools that don't resolve a product.
+    prismaCtl.__overrides["product.findFirst"] = { id: 1, name: "Gate Fixture Product" };
     const result = await assistantTools[name].run(TOOL_GATE_FIXTURES[name][0], CTX);
     expect(result.status).toBe("ok");
     if (result.status !== "ok") return;
@@ -351,6 +351,8 @@ describe("DEFINITION gate (spec §7 — rate field ⇒ definition string)", () =
   const definitionTools = TOOL_NAMES.filter((n) => !isExempt(n, "definition"));
   it.each(definitionTools)("%s: any rate field is accompanied by a definition string", async (name) => {
     prismaCtl.__reset();
+    // See the coverage gate: resolve the productId fixture to an approved product.
+    prismaCtl.__overrides["product.findFirst"] = { id: 1, name: "Gate Fixture Product" };
     const result = await assistantTools[name].run(TOOL_GATE_FIXTURES[name][0], CTX);
     if (result.status !== "ok") return;
     const rateKeys = collectKeys(result.data, (k) => RATE_FIELD.test(k) && !/Definition$/i.test(k));
@@ -398,12 +400,25 @@ describe("resolveAssistantProduct (spec §4 W0-PROD)", () => {
 // ---------------------------------------------------------------------------
 // Universal productId fixture (spec §4 W0-PROD). A guessed pending-review ID must
 // return the notFound shape from EVERY tool wired through resolveAssistantProduct.
-// TODAY none are — W0-2 wires get_stock/get_sales — so these are todo. The resolver +
-// fixture mechanism (proxy null-for-any-id) ship here; the per-tool assertions light up
-// when W0-2 lands.
+// W0-2 wired get_stock + get_sales — the proxy resolves findFirst to null for the
+// sentinel id, so each returns the shared notFound shape (never provisional data).
 // ---------------------------------------------------------------------------
 
 describe("universal productId not-found fixture (spec §4 W0-PROD)", () => {
-  it.todo("get_stock returns notFound for a pending-review productId — W0-2 wires the resolver");
-  it.todo("get_sales returns notFound for a pending-review productId — W0-2 wires the resolver");
+  const NOT_FOUND = {
+    status: "error",
+    error: { code: "NOT_FOUND", message: expect.stringContaining(String(PENDING_REVIEW_FIXTURE_ID)) },
+  };
+
+  it("get_stock returns notFound for a pending-review productId (never currentStock:0)", async () => {
+    prismaCtl.__reset();
+    const result = await assistantTools.get_stock.run({ productId: PENDING_REVIEW_FIXTURE_ID }, CTX);
+    expect(result).toEqual(NOT_FOUND);
+  });
+
+  it("get_sales returns notFound for a pending-review productId", async () => {
+    prismaCtl.__reset();
+    const result = await assistantTools.get_sales.run({ productId: PENDING_REVIEW_FIXTURE_ID }, CTX);
+    expect(result).toEqual(NOT_FOUND);
+  });
 });

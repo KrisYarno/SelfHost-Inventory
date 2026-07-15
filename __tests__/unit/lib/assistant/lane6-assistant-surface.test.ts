@@ -82,8 +82,10 @@ describe("buildSystemPrompt: today's UTC date (review B4)", () => {
 // D-T6 — relativeDays + returned window (omitting dates is never all-time)
 // ---------------------------------------------------------------------------
 
-describe("get_sales: relativeDays default + returned window (review B4)", () => {
-  it("no dates -> last 30 days ending today, and the payload states the window", async () => {
+describe("get_sales: relativeDays default + returned window (review B4; W0-WIN resolver)", () => {
+  // W0-WIN: relativeDays N = EXACTLY N day-keys (from = to − (N−1)); the resolved
+  // window echoes days + source. spanDays is the day DIFFERENCE, so N keys span N−1.
+  it("no dates -> last 30 day-keys ending today, and the payload states the window", async () => {
     mockGetSales.mockResolvedValue([]);
     const today = toDayKey(new Date());
 
@@ -91,10 +93,11 @@ describe("get_sales: relativeDays default + returned window (review B4)", () => 
 
     expect(result.status).toBe("ok");
     if (result.status === "ok") {
-      const data = result.data as { window: { from: string; to: string; relativeDays: number | null } };
+      const data = result.data as { window: { from: string; to: string; days: number; source: string } };
       expect(data.window.to).toBe(today);
-      expect(data.window.relativeDays).toBe(30);
-      expect(spanDays(data.window.from, data.window.to)).toBe(30);
+      expect(data.window.days).toBe(30);
+      expect(data.window.source).toBe("default");
+      expect(spanDays(data.window.from, data.window.to)).toBe(29); // 30 inclusive day-keys
     }
     // getSales received EXPLICIT dates — never undefined (which would mean all-time).
     const call = mockGetSales.mock.calls[0][0];
@@ -103,24 +106,26 @@ describe("get_sales: relativeDays default + returned window (review B4)", () => 
     expect(call.to).toBe(today);
   });
 
-  it("honors a custom relativeDays", async () => {
+  it("honors a custom relativeDays (N day-keys, source relative)", async () => {
     mockGetSales.mockResolvedValue([]);
     const result = await assistantTools.get_sales.run({ relativeDays: 7 }, CTX);
     if (result.status === "ok") {
-      const data = result.data as { window: { from: string; to: string; relativeDays: number | null } };
-      expect(data.window.relativeDays).toBe(7);
-      expect(spanDays(data.window.from, data.window.to)).toBe(7);
+      const data = result.data as { window: { from: string; to: string; days: number; source: string } };
+      expect(data.window.days).toBe(7);
+      expect(data.window.source).toBe("relative");
+      expect(spanDays(data.window.from, data.window.to)).toBe(6); // 7 inclusive day-keys
     }
   });
 
-  it("uses explicit from/to verbatim (relativeDays reported null)", async () => {
+  it("uses explicit from/to verbatim (source explicit + inclusive day count)", async () => {
     mockGetSales.mockResolvedValue([]);
     const result = await assistantTools.get_sales.run({ from: "2026-01-01", to: "2026-01-31" }, CTX);
     if (result.status === "ok") {
-      const data = result.data as { window: { from: string; to: string; relativeDays: number | null } };
+      const data = result.data as { window: { from: string; to: string; days: number; source: string } };
       expect(data.window.from).toBe("2026-01-01");
       expect(data.window.to).toBe("2026-01-31");
-      expect(data.window.relativeDays).toBeNull();
+      expect(data.window.days).toBe(31);
+      expect(data.window.source).toBe("explicit");
     }
   });
 
@@ -128,10 +133,17 @@ describe("get_sales: relativeDays default + returned window (review B4)", () => 
     const result = await assistantTools.get_sales.run({}, CTX_NO_COMPANY);
     expect(mockGetSales).not.toHaveBeenCalled();
     if (result.status === "ok") {
-      const data = result.data as { window: { relativeDays: number | null }; note: string };
-      expect(data.window.relativeDays).toBe(30);
+      const data = result.data as { window: { days: number; source: string }; note: string };
+      expect(data.window.days).toBe(30);
+      expect(data.window.source).toBe("default");
       expect(typeof data.note).toBe("string");
     }
+  });
+
+  it("rejects from + relativeDays together (resolveWindow throws AppError)", async () => {
+    await expect(
+      assistantTools.get_sales.run({ from: "2026-01-01", relativeDays: 5 }, CTX),
+    ).rejects.toThrow();
   });
 });
 
@@ -148,9 +160,10 @@ describe("truncation degrades to a page + cursor, never an empty notice (review 
       attention: "ok" as const,
       unitsOut30: null,
       unitsOut90: null,
-      avgDaily30: null,
+      avgDailyOutbound30: null,
       daysOfSupply: null,
-      turns90: null,
+      turns: null,
+      turnsWindowDays: 90,
       turnsCoverage: null,
       lastInboundAt: null,
       lastOutboundAt: null,

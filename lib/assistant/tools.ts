@@ -51,6 +51,9 @@ import {
   getLowStockDefault,
   isLowStock,
 } from "@/lib/stock-threshold";
+import { resolveWindow } from "@/lib/assistant/window";
+import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
+import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
 
 // ---------------------------------------------------------------------------
 // Result contract (spec D4 / §3 E1). Discriminated union so consumers branch on
@@ -144,12 +147,16 @@ const LOW_STOCK_MAX = 50;
 const REORDER_MAX = 50;
 const SALES_ROWS_MAX = 500;
 const DEFAULT_RELATIVE_DAYS = 30;
-// DB-level `take` for the snapshot series. Reconciled with the budget (D-T7): a
+// DB-level `take` for the snapshot series rows. Reconciled with the budget (D-T7): a
 // point serializes to ~52 bytes, so 1000 points ≈ 51 KiB < ROW_PAGE_BYTE_BUDGET
 // (~56 KiB) < the per-tool cap (64 KiB) < the turn budget (128 KiB). The series is
-// ALSO byte-fit at the boundary below, so a pathologically large point can never
-// blow the cap — it is trimmed with a coverage flag instead.
+// ALSO paged by whole days + byte-fit at the boundary below, so a pathologically wide
+// window can never blow the cap — older days are omitted with a coverage flag instead.
 const STOCK_SERIES_MAX_ROWS = 1000;
+// Max DISTINCT DAYS returned in one get_stock series page (W0-STOCK): the series is
+// paged on dayKey GROUPS so a page never splits a day. Aligns with the 366-day window
+// cap; a wider all-time history is truncated to the newest 366 days with complete:false.
+const STOCK_SERIES_MAX_DAYS = MAX_WINDOW_DAYS;
 
 const ATTENTION_RANK: Record<OperationsRow["attention"], number> = {
   out: 3,
@@ -165,14 +172,16 @@ const ATTENTION_RANK: Record<OperationsRow["attention"], number> = {
 const positiveInt = z.number().int().positive();
 const nonNegInt = z.number().int().min(0);
 
-/** Strict ISO calendar day 'YYYY-MM-DD'. */
+/** Strict ISO calendar day 'YYYY-MM-DD'. Round-trip validated (W0-ISO): parse to a
+ *  UTC instant, re-format, and require equality — so a rolled-over date like
+ *  `2026-02-30` (which `new Date` silently coerces to Mar 2) is REJECTED, not accepted. */
 const isoDay = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "date must be an ISO calendar day (YYYY-MM-DD)")
-  .refine(
-    (s) => !Number.isNaN(new Date(`${s}T00:00:00.000Z`).getTime()),
-    "date is not a valid calendar day",
-  );
+  .refine((s) => {
+    const d = new Date(`${s}T00:00:00.000Z`);
+    return !Number.isNaN(d.getTime()) && toDayKey(d) === s;
+  }, "date is not a valid calendar day");
 
 /** Enforce the ≤366-day window (and from<=to) OUTSIDE the object schema so the
  *  schema stays a plain ZodObject (MCP registerTool needs its raw `.shape`). */
@@ -188,6 +197,19 @@ function assertWindow(from?: string, to?: string): void {
   if (toMs - fromMs > MAX_WINDOW_DAYS * DAY_MS) {
     throw new z.ZodError([
       { code: z.ZodIssueCode.custom, path: ["to"], message: `date window must be <= ${MAX_WINDOW_DAYS} days` },
+    ]);
+  }
+}
+
+/** Page-alignment check for offset paging (W0-FIND): `offset` MUST be a multiple of
+ *  `limit` so an offset→page translation is exact. Enforced OUTSIDE the object schema
+ *  (a ZodError so the message matches the schema-rejection contract) — a `.refine` on
+ *  the object would make it a ZodEffects and strip the raw `.shape` MCP registerTool
+ *  needs. */
+function assertPageAligned(offset: number, limit: number): void {
+  if (offset % limit !== 0) {
+    throw new z.ZodError([
+      { code: z.ZodIssueCode.custom, path: ["offset"], message: "offset must be a multiple of limit" },
     ]);
   }
 }
@@ -281,6 +303,13 @@ export interface DbPage<T> {
   totalRows: number;
   nextOffset: number | null;
 }
+
+/** One WHOLE day of the get_stock snapshot series (W0-STOCK): the dayKey plus every
+ *  per-location point on that day. Paging on these keeps day boundaries intact. */
+type DaySnapshot = {
+  dayKey: string;
+  points: Array<{ locationId: number; quantity: number; locationName: string | null }>;
+};
 
 /**
  * DB-side paging for list tools whose source is too large to materialize in memory
@@ -568,45 +597,58 @@ export const assistantTools: Record<string, AssistantToolDef> = {
   find_product: {
     description:
       `Find products by name (approved products only). Returns id, name, baseName, ` +
-      `variant, current global stock, and a low-stock flag. ${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `variant, current global stock, a low-stock flag, and stockState ` +
+      `(in_stock | low | out — out means stock 0, low means at/below its alert ` +
+      `threshold). ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: findProductSchema,
     run: async (input) => {
       const args = findProductSchema.parse(input);
       const limit = args.limit ?? FIND_PRODUCT_MAX;
       const offset = args.offset ?? 0;
+      // Honest paging (W0-FIND): `offset` must be page-aligned so it translates to a
+      // real DB page; `totalRows` is the FULL match count from getProductsWithQuantities,
+      // not the size of a single fetched page.
+      assertPageAligned(offset, limit);
+      const dbPage = offset / limit + 1;
       const [{ products, total }, systemDefault] = await Promise.all([
         getProductsWithQuantities(
-          { search: args.query, approvalStatus: "APPROVED", pageSize: FIND_PRODUCT_MAX, page: 1 },
+          { search: args.query, approvalStatus: "APPROVED", pageSize: limit, page: dbPage },
           undefined,
           true,
         ),
         getLowStockDefault(),
       ]);
-      const allRows = products.map((p) => ({
-        id: p.id,
-        name: p.name,
-        baseName: p.baseName,
-        variant: p.variant,
-        currentStock: p.currentQuantity,
-        lowStock: isLowStock(
-          p.currentQuantity,
-          effectiveLowStockThreshold(p.lowStockThreshold, systemDefault),
-        ),
-        approvalStatus: p.approvalStatus,
-      }));
-      const page = paginate(allRows, offset, limit, ROW_PAGE_BYTE_BUDGET);
-      const data: Record<string, unknown> = {
-        products: page.rows,
-        returned: page.returned,
-        totalRows: page.totalRows,
-        nextOffset: page.nextOffset,
-      };
-      // The search matched more than this tool fetches — say so rather than imply
-      // the returned set is exhaustive.
-      if (total > allRows.length) {
-        data.note = `${total} products match; only the top ${allRows.length} are searched — refine the query to narrow it.`;
-      }
-      return ok(data, { scope: "global" });
+      const rows = products.map((p) => {
+        const effectiveThreshold = effectiveLowStockThreshold(p.lowStockThreshold, systemDefault);
+        const low = isLowStock(p.currentQuantity, effectiveThreshold);
+        // stockState fixes lowStock:false-when-out-of-stock (W0-FIND): out wins over low.
+        const stockState: "in_stock" | "low" | "out" =
+          p.currentQuantity <= 0 ? "out" : low ? "low" : "in_stock";
+        return {
+          id: p.id,
+          name: p.name,
+          baseName: p.baseName,
+          variant: p.variant,
+          currentStock: p.currentQuantity,
+          lowStock: low,
+          stockState,
+          approvalStatus: p.approvalStatus,
+        };
+      });
+      // Byte-fit the page (the DB already returned <= limit rows in production; the byte
+      // cap only bites a pathologically wide row). totalRows stays the HONEST full count.
+      const page = paginate(rows, 0, limit, ROW_PAGE_BYTE_BUDGET);
+      const consumed = offset + page.returned;
+      return ok(
+        {
+          products: page.rows,
+          returned: page.returned,
+          totalRows: total,
+          nextOffset: consumed < total ? consumed : null,
+          coverage: { matched: total, scope: "approved products; name/baseName/variant match" },
+        },
+        { scope: "global" },
+      );
     },
   },
 
@@ -614,12 +656,30 @@ export const assistantTools: Record<string, AssistantToolDef> = {
     description:
       `Current global stock for a product (by location) plus a daily snapshot ` +
       `series over an optional date window (<= 366 days). Inventory is GLOBAL — not ` +
-      `company-scoped. ${DATA_POSTURE}`,
+      `company-scoped. A location-scoped read reports 'locationStock'; a global read ` +
+      `reports 'currentStock'. seriesCoverage.complete is false when older days were ` +
+      `omitted (see 'omitted'). ${DATA_POSTURE}`,
     inputSchema: getStockSchema,
     run: async (input) => {
       const args = getStockSchema.parse(input);
       assertWindow(args.from, args.to);
-      const [locations, series] = await Promise.all([
+      // W0-PROD: resolve through the shared approved-product resolver. A pending-review
+      // / soft-deleted / absent id returns notFound — NEVER a currentStock:0 for an
+      // unapproved id (which would leak provisional stock through the assistant/MCP).
+      const product = await resolveAssistantProduct(args.productId);
+      if (!product) return notFound("product", args.productId);
+
+      const dayFilter =
+        args.from || args.to
+          ? { dayKey: { ...(args.from ? { gte: args.from } : {}), ...(args.to ? { lte: args.to } : {}) } }
+          : {};
+      const seriesWhere = {
+        productId: args.productId,
+        ...(args.locationId ? { locationId: args.locationId } : {}),
+        ...dayFilter,
+      };
+
+      const [locations, locationRows] = await Promise.all([
         prisma.product_locations.findMany({
           where: {
             productId: args.productId,
@@ -627,30 +687,96 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           },
           select: { locationId: true, quantity: true },
         }),
-        getStockSeries({
-          productId: args.productId,
-          locationId: args.locationId,
-          from: args.from,
-          to: args.to,
-          take: STOCK_SERIES_MAX_ROWS,
-        }),
+        // Location names (W0-STOCK): the locations table is tiny — resolve every name
+        // once so both byLocation and the series points can be labeled.
+        prisma.location.findMany({ select: { id: true, name: true } }),
       ]);
-      const currentStock = locations.reduce((sum, l) => sum + l.quantity, 0);
-      // Byte-fit the series so a wide window can never blow the per-tool cap; the
-      // 1000-row DB take already keeps this well within budget (see the constant).
-      const seriesPage = paginate(series ?? [], 0, STOCK_SERIES_MAX_ROWS, ROW_PAGE_BYTE_BUDGET);
-      return ok(
-        {
-          productId: args.productId,
-          currentStock,
-          byLocation: locations,
-          series: seriesPage.rows,
-          seriesCoverage: {
-            returned: seriesPage.returned,
-            totalRows: seriesPage.totalRows,
-            truncated: seriesPage.nextOffset != null,
-          },
+      const locNames = new Map<number, string>(
+        (locationRows ?? []).map((l) => [l.id, l.name]),
+      );
+      const byLocation = (locations ?? []).map((l) => ({
+        locationId: l.locationId,
+        quantity: l.quantity,
+        locationName: locNames.get(l.locationId) ?? null,
+      }));
+      const stockTotal = byLocation.reduce((sum, l) => sum + l.quantity, 0);
+
+      // Series paging (W0-STOCK): DB-side count of DISTINCT DAYS + skip/take over the
+      // dayKey groups, so a page is always WHOLE days (never a day split across pages),
+      // and totalDays is exact — `take MAX+1` alone would only prove "more exist" and
+      // strand older rows. Whole days are then byte-fit under the per-tool budget.
+      const dayPage = await pageFromDb<DaySnapshot>({
+        count: async () =>
+          ((await prisma.productStockSnapshot.groupBy({ by: ["dayKey"], where: seriesWhere })) ?? [])
+            .length,
+        fetch: async (skip, take) => {
+          const groups =
+            (await prisma.productStockSnapshot.groupBy({
+              by: ["dayKey"],
+              where: seriesWhere,
+              orderBy: { dayKey: "asc" },
+              skip,
+              take,
+            })) ?? [];
+          const days = groups.map((g) => g.dayKey as string);
+          if (days.length === 0) return [];
+          const points =
+            (await getStockSeries({
+              productId: args.productId,
+              locationId: args.locationId,
+              from: days[0],
+              to: days[days.length - 1],
+              take: STOCK_SERIES_MAX_ROWS,
+            })) ?? [];
+          const byDay = new Map<
+            string,
+            Array<{ locationId: number; quantity: number; locationName: string | null }>
+          >();
+          for (const d of days) byDay.set(d, []);
+          for (const pt of points) {
+            byDay
+              .get(pt.dayKey)
+              ?.push({
+                locationId: pt.locationId,
+                quantity: pt.quantity,
+                locationName: locNames.get(pt.locationId) ?? null,
+              });
+          }
+          return days.map((d) => ({ dayKey: d, points: byDay.get(d) ?? [] }));
         },
+        offset: 0,
+        limit: STOCK_SERIES_MAX_DAYS,
+        byteBudget: ROW_PAGE_BYTE_BUDGET,
+      });
+
+      const series = dayPage.rows.flatMap((d) =>
+        d.points.map((p) => ({
+          dayKey: d.dayKey,
+          locationId: p.locationId,
+          quantity: p.quantity,
+          locationName: p.locationName,
+        })),
+      );
+      const complete = dayPage.nextOffset === null;
+      const seriesCoverage: Record<string, unknown> = {
+        returnedDays: dayPage.returned,
+        totalDays: dayPage.totalRows,
+        complete,
+        omitted: Math.max(0, dayPage.totalRows - dayPage.returned),
+      };
+      if (!complete) {
+        seriesCoverage.note =
+          "Older snapshot days were omitted to fit the budget — narrow the date window or ask again.";
+      }
+
+      // Location-scoped reads name the scalar `locationStock` (never reuse currentStock).
+      const scalar =
+        args.locationId != null
+          ? { locationId: args.locationId, locationStock: stockTotal }
+          : { currentStock: stockTotal };
+
+      return ok(
+        { productId: args.productId, ...scalar, byLocation, series, seriesCoverage },
         { scope: "global" },
       );
     },
@@ -658,30 +784,40 @@ export const assistantTools: Record<string, AssistantToolDef> = {
 
   get_sales: {
     description:
-      `Sales aggregates scoped to the companies you can access. Grain via groupBy: ` +
-      `product | day | week | month | integration | company | company_day. Omitting ` +
-      `dates uses relativeDays (default 30) ending today; the effective window is ` +
-      `returned. Revenue is a string. ${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `Sales aggregates scoped to the companies you can access. productId is OPTIONAL — ` +
+      `omit to aggregate across ALL products; for trend questions use groupBy ` +
+      `'day' | 'week' | 'month'. Grain via groupBy: product | day | week | month | ` +
+      `integration | company | company_day. Omitting dates uses relativeDays (default ` +
+      `30) ending today; the resolved window (from/to/days/source) is returned. Figures ` +
+      `are GROSS ordered, attributed; refunds are not netted. Revenue is a string. ` +
+      `coverage.unattributedOrders is caller-scoped. ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getSalesSchema,
     run: async (input, ctx) => {
       const args = getSalesSchema.parse(input);
-      // D-T6: omitting dates NEVER means all-time. Resolve a window from relativeDays
-      // (default 30) ending today (UTC) and RETURN it so the model can cite it.
-      const now = new Date();
-      const relativeDays = args.relativeDays ?? DEFAULT_RELATIVE_DAYS;
-      const to = args.to ?? toDayKey(now);
-      const from = args.from ?? toDayKey(new Date(now.getTime() - relativeDays * DAY_MS));
-      assertWindow(from, to);
-      const window = {
-        from,
-        to,
-        relativeDays: args.from || args.to ? null : relativeDays,
-      };
+      // D-T6 / W0-WIN: omitting dates NEVER means all-time. The shared resolver turns
+      // from/to/relativeDays into an N-day-key window (from = to − (N−1)), throws on the
+      // from+relativeDays contradiction, and echoes its `source` so the model can cite it.
+      const window = resolveWindow(
+        { from: args.from, to: args.to, relativeDays: args.relativeDays },
+        new Date(),
+        DEFAULT_RELATIVE_DAYS,
+      );
+      assertWindow(window.from, window.to);
+
+      // W0-PROD: a provided productId resolves through the shared approved-product
+      // resolver — a pending-review / soft-deleted id returns notFound, never phantom rows.
+      if (args.productId != null) {
+        const product = await resolveAssistantProduct(args.productId);
+        if (!product) return notFound("product", args.productId);
+      }
+
       const groupBy = (args.groupBy ?? "product") as SalesToolGroupBy;
       const limit = args.limit ?? SALES_ROWS_MAX;
       const offset = args.offset ?? 0;
 
       if (ctx.companyIds.length === 0) {
+        // Empty companyIds → no query; coverage is the []-fast shape (unattributed 0).
+        const coverage = await callerScopedSalesCoverage(ctx.companyIds);
         return ok(
           {
             rows: [],
@@ -690,6 +826,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             nextOffset: null,
             groupBy,
             window,
+            coverage,
             note: "You have no company access, so there are no sales to report.",
           },
           { scope: "company" },
@@ -699,14 +836,18 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       const raw = (await getSales({
         companyIds: ctx.companyIds,
         productId: args.productId,
-        from,
-        to,
+        from: window.from,
+        to: window.to,
         groupBy: SALES_BASE_GRAIN[groupBy],
       })) as unknown as RawSalesRow[];
 
       const shaped = await shapeSalesRows(raw, groupBy);
       const serialized = serializeSalesRows(shaped.rows as object[]);
       const page = paginate(serialized, offset, limit, ROW_PAGE_BYTE_BUDGET);
+      // Caller-scoped coverage (spec §3 E2): live unattributed-order count for THIS
+      // caller's companies (never the global rebuild count), the bundle-revenue
+      // disclosure, and the (global) rebuild recency.
+      const coverage = await callerScopedSalesCoverage(ctx.companyIds);
       const data: Record<string, unknown> = {
         groupBy,
         window,
@@ -714,6 +855,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         returned: page.returned,
         totalRows: page.totalRows,
         nextOffset: page.nextOffset,
+        coverage,
       };
       if (shaped.orderCountNote) data.orderCountNote = shaped.orderCountNote;
       return ok(data, { scope: "company" });
@@ -723,36 +865,51 @@ export const assistantTools: Record<string, AssistantToolDef> = {
   get_operations: {
     description:
       `Per-product operations metrics (velocity, days-of-supply, turns, shrinkage, ` +
-      `attention state) over a 30- or 90-day window, ranked by attention. Global ` +
-      `physical pool. ${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `attention state) over a 30- or 90-day window, ranked by attention — the go-to ` +
+      `for "overall product health". Global physical pool. freshness.ledgerSaleStart ` +
+      `is the first in-platform SALE ledger row — NOT the start of order/sales history ` +
+      `(see get_sales). velocityDefinition states how avgDailyOutbound30 is computed. ` +
+      `${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getOperationsSchema,
     run: async (input) => {
       const args = getOperationsSchema.parse(input);
       const windowDays = args.windowDays ?? 90;
       const limit = args.limit ?? OPERATIONS_MAX;
       const offset = args.offset ?? 0;
-      const { rows, dataStarts } = await getOperationsRows({ windowDays });
+      const { rows, dataStarts, velocityDefinition } = await getOperationsRows({ windowDays });
       const ranked = [...rows].sort(
         (a, b) => ATTENTION_RANK[b.attention] - ATTENTION_RANK[a.attention],
       );
       const page = paginate(ranked, offset, limit, ROW_PAGE_BYTE_BUDGET);
-      return ok(
-        {
-          rows: page.rows,
-          returned: page.returned,
-          totalRows: page.totalRows,
-          nextOffset: page.nextOffset,
-          dataStarts,
+      const data: Record<string, unknown> = {
+        rows: page.rows,
+        returned: page.returned,
+        totalRows: page.totalRows,
+        nextOffset: page.nextOffset,
+        // Boundary-only rename (spec §3 E3): dataStarts.sale → ledgerSaleStart; the shared
+        // web OperationsDataStarts type is untouched. This freshness block is also the
+        // tool's coverage envelope (spec §3 E1 / §7 coverage gate).
+        freshness: {
+          ledgerSaleStart: dataStarts?.sale ?? null,
+          outbound: dataStarts?.outbound ?? null,
+          adjustment: dataStarts?.adjustment ?? null,
+          receipt: dataStarts?.receipt ?? null,
+          snapshot: dataStarts?.snapshot ?? null,
         },
-        { scope: "global" },
-      );
+      };
+      // Relay the velocity definition (W0-1 produces it; spec §2 D3 / §7 definition gate).
+      if (velocityDefinition) data.velocityDefinition = velocityDefinition;
+      return ok(data, { scope: "global" });
     },
   },
 
   get_shrinkage: {
     description:
-      `Shrinkage bucketed by reason (damage/theft/expiry/count/correction/` +
-      `unclassified) over 30/90/365 days. UNCLASSIFIED is always relayed. ${DATA_POSTURE}`,
+      `Shrinkage bucketed by the 4 classified loss reasons (damage/theft/expiry/count) ` +
+      `over 30/90/365 days. All OTHER negative movement — bare corrections and ` +
+      `reason-less rows (how this shop ships pre-Lane-4) — is surfaced as ` +
+      `coverage.unclassifiedOutboundUnits, NEVER as loss. valueAtCurrentCostCents is a ` +
+      `known-cost subtotal — check costCoverage. UNCLASSIFIED is always relayed. ${DATA_POSTURE}`,
     inputSchema: getShrinkageSchema,
     run: async (input) => {
       const args = getShrinkageSchema.parse(input);
@@ -775,12 +932,15 @@ export const assistantTools: Record<string, AssistantToolDef> = {
 
   low_stock_report: {
     description:
-      `Low-stock ALERT report (threshold-based) — NOT the demand-based reorder_report. ` +
-      `Products at or below their effective low-stock threshold, INCLUDING out-of-stock ` +
-      `items, sorted most-critical first. This flags what is LOW against a fixed ` +
-      `threshold; for demand-based suggested ORDER QUANTITIES use reorder_report instead. ` +
-      `Top-level systemDefaultThreshold is the shop default; each row's effectiveThreshold ` +
-      `+ thresholdSource is the value that actually applied. ${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `Low-stock ALERT report (threshold-based) — answers "what is currently below its ` +
+      `alert threshold?" — NOT the demand-based reorder_report. Products at or below ` +
+      `their effective low-stock threshold, INCLUDING out-of-stock items, sorted ` +
+      `most-critical first. This flags what is LOW against a fixed threshold; for ` +
+      `demand-based suggested ORDER QUANTITIES use reorder_report instead. Top-level ` +
+      `systemDefaultThreshold is the shop default; each row's effectiveThreshold + ` +
+      `thresholdSource is the value that actually applied. averageDailyUsage is null ` +
+      `(usageKnown false) when a product has no measured outbound — never a fabricated ` +
+      `0/day; velocityDefinition states the rate math. ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: lowStockSchema,
     run: async (input) => {
       const args = lowStockSchema.parse(input);
@@ -806,23 +966,33 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         };
       });
       const page = paginate(alerts, offset, limit, ROW_PAGE_BYTE_BUDGET);
-      return ok(
-        {
+      // Coverage envelope (spec §3 E1 / §7): how many alerts carry a KNOWN usage rate
+      // (the rest are usage-unknown — never a fabricated 0/day) + the shop default.
+      const usageKnownCount = report.alerts.filter((a) => a.usageKnown === true).length;
+      const data: Record<string, unknown> = {
+        systemDefaultThreshold,
+        alerts: page.rows,
+        returned: page.returned,
+        totalRows: page.totalRows,
+        nextOffset: page.nextOffset,
+        coverage: {
+          totalAlerts: page.totalRows,
+          usageKnown: usageKnownCount,
+          usageUnknown: page.totalRows - usageKnownCount,
           systemDefaultThreshold,
-          alerts: page.rows,
-          returned: page.returned,
-          totalRows: page.totalRows,
-          nextOffset: page.nextOffset,
         },
-        { scope: "global" },
-      );
+      };
+      // Relay the report-level usage definition (W0-1 produces it; spec §2 D3 / §7).
+      if (report.velocityDefinition) data.velocityDefinition = report.velocityDefinition;
+      return ok(data, { scope: "global" });
     },
   },
 
   reorder_report: {
     description:
-      `Reorder report: DEMAND-based suggested order quantities (distinct from ` +
-      `low_stock_report, which is threshold-based). Each 'suggested' row shows every ` +
+      `Reorder report — answers "what needs reordering?": DEMAND-based suggested order ` +
+      `quantities (distinct from low_stock_report, which is threshold-based). Each ` +
+      `'suggested' row shows every ` +
       `input so the number is auditable: avgDailyDemand, daysCovered, leadTimeDays + ` +
       `leadTimeSource, bufferDays, reorderPoint, targetLevel, grossReplenishmentNeed, ` +
       `minOrderQuantity, urgency (OUT/CRITICAL/REORDER_NOW/APPROACHING), and cost. ` +

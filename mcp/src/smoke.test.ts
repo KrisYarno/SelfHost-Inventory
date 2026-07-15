@@ -33,7 +33,14 @@ describe("mcp skeleton: shared tool runs via the @ alias", () => {
     );
     expect(result.status).toBe("ok");
     if (result.status === "ok") {
-      expect(result.data).toEqual({ products: [], returned: 0, totalRows: 0, nextOffset: null });
+      // find_product now carries a caller-honest coverage block (W0-2 / spec §7).
+      expect(result.data).toEqual({
+        products: [],
+        returned: 0,
+        totalRows: 0,
+        nextOffset: null,
+        coverage: { matched: 0, scope: "approved products; name/baseName/variant match" },
+      });
       expect(result.meta.scope).toBe("global");
     }
   });
