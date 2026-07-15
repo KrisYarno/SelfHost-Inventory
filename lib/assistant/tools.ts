@@ -51,16 +51,34 @@ import {
   getLowStockDefault,
   isLowStock,
 } from "@/lib/stock-threshold";
-import type { ToolContext } from "@/lib/assistant/context";
 
 // ---------------------------------------------------------------------------
-// Result contract (spec D4). Discriminated union so consumers branch on `status`.
+// Result contract (spec D4 / §3 E1). Discriminated union so consumers branch on
+// `status`. `scope` gains a third value "mixed" for composite tools whose sections
+// carry their own scope (spec §6); "mixed" is ONLY a result-meta value, never a
+// TOOL_SCOPES entry. `meta.dataStart` is OMITTED when inapplicable (never null).
 // ---------------------------------------------------------------------------
+
+export type ToolScope = "company" | "global" | "mixed";
 
 export type ToolResult =
-  | { status: "ok"; data: unknown; meta: { dataStart?: string | null; scope: "company" | "global"; bytes: number } }
-  | { status: "truncated"; notice: string; meta: { scope: "company" | "global"; bytes: number } }
-  | { status: "error"; code: "TOOL_ERROR"; meta: { scope: "company" | "global" } };
+  | { status: "ok"; data: unknown; meta: { dataStart?: string; scope: ToolScope; bytes: number } }
+  | { status: "truncated"; notice: string; meta: { scope: ToolScope; bytes: number } }
+  | { status: "error"; code: "TOOL_ERROR"; meta: { scope: ToolScope } }
+  | { status: "error"; error: { code: "NOT_FOUND"; message: string } };
+
+/**
+ * The run-time tool context (spec §3 E1 / plan-gate #6/#11) — the SHRUNK context a
+ * tool's `run` receives: the caller's company scope plus the byte budget remaining for
+ * THIS call. The fuller resolved identity (userId/surface/tokenId) lives in
+ * lib/assistant/context.ts and stays in the adapter for telemetry — a tool never sees
+ * it. The adapter builds this per call: `remainingBytes = min(PER_TOOL_RESULT_CAP_BYTES,
+ * turn-budget remaining)`; the MCP path always passes the full per-tool cap.
+ */
+export interface ToolContext {
+  companyIds: string[];
+  remainingBytes: number;
+}
 
 export interface AssistantToolDef {
   description: string;
@@ -80,6 +98,26 @@ export const PER_TOOL_RESULT_CAP_BYTES = 65_536;
 /** Byte budget a paginated ROW ARRAY is fit into, leaving headroom under the per-tool
  *  cap for the wrapper fields (window, coverage, counts, notes). */
 const ROW_PAGE_BYTE_BUDGET = PER_TOOL_RESULT_CAP_BYTES - 8_192;
+
+/**
+ * The byte budget available for THIS tool result: never more than the per-tool cap,
+ * and never more than the turn budget the adapter threaded in (spec §5 T-TUNE — a
+ * late-turn read returns a SMALLER page instead of being discarded whole). Wave-0
+ * tools still page against ROW_PAGE_BYTE_BUDGET; the ctx-aware page-shrink wiring is
+ * W3-TUNE. Exported for the list tools + the W3-TUNE page-shrink test.
+ */
+export function byteBudget(ctx: ToolContext): number {
+  return Math.min(PER_TOOL_RESULT_CAP_BYTES, ctx.remainingBytes);
+}
+
+/**
+ * Build a run-time ToolContext for direct-call unit tests: `remainingBytes` defaults
+ * to the full per-tool cap (so a test never hits budget truncation), `companyIds`
+ * defaults to []. Override either as needed.
+ */
+export function testCtx(overrides?: Partial<ToolContext>): ToolContext {
+  return { companyIds: [], remainingBytes: PER_TOOL_RESULT_CAP_BYTES, ...overrides };
+}
 
 /** Per-tool scope, so the adapter can label an ERROR result (which never reaches
  *  run's return) and telemetry can record scope without re-deriving it. */
@@ -165,20 +203,48 @@ function byteLengthOf(data: unknown): number {
 /** Finalize an OK payload: serialize, byte-count, and downgrade to `truncated`
  *  only as a LAST-RESORT safety net (a single non-paginated payload somehow blows
  *  the per-tool cap). List tools paginate to fit, so this never fires for them. */
-function ok(data: unknown, scope: "company" | "global", dataStart: string | null): ToolResult {
+function ok(data: unknown, opts: { scope: ToolScope; dataStart?: string }): ToolResult {
   const bytes = byteLengthOf(data);
   if (bytes > PER_TOOL_RESULT_CAP_BYTES) {
     return {
       status: "truncated",
       notice:
         "This result was too large to return in full. Narrow the product or date range and ask again.",
-      meta: { scope, bytes },
+      meta: { scope: opts.scope, bytes },
     };
   }
-  return { status: "ok", data, meta: { dataStart, scope, bytes } };
+  // meta.dataStart is OMITTED when inapplicable (spec §3 E1) — never emitted as null.
+  const meta: { dataStart?: string; scope: ToolScope; bytes: number } = { scope: opts.scope, bytes };
+  if (opts.dataStart !== undefined) meta.dataStart = opts.dataStart;
+  return { status: "ok", data, meta };
 }
 
-interface Page<T> {
+/**
+ * The ONE not-found result shape (spec §4 W0-PROD). A productId-taking tool that
+ * resolves through resolveAssistantProduct returns this when the ID is absent /
+ * pending-review / soft-deleted — never a `currentStock: 0` for an unapproved ID.
+ */
+export function notFound(entity: "product", id: number): ToolResult {
+  return {
+    status: "error",
+    error: { code: "NOT_FOUND", message: `No approved ${entity} with id ${id}.` },
+  };
+}
+
+/**
+ * The shared coverage/freshness envelope validator (spec §7 COVERAGE GATE): a coverage
+ * or freshness block must be a NON-EMPTY object of named fields — `coverage: {}` FAILS.
+ * New tools validate their coverage block against this; the gate harness enforces the
+ * meta-rule across every registered tool.
+ */
+export const CoverageSchema = z
+  .object({})
+  .catchall(z.unknown())
+  .refine((o) => Object.keys(o as Record<string, unknown>).length > 0, {
+    message: "coverage/freshness must be a non-empty object of named fields",
+  });
+
+export interface Page<T> {
   rows: T[];
   returned: number;
   totalRows: number;
@@ -193,7 +259,7 @@ interface Page<T> {
  * ask again from nextOffset" rather than an empty truncation notice. `nextOffset`
  * covers BOTH limit- and byte-truncation.
  */
-function paginate<T>(all: T[], offset: number, limit: number, byteCap: number): Page<T> {
+export function paginate<T>(all: T[], offset: number, limit: number, byteBudget: number): Page<T> {
   const totalRows = all.length;
   const start = Math.min(Math.max(0, offset), totalRows);
   const window = all.slice(start, start + limit);
@@ -201,12 +267,55 @@ function paginate<T>(all: T[], offset: number, limit: number, byteCap: number): 
   let bytes = 2; // the enclosing "[]"
   for (const row of window) {
     const rowBytes = Buffer.byteLength(JSON.stringify(row ?? null), "utf8") + 1; // + comma
-    if (rows.length > 0 && bytes + rowBytes > byteCap) break;
+    if (rows.length > 0 && bytes + rowBytes > byteBudget) break;
     rows.push(row);
     bytes += rowBytes;
   }
   const consumedEnd = start + rows.length;
   return { rows, returned: rows.length, totalRows, nextOffset: consumedEnd < totalRows ? consumedEnd : null };
+}
+
+export interface DbPage<T> {
+  rows: T[];
+  returned: number;
+  totalRows: number;
+  nextOffset: number | null;
+}
+
+/**
+ * DB-side paging for list tools whose source is too large to materialize in memory
+ * (spec §5 W0-STOCK / T-RCPT — "never materialize the full event history to slice in
+ * memory"). `count()` gives the EXACT totalRows; `fetch(skip, take)` pulls one page;
+ * the fetched page is then byte-fit to `byteBudget` exactly like `paginate` (always
+ * >= 1 row when the fetched page is non-empty). `nextOffset` covers BOTH row-count and
+ * byte truncation. Use `paginate` instead only where the source is already small and
+ * bounded (e.g. the ~80-product catalog).
+ */
+export async function pageFromDb<T>(opts: {
+  count: () => Promise<number>;
+  fetch: (skip: number, take: number) => Promise<T[]>;
+  offset: number;
+  limit: number;
+  byteBudget: number;
+}): Promise<DbPage<T>> {
+  const totalRows = await opts.count();
+  const start = Math.min(Math.max(0, opts.offset), totalRows);
+  const fetched = await opts.fetch(start, opts.limit);
+  const rows: T[] = [];
+  let bytes = 2; // the enclosing "[]"
+  for (const row of fetched) {
+    const rowBytes = Buffer.byteLength(JSON.stringify(row ?? null), "utf8") + 1; // + comma
+    if (rows.length > 0 && bytes + rowBytes > opts.byteBudget) break;
+    rows.push(row);
+    bytes += rowBytes;
+  }
+  const consumedEnd = start + rows.length;
+  return {
+    rows,
+    returned: rows.length,
+    totalRows,
+    nextOffset: consumedEnd < totalRows ? consumedEnd : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -497,7 +606,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       if (total > allRows.length) {
         data.note = `${total} products match; only the top ${allRows.length} are searched — refine the query to narrow it.`;
       }
-      return ok(data, "global", null);
+      return ok(data, { scope: "global" });
     },
   },
 
@@ -542,8 +651,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             truncated: seriesPage.nextOffset != null,
           },
         },
-        "global",
-        null,
+        { scope: "global" },
       );
     },
   },
@@ -584,8 +692,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             window,
             note: "You have no company access, so there are no sales to report.",
           },
-          "company",
-          null,
+          { scope: "company" },
         );
       }
 
@@ -609,7 +716,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         nextOffset: page.nextOffset,
       };
       if (shaped.orderCountNote) data.orderCountNote = shaped.orderCountNote;
-      return ok(data, "company", null);
+      return ok(data, { scope: "company" });
     },
   },
 
@@ -637,8 +744,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           nextOffset: page.nextOffset,
           dataStarts,
         },
-        "global",
-        null,
+        { scope: "global" },
       );
     },
   },
@@ -651,7 +757,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
     run: async (input) => {
       const args = getShrinkageSchema.parse(input);
       const summary = await getShrinkageSummary({ days: args.days });
-      return ok(summary, "global", summary.dataStart);
+      return ok(summary, { scope: "global", dataStart: summary.dataStart ?? undefined });
     },
   },
 
@@ -663,7 +769,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
     run: async (input) => {
       getValuationSchema.parse(input);
       const summary = await getValuationSummary();
-      return ok(summary, "global", null);
+      return ok(summary, { scope: "global" });
     },
   },
 
@@ -708,8 +814,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           totalRows: page.totalRows,
           nextOffset: page.nextOffset,
         },
-        "global",
-        null,
+        { scope: "global" },
       );
     },
   },
@@ -746,8 +851,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           assumptions: report.assumptions,
           coverage: report.coverage,
         },
-        "global",
-        null,
+        { scope: "global" },
       );
     },
   },

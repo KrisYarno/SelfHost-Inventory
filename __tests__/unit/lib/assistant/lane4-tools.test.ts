@@ -40,8 +40,7 @@ jest.mock("@/lib/reports/low-stock", () => ({
 }));
 
 import prisma from "@/lib/prisma";
-import { assistantTools, TURN_RESULT_BUDGET_BYTES } from "@/lib/assistant/tools";
-import type { ToolContext } from "@/lib/assistant/context";
+import { assistantTools, TURN_RESULT_BUDGET_BYTES, testCtx } from "@/lib/assistant/tools";
 import { getProductsWithQuantities } from "@/lib/products";
 import {
   getSales,
@@ -57,8 +56,8 @@ const mockGetStockSeries = getStockSeries as jest.Mock;
 const mockGetOperations = getOperationsRows as jest.Mock;
 const mockGetLowStock = getLowStockReport as jest.Mock;
 
-const CTX: ToolContext = { userId: 7, isAdmin: false, companyIds: ["c1"], surface: "assistant" };
-const CTX_NO_COMPANY: ToolContext = { ...CTX, companyIds: [] };
+const CTX = testCtx({ companyIds: ["c1"] });
+const CTX_NO_COMPANY = testCtx({ companyIds: [] });
 
 function product(over: Record<string, unknown> = {}) {
   return {

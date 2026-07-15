@@ -27,6 +27,11 @@
 
 import prisma from "@/lib/prisma";
 import { inventory_logs_logType } from "@prisma/client";
+import {
+  isReorderDemandRow,
+  isPhysicalOutboundRow,
+  daysCovered as daysCoveredInWindow,
+} from "@/lib/reports/metrics-contract";
 
 const DAY_MS = 86_400_000;
 
@@ -48,17 +53,17 @@ export interface DemandRow {
 }
 
 /**
- * LOCKED reorder-demand predicate: `delta < 0 AND logType != TRANSFER AND
- * (reasonCode IS NULL OR reasonCode != 'CORRECTION')`. `reasonCode !== 'CORRECTION'`
- * is null-safe — a null reason satisfies it (a plain sale/loss carries no reason).
+ * LOCKED reorder-demand predicate — now defined VERBATIM in
+ * lib/reports/metrics-contract.ts (spec §2 D1) and re-exported here for existing
+ * importers. Semantics unchanged: `delta < 0 AND logType != TRANSFER AND (reasonCode
+ * IS NULL OR reasonCode != 'CORRECTION')`.
  */
-export function isReorderDemandRow(row: DemandRow): boolean {
-  return row.delta < 0 && row.logType !== "TRANSFER" && row.reasonCode !== "CORRECTION";
-}
+export { isReorderDemandRow };
 
-/** Units-out usage: outbound that is not an internal transfer. Corrections INCLUDED. */
+/** Units-out usage: outbound that is not an internal transfer. Corrections INCLUDED.
+ *  Delegates to the contract's shared physicalOutbound predicate (spec §2 D1). */
 export function isOutboundUsageRow(row: DemandRow): boolean {
-  return row.delta < 0 && row.logType !== "TRANSFER";
+  return isPhysicalOutboundRow(row);
 }
 
 interface ComputeOpts {
@@ -110,14 +115,14 @@ async function computeDemand(opts: ComputeOpts): Promise<Map<number, ProductDema
   }
 
   acc.forEach((a, productId) => {
-    // Span from the first qualifying outbound to now, in whole days, floored at 1 (no
-    // divide-by-zero for a same-day signal) and clamped to the window.
-    const spanDays = Math.ceil((now - a.firstMs) / DAY_MS);
-    const daysCovered = Math.min(windowDays, Math.max(1, spanDays));
+    // Span from the first qualifying outbound to now — the shared contract denominator
+    // (spec §2 D2): whole days, floored at 1 (no divide-by-zero for a same-day signal),
+    // clamped to the window.
+    const covered = daysCoveredInWindow(a.firstMs, now, windowDays);
     result.set(productId, {
-      avgDailyDemand: a.total / daysCovered,
+      avgDailyDemand: a.total / covered,
       outboundEvents: a.events,
-      daysCovered,
+      daysCovered: covered,
     });
   });
 

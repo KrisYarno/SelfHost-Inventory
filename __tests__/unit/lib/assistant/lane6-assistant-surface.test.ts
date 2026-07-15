@@ -34,12 +34,11 @@ jest.mock("@/lib/analytics/queries", () => ({
 jest.mock("@/lib/reports/low-stock", () => ({ __esModule: true, getLowStockReport: jest.fn() }));
 
 import prisma from "@/lib/prisma";
-import { assistantTools, PER_TOOL_RESULT_CAP_BYTES } from "@/lib/assistant/tools";
+import { assistantTools, PER_TOOL_RESULT_CAP_BYTES, testCtx } from "@/lib/assistant/tools";
 import { buildSystemPrompt } from "@/lib/assistant/prompt";
 import { getSales, getOperationsRows } from "@/lib/analytics/queries";
 import { getLowStockReport } from "@/lib/reports/low-stock";
 import { toDayKey, dayKeyStart } from "@/lib/analytics/dates";
-import type { ToolContext } from "@/lib/assistant/context";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 const mockGetSales = getSales as jest.Mock;
@@ -47,8 +46,8 @@ const mockGetOperations = getOperationsRows as jest.Mock;
 const mockGetLowStock = getLowStockReport as jest.Mock;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CTX: ToolContext = { userId: 7, isAdmin: false, companyIds: ["c1", "c2"], surface: "assistant" };
-const CTX_NO_COMPANY: ToolContext = { ...CTX, companyIds: [] };
+const CTX = testCtx({ companyIds: ["c1", "c2"] });
+const CTX_NO_COMPANY = testCtx({ companyIds: [] });
 const D = (v: string) => new Prisma.Decimal(v);
 const spanDays = (from: string, to: string) =>
   Math.round((dayKeyStart(to).getTime() - dayKeyStart(from).getTime()) / DAY_MS);

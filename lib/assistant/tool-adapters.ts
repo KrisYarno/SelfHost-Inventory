@@ -16,7 +16,10 @@ import {
   PER_TOOL_RESULT_CAP_BYTES,
   type ToolResult,
 } from "@/lib/assistant/tools";
-import type { ToolContext } from "@/lib/assistant/context";
+// The FULL resolved identity (userId/surface/tokenId + companyIds) stays here for
+// telemetry; the tools see only the shrunk run-ctx (companyIds + remainingBytes) that
+// this adapter builds per call.
+import type { ToolContext as ResolvedContext } from "@/lib/assistant/context";
 import type { RecordRun } from "@/lib/assistant/telemetry";
 
 const TURN_BUDGET_NOTICE =
@@ -33,7 +36,7 @@ function errorResult(name: string): ToolResult {
  * downgraded to a truncation notice.
  */
 export function createAiTools(
-  ctx: ToolContext,
+  ctx: ResolvedContext,
   budget: { remaining: number },
   onRun: RecordRun,
 ): ToolSet {
@@ -46,7 +49,13 @@ export function createAiTools(
         const started = Date.now();
         let result: ToolResult;
         try {
-          result = await def.run(args, ctx);
+          // Thread the turn's remaining budget into the run-ctx (spec §5 T-TUNE): a
+          // list tool byte-fits its page to min(cap, remaining) so a late-turn read
+          // returns a smaller page instead of being discarded whole.
+          result = await def.run(args, {
+            companyIds: ctx.companyIds,
+            remainingBytes: Math.min(PER_TOOL_RESULT_CAP_BYTES, budget.remaining),
+          });
         } catch {
           result = errorResult(name);
         }
@@ -78,7 +87,7 @@ export function createAiTools(
  */
 export function registerMcpTools(
   server: McpServer,
-  makeCtx: () => Promise<ToolContext>,
+  makeCtx: () => Promise<ResolvedContext>,
   onRun: RecordRun,
 ): void {
   for (const [name, def] of Object.entries(assistantTools)) {
@@ -91,7 +100,12 @@ export function registerMcpTools(
         const started = Date.now();
         let result: ToolResult;
         try {
-          result = await def.run(args, ctx);
+          // No cumulative budget on the sidecar (deliberate) — always the full
+          // per-tool cap.
+          result = await def.run(args, {
+            companyIds: ctx.companyIds,
+            remainingBytes: PER_TOOL_RESULT_CAP_BYTES,
+          });
         } catch {
           result = errorResult(name);
         }
@@ -113,7 +127,7 @@ export function registerMcpTools(
 
 function recordRun(
   onRun: RecordRun,
-  ctx: ToolContext,
+  ctx: ResolvedContext,
   toolName: string,
   result: ToolResult,
   durationMs: number,

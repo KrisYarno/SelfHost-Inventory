@@ -23,13 +23,12 @@ jest.mock("@/lib/prisma", () => ({ __esModule: true, default: {} }));
 jest.mock("@/lib/products", () => ({ __esModule: true, getProductsWithQuantities: jest.fn() }));
 jest.mock("@/lib/reports/low-stock", () => ({ __esModule: true, getLowStockReport: jest.fn() }));
 
-import { assistantTools, TOOL_SCOPES } from "@/lib/assistant/tools";
+import { assistantTools, TOOL_SCOPES, testCtx } from "@/lib/assistant/tools";
 import { TOOL_PRESENTATION } from "@/lib/assistant/tool-presentation";
 import { getReorderReport } from "@/lib/reports/reorder";
-import type { ToolContext } from "@/lib/assistant/context";
 
 const mockReport = getReorderReport as jest.Mock;
-const CTX: ToolContext = { userId: 7, isAdmin: false, companyIds: [], surface: "assistant" };
+const CTX = testCtx();
 
 const REPORT = {
   rows: [
