@@ -574,59 +574,11 @@ export async function getShrinkageSummary(
   };
 }
 
-export interface ValuationSummary {
-  atCurrentCostCents: number | null;
-  costCoverage: { valued: number; of: number };
-  atReceiptCostCents: number | null;
-  receiptCoverage: { have: number; of: number };
-}
-
-/**
- * Inventory valuation tier 1 (spec D6 / Lane 6 review B2 / D-T2).
- * (a) value at CURRENT cost = SUM(current stock x costPrice) over products with a
- *     KNOWN cost. `costCoverage` reports how many of the products carry a cost;
- *     when NONE do (prod today: 0 of 80) `atCurrentCostCents` is `null` — the
- *     honest "no cost data on file", never "$0.00" for a stocked warehouse.
- * (b) value at last-receipt cost = SUM over in-stock products that HAVE receipt-cost
- *     data (products without it are EXCLUDED, surfaced via `receiptCoverage` — never
- *     blended silently). Receipt coverage is counted over IN-STOCK products only;
- *     `getValuationSummary`'s coverage blocks are the reference for the D-T1 contract.
- */
-export async function getValuationSummary(): Promise<ValuationSummary> {
-  const [products, receiptMap] = await Promise.all([
-    prisma.product.findMany({
-      where: { deletedAt: null, approvalStatus: "APPROVED" },
-      select: { id: true, costPrice: true, product_locations: { select: { quantity: true } } },
-    }),
-    latestReceiptCostByProduct(),
-  ]);
-
-  let atCurrentCostCents = 0;
-  let valued = 0; // products carrying a known cost
-  let atReceiptCostCents = 0;
-  let have = 0;
-  let receiptOf = 0;
-  for (const p of products) {
-    const currentStock = p.product_locations.reduce((a, l) => a + l.quantity, 0);
-    const costCents = centsFromCostPrice(p.costPrice);
-    if (costCents !== null) {
-      valued += 1;
-      atCurrentCostCents += currentStock * costCents;
-    }
-    if (currentStock > 0) {
-      receiptOf += 1;
-      const receiptCents = receiptMap.get(p.id);
-      if (receiptCents != null) {
-        have += 1;
-        atReceiptCostCents += currentStock * receiptCents;
-      }
-    }
-  }
-
-  return {
-    atCurrentCostCents: valued > 0 ? atCurrentCostCents : null,
-    costCoverage: { valued, of: products.length },
-    atReceiptCostCents: have > 0 ? atReceiptCostCents : null,
-    receiptCoverage: { have, of: receiptOf },
-  };
-}
+// W1-INT fence exception (plan §"Fence exceptions" #1): `getValuationSummary` and
+// its `ValuationSummary` interface MOVED to lib/analytics/valuation.ts (W1-VAL). This
+// is a REPLACE, not an add — the local definitions are DELETED here and re-exported so
+// every existing import site (get_valuation tool, lane3-operations-queries.test.ts)
+// keeps resolving `@/lib/analytics/queries` unchanged. The private
+// `latestReceiptCostByProduct` helper STAYS (getOperationsRows/getShrinkageSummary
+// still call it); valuation.ts carries its own verbatim copy.
+export { getValuationSummary, type ValuationSummary } from "@/lib/analytics/valuation";

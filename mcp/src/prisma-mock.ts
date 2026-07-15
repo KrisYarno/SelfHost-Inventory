@@ -38,12 +38,43 @@ const prismaMock: any = {
   product: {
     count: async () => 0,
     findMany: async () => [],
+    findUnique: async () => null,
+    findFirst: async () => null,
   },
   product_locations: {
     findMany: async () => [],
   },
   systemSetting: {
     findUnique: async () => null,
+  },
+  // Wave-1 breadth tools' read graphs (get_valuation / get_movement_series /
+  // get_inventory_summary / get_inventory_policy / get_data_freshness) — benign shapes
+  // so the mock build can serve them end-to-end without a database.
+  inventory_logs: {
+    findMany: async () => [],
+    groupBy: async () => [],
+    aggregate: async () => ({ _min: {}, _max: {}, _sum: {}, _count: {} }),
+  },
+  analyticsRebuildState: {
+    findUnique: async () => null,
+  },
+  fulfillmentSyncState: {
+    findMany: async () => [],
+  },
+  productStockSnapshot: {
+    aggregate: async () => ({ _min: {} }),
+    groupBy: async () => [],
+    findMany: async () => [],
+  },
+  externalOrder: {
+    findFirst: async () => null,
+    count: async () => 0,
+  },
+  globalReorderSettings: {
+    findUnique: async () => null,
+  },
+  location: {
+    findMany: async () => [],
   },
   $queryRaw: async () => [{ ok: 1 }],
 };

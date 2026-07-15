@@ -23,9 +23,32 @@ jest.mock("@/lib/prisma", () => ({
     },
     userCompany: { findMany: jest.fn(async () => []) },
     assistantRun: { create: jest.fn(async () => ({ id: 1 })) },
-    product: { count: jest.fn(async () => 0), findMany: jest.fn(async () => []) },
+    product: {
+      count: jest.fn(async () => 0),
+      findMany: jest.fn(async () => []),
+      findUnique: jest.fn(async () => null),
+      findFirst: jest.fn(async () => null),
+    },
     product_locations: { findMany: jest.fn(async () => []) },
     systemSetting: { findUnique: jest.fn(async () => null) },
+    // Wave-1 breadth tools' read graphs (benign shapes so each def.run completes over
+    // the mock): get_valuation / get_movement_series / get_inventory_summary /
+    // get_inventory_policy / get_data_freshness.
+    inventory_logs: {
+      findMany: jest.fn(async () => []),
+      groupBy: jest.fn(async () => []),
+      aggregate: jest.fn(async () => ({ _min: {}, _max: {}, _sum: {}, _count: {} })),
+    },
+    analyticsRebuildState: { findUnique: jest.fn(async () => null) },
+    fulfillmentSyncState: { findMany: jest.fn(async () => []) },
+    productStockSnapshot: {
+      aggregate: jest.fn(async () => ({ _min: {} })),
+      groupBy: jest.fn(async () => []),
+      findMany: jest.fn(async () => []),
+    },
+    externalOrder: { findFirst: jest.fn(async () => null), count: jest.fn(async () => 0) },
+    globalReorderSettings: { findUnique: jest.fn(async () => null) },
+    location: { findMany: jest.fn(async () => []) },
     $queryRaw: jest.fn(async () => [{ ok: 1 }]),
   },
 }));
@@ -228,6 +251,40 @@ describe("POST /mcp — tool round-trip", () => {
       expect(get.status).toBe(405);
       const missing = await fetch(`http://127.0.0.1:${port}/nope`);
       expect(missing.status).toBe(404);
+    } finally {
+      await close(server);
+    }
+  });
+});
+
+describe("POST /mcp — Wave-1 tool round-trips (parity per new tool, spec §7)", () => {
+  // Each new tool executes end-to-end over MCP Streamable HTTP against the benign mock
+  // and returns an ok ToolResult carrying a coverage/freshness block on the wire.
+  const CASES: Array<[string, Record<string, unknown>]> = [
+    ["get_valuation", {}],
+    ["get_movement_series", {}],
+    ["get_inventory_summary", {}],
+    ["get_inventory_policy", {}],
+    ["get_data_freshness", {}],
+  ];
+
+  it.each(CASES)("executes %s and returns an ok ToolResult with a coverage block", async (name, args) => {
+    const server = createMcpHttpServer();
+    const port = await listen(server);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: MCP_HEADERS,
+        body: toolCall(1, name, args),
+      });
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rpc = (await res.json()) as any;
+      expect(rpc.result).toBeDefined();
+      const toolResult = JSON.parse(rpc.result.content[0].text as string);
+      expect(toolResult.status).toBe("ok");
+      // a coverage/freshness block reached the wire (spec §7 coverage gate parity)
+      expect(JSON.stringify(toolResult.data)).toMatch(/coverage|freshness/);
     } finally {
       await close(server);
     }

@@ -25,7 +25,9 @@ jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {
     analyticsRebuildState: { findUnique: jest.fn() },
-    fulfillmentSyncState: { findFirst: jest.fn() },
+    // IN-WAVE FIX (W1-INT): fulfillmentSync now aggregates across ALL rows (two Woo
+    // stores in prod) — the query is findMany, not findFirst.
+    fulfillmentSyncState: { findMany: jest.fn() },
     inventory_logs: { aggregate: jest.fn() },
     productStockSnapshot: { aggregate: jest.fn() },
     externalOrder: { findFirst: jest.fn() },
@@ -47,7 +49,7 @@ import {
 } from "@/lib/assistant/freshness";
 
 const mockRebuildFindUnique = prisma.analyticsRebuildState.findUnique as jest.Mock;
-const mockSyncFindFirst = prisma.fulfillmentSyncState.findFirst as jest.Mock;
+const mockSyncFindMany = prisma.fulfillmentSyncState.findMany as jest.Mock;
 const mockLedgerAggregate = prisma.inventory_logs.aggregate as jest.Mock;
 const mockSnapshotAggregate = prisma.productStockSnapshot.aggregate as jest.Mock;
 const mockOrderFindFirst = prisma.externalOrder.findFirst as jest.Mock;
@@ -103,12 +105,14 @@ describe("getFreshness", () => {
       sales: { lastRunAt: REBUILD_LAST_RUN, sourceWatermark: REBUILD_WATERMARK },
       snapshots: { flaggedPairs: 3 },
     });
-    mockSyncFindFirst.mockResolvedValue({
-      cursorModifiedAt: SYNC_CURSOR,
-      backfillComplete: true,
-      backfillPage: null,
-      backfillBefore: null,
-    });
+    mockSyncFindMany.mockResolvedValue([
+      {
+        cursorModifiedAt: SYNC_CURSOR,
+        backfillComplete: true,
+        backfillPage: null,
+        backfillBefore: null,
+      },
+    ]);
     wireLedgerAggregate();
     mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: "2026-01-02" } });
     mockCoverage.mockResolvedValue({
@@ -137,8 +141,9 @@ describe("getFreshness", () => {
       fulfillmentSync: {
         enabled: null,
         reason: FULFILLMENT_SYNC_NOT_OBSERVABLE_REASON,
-        cursor: SYNC_CURSOR.toISOString(),
-        backfill: "complete",
+        // IN-WAVE FIX: cursor/backfill carry the "(oldest of N integrations)" disclosure.
+        cursor: `${SYNC_CURSOR.toISOString()} (oldest of 1 integration)`,
+        backfill: "complete (oldest of 1 integration)",
       },
       dataStarts: {
         ledgerOutboundStart: OUTBOUND_START.toISOString(),
@@ -156,7 +161,7 @@ describe("getFreshness", () => {
 
   it("consumes callerScopedSalesCoverage for unattributedOrders and NEVER derives it from a raw rebuild-state field", async () => {
     wireRebuildState({ sales: null, snapshots: null });
-    mockSyncFindFirst.mockResolvedValue(null);
+    mockSyncFindMany.mockResolvedValue([]);
     wireEmptyLedgerAggregate();
     mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
     mockOrderFindFirst.mockResolvedValue(null);
@@ -175,7 +180,7 @@ describe("getFreshness", () => {
 
   it("scopes dataStarts.ordersFirstSeen to the caller's companyIds", async () => {
     wireRebuildState({ sales: null, snapshots: null });
-    mockSyncFindFirst.mockResolvedValue(null);
+    mockSyncFindMany.mockResolvedValue([]);
     wireEmptyLedgerAggregate();
     mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
     mockCoverage.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "x", lastRebuildAt: null });
@@ -191,7 +196,7 @@ describe("getFreshness", () => {
 
   it("short-circuits order-derived fields for empty companyIds WITHOUT querying ExternalOrder", async () => {
     wireRebuildState({ sales: null, snapshots: null });
-    mockSyncFindFirst.mockResolvedValue(null);
+    mockSyncFindMany.mockResolvedValue([]);
     wireEmptyLedgerAggregate();
     mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
     mockCoverage.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "x", lastRebuildAt: null });
@@ -208,7 +213,7 @@ describe("getFreshness", () => {
 
   it("returns nulls (not a throw) when no rebuild/sync/ledger/snapshot/order rows exist anywhere", async () => {
     wireRebuildState({ sales: null, snapshots: null });
-    mockSyncFindFirst.mockResolvedValue(null);
+    mockSyncFindMany.mockResolvedValue([]);
     wireEmptyLedgerAggregate();
     mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
     mockOrderFindFirst.mockResolvedValue(null);
@@ -237,12 +242,14 @@ describe("getFreshness", () => {
     it("is null with the fixed reason even for a FRESH sync-state row", async () => {
       wireRebuildState({ sales: null, snapshots: null });
       const now = new Date();
-      mockSyncFindFirst.mockResolvedValue({
-        cursorModifiedAt: now,
-        backfillComplete: false,
-        backfillPage: 12,
-        backfillBefore: now,
-      });
+      mockSyncFindMany.mockResolvedValue([
+        {
+          cursorModifiedAt: now,
+          backfillComplete: false,
+          backfillPage: 12,
+          backfillBefore: now,
+        },
+      ]);
       wireEmptyLedgerAggregate();
       mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
       mockOrderFindFirst.mockResolvedValue(null);
@@ -253,12 +260,12 @@ describe("getFreshness", () => {
       expect(report.fulfillmentSync.enabled).toBeNull();
       expect(report.fulfillmentSync.reason).toBe(FULFILLMENT_SYNC_NOT_OBSERVABLE_REASON);
       // Recency of the row must not leak into "enabled" — only cursor/backfill relay it.
-      expect(report.fulfillmentSync.cursor).toBe(now.toISOString());
+      expect(report.fulfillmentSync.cursor).toBe(`${now.toISOString()} (oldest of 1 integration)`);
     });
 
     it("is null with the same reason for a stale/absent sync-state row", async () => {
       wireRebuildState({ sales: null, snapshots: null });
-      mockSyncFindFirst.mockResolvedValue(null);
+      mockSyncFindMany.mockResolvedValue([]);
       wireEmptyLedgerAggregate();
       mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
       mockOrderFindFirst.mockResolvedValue(null);
@@ -276,42 +283,72 @@ describe("getFreshness", () => {
 
     it("reads 'not started' when the row exists but backfill never began", async () => {
       wireRebuildState({ sales: null, snapshots: null });
-      mockSyncFindFirst.mockResolvedValue({
-        ...base,
-        backfillComplete: false,
-        backfillPage: null,
-        backfillBefore: null,
-      });
+      mockSyncFindMany.mockResolvedValue([
+        {
+          ...base,
+          backfillComplete: false,
+          backfillPage: null,
+          backfillBefore: null,
+        },
+      ]);
       wireEmptyLedgerAggregate();
       mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
       mockOrderFindFirst.mockResolvedValue(null);
       mockCoverage.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "x", lastRebuildAt: null });
 
       const report = await getFreshness(["company-1"]);
-      expect(report.fulfillmentSync.backfill).toBe("not started");
+      expect(report.fulfillmentSync.backfill).toBe("not started (oldest of 1 integration)");
     });
 
     it("reads an in-progress page/before summary", async () => {
       wireRebuildState({ sales: null, snapshots: null });
       const before = new Date("2026-06-01T00:00:00.000Z");
-      mockSyncFindFirst.mockResolvedValue({
-        ...base,
-        backfillComplete: false,
-        backfillPage: 5,
-        backfillBefore: before,
-      });
+      mockSyncFindMany.mockResolvedValue([
+        {
+          ...base,
+          backfillComplete: false,
+          backfillPage: 5,
+          backfillBefore: before,
+        },
+      ]);
       wireEmptyLedgerAggregate();
       mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
       mockOrderFindFirst.mockResolvedValue(null);
       mockCoverage.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "x", lastRebuildAt: null });
 
       const report = await getFreshness(["company-1"]);
-      expect(report.fulfillmentSync.backfill).toBe(`in progress — page 5, before ${before.toISOString()}`);
+      expect(report.fulfillmentSync.backfill).toBe(
+        `in progress — page 5, before ${before.toISOString()} (oldest of 1 integration)`,
+      );
+    });
+
+    it("aggregates TWO integrations: oldest cursor + least-progressed backfill + count disclosed", async () => {
+      wireRebuildState({ sales: null, snapshots: null });
+      const older = new Date("2026-06-01T00:00:00.000Z");
+      const newer = new Date("2026-07-10T00:00:00.000Z");
+      // Store A is fully backfilled and fresh; store B lags (older cursor, still
+      // in progress). The aggregate must report B's older cursor and B's backfill
+      // floor — never A's rosier numbers.
+      mockSyncFindMany.mockResolvedValue([
+        { cursorModifiedAt: newer, backfillComplete: true, backfillPage: null, backfillBefore: null },
+        { cursorModifiedAt: older, backfillComplete: false, backfillPage: 3, backfillBefore: older },
+      ]);
+      wireEmptyLedgerAggregate();
+      mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
+      mockOrderFindFirst.mockResolvedValue(null);
+      mockCoverage.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "x", lastRebuildAt: null });
+
+      const report = await getFreshness(["company-1"]);
+      expect(report.fulfillmentSync.cursor).toBe(`${older.toISOString()} (oldest of 2 integrations)`);
+      expect(report.fulfillmentSync.backfill).toBe(
+        `in progress — page 3, before ${older.toISOString()} (oldest of 2 integrations)`,
+      );
+      expect(report.fulfillmentSync.enabled).toBeNull();
     });
 
     it("is null (not 'not started') when there is no sync-state row at all", async () => {
       wireRebuildState({ sales: null, snapshots: null });
-      mockSyncFindFirst.mockResolvedValue(null);
+      mockSyncFindMany.mockResolvedValue([]);
       wireEmptyLedgerAggregate();
       mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
       mockOrderFindFirst.mockResolvedValue(null);
@@ -325,7 +362,7 @@ describe("getFreshness", () => {
 
   it("pins the notTracked list content verbatim", async () => {
     wireRebuildState({ sales: null, snapshots: null });
-    mockSyncFindFirst.mockResolvedValue(null);
+    mockSyncFindMany.mockResolvedValue([]);
     wireEmptyLedgerAggregate();
     mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
     mockOrderFindFirst.mockResolvedValue(null);
@@ -348,7 +385,7 @@ describe("getFreshness", () => {
       sales: { lastRunAt: REBUILD_LAST_RUN, sourceWatermark: null },
       snapshots: { flaggedPairs: 11 },
     });
-    mockSyncFindFirst.mockResolvedValue(null);
+    mockSyncFindMany.mockResolvedValue([]);
     wireEmptyLedgerAggregate();
     mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
     mockOrderFindFirst.mockResolvedValue(null);

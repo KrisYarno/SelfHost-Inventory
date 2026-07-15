@@ -38,7 +38,6 @@ import {
   getStockSeries,
   getOperationsRows,
   getShrinkageSummary,
-  getValuationSummary,
   type OperationsRow,
   type SalesGroupBy,
 } from "@/lib/analytics/queries";
@@ -54,6 +53,13 @@ import {
 import { resolveWindow } from "@/lib/assistant/window";
 import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
 import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
+// Wave-1 breadth modules (W1-VAL/MOVE/SUM/POL/FRESH) — each is a self-contained,
+// Next-free data layer; this file is the ONLY place they are wired into a tool.
+import { getValuation } from "@/lib/analytics/valuation";
+import { getMovementSeries } from "@/lib/reports/movement";
+import { getInventorySummary } from "@/lib/reports/inventory-summary";
+import { getPolicy } from "@/lib/reports/policy";
+import { getFreshness } from "@/lib/assistant/freshness";
 
 // ---------------------------------------------------------------------------
 // Result contract (spec D4 / §3 E1). Discriminated union so consumers branch on
@@ -133,6 +139,11 @@ export const TOOL_SCOPES: Record<string, "company" | "global"> = {
   get_valuation: "global",
   low_stock_report: "global",
   reorder_report: "global",
+  // Wave 1 breadth tools (spec §6) — all read the GLOBAL physical/config pool.
+  get_movement_series: "global",
+  get_inventory_summary: "global",
+  get_inventory_policy: "global",
+  get_data_freshness: "global",
 };
 
 // ---------------------------------------------------------------------------
@@ -147,6 +158,10 @@ const LOW_STOCK_MAX = 50;
 const REORDER_MAX = 50;
 const SALES_ROWS_MAX = 500;
 const DEFAULT_RELATIVE_DAYS = 30;
+// Valuation product/location rows (catalog ~80 products, few locations) and the
+// inventory-summary ranked page — both paginated at the tool boundary.
+const VALUATION_MAX = 100;
+const SUMMARY_RANK_MAX = 50;
 // DB-level `take` for the snapshot series rows. Reconciled with the budget (D-T7): a
 // point serializes to ~52 bytes, so 1000 points ≈ 51 KiB < ROW_PAGE_BYTE_BUDGET
 // (~56 KiB) < the per-tool cap (64 KiB) < the turn budget (128 KiB). The series is
@@ -573,6 +588,8 @@ const getSalesSchema = z.object({
 });
 
 const getOperationsSchema = z.object({
+  // W1-OPS (spec §5 T-OPS / R2-M8): a single-product operations row, unranked.
+  productId: positiveInt.optional(),
   windowDays: z.union([z.literal(30), z.literal(90)]).optional(),
   limit: z.number().int().positive().max(OPERATIONS_MAX).optional(),
   offset: nonNegInt.optional(),
@@ -582,7 +599,42 @@ const getShrinkageSchema = z.object({
   days: z.union([z.literal(30), z.literal(90), z.literal(365)]),
 });
 
-const getValuationSchema = z.object({});
+// get_valuation v2 (spec §5 T-VAL): optional single-product scope + groupBy grain;
+// product/location grains paginate at the tool layer (the module returns full arrays).
+const getValuationSchema = z.object({
+  productId: positiveInt.optional(),
+  groupBy: z.enum(["total", "product", "location"]).optional(),
+  limit: z.number().int().positive().max(VALUATION_MAX).optional(),
+  offset: nonNegInt.optional(),
+});
+
+// get_movement_series (spec §5 T-MOVE): windowed ledger partition; groupBy maps to the
+// module's day|week|month grain.
+const getMovementSeriesSchema = z.object({
+  productId: positiveInt.optional(),
+  locationId: positiveInt.optional(),
+  from: isoDay.optional(),
+  to: isoDay.optional(),
+  relativeDays: z.number().int().min(1).max(MAX_WINDOW_DAYS).optional(),
+  groupBy: z.enum(["day", "week", "month"]).optional(),
+});
+
+// get_inventory_summary (spec §5 T-SUM): catalog totals + optional ranked page.
+const getInventorySummarySchema = z.object({
+  rankBy: z.enum(["onHand", "value", "outbound30", "daysOfSupply"]).optional(),
+  locationId: positiveInt.optional(),
+  limit: z.number().int().positive().max(SUMMARY_RANK_MAX).optional(),
+  offset: nonNegInt.optional(),
+});
+
+// get_inventory_policy (spec §5 T-POL): global defaults, plus per-product overrides
+// when productId is given.
+const getInventoryPolicySchema = z.object({
+  productId: positiveInt.optional(),
+});
+
+// get_data_freshness (spec §5 T-FRESH): no args — companies come from the run ctx.
+const getDataFreshnessSchema = z.object({});
 
 const lowStockSchema = z.object({
   limit: z.number().int().positive().max(LOW_STOCK_MAX).optional(),
@@ -918,7 +970,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
     description:
       `Per-product operations metrics (velocity, days-of-supply, turns, shrinkage, ` +
       `attention state) over a 30- or 90-day window, ranked by attention — the go-to ` +
-      `for "overall product health". Global physical pool. freshness.ledgerSaleStart ` +
+      `for "overall product health". Pass productId for ONE product's row unranked. ` +
+      `Global physical pool. freshness.ledgerSaleStart ` +
       `is the first in-platform SALE ledger row — NOT the start of order/sales history ` +
       `(see get_sales). velocityDefinition states how avgDailyOutbound30 is computed. ` +
       `${PAGING_POSTURE} ${DATA_POSTURE}`,
@@ -928,10 +981,18 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       const windowDays = args.windowDays ?? 90;
       const limit = args.limit ?? OPERATIONS_MAX;
       const offset = args.offset ?? 0;
+      // W1-OPS: a provided productId resolves through the shared approved-product
+      // resolver (pending-review / soft-deleted / absent -> notFound) and returns that
+      // ONE product's row unranked, rather than the attention-ranked whole catalog.
+      if (args.productId != null) {
+        const product = await resolveAssistantProduct(args.productId);
+        if (!product) return notFound("product", args.productId);
+      }
       const { rows, dataStarts, velocityDefinition } = await getOperationsRows({ windowDays });
-      const ranked = [...rows].sort(
-        (a, b) => ATTENTION_RANK[b.attention] - ATTENTION_RANK[a.attention],
-      );
+      const ranked =
+        args.productId != null
+          ? rows.filter((r) => r.productId === args.productId)
+          : [...rows].sort((a, b) => ATTENTION_RANK[b.attention] - ATTENTION_RANK[a.attention]);
       const page = paginate(ranked, offset, limit, ROW_PAGE_BYTE_BUDGET);
       const data: Record<string, unknown> = {
         rows: page.rows,
@@ -972,13 +1033,181 @@ export const assistantTools: Record<string, AssistantToolDef> = {
 
   get_valuation: {
     description:
-      `Inventory valuation at current cost and at last-receipt cost, with the ` +
-      `receipt-cost coverage relayed. ${DATA_POSTURE}`,
+      `Inventory valuation: units valued at CURRENT cost, LAST-RECEIPT cost, RETAIL ` +
+      `price, and MARGIN (retail − cost, only where BOTH are known). groupBy ` +
+      `total (default) | product | location; product/location grains are paginated. ` +
+      `Each money field is a KNOWN-subtotal — null (never $0.00) when nothing in scope ` +
+      `carries that price; retail 0 means genuinely free, retail null means price ` +
+      `unknown. 'coverage' counts BOTH products AND on-hand units per dimension, so ` +
+      `you can see exactly which units lack costs (costedUnits of ofUnits) instead of a ` +
+      `misleading product percentage. Receipt cost is product-level only — location ` +
+      `rows carry atReceiptCostCents null with a reason. Answers "what is my inventory ` +
+      `worth?" / "cost vs retail value". ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getValuationSchema,
     run: async (input) => {
-      getValuationSchema.parse(input);
-      const summary = await getValuationSummary();
-      return ok(summary, { scope: "global" });
+      const args = getValuationSchema.parse(input);
+      // W0-PROD: a provided productId resolves through the shared approved-product
+      // resolver — pending-review / soft-deleted / absent -> notFound.
+      if (args.productId != null) {
+        const product = await resolveAssistantProduct(args.productId);
+        if (!product) return notFound("product", args.productId);
+      }
+      const groupBy = args.groupBy ?? "total";
+      const result = await getValuation({ productId: args.productId, groupBy });
+      // coverage travels verbatim (its unit+product counts ARE the completeness
+      // disclosure) and satisfies the §7 COVERAGE GATE's CoverageSchema.
+      if (groupBy === "total") {
+        return ok(
+          { groupBy: result.groupBy, rows: result.rows, coverage: result.coverage },
+          { scope: "global" },
+        );
+      }
+      // Paginate the product/location row array at the tool boundary (the module
+      // returns the full arrays; the ~80-product catalog stays cheap).
+      const limit = args.limit ?? VALUATION_MAX;
+      const offset = args.offset ?? 0;
+      const page = paginate(result.rows, offset, limit, ROW_PAGE_BYTE_BUDGET);
+      return ok(
+        {
+          groupBy: result.groupBy,
+          rows: page.rows,
+          returned: page.returned,
+          totalRows: page.totalRows,
+          nextOffset: page.nextOffset,
+          coverage: result.coverage,
+        },
+        { scope: "global" },
+      );
+    },
+  },
+
+  get_movement_series: {
+    description:
+      `Movement series: an EXHAUSTIVE, mutually-exclusive partition of the inventory ` +
+      `ledger over a date window, bucketed by grain (groupBy day|week|month). Every ` +
+      `ledger row lands in exactly ONE bucket — inbound (stockIn/correctionIn/` +
+      `adjustmentIn/countIn), outbound (sale/classifiedLoss/adjustmentUnclassified/` +
+      `correctionUnclassified/countOut), and transfers (transferIn/transferOut, kept ` +
+      `SEPARATE because a TRANSFER is an INTERNAL relocation between locations, never a ` +
+      `real gain or loss). net === SUM of every bucket. A period ABSENT from 'points' ` +
+      `had ZERO movement (points are sparse — only active periods appear). coverage ` +
+      `relays the legacy note (pre-Lane-4 negative ADJUSTMENT is how this shop shipped ` +
+      `— unclassified outbound, NOT sales) and the reasonCode-null count. The honest ` +
+      `home for "outbound as demand" while SALE history is thin. Omitting dates uses ` +
+      `relativeDays (default 30). ${DATA_POSTURE}`,
+    inputSchema: getMovementSeriesSchema,
+    run: async (input) => {
+      const args = getMovementSeriesSchema.parse(input);
+      // Shared window resolver (W0-WIN): from/to/relativeDays -> N day-keys; throws on
+      // the from+relativeDays contradiction; echoes its source.
+      const window = resolveWindow(
+        { from: args.from, to: args.to, relativeDays: args.relativeDays },
+        new Date(),
+        DEFAULT_RELATIVE_DAYS,
+      );
+      assertWindow(window.from, window.to);
+      if (args.productId != null) {
+        const product = await resolveAssistantProduct(args.productId);
+        if (!product) return notFound("product", args.productId);
+      }
+      // Map the tool's groupBy -> the module's grain (default day).
+      const grain = args.groupBy ?? "day";
+      const result = await getMovementSeries({
+        productId: args.productId,
+        locationId: args.locationId,
+        window,
+        grain,
+      });
+      // result = { grain, window, points, totals, coverage }; coverage is a named-field
+      // block validating CoverageSchema.
+      return ok(result, { scope: "global" });
+    },
+  },
+
+  get_inventory_summary: {
+    description:
+      `Catalog-wide inventory summary: total unitsOnHand, productCount, ` +
+      `stockStateCounts (in_stock/low/out), and valuation totals with coverage — the ` +
+      `"how much stock, and what's it worth?" overview. Optionally rankBy ` +
+      `onHand|value|outbound30|daysOfSupply for a deterministic paginated leaderboard ` +
+      `(nulls sort last — a product with no outbound has daysOfSupply null, never 0). ` +
+      `For ONE product's health use get_operations(productId); this is the catalog ` +
+      `roll-up. valuation stays catalog-wide even when locationId is set (a row note ` +
+      `says so). ${PAGING_POSTURE} ${DATA_POSTURE}`,
+    inputSchema: getInventorySummarySchema,
+    run: async (input, ctx) => {
+      const args = getInventorySummarySchema.parse(input);
+      const summary = await getInventorySummary({
+        rankBy: args.rankBy,
+        locationId: args.locationId,
+        limit: args.limit,
+        offset: args.offset,
+        // byteBudget from ctx (spec §5 T-TUNE): a late-turn read fits a smaller page.
+        byteBudget: byteBudget(ctx),
+      });
+      // Explicit top-level coverage (spec §3 E1) beside the nested valuation.coverage:
+      // stockStateCounts is a full census (no unknowns); the valuation counts disclose
+      // the priced fraction.
+      const coverage = {
+        productsCounted: summary.productCount,
+        unitsOnHand: summary.unitsOnHand,
+        costedProducts: summary.valuation.coverage.costedProducts,
+        ofProducts: summary.valuation.coverage.ofProducts,
+      };
+      return ok({ ...summary, coverage }, { scope: "global" });
+    },
+  },
+
+  get_inventory_policy: {
+    description:
+      `Inventory POLICY (configuration, not stock levels): global defaults (low-stock ` +
+      `default, reorder lead time, buffer/safety days, target coverage, min-evidence ` +
+      `gate) and — with productId — that product's RAW override values, EFFECTIVE ` +
+      `values, and a TRUE per-field source (product_override vs system_default), plus ` +
+      `any per-location minimums. A raw-null field is INHERITED (system_default) even ` +
+      `when its effective value coincides with a real override elsewhere — source is ` +
+      `never guessed by comparing to the default. The "what are my thresholds / lead ` +
+      `times?" tool; for what is actually low use low_stock_report, for what to order ` +
+      `use reorder_report. ${DATA_POSTURE}`,
+    inputSchema: getInventoryPolicySchema,
+    run: async (input) => {
+      const args = getInventoryPolicySchema.parse(input);
+      const result = await getPolicy({ productId: args.productId });
+      // Not-found signaling is the tool's job (the module returns { global } with
+      // product undefined for an unknown / pending-review / soft-deleted id).
+      if (args.productId != null && result.product === undefined) {
+        return notFound("product", args.productId);
+      }
+      const coverage = {
+        scope: result.product ? "product overrides + global defaults" : "global defaults only",
+        productPolicyIncluded: result.product != null,
+      };
+      return ok({ ...result, coverage }, { scope: "global" });
+    },
+  },
+
+  get_data_freshness: {
+    description:
+      `Data freshness + "what do you track?": rebuild recency/watermark, ` +
+      `fulfillment-sync cursor/backfill (aggregated across ALL Woo stores — enabled is ` +
+      `always null because enablement is not observable from this process), per-source ` +
+      `data-start dates (ledger/snapshot GLOBAL; order dates scoped to your companies), ` +
+      `snapshot flagged-pair count, and an explicit notTracked list (fulfillment ` +
+      `quantities live in WooCommerce; no PO/on-order, supplier, lot/expiry, or ` +
+      `historical cost/retail/policy). Answers "how fresh is this data?" / "do you ` +
+      `track fulfillment?". ${DATA_POSTURE}`,
+    inputSchema: getDataFreshnessSchema,
+    run: async (input, ctx) => {
+      getDataFreshnessSchema.parse(input);
+      // Order-derived fields are caller-scoped (spec §3 E2) — pass the run ctx's
+      // companyIds; the rest is the global physical/analytics state.
+      const report = await getFreshness(ctx.companyIds);
+      const coverage = {
+        scope: "global freshness; order-derived fields caller-scoped to your companies",
+        fulfillmentEnablement: report.fulfillmentSync.reason,
+        notTrackedCount: report.notTracked.length,
+      };
+      return ok({ ...report, coverage }, { scope: "global" });
     },
   },
 

@@ -59,19 +59,21 @@ export interface FreshnessReport {
   notTracked: string[];
 }
 
-/**
- * Compose a truthful one-line summary of FulfillmentSyncState's backfill columns
- * (`backfillComplete` / `backfillPage` / `backfillBefore` — there is no single
- * "backfill" column to relay verbatim). `null` only when there is no state row at
- * all (sync has never run); a row that exists but never started backfill reads
- * "not started", never null (the row IS the observation).
- */
-function summarizeBackfill(row: {
+/** One FulfillmentSyncState row's observable columns. */
+interface SyncRow {
+  cursorModifiedAt: Date | null;
   backfillComplete: boolean;
   backfillPage: number | null;
   backfillBefore: Date | null;
-} | null): string | null {
-  if (!row) return null;
+}
+
+/**
+ * Compose a truthful one-line summary of a single row's backfill columns
+ * (`backfillComplete` / `backfillPage` / `backfillBefore` — there is no single
+ * "backfill" column to relay verbatim). A row that exists but never started backfill
+ * reads "not started", never null (the row IS the observation).
+ */
+function summarizeBackfill(row: SyncRow): string {
   if (row.backfillComplete) return "complete";
   if (row.backfillPage != null || row.backfillBefore != null) {
     const before = row.backfillBefore ? row.backfillBefore.toISOString() : "unknown";
@@ -79,6 +81,51 @@ function summarizeBackfill(row: {
     return `in progress — page ${page}, before ${before}`;
   }
   return "not started";
+}
+
+/** Backfill-progress rank: the least-progressed integration sets the aggregate floor
+ *  (not-started < in-progress < complete). */
+function backfillRank(row: SyncRow): number {
+  if (row.backfillComplete) return 2;
+  if (row.backfillPage != null || row.backfillBefore != null) return 1;
+  return 0;
+}
+
+/**
+ * IN-WAVE FIX (W1-INT): prod runs TWO WooCommerce stores, so fulfillment freshness
+ * must aggregate across ALL FulfillmentSyncState rows — never one store's row read as
+ * "the" state (which would silently hide a lagging second store). The OLDEST cursor
+ * across integrations is the freshness floor; the LEAST-progressed backfill is the
+ * floor; the integration count is disclosed in both strings. `enabled` stays null
+ * (enablement is still not observable from this process — module rule 1).
+ */
+function aggregateFulfillmentSync(rows: SyncRow[]): {
+  enabled: null;
+  reason: string;
+  cursor: string | null;
+  backfill: string | null;
+} {
+  const n = rows.length;
+  const base = { enabled: null as null, reason: FULFILLMENT_SYNC_NOT_OBSERVABLE_REASON };
+  if (n === 0) {
+    // No sync-state row at all — sync has never run for any integration.
+    return { ...base, cursor: null, backfill: null };
+  }
+  const suffix = ` (oldest of ${n} integration${n === 1 ? "" : "s"})`;
+
+  // Oldest cursor across integrations (nulls excluded — a store with no cursor yet
+  // does not pull the floor to null; but if EVERY store lacks a cursor, cursor is null).
+  const cursors = rows.map((r) => r.cursorModifiedAt).filter((c): c is Date => c != null);
+  const oldestCursor = cursors.length ? cursors.reduce((a, b) => (a < b ? a : b)) : null;
+
+  // Least-progressed backfill across integrations sets the aggregate floor.
+  const floorRow = rows.reduce((a, b) => (backfillRank(a) <= backfillRank(b) ? a : b));
+
+  return {
+    ...base,
+    cursor: oldestCursor ? oldestCursor.toISOString() + suffix : null,
+    backfill: summarizeBackfill(floorRow) + suffix,
+  };
 }
 
 /**
@@ -116,14 +163,11 @@ export async function getFreshness(companyIds: string[]): Promise<FreshnessRepor
       where: { job: "snapshots" },
       select: { flaggedPairs: true },
     }),
-    // fulfillmentSync cursor/backfill: the current deployment runs one active
-    // WooCommerce integration, so the most-recently-updated FulfillmentSyncState row
-    // is "the" sync state. A future multi-integration deployment would need this
-    // widened to a per-integration breakdown — registered as a follow-up (see the
-    // task report), not attempted here since the pinned FreshnessReport shape is a
-    // single global block, not an array.
-    prisma.fulfillmentSyncState.findFirst({
-      orderBy: { updatedAt: "desc" },
+    // fulfillmentSync cursor/backfill (IN-WAVE FIX, W1-INT): prod runs TWO WooCommerce
+    // stores, so read ALL FulfillmentSyncState rows and aggregate — the oldest cursor +
+    // least-progressed backfill are the freshness floor, and the integration count is
+    // disclosed. `findFirst`-most-recent would have hidden a lagging second store.
+    prisma.fulfillmentSyncState.findMany({
       select: { cursorModifiedAt: true, backfillComplete: true, backfillPage: true, backfillBefore: true },
     }),
     // sales.unattributedOrders (spec item 2): CONSUME W0-2's caller-scoped coverage.
@@ -181,12 +225,7 @@ export async function getFreshness(companyIds: string[]): Promise<FreshnessRepor
       unattributedOrders: coverage.unattributedOrders,
       scope: "caller-companies",
     },
-    fulfillmentSync: {
-      enabled: null,
-      reason: FULFILLMENT_SYNC_NOT_OBSERVABLE_REASON,
-      cursor: toIso(syncState?.cursorModifiedAt ?? null),
-      backfill: summarizeBackfill(syncState),
-    },
+    fulfillmentSync: aggregateFulfillmentSync(syncState ?? []),
     dataStarts: {
       ledgerOutboundStart: toIso(outboundStart._min.changeTime),
       ledgerSaleStart: toIso(saleStart._min.changeTime),

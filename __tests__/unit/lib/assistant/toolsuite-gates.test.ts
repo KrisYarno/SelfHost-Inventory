@@ -102,6 +102,7 @@ import {
   testCtx,
   type ToolResult,
 } from "@/lib/assistant/tools";
+import { TOOL_PRESENTATION } from "@/lib/assistant/tool-presentation";
 import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
 import { STATIC_WRITE_ALLOWLIST } from "./static-write-allowlist";
 
@@ -154,9 +155,33 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
     { groupBy: "month" },
     { groupBy: "company" },
   ],
-  get_operations: [{}, { windowDays: 30 }],
+  // fixture[0] is the HAPPY path used by the coverage/definition gates — keep it argless
+  // (or product-resolving) so it reaches an OK result; the pending-review productId case
+  // is a LATER fixture (read-only gate only) that must return the notFound shape.
+  get_operations: [{}, { windowDays: 30 }, { productId: PENDING_REVIEW_FIXTURE_ID }],
   get_shrinkage: [{ days: 30 }, { days: 365 }],
-  get_valuation: [{}],
+  get_valuation: [
+    {},
+    { groupBy: "product" },
+    { groupBy: "location" },
+    { productId: PENDING_REVIEW_FIXTURE_ID },
+  ],
+  get_movement_series: [
+    {},
+    { groupBy: "week" },
+    { groupBy: "month" },
+    { relativeDays: 7 },
+    { productId: PENDING_REVIEW_FIXTURE_ID },
+  ],
+  get_inventory_summary: [
+    {},
+    { rankBy: "onHand" },
+    { rankBy: "value" },
+    { rankBy: "outbound30" },
+    { rankBy: "daysOfSupply" },
+  ],
+  get_inventory_policy: [{}, { productId: PENDING_REVIEW_FIXTURE_ID }],
+  get_data_freshness: [{}],
   low_stock_report: [{}],
   reorder_report: [{}, { includeOkay: false }],
 };
@@ -205,6 +230,52 @@ describe("registration", () => {
       expect(GATE_EXEMPTIONS_BASELINE[tool]).toBeDefined(); // no NEWLY-exempted tool
       for (const g of gates) expect(GATE_EXEMPTIONS_BASELINE[tool]).toContain(g); // no NEW gate
     }
+  });
+
+  it("every registered tool has a TOOL_PRESENTATION entry", () => {
+    for (const name of TOOL_NAMES) {
+      expect(TOOL_PRESENTATION[name]).toBeDefined();
+      expect(typeof TOOL_PRESENTATION[name].successLabel).toBe("string");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Disambiguation + truthfulness cues in the tool descriptions (spec §5 W0-DESC /
+// §7 — the model routes on these; a missing cue is how it picks the wrong tool).
+// ---------------------------------------------------------------------------
+
+describe("tool descriptions carry their disambiguation + truthfulness cues", () => {
+  const desc = (name: string) => assistantTools[name].description;
+
+  it("get_valuation names cost, retail, margin and 'which units lack costs'", () => {
+    const d = desc("get_valuation");
+    expect(d).toMatch(/cost/i);
+    expect(d).toMatch(/retail/i);
+    expect(d).toMatch(/margin/i);
+    expect(d).toMatch(/which units lack costs/i);
+  });
+
+  it("get_movement_series names transfers-are-internal, the legacy note, and absent=zero", () => {
+    const d = desc("get_movement_series");
+    expect(d).toMatch(/internal/i); // transfers are internal relocations
+    expect(d).toMatch(/not sales/i); // legacy negative-ADJUSTMENT note
+    expect(d).toMatch(/zero movement/i); // absent in-window period = zero movement
+  });
+
+  it("get_inventory_policy disambiguates against low_stock_report and reorder_report", () => {
+    const d = desc("get_inventory_policy");
+    expect(d).toContain("low_stock_report");
+    expect(d).toContain("reorder_report");
+  });
+
+  it("get_inventory_summary points single-product questions at get_operations", () => {
+    expect(desc("get_inventory_summary")).toContain("get_operations");
+  });
+
+  it("get_data_freshness names the not-tracked disclosure", () => {
+    const d = desc("get_data_freshness");
+    expect(d).toMatch(/notTracked|do you track|what do you track/i);
   });
 });
 
@@ -279,6 +350,12 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
     "lib/reports/reorder.ts",
     "lib/reports/demand.ts",
     "lib/reports/metrics-contract.ts",
+    // Wave-1 breadth modules wired into the read path by W1-INT (all read-only).
+    "lib/analytics/valuation.ts",
+    "lib/reports/movement.ts",
+    "lib/reports/inventory-summary.ts",
+    "lib/reports/policy.ts",
+    "lib/assistant/freshness.ts",
     // reorder-config.ts is the read-path config dependency (reorder.ts imports it) and
     // is where the R2-B1 write lives — scanned so the allowlist can name it.
     "lib/reorder-config.ts",
@@ -472,4 +549,15 @@ describe("universal productId not-found fixture (spec §4 W0-PROD)", () => {
     const result = await assistantTools.get_sales.run({ productId: PENDING_REVIEW_FIXTURE_ID }, CTX);
     expect(result).toEqual(NOT_FOUND);
   });
+
+  // Wave-1 productId tools (spec §4 W0-PROD): each resolves through the shared resolver,
+  // so a guessed pending-review id returns the SAME notFound shape — never provisional data.
+  it.each(["get_operations", "get_valuation", "get_movement_series", "get_inventory_policy"])(
+    "%s returns notFound for a pending-review productId",
+    async (name) => {
+      prismaCtl.__reset();
+      const result = await assistantTools[name].run({ productId: PENDING_REVIEW_FIXTURE_ID }, CTX);
+      expect(result).toEqual(NOT_FOUND);
+    },
+  );
 });

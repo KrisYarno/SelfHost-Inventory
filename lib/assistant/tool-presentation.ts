@@ -90,8 +90,10 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     failureNoun: "operations",
     emptyCopy: "No operations data yet.",
     summarizeArgs: (input) => {
+      const id = num(input, "productId");
       const windowDays = num(input, "windowDays");
-      return windowDays ? `last ${windowDays} days` : "";
+      const parts = [id ? `product #${id}` : "", windowDays ? `last ${windowDays} days` : ""].filter(Boolean);
+      return parts.join(", ");
     },
   },
   get_shrinkage: {
@@ -109,6 +111,51 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     successLabel: "Looked up valuation",
     failureNoun: "valuation",
     emptyCopy: "No valuation available.",
+    summarizeArgs: (input) => {
+      const id = num(input, "productId");
+      const groupBy = str(input, "groupBy");
+      const parts = [id ? `product #${id}` : "", groupBy ? `by ${groupBy}` : ""].filter(Boolean);
+      return parts.join(", ");
+    },
+  },
+  get_movement_series: {
+    pendingLabel: "Building the movement series…",
+    successLabel: "Built the movement series",
+    failureNoun: "movement series",
+    emptyCopy: "No movement in this range.",
+    summarizeArgs: (input) => {
+      const id = num(input, "productId");
+      const range = dateRangePhrase(input);
+      const groupBy = str(input, "groupBy");
+      const parts = [id ? `product #${id}` : "", range, groupBy ? `by ${groupBy}` : ""].filter(Boolean);
+      return parts.join(", ");
+    },
+  },
+  get_inventory_summary: {
+    pendingLabel: "Summarizing inventory…",
+    successLabel: "Summarized inventory",
+    failureNoun: "inventory summary",
+    emptyCopy: "No inventory to summarize.",
+    summarizeArgs: (input) => {
+      const rankBy = str(input, "rankBy");
+      return rankBy ? `ranked by ${rankBy}` : "";
+    },
+  },
+  get_inventory_policy: {
+    pendingLabel: "Looking up policy…",
+    successLabel: "Looked up policy",
+    failureNoun: "inventory policy",
+    emptyCopy: "No policy on file.",
+    summarizeArgs: (input) => {
+      const id = num(input, "productId");
+      return id ? `product #${id}` : "global defaults";
+    },
+  },
+  get_data_freshness: {
+    pendingLabel: "Checking data freshness…",
+    successLabel: "Checked data freshness",
+    failureNoun: "data freshness",
+    emptyCopy: "No freshness data available.",
     summarizeArgs: () => "",
   },
   low_stock_report: {
