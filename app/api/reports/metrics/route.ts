@@ -226,8 +226,11 @@ export const GET = apiHandler(async (request: NextRequest) => {
     productsAtLocation > 0
       ? Math.round((healthyProducts / productsAtLocation) * 100)
       : 100;
+  // TRUTHFUL NULL (FIX 3): when the known-usage set is empty (NO product has a measured
+  // usage rate) the average is UNKNOWN — emit null, never a fabricated 0 (a 0 reads as
+  // "supply exhausted / order everything now").
   const daysOfSupplyAvg =
-    productsWithMovement > 0 ? Math.round(daysOfSupplySum / productsWithMovement) : 0;
+    productsWithMovement > 0 ? Math.round(daysOfSupplySum / productsWithMovement) : null;
 
   // B8: honest low-stock %-trend backed by product_stock_snapshots.
   // calculateTrend returns a PERCENTAGE (the card renders {value}%); this is the % change in

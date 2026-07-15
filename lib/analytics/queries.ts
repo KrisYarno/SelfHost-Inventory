@@ -81,7 +81,7 @@ const AGING_OUTLIER_DAYS = 90; // aligns with DEAD_STOCK_DAYS.
  * as a coverage figure and NEVER bucketed as shrinkage.
  */
 export type ShrinkageReason = "DAMAGE" | "THEFT" | "EXPIRY" | "COUNT";
-const SHRINKAGE_CLASS_REASONS = ["DAMAGE", "THEFT", "EXPIRY", "COUNT"] as const;
+export const SHRINKAGE_CLASS_REASONS = ["DAMAGE", "THEFT", "EXPIRY", "COUNT"] as const;
 
 // The ONE outbound (units-out / velocity) predicate now lives in the metrics
 // contract (spec §2 D1): `PHYSICAL_OUTBOUND_WHERE` = delta<0 AND logType != TRANSFER

@@ -59,6 +59,16 @@ test("usage-velocity query excludes internal transfers (live prod bug fix)", asy
   expect(where.delta).toEqual({ lt: 0 });
 });
 
+test("daysOfSupplyAvg is null (never a fabricated 0) when NO product has known usage", async () => {
+  // Default beforeEach: no outbound rows (inventory_logs.findMany -> []), so the shared
+  // velocity is unknown for every product => the known-usage set is empty. The average
+  // must be null (unknown), NEVER 0 — a 0 would read as "supply exhausted".
+  m.inventory_logs.findMany.mockResolvedValue([]);
+  const res = await GET(new NextRequest("http://x/api/reports/metrics"));
+  const body = await res.json();
+  expect(body.metrics.daysOfSupplyAvg).toBeNull();
+});
+
 test("no snapshots => lowStockTrend defaults to {value:0, direction:'stable'} (card never breaks)", async () => {
   // No snapshot rows at all => aggregate max dayKey is null => the heavy groupBy is skipped.
   m.productStockSnapshot.aggregate.mockResolvedValue({ _max: { dayKey: null } });

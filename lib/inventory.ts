@@ -86,17 +86,23 @@ export function centsFromCostPrice(costPrice: Prisma.Decimal | number | null): n
 
 /**
  * W0-RETAIL (spec §4): frozen retail-price → INT-cents conversion, the canonical
- * money converter for every retail-valuation surface (mirrors `centsFromCostPrice`).
+ * money converter for every retail-valuation surface.
  *
- * `retailPrice` is a NULLABLE Decimal: NULL = retail unknown, an explicit 0 =
- * genuinely free. Both a NULL and a 0 yield null here (NULL truthfully = no price;
- * a "free" product carries no representable retail cents either), so a value is
- * emitted only for a real positive price. A numeric string is accepted (some price
- * paths carry the value as a string) and parsed the same way; a non-numeric string
- * parses to NaN → null. Negative is impossible in real data but defended (→ null).
- * The signed-INT cents bound caps at 2147483647 (a price of 21474836.47); ABOVE that
- * we cannot represent the value, so we return null AND console.error — writing a
- * truncated number would be a lie (truthful-data).
+ * RETAIL SEMANTICS DIVERGE FROM `centsFromCostPrice` on the value 0, deliberately:
+ *   - NULL      → null  (retail genuinely unknown).
+ *   - 0         → 0     (a stored 0 is a DELIBERATELY-typed "genuinely free" price).
+ *   - positive  → cents (rounded).
+ *
+ * Why 0 differs from the cost helper: the Lane-6 migration already backfilled EVERY
+ * legacy ambiguous 0 retail to NULL, so any surviving stored 0 is an intentional price,
+ * not the "unset" sentinel the cost column still carries. Collapsing it to null would
+ * erase a real, priced-at-free product (and disagree with the metrics route, which
+ * already counts a 0-retail product as priced). A numeric string is accepted (some
+ * price paths carry the value as a string) and parsed the same way; a non-numeric
+ * string parses to NaN → null (NaN >= 0 is false). Negative is impossible in real data
+ * but defended (→ null). The signed-INT cents bound caps at 2147483647 (a price of
+ * 21474836.47); ABOVE that we cannot represent the value, so we return null AND
+ * console.error — writing a truncated number would be a lie (truthful-data).
  */
 export function centsFromRetailPrice(
   v: Prisma.Decimal | number | string | null
@@ -109,7 +115,9 @@ export function centsFromRetailPrice(
     );
     return null;
   }
-  return n > 0 ? Math.round(n * 100) : null;
+  // A stored 0 is a genuinely-free price (0 cents), NOT unknown — the ONLY divergence
+  // from centsFromCostPrice. `>= 0` also rejects NaN and negatives (both → null).
+  return n >= 0 ? Math.round(n * 100) : null;
 }
 
 /**

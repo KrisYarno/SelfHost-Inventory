@@ -194,9 +194,13 @@ function assertWindow(from?: string, to?: string): void {
       { code: z.ZodIssueCode.custom, path: ["to"], message: "`to` must not be before `from`" },
     ]);
   }
-  if (toMs - fromMs > MAX_WINDOW_DAYS * DAY_MS) {
+  // FIX 5: the cap is EXACTLY MAX_WINDOW_DAYS INCLUSIVE day-keys. An N-day-key window
+  // spans (N-1) days, so 366 keys = a 365-day span. The bound is therefore
+  // `> (MAX_WINDOW_DAYS - 1) * DAY_MS`: a 365-day span (366 keys) passes, a 366-day span
+  // (367 keys) is rejected. (The old `> MAX_WINDOW_DAYS * DAY_MS` let 367 keys through.)
+  if (toMs - fromMs > (MAX_WINDOW_DAYS - 1) * DAY_MS) {
     throw new z.ZodError([
-      { code: z.ZodIssueCode.custom, path: ["to"], message: `date window must be <= ${MAX_WINDOW_DAYS} days` },
+      { code: z.ZodIssueCode.custom, path: ["to"], message: `date window must be <= ${MAX_WINDOW_DAYS} day-keys` },
     ]);
   }
 }
@@ -262,9 +266,16 @@ export function notFound(entity: "product", id: number): ToolResult {
 export const CoverageSchema = z
   .object({})
   .catchall(z.unknown())
-  .refine((o) => Object.keys(o as Record<string, unknown>).length > 0, {
-    message: "coverage/freshness must be a non-empty object of named fields",
-  });
+  .refine(
+    (o) => {
+      const rec = o as Record<string, unknown>;
+      // FIX 4a: at least one key AND at least one DEFINED value. `{ field: undefined }`
+      // has a key but serializes to `{}` — it must FAIL, so the gate can never be
+      // satisfied by a block that ships empty JSON. (null/0/"" are defined and count.)
+      return Object.keys(rec).length > 0 && Object.values(rec).some((v) => v !== undefined);
+    },
+    { message: "coverage/freshness must be a non-empty object with at least one defined field" },
+  );
 
 export interface Page<T> {
   rows: T[];
@@ -545,6 +556,10 @@ const getStockSchema = z.object({
   locationId: positiveInt.optional(),
   from: isoDay.optional(),
   to: isoDay.optional(),
+  // W0-STOCK REV-2: day-group offset into the NEWEST-first snapshot paging. offset 0 is
+  // the most-recent page; older pages via offset. Plain ZodObject (no refine) so MCP
+  // registerTool keeps its raw `.shape`.
+  offset: nonNegInt.optional(),
 });
 
 const getSalesSchema = z.object({
@@ -655,10 +670,14 @@ export const assistantTools: Record<string, AssistantToolDef> = {
   get_stock: {
     description:
       `Current global stock for a product (by location) plus a daily snapshot ` +
-      `series over an optional date window (<= 366 days). Inventory is GLOBAL — not ` +
+      `series over an optional date window (<= 366 day-keys). Inventory is GLOBAL — not ` +
       `company-scoped. A location-scoped read reports 'locationStock'; a global read ` +
-      `reports 'currentStock'. seriesCoverage.complete is false when older days were ` +
-      `omitted (see 'omitted'). ${DATA_POSTURE}`,
+      `reports 'currentStock'. The snapshot series is paged NEWEST-day-first and ` +
+      `returned re-sorted ascending; when history exceeds one page, ` +
+      `seriesCoverage.complete is false and older pages are reachable via 'offset' (a ` +
+      `day-group offset) or by narrowing from/to. If a page's per-location points exceed ` +
+      `the cap, the OLDEST whole days of the page are dropped (seriesCoverage.pointsNote ` +
+      `names them) and complete is false. ${DATA_POSTURE}`,
     inputSchema: getStockSchema,
     run: async (input) => {
       const args = getStockSchema.parse(input);
@@ -701,10 +720,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       }));
       const stockTotal = byLocation.reduce((sum, l) => sum + l.quantity, 0);
 
-      // Series paging (W0-STOCK): DB-side count of DISTINCT DAYS + skip/take over the
-      // dayKey groups, so a page is always WHOLE days (never a day split across pages),
-      // and totalDays is exact — `take MAX+1` alone would only prove "more exist" and
-      // strand older rows. Whole days are then byte-fit under the per-tool budget.
+      // Series paging (W0-STOCK REV-2): DB-side count of DISTINCT DAYS + skip/take over
+      // the dayKey groups paged NEWEST-first, so a page is always WHOLE days (never a day
+      // split across pages), the most RECENT days win when history exceeds the cap (the
+      // old `dayKey asc` returned the OLDEST days and dropped the newest), and totalDays
+      // is exact. `offset` is a day-group offset into the newest-first order.
+      const offset = args.offset ?? 0;
       const dayPage = await pageFromDb<DaySnapshot>({
         count: async () =>
           ((await prisma.productStockSnapshot.groupBy({ by: ["dayKey"], where: seriesWhere })) ?? [])
@@ -714,25 +735,30 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             (await prisma.productStockSnapshot.groupBy({
               by: ["dayKey"],
               where: seriesWhere,
-              orderBy: { dayKey: "asc" },
+              orderBy: { dayKey: "desc" }, // NEWEST-first page selection
               skip,
               take,
             })) ?? [];
-          const days = groups.map((g) => g.dayKey as string);
-          if (days.length === 0) return [];
+          if (groups.length === 0) return [];
+          // Re-sort THIS page's days ASC for presentation; the range fetch (from/to) uses
+          // the page's own min/max day, never the whole-history bounds.
+          const daysAsc = groups.map((g) => g.dayKey as string).sort(byStringKey);
           const points =
             (await getStockSeries({
               productId: args.productId,
               locationId: args.locationId,
-              from: days[0],
-              to: days[days.length - 1],
-              take: STOCK_SERIES_MAX_ROWS,
+              from: daysAsc[0],
+              to: daysAsc[daysAsc.length - 1],
+              // Probe ONE past the cap so a points overflow is DETECTABLE (and trimmable
+              // on whole-day boundaries below) — a plain `take: MAX` would silently drop
+              // location-points while day-based completeness still read true.
+              take: STOCK_SERIES_MAX_ROWS + 1,
             })) ?? [];
           const byDay = new Map<
             string,
             Array<{ locationId: number; quantity: number; locationName: string | null }>
           >();
-          for (const d of days) byDay.set(d, []);
+          for (const d of daysAsc) byDay.set(d, []);
           for (const pt of points) {
             byDay
               .get(pt.dayKey)
@@ -742,14 +768,28 @@ export const assistantTools: Record<string, AssistantToolDef> = {
                 locationName: locNames.get(pt.locationId) ?? null,
               });
           }
-          return days.map((d) => ({ dayKey: d, points: byDay.get(d) ?? [] }));
+          return daysAsc.map((d) => ({ dayKey: d, points: byDay.get(d) ?? [] }));
         },
-        offset: 0,
+        offset,
         limit: STOCK_SERIES_MAX_DAYS,
         byteBudget: ROW_PAGE_BYTE_BUDGET,
       });
 
-      const series = dayPage.rows.flatMap((d) =>
+      // Points-cap honesty (W0-STOCK REV-2 (d)): if this page's per-location points exceed
+      // the row cap, trim on WHOLE-day boundaries — drop the OLDEST whole days of the page
+      // (front of the ASC array) until under the cap. seriesCoverage.complete can NEVER be
+      // true when a point in the requested range went unreturned.
+      let pageDays = dayPage.rows;
+      const trimmedDayKeys: string[] = [];
+      let totalPoints = pageDays.reduce((n, d) => n + d.points.length, 0);
+      while (totalPoints > STOCK_SERIES_MAX_ROWS && pageDays.length > 0) {
+        const dropped = pageDays[0];
+        totalPoints -= dropped.points.length;
+        trimmedDayKeys.push(dropped.dayKey);
+        pageDays = pageDays.slice(1);
+      }
+
+      const series = pageDays.flatMap((d) =>
         d.points.map((p) => ({
           dayKey: d.dayKey,
           locationId: p.locationId,
@@ -757,16 +797,28 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           locationName: p.locationName,
         })),
       );
-      const complete = dayPage.nextOffset === null;
+      const returnedDays = pageDays.length;
+      const daysComplete = dayPage.nextOffset === null;
+      const pointsTrimmed = trimmedDayKeys.length > 0;
+      const complete = daysComplete && !pointsTrimmed;
       const seriesCoverage: Record<string, unknown> = {
-        returnedDays: dayPage.returned,
+        returnedDays,
         totalDays: dayPage.totalRows,
         complete,
-        omitted: Math.max(0, dayPage.totalRows - dayPage.returned),
+        omitted: Math.max(0, dayPage.totalRows - returnedDays),
       };
-      if (!complete) {
+      if (!daysComplete) {
+        // Truthful about WHICH end is returned + how to reach the rest (REV-2 (c)).
         seriesCoverage.note =
-          "Older snapshot days were omitted to fit the budget — narrow the date window or ask again.";
+          `Only the most recent ${returnedDays} snapshot days are returned per page — ` +
+          `older days are available via offset, or narrow from/to.`;
+      }
+      if (pointsTrimmed) {
+        seriesCoverage.pointsNote =
+          `The page's per-location points exceeded the ${STOCK_SERIES_MAX_ROWS}-point cap, ` +
+          `so the oldest ${trimmedDayKeys.length} whole day(s) of this page ` +
+          `(${trimmedDayKeys.join(", ")}) were dropped — narrow the location or date ` +
+          `window for full point detail.`;
       }
 
       // Location-scoped reads name the scalar `locationStock` (never reuse currentStock).

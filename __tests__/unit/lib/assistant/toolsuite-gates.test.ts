@@ -141,13 +141,24 @@ function writeCalls(): Array<{ model: string; method: string }> {
 
 const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
   find_product: [{ query: "abc" }],
-  get_stock: [{ productId: 1 }, { productId: 1, from: "2026-01-01", to: "2026-06-01" }],
-  get_sales: [{}, { groupBy: "day" }, { productId: 1, groupBy: "product" }],
+  get_stock: [
+    { productId: 1 },
+    { productId: 1, from: "2026-01-01", to: "2026-06-01" },
+    { productId: 1, locationId: 2 },
+  ],
+  get_sales: [
+    {},
+    { groupBy: "day" },
+    { productId: 1, groupBy: "product" },
+    { groupBy: "week" },
+    { groupBy: "month" },
+    { groupBy: "company" },
+  ],
   get_operations: [{}, { windowDays: 30 }],
   get_shrinkage: [{ days: 30 }, { days: 365 }],
   get_valuation: [{}],
   low_stock_report: [{}],
-  reorder_report: [{}, { includeOkay: true }],
+  reorder_report: [{}, { includeOkay: false }],
 };
 
 /**
@@ -235,6 +246,15 @@ describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)
     await assistantTools.reorder_report.run({}, CTX);
     expect(writeCalls()).toEqual([]);
   });
+
+  // FIX 4d: the empty-companyIds context (a caller with no company access) must complete
+  // and issue zero writes — get_sales takes the []-fast path (no query) rather than throwing.
+  it("get_sales with EMPTY companyIds completes without throwing and issues zero writes", async () => {
+    prismaCtl.__reset();
+    const result = await assistantTools.get_sales.run({}, testCtx({ companyIds: [] }));
+    expect(["ok", "truncated", "error"]).toContain((result as ToolResult).status);
+    expect(writeCalls()).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -242,8 +262,16 @@ describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)
 // ---------------------------------------------------------------------------
 
 describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
+  // FIX 4c: every module tools.ts pulls into the read path is scanned, so a write that
+  // sneaks into ANY of them fails the gate. These mirror the actual @/lib imports of
+  // lib/assistant/tools.ts (checked to exist; stock-threshold.ts is present in this repo).
   const READ_PATH_FILES = [
     "lib/assistant/tools.ts",
+    "lib/assistant/window.ts",
+    "lib/assistant/resolve-product.ts",
+    "lib/assistant/sales-coverage.ts",
+    "lib/products.ts",
+    "lib/stock-threshold.ts",
     "lib/analytics/queries.ts",
     "lib/analytics/serialize.ts",
     "lib/analytics/dates.ts",
@@ -284,7 +312,20 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
 // (3) COVERAGE gate — shape, not just presence.
 // ---------------------------------------------------------------------------
 
-/** Recursively collect the values of any key matching /coverage|freshness/i. */
+// FIX 4b: an EXACT key allowlist, not a substring match — so an unrelated key like
+// `coverageNote` (or a future `pointsNote`) can never satisfy the coverage gate by merely
+// containing "coverage". These are the only keys that carry a real coverage/freshness block.
+const COVERAGE_BLOCK_KEYS = new Set([
+  "coverage",
+  "freshness",
+  "seriesCoverage",
+  "costCoverage",
+  "receiptCoverage",
+  "retailCoverage",
+  "turnsCoverage",
+]);
+
+/** Recursively collect the values of any key in COVERAGE_BLOCK_KEYS (exact match). */
 function collectCoverageBlocks(data: unknown): unknown[] {
   const found: unknown[] = [];
   const visit = (v: unknown) => {
@@ -292,7 +333,7 @@ function collectCoverageBlocks(data: unknown): unknown[] {
       v.forEach(visit);
     } else if (v && typeof v === "object") {
       for (const [k, val] of Object.entries(v)) {
-        if (/coverage|freshness/i.test(k) && val && typeof val === "object" && !Array.isArray(val)) {
+        if (COVERAGE_BLOCK_KEYS.has(k) && val && typeof val === "object" && !Array.isArray(val)) {
           found.push(val);
         }
         visit(val);
@@ -307,6 +348,16 @@ describe("COVERAGE gate (spec §7 — validates CoverageSchema)", () => {
   it("CoverageSchema rejects an empty object but accepts a named-field block", () => {
     expect(() => CoverageSchema.parse({})).toThrow();
     expect(() => CoverageSchema.parse({ valued: 0, of: 80 })).not.toThrow();
+  });
+
+  // FIX 4a: a block whose only key holds `undefined` serializes to `{}` — it must FAIL,
+  // so the gate can never be satisfied by an all-undefined block that ships empty JSON.
+  it("CoverageSchema rejects a block whose keys are ALL undefined (serializes empty)", () => {
+    expect(() => CoverageSchema.parse({ field: undefined })).toThrow();
+    expect(() => CoverageSchema.parse({ a: undefined, b: undefined })).toThrow();
+    // A single defined value (even 0 or null) is enough.
+    expect(() => CoverageSchema.parse({ a: undefined, b: 0 })).not.toThrow();
+    expect(() => CoverageSchema.parse({ a: null })).not.toThrow();
   });
 
   const coverageTools = TOOL_NAMES.filter((n) => !isExempt(n, "coverage"));

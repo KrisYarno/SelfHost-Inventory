@@ -26,7 +26,7 @@ export interface DashboardMetrics {
   // New warehouse decision metrics
   orderNowCount: number;        // Products with daysOfSupply < leadTime (14 days)
   orderSoonCount: number;       // Products with daysOfSupply < leadTime * 1.5 (21 days)
-  daysOfSupplyAvg: number;      // Average across products with movement
+  daysOfSupplyAvg: number | null; // Average across products with a KNOWN usage rate; null when none have one (never a fabricated 0)
   monthlyCarryingCost: number;  // (totalInventoryCostValue * 0.25) / 12
   deadStockValue: number;       // Cost value of products with 0 movement in 90 days
   stockoutRiskCount: number;    // Products with currentStock = 0 or daysOfSupply < 7

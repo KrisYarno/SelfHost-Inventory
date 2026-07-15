@@ -168,9 +168,9 @@ describe("get_stock: DB-level take + window validation", () => {
 
     expect(result.status).toBe("ok");
     const seriesArg = mockGetStockSeries.mock.calls[0][0];
-    expect(typeof seriesArg.take).toBe("number");
-    expect(seriesArg.take).toBeLessThanOrEqual(1000);
-    expect(seriesArg.take).toBeGreaterThan(0);
+    // FIX 1(d): the points fetch probes ONE past the cap (STOCK_SERIES_MAX_ROWS + 1 =
+    // 1001) so an overflow is detectable and trimmed on whole-day boundaries.
+    expect(seriesArg.take).toBe(1001);
     if (result.status === "ok") {
       expect(result.meta.scope).toBe("global");
       expect((result.data as { currentStock: number }).currentStock).toBe(42);
@@ -224,6 +224,105 @@ describe("get_stock: DB-level take + window validation", () => {
     }
   });
 
+  // FIX 1 REV-2: a mock day-group source that honors orderBy desc + skip/take, so the
+  // NEWEST-first paging (and offset into it) is actually exercised, not assumed.
+  function mockDayGroups(allDaysAsc: string[]) {
+    db.productStockSnapshot.groupBy.mockImplementation((arg: unknown) => {
+      const a = arg as { orderBy?: { dayKey?: string }; skip?: number; take?: number };
+      const all = allDaysAsc.map((dk) => ({ dayKey: dk }));
+      if (a && a.orderBy && a.orderBy.dayKey === "desc") {
+        const desc = [...all].reverse();
+        const skip = a.skip ?? 0;
+        return Promise.resolve(desc.slice(skip, skip + (a.take ?? desc.length))) as never;
+      }
+      return Promise.resolve(all) as never; // count() call: no orderBy/skip/take
+    });
+  }
+  const isoSeq = (n: number, startUtc = Date.UTC(2024, 0, 1)) =>
+    Array.from({ length: n }, (_, i) => new Date(startUtc + i * 86_400_000).toISOString().slice(0, 10));
+
+  it("pages the NEWEST days first (re-sorted ASC) when history exceeds the day cap (FIX 1 REV-2)", async () => {
+    db.product_locations.findMany.mockResolvedValue([{ locationId: 1, quantity: 5 }] as never);
+    const allDaysAsc = isoSeq(400);
+    mockDayGroups(allDaysAsc);
+    // Echo one point on the fetched range's from + to so the presented series shows dayKeys.
+    mockGetStockSeries.mockImplementation((opts: { from: string; to: string }) =>
+      Promise.resolve([
+        { dayKey: opts.from, locationId: 1, quantity: 1 },
+        { dayKey: opts.to, locationId: 1, quantity: 2 },
+      ]),
+    );
+
+    const result = await assistantTools.get_stock.run({ productId: 1 }, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+
+    const newest366 = allDaysAsc.slice(400 - 366); // the newest 366 days, ascending
+    // The range fetch used min/max of the PAGE = the newest 366 days (never the oldest).
+    const seriesArg = mockGetStockSeries.mock.calls[0][0];
+    expect(seriesArg.from).toBe(newest366[0]); // oldest day OF the newest page
+    expect(seriesArg.to).toBe(newest366[newest366.length - 1]); // the very newest day
+    // The presented series is ASC.
+    const series = (result.data as { series: Array<{ dayKey: string }> }).series;
+    expect(series[0].dayKey).toBe(newest366[0]);
+    expect(series[series.length - 1].dayKey).toBe(newest366[newest366.length - 1]);
+
+    const cov = (result.data as { seriesCoverage: Record<string, unknown> }).seriesCoverage;
+    expect(cov.returnedDays).toBe(366);
+    expect(cov.totalDays).toBe(400);
+    expect(cov.complete).toBe(false);
+    expect(cov.omitted).toBe(34);
+    // FIX 1(c): the omission note is truthful about WHICH end + how to reach the rest.
+    expect(String(cov.note)).toContain("most recent");
+    expect(String(cov.note)).toContain("older days are available via offset");
+  });
+
+  it("offset reaches OLDER day pages (day-group offset into the newest-first order) (FIX 1b)", async () => {
+    db.product_locations.findMany.mockResolvedValue([{ locationId: 1, quantity: 5 }] as never);
+    const allDaysAsc = isoSeq(400);
+    mockDayGroups(allDaysAsc);
+    mockGetStockSeries.mockResolvedValue([]);
+
+    // offset 366 skips the newest 366 day-groups => the OLDEST 34 days remain.
+    const result = await assistantTools.get_stock.run({ productId: 1, offset: 366 }, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+
+    const oldest34 = allDaysAsc.slice(0, 34);
+    const seriesArg = mockGetStockSeries.mock.calls[0][0];
+    expect(seriesArg.from).toBe(oldest34[0]); // 2024-01-01
+    expect(seriesArg.to).toBe(oldest34[oldest34.length - 1]); // the oldest page's newest day
+    const cov = (result.data as { seriesCoverage: Record<string, unknown> }).seriesCoverage;
+    expect(cov.returnedDays).toBe(34);
+    expect(cov.totalDays).toBe(400);
+    expect(cov.complete).toBe(true); // 366 + 34 = 400 => nothing beyond this page
+  });
+
+  it("trims WHOLE days off the OLDEST end + complete:false when points overflow the cap (FIX 1d)", async () => {
+    db.product_locations.findMany.mockResolvedValue([{ locationId: 1, quantity: 5 }] as never);
+    const [dayA, dayB, dayC] = ["2026-03-01", "2026-03-02", "2026-03-03"]; // ASC
+    mockDayGroups([dayA, dayB, dayC]);
+    // 1001 compact points (> the 1000 cap): 500 on the OLDEST day, then 300 + 201.
+    // Dropping the oldest whole day (dayA, 500 pts) brings the page under the cap.
+    const pts: Array<{ dayKey: string; locationId: number; quantity: number }> = [];
+    for (let i = 0; i < 500; i++) pts.push({ dayKey: dayA, locationId: 1, quantity: 1 });
+    for (let i = 0; i < 300; i++) pts.push({ dayKey: dayB, locationId: 1, quantity: 1 });
+    for (let i = 0; i < 201; i++) pts.push({ dayKey: dayC, locationId: 1, quantity: 1 });
+    mockGetStockSeries.mockResolvedValue(pts); // length 1001 = STOCK_SERIES_MAX_ROWS + 1
+
+    const result = await assistantTools.get_stock.run({ productId: 1 }, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+
+    const cov = (result.data as { seriesCoverage: Record<string, unknown> }).seriesCoverage;
+    expect(cov.complete).toBe(false);
+    expect(String(cov.pointsNote)).toContain(dayA); // the dropped oldest day is named
+    const series = (result.data as { series: Array<{ dayKey: string }> }).series;
+    expect(series.some((p) => p.dayKey === dayA)).toBe(false); // fully trimmed
+    expect(series.some((p) => p.dayKey === dayB)).toBe(true);
+    expect(series.some((p) => p.dayKey === dayC)).toBe(true);
+  });
+
   it("rejects a non-ISO date (schema)", async () => {
     await expect(assistantTools.get_stock.run({ productId: 1, from: "2026-13-40" }, CTX)).rejects.toThrow();
   });
@@ -249,6 +348,21 @@ describe("get_stock: DB-level take + window validation", () => {
       CTX,
     );
     expect(result.status).toBe("ok");
+  });
+
+  // FIX 5: the explicit-range cap is EXACTLY 366 inclusive day-keys (a 365-day span).
+  it("accepts a window of exactly 366 inclusive day-keys (2026-01-01..2027-01-01, 365-day span)", async () => {
+    const result = await assistantTools.get_stock.run(
+      { productId: 1, from: "2026-01-01", to: "2027-01-01" },
+      CTX,
+    );
+    expect(result.status).toBe("ok");
+  });
+
+  it("rejects a window of 367 inclusive day-keys (2026-01-01..2027-01-02, 366-day span)", async () => {
+    await expect(
+      assistantTools.get_stock.run({ productId: 1, from: "2026-01-01", to: "2027-01-02" }, CTX),
+    ).rejects.toThrow();
   });
 });
 

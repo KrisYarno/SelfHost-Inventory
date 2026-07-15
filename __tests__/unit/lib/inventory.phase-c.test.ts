@@ -226,8 +226,21 @@ describe('centsFromRetailPrice — W0-RETAIL money conversion (never lie)', () =
     expect(errSpy).not.toHaveBeenCalled();
   });
 
-  it('0 -> null (0-and-null both mean unknown, matching cost)', () => {
-    expect(centsFromRetailPrice(0)).toBeNull();
+  it('0 -> 0 (a stored 0 retail is a deliberately-typed free price, NOT unknown)', () => {
+    // Retail semantics DIVERGE from cost here (W0-RETAIL): the migration backfilled
+    // every legacy ambiguous 0 to NULL, so a surviving stored 0 is an intentional
+    // "genuinely free" price and must round-trip to 0 cents, never collapse to null.
+    expect(centsFromRetailPrice(0)).toBe(0);
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('Decimal("0") -> 0 (free is a known price, not unknown)', () => {
+    expect(centsFromRetailPrice(new Prisma.Decimal('0'))).toBe(0);
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('numeric string "0" -> 0', () => {
+    expect(centsFromRetailPrice('0')).toBe(0);
     expect(errSpy).not.toHaveBeenCalled();
   });
 
