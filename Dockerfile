@@ -14,6 +14,13 @@ COPY prisma ./prisma
 COPY . .
 RUN npm run db:generate
 RUN npm run build
+# /api/version build-identity probe (2026-07-16 stale-image incident): bake the
+# git sha + build time into the image. The GIT_SHA build arg wins; otherwise the
+# sha is derived from the .git/HEAD+refs the .dockerignore negations let into
+# the context. Placed AFTER `npm run build` so an arg change never busts the
+# build layer cache.
+ARG GIT_SHA=""
+RUN sh scripts/build-info.sh "$GIT_SHA" > build-info.json
 
 FROM node:22-alpine AS runner
 WORKDIR /app
@@ -35,6 +42,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=nextjs:nodejs /app/build-info.json ./build-info.json
 
 # Ensure backup directory and .next/cache have correct ownership
 RUN mkdir -p /backup .next/cache && chown -R nextjs:nodejs /backup .next/cache

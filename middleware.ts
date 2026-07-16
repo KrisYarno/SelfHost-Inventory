@@ -7,6 +7,7 @@ import { enforceRateLimit, RateLimitError } from "./lib/rateLimit";
 // Everything else requires auth by default (deny-by-default)
 const publicRoutes = [
   "/api/healthz",
+  "/api/version",     // Build-identity probe (same posture as healthz; sha is not a secret)
   "/api/csrf",
   "/api/placeholder",
   "/api/webhooks",    // Webhooks use HMAC signature verification

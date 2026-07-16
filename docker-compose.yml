@@ -53,6 +53,11 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runner
+      args:
+        # /api/version probe: `GIT_SHA=$(git rev-parse HEAD) docker compose ...
+        # build` pins the sha explicitly; unset falls back to the .git/HEAD the
+        # .dockerignore negations let into the context.
+        GIT_SHA: ${GIT_SHA:-}
     environment:
       NODE_ENV: production
       PORT: 3000

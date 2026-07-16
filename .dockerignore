@@ -17,3 +17,11 @@ staging-initdb
 backup
 .claude
 docs
+
+# /api/version build-identity probe: let the builder derive the git sha with no
+# host cooperation. HEAD + refs are pointers only (no history, no secrets); the
+# bulk .git exclusion above still applies to everything else.
+!.git/HEAD
+!.git/packed-refs
+!.git/refs
+!.git/refs/**
