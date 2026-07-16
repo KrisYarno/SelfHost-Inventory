@@ -15,7 +15,6 @@
  * `@/lib/api-utils`.
  */
 
-import { AppError } from "@/lib/error-handling";
 import { toDayKey, dayKeyStart } from "@/lib/analytics/dates";
 
 const DAY_MS = 86_400_000;
