@@ -87,6 +87,50 @@ export const SALES_COMPANY_COVERAGE_NOTE =
   "coverage classified per company; the latest-starting company governs zero legality.";
 
 /**
+ * What degraded per-company coverage does and does NOT do (FD2-2), stated where a reader
+ * meets a measured figure that a degraded window nevertheless produced.
+ *
+ * The degradation is a rule about SILENCE: absence cannot be read as zero when a company
+ * was not recording. It is NOT a rule about the rows that WERE recorded — a sum over
+ * them is a true statement about recorded facts, and withholding it would answer a
+ * question about real sales with "unknown" while the facts sit in the table.
+ */
+export const SALES_COMPANY_COVERAGE_MEASURED_NOTE =
+  "degraded coverage governs ZERO legality only: sums shown are MEASURED over the facts " +
+  "that WERE recorded, while a period with no matching rows reads null + a reason " +
+  "instead of 0.";
+
+/**
+ * WHICH companies degrade the window, NAMED (FD2-2 / FD2-3). A disclosure that says
+ * "some company started later" sends the reader to look for a company it will not name;
+ * the ids are already in hand, so they are said out loud — the companies with NO
+ * recorded facts first (they degrade hardest), then the latest start among those that do
+ * record (the day that actually governs zero legality).
+ *
+ * Empty/absent input yields "" — every caller only builds this string when the
+ * degradation it describes is real.
+ */
+export function companyCoverageDetail(
+  companyCoverage: Array<{ companyId: string; salesDataStart: string | null }> | undefined,
+): string {
+  const entries = companyCoverage ?? [];
+  const silent = entries.filter((c) => c.salesDataStart == null).map((c) => c.companyId);
+  const starts = entries
+    .map((c) => c.salesDataStart)
+    .filter((day): day is string => day != null);
+  const parts: string[] = [];
+  if (silent.length > 0) {
+    parts.push(
+      `no sales data recorded for ${silent.length === 1 ? "company" : "companies"} ${silent.join(", ")}`,
+    );
+  }
+  if (starts.length > 0) {
+    parts.push(`latest company start ${starts.reduce((a, b) => (a >= b ? a : b))}`);
+  }
+  return parts.join("; ");
+}
+
+/**
  * The caller-scoped windowCoverage (OC-3). `salesDataStart` alone classifies the EARLIEST
  * company's coverage; when the caller's companies start at DIFFERENT days, the window is
  * only fully covered if the LATEST-starting one covers it too — so a staggered caller

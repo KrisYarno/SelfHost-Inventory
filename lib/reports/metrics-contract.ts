@@ -59,6 +59,10 @@ const SHRINKAGE_SET: ReadonlySet<string> = new Set(SHRINKAGE_CLASS_REASONS as re
  * column's collation — case-insensitive under MySQL's `*_ci` default, case-SENSITIVE the
  * moment that column or connection is `_bin`/`_cs`. No classification site may depend on
  * that assumption: SQL narrows, JS classifies.
+ *
+ * THE ONE reasonCode COMPARISON THAT STILL HAPPENS IN SQL is `REORDER_DEMAND_WHERE`
+ * below — read its annotation before adding a caller. It is a NARROWING, not a
+ * classification, and the live reorder path re-decides in JS.
  */
 export function shrinkageReasonOf(reasonCode: string | null | undefined): ShrinkageReason | null {
   if (reasonCode == null) return null;
@@ -118,6 +122,21 @@ export const PHYSICAL_OUTBOUND_WHERE: Prisma.inventory_logsWhereInput = {
  * null-INCLUSIVE intent and matches isReorderDemandRow (`reasonCode !== 'CORRECTION'`).
  * The base delta/logType conditions stay top-level (AND-composed with the OR). Pinned by
  * the contract test.
+ *
+ * COLLATION CAVEAT — THE ONE DOCUMENTED EXCEPTION to the `shrinkageReasonOf` rule above
+ * (FD2-5). `NOT: { reasonCode: 'CORRECTION' }` compares reasonCode IN SQL, so which rows
+ * it excludes depends on the column's collation: under MySQL's `*_ci` default a lowercase
+ * 'correction' is excluded too; under a `_bin`/`_cs` column it would be KEPT. That is
+ * tolerable HERE and nowhere else, because this WHERE is a NARROWING, not a
+ * classification — SQL narrows, JS classifies.
+ *
+ * NOT FOR CLASSIFICATION DECISIONS. The LIVE reorder path does not read this constant at
+ * all: `lib/reports/demand.ts` pulls the rows and predicates them in JS via
+ * `isReorderDemandRow`, which is where the demand-vs-not decision is actually made. A
+ * caller that needs to DECIDE something about a row must do the same rather than trust
+ * this predicate's SQL-side reasonCode comparison. The export stays because the contract
+ * pack names it as the SQL-boundary half of the locked reorder-demand predicate (spec §2
+ * D1) and the contract test pins its exact shape.
  */
 export const REORDER_DEMAND_WHERE: Prisma.inventory_logsWhereInput = {
   delta: { lt: 0 },

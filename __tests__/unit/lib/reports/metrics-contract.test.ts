@@ -6,6 +6,8 @@
  * shared days-covered denominator, and the non-empty definition strings.
  */
 
+import fs from "fs";
+import path from "path";
 import { mockReset, type DeepMockProxy } from "jest-mock-extended";
 import type { PrismaClient } from "@prisma/client";
 
@@ -152,5 +154,46 @@ describe("definition strings are non-empty (spec §2 D3)", () => {
   // deprecated re-export. Both spellings must stay the SAME frozen tuple.
   it("SHRINKAGE_CLASS_REASONS is the canonical four-reason taxonomy", () => {
     expect(SHRINKAGE_CLASS_REASONS).toEqual(["DAMAGE", "THEFT", "EXPIRY", "COUNT"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD2-5 — the ONE reasonCode comparison that still happens in SQL is ANNOTATED.
+//
+// FD-5 made `shrinkageReasonOf` the single classification rule and declassified every
+// SQL-boundary reason decision. REORDER_DEMAND_WHERE survived it: its `NOT: { reasonCode:
+// 'CORRECTION' }` is still a collation-dependent SQL comparison. It is legitimate — it
+// NARROWS, and the live reorder path re-decides in JS (demand.ts / isReorderDemandRow) —
+// but an unannotated exception to a binding rule is an invitation to copy it into a
+// classification site. The annotation is the contract, so it is pinned like one.
+// ---------------------------------------------------------------------------
+
+describe("FD2-5 REORDER_DEMAND_WHERE carries its collation + not-a-classifier annotation", () => {
+  const src = fs.readFileSync(
+    path.join(process.cwd(), "lib/reports/metrics-contract.ts"),
+    "utf8",
+  );
+  /** The doc block immediately preceding the export. */
+  const annotation = src.slice(0, src.indexOf("export const REORDER_DEMAND_WHERE"));
+
+  it("names the collation dependency of the SQL-side reasonCode comparison", () => {
+    expect(annotation).toContain("COLLATION CAVEAT");
+    expect(annotation).toMatch(/_bin|_cs/);
+    expect(annotation).toContain("SQL narrows, JS classifies");
+  });
+
+  it("says it is NOT for classification decisions and points at the JS predicate", () => {
+    expect(annotation).toContain("NOT FOR CLASSIFICATION DECISIONS");
+    expect(annotation).toContain("demand.ts");
+    expect(annotation).toContain("isReorderDemandRow");
+  });
+
+  it("the FD-5 binding rule points AT this exception (a rule with a silent exception is a trap)", () => {
+    const rule = src.slice(0, src.indexOf("export function shrinkageReasonOf"));
+    expect(rule).toContain("REORDER_DEMAND_WHERE");
+  });
+
+  it("keeps the export the contract pack references", () => {
+    expect(src).toContain("export const REORDER_DEMAND_WHERE");
   });
 });

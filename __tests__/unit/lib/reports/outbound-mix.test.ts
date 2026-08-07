@@ -751,6 +751,44 @@ describe("C6 get_sales — salesDataStart / windowCoverage / includeZeroRows (Ta
       expect(zero.reason).toEqual(expect.any(String));
     });
 
+    // FD2-3: the zero-row REASON must discriminate the same three ways compare does.
+    // A caller-wide start six years before the window does not "predate/straddle"
+    // anything — saying so is false on its face, and it points the reader at the wrong
+    // fix (widen the window) instead of the real one (a company that never recorded).
+    it("a per-company degradation names THE COMPANIES, never 'window predates/straddles'", async () => {
+      seedSales({
+        salesDataStart: "2020-01-01",
+        companyStarts: [{ companyId: "c1", _min: { dayKey: "2020-01-01" } }], // c2 factless
+        catalog: [{ id: 2, name: "Silent" }],
+      });
+      const data = await multiData({ groupBy: "product", includeZeroRows: true, relativeDays: 30 });
+      const zero = (data.rows as Array<Record<string, unknown>>).find((r) => r.productId === 2)!;
+
+      const reason = zero.reason as string;
+      expect(reason).not.toContain("predates");
+      expect(reason).not.toContain("straddles");
+      // The window IS covered caller-wide (2020-01-01) — what is not covered is c2.
+      expect(reason).toContain("c2");
+      expect(reason).toContain("in every company");
+      expect(reason).toContain("latest-starting company governs zero legality");
+    });
+
+    it("a WINDOW-level gap still reads as predates/straddles (the discrimination cuts both ways)", async () => {
+      seedSales({
+        // Both companies start AFTER the window: this really is a window-level gap.
+        salesDataStart: "2099-01-01",
+        companyStarts: [
+          { companyId: "c1", _min: { dayKey: "2099-01-01" } },
+          { companyId: "c2", _min: { dayKey: "2099-06-01" } },
+        ],
+        catalog: [{ id: 2, name: "Silent" }],
+      });
+      const data = await multiData({ groupBy: "product", includeZeroRows: true, relativeDays: 30 });
+      const zero = (data.rows as Array<Record<string, unknown>>).find((r) => r.productId === 2)!;
+      expect(zero.reason).toContain("predates/straddles");
+      expect(zero.reason).toContain("2099-01-01");
+    });
+
     it("a staggered set whose LATEST start still covers the window stays 'full'", async () => {
       seedSales({
         salesDataStart: "2020-01-01",
@@ -1030,6 +1068,96 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       expect((compare.unranked as unknown[]).length).toBe(unrankedCount);
     },
   );
+
+  // FD2-2 at the TOOL layer: the module returns measured sums under a degraded window;
+  // the envelope has to carry the disclosure that explains them, or a reader sees plain
+  // numbers with no hint that one of their companies contributes nothing.
+  it("a DEGRADED window ships MEASURED rows PLUS the companyCoverage disclosure", async () => {
+    const MULTI = testCtx({ companyIds: ["c1", "c2"] });
+    seedSales({
+      dataStart: "2020-01-01",
+      // c2 has no facts at all — degradation, but c1's rows are real.
+      companyStarts: [{ companyId: "c1", _min: { dayKey: "2020-01-01" } }],
+      a: [{ productId: 1, _sum: { orderedQty: 10 } }],
+      b: [
+        { productId: 1, _sum: { orderedQty: 30 } },
+        { productId: 2, _sum: { orderedQty: 12 } },
+      ],
+      names: [
+        { id: 1, name: "One", deletedAt: null },
+        { id: 2, name: "Two", deletedAt: null },
+      ],
+    });
+    const result = await assistantTools.compare_periods.run(
+      { metric: "sales_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 }, groupBy: "product" },
+      MULTI,
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as Record<string, unknown>;
+    const coverage = data.coverage as Record<string, unknown>;
+
+    // Product 1's rows were recorded; they are reported, ranked, with a real delta.
+    expect((data.rows as Array<Record<string, unknown>>).map((r) => r.productId)).toEqual([1]);
+    expect((data.rows as Array<Record<string, unknown>>)[0].delta).toBe(20);
+    // Product 2 has no period-A row: unknown under degradation, never a measured 0.
+    expect((data.unranked as Array<Record<string, unknown>>).map((r) => r.productId)).toEqual([2]);
+    // ...and BOTH arrays are non-empty at once, which the disclosure explains.
+    expect(coverage.periodCoverage).toEqual({ a: "partial", b: "partial" });
+    expect(coverage.companyCoverage).toEqual([
+      { companyId: "c1", salesDataStart: "2020-01-01" },
+      { companyId: "c2", salesDataStart: null },
+    ]);
+    expect(coverage.companyCoverageNote).toContain("c2");
+    expect(coverage.companyCoverageNote).toContain("MEASURED");
+  });
+
+  it("an UNDEGRADED comparison carries no companyCoverage keys at all", async () => {
+    seedSales({
+      dataStart: "2020-01-01",
+      a: [{ productId: 1, _sum: { orderedQty: 10 } }],
+      b: [{ productId: 1, _sum: { orderedQty: 30 } }],
+      names: [{ id: 1, name: "One", deletedAt: null }],
+    });
+    const data = await okData({
+      metric: "sales_units",
+      periodA: { relativeDays: 7 },
+      periodB: { relativeDays: 7 },
+      groupBy: "product",
+    });
+    const coverage = data.coverage as Record<string, unknown>;
+    expect(coverage.companyCoverage).toBeUndefined();
+    expect(coverage.companyCoverageNote).toBeUndefined();
+  });
+
+  it("TOTALS mode carries the same disclosure pair", async () => {
+    const MULTI = testCtx({ companyIds: ["c1", "c2"] });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) =>
+      Promise.resolve(args?._min ? { _min: { dayKey: "2020-01-01" } } : { _sum: { orderedQty: 7 } }) as never,
+    );
+    db.productSalesFact.groupBy.mockResolvedValue([
+      { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+    ] as never);
+    db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+
+    const result = await assistantTools.compare_periods.run(
+      { metric: "sales_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 } },
+      MULTI,
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as Record<string, unknown>;
+    // The sums are MEASURED (7 units in each period) even though c2 never recorded.
+    expect(data.a).toBe(7);
+    expect(data.b).toBe(7);
+    const coverage = data.coverage as Record<string, unknown>;
+    expect(coverage.companyCoverage).toEqual([
+      { companyId: "c1", salesDataStart: "2020-01-01" },
+      { companyId: "c2", salesDataStart: null },
+    ]);
+    expect(coverage.companyCoverageNote).toContain("c2");
+  });
 
   it("JOINT byte fit — unranked-only (period predates the source) shrinks the unranked array", async () => {
     seedSales({

@@ -56,10 +56,12 @@ import { resolveAssistantProduct, resolveAssistantProducts } from "@/lib/assista
 import {
   callerScopedSalesCoverage,
   callerWindowCoverage,
+  companyCoverageDetail,
   SALES_ROWS_NOTE,
   SALES_COMPANY_COVERAGE_NOTE,
+  type CallerScopedSalesCoverage,
 } from "@/lib/assistant/sales-coverage";
-import { type WindowCoverage } from "@/lib/reports/metrics-contract";
+import { classifyWindowCoverage, type WindowCoverage } from "@/lib/reports/metrics-contract";
 import {
   approvedProductIds,
   productIdentities,
@@ -869,7 +871,8 @@ type ZeroSalesRow = {
  */
 async function withZeroSalesRows(
   rows: object[],
-  salesDataStart: string | null,
+  coverage: Pick<CallerScopedSalesCoverage, "salesDataStart" | "companyCoverage">,
+  windowFrom: string,
   windowCoverage: WindowCoverage,
 ): Promise<{ rows: object[]; zeros: ZeroSalesRow[] }> {
   const present = new Set(
@@ -882,11 +885,21 @@ async function withZeroSalesRows(
   // A fully-covered window makes silence measurable; anything else leaves it unknown
   // (nulls + a named reason), because a partial sum can never stand in for the whole.
   const measured = windowCoverage === "full";
+  const salesDataStart = coverage.salesDataStart;
+  // FD2-3: the SAME three-way discrimination compare_periods makes — no data at all /
+  // the WINDOW is outside the data / the window is covered caller-wide but a MEMBER
+  // COMPANY was not recording. The third case used to borrow the second's sentence, which
+  // is false on its face when the caller-wide start is years before the window: it sends
+  // the reader to widen a window that is already covered instead of at the company that
+  // never recorded. The companies are named, because their ids are right here.
   const reason =
     salesDataStart == null
       ? // No truthful substitution exists for the starts-<date> template.
         "no attributed sales data recorded"
-      : `window predates/straddles sales data (starts ${salesDataStart})`;
+      : classifyWindowCoverage(salesDataStart, windowFrom) === "full"
+        ? `sales data is not recorded in every company for this window ` +
+          `(${companyCoverageDetail(coverage.companyCoverage)}; ${SALES_COMPANY_COVERAGE_NOTE})`
+        : `window predates/straddles sales data (starts ${salesDataStart})`;
   const zeros: ZeroSalesRow[] = missing.map((id) => {
     const identity = identities.get(id);
     const row: ZeroSalesRow = {
@@ -949,9 +962,13 @@ const COMPARE_EVIDENCE_NOTE =
   "period A, never that the product did not exist.";
 
 const COMPARE_UNRANKED_NOTE =
-  "unranked rows are a COVERAGE artifact, not a result: they appear only when the " +
-  "metric's source does not cover a whole period, and then for EVERY product alike. " +
-  "Cite them as unknown-base — never as growth, decline, or 'newly active'.";
+  "unranked rows are a COVERAGE artifact, not a result: a row lands here when one of its " +
+  "periods is UNKNOWN — either the metric's source does not cover that period at all " +
+  "(then EVERY product is unranked alike), or coverage is degraded across your companies " +
+  "(see coverage.companyCoverage) and this product has no rows in that period, where " +
+  "absence cannot be read as zero. Rows with recorded sums in both periods are still " +
+  "MEASURED and ranked. Cite unranked rows as unknown-base — never as growth, decline, " +
+  "or 'newly active'.";
 
 /** Attach identity to every row BEFORE byte-fitting, so the fitter measures the shape
  *  the caller actually receives. Evidence fields ride as null placeholders here and are
@@ -1005,8 +1022,12 @@ async function fillCompareEvidence(
  *
  * JOINT BYTE FIT (G2-8, corrected by review G2-5): `rows` and `unranked` share ONE budget
  * — ranked fits against 70% of it, then unranked fits against the MEASURED remainder.
- * Only ONE of the two is ever non-empty (coverage is all-or-nothing per period), so the
- * split simply decides how much the populated array may use.
+ * FD2-2: both arrays CAN now be non-empty at once (per-company degradation measures the
+ * products that have rows and unranks the ones that do not), where coverage was
+ * previously all-or-nothing per period. The split is unchanged and needs no change — it
+ * already answers "how much may each array use" rather than assuming one of them is
+ * empty — but the contract pack's "both-arrays-non-empty is structurally impossible" note
+ * no longer holds.
  *
  * The budget is the EXACT room this result has: `byteBudget(ctx)` minus the MEASURED
  * envelope, never a fixed 8 KiB reserve floored at 4 KiB. Both of those were bigger than
@@ -1068,6 +1089,12 @@ async function compareByProduct(
       metricScopes: { sales: "company", ledger: "global" },
       // Source-level coverage per period — the SAME classification get_sales uses.
       periodCoverage: result.periodCoverage,
+      // FD2-2: the per-company disclosure, identical to totals mode's. Under degradation
+      // BOTH arrays can be populated (measured rows rank; rows absent from a period do
+      // not), and this pair is what explains the mixture.
+      ...(result.companyCoverage
+        ? { companyCoverage: result.companyCoverage, companyCoverageNote: result.companyCoverageNote }
+        : {}),
       reasonsKeys: "a = periodA, b = periodB, pctChange = percent change",
       unequalLengths: result.unequalLengths,
       unrankedNote: COMPARE_UNRANKED_NOTE,
@@ -1489,7 +1516,18 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // rows still advances — the alternative is a cursor that never moves).
       const sourceConsumed =
         page.returned === rows.length ? products.length : sourceIndexOf[page.returned];
-      const consumed = offset + sourceConsumed;
+      // FD2-4: and the cursor must be PAGE-ALIGNED, because `assertPageAligned` is the
+      // first thing the next call runs — a raw source index (what a byte-TRUNCATED page
+      // consumes: `sourceIndexOf[page.returned]`, an arbitrary number) is a cursor this
+      // tool's own schema rejects. One call reads exactly ONE DB page, so the only legal
+      // advance is a whole page: floor the consumed rows to a multiple of `limit`, and
+      // never to zero — a 0 would hand back the offset we were given and stall the walk.
+      //
+      // The cost is stated rather than hidden: rows the byte fit dropped are SKIPPED by
+      // the aligned cursor (`returned` < `limit` is the signal that happened). At this
+      // budget they could not be delivered anyway, and an illegal cursor would end the
+      // walk in a schema rejection instead of a short page.
+      const consumed = offset + Math.max(Math.floor(sourceConsumed / limit), 1) * limit;
       return ok(
         {
           products: page.rows,
@@ -1797,7 +1835,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // never manufactured for a company that was not yet recording.
       const windowCoverage = callerWindowCoverage(coverage, window.from);
       const zeroRowResult = args.includeZeroRows
-        ? await withZeroSalesRows(serialized, coverage.salesDataStart, windowCoverage)
+        ? await withZeroSalesRows(serialized, coverage, window.from, windowCoverage)
         : { rows: serialized, zeros: [] as object[] };
       const withZeros = zeroRowResult.rows;
       // G5 disclosure, PER GRAIN (spec C13). The product grain's rows carry `lifecycle`
@@ -2495,13 +2533,18 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `yourself. direction:'increase'|'decrease' filters the ranked set BEFORE paging, ` +
       `and limit/offset page it. A ranked row with a MEASURED a of 0 and b > 0 is the ` +
       `"started moving" case (say 'no recorded activity in period A', never 'new ` +
-      `product'). The separate 'unranked' array is a COVERAGE artifact — it fills only ` +
-      `when the metric's source does not cover a whole period, and then for every ` +
-      `product alike; cite those rows as unknown-base, NEVER as growth. mode is ` +
+      `product'). The separate 'unranked' array is a COVERAGE artifact — it fills when a ` +
+      `period's value is unknown: either the metric's source does not cover that period ` +
+      `at all (then every product alike), or your companies' sales coverage is degraded ` +
+      `(coverage.companyCoverage names them) and the product has no rows in that period; ` +
+      `cite those rows as unknown-base, NEVER as growth. mode is ` +
       `'totals' or 'by_product'. A period with NO rows ` +
       `counts as 0 ONLY when the metric's data covers the whole interval; a period ` +
       `that predates (or straddles) the data reads as null + a reason — growth from a ` +
-      `pre-history period is UNKNOWN, never "growth from zero". pctChange is null when ` +
+      `pre-history period is UNKNOWN, never "growth from zero". Degraded per-company ` +
+      `coverage removes only that zero: measured sums over recorded rows are still ` +
+      `reported, with coverage.companyCoverage/companyCoverageNote beside them. ` +
+      `pctChange is null when ` +
       `period A is zero. reasons keys: a = periodA, b = periodB, pctChange = percent ` +
       `change. unequalLengths flags mismatched window lengths (comparison still runs). ` +
       `outbound_units/inbound_units use a SIGN-FIRST ledger predicate over CALENDAR-DAY ` +
@@ -2569,6 +2612,15 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             // consumer never has to parse the sentence to learn which pool each metric
             // reads (sales metrics = your companies; ledger metrics = the global pool).
             metricScopes: { sales: "company", ledger: "global" },
+            // FD2-2: a degraded window returns MEASURED sums, so the fact that one of the
+            // caller's companies contributes nothing has to be visible beside them —
+            // present only when the companies' starts actually differ.
+            ...(result.companyCoverage
+              ? {
+                  companyCoverage: result.companyCoverage,
+                  companyCoverageNote: result.companyCoverageNote,
+                }
+              : {}),
             reasonsKeys: "a = periodA, b = periodB, pctChange = percent change",
             unequalLengths: result.unequalLengths,
             // G5 disclosure (spec C13): totals mode is a non-product grain, so both

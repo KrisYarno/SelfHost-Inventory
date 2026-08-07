@@ -19,6 +19,21 @@
  * and `period.from` are compared as ISO day-keys, matching every other window in
  * this codebase), never sub-day.
  *
+ * WHAT PER-COMPANY DEGRADATION DOES TO THAT RULE (FD2-2, binding): a sales caller whose
+ * companies do not share one start has a window that is degraded to "partial" even
+ * though the metric's own `dataStart` covers it. That degradation governs ZERO LEGALITY
+ * ONLY — no measured zero may be synthesized, no growth-from-zero may be computed, and a
+ * period with NO matching rows reads null + a reason. It NEVER discards a MEASURED sum:
+ * a sum over rows that were really recorded is a true statement about recorded facts, and
+ * it is returned with the `companyCoverage` disclosure beside it. (get_sales has always
+ * had exactly this shape — real rows survive a "partial" window; only the SYNTHESIZED
+ * zero rows go null-with-a-reason. Nulling measured sums here made the two surfaces
+ * contradict each other over one seeded source, which is the failure seam S8 exists to
+ * prevent.) The window-level cases are untouched: when the metric's OWN source starts
+ * after the period began (predates or straddles), no sum can stand for the whole
+ * interval and the value stays null — the distinction is structural-vs-windowed, and it
+ * falls out of asking the caller-wide classification separately from the degraded one.
+ *
  * MUST stay Next-free (imported by the assistant-tool layer): no `next/*`, no
  * `@/lib/api-utils`.
  */
@@ -40,8 +55,10 @@ import {
 } from "@/lib/reports/outbound-mix";
 import {
   callerWindowCoverage,
+  companyCoverageDetail,
   salesDataStartsByCompany,
   SALES_COMPANY_COVERAGE_NOTE,
+  SALES_COMPANY_COVERAGE_MEASURED_NOTE,
 } from "@/lib/assistant/sales-coverage";
 
 export type CompareMetric = "sales_units" | "sales_revenue" | "outbound_units" | "inbound_units";
@@ -61,6 +78,14 @@ export interface ComparePeriodsResult {
   pctChange: number | null;
   reasons: Record<string, string>;
   unequalLengths: boolean;
+  /** FD2-2 disclosure: the per-company sales starts, present ONLY when they differ (a
+   *  degraded window). It rides even when both periods are MEASURED — that is precisely
+   *  the case a reader cannot otherwise see. Absent for the ledger metrics (no company
+   *  dimension) and for callers whose companies share one start. */
+  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
+  /** The sentence that goes with it: which companies degrade the window, and what the
+   *  degradation does (zero legality only). Present exactly when companyCoverage is. */
+  companyCoverageNote?: string;
   /** G5 disclosure (spec C13). Totals mode carries no product ids, so BOTH counts come
    *  from the contributor census, over BOTH periods (a product that contributed to
    *  either one is a contributor to this comparison). */
@@ -138,18 +163,53 @@ interface MetricCoverageSource {
  *  and every silence became a measured 0 (a by_product row of 0, a scalar delta computed
  *  from a manufactured base). get_sales degrades exactly this case; comparing the same
  *  facts over the same window had to classify it identically or the two tools contradict
- *  each other over ONE seeded source. */
+ *  each other over ONE seeded source.
+ *
+ *  FD2-1: the PER-COMPANY question is asked SOURCE-LEVEL — `productId` narrows the VALUE
+ *  reads, never "was this company recording sales at all?". Folding it in made a company
+ *  that simply never sold THAT product indistinguishable from a company with no coverage,
+ *  so a product-scoped comparison across two fully-recording companies degraded itself on
+ *  the strength of a product's absence. get_sales asks the identical question source-level
+ *  (its `salesDataStart` carries no productId), and seam S8 only holds if both ask it the
+ *  same way. The CALLER-WIDE `dataStart` keeps its product-scoped meaning: it is what the
+ *  predates/straddles reason strings quote ("starts <date>") and what has classified
+ *  single-company product comparisons since birth — narrowing that too would change
+ *  answers this finding never questioned. */
 async function salesStarts(
   companyIds: string[],
   productId: number | undefined,
   approvedIds?: number[],
 ): Promise<MetricCoverageSource> {
   if (companyIds.length === 0) return { dataStart: null };
-  const starts = await salesDataStartsByCompany(companyIds, productFilter(productId, approvedIds));
+  const [source, scopedStart] = await Promise.all([
+    salesDataStartsByCompany(companyIds, productFilter(undefined, approvedIds)),
+    // One extra read ONLY when a productId narrows the values; otherwise the two
+    // questions are the same question. It is a bare `_min(dayKey)` — the per-company
+    // half of the product-scoped answer is exactly what must NOT govern coverage.
+    productId == null ? null : callerWideSalesStart(companyIds, productId, approvedIds),
+  ]);
   return {
-    dataStart: starts.salesDataStart,
-    ...(starts.staggered ? { companyCoverage: starts.perCompany } : {}),
+    dataStart: productId == null ? source.salesDataStart : scopedStart,
+    ...(source.staggered ? { companyCoverage: source.perCompany } : {}),
   };
+}
+
+/** `MIN(dayKey)` for the caller's companies under the PRODUCT-scoped narrowing — the
+ *  date the predates/straddles reason strings quote. Company scoping is applied here and
+ *  is not optional, same as every other read in this module. */
+async function callerWideSalesStart(
+  companyIds: string[],
+  productId: number,
+  approvedIds?: number[],
+): Promise<string | null> {
+  const row = await prisma.productSalesFact.aggregate({
+    where: {
+      companyId: { in: companyIds },
+      ...productFilter(productId, approvedIds),
+    },
+    _min: { dayKey: true },
+  });
+  return row?._min?.dayKey ?? null;
 }
 
 /** Sum of ProductSalesFact.orderedQty over a window, company + optional product scoped. */
@@ -318,13 +378,37 @@ function periodCoverage(source: MetricCoverageSource, window: ResolvedWindow): W
 }
 
 /**
- * Resolve one period's raw aggregate into the zero-vs-unknown result. Coverage is
- * checked FIRST, before ever looking at `raw` — a real sum is only trustworthy
- * when the source covers the WHOLE interval (`dataStart <= window.from`); a period
- * straddling `dataStart` (window.from < dataStart <= window.to) has, at best, a
- * PARTIAL sum for its covered tail, and must read as unknown just like a period
- * that predates the data entirely — never as an authoritative total. Only once
- * coverage is confirmed does an absent sum become a real measured `0`.
+ * The reason a period's ABSENCE is unknown rather than zero under per-company degradation
+ * (FD2-2). Deliberately worded as a statement about the PERIOD's coverage, not about the
+ * rows: by_product reuses this exact vocabulary for its unranked rows, where the period
+ * itself may well have rows — just not for that product.
+ */
+function degradedCoverageReason(
+  periodLabel: "A" | "B",
+  metric: CompareMetric,
+  source: MetricCoverageSource,
+): string {
+  const detail = companyCoverageDetail(source.companyCoverage);
+  return (
+    `period ${periodLabel} is not fully covered by ${metric} data in every company ` +
+    `(${detail}; ${SALES_COMPANY_COVERAGE_NOTE}) — absence here is UNKNOWN, never zero`
+  );
+}
+
+/**
+ * Resolve one period's raw aggregate into the zero-vs-unknown result.
+ *
+ * The WINDOW-level check comes first and is unchanged (spec §5 T-CMP REV-2): a real sum
+ * is only trustworthy when the metric's own source covers the WHOLE interval
+ * (`dataStart <= window.from`); a period straddling `dataStart` has, at best, a PARTIAL
+ * sum for its covered tail, and must read as unknown just like a period that predates the
+ * data entirely — never as an authoritative total.
+ *
+ * PER-COMPANY degradation is the OTHER axis (FD2-2) and does strictly less: the
+ * caller-wide source DOES cover the interval, one of the caller's companies just was not
+ * recording in it. That makes SILENCE unreadable, not the recorded rows — so `raw`
+ * survives when it exists, and only an absent sum becomes null + a named reason. The
+ * disclosure (`companyCoverage`) rides on the result either way.
  */
 function resolvePeriod(
   raw: number | null,
@@ -340,31 +424,48 @@ function resolvePeriod(
   // get_sales' windowCoverage and this tool can never classify one seeded source
   // differently — INCLUDING the per-company degradation (FD-1): with staggered company
   // starts the LATEST-starting company governs, and a company with no facts at all
-  // degrades the set outright. The reason TEXT still distinguishes predates-vs-straddles
-  // vs per-company below — that distinction is prose, not a different verdict.
+  // degrades the set outright.
   const coverage = periodCoverage(source, window);
   if (coverage === "none") {
     reasons[label] = `no ${metric} data recorded`;
     return null;
   }
-  if (coverage === "partial") {
-    // Source does not cover the whole interval — either the period predates the
-    // data entirely (dataStart > window.to), straddles it (dataStart falls
-    // inside the window), or the caller-wide start covers it while a MEMBER COMPANY's
-    // does not. Either way `raw` (even a non-null partial sum) is discarded: it cannot
-    // stand in for the whole period.
+  // The caller-wide classification, asked SEPARATELY from the degraded one: it is what
+  // distinguishes "this window is outside the data" (no sum can be trusted) from "a
+  // member company was not recording" (only silence cannot be trusted).
+  if (classifyWindowCoverage(dataStart, window.from) !== "full") {
     reasons[label] =
-      classifyWindowCoverage(dataStart, window.from) === "full"
-        ? `period ${periodLabel} is not fully covered by ${metric} data in every company ` +
-          `(${SALES_COMPANY_COVERAGE_NOTE})`
-        : dataStart! > window.to
-          ? `period${periodLabel} predates ${metric} data (starts ${dataStart})`
-          : `period ${periodLabel} is not fully covered by ${metric} data (starts ${dataStart})`;
+      dataStart! > window.to
+        ? `period${periodLabel} predates ${metric} data (starts ${dataStart})`
+        : `period ${periodLabel} is not fully covered by ${metric} data (starts ${dataStart})`;
     return null;
+  }
+  if (coverage === "partial") {
+    // FD2-2: per-company degradation, and the source covers the interval. A sum over rows
+    // that were recorded is reported; only its ABSENCE stays unknown.
+    if (raw == null) {
+      reasons[label] = degradedCoverageReason(periodLabel, metric, source);
+      return null;
+    }
+    return raw;
   }
   // dataStart <= window.from: source is complete for the whole interval, so an
   // absent sum is a real measured zero, not an unknown.
   return raw ?? 0;
+}
+
+/** The `companyCoverage` + note disclosure pair, present exactly when the caller's
+ *  companies do not share one start (FD2-2). Spread into both modes' results. */
+function companyCoverageDisclosure(
+  source: MetricCoverageSource,
+): Pick<ComparePeriodsResult, "companyCoverage" | "companyCoverageNote"> {
+  if (source.companyCoverage == null) return {};
+  return {
+    companyCoverage: source.companyCoverage,
+    companyCoverageNote:
+      `${companyCoverageDetail(source.companyCoverage)}; ` +
+      `${SALES_COMPANY_COVERAGE_NOTE} ${SALES_COMPANY_COVERAGE_MEASURED_NOTE}`,
+  };
 }
 
 /**
@@ -409,6 +510,7 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
     pctChange,
     reasons,
     unequalLengths: periodA.days !== periodB.days,
+    ...companyCoverageDisclosure(starts),
     excludedUnapprovedProducts: disclosure.excludedUnapprovedProducts,
     archivedProductsIncluded: disclosure.archivedProductsIncluded,
     approvalNote: APPROVED_UNIVERSE_NOTE,
@@ -427,6 +529,16 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
 // source covers the whole period and EVERY product is measurable in it, or it does not
 // and EVERY product is unknown in it. A "started moving" product is therefore a RANKED
 // row with a MEASURED a == 0 — never an unranked one.
+//
+// FD2-2 QUALIFIES THE "ALL-OR-NOTHING" HALF (deviation from the erratum's prose, forced
+// by the adjudicated semantic): it still holds for WINDOW-level coverage — a period the
+// metric's own source does not cover leaves every product unknown at once. It does NOT
+// hold under PER-COMPANY degradation, which governs zero legality only: there, a product
+// with rows in both periods is measured and RANKED, while a product with no rows in one
+// of them is unknown there and unranked. So the two arrays CAN both be non-empty (the
+// joint byte fitter in tools.ts handles that: ranked takes its share, unranked the
+// measured remainder). What never happens is the thing the erratum exists to stop — a
+// product being ranked on a base nobody measured.
 // ---------------------------------------------------------------------------
 
 /** One product's cross-period comparison. `name`/`lifecycle` and the evidence fields
@@ -444,14 +556,20 @@ export interface ComparePeriodsByProductResult {
   /** Both sides measured: ranked |delta| desc (ties delta desc, then productId asc),
    *  with `direction` ALREADY applied — so a caller's totalRows is post-direction. */
   ranked: ComparePeriodsProductRow[];
-  /** Either side unknown. Non-empty ONLY when a period is not fully covered, and then
-   *  for every product alike. Citable as unknown-base, NEVER as growth. */
+  /** Either side unknown: the period is not fully covered at the WINDOW level (then every
+   *  product lands here at once), or coverage is degraded per company and this product has
+   *  no rows in that period (FD2-2 — its absence cannot be read as a zero). Citable as
+   *  unknown-base, NEVER as growth. */
   unranked: ComparePeriodsProductRow[];
   /** Period-level reason vocabulary (the scalar mode's strings), shared by every
    *  unranked row because the cause is the SOURCE, not the product. */
   reasons: Record<string, string>;
   periodCoverage: { a: WindowCoverage; b: WindowCoverage };
   unequalLengths: boolean;
+  /** FD2-2 disclosure, identical to the scalar mode's: the per-company starts + their
+   *  sentence, present ONLY when the caller's companies do not share one. */
+  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
+  companyCoverageNote?: string;
   /** G5 disclosure, excluded half (spec C13). The ARCHIVED half is product-grain here —
    *  the tool layer counts it off the rows' own `lifecycle` after attaching identities. */
   excludedUnapprovedProducts: number;
@@ -524,9 +642,10 @@ export async function comparePeriodsByProduct(opts: {
 
   const [starts, aByProduct, bByProduct, excludedUnapprovedProducts] = await Promise.all([
     // FD-1: the SAME coverage source the scalar mode resolves — including the per-company
-    // starts for a sales metric. A degraded window must leave EVERY row's a/b null; a
-    // by_product row carrying a measured 0 under a staggered membership is precisely the
-    // manufactured zero this rule exists to prevent, per product.
+    // starts for a sales metric. A by_product row carrying a measured 0 under a staggered
+    // membership is precisely the manufactured zero this rule exists to prevent, per
+    // product — FD2-2: and precisely that, no more. A row with real sums in both periods
+    // is still measured and still ranked.
     isSales
       ? salesStarts(companyIds, undefined, approvedIds)
       : ledgerDataStart(
@@ -564,13 +683,33 @@ export async function comparePeriodsByProduct(opts: {
     new Set([...Array.from(aByProduct.keys()), ...Array.from(bByProduct.keys())]),
   );
 
+  // The caller-wide classifications, asked separately from the degraded ones (FD2-2):
+  // window-level coverage decides whether ANY value in the period is trustworthy;
+  // per-company degradation decides only whether ABSENCE may be read as a zero.
+  const callerWideA = classifyWindowCoverage(starts.dataStart, periodA.from);
+  const callerWideB = classifyWindowCoverage(starts.dataStart, periodB.from);
+
+  /** One product's value in ONE period, under that period's two classifications. */
+  const valueOf = (
+    coverage: WindowCoverage,
+    callerWide: WindowCoverage,
+    sums: Map<number, number>,
+    productId: number,
+  ): number | null => {
+    // A fully-covered period turns absence into a MEASURED 0.
+    if (coverage === "full") return sums.get(productId) ?? 0;
+    // Degraded per company, source covers the window: a recorded sum stands, absence is
+    // unknown. Never a manufactured zero standing in for a company that was not recording.
+    if (callerWide === "full") return sums.get(productId) ?? null;
+    // The window itself is outside the data — nothing in it is measurable.
+    return null;
+  };
+
   const ranked: ComparePeriodsProductRow[] = [];
   const unranked: ComparePeriodsProductRow[] = [];
   for (const productId of productIds) {
-    // A fully-covered period turns absence into a MEASURED 0; anything else leaves it
-    // unknown. Never a manufactured zero standing in for "we cannot see that far back".
-    const a = coverageA === "full" ? aByProduct.get(productId) ?? 0 : null;
-    const b = coverageB === "full" ? bByProduct.get(productId) ?? 0 : null;
+    const a = valueOf(coverageA, callerWideA, aByProduct, productId);
+    const b = valueOf(coverageB, callerWideB, bByProduct, productId);
     if (a == null || b == null) {
       unranked.push({ productId, a, b, delta: null, pctChange: null, reasons });
       continue;
@@ -607,6 +746,7 @@ export async function comparePeriodsByProduct(opts: {
     reasons,
     periodCoverage: { a: coverageA, b: coverageB },
     unequalLengths: periodA.days !== periodB.days,
+    ...companyCoverageDisclosure(starts),
     excludedUnapprovedProducts,
   };
 }

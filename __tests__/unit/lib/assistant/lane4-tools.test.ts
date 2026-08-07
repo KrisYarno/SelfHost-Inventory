@@ -273,6 +273,61 @@ describe("find_product: APPROVED-only + caps", () => {
     ]);
   });
 
+  // FD2-4: the OTHER way this page shortens. FD-3 fixed the cursor for OMITTED rows (it
+  // counts source rows), but a BYTE-TRUNCATED page consumes a source index that is not a
+  // whole page — and `assertPageAligned` rejects any offset that is not a multiple of
+  // `limit`, so the tool handed back a cursor its own schema refuses. Exactly the FD-3
+  // defect, reached through the byte fitter instead of the identity lookup.
+  it("nextOffset stays page-ALIGNED when the byte fit truncates the page (and the walk continues)", async () => {
+    // Rows fat enough that the 4 KiB floor cannot hold a whole page of them.
+    const CATALOG = Array.from({ length: 12 }, (_, i) =>
+      product({ id: i + 1, name: `Product ${i + 1} ` + "x".repeat(1200) }),
+    );
+    mockGetProducts.mockImplementation((filters: { page: number; pageSize: number }) => ({
+      products: CATALOG.slice((filters.page - 1) * filters.pageSize, filters.page * filters.pageSize),
+      total: CATALOG.length,
+    }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.product.findMany.mockImplementation((args: any) =>
+      Promise.resolve(
+        ((args?.where?.id?.in ?? []) as number[]).map((id) => ({
+          id,
+          name: `Product ${id}`,
+          deletedAt: null,
+        })),
+      ) as never,
+    );
+
+    // A tight late-turn budget, so the page shrinks instead of the result being discarded.
+    const TIGHT = testCtx({ companyIds: ["c1"], remainingBytes: 5_000 });
+    const first = await assistantTools.find_product.run({ query: "product", limit: 4 }, TIGHT);
+    if (first.status !== "ok") throw new Error("page 1 not ok");
+    const page1 = first.data as { products: unknown[]; returned: number; nextOffset: number | null };
+
+    // The fitter really did shorten this page — otherwise the test proves nothing.
+    expect(page1.returned).toBeLessThan(4);
+    expect(page1.returned).toBeGreaterThan(0);
+    // ...and the cursor it hands back is a LEGAL offset for this limit.
+    expect(page1.nextOffset).not.toBeNull();
+    expect(page1.nextOffset! % 4).toBe(0);
+
+    // Calling it is accepted by the same schema assert, and the walk terminates.
+    let offset = page1.nextOffset!;
+    for (let hop = 0; hop < 5 && offset != null; hop += 1) {
+      const next = await assistantTools.find_product.run({ query: "product", limit: 4, offset }, TIGHT);
+      if (next.status !== "ok") throw new Error(`page at offset ${offset} not ok`);
+      const page = next.data as { nextOffset: number | null };
+      if (page.nextOffset == null) {
+        offset = null as unknown as number;
+        break;
+      }
+      expect(page.nextOffset % 4).toBe(0);
+      expect(page.nextOffset).toBeGreaterThan(offset);
+      offset = page.nextOffset;
+    }
+    expect(offset).toBeNull();
+  });
+
   it("reports identityMisses: 0 on the normal path (a defined field, not a conditional one)", async () => {
     mockGetProducts.mockResolvedValue({ products: [product()], total: 1 });
     const result = await assistantTools.find_product.run({ query: "abc" }, CTX);

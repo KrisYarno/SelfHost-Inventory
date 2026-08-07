@@ -892,6 +892,48 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     expect(toolResult.data.coverage.unrankedNote).toContain("COVERAGE artifact");
   });
 
+  // FD2-2 on the WIRE: degraded per-company coverage governs zero legality only, so the
+  // measured rows still cross the boundary — together with the disclosure that explains
+  // why one product is ranked and another is not.
+  it("compare_periods by_product: degraded coverage ships MEASURED rows + companyCoverage", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }, { companyId: "c2" }]);
+    p.productSalesFact.aggregate.mockResolvedValueOnce({ _min: { dayKey: "2019-01-01" } });
+    p.productSalesFact.groupBy
+      // c2 returns NO group: it has never recorded a fact, so the window is degraded.
+      .mockResolvedValueOnce([{ companyId: "c1", _min: { dayKey: "2019-01-01" } }])
+      .mockResolvedValueOnce([{ productId: 1, _sum: { orderedQty: 10 } }])
+      .mockResolvedValueOnce([
+        { productId: 1, _sum: { orderedQty: 40 } }, // +30, measured on BOTH sides
+        { productId: 2, _sum: { orderedQty: 4 } }, // no period-A row => unknown base
+      ])
+      .mockResolvedValueOnce([]); // post-pagination firstSaleDayKey lookup
+    p.product.findMany.mockResolvedValue([
+      { id: 1, name: "Grower", deletedAt: null },
+      { id: 2, name: "Newcomer", deletedAt: null },
+    ]);
+
+    const toolResult = await roundTrip("compare_periods", {
+      metric: "sales_units",
+      periodA: { relativeDays: 30 },
+      periodB: { relativeDays: 30 },
+      groupBy: "product",
+    });
+    expect(toolResult.status).toBe("ok");
+    // The recorded rows are REPORTED, not withheld.
+    expect(toolResult.data.rows.map((r: { productId: number }) => r.productId)).toEqual([1]);
+    expect(toolResult.data.rows[0].delta).toBe(30);
+    // The absent-in-A product is unknown-base, never a manufactured zero.
+    expect(toolResult.data.unranked.map((r: { productId: number }) => r.productId)).toEqual([2]);
+    expect(toolResult.data.unranked[0].a).toBeNull();
+    // ...and the disclosure names the company that degrades the window.
+    expect(toolResult.data.coverage.periodCoverage).toEqual({ a: "partial", b: "partial" });
+    expect(toolResult.data.coverage.companyCoverage).toEqual([
+      { companyId: "c1", salesDataStart: "2019-01-01" },
+      { companyId: "c2", salesDataStart: null },
+    ]);
+    expect(toolResult.data.coverage.companyCoverageNote).toContain("c2");
+  });
+
   it("compare_periods totals mode gains its `mode` discriminant (ADDITIVE, C9)", async () => {
     p.inventory_logs.aggregate
       .mockResolvedValueOnce({ _min: { changeTime: new Date("2020-01-01T00:00:00.000Z") } })

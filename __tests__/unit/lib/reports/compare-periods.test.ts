@@ -273,22 +273,44 @@ describe("caller scoping — sales metrics never leak other companies", () => {
 });
 
 describe("productId narrowing", () => {
+  // FD2-1 reshaped this read graph: a product-scoped call now issues TWO `_min` reads —
+  // the SOURCE-level one behind the per-company coverage question (never product-scoped,
+  // see the FD2-1 describe) and the CALLER-WIDE one that keeps its product scope because
+  // it is the date the predates/straddles reasons quote. So the mock dispatches on shape
+  // rather than on call order, and the assertion is about the PRODUCT-SCOPED reads.
   it("narrows sales aggregates by productId when provided", async () => {
-    mockSales("2026-01-01", 3, 4, "orderedQty");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?._min
+          ? { _min: { dayKey: "2026-01-01" } }
+          : { _sum: { orderedQty: args?.where?.dayKey?.gte === "2026-06-01" ? 3 : 4 } },
+      ) as never,
+    );
 
-    await comparePeriods({
+    const res = await comparePeriods({
       metric: "sales_units",
       periodA: win("2026-06-01", "2026-06-07"),
       periodB: win("2026-06-08", "2026-06-14"),
       productId: 42,
       companyIds: ["co-1"],
     });
+    expect(res.a).toBe(3);
+    expect(res.b).toBe(4);
 
     // quality+reach Task 3.1: productId and the G5 approved-id set narrow the SAME
     // column, so the read builds ONE IntFilter (`equals` + `in`) rather than two
     // `productId` keys where the second silently overwrites the first.
-    for (const call of db.productSalesFact.aggregate.mock.calls) {
-      expect((call[0] as { where: { productId?: { equals?: number } } }).where.productId?.equals).toBe(42);
+    const scoped = db.productSalesFact.aggregate.mock.calls
+      .map((call) => call[0] as { _min?: unknown; where: { productId?: { equals?: number; in?: number[] } } })
+      .filter((args) => args.where.productId?.equals != null);
+    // The two VALUE reads plus the caller-wide start: every product-scoped read carries
+    // BOTH halves of the filter.
+    expect(scoped).toHaveLength(3);
+    expect(scoped.filter((args) => args._min != null)).toHaveLength(1);
+    for (const args of scoped) {
+      expect(args.where.productId?.equals).toBe(42);
+      expect(Array.isArray(args.where.productId?.in)).toBe(true);
     }
   });
 
@@ -381,6 +403,15 @@ describe("per-metric predicate", () => {
 //
 // Both modes now route through the SAME classifier (`callerWindowCoverage`), so one
 // seeded source can only ever produce one verdict.
+//
+// FD2-2 NARROWED WHAT THAT VERDICT DOES (assertions below were INVERTED where they
+// pinned the over-reach): a degraded window governs ZERO LEGALITY only. No measured zero
+// may be synthesized and no growth-from-zero may be computed, but a MEASURED sum over
+// rows that really were recorded is a true statement about recorded facts and is
+// RETURNED, with the per-company disclosure beside it. Discarding it invented a second
+// failure — "we recorded these sales but will not tell you" — out of the fix for the
+// first, and made compare contradict get_sales, which has always returned its measured
+// rows under a partial window and nulled only the SYNTHESIZED ones.
 // ---------------------------------------------------------------------------
 
 describe("FD-1 staggered company starts — the latest company governs in BOTH modes", () => {
@@ -389,17 +420,32 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
 
   /** One seeded sales source: a caller-wide start plus the per-company starts, and (for
    *  by_product) the per-product sums. The groupBy delegate is shared by the per-company
-   *  starts read and the per-product sums, so it dispatches on the SHAPE each one sends. */
+   *  starts read and the per-product sums, so it dispatches on the SHAPE each one sends.
+   *
+   *  FD2-2: the SCALAR sums are seeded too (`sumA`/`sumB`, default null = NO rows in the
+   *  period). Degraded coverage now only decides whether ABSENCE may read as zero, so
+   *  "did this period have rows?" is the question these fixtures have to be able to ask. */
   function seedStaggered(opts: {
     callerWide: string | null;
     companyStarts: Array<{ companyId: string; _min: { dayKey: string | null } }>;
+    sumA?: number | null;
+    sumB?: number | null;
     a?: Array<{ productId: number; _sum: { orderedQty: number } }>;
     b?: Array<{ productId: number; _sum: { orderedQty: number } }>;
   }) {
-    db.productSalesFact.aggregate.mockResolvedValue({
-      _min: { dayKey: opts.callerWide },
-      _sum: { orderedQty: null },
-    } as never);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?._min
+          ? { _min: { dayKey: opts.callerWide } }
+          : {
+              _sum: {
+                orderedQty:
+                  args?.where?.dayKey?.gte === PERIOD_A.from ? opts.sumA ?? null : opts.sumB ?? null,
+              },
+            },
+      ) as never,
+    );
     let periodCall = 0;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     db.productSalesFact.groupBy.mockImplementation((args: any) => {
@@ -409,7 +455,12 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
     db.product.findMany.mockResolvedValue([{ id: 1 }, { id: 2 }] as never);
   }
 
-  it("SCALAR: a late-starting company leaves BOTH periods null with a per-company reason", async () => {
+  // FD2-2 (inversion, scope): this case is now pinned for what it always WAS — a
+  // degraded window with NO rows in either period (the seed sums default to null). The
+  // title used to claim degradation nulls both periods outright; it nulls them because
+  // absence under degradation is UNKNOWN, never because the sums were thrown away. The
+  // measured-sum half of the rule is pinned in the FD2-2 describe below.
+  it("SCALAR: with NO rows in either period, a late-starting company leaves both null + a per-company reason", async () => {
     seedStaggered({
       // c1 has recorded since 2020 — the caller-wide minimum says "fully covered".
       callerWide: "2020-01-01",
@@ -437,7 +488,9 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
     expect(res.reasons.b).toContain("in every company");
   });
 
-  it("SCALAR: a company with NO facts at all governs just as hard", async () => {
+  // FD2-2 (inversion, scope): same narrowing — a factless company degrades ZERO legality
+  // just as hard, and with no rows in either period that is exactly a null + reason.
+  it("SCALAR: a company with NO facts at all governs zero legality just as hard", async () => {
     seedStaggered({
       callerWide: "2020-01-01",
       // c2 has no facts, so the per-company read returns no group for it.
@@ -463,11 +516,9 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
         { companyId: "c1", _min: { dayKey: "2020-01-01" } },
         { companyId: "c2", _min: { dayKey: "2021-06-01" } }, // still well before the window
       ],
+      sumA: 10,
+      sumB: 15,
     });
-    db.productSalesFact.aggregate
-      .mockResolvedValueOnce({ _min: { dayKey: "2020-01-01" } } as never)
-      .mockResolvedValueOnce({ _sum: { orderedQty: 10 } } as never)
-      .mockResolvedValueOnce({ _sum: { orderedQty: 15 } } as never);
 
     const res = await comparePeriods({
       metric: "sales_units",
@@ -482,7 +533,13 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
     expect(res.reasons.a).toBeUndefined();
   });
 
-  it("BY_PRODUCT: a degraded window leaves EVERY row unknown — never a measured 0", async () => {
+  // FD2-2 INVERSION (this test previously pinned the discard). It asserted that a
+  // degraded window left EVERY row unknown, INCLUDING product 1 — whose 10 and 30 units
+  // are rows that were really recorded in the company that really was recording. That is
+  // the defect: degradation kills the manufactured zero (product 2's absent period A),
+  // never the measured sum. The assertions are inverted accordingly; the manufactured-
+  // zero half is still pinned, on the row it actually applies to.
+  it("BY_PRODUCT: a degraded window keeps MEASURED rows ranked and unranks only the ABSENT ones", async () => {
     seedStaggered({
       callerWide: "2020-01-01",
       companyStarts: [
@@ -505,16 +562,24 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
       companyIds: ["c1", "c2"],
     });
 
+    // The window IS degraded — the disclosure is unchanged.
     expect(res.periodCoverage).toEqual({ a: "partial", b: "partial" });
-    expect(res.ranked).toEqual([]);
-    expect(res.unranked.map((r) => r.productId)).toEqual([1, 2]);
-    for (const row of res.unranked) {
-      expect(row.a).toBeNull();
-      expect(row.b).toBeNull();
-      expect(row.delta).toBeNull();
-      expect(row.pctChange).toBeNull();
-    }
+    // Product 1 has real rows in BOTH periods: measured, ranked, delta computed.
+    expect(res.ranked).toHaveLength(1);
+    expect(res.ranked[0]).toMatchObject({ productId: 1, a: 10, b: 30, delta: 20 });
+    // Product 2 has NO row in period A. Under degradation that absence is UNKNOWN, so it
+    // must never become the measured 0 a "started moving" claim would be computed from.
+    expect(res.unranked.map((r) => r.productId)).toEqual([2]);
+    expect(res.unranked[0].a).toBeNull();
+    expect(res.unranked[0].b).toBe(12);
+    expect(res.unranked[0].delta).toBeNull();
+    expect(res.unranked[0].pctChange).toBeNull();
     expect(res.reasons.a).toContain("in every company");
+    // The null-start/late company is NAMED, not just alluded to.
+    expect(res.companyCoverage).toEqual([
+      { companyId: "c1", salesDataStart: "2020-01-01" },
+      { companyId: "c2", salesDataStart: "2099-01-01" },
+    ]);
   });
 
   it("BY_PRODUCT: an un-staggered caller still measures zeros (the rule only DEGRADES)", async () => {
@@ -542,6 +607,101 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
     expect(res.ranked[0].b).toBe(12);
   });
 
+  // -------------------------------------------------------------------------
+  // FD2-2 — degraded coverage governs ZERO LEGALITY ONLY.
+  //
+  // The FD-1 fix classified per company (right) and then discarded every value the
+  // degraded classification touched (wrong). A sum over rows that were recorded is a
+  // TRUE statement about recorded facts; the only thing per-company degradation may
+  // take away is the right to turn SILENCE into a measured zero. get_sales has always
+  // had this shape — real rows are returned under a 'partial' window and only the
+  // SYNTHESIZED zero rows go null-with-a-reason — so this is also what makes the two
+  // surfaces agree about one seeded source (seam S8).
+  // -------------------------------------------------------------------------
+
+  it("SCALAR: a FACTLESS member company degrades coverage but the MEASURED sums survive", async () => {
+    seedStaggered({
+      callerWide: "2020-01-01",
+      // c2 has no facts at all — the strongest degradation there is.
+      companyStarts: [{ companyId: "c1", _min: { dayKey: "2020-01-01" } }],
+      sumA: 40,
+      sumB: 60,
+    });
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    // 40 and 60 units really were recorded in c1's window. Refusing to report them is not
+    // caution, it is a second falsehood.
+    expect(res.a).toBe(40);
+    expect(res.b).toBe(60);
+    expect(res.delta).toBe(20);
+    expect(res.pctChange).toBeCloseTo(0.5);
+    // A measured value carries NO reason...
+    expect(res.reasons.a).toBeUndefined();
+    expect(res.reasons.b).toBeUndefined();
+    // ...the degradation rides as a DISCLOSURE instead, naming the null-start company.
+    expect(res.companyCoverage).toEqual([
+      { companyId: "c1", salesDataStart: "2020-01-01" },
+      { companyId: "c2", salesDataStart: null },
+    ]);
+    expect(res.companyCoverageNote).toContain("c2");
+    expect(res.companyCoverageNote).toContain("latest-starting company governs zero legality");
+  });
+
+  it("SCALAR: under degradation a period with NO rows is null + a reason (the zero is never manufactured)", async () => {
+    seedStaggered({
+      callerWide: "2020-01-01",
+      companyStarts: [{ companyId: "c1", _min: { dayKey: "2020-01-01" } }],
+      sumA: null, // no rows at all in period A
+      sumB: 60,
+    });
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.a).toBeNull();
+    expect(res.reasons.a).toContain("in every company");
+    expect(res.reasons.a).toContain("c2");
+    // ...and B, which HAS rows, keeps its measured sum. No delta: one side is unknown, so
+    // "growth from zero" is exactly what must not be computed.
+    expect(res.b).toBe(60);
+    expect(res.reasons.b).toBeUndefined();
+    expect(res.delta).toBeNull();
+    expect(res.pctChange).toBeNull();
+  });
+
+  it("an UN-degraded caller carries no companyCoverage disclosure at all", async () => {
+    seedStaggered({
+      callerWide: "2020-01-01",
+      companyStarts: [
+        { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+        { companyId: "c2", _min: { dayKey: "2020-01-01" } },
+      ],
+      sumA: 5,
+      sumB: 9,
+    });
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.a).toBe(5);
+    expect(res.companyCoverage).toBeUndefined();
+    expect(res.companyCoverageNote).toBeUndefined();
+  });
+
   it("LEDGER metrics have no company dimension, so the per-company rule never fires", async () => {
     // Same staggered membership; an inventory metric is global, so the ledger dataStart
     // alone decides — and no per-company read is issued for it at all.
@@ -559,5 +719,101 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
     expect(res.a).toBe(10);
     expect(res.b).toBe(25);
     expect(db.productSalesFact.groupBy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD2-1 — the per-company coverage question is asked SOURCE-LEVEL.
+//
+// `productId` narrows which VALUES are summed. It must never narrow "was this company
+// recording sales at all?" — folding it into the per-company starts turned a company
+// that simply never sold THAT product into a company with no coverage, degraded the
+// window on that basis, and (pre-FD2-2) nulled the sums of the company that WAS
+// recording. get_sales asks the identical question source-level (`salesDataStart`
+// carries no productId), so seam S8 only holds if compare asks it the same way.
+// ---------------------------------------------------------------------------
+
+describe("FD2-1 per-company coverage is SOURCE-level, never product-narrowed", () => {
+  const PERIOD_A = win("2026-06-01", "2026-06-07");
+  const PERIOD_B = win("2026-06-08", "2026-06-14");
+
+  /** Two RECORDING companies; product 42 has only ever sold in c1. The delegates
+   *  dispatch on whether the read carries the productId equality, so the source-level
+   *  question and the product-scoped one can answer differently — which is the whole
+   *  point of the finding. */
+  function seedProductNarrowed() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) => {
+      if (args?._min) {
+        // Product-scoped: the product's own first fact. Source-level: the company's.
+        return Promise.resolve({
+          _min: { dayKey: args?.where?.productId?.equals === 42 ? "2026-01-01" : "2020-01-01" },
+        }) as never;
+      }
+      const from = args?.where?.dayKey?.gte;
+      return Promise.resolve({ _sum: { orderedQty: from === PERIOD_A.from ? 10 : 15 } }) as never;
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.groupBy.mockImplementation((args: any) => {
+      if (args?.where?.productId?.equals === 42) {
+        // c2 never sold this product, so a product-scoped per-company read omits it.
+        return Promise.resolve([{ companyId: "c1", _min: { dayKey: "2026-01-01" } }]) as never;
+      }
+      return Promise.resolve([
+        { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+        { companyId: "c2", _min: { dayKey: "2021-01-01" } },
+      ]) as never;
+    });
+    db.product.findMany.mockResolvedValue([{ id: 42 }] as never);
+  }
+
+  it("a product absent from one company is NOT a coverage gap there — both periods stay MEASURED", async () => {
+    seedProductNarrowed();
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      productId: 42,
+      companyIds: ["c1", "c2"],
+    });
+
+    // Both companies were recording throughout both windows; the product simply never
+    // sold in c2. That is a measured zero contribution, not an unknown.
+    expect(res.a).toBe(10);
+    expect(res.b).toBe(15);
+    expect(res.delta).toBe(5);
+    expect(res.pctChange).toBeCloseTo(0.5);
+    expect(res.reasons.a).toBeUndefined();
+    expect(res.reasons.b).toBeUndefined();
+  });
+
+  it("the per-company coverage read carries NO productId equality; the VALUE reads carry it", async () => {
+    seedProductNarrowed();
+
+    await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      productId: 42,
+      companyIds: ["c1", "c2"],
+    });
+
+    const perCompanyCalls = db.productSalesFact.groupBy.mock.calls
+      .map((call) => call[0] as { by?: string[]; where?: { productId?: { equals?: number; in?: number[] } } })
+      .filter((args) => args?.by?.[0] === "companyId");
+    expect(perCompanyCalls.length).toBeGreaterThan(0);
+    for (const args of perCompanyCalls) {
+      // The APPROVED-universe narrowing stays (G5); the productId equality does not.
+      expect(args.where?.productId?.equals).toBeUndefined();
+      expect(Array.isArray(args.where?.productId?.in)).toBe(true);
+    }
+
+    // The VALUE reads are still product-scoped — that is what the caller asked for.
+    const valueCalls = db.productSalesFact.aggregate.mock.calls
+      .map((call) => call[0] as { _sum?: unknown; where: { productId?: { equals?: number } } })
+      .filter((args) => args._sum != null);
+    expect(valueCalls).toHaveLength(2);
+    for (const args of valueCalls) expect(args.where.productId?.equals).toBe(42);
   });
 });
