@@ -1200,6 +1200,84 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     expect((data.reasons as Record<string, string>).delta).toBe(coverage.coverageShift);
   });
 
+  // FD4-7: the totals pin above had no by_product twin, so the MIRROR the FD3 round added
+  // (a shift changes every row's denominator, so it rides on the envelope) was pinned in
+  // the module and nowhere at the tool layer — and the CONDITIONAL legend it ships with was
+  // pinned nowhere at all. Both halves, on a degraded by_product envelope.
+  it("BY_PRODUCT mode mirrors coverageShift AND names `delta` in its conditional legend", async () => {
+    const MULTI = testCtx({ companyIds: ["c1", "c2"] });
+    seedSales({
+      dataStart: "2020-01-01",
+      // c2's first fact is period B's first day: it contributes to B and not to A.
+      companyStarts: [
+        { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+        { companyId: "c2", _min: { dayKey: "2026-06-08" } },
+      ],
+      a: [{ productId: 1, _sum: { orderedQty: 10 } }],
+      b: [
+        { productId: 1, _sum: { orderedQty: 25 } },
+        { productId: 2, _sum: { orderedQty: 12 } },
+      ],
+      names: [
+        { id: 1, name: "One", deletedAt: null },
+        { id: 2, name: "Two", deletedAt: null },
+      ],
+    });
+
+    const result = await assistantTools.compare_periods.run(
+      {
+        metric: "sales_units",
+        periodA: { from: "2026-06-01", to: "2026-06-07" },
+        periodB: { from: "2026-06-08", to: "2026-06-14" },
+        groupBy: "product",
+      },
+      MULTI,
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as Record<string, unknown>;
+    const coverage = data.coverage as Record<string, unknown>;
+
+    // Product 1 is measured on both sides and ranked; the delta it carries is the one the
+    // qualification is about.
+    expect((data.rows as Array<Record<string, unknown>>).map((r) => r.productId)).toEqual([1]);
+    expect((data.rows as Array<Record<string, unknown>>)[0].delta).toBe(15);
+    expect((data.unranked as Array<Record<string, unknown>>).map((r) => r.productId)).toEqual([2]);
+    // The mirror: the same sentence totals mode ships, on the ENVELOPE (never per row).
+    expect(coverage.periodCoverage).toEqual({ a: "partial", b: "full" });
+    expect(coverage.coverageShift).toContain("c2");
+    expect(coverage.coverageShift).toContain("2026-06-08");
+    expect(coverage.coverageShift).toContain("not like-for-like");
+    expect((data.reasons as Record<string, string>).delta).toBe(coverage.coverageShift);
+    // ...and the legend names the key the envelope actually emits.
+    expect(coverage.reasonsKeys).toContain("delta = the coverageShift qualification");
+    // FD4-3 at the tool layer: the row-level reasons are the PERIOD vocabulary only — the
+    // qualification is not re-paid for once per unranked row.
+    const unrankedRow = (data.unranked as Array<Record<string, unknown>>)[0];
+    expect(unrankedRow.reasons).not.toHaveProperty("delta");
+  });
+
+  it("BY_PRODUCT with no shift OMITS the key and drops `delta` from the legend", async () => {
+    // The other branch of the conditional legend: equally-covered periods emit no delta
+    // reason, so a legend naming one would describe a key that is never there.
+    seedSales({
+      dataStart: "2020-01-01",
+      a: [{ productId: 1, _sum: { orderedQty: 10 } }],
+      b: [{ productId: 1, _sum: { orderedQty: 30 } }],
+      names: [{ id: 1, name: "One", deletedAt: null }],
+    });
+    const data = await okData({
+      metric: "sales_units",
+      periodA: { from: "2026-06-01", to: "2026-06-07" },
+      periodB: { from: "2026-06-08", to: "2026-06-14" },
+      groupBy: "product",
+    });
+    const coverage = data.coverage as Record<string, unknown>;
+    expect(coverage.coverageShift).toBeUndefined();
+    expect((data.reasons as Record<string, string>).delta).toBeUndefined();
+    expect(coverage.reasonsKeys).not.toContain("delta");
+  });
+
   it("TOTALS mode over equally-covered periods carries periodCoverage and NO shift key", async () => {
     const MULTI = testCtx({ companyIds: ["c1", "c2"] });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

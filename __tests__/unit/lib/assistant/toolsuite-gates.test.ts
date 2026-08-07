@@ -525,6 +525,14 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d("compare_periods")).toMatch(/coverage\.periodCoverage/);
     expect(d("compare_periods")).toMatch(/coverage\.coverageShift/);
     expect(d("compare_periods")).toMatch(/not\s+like-for-like/i);
+    // FD4-4: the `delta` reason key is emitted by BOTH modes (the FD3-3 mirror put it on
+    // the by_product envelope too), so the legend that said "(totals mode)" told a model
+    // to expect it in one mode and ignore it in the other. The corrected sentence names
+    // the real condition — the presence of coverageShift — instead of a mode.
+    expect(d("compare_periods")).toMatch(
+      /delta = the coverageShift qualification \(BOTH modes, present only with\s+coverageShift\)/,
+    );
+    expect(d("compare_periods")).not.toMatch(/qualification \(totals mode\)/);
   });
 
   // Quality+reach C12 (Task 2.1): the mix fields are the composition a bare depletion

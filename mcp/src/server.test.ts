@@ -934,6 +934,48 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     expect(toolResult.data.coverage.companyCoverageNote).toContain("c2");
   });
 
+  // FD4-7 on the WIRE: the FD3 round mirrored `coverageShift` onto the by_product envelope
+  // (a joining company changes EVERY row's denominator) and the wire had no assertion for
+  // it — only the totals mode did. A mirror nobody checks across the boundary is a mirror
+  // that can be dropped by the next envelope edit without a test noticing.
+  it("compare_periods by_product: a coverage shift rides on the ENVELOPE, with its legend", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }, { companyId: "c2" }]);
+    p.productSalesFact.aggregate.mockResolvedValueOnce({ _min: { dayKey: "2020-01-01" } });
+    p.productSalesFact.groupBy
+      // c2's first fact is period B's FIRST DAY: it contributes to B and not to A.
+      .mockResolvedValueOnce([
+        { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+        { companyId: "c2", _min: { dayKey: "2026-06-08" } },
+      ])
+      .mockResolvedValueOnce([{ productId: 1, _sum: { orderedQty: 10 } }])
+      .mockResolvedValueOnce([
+        { productId: 1, _sum: { orderedQty: 25 } }, // +15, measured on both sides
+        { productId: 2, _sum: { orderedQty: 12 } }, // no period-A row => unknown base
+      ])
+      .mockResolvedValueOnce([]); // post-pagination firstSaleDayKey lookup
+    p.product.findMany.mockResolvedValue([
+      { id: 1, name: "Grower", deletedAt: null },
+      { id: 2, name: "Newcomer", deletedAt: null },
+    ]);
+
+    const toolResult = await roundTrip("compare_periods", {
+      metric: "sales_units",
+      periodA: { from: "2026-06-01", to: "2026-06-07" },
+      periodB: { from: "2026-06-08", to: "2026-06-14" },
+      groupBy: "product",
+    });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.rows[0].delta).toBe(15);
+    expect(toolResult.data.coverage.periodCoverage).toEqual({ a: "partial", b: "full" });
+    // The qualification crosses the boundary ONCE, on the envelope...
+    expect(toolResult.data.coverage.coverageShift).toContain("c2");
+    expect(toolResult.data.coverage.coverageShift).toContain("not like-for-like");
+    expect(toolResult.data.reasons.delta).toBe(toolResult.data.coverage.coverageShift);
+    // ...with the legend that names the key, and never once per unranked row (FD4-3).
+    expect(toolResult.data.coverage.reasonsKeys).toContain("delta = the coverageShift qualification");
+    expect(toolResult.data.unranked[0].reasons.delta).toBeUndefined();
+  });
+
   it("compare_periods totals mode gains its `mode` discriminant (ADDITIVE, C9)", async () => {
     p.inventory_logs.aggregate
       .mockResolvedValueOnce({ _min: { changeTime: new Date("2020-01-01T00:00:00.000Z") } })

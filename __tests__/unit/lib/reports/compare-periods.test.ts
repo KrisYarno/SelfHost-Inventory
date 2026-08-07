@@ -1099,3 +1099,300 @@ describe("FD3-3 mirrored to by_product (orchestrator seam-fix): the shift is env
     expect(res.reasons.delta).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// FD4-1 — the disclosure pair discriminates a REAL per-company degradation from a
+// WINDOW-level partial.
+//
+// `periods.includes("partial")` could not tell the two apart. A period whose CALLER-WIDE
+// classification is already not "full" is partial because the metric's own source
+// straddles or predates it; the staggered memberships had no hand in that. FD3-1 stopped
+// the measured-note sentence from riding on a result whose coverage was not degraded, and
+// left this second case — where a period IS partial, for a reason the disclosure does not
+// describe — still attaching both the note and the sentence.
+// ---------------------------------------------------------------------------
+
+describe("FD4-1 the companyCoverage pair follows PER-COMPANY degradation, not any 'partial'", () => {
+  const PERIOD_A = win("2026-01-01", "2026-01-31");
+  const PERIOD_B = win("2026-06-01", "2026-06-30");
+
+  /** The FD3-7 fixture verbatim: staggered companies (so the pair WOULD ride) and a
+   *  PRODUCT-scoped first fact that leaves period A window-level partial. */
+  function seedProductScoped(productStart: string) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) => {
+      if (args?._min) {
+        return Promise.resolve({
+          _min: { dayKey: args?.where?.productId?.equals === 42 ? productStart : "2020-01-01" },
+        }) as never;
+      }
+      return Promise.resolve({
+        _sum: { orderedQty: args?.where?.dayKey?.gte === PERIOD_A.from ? null : 12 },
+      }) as never;
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.groupBy.mockImplementation((args: any) =>
+      args?.by?.[0] === "companyId"
+        ? (Promise.resolve([
+            { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+            { companyId: "c2", _min: { dayKey: "2021-06-01" } },
+          ]) as never)
+        : (Promise.resolve([]) as never),
+    );
+    db.product.findMany.mockResolvedValue([{ id: 42 }] as never);
+  }
+
+  it("a WINDOW-level partial drops the WHOLE pair (the staggering did not cause it)", async () => {
+    // The product's first fact is 2026-05-01: period A predates it outright, period B is
+    // covered. Both companies have been recording since 2020/2021, so they cover period B
+    // and every day of period A that the PRODUCT does not — the degradation the disclosure
+    // describes played no part in period A being null.
+    seedProductScoped("2026-05-01");
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      productId: 42,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.periodCoverage).toEqual({ a: "partial", b: "full" });
+    expect(res.a).toBeNull();
+    expect(res.reasons.a).toContain("predates this product's recorded sales");
+    // Neither half of the pair: the note would explain the wrong thing, and the raw
+    // per-company starts beside a nullity they did not cause read as its cause.
+    expect(res.companyCoverage).toBeUndefined();
+    expect(res.companyCoverageNote).toBeUndefined();
+  });
+
+  it("a REAL per-company degradation still ships BOTH halves with the measured note", async () => {
+    // Same staggered companies, no productId: the source covers both windows (caller-wide
+    // "full"), and c2's 2021 start is the only thing making period A partial — which is
+    // exactly what the pair exists to say.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?._min ? { _min: { dayKey: "2020-01-01" } } : { _sum: { orderedQty: 30 } },
+      ) as never,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.groupBy.mockImplementation((args: any) =>
+      args?.by?.[0] === "companyId"
+        ? (Promise.resolve([
+            { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+            { companyId: "c2", _min: { dayKey: "2026-01-15" } },
+          ]) as never)
+        : (Promise.resolve([]) as never),
+    );
+    db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.periodCoverage).toEqual({ a: "partial", b: "full" });
+    expect(res.companyCoverage).toEqual([
+      { companyId: "c1", salesDataStart: "2020-01-01" },
+      { companyId: "c2", salesDataStart: "2026-01-15" },
+    ]);
+    expect(res.companyCoverageNote).toContain("MEASURED");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD4-2 — the shift qualification rides only where a DELTA exists, and never as the
+// nameless fallback.
+//
+// `coverageShift`'s whole content is "this delta is not like-for-like growth". Two ways it
+// used to be emitted with nothing to qualify: a period the source does not cover nulls its
+// value (and the delta with it) while still classifying differently from the other, and
+// the `shifted.length === 0` fallback quoted the two classifications when no company was
+// nameable — including for two IDENTICAL windows, where nothing can have moved at all.
+// ---------------------------------------------------------------------------
+
+describe("FD4-2 no shift keys without a delta to qualify", () => {
+  const PERIOD_A = win("2026-06-01", "2026-06-07");
+  const PERIOD_B = win("2026-06-08", "2026-06-14");
+
+  it("LEDGER metric whose source starts BETWEEN the two periods: no shift keys", async () => {
+    // dataStart 2026-06-05 — after period A began, before period B did. The two periods
+    // really do classify differently, and no company is nameable (ledger metrics have no
+    // company dimension), which is exactly the fallback's case. Period A is null, so
+    // there is no delta the sentence could be about; reasons.a already says why.
+    mockLedger(new Date("2026-06-05T00:00:00.000Z"), -10, -25);
+    db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+
+    const res = await comparePeriods({
+      metric: "outbound_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1"],
+    });
+
+    expect(res.periodCoverage).toEqual({ a: "partial", b: "full" });
+    expect(res.a).toBeNull();
+    expect(res.delta).toBeNull();
+    expect(res.reasons.a).toContain("not fully covered");
+    expect(res.coverageShift).toBeUndefined();
+    expect(res.reasons.delta).toBeUndefined();
+  });
+
+  it("a nameable shift on a NULL delta carries no keys either (sales)", async () => {
+    // c2 joins inside period B — nameable — but the PRODUCT's own first fact leaves period
+    // A predating the data, so `delta` is null. A "not like-for-like growth" note here
+    // qualifies a comparison nobody made.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) => {
+      if (args?._min) {
+        return Promise.resolve({
+          _min: { dayKey: args?.where?.productId?.equals === 42 ? "2026-06-08" : "2020-01-01" },
+        }) as never;
+      }
+      return Promise.resolve({
+        _sum: { orderedQty: args?.where?.dayKey?.gte === PERIOD_A.from ? null : 12 },
+      }) as never;
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.groupBy.mockImplementation((args: any) =>
+      args?.by?.[0] === "companyId"
+        ? (Promise.resolve([
+            { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+            { companyId: "c2", _min: { dayKey: "2026-06-08" } },
+          ]) as never)
+        : (Promise.resolve([]) as never),
+    );
+    db.product.findMany.mockResolvedValue([{ id: 42 }] as never);
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      productId: 42,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.a).toBeNull();
+    expect(res.delta).toBeNull();
+    expect(res.coverageShift).toBeUndefined();
+    expect(res.reasons.delta).toBeUndefined();
+  });
+
+  it("IDENTICAL windows with a company start inside them: nothing MOVED, so no shift", async () => {
+    // The fallback's other reachable shape, and the one with a real delta: c2's start sits
+    // strictly inside a window both periods share. `insidePeriod` fires, no company's
+    // contribution DIFFERS between the periods, and the old fallback answered with
+    // "period A and period B are not equally covered (period A: partial, period B:
+    // partial)" — a sentence that contradicts itself.
+    const SAME = win("2026-06-01", "2026-06-30");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?._min ? { _min: { dayKey: "2020-01-01" } } : { _sum: { orderedQty: 40 } },
+      ) as never,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.groupBy.mockImplementation((args: any) =>
+      args?.by?.[0] === "companyId"
+        ? (Promise.resolve([
+            { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+            { companyId: "c2", _min: { dayKey: "2026-06-15" } },
+          ]) as never)
+        : (Promise.resolve([]) as never),
+    );
+    db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: SAME,
+      periodB: SAME,
+      companyIds: ["c1", "c2"],
+    });
+
+    // Both sums measured, so a delta exists — the gate is not what suppresses this one.
+    expect(res.delta).toBe(0);
+    expect(res.periodCoverage).toEqual({ a: "partial", b: "partial" });
+    expect(res.coverageShift).toBeUndefined();
+    expect(res.reasons.delta).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD4-3 — an unranked row's `reasons` is a SNAPSHOT, never the envelope's object.
+//
+// The rows aliased the envelope's `reasons`, and `reasons.delta` is added AFTER the split.
+// Every unranked row therefore grew a delta qualification for a delta that is null by
+// construction — and paid for the sentence once per row on the wire.
+// ---------------------------------------------------------------------------
+
+describe("FD4-3 row reasons carry the PERIOD vocabulary only", () => {
+  const PERIOD_A = win("2026-06-01", "2026-06-07");
+  const PERIOD_B = win("2026-06-08", "2026-06-14");
+
+  /** Degraded (c2 joins at period B's first day) with TWO products absent from period A —
+   *  so the envelope carries a real shift, one ranked row, and more than one unranked row
+   *  (a single row cannot tell a snapshot from an alias by byte count). */
+  function seedDegradedShift() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.groupBy.mockImplementation((args: any) => {
+      if (args?.by?.includes?.("companyId")) {
+        return Promise.resolve([
+          { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+          { companyId: "c2", _min: { dayKey: "2026-06-08" } },
+        ]) as never;
+      }
+      return Promise.resolve(
+        args?.where?.dayKey?.gte === PERIOD_A.from
+          ? [{ productId: 1, _sum: { orderedQty: 10 } }]
+          : [
+              { productId: 1, _sum: { orderedQty: 25 } },
+              { productId: 2, _sum: { orderedQty: 12 } },
+              { productId: 3, _sum: { orderedQty: 5 } },
+            ],
+      ) as never;
+    });
+    db.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: "2020-01-01" } } as never);
+    db.product.findMany.mockResolvedValue([{ id: 1 }, { id: 2 }, { id: 3 }] as never);
+  }
+
+  /** Occurrences of `needle` in `haystack` — the byte-cost question, counted. */
+  function occurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
+  }
+
+  it("unranked rows carry a/b only; the envelope alone carries reasons.delta", async () => {
+    seedDegradedShift();
+
+    const res = await comparePeriodsByProduct({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    // The fixture really is the degraded-with-a-shift case: one measured row, two unknown.
+    expect(res.ranked.map((r) => r.productId)).toEqual([1]);
+    expect(res.unranked.map((r) => r.productId)).toEqual([2, 3]);
+    expect(res.coverageShift).toBeDefined();
+    expect(res.reasons.delta).toBe(res.coverageShift);
+
+    // Every unranked row: PERIOD keys only, and never the envelope's own object.
+    for (const row of res.unranked) {
+      expect(Object.keys(row.reasons ?? {}).sort()).toEqual(["a"]);
+      expect(row.reasons).not.toHaveProperty("delta");
+      expect(row.reasons).not.toBe(res.reasons);
+    }
+    // The ranked row agrees: neither array carries a delta reason.
+    expect(res.ranked[0].reasons).toBeUndefined();
+
+    // Byte cost: the sentence is paid for by the ENVELOPE — once in `coverageShift` and
+    // once in its `reasons.delta` mirror (FD3-3's deliberate pair) — and not once more per
+    // unranked row, which is what the alias was costing.
+    const shift = res.coverageShift as string;
+    expect(occurrences(JSON.stringify(res.unranked), shift)).toBe(0);
+    expect(occurrences(JSON.stringify(res), shift)).toBe(2);
+  });
+});

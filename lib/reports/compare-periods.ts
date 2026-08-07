@@ -495,13 +495,26 @@ function resolvePeriod(
  * That is the "there is nothing to be covered" case (a product-scoped comparison for a
  * product with no facts, whose periods are null for that reason alone) — a staggered-
  * membership disclosure there explains a degradation that had no part in the answer.
+ *
+ * FD4-1: "partial" has TWO causes and `periods.includes("partial")` could not tell them
+ * apart. A period whose CALLER-WIDE classification is already not "full" is partial
+ * because the metric's OWN source straddles or predates it — the staggered memberships had
+ * no hand in that, and `callerWindowCoverage` returns the caller-wide class unchanged in
+ * exactly that case. So REAL per-company degradation is `partial` sitting on top of a
+ * `full` caller-wide class, and only that earns the measured-note sentence. When the only
+ * non-full classification is the window-level one, FD3-4's own rationale applies to the
+ * WHOLE pair: a staggered-start disclosure beside a nullity the staggering did not cause
+ * points the reader at the wrong explanation, so neither key ships.
  */
 function companyCoverageDisclosure(
   source: MetricCoverageSource,
   periods: WindowCoverage[],
+  callerWide: WindowCoverage[],
 ): Pick<ComparePeriodsResult, "companyCoverage" | "companyCoverageNote"> {
   if (source.companyCoverage == null || source.dataStart == null) return {};
-  const degraded = periods.includes("partial");
+  const degraded = periods.some((c, i) => c === "partial" && callerWide[i] === "full");
+  const windowLevel = callerWide.some((c) => c !== "full");
+  if (!degraded && windowLevel) return {};
   return {
     companyCoverage: source.companyCoverage,
     companyCoverageNote:
@@ -566,13 +579,14 @@ function coverageShiftNote(
         `(sales facts begin ${c.start}) that period ${less} does not`
       );
     });
-  const detail =
-    shifted.length > 0
-      ? shifted.join("; ")
-      : // No company is nameable (the shift is the metric's OWN source moving inside one
-        // of the periods), so the classifications are quoted instead of inventing a name.
-        `period A and period B are not equally covered (period A: ${coverageA}, period B: ${coverageB})`;
-  return `${detail} — delta is not like-for-like growth`;
+  // FD4-2: no company is nameable, so the only thing that can have moved is the metric's
+  // OWN source, inside one of the periods — which makes that period's caller-wide class
+  // not "full", which nulls its value and the delta with it. `reasons.a`/`reasons.b`
+  // already say so in the source's own words; the sentence this branch used to build
+  // qualified a delta that does not exist. Under the callers' `delta != null` gate it is
+  // unreachable besides, so it is deleted rather than left as a trap.
+  if (shifted.length === 0) return undefined;
+  return `${shifted.join("; ")} — delta is not like-for-like growth`;
 }
 
 /**
@@ -601,6 +615,11 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
   // FD3-3: the same source-level classification by_product returns, per period.
   const coverageA = periodCoverage(starts, periodA);
   const coverageB = periodCoverage(starts, periodB);
+  // FD4-1: and the caller-wide classification beside it — the SAME pair `resolvePeriod`
+  // asks internally, hoisted because the disclosure needs to tell a per-company
+  // degradation apart from a window the source itself does not cover.
+  const callerWideA = classifyWindowCoverage(starts.dataStart, periodA.from);
+  const callerWideB = classifyWindowCoverage(starts.dataStart, periodB.from);
 
   let delta: number | null = null;
   let pctChange: number | null = null;
@@ -615,7 +634,12 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
 
   // FD3-3: the delta is NEVER nulled for a coverage shift (the sums are measured) — it is
   // qualified, in both the reason vocabulary and the coverage block.
-  const coverageShift = coverageShiftNote(starts, periodA, periodB, coverageA, coverageB);
+  //
+  // FD4-2: and only when there IS a delta. The qualification's whole content is "this
+  // delta is not like-for-like growth"; attached to a null delta it announces a comparison
+  // nobody made, on top of the `reasons.a`/`reasons.b` that already explain the nullity.
+  const coverageShift =
+    delta == null ? undefined : coverageShiftNote(starts, periodA, periodB, coverageA, coverageB);
   if (coverageShift) reasons.delta = coverageShift;
 
   return {
@@ -627,7 +651,7 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
     unequalLengths: periodA.days !== periodB.days,
     periodCoverage: { a: coverageA, b: coverageB },
     ...(coverageShift ? { coverageShift } : {}),
-    ...companyCoverageDisclosure(starts, [coverageA, coverageB]),
+    ...companyCoverageDisclosure(starts, [coverageA, coverageB], [callerWideA, callerWideB]),
     excludedUnapprovedProducts: disclosure.excludedUnapprovedProducts,
     archivedProductsIncluded: disclosure.archivedProductsIncluded,
     approvalNote: APPROVED_UNIVERSE_NOTE,
@@ -678,8 +702,10 @@ export interface ComparePeriodsByProductResult {
    *  no rows in that period (FD2-2 — its absence cannot be read as a zero). Citable as
    *  unknown-base, NEVER as growth. */
   unranked: ComparePeriodsProductRow[];
-  /** Period-level reason vocabulary (the scalar mode's strings), shared by every
-   *  unranked row because the cause is the SOURCE, not the product. */
+  /** Period-level reason vocabulary (the scalar mode's strings). The unranked rows carry a
+   *  SNAPSHOT of it — the period keys only — because the cause is the SOURCE, not the
+   *  product; `reasons.delta` (FD3-3/FD4-3) is added HERE afterwards and belongs to the
+   *  envelope alone, which is the only thing that carries the shift. */
   reasons: Record<string, string>;
   periodCoverage: { a: WindowCoverage; b: WindowCoverage };
   unequalLengths: boolean;
@@ -798,6 +824,12 @@ export async function comparePeriodsByProduct(opts: {
   // Reuse the scalar reason vocabulary verbatim: same strings, same meanings.
   resolvePeriod(null, periodA, "a", starts, metric, reasons);
   resolvePeriod(null, periodB, "b", starts, metric, reasons);
+  // FD4-3: the rows get a SNAPSHOT of that vocabulary, taken while it is still PERIOD
+  // reasons alone. The rows used to alias this very object, so `reasons.delta` — added
+  // below, after the split — appeared on every unranked row, each of which has a null
+  // delta by construction. It also duplicated the sentence's bytes once per row on the
+  // wire. The shift is an envelope-level fact (FD3-3); the envelope carries it alone.
+  const rowReasons = { ...reasons };
 
   // The product universe: everything with a qualifying row in EITHER window.
   const productIds = Array.from(
@@ -832,7 +864,7 @@ export async function comparePeriodsByProduct(opts: {
     const a = valueOf(coverageA, callerWideA, aByProduct, productId);
     const b = valueOf(coverageB, callerWideB, bByProduct, productId);
     if (a == null || b == null) {
-      unranked.push({ productId, a, b, delta: null, pctChange: null, reasons });
+      unranked.push({ productId, a, b, delta: null, pctChange: null, reasons: rowReasons });
       continue;
     }
     const delta = b - a;
@@ -861,7 +893,14 @@ export async function comparePeriodsByProduct(opts: {
   );
   unranked.sort((x, y) => x.productId - y.productId);
 
-  const coverageShift = coverageShiftNote(starts, periodA, periodB, coverageA, coverageB);
+  // FD4-2, the by_product reading of "only when there is a delta": the deltas this
+  // envelope ships are its RANKED rows' (an unranked row's delta is null by construction),
+  // so the qualification rides exactly when the page has at least one of them. `directed`
+  // is the post-direction set — what the caller actually receives.
+  const coverageShift =
+    directed.length === 0
+      ? undefined
+      : coverageShiftNote(starts, periodA, periodB, coverageA, coverageB);
   if (coverageShift) reasons.delta = coverageShift;
 
   return {
@@ -870,7 +909,7 @@ export async function comparePeriodsByProduct(opts: {
     reasons,
     periodCoverage: { a: coverageA, b: coverageB },
     unequalLengths: periodA.days !== periodB.days,
-    ...companyCoverageDisclosure(starts, [coverageA, coverageB]),
+    ...companyCoverageDisclosure(starts, [coverageA, coverageB], [callerWideA, callerWideB]),
     ...(coverageShift ? { coverageShift } : {}),
     excludedUnapprovedProducts,
   };

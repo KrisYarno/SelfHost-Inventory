@@ -229,9 +229,12 @@ const RECEIPTS_MAX = 100;
 // share ONE byte budget, so the default stays modest.
 const COMPARE_ROWS_MAX = 100;
 const COMPARE_ROWS_DEFAULT = 25;
-// The ranked array's share of the JOINT byte budget (G2-8). The measured REMAINDER goes
-// to `unranked`; the two are never both non-empty (coverage is all-or-nothing), so this
-// split only ever decides how much of the budget the ONE populated array may use.
+// The ranked array's share of the JOINT byte budget (G2-8). The measured REMAINDER goes to
+// `unranked`. [FD4-6, correcting this note] The two CAN be both non-empty: coverage is
+// all-or-nothing at the WINDOW level only, and under PER-COMPANY degradation (FD2-2, pack
+// REV-7) the products with rows in both periods are measured and RANKED while the ones
+// absent from a period are unknown and unranked. So the split really does govern two live
+// shares — it is not a formality around whichever array happened to be populated.
 const COMPARE_RANKED_BUDGET_SHARE = 0.7;
 
 /**
@@ -1511,19 +1514,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // simply unknown. A missing identity now OMITS the row and is COUNTED, so the gap
       // is disclosed instead of papered over with a plausible value.
       let identityMisses = 0;
-      // FD-3: the SOURCE index behind every EMITTED row. The omission above makes `rows`
-      // shorter than the DB page it came from, so a cursor counted in emitted rows would
-      // (a) point back at rows this page already consumed and (b) stop being a multiple of
-      // `limit` — which `assertPageAligned` rejects, making `nextOffset` an ILLEGAL cursor
-      // the moment one identity goes missing. The cursor is counted in source rows.
-      const sourceIndexOf: number[] = [];
-      const rows = products.flatMap((p, sourceIndex) => {
+      const rows = products.flatMap((p) => {
         const identity = identities.get(p.id);
         if (!identity) {
           identityMisses += 1;
           return [];
         }
-        sourceIndexOf.push(sourceIndex);
         const lifecycle = identity.lifecycle;
         const base = {
           id: p.id,
@@ -1557,25 +1553,26 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // W3 seam-fix item 1: page against the ctx-aware reserved budget so a tight late-turn
       // read shrinks the page instead of the completed result being discarded whole.
       const page = paginate(rows, 0, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
-      // FD-3: SOURCE rows consumed, not emitted rows. Every emitted row that survived the
-      // byte fit consumed its own source row PLUS any omitted rows before it; when the
-      // whole page fit, the whole DB page was consumed (so a page of nothing but omitted
-      // rows still advances — the alternative is a cursor that never moves).
-      const sourceConsumed =
-        page.returned === rows.length ? products.length : sourceIndexOf[page.returned];
-      // FD2-4: and the cursor must be PAGE-ALIGNED, because `assertPageAligned` is the
-      // first thing the next call runs — a raw source index (what a byte-TRUNCATED page
-      // consumes: `sourceIndexOf[page.returned]`, an arbitrary number) is a cursor this
-      // tool's own schema rejects. One call reads exactly ONE DB page, so the only legal
-      // advance is a whole page: floor the consumed rows to a multiple of `limit`, and
-      // never to zero — a 0 would hand back the offset we were given and stall the walk.
+      // FD2-4, the page-alignment rule: `assertPageAligned(offset, limit)` is the FIRST
+      // thing the next call runs, so a cursor that is not a multiple of `limit` is one this
+      // tool's own schema rejects. One call reads exactly ONE DB page (`pageSize: limit`),
+      // so the only legal advance is that whole page.
       //
-      // The cost is stated rather than hidden — FD3-2: STATED, now, in the payload. Rows
-      // the byte fit dropped are SKIPPED by the aligned cursor, and `returned < limit` is
-      // not a signal a caller can read (an identity omission and a short final page look
-      // identical). The count of source rows this page consumed without delivering rides
-      // in `coverage.byteSkipped`, with the retry that recovers them.
-      const consumed = offset + Math.max(Math.floor(sourceConsumed / limit), 1) * limit;
+      // [FD4-8] And it is UNCONDITIONAL. The earlier arithmetic floored a "source rows
+      // consumed" count to a multiple of `limit` with a floor of one page, tracking the
+      // source index behind every emitted row to do it — but every branch of that count
+      // lands in [0, limit], because the DB page is at most `limit` rows and a truncated
+      // page's source index is strictly inside it. So the result was always `offset +
+      // limit`, and the machinery only made the rule harder to check. It is stated
+      // directly instead: a page that read fewer rows than it delivered still READ them,
+      // and the way to get them back is a SMALLER page at the SAME offset — never a
+      // partial cursor advance, which would re-deliver rows this page already shipped.
+      //
+      // The gap is DISCLOSED rather than encoded in the cursor (FD3-2): `returned < limit`
+      // is not a signal a caller can read (an identity omission, a byte truncation and a
+      // short final page look identical), so `coverage.byteSkipped` + `coverage.byteNote`
+      // carry the byte half with its retry and `coverage.identityMisses` carries the other.
+      const consumed = offset + limit;
       // Counted over rows the fit DROPPED, not over every source row past the cut: a
       // trailing identity miss is skipped by the same cursor but already has its own
       // counter, and counting it twice would tell the reader more rows are missing than
@@ -2606,7 +2603,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `like-for-like growth — relay that qualification, never the delta alone. ` +
       `pctChange is null when ` +
       `period A is zero. reasons keys: a = periodA, b = periodB, pctChange = percent ` +
-      `change, delta = the coverageShift qualification (totals mode). ` +
+      `change, delta = the coverageShift qualification (BOTH modes, present only with ` +
+      `coverageShift). ` +
       `unequalLengths flags mismatched window lengths (comparison still runs). ` +
       `outbound_units/inbound_units use a SIGN-FIRST ledger predicate over CALENDAR-DAY ` +
       `windows; a small gap from get_operations is that tool's ROLLING-INSTANT window ` +
@@ -2689,9 +2687,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
                   companyCoverageNote: result.companyCoverageNote,
                 }
               : {}),
-            // FD3-3: totals mode is the mode that can emit a `delta` reason, so its legend
-            // names it. by_product's legend is left alone — a legend describing a key that
-            // mode never emits is its own small lie.
+            // FD3-3: the legend names the `delta` reason and says when it appears. [FD4-4,
+            // correcting the note that stood here] "by_product's legend is left alone" was
+            // written before the mirror shipped and contradicts the code: by_product emits
+            // a CONDITIONAL legend (see compareByProduct) that names `delta` exactly when
+            // its own coverageShift is present. Both modes describe the key; totals says
+            // "present only with coverageShift" in one fixed sentence, by_product swaps the
+            // sentence. Neither describes a key it never emits.
             reasonsKeys:
               "a = periodA, b = periodB, pctChange = percent change, delta = why this " +
               "delta is not like-for-like (present only with coverageShift)",
