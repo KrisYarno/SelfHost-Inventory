@@ -95,7 +95,14 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     emptyCopy: "No matching products.",
     summarizeArgs: (input) => {
       const q = str(input, "query");
-      return q ? `matching “${q}”` : "";
+      // OC-5 (QA-3): includeArchived widens the population from the LIVE catalog to live
+      // + DELETED products. A row that reads the same either way tells the reader a
+      // retired product could not have been among the matches when it could.
+      const parts = [
+        q ? `matching “${q}”` : "",
+        flag(input, "includeArchived") ? "incl. deleted" : "",
+      ].filter(Boolean);
+      return parts.join(", ");
     },
   },
   get_stock: {

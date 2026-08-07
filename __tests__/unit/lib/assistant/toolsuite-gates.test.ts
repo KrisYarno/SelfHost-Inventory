@@ -349,6 +349,33 @@ describe("registration", () => {
       expect(typeof TOOL_PRESENTATION[name].successLabel).toBe("string");
     }
   });
+
+  // QA-3 / OC-5 as a GATE: an argument that changes WHICH POPULATION an answer covers must
+  // never render the same disclosure row as the call without it — otherwise the user's only
+  // record of the call describes a narrower (or wider) question than the tool answered.
+  // find_product's `includeArchived` was the one member of the set that still did.
+  it("OC-5: every population-changing argument changes its tool's disclosure row", () => {
+    const PERIODS = { periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 } };
+    const cases: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+      ["find_product", { query: "tirz" }, { query: "tirz", includeArchived: true }],
+      ["get_sales", { groupBy: "product" }, { groupBy: "product", includeZeroRows: true }],
+      ["get_movement_series", {}, { breakdownBy: "product" }],
+      ["get_movement_series", { breakdownBy: "product" }, { breakdownBy: "product", productIds: [7] }],
+      ["compare_periods", { metric: "sales_units", ...PERIODS }, { metric: "sales_units", ...PERIODS, groupBy: "product" }],
+      ["reorder_report", {}, { includeOkay: false }],
+      ["reorder_report", {}, { includeHealthy: true }],
+      ["reorder_report", {}, { productIds: [7] }],
+    ];
+    for (const [name, plain, widened] of cases) {
+      const p = TOOL_PRESENTATION[name];
+      expect(p.summarizeArgs(widened)).not.toBe(p.summarizeArgs(plain));
+    }
+    // The QA-3 member, by its rendered words (a row that differs is not enough — it has to
+    // say WHAT it now covers).
+    expect(
+      TOOL_PRESENTATION.find_product.summarizeArgs({ query: "tirz", includeArchived: true }),
+    ).toContain("incl. deleted");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -515,6 +542,16 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d("get_sales")).toMatch(/archivedProductsIncluded/);
     expect(d("get_sales")).toMatch(/archivedZeroRows/);
     expect(d("get_sales")).toMatch(/contributed nothing/i);
+    // QA-1: the same two counts, the same distinction, on the movement breakdown — whose
+    // force-emitted all-zero rows are the mechanism that made the fold-in wrong there too.
+    expect(d("get_movement_series")).toMatch(/archivedProductsIncluded/);
+    expect(d("get_movement_series")).toMatch(/archivedZeroRows/);
+    expect(d("get_movement_series")).toMatch(/moved\s+nothing/i);
+    // QA-8: includeZeroRows changes the ROW ORDER (one productId-asc order across real and
+    // synthesized rows). A model that read page 1 as "the best sellers" — which is what the
+    // default order gives it — would report the lowest product ids as the top of the list.
+    expect(d("get_sales")).toMatch(/RE-ORDERS the\s+rows by productId ascending/);
+    expect(d("get_sales")).toMatch(/measured rows no longer lead/i);
     // FD3-2: a page that silently dropped matched products is a page the model will walk
     // straight past — the repair has to be described where it routes, not only emitted.
     expect(d("find_product")).toMatch(/coverage\.byteSkipped/);

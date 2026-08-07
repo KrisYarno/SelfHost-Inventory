@@ -456,6 +456,10 @@ export interface MovementByProductResult extends MovementEnvelope<"by_product"> 
     reasonCodeNullRows: number;
     excludedUnapprovedProducts: number;
     archivedProductsIncluded: number;
+    /** QA-1, mirroring get_sales' OC-2 shape: archived products present ONLY as a
+     *  force-emitted all-zero row. Present on BOUNDED requests alone (nothing else can
+     *  force a row), exactly as get_sales emits its sibling under includeZeroRows only. */
+    archivedZeroRows?: number;
     approvalNote: string;
   };
 }
@@ -515,11 +519,19 @@ export async function getMovementByProduct(opts: {
     }),
   ]);
 
-  const byProduct = new Map<number, { buckets: MovementBuckets; outboundUnits: number }>();
+  // `contributed` is set the moment a real group lands on a product (QA-1): it is what
+  // separates a product whose facts moved these numbers from one that was force-emitted
+  // as an all-zero row. It cannot be read back off the finished row — a product whose
+  // only group is a +5/-5 SALE pair nets to 0 in a bucket the same way an untouched row
+  // reads 0 — so it is recorded where the classification happens.
+  const byProduct = new Map<
+    number,
+    { buckets: MovementBuckets; outboundUnits: number; contributed: boolean }
+  >();
   const ensure = (productId: number) => {
     let entry = byProduct.get(productId);
     if (!entry) {
-      entry = { buckets: emptyBuckets(), outboundUnits: 0 };
+      entry = { buckets: emptyBuckets(), outboundUnits: 0, contributed: false };
       byProduct.set(productId, entry);
     }
     return entry;
@@ -551,6 +563,7 @@ export async function getMovementByProduct(opts: {
       reasonCodeNullRows += rowsIn(g);
     }
     const entry = ensure(g.productId);
+    entry.contributed = true;
     entry.buckets[classify(g.logType, delta, g.reasonCode)] += delta;
     // Sign-first: the SAME predicate the outbound mixes use (delta < 0, not TRANSFER).
     if (g.logType !== "TRANSFER") entry.outboundUnits += Math.abs(delta);
@@ -558,22 +571,29 @@ export async function getMovementByProduct(opts: {
   for (const g of (positiveGroups ?? []) as MovementGroup[]) {
     const delta = g._sum?.delta ?? 0;
     if (!(delta > 0)) continue;
-    ensure(g.productId).buckets[classify(g.logType, delta, g.reasonCode)] += delta;
+    const entry = ensure(g.productId);
+    entry.contributed = true;
+    entry.buckets[classify(g.logType, delta, g.reasonCode)] += delta;
   }
 
-  const productRows: MovementProductRow[] = Array.from(byProduct.entries()).map(
-    ([productId, entry]) => {
-      finalizeNet(entry.buckets);
-      const identity = identities.get(productId);
-      return {
-        productId,
-        name: identity?.name ?? null,
-        lifecycle: identity?.lifecycle ?? null,
-        outboundUnits: entry.outboundUnits,
-        ...entry.buckets,
-      };
-    },
-  );
+  const productRows: MovementProductRow[] = [];
+  /** The two halves of the SAME rows, kept for the disclosure: products whose facts moved
+   *  these numbers, and the force-emitted ones with no group in the window. */
+  const contributingRows: MovementProductRow[] = [];
+  const zeroRows: MovementProductRow[] = [];
+  for (const [productId, entry] of Array.from(byProduct.entries())) {
+    finalizeNet(entry.buckets);
+    const identity = identities.get(productId);
+    const row: MovementProductRow = {
+      productId,
+      name: identity?.name ?? null,
+      lifecycle: identity?.lifecycle ?? null,
+      outboundUnits: entry.outboundUnits,
+      ...entry.buckets,
+    };
+    productRows.push(row);
+    (entry.contributed ? contributingRows : zeroRows).push(row);
+  }
   // Most-moved first; ties by productId so paging is deterministic.
   productRows.sort((a, b) => b.outboundUnits - a.outboundUnits || a.productId - b.productId);
 
@@ -581,6 +601,13 @@ export async function getMovementByProduct(opts: {
   // own rows (they already carry the identities' `lifecycle`); only the excluded half —
   // unreachable from approved result ids by construction — needs the census. The census
   // MIRRORS the read's scope, so a bounded request never reports catalog-wide noise.
+  //
+  // QA-1 (get_sales' OC-2, mirrored here): `archivedProductsIncluded` counts
+  // CONTRIBUTORS — products whose real facts moved these numbers — so the force-emitted
+  // all-zero rows are excluded from it. A synthesized zero row proves the opposite of a
+  // contribution, and folding it in made the count read as "N archived products' history
+  // is in these figures" when the honest answer was 0. That population is disclosed
+  // SEPARATELY (`archivedZeroRows`), so nothing is hidden by the correction.
   const excludedUnapprovedProducts = await excludedUnapprovedProductCount({
     relation: "inventory_logs",
     some: windowPredicate,
@@ -601,7 +628,10 @@ export async function getMovementByProduct(opts: {
       unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE,
       reasonCodeNullRows,
       excludedUnapprovedProducts,
-      archivedProductsIncluded: archivedCountOf(productRows),
+      archivedProductsIncluded: archivedCountOf(contributingRows),
+      // Only a BOUNDED request can force a row, so the sibling key rides exactly there —
+      // the same "emitted with the mode that creates the population" rule get_sales uses.
+      ...(productIds != null ? { archivedZeroRows: archivedCountOf(zeroRows) } : {}),
       approvalNote: APPROVED_UNIVERSE_NOTE,
     },
   };

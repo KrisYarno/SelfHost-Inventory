@@ -1054,6 +1054,11 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
       resolved: 2,
       rejected: [{ productId: 4242, reason: "unknown_id" }],
     });
+    // QA-1 on the WIRE: a bounded request carries BOTH archived counts. Product 2 is a
+    // force-emitted all-zero row, so it belongs to the zero-row half — and neither product
+    // is deleted here, which is what makes 0/0 the true pair rather than an absent key.
+    expect(toolResult.data.coverage.archivedProductsIncluded).toBe(0);
+    expect(toolResult.data.coverage.archivedZeroRows).toBe(0);
   });
 
   it("get_movement_series productIds WITHOUT breakdownBy is rejected with a hint (C10 narrowing)", async () => {

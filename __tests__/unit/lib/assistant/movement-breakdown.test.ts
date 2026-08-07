@@ -236,6 +236,29 @@ describe("row integrity — the FULL partition, per product", () => {
     expect((data.coverage as { reasonCodeNullRows: number }).reasonCodeNullRows).toBe(2);
   });
 
+  // QA-6 (spec C10's formula line, corrected): `outboundUnits` is the |delta| sum over
+  // EVERY negative non-TRANSFER row — which includes a negative STOCK_IN (a receipt
+  // reversal). No sum of buckets can express that: the `stockIn` bucket is SIGNED and
+  // holds the receipts themselves, so the reversal is invisible inside it. This pins the
+  // shipped definition the spec line now states.
+  it("a NEGATIVE STOCK_IN (receipt reversal) counts as outbound, though no bucket shows it", async () => {
+    seedCatalog([{ id: 1, name: "Reversed" }]);
+    seedLedger([
+      { productId: 1, delta: 30, logType: "STOCK_IN" },
+      { productId: 1, delta: -12, logType: "STOCK_IN" }, // the reversal: real movement out
+      { productId: 1, delta: -5, logType: "SALE" },
+    ]);
+
+    const row = ((await okData({ breakdownBy: "product" })).rows as Array<Record<string, number>>)[0];
+    // 12 (reversal) + 5 (sale) — the five named outbound buckets alone would say 5.
+    expect(row.outboundUnits).toBe(17);
+    // ...and the signed bucket nets the pair, which is exactly why it cannot be summed to
+    // reach the number above.
+    expect(row.stockIn).toBe(18);
+    expect(row.sale).toBe(-5);
+    expect(row.net).toBe(13);
+  });
+
   it("a TRANSFER leg is NOT outbound for ranking (internal relocation, spec C10)", async () => {
     seedCatalog([
       { id: 1, name: "Mover" },

@@ -174,6 +174,22 @@ describe("OC-5 — scope-changing arguments are disclosed", () => {
     expect(summarize("get_sales", { includeZeroRows: false })).not.toContain("zero-sales");
   });
 
+  // QA-3: the OC-5 rule's one missed population argument. `includeArchived` widens the
+  // lookup from the live catalog to live + DELETED products, so a search that surfaces a
+  // retired product rendered exactly like one that could not have.
+  it("find_product renders includeArchived (the answer covers deleted products too)", () => {
+    const s = summarize("find_product", { query: "tirz", includeArchived: true });
+    expect(s).toContain("incl. deleted");
+    expect(s).toContain("matching");
+    // Absent/false renders nothing — the phrase is a claim about the population, not decoration.
+    expect(summarize("find_product", { query: "tirz" })).not.toContain("deleted");
+    expect(summarize("find_product", { query: "tirz", includeArchived: false })).not.toContain("deleted");
+    // Streamed junk is not an explicit true (the `flag` posture every other arg uses).
+    expect(summarize("find_product", { query: "tirz", includeArchived: "yes" })).not.toContain("deleted");
+    // ...and the flag alone still renders, so a mid-stream call is never a bare label.
+    expect(summarize("find_product", { includeArchived: true })).toBe("incl. deleted");
+  });
+
   it("get_movement_series renders breakdownBy and the productIds set", () => {
     const s = summarize("get_movement_series", {
       breakdownBy: "product",

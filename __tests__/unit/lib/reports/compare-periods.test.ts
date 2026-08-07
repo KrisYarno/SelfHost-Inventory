@@ -595,6 +595,68 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
     ]);
   });
 
+  // QA-5: the row-level `reasons` snapshot was the WHOLE period vocabulary, so a row with
+  // a measured b carried "period B is not fully covered … absence here is UNKNOWN" beside
+  // a number that was measured. The reason a row is unranked is its OWN nullity, so that
+  // is what its reasons name.
+  it("BY_PRODUCT: an unranked row's reasons name ONLY the periods that are null FOR IT", async () => {
+    seedStaggered({
+      callerWide: "2020-01-01",
+      companyStarts: [
+        { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+        { companyId: "c2", _min: { dayKey: "2099-01-01" } },
+      ],
+      a: [{ productId: 1, _sum: { orderedQty: 10 } }],
+      b: [
+        { productId: 1, _sum: { orderedQty: 30 } },
+        { productId: 2, _sum: { orderedQty: 12 } },
+      ],
+    });
+
+    const res = await comparePeriodsByProduct({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    // BOTH periods are degraded, so the ENVELOPE vocabulary keeps both keys...
+    expect(Object.keys(res.reasons).sort()).toEqual(["a", "b"]);
+    expect(res.reasons.b).toContain("in every company");
+    // ...but this row's b was MEASURED: 12 units really were recorded in period B.
+    const row = res.unranked[0];
+    expect(row.productId).toBe(2);
+    expect(row.a).toBeNull();
+    expect(row.b).toBe(12);
+    expect(Object.keys(row.reasons ?? {})).toEqual(["a"]);
+    // The sentence itself is unchanged — only WHICH rows carry it.
+    expect(row.reasons!.a).toBe(res.reasons.a);
+  });
+
+  it("BY_PRODUCT: a row unknown in BOTH periods still carries BOTH reason keys", async () => {
+    // The other side of the per-row rule: the window-level case leaves every product
+    // unknown in both periods, and each row says so for both.
+    seedStaggered({
+      callerWide: "2099-01-01", // the source starts after both windows
+      companyStarts: [{ companyId: "c1", _min: { dayKey: "2099-01-01" } }],
+      a: [],
+      b: [{ productId: 2, _sum: { orderedQty: 12 } }],
+    });
+
+    const res = await comparePeriodsByProduct({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1"],
+    });
+
+    expect(res.ranked).toEqual([]);
+    const row = res.unranked[0];
+    expect(row.a).toBeNull();
+    expect(row.b).toBeNull();
+    expect(Object.keys(row.reasons ?? {}).sort()).toEqual(["a", "b"]);
+  });
+
   it("BY_PRODUCT: an un-staggered caller still measures zeros (the rule only DEGRADES)", async () => {
     seedStaggered({
       callerWide: "2020-01-01",

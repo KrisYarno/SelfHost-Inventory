@@ -830,6 +830,20 @@ export async function comparePeriodsByProduct(opts: {
   // delta by construction. It also duplicated the sentence's bytes once per row on the
   // wire. The shift is an envelope-level fact (FD3-3); the envelope carries it alone.
   const rowReasons = { ...reasons };
+  /**
+   * QA-5: a row's reasons are the reasons THIS ROW is unranked, so they name only the
+   * periods that are null for it. Under per-company degradation both periods carry a
+   * reason in the envelope vocabulary while a given product may well have a MEASURED
+   * value in one of them — and a row shipping "period B … absence here is UNKNOWN" next
+   * to a recorded b invites exactly the misreading the reason exists to prevent. The
+   * ENVELOPE keeps the full vocabulary: it describes the periods, not the rows.
+   */
+  const reasonsFor = (a: number | null, b: number | null): Record<string, string> => {
+    const out: Record<string, string> = {};
+    if (a == null && rowReasons.a != null) out.a = rowReasons.a;
+    if (b == null && rowReasons.b != null) out.b = rowReasons.b;
+    return out;
+  };
 
   // The product universe: everything with a qualifying row in EITHER window.
   const productIds = Array.from(
@@ -864,7 +878,7 @@ export async function comparePeriodsByProduct(opts: {
     const a = valueOf(coverageA, callerWideA, aByProduct, productId);
     const b = valueOf(coverageB, callerWideB, bByProduct, productId);
     if (a == null || b == null) {
-      unranked.push({ productId, a, b, delta: null, pctChange: null, reasons: rowReasons });
+      unranked.push({ productId, a, b, delta: null, pctChange: null, reasons: reasonsFor(a, b) });
       continue;
     }
     const delta = b - a;
@@ -894,9 +908,13 @@ export async function comparePeriodsByProduct(opts: {
   unranked.sort((x, y) => x.productId - y.productId);
 
   // FD4-2, the by_product reading of "only when there is a delta": the deltas this
-  // envelope ships are its RANKED rows' (an unranked row's delta is null by construction),
-  // so the qualification rides exactly when the page has at least one of them. `directed`
-  // is the post-direction set — what the caller actually receives.
+  // RESULT ships are its RANKED rows' (an unranked row's delta is null by construction),
+  // so the qualification rides exactly when the post-direction set has at least one of
+  // them. [QA-2] `directed` is the whole result, NOT the page: this module does not page,
+  // and an offset past the last ranked row ships a page with no delta on it. The
+  // PAGE-level gate therefore lives at the tool layer (tools.ts compareByProduct), which
+  // suppresses coverageShift, reasons.delta and the delta legend when its ranked page is
+  // empty. Both gates are the same rule asked at the two levels that know the answer.
   const coverageShift =
     directed.length === 0
       ? undefined

@@ -971,7 +971,8 @@ const COMPARE_UNRANKED_NOTE =
   "(see coverage.companyCoverage) and this product has no rows in that period, where " +
   "absence cannot be read as zero. Rows with recorded sums in both periods are still " +
   "MEASURED and ranked. Cite unranked rows as unknown-base — never as growth, decline, " +
-  "or 'newly active'.";
+  "or 'newly active'. unranked is listed (up to limit) on the first page only — " +
+  "unrankedTotal counts all.";
 
 /** Attach identity to every row BEFORE byte-fitting, so the fitter measures the shape
  *  the caller actually receives. Evidence fields ride as null placeholders here and are
@@ -1070,51 +1071,68 @@ async function compareByProduct(
   const rankedShaped = await shapeCompareRows(result.ranked);
   const unrankedShaped = await shapeCompareRows(result.unranked);
 
+  // The period-reason vocabulary WITHOUT the envelope-level shift key (QA-2): the module
+  // adds `reasons.delta` whenever the RESULT has a delta, and this page may not.
+  const periodReasons: Record<string, string> = {};
+  for (const [key, value] of Object.entries(result.reasons)) {
+    if (key !== "delta") periodReasons[key] = value;
+  }
+
   // The envelope, MEASURED (G2-5): build the payload with both arrays empty and weigh it,
   // so the row budget is `whatever room is actually left` rather than a constant that can
   // exceed the caller's whole budget.
-  const envelopeOf = (ranked: Page<CompareProductToolRow>, unranked: Page<CompareProductToolRow>) => ({
-    mode: "by_product",
-    metric: args.metric,
-    periodA,
-    periodB,
-    unequalLengths: result.unequalLengths,
-    rows: ranked.rows,
-    returned: ranked.returned,
-    totalRows: ranked.totalRows,
-    nextOffset: ranked.nextOffset,
-    unranked: unranked.rows,
-    unrankedReturned: unranked.returned,
-    unrankedTotal: unranked.totalRows,
-    reasons: result.reasons,
-    coverage: {
-      metricScope: metricScopeNote,
-      metricScopes: { sales: "company", ledger: "global" },
-      // Source-level coverage per period — the SAME classification get_sales uses.
-      periodCoverage: result.periodCoverage,
-      // FD2-2: the per-company disclosure, identical to totals mode's. Under degradation
-      // BOTH arrays can be populated (measured rows rank; rows absent from a period do
-      // not), and this pair is what explains the mixture.
-      ...(result.companyCoverage
-        ? { companyCoverage: result.companyCoverage, companyCoverageNote: result.companyCoverageNote }
-        : {}),
-      // FD3-3 mirrored (orchestrator seam-fix): a coverage shift changes EVERY row's
-      // denominator, so the qualification is envelope-level here exactly as in totals.
-      ...(result.coverageShift ? { coverageShift: result.coverageShift } : {}),
-      reasonsKeys: result.coverageShift
-        ? "a = periodA, b = periodB, pctChange = percent change, delta = the coverageShift qualification"
-        : "a = periodA, b = periodB, pctChange = percent change",
+  const envelopeOf = (ranked: Page<CompareProductToolRow>, unranked: Page<CompareProductToolRow>) => {
+    // QA-2, completing FD4-2's "only when there is a delta" at the layer that pages: the
+    // module gates the shift on the post-direction RESULT, but the deltas a caller
+    // receives are THIS PAGE's ranked rows. An offset past the end ships no delta at all,
+    // so the qualification — and the legend promising a `delta` key — would describe a
+    // page the caller does not have. Envelope-level facts about the PERIODS still ride;
+    // they are not claims about a delta.
+    const coverageShift = ranked.returned > 0 ? result.coverageShift : undefined;
+    return {
+      mode: "by_product",
+      metric: args.metric,
+      periodA,
+      periodB,
       unequalLengths: result.unequalLengths,
-      unrankedNote: COMPARE_UNRANKED_NOTE,
-      evidenceNote: COMPARE_EVIDENCE_NOTE,
-      // G5 disclosure (spec C13): PRODUCT grain, so the archived half is a JS count
-      // over the shaped rows' own `lifecycle` (both arrays — a coverage-artifact row
-      // is still a contributing product), and only the excluded half needs the census.
-      excludedUnapprovedProducts: result.excludedUnapprovedProducts,
-      archivedProductsIncluded: archivedCountOf([...rankedShaped, ...unrankedShaped]),
-      approvalNote: APPROVED_UNIVERSE_NOTE,
-    },
-  });
+      rows: ranked.rows,
+      returned: ranked.returned,
+      totalRows: ranked.totalRows,
+      nextOffset: ranked.nextOffset,
+      unranked: unranked.rows,
+      unrankedReturned: unranked.returned,
+      unrankedTotal: unranked.totalRows,
+      reasons: coverageShift ? result.reasons : periodReasons,
+      coverage: {
+        metricScope: metricScopeNote,
+        metricScopes: { sales: "company", ledger: "global" },
+        // Source-level coverage per period — the SAME classification get_sales uses.
+        periodCoverage: result.periodCoverage,
+        // FD2-2: the per-company disclosure, identical to totals mode's. Under degradation
+        // BOTH arrays can be populated (measured rows rank; rows absent from a period do
+        // not), and this pair is what explains the mixture.
+        ...(result.companyCoverage
+          ? { companyCoverage: result.companyCoverage, companyCoverageNote: result.companyCoverageNote }
+          : {}),
+        // FD3-3 mirrored (orchestrator seam-fix): a coverage shift changes EVERY row's
+        // denominator, so the qualification is envelope-level here exactly as in totals —
+        // on the pages that carry a delta at all (QA-2).
+        ...(coverageShift ? { coverageShift } : {}),
+        reasonsKeys: coverageShift
+          ? "a = periodA, b = periodB, pctChange = percent change, delta = the coverageShift qualification"
+          : "a = periodA, b = periodB, pctChange = percent change",
+        unequalLengths: result.unequalLengths,
+        unrankedNote: COMPARE_UNRANKED_NOTE,
+        evidenceNote: COMPARE_EVIDENCE_NOTE,
+        // G5 disclosure (spec C13): PRODUCT grain, so the archived half is a JS count
+        // over the shaped rows' own `lifecycle` (both arrays — a coverage-artifact row
+        // is still a contributing product), and only the excluded half needs the census.
+        excludedUnapprovedProducts: result.excludedUnapprovedProducts,
+        archivedProductsIncluded: archivedCountOf([...rankedShaped, ...unrankedShaped]),
+        approvalNote: APPROVED_UNIVERSE_NOTE,
+      },
+    };
+  };
 
   // Measured with the WIDEST counters this call can emit (the real array lengths), so the
   // envelope estimate is never smaller than the envelope actually shipped.
@@ -1134,7 +1152,16 @@ async function compareByProduct(
   const rankedFit = paginate(rankedShaped, offset, limit, rankedBudget);
   // The MEASURED remainder — what the ranked page actually consumed, not its allowance.
   const remainder = Math.max(budget - byteLengthOf(rankedFit.rows), 0);
-  const unrankedFit = paginate(unrankedShaped, 0, limit, remainder);
+  // QA-4: `unranked` is a disclosure about the WHOLE result, and it was fit at offset 0
+  // on EVERY page — so walking a ranked result re-shipped the same coverage rows page
+  // after page (bytes paid for again each time, and a set a model can double-count). It
+  // is LISTED once, on the first ranked page; deeper pages keep `unrankedTotal` (the
+  // count is still true of the whole result) and the note says where the list is. Full
+  // unranked pagination is registered forward work, not this fix.
+  const unrankedFit: Page<CompareProductToolRow> =
+    offset === 0
+      ? paginate(unrankedShaped, 0, limit, remainder)
+      : { rows: [], returned: 0, totalRows: unrankedShaped.length, nextOffset: null };
 
   await fillCompareEvidence(rankedFit.rows, { isSales, companyIds: ctx.companyIds });
   await fillCompareEvidence(unrankedFit.rows, { isSales, companyIds: ctx.companyIds });
@@ -1786,7 +1813,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `coverage.unattributedOrders is caller-scoped. Products with NO attributed sales ` +
       `in the window are ABSENT by default — pass includeZeroRows:true (groupBy:'product', ` +
       `no productId) to get a row for every approved product instead, which is how you ` +
-      `answer "which products sold nothing". coverage.salesDataStart is the first day ` +
+      `answer "which products sold nothing" — note that includeZeroRows RE-ORDERS the ` +
+      `rows by productId ascending (one paging-stable order across real and synthesized ` +
+      `rows), so the measured rows no longer lead and page 1 is not a "top sellers" list. ` +
+      `coverage.salesDataStart is the first day ` +
       `with any attributed sales fact for you, and coverage.windowCoverage says whether ` +
       `the window is 'full' (silence is a MEASURED zero), 'partial' (the window predates ` +
       `or straddles that start, so a zero row's sums are null with a reason — never read ` +
@@ -2149,7 +2179,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `breakdown row — a requested product with no ` +
       `movement comes back as an ALL-ZERO row (that is how "0 deductions recorded" is ` +
       `answerable), and ids that cannot be resolved are echoed in coverage.requested ` +
-      `rather than silently dropped. The result's mode is 'series', 'receipts', or ` +
+      `rather than silently dropped. coverage.archivedProductsIncluded counts deleted ` +
+      `products whose REAL movement is in these rows; archivedZeroRows (bounded requests ` +
+      `only) counts deleted products present ONLY as an all-zero row — they moved ` +
+      `nothing. The result's mode is 'series', 'receipts', or ` +
       `'by_product', and filters echoes the scope actually queried. Omitting dates uses ` +
       `relativeDays (default 30). ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getMovementSeriesSchema,

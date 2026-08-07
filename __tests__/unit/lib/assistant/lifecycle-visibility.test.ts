@@ -576,6 +576,41 @@ describe("3.1 get_movement_series — approved universe in all three modes", () 
     expect(ids).toEqual([ACTIVE_ID, ARCHIVED_ID]);
     expect(data.coverage.excludedUnapprovedProducts).toBe(1);
     expect(data.coverage.archivedProductsIncluded).toBe(1);
+    // QA-1: a catalog-wide breakdown force-emits nothing, so the zero-row sibling is
+    // absent exactly as get_sales omits it without includeZeroRows.
+    expect(data.coverage.archivedZeroRows).toBeUndefined();
+  });
+
+  // QA-1 — the movement mirror of get_sales' OC-2. A BOUNDED batch force-emits an
+  // all-zero row for a requested product with no movement, and folding those rows into
+  // `archivedProductsIncluded` made a silent archived product read as history that moved
+  // these numbers: an all-zero row proves the OPPOSITE of a contribution.
+  it("archivedProductsIncluded counts CONTRIBUTORS; forced zero rows are counted apart", async () => {
+    const data = await runTool("get_movement_series", {
+      breakdownBy: "product",
+      productIds: [SILENT_ARCHIVED_ID],
+    });
+    // The row is still emitted and still tagged — nothing is hidden by the correction.
+    expect(data.rows.map((r: any) => r.productId)).toEqual([SILENT_ARCHIVED_ID]);
+    expect(data.rows[0].lifecycle).toBe("deleted");
+    expect(data.rows[0].outboundUnits).toBe(0);
+    expect(data.rows[0].net).toBe(0);
+    // Nothing of its history is in these figures...
+    expect(data.coverage.archivedProductsIncluded).toBe(0);
+    // ...and the silent archived population is disclosed on its own terms.
+    expect(data.coverage.archivedZeroRows).toBe(1);
+    // The note beside the counts is a claim about them, so it has to stay true.
+    expect(data.coverage.approvalNote).toContain("archivedProductsIncluded counts contributing");
+  });
+
+  it("a bounded batch splits a REAL archived contributor from a silent one", async () => {
+    const data = await runTool("get_movement_series", {
+      breakdownBy: "product",
+      productIds: [ARCHIVED_ID, SILENT_ARCHIVED_ID],
+    });
+    // ARCHIVED_ID really shipped 100 units in the window; SILENT_ARCHIVED_ID has no rows.
+    expect(data.coverage.archivedProductsIncluded).toBe(1);
+    expect(data.coverage.archivedZeroRows).toBe(1);
   });
 
   it("G5 mechanics: the ledger census uses the PRODUCT-SIDE inventory_logs relation", async () => {

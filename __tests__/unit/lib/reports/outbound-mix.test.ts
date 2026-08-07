@@ -1257,6 +1257,160 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     expect(unrankedRow.reasons).not.toHaveProperty("delta");
   });
 
+  // QA-2: the shift qualifies DELTAS, and the deltas a caller receives are the ones on
+  // THIS PAGE. An offset past the last ranked row ships no delta at all, so shipping the
+  // qualification there (with a legend naming a `delta` key the payload does not carry)
+  // describes a different page than the one in hand.
+  it("BY_PRODUCT: a page with NO ranked rows ships no coverageShift, no reasons.delta, no delta legend", async () => {
+    const MULTI = testCtx({ companyIds: ["c1", "c2"] });
+    /** One measured product + one unknown-base product, under a real coverage shift. */
+    const seedShift = () =>
+      seedSales({
+        dataStart: "2020-01-01",
+        companyStarts: [
+          { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+          { companyId: "c2", _min: { dayKey: "2026-06-08" } },
+        ],
+        a: [{ productId: 1, _sum: { orderedQty: 10 } }],
+        b: [
+          { productId: 1, _sum: { orderedQty: 25 } },
+          { productId: 2, _sum: { orderedQty: 12 } },
+        ],
+        names: [
+          { id: 1, name: "One", deletedAt: null },
+          { id: 2, name: "Two", deletedAt: null },
+        ],
+      });
+    const args = {
+      metric: "sales_units",
+      periodA: { from: "2026-06-01", to: "2026-06-07" },
+      periodB: { from: "2026-06-08", to: "2026-06-14" },
+      groupBy: "product",
+    };
+    const dataAt = async (offset: number): Promise<Record<string, unknown>> => {
+      seedShift(); // the per-period delegate is call-ordered: re-seed per invocation
+      const result = await assistantTools.compare_periods.run({ ...args, offset }, MULTI);
+      expect(result.status).toBe("ok");
+      if (result.status !== "ok") throw new Error("not ok");
+      return result.data as Record<string, unknown>;
+    };
+
+    // The FIRST page has the ranked row the qualification is about: all three ride.
+    const first = await dataAt(0);
+    const firstCoverage = first.coverage as Record<string, unknown>;
+    expect((first.rows as unknown[]).length).toBe(1);
+    expect(firstCoverage.coverageShift).toContain("not like-for-like");
+    expect((first.reasons as Record<string, string>).delta).toBe(firstCoverage.coverageShift);
+    expect(firstCoverage.reasonsKeys).toContain("delta = the coverageShift qualification");
+
+    // Offset past the end: one ranked row exists in total, so this page carries none.
+    const beyond = await dataAt(5);
+    const beyondCoverage = beyond.coverage as Record<string, unknown>;
+    expect(beyond.rows).toEqual([]);
+    expect(beyond.returned).toBe(0);
+    // The envelope-level facts about the PERIODS still ship — they are not delta claims.
+    expect(beyondCoverage.periodCoverage).toEqual({ a: "partial", b: "full" });
+    // The delta qualification does not.
+    expect(beyondCoverage.coverageShift).toBeUndefined();
+    expect((beyond.reasons as Record<string, string>).delta).toBeUndefined();
+    expect(beyondCoverage.reasonsKeys).not.toContain("delta");
+  });
+
+  // QA-4: `unranked` was fit at offset 0 on EVERY page, so walking a ranked result
+  // re-shipped the same coverage rows page after page — bytes the caller pays for twice
+  // and a set a model can double-count. It is listed once, on the first page.
+  it("unranked ships on the FIRST ranked page only; deeper pages keep unrankedTotal", async () => {
+    const MULTI = testCtx({ companyIds: ["c1", "c2"] });
+    /** Degraded (c2 never recorded): products 1+2 measured in both periods and ranked,
+     *  product 3 recorded in B only — unknown base, unranked. */
+    const seedMixed = () =>
+      seedSales({
+        dataStart: "2020-01-01",
+        companyStarts: [{ companyId: "c1", _min: { dayKey: "2020-01-01" } }],
+        a: [
+          { productId: 1, _sum: { orderedQty: 10 } },
+          { productId: 2, _sum: { orderedQty: 10 } },
+        ],
+        b: [
+          { productId: 1, _sum: { orderedQty: 40 } }, // +30
+          { productId: 2, _sum: { orderedQty: 15 } }, // +5
+          { productId: 3, _sum: { orderedQty: 12 } }, // no period-A row => unranked
+        ],
+        names: [
+          { id: 1, name: "One", deletedAt: null },
+          { id: 2, name: "Two", deletedAt: null },
+          { id: 3, name: "Three", deletedAt: null },
+        ],
+      });
+    const pageAt = async (offset: number): Promise<Record<string, unknown>> => {
+      seedMixed();
+      const result = await assistantTools.compare_periods.run(
+        {
+          metric: "sales_units",
+          periodA: { relativeDays: 7 },
+          periodB: { relativeDays: 7 },
+          groupBy: "product",
+          limit: 1,
+          offset,
+        },
+        MULTI,
+      );
+      expect(result.status).toBe("ok");
+      if (result.status !== "ok") throw new Error("not ok");
+      return result.data as Record<string, unknown>;
+    };
+
+    const first = await pageAt(0);
+    expect((first.rows as Array<Record<string, unknown>>).map((r) => r.productId)).toEqual([1]);
+    expect((first.unranked as Array<Record<string, unknown>>).map((r) => r.productId)).toEqual([3]);
+    expect(first.unrankedReturned).toBe(1);
+    expect(first.unrankedTotal).toBe(1);
+
+    const second = await pageAt(1);
+    // The ranked page moves on...
+    expect((second.rows as Array<Record<string, unknown>>).map((r) => r.productId)).toEqual([2]);
+    // ...and the coverage rows are NOT re-shipped, while their count still is.
+    expect(second.unranked).toEqual([]);
+    expect(second.unrankedReturned).toBe(0);
+    expect(second.unrankedTotal).toBe(1);
+    // The note says so, so the absence can never read as "no unranked rows".
+    expect((second.coverage as Record<string, string>).unrankedNote).toContain(
+      "first page only",
+    );
+  });
+
+  // QA-5 at the TOOL layer: a row's reasons name the periods that are null FOR IT. The
+  // shared snapshot put "period B ... absence here is UNKNOWN" on a row whose b was 12.
+  it("an unranked row's reasons name only ITS OWN null periods (a measured b keeps no b reason)", async () => {
+    const MULTI = testCtx({ companyIds: ["c1", "c2"] });
+    seedSales({
+      dataStart: "2020-01-01",
+      companyStarts: [{ companyId: "c1", _min: { dayKey: "2020-01-01" } }],
+      a: [{ productId: 1, _sum: { orderedQty: 10 } }],
+      b: [
+        { productId: 1, _sum: { orderedQty: 30 } },
+        { productId: 2, _sum: { orderedQty: 12 } },
+      ],
+      names: [
+        { id: 1, name: "One", deletedAt: null },
+        { id: 2, name: "Two", deletedAt: null },
+      ],
+    });
+    const result = await assistantTools.compare_periods.run(
+      { metric: "sales_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 }, groupBy: "product" },
+      MULTI,
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as Record<string, unknown>;
+    // Both periods are degraded, so the ENVELOPE vocabulary keeps both keys.
+    expect(Object.keys(data.reasons as Record<string, string>).sort()).toEqual(["a", "b"]);
+    const row = (data.unranked as Array<Record<string, unknown>>)[0];
+    expect(row.productId).toBe(2);
+    expect(row.b).toBe(12); // MEASURED — 12 units really were recorded in period B
+    expect(Object.keys(row.reasons as Record<string, string>)).toEqual(["a"]);
+  });
+
   it("BY_PRODUCT with no shift OMITS the key and drops `delta` from the legend", async () => {
     // The other branch of the conditional legend: equally-covered periods emit no delta
     // reason, so a legend naming one would describe a key that is never there.
