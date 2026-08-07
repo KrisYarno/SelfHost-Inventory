@@ -311,6 +311,35 @@ export function notFound(entity: "product", id: number): ToolResult {
 }
 
 /**
+ * Effective-scope echo for a single-product call (spec C4, Task 1.1). Present and
+ * NON-null only when the caller scoped the read to one product; `null` means the
+ * figures really are catalog-wide. The note exists so a per-product answer can never
+ * be relayed as evidence about the catalog.
+ */
+export interface ProductScopeEcho {
+  productId: number;
+  name: string;
+  note: string;
+}
+
+export const PRODUCT_SCOPE_NOTE =
+  "covers ONLY this product — not evidence about any other product";
+
+/**
+ * Derive a low-stock alert's threshold SOURCE from the raw per-product column (spec
+ * C8, review F5). `rawThreshold` is the column verbatim: `null` means the product
+ * inherits the shop default; ANY number — including an explicit 0 (alerts disabled)
+ * and a value that happens to equal the current default — is a product-specific
+ * override. Exported so the 0 case is directly testable: a 0-threshold product is
+ * never an alert row, so the property is unobservable through the report.
+ */
+export function deriveThresholdSource(alert: {
+  rawThreshold: number | null;
+}): "product_override" | "system_default" {
+  return alert.rawThreshold != null ? "product_override" : "system_default";
+}
+
+/**
  * The shared coverage/freshness envelope validator (spec §7 COVERAGE GATE): a coverage
  * or freshness block must be a NON-EMPTY object of named fields — `coverage: {}` FAILS.
  * New tools validate their coverage block against this; the gate harness enforces the
@@ -995,9 +1024,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
 
       // W0-PROD: a provided productId resolves through the shared approved-product
       // resolver — a pending-review / soft-deleted id returns notFound, never phantom rows.
+      // C4 (Task 1.1): the resolved identity becomes the payload's `productScope` echo,
+      // so a single-product answer can never be relayed as a catalog-wide one.
+      let productScope: ProductScopeEcho | null = null;
       if (args.productId != null) {
         const product = await resolveAssistantProduct(args.productId);
         if (!product) return notFound("product", args.productId);
+        productScope = { productId: product.id, name: product.name, note: PRODUCT_SCOPE_NOTE };
       }
 
       const groupBy = (args.groupBy ?? "product") as SalesToolGroupBy;
@@ -1015,6 +1048,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             nextOffset: null,
             groupBy,
             window,
+            productScope,
             coverage,
             note: "You have no company access, so there are no sales to report.",
           },
@@ -1042,6 +1076,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       const data: Record<string, unknown> = {
         groupBy,
         window,
+        productScope,
         rows: page.rows,
         returned: page.returned,
         totalRows: page.totalRows,
@@ -1063,7 +1098,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `(see get_sales). velocityDefinition states how avgDailyOutbound30 is computed. ` +
       `unitsOut30/unitsOut90/avgDailyOutbound30 measure PHYSICAL DEPLETION, not ` +
       `verified sales: legacy unclassified adjustments, corrections, and count ` +
-      `depletion are all included — never present these as 'sold'. ` +
+      `depletion are all included — never present these as 'sold'. scope echoes the ` +
+      `effective { productId, windowDays } this row set was computed over. ` +
       `Outbound/velocity here count ALL negative non-transfer deltas over a ROLLING ` +
       `window ending now; get_movement_series instead partitions the ledger into ` +
       `CALENDAR-DAY buckets (wrong-signed rows folded into their natural bucket), so a ` +
@@ -1090,6 +1126,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // W3 seam-fix item 1: ctx-aware reserved budget (was the fixed row budget).
       const page = paginate(ranked, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
       const data: Record<string, unknown> = {
+        // Effective-scope echo (spec C4): the REAL window this row set was computed
+        // over — get_operations takes windowDays (default 90), never relativeDays.
+        scope: { productId: args.productId ?? null, windowDays },
         rows: page.rows,
         returned: page.returned,
         totalRows: page.totalRows,
@@ -1117,12 +1156,18 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `over 30/90/365 days. All OTHER negative movement — bare corrections and ` +
       `reason-less rows (how this shop ships pre-Lane-4) — is surfaced as ` +
       `coverage.unclassifiedOutboundUnits, NEVER as loss. valueAtCurrentCostCents is a ` +
-      `known-cost subtotal — check costCoverage. UNCLASSIFIED is always relayed. ${DATA_POSTURE}`,
+      `known-cost subtotal — check costCoverage. UNCLASSIFIED is always relayed. ` +
+      `scope echoes the effective { days } this result covers. ${DATA_POSTURE}`,
     inputSchema: getShrinkageSchema,
     run: async (input) => {
       const args = getShrinkageSchema.parse(input);
       const summary = await getShrinkageSummary({ days: args.days });
-      return ok(summary, { scope: "global", dataStart: summary.dataStart ?? undefined });
+      // Effective-scope echo (spec C4): the window these loss figures cover. The tool
+      // that produced conv-3's "sold" figures gets the same F1 guard as get_sales.
+      return ok(
+        { scope: { days: args.days }, ...summary },
+        { scope: "global", dataStart: summary.dataStart ?? undefined },
+      );
     },
   },
 
@@ -1243,6 +1288,14 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           {
             mode: "receipts",
             window,
+            // C4 / T4: the SAME filters echo the series envelope carries, with the
+            // receipts discriminant — `filters.mode === mode` on every variant.
+            filters: {
+              productId: args.productId ?? null,
+              productIds: null,
+              locationId: args.locationId ?? null,
+              mode: "receipts",
+            },
             rows: page.rows,
             returned: page.returned,
             totalRows: page.totalRows,
@@ -1401,17 +1454,16 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       const systemDefaultThreshold = report.threshold;
       // D-T8: the underlying report exposes one `threshold` per row (effective) AND a
       // top-level `threshold` (the default) — two fields, one name. Rename at the
-      // boundary so no model can conflate them. `thresholdSource` is inferred by
-      // comparison: a row whose effective value differs from the default carries a
-      // product-specific override. (An override that happens to equal the default
-      // reads as system_default — functionally identical; see SEAMS for the exact
-      // source, which needs L-TRUTH to expose the raw per-product threshold.)
+      // boundary so no model can conflate them. `thresholdSource` comes from the RAW
+      // per-product column (spec C8): the old equality inference reported an override
+      // that happened to equal the default as "system_default", which is false — the
+      // two behave differently the moment the shop default moves.
       const alerts = report.alerts.map((a) => {
         const { threshold, ...rest } = a;
         return {
           ...rest,
           effectiveThreshold: threshold,
-          thresholdSource: threshold === systemDefaultThreshold ? "system_default" : "product_override",
+          thresholdSource: deriveThresholdSource(a),
         };
       });
       // W3 seam-fix item 1: ctx-aware reserved budget (was the fixed row budget).
@@ -1454,7 +1506,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `they do NOT subtract stock already on order. costPrice/orderValue are null when ` +
       `unknown (NEVER shown as $0). 'assumptions' states the demand window, default ` +
       `bufferDays, targetCoverageMultiple, and demand definition — relay them. 'coverage' ` +
-      `counts total/suggested/unavailable/costed. ${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `counts total/suggested/unavailable/healthy/approachingOmitted/costed and satisfies ` +
+      `total = suggested + unavailable + healthy + approachingOmitted; healthy products ` +
+      `are counted, never rows — coverageNote states the definition, relay it. ` +
+      `${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: reorderSchema,
     run: async (input, ctx) => {
       const args = reorderSchema.parse(input);
@@ -1473,7 +1528,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           nextOffset: page.nextOffset,
           inventoryPositionKnown: report.inventoryPositionKnown,
           assumptions: report.assumptions,
+          // This envelope is a MANUAL projection (G2-7): a new report field is invisible
+          // to the assistant/MCP surface until it is relayed HERE.
           coverage: report.coverage,
+          coverageNote: report.coverageNote,
         },
         { scope: "global" },
       );

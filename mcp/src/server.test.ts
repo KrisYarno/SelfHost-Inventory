@@ -50,7 +50,12 @@ jest.mock("@/lib/prisma", () => ({
       findMany: jest.fn(async () => []),
     },
     // Wave-2: compare_periods sales metrics read ProductSalesFact aggregates.
-    productSalesFact: { aggregate: jest.fn(async () => ({ _min: {}, _max: {}, _sum: {}, _count: {} })) },
+    // quality+reach W1 (Task 1.1): get_sales groups facts BY product — the wire
+    // assertion for productScope needs real rows beside the echo.
+    productSalesFact: {
+      aggregate: jest.fn(async () => ({ _min: {}, _max: {}, _sum: {}, _count: {} })),
+      groupBy: jest.fn(async () => []),
+    },
     externalOrder: {
       findFirst: jest.fn(async () => null),
       count: jest.fn(async () => 0),
@@ -571,6 +576,230 @@ describe("POST /mcp — Wave-2 tool round-trips assert REAL payload values (item
     expect(toolResult.data.rows[0].unitCostCents).toBe(500);
     expect(toolResult.data.rows[0].batchId).toBe("B1");
     expect(toolResult.data.rows[0].locationId).toBe(2);
+  });
+});
+
+describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage additions)", () => {
+  // MCP parity is PER-TASK: every payload change lands its wire assertion here, over the
+  // inline mock, with REAL values (never a status-only smoke). Task 1.1 owns the four
+  // scope-echo payloads; 1.3/1.4/1.5 append their coverage/derivation assertions.
+  beforeEach(() => {
+    p.userCompany.findMany.mockReset();
+    p.userCompany.findMany.mockResolvedValue([]);
+    p.product.findMany.mockReset();
+    p.product.findMany.mockResolvedValue([]);
+    p.product.findFirst.mockReset();
+    p.product.findFirst.mockResolvedValue(null);
+    p.product.findUnique.mockReset();
+    p.product.findUnique.mockResolvedValue(null);
+    p.productSalesFact.groupBy.mockReset();
+    p.productSalesFact.groupBy.mockResolvedValue([]);
+    p.externalOrder.count.mockReset();
+    p.externalOrder.count.mockResolvedValue(0);
+    p.inventory_logs.findMany.mockReset();
+    p.inventory_logs.findMany.mockResolvedValue([]);
+    p.inventory_logs.groupBy.mockReset();
+    p.inventory_logs.groupBy.mockResolvedValue([]);
+    p.inventory_logs.aggregate.mockReset();
+    p.inventory_logs.aggregate.mockResolvedValue({ _min: {}, _max: {}, _sum: {}, _count: {} });
+    p.inventory_logs.count.mockReset();
+    p.inventory_logs.count.mockResolvedValue(0);
+    p.analyticsRebuildState.findUnique.mockReset();
+    p.analyticsRebuildState.findUnique.mockResolvedValue(null);
+    p.systemSetting.findUnique.mockReset();
+    p.systemSetting.findUnique.mockResolvedValue(null);
+    p.globalReorderSettings.findUnique.mockReset();
+    p.globalReorderSettings.findUnique.mockResolvedValue(null);
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function roundTrip(name: string, args: Record<string, unknown>): Promise<any> {
+    const server = createMcpHttpServer();
+    const port = await listen(server);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: MCP_HEADERS,
+        body: toolCall(1, name, args),
+      });
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rpc = (await res.json()) as any;
+      expect(rpc.result).toBeDefined();
+      return JSON.parse(rpc.result.content[0].text as string);
+    } finally {
+      await close(server);
+    }
+  }
+
+  it("get_sales: productScope echoes the RESOLVED product identity on the wire (C4)", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]); // ctx.companyIds
+    p.product.findFirst.mockResolvedValueOnce({ id: 7, name: "TIRZ 10mg" }); // resolver
+    p.productSalesFact.groupBy.mockResolvedValueOnce([
+      { productId: 7, _sum: { orderedQty: 12, revenue: "24.00", orderCount: 3 } },
+    ]);
+    p.product.findMany.mockResolvedValueOnce([{ id: 7, name: "TIRZ 10mg" }]); // row names
+
+    const toolResult = await roundTrip("get_sales", { productId: 7, groupBy: "product" });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.productScope).toEqual({
+      productId: 7,
+      name: "TIRZ 10mg",
+      note: "covers ONLY this product — not evidence about any other product",
+    });
+    // The scope echo sits beside REAL rows, not an empty payload.
+    expect(toolResult.data.rows[0].productId).toBe(7);
+  });
+
+  it("get_sales: productScope is null for a catalog-wide call", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    const toolResult = await roundTrip("get_sales", { groupBy: "product" });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data).toHaveProperty("productScope");
+    expect(toolResult.data.productScope).toBeNull();
+  });
+
+  it("get_sales: coverage carries the totalOrders DENOMINATOR + attributionNote (C7)", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    // The two counts are siblings on ONE delegate: unattributed first, total second.
+    p.externalOrder.count.mockResolvedValueOnce(319).mockResolvedValueOnce(2331);
+
+    const toolResult = await roundTrip("get_sales", { groupBy: "product" });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.coverage.unattributedOrders).toBe(319);
+    expect(toolResult.data.coverage.totalOrders).toBe(2331);
+    expect(toolResult.data.coverage.attributionNote).toContain(
+      "unattributedOrders of totalOrders company-scoped orders (all time)",
+    );
+    // The denominator is company-scoped and UNWINDOWED (no isMapped, no date range).
+    expect(p.externalOrder.count.mock.calls[1][0]).toEqual({
+      where: { companyId: { in: ["c1"] } },
+    });
+  });
+
+  it("get_movement_series: mode 'series' + filters echo, filters.mode === mode (T4)", async () => {
+    const when = new Date(Date.now() - 2 * 86_400_000);
+    p.product.findFirst.mockResolvedValueOnce({ id: 3, name: "P" });
+    p.inventory_logs.findMany.mockResolvedValueOnce([
+      { delta: -5, changeTime: when, logType: "SALE", reasonCode: null },
+    ]);
+
+    const toolResult = await roundTrip("get_movement_series", { productId: 3, locationId: 2 });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.mode).toBe("series");
+    expect(toolResult.data.filters).toEqual({
+      productId: 3,
+      productIds: null,
+      locationId: 2,
+      mode: "series",
+    });
+    expect(toolResult.data.filters.mode).toBe(toolResult.data.mode);
+    expect(toolResult.data.totals.sale).toBe(-5);
+  });
+
+  it("get_movement_series receipts:true: mode 'receipts' + the SAME filters echo (T4)", async () => {
+    p.product.findFirst.mockResolvedValueOnce({ id: 3, name: "P" });
+    p.inventory_logs.count.mockResolvedValueOnce(1);
+    p.inventory_logs.findMany.mockResolvedValueOnce([
+      {
+        productId: 3,
+        locationId: 2,
+        delta: 20,
+        unitCostCents: 500,
+        batchId: "B1",
+        changeTime: new Date("2026-07-01T00:00:00.000Z"),
+      },
+    ]);
+
+    const toolResult = await roundTrip("get_movement_series", {
+      productId: 3,
+      locationId: 2,
+      receipts: true,
+    });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.mode).toBe("receipts");
+    expect(toolResult.data.filters).toEqual({
+      productId: 3,
+      productIds: null,
+      locationId: 2,
+      mode: "receipts",
+    });
+    expect(toolResult.data.filters.mode).toBe(toolResult.data.mode);
+    expect(toolResult.data.rows[0].quantity).toBe(20);
+  });
+
+  it("get_operations: scope echoes the REAL windowDays (default 90, explicit 30)", async () => {
+    const dflt = await roundTrip("get_operations", {});
+    expect(dflt.status).toBe("ok");
+    expect(dflt.data.scope).toEqual({ productId: null, windowDays: 90 });
+
+    p.product.findFirst.mockResolvedValueOnce({ id: 4, name: "P" });
+    const scoped = await roundTrip("get_operations", { productId: 4, windowDays: 30 });
+    expect(scoped.status).toBe("ok");
+    expect(scoped.data.scope).toEqual({ productId: 4, windowDays: 30 });
+  });
+
+  it("get_shrinkage: scope echoes the REAL days window", async () => {
+    const toolResult = await roundTrip("get_shrinkage", { days: 365 });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.scope).toEqual({ days: 365 });
+  });
+
+  it("reorder_report: the six-bucket coverage + coverageNote reach the wire (C5)", async () => {
+    // Two approved-active products; only one is emitted, so `healthy` is the field that
+    // proves the accounting (the old block would have shown total 2 / suggested 0 /
+    // unavailable 1 and silently lost the second product).
+    p.product.findMany.mockResolvedValueOnce([
+      { id: 1, name: "A NoDemand", costPrice: null, product_locations: [{ quantity: 3 }], reorderConfig: null },
+      { id: 2, name: "B Healthy", costPrice: null, product_locations: [{ quantity: 1000 }], reorderConfig: null },
+    ]);
+    // Product 2 has a real demand signal (>= the default minEvidenceEvents of 3) but
+    // stock far above 1.2x its reorder point => FINAL urgency null => healthy.
+    const recent = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000);
+    p.inventory_logs.findMany.mockResolvedValueOnce([
+      { productId: 2, delta: -1, changeTime: recent(3), logType: "SALE", reasonCode: null },
+      { productId: 2, delta: -1, changeTime: recent(2), logType: "SALE", reasonCode: null },
+      { productId: 2, delta: -1, changeTime: recent(1), logType: "SALE", reasonCode: null },
+    ]);
+
+    const toolResult = await roundTrip("reorder_report", {});
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.coverage).toEqual({
+      total: 2,
+      suggested: 0,
+      unavailable: 1, // product 1: no_demand_signal
+      healthy: 1, // product 2: final urgency null, not emitted
+      approachingOmitted: 0,
+      costed: 0,
+    });
+    expect(toolResult.data.coverageNote).toContain("healthy = final urgency null");
+    // The NORMATIVE invariant, asserted on the wire payload itself.
+    const c = toolResult.data.coverage;
+    expect(c.suggested + c.unavailable + c.healthy + c.approachingOmitted).toBe(c.total);
+  });
+
+  it("low_stock_report: thresholdSource comes from the RAW override, not equality (C8)", async () => {
+    // The fixture the OLD inference got wrong: an explicit override that EQUALS the
+    // system default (10). Equality reported "system_default"; the raw column says
+    // otherwise, and the raw value rides along as the evidence.
+    p.product.findMany.mockResolvedValueOnce([
+      { id: 1, name: "Equal Override", lowStockThreshold: 10, product_locations: [{ quantity: 2 }] },
+      { id: 2, name: "Inherited", lowStockThreshold: null, product_locations: [{ quantity: 1 }] },
+    ]);
+
+    const toolResult = await roundTrip("low_stock_report", {});
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.systemDefaultThreshold).toBe(10);
+    const byId = Object.fromEntries(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (toolResult.data.alerts as any[]).map((a) => [a.productId, a]),
+    );
+    expect(byId[1].effectiveThreshold).toBe(10);
+    expect(byId[1].rawThreshold).toBe(10);
+    expect(byId[1].thresholdSource).toBe("product_override");
+    expect(byId[2].effectiveThreshold).toBe(10);
+    expect(byId[2].rawThreshold).toBeNull();
+    expect(byId[2].thresholdSource).toBe("system_default");
   });
 });
 

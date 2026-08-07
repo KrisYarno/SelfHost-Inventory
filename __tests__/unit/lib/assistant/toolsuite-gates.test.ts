@@ -784,6 +784,95 @@ describe("PII PROJECTION gate (spec §7 — get_order_pipeline)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// SCOPE ECHO gate (spec C4, payload half — Task 1.1). Every scope-bearing tool
+// echoes the scope it ACTUALLY queried, so a per-product answer can never be read
+// as a catalog-wide one (and vice versa). Runs over the fail-closed proxy: the data
+// is empty, but the echo is structural and must be present regardless.
+// ---------------------------------------------------------------------------
+
+describe("SCOPE ECHO gate (spec C4 — effective-scope echoes)", () => {
+  const okData = async (name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const result = await assistantTools[name].run(args, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") throw new Error("not ok");
+    return result.data as Record<string, unknown>;
+  };
+
+  it("get_sales echoes productScope: null for a catalog-wide call", async () => {
+    prismaCtl.__reset();
+    const data = await okData("get_sales", { groupBy: "product" });
+    expect(data).toHaveProperty("productScope");
+    expect(data.productScope).toBeNull();
+  });
+
+  it("get_sales echoes { productId, name, note } for a resolved single-product call", async () => {
+    prismaCtl.__reset();
+    prismaCtl.__overrides["product.findFirst"] = { id: 7, name: "TIRZ 10mg" };
+    const data = await okData("get_sales", { productId: 7, groupBy: "product" });
+    expect(data.productScope).toEqual({
+      productId: 7,
+      name: "TIRZ 10mg",
+      note: "covers ONLY this product — not evidence about any other product",
+    });
+  });
+
+  it("get_sales echoes productScope even on the EMPTY-companyIds short circuit", async () => {
+    prismaCtl.__reset();
+    prismaCtl.__overrides["product.findFirst"] = { id: 7, name: "TIRZ 10mg" };
+    const result = await assistantTools.get_sales.run({ productId: 7 }, testCtx({ companyIds: [] }));
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    expect((result.data as { productScope: unknown }).productScope).toMatchObject({ productId: 7 });
+  });
+
+  // T4 (contract pack): the movement envelope is a DISCRIMINATED union keyed by the
+  // literal `mode`, and `filters.mode === mode` on EVERY variant. One test per variant.
+  it("get_movement_series (series) carries mode 'series' + filters, and filters.mode === mode", async () => {
+    prismaCtl.__reset();
+    prismaCtl.__overrides["product.findFirst"] = { id: 3, name: "P" };
+    const data = await okData("get_movement_series", { productId: 3, locationId: 2 });
+    expect(data.mode).toBe("series");
+    expect(data.filters).toEqual({ productId: 3, productIds: null, locationId: 2, mode: "series" });
+    expect((data.filters as { mode: string }).mode).toBe(data.mode);
+  });
+
+  it("get_movement_series (receipts) carries mode 'receipts' + the SAME filters shape", async () => {
+    prismaCtl.__reset();
+    prismaCtl.__overrides["product.findFirst"] = { id: 3, name: "P" };
+    const data = await okData("get_movement_series", { productId: 3, locationId: 2, receipts: true });
+    expect(data.mode).toBe("receipts");
+    expect(data.filters).toEqual({ productId: 3, productIds: null, locationId: 2, mode: "receipts" });
+    expect((data.filters as { mode: string }).mode).toBe(data.mode);
+  });
+
+  it("get_movement_series echoes nulls for an unscoped call (both modes)", async () => {
+    prismaCtl.__reset();
+    const series = await okData("get_movement_series", {});
+    expect(series.filters).toEqual({ productId: null, productIds: null, locationId: null, mode: "series" });
+    prismaCtl.__reset();
+    const receipts = await okData("get_movement_series", { receipts: true });
+    expect(receipts.filters).toEqual({ productId: null, productIds: null, locationId: null, mode: "receipts" });
+  });
+
+  it("get_operations echoes scope { productId, windowDays } with the real default (90)", async () => {
+    prismaCtl.__reset();
+    const dflt = await okData("get_operations", {});
+    expect(dflt.scope).toEqual({ productId: null, windowDays: 90 });
+    prismaCtl.__reset();
+    prismaCtl.__overrides["product.findFirst"] = { id: 4, name: "P" };
+    const scoped = await okData("get_operations", { productId: 4, windowDays: 30 });
+    expect(scoped.scope).toEqual({ productId: 4, windowDays: 30 });
+  });
+
+  it("get_shrinkage echoes scope { days }", async () => {
+    prismaCtl.__reset();
+    expect((await okData("get_shrinkage", { days: 30 })).scope).toEqual({ days: 30 });
+    prismaCtl.__reset();
+    expect((await okData("get_shrinkage", { days: 365 })).scope).toEqual({ days: 365 });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // W0-PROD — the shared resolver + the ONE not-found shape.
 // ---------------------------------------------------------------------------
 

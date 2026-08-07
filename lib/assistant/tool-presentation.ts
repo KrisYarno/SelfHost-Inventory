@@ -35,13 +35,32 @@ function num(input: unknown, key: string): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
-function dateRangePhrase(input: unknown): string {
+/** The window phrase for tools whose window resolver defaults to relativeDays 30
+ *  (get_sales / get_movement_series / compare_periods' periods). */
+const DEFAULT_RELATIVE_WINDOW_PHRASE = "last 30 days (default)";
+
+/**
+ * Render a tool call's window as a phrase (spec C4, UI half — review F12). Explicit
+ * dates win; `relativeDays` renders "last N days"; when the call carries neither, the
+ * caller supplies the PER-TOOL default descriptor — there is no universal fallback,
+ * because the tools do not share a default window (get_stock has none at all, and
+ * get_operations takes windowDays instead). Returns "" when no default is given.
+ */
+function dateRangePhrase(input: unknown, dflt?: string): string {
   const from = str(input, "from");
   const to = str(input, "to");
   if (from && to) return `${from} to ${to}`;
   if (from) return `since ${from}`;
   if (to) return `through ${to}`;
-  return "";
+  const relativeDays = num(input, "relativeDays");
+  if (relativeDays) return `last ${relativeDays} days`;
+  return dflt ?? "";
+}
+
+/** One compare_periods period ({from,to} | {relativeDays} | {}), same resolver
+ *  defaults as the tool (relativeDays 30). */
+function periodPhrase(period: unknown): string {
+  return dateRangePhrase(period, DEFAULT_RELATIVE_WINDOW_PHRASE);
 }
 
 export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
@@ -62,8 +81,15 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     emptyCopy: "No stock records found.",
     summarizeArgs: (input) => {
       const id = num(input, "productId");
-      const range = dateRangePhrase(input);
-      const parts = [id ? `product #${id}` : "", range].filter(Boolean);
+      const locationId = num(input, "locationId");
+      // get_stock has NO default window — it pages the whole recorded snapshot history
+      // newest-first, so a "last 30 days" fallback here would be a false disclosure.
+      const range = dateRangePhrase(input, "all recorded days (paged)");
+      const parts = [
+        id ? `product #${id}` : "",
+        locationId ? `location #${locationId}` : "",
+        range,
+      ].filter(Boolean);
       return parts.join(", ");
     },
   },
@@ -74,7 +100,7 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     emptyCopy: "No sales in this range.",
     summarizeArgs: (input) => {
       const id = num(input, "productId");
-      const range = dateRangePhrase(input);
+      const range = dateRangePhrase(input, DEFAULT_RELATIVE_WINDOW_PHRASE);
       const groupBy = str(input, "groupBy");
       const parts = [
         id ? `product #${id}` : "",
@@ -91,8 +117,14 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     emptyCopy: "No operations data yet.",
     summarizeArgs: (input) => {
       const id = num(input, "productId");
+      // get_operations takes `windowDays` (30 | 90, default 90) — NOT relativeDays and
+      // NOT from/to. Rendering "last N days" from an argument this tool ignores would
+      // disclose a window it never queried.
       const windowDays = num(input, "windowDays");
-      const parts = [id ? `product #${id}` : "", windowDays ? `last ${windowDays} days` : ""].filter(Boolean);
+      const parts = [
+        id ? `product #${id}` : "",
+        windowDays ? `${windowDays}-day window` : "90-day window (default)",
+      ].filter(Boolean);
       return parts.join(", ");
     },
   },
@@ -125,11 +157,13 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     emptyCopy: "No movement in this range.",
     summarizeArgs: (input) => {
       const id = num(input, "productId");
-      const range = dateRangePhrase(input);
+      const locationId = num(input, "locationId");
+      const range = dateRangePhrase(input, DEFAULT_RELATIVE_WINDOW_PHRASE);
       const groupBy = str(input, "groupBy");
       const receipts = (input as Record<string, unknown> | null | undefined)?.receipts === true;
       const parts = [
         id ? `product #${id}` : "",
+        locationId ? `location #${locationId}` : "",
         range,
         receipts ? "receipts" : groupBy ? `by ${groupBy}` : "",
       ].filter(Boolean);
@@ -156,7 +190,14 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     summarizeArgs: (input) => {
       const metric = str(input, "metric");
       const id = num(input, "productId");
-      const parts = [metric ? metric.replace(/_/g, " ") : "", id ? `product #${id}` : ""].filter(Boolean);
+      // Render BOTH periods (it rendered neither): a comparison disclosure that names
+      // no windows tells the reader nothing about what was compared.
+      const rec = input as Record<string, unknown> | null | undefined;
+      const parts = [
+        metric ? metric.replace(/_/g, " ") : "",
+        `${periodPhrase(rec?.periodA)} vs ${periodPhrase(rec?.periodB)}`,
+        id ? `product #${id}` : "",
+      ].filter(Boolean);
       return parts.join(", ");
     },
   },

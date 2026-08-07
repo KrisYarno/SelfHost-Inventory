@@ -61,9 +61,24 @@ export interface MovementBuckets {
   net: number;
 }
 
+/** The effective filter echo carried by EVERY movement envelope variant (spec C4 /
+ *  contract-pack T4). `mode` is the envelope's discriminant and `filters.mode` ALWAYS
+ *  equals the envelope's own `mode` — a mismatched pair is a contract violation.
+ *  `productIds` is the batch scope (null until Task 2.4 populates it). */
+export interface MovementFilters {
+  productId: number | null;
+  productIds: number[] | null;
+  locationId: number | null;
+  mode: "series" | "receipts";
+}
+
 export interface MovementSeriesResult {
+  /** Envelope discriminant (spec C4 / T4). The receipts envelope is assembled in the
+   *  tool layer and carries `mode: "receipts"`. */
+  mode: "series";
   grain: "day" | "week" | "month";
   window: ResolvedWindow;
+  filters: MovementFilters;
   points: Array<{ key: string } & MovementBuckets>;
   totals: MovementBuckets;
   coverage: { unclassifiedLegacyNote: string; reasonCodeNullRows: number };
@@ -208,8 +223,17 @@ export async function getMovementSeries(opts: {
     });
 
   return {
+    mode: "series",
     grain,
     window,
+    // Effective-scope echo (spec C4): what this series ACTUALLY covers, so a
+    // single-product series can never be read as a catalog-wide one.
+    filters: {
+      productId: productId ?? null,
+      productIds: null,
+      locationId: locationId ?? null,
+      mode: "series",
+    },
     points,
     totals,
     coverage: { unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE, reasonCodeNullRows },
