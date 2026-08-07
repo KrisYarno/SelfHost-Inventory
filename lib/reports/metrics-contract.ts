@@ -98,18 +98,21 @@ export function daysCovered(firstEventMs: number, nowMs: number, windowDays: num
  * tool relays next to any units-out / avgDailyOutbound figure it carries.
  */
 export const PHYSICAL_OUTBOUND_DEFINITION =
-  "Physical outbound = every negative inventory movement that is NOT an internal " +
-  "transfer (corrections included — they still deplete stock). Sales are the largest " +
-  "component but not the whole definition.";
+  "Physical outbound = every ledger row with delta < 0 and logType != TRANSFER — " +
+  "sales, classified losses (DAMAGE/THEFT/EXPIRY/COUNT), unclassified adjustments/" +
+  "corrections, count depletion, and rare wrong-signed receipt reversals alike. It is " +
+  "NOT evidence of verified sales; see get_movement_series's outbound buckets for " +
+  "composition.";
 
 /**
  * Definition string for reorderDemand (spec §2 D3). reorder.ts's duplicate string
  * migrates here in W0-1; this is the canonical text.
  */
 export const REORDER_DEMAND_DEFINITION =
-  "Reorder demand = outbound depletion excluding internal transfers and CORRECTION " +
-  "reversals (sales plus genuine losses — damage/theft/expiry). avgDailyDemand = " +
-  "units out / days covered since the first such movement in the window (never a flat " +
+  "Reorder demand = every ledger row with delta < 0, logType != TRANSFER, and " +
+  "reasonCode != CORRECTION (null/unclassified reasons ARE included — depletion you must " +
+  "replace, whether or not it was a sale; NOT evidence of verified sales). avgDailyDemand " +
+  "= units out / days covered since the first such movement in the window (never a flat " +
   "window, never 0-as-measurement).";
 
 /**
@@ -117,6 +120,7 @@ export const REORDER_DEMAND_DEFINITION =
  * figure derived from physicalOutbound over the days actually covered.
  */
 export const OUTBOUND_USAGE_DEFINITION =
-  "units/day = physical outbound (non-transfer depletion, corrections included) over " +
-  "the days actually covered by outbound data in the window — not a flat divide by the " +
-  "full window, and null (unknown) when there is no outbound movement.";
+  "units/day = physical outbound (every row with delta < 0 and logType != TRANSFER, " +
+  "corrections included; NOT evidence of verified sales) over the days actually covered " +
+  "by outbound data in the window — not a flat divide by the full window, and null " +
+  "(unknown) when there is no outbound movement.";

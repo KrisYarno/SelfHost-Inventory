@@ -35,6 +35,17 @@ const testSuites = {
     pattern: '__tests__/e2e/**/*.test.{tsx}',
     description: 'Testing complete user workflows'
   },
+  gate: {
+    name: 'Gate Suite',
+    // The registration point every contract-gate test file appends to. Multi-pattern
+    // (`patterns`) instead of the single `pattern` the other suites use.
+    patterns: [
+      '__tests__/unit/lib/assistant/toolsuite-gates.test.ts',
+      '__tests__/unit/lib/reports/metrics-contract.test.ts',
+      '__tests__/unit/lib/assistant/prompt-rules.test.ts',
+    ],
+    description: 'Fast named subset of the contract gates (also covered by "all")',
+  },
   all: {
     name: 'All Tests',
     pattern: '__tests__/**/*.test.{ts,tsx,js,jsx}',
@@ -59,10 +70,12 @@ if (!testSuites[suite]) {
   process.exit(1);
 }
 
-// Build jest command
+// Build jest command. A suite declares EITHER one `pattern` or a `patterns` list;
+// every pattern is spliced in where the single positional pattern used to go.
+const patterns = testSuites[suite].patterns ?? [testSuites[suite].pattern];
 const jestArgs = [
   'jest',
-  testSuites[suite].pattern,
+  ...patterns,
   '--config', 'jest.config.js',
 ];
 
@@ -91,7 +104,7 @@ jestArgs.push(...additionalArgs);
 // Print test run information
 console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
 console.log(`${colors.cyan}🧪 Running ${testSuites[suite].name}${colors.reset}`);
-console.log(`${colors.yellow}📁 Pattern: ${testSuites[suite].pattern}${colors.reset}`);
+console.log(`${colors.yellow}📁 Pattern: ${patterns.join(', ')}${colors.reset}`);
 if (watch) console.log(`${colors.yellow}👀 Watch mode enabled${colors.reset}`);
 if (coverage) console.log(`${colors.yellow}📊 Coverage report enabled${colors.reset}`);
 console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);

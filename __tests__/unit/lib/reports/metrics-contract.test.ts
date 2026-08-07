@@ -114,4 +114,17 @@ describe("definition strings are non-empty (spec §2 D3)", () => {
     expect(typeof value).toBe("string");
     expect((value as string).length).toBeGreaterThan(0);
   });
+
+  // Quality+reach lane C3: the payload prose must state the EXACT predicate it measures
+  // and must never claim empirical composition ("largest component", "genuine losses") —
+  // review F2's over-claims are what made outbound figures read as verified sales.
+  it.each([
+    ["PHYSICAL_OUTBOUND_DEFINITION", PHYSICAL_OUTBOUND_DEFINITION, "delta < 0"],
+    ["REORDER_DEMAND_DEFINITION", REORDER_DEMAND_DEFINITION, "reasonCode != CORRECTION"],
+    ["OUTBOUND_USAGE_DEFINITION", OUTBOUND_USAGE_DEFINITION, "delta < 0"],
+  ])("%s states its exact predicate", (_n, s, predicate) => {
+    expect(s).toContain(predicate);
+    expect(s.toLowerCase()).toContain("not evidence of verified sales");
+    expect(s).not.toMatch(/largest component|genuine losses/); // the review-F2 over-claims
+  });
 });

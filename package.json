@@ -29,6 +29,7 @@
     "test:integration": "node scripts/test-runner.js integration",
     "test:components": "node scripts/test-runner.js components",
     "test:e2e": "node scripts/test-runner.js e2e",
+    "test:gate": "node scripts/test-runner.js gate",
     "test:watch": "node scripts/test-runner.js all --watch",
     "test:coverage": "node scripts/test-runner.js all --coverage",
     "test:mcp": "jest -c mcp/jest.config.mjs",
