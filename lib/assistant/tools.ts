@@ -1095,7 +1095,12 @@ async function compareByProduct(
       ...(result.companyCoverage
         ? { companyCoverage: result.companyCoverage, companyCoverageNote: result.companyCoverageNote }
         : {}),
-      reasonsKeys: "a = periodA, b = periodB, pctChange = percent change",
+      // FD3-3 mirrored (orchestrator seam-fix): a coverage shift changes EVERY row's
+      // denominator, so the qualification is envelope-level here exactly as in totals.
+      ...(result.coverageShift ? { coverageShift: result.coverageShift } : {}),
+      reasonsKeys: result.coverageShift
+        ? "a = periodA, b = periodB, pctChange = percent change, delta = the coverageShift qualification"
+        : "a = periodA, b = periodB, pctChange = percent change",
       unequalLengths: result.unequalLengths,
       unrankedNote: COMPARE_UNRANKED_NOTE,
       evidenceNote: COMPARE_EVIDENCE_NOTE,
@@ -1414,6 +1419,45 @@ const FIND_PRODUCT_IDENTITY_MISS_NOTE =
   "some matched products are omitted: their lifecycle could not be read, and this surface " +
   "never guesses one — retry, or narrow the query.";
 
+/**
+ * The LEGAL retry limit for a byte-truncated find_product page (FD3-2).
+ *
+ * The repair is "same offset, a page small enough to fit", i.e. `limit: returned`. But
+ * `assertPageAligned` requires `offset % limit === 0`, so naming `returned` unconditionally
+ * would sometimes hand back guidance this tool's own schema rejects — the FD2-4 defect,
+ * one layer up. At offset 0 every limit is aligned (so the guidance is exactly
+ * `page.returned`); deeper in a walk the largest divisor of `offset` that still fits is
+ * named instead, and 1 always divides.
+ */
+function byteRetryLimit(offset: number, returned: number): number {
+  if (offset === 0 || returned <= 1) return Math.max(returned, 1);
+  for (let limit = returned; limit > 1; limit -= 1) {
+    if (offset % limit === 0) return limit;
+  }
+  return 1;
+}
+
+/** The byte-truncation disclosure (FD3-2): how many matched products this page had ready
+ *  and dropped to fit the byte budget, and the exact call that re-reads them.
+ *  `returned < limit` alone is not this signal — an identity omission and a short final
+ *  page produce it too. */
+function findProductByteSkip(
+  offset: number,
+  skipped: number,
+  returned: number,
+): { byteSkipped: number; byteNote: string } | Record<string, never> {
+  if (skipped <= 0) return {};
+  const retryLimit = byteRetryLimit(offset, returned);
+  return {
+    byteSkipped: skipped,
+    byteNote:
+      `${skipped} matched product${skipped === 1 ? "" : "s"} on this page did not fit the ` +
+      `response byte budget, and nextOffset (which must stay page-aligned) skips past ` +
+      `them. To read them, call again with offset ${offset} and limit ${retryLimit} — a ` +
+      `smaller page re-covers this same range and loses nothing.`,
+  };
+}
+
 export const assistantTools: Record<string, AssistantToolDef> = {
   find_product: {
     description:
@@ -1426,6 +1470,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `and stockState NULL plus a stateNote, because a deleted product has no current ` +
       `stock to report; its HISTORY stays queryable (get_sales, get_movement_series, ` +
       `compare_periods, and get_stock_asof with that productId all answer for it). ` +
+      `If coverage.byteSkipped is present, this page dropped that many matched products ` +
+      `to fit the response size and nextOffset skips past them — follow coverage.byteNote ` +
+      `(same offset, smaller limit) to read them instead of walking on. ` +
       `${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: findProductSchema,
     run: async (input, ctx) => {
@@ -1523,11 +1570,17 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // advance is a whole page: floor the consumed rows to a multiple of `limit`, and
       // never to zero — a 0 would hand back the offset we were given and stall the walk.
       //
-      // The cost is stated rather than hidden: rows the byte fit dropped are SKIPPED by
-      // the aligned cursor (`returned` < `limit` is the signal that happened). At this
-      // budget they could not be delivered anyway, and an illegal cursor would end the
-      // walk in a schema rejection instead of a short page.
+      // The cost is stated rather than hidden — FD3-2: STATED, now, in the payload. Rows
+      // the byte fit dropped are SKIPPED by the aligned cursor, and `returned < limit` is
+      // not a signal a caller can read (an identity omission and a short final page look
+      // identical). The count of source rows this page consumed without delivering rides
+      // in `coverage.byteSkipped`, with the retry that recovers them.
       const consumed = offset + Math.max(Math.floor(sourceConsumed / limit), 1) * limit;
+      // Counted over rows the fit DROPPED, not over every source row past the cut: a
+      // trailing identity miss is skipped by the same cursor but already has its own
+      // counter, and counting it twice would tell the reader more rows are missing than
+      // are. byteSkipped + identityMisses is the whole gap, with a cause for each.
+      const byteSkipped = rows.length - page.returned;
       return ok(
         {
           products: page.rows,
@@ -1542,6 +1595,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             // the rows disagree — never a silently shortened list.
             identityMisses,
             ...(identityMisses > 0 ? { identityNote: FIND_PRODUCT_IDENTITY_MISS_NOTE } : {}),
+            // FD3-2: absent on a page that fit — a key that is always present says
+            // nothing, and 0 would read as "checked and fine" on tools that never check.
+            ...findProductByteSkip(offset, byteSkipped, page.returned),
           },
         },
         { scope: "global" },
@@ -2544,9 +2600,14 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `pre-history period is UNKNOWN, never "growth from zero". Degraded per-company ` +
       `coverage removes only that zero: measured sums over recorded rows are still ` +
       `reported, with coverage.companyCoverage/companyCoverageNote beside them. ` +
+      `coverage.periodCoverage classifies EACH period (full|partial|none). When ` +
+      `coverage.coverageShift is present the two periods are not covered by the same ` +
+      `companies (it names which, and since when): the delta is real but NOT ` +
+      `like-for-like growth — relay that qualification, never the delta alone. ` +
       `pctChange is null when ` +
       `period A is zero. reasons keys: a = periodA, b = periodB, pctChange = percent ` +
-      `change. unequalLengths flags mismatched window lengths (comparison still runs). ` +
+      `change, delta = the coverageShift qualification (totals mode). ` +
+      `unequalLengths flags mismatched window lengths (comparison still runs). ` +
       `outbound_units/inbound_units use a SIGN-FIRST ledger predicate over CALENDAR-DAY ` +
       `windows; a small gap from get_operations is that tool's ROLLING-INSTANT window ` +
       `(ending now), and a gap from get_movement_series is that movement FOLDS a ` +
@@ -2612,6 +2673,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             // consumer never has to parse the sentence to learn which pool each metric
             // reads (sales metrics = your companies; ledger metrics = the global pool).
             metricScopes: { sales: "company", ledger: "global" },
+            // FD3-3: the same source-level classification by_product has always carried,
+            // so a consumer can read comparability off ONE key in both modes.
+            periodCoverage: result.periodCoverage,
+            // FD3-3: and when the two periods are not covered by the same set of
+            // recording companies, the sentence that says the delta beside it is real
+            // but not like-for-like. Absent when the periods are equally covered.
+            ...(result.coverageShift ? { coverageShift: result.coverageShift } : {}),
             // FD2-2: a degraded window returns MEASURED sums, so the fact that one of the
             // caller's companies contributes nothing has to be visible beside them —
             // present only when the companies' starts actually differ.
@@ -2621,7 +2689,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
                   companyCoverageNote: result.companyCoverageNote,
                 }
               : {}),
-            reasonsKeys: "a = periodA, b = periodB, pctChange = percent change",
+            // FD3-3: totals mode is the mode that can emit a `delta` reason, so its legend
+            // names it. by_product's legend is left alone — a legend describing a key that
+            // mode never emits is its own small lie.
+            reasonsKeys:
+              "a = periodA, b = periodB, pctChange = percent change, delta = why this " +
+              "delta is not like-for-like (present only with coverageShift)",
             unequalLengths: result.unequalLengths,
             // G5 disclosure (spec C13): totals mode is a non-product grain, so both
             // counts are the module's contributor census over BOTH periods.

@@ -949,6 +949,11 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     expect(toolResult.data.mode).toBe("totals");
     expect(toolResult.data.a).toBe(10);
     expect(toolResult.data.b).toBe(25);
+    // FD3-3 on the WIRE: totals mode carries the same per-period classification
+    // by_product does, so a consumer branches on ONE key across both modes.
+    expect(toolResult.data.coverage.periodCoverage).toEqual({ a: "full", b: "full" });
+    // Equally-covered periods: the comparability qualification stays OFF.
+    expect(toolResult.data.coverage.coverageShift).toBeUndefined();
   });
 
   it("get_movement_series breakdownBy:'product': per-product rows + a rejected-id echo (C10)", async () => {

@@ -328,6 +328,121 @@ describe("find_product: APPROVED-only + caps", () => {
     expect(offset).toBeNull();
   });
 
+  // FD3-2: FD2-4 made the truncated page's cursor LEGAL by skipping to the next whole
+  // page — and left the skip SILENT. `returned < limit` was the only signal, which a
+  // caller cannot distinguish from "the identity lookup dropped one" or "the source had
+  // fewer rows", and following `nextOffset` then walks past matched products that were
+  // never delivered. The loss is now counted and the repair is spelled out.
+  describe("FD3-2 byte-truncated pages disclose the rows they dropped", () => {
+    /** 12 fat products; a 5 KB late-turn budget holds only a couple of them per page. */
+    function seedFatCatalog() {
+      const CATALOG = Array.from({ length: 12 }, (_, i) =>
+        product({ id: i + 1, name: `Product ${i + 1} ` + "x".repeat(1200) }),
+      );
+      mockGetProducts.mockImplementation((filters: { page: number; pageSize: number }) => ({
+        products: CATALOG.slice((filters.page - 1) * filters.pageSize, filters.page * filters.pageSize),
+        total: CATALOG.length,
+      }));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      db.product.findMany.mockImplementation((args: any) =>
+        Promise.resolve(
+          ((args?.where?.id?.in ?? []) as number[]).map((id) => ({
+            id,
+            name: `Product ${id}`,
+            deletedAt: null,
+          })),
+        ) as never,
+      );
+      return CATALOG;
+    }
+
+    const TIGHT = () => testCtx({ companyIds: ["c1"], remainingBytes: 5_000 });
+
+    type FindPage = {
+      products: Array<{ id: number }>;
+      returned: number;
+      totalRows: number;
+      nextOffset: number | null;
+      coverage: { byteSkipped?: number; byteNote?: string; identityMisses: number };
+    };
+
+    it("counts the skipped SOURCE rows and names the retry that recovers them", async () => {
+      seedFatCatalog();
+      const result = await assistantTools.find_product.run({ query: "product", limit: 4 }, TIGHT());
+      if (result.status !== "ok") throw new Error("not ok");
+      const page = result.data as FindPage;
+
+      // The fit really did shorten the page (otherwise the test proves nothing)...
+      expect(page.returned).toBeLessThan(4);
+      // ...and the rows the aligned cursor skips are COUNTED, not left to be inferred.
+      expect(page.coverage.byteSkipped).toBe(4 - page.returned);
+      expect(page.coverage.byteNote).toBeDefined();
+      // The note is executable guidance: the same offset, a page small enough to fit.
+      expect(page.coverage.byteNote).toMatch(/offset 0 and limit 2/);
+      expect(page.coverage.byteNote).toMatch(/byte budget/i);
+    });
+
+    it("a walk that FOLLOWS the retry guidance reaches every matched source row", async () => {
+      const CATALOG = seedFatCatalog();
+      const seen = new Set<number>();
+      let offset = 0;
+      let limit = 4;
+      // Bounded: 12 rows, so no legal walk needs more hops than that.
+      for (let hop = 0; hop < 20; hop += 1) {
+        const result = await assistantTools.find_product.run({ query: "product", limit, offset }, TIGHT());
+        if (result.status !== "ok") throw new Error(`page at offset ${offset} not ok`);
+        const page = result.data as FindPage;
+        for (const row of page.products) seen.add(row.id);
+        if (page.coverage.byteSkipped) {
+          // Follow the note VERBATIM: same offset, the limit it names.
+          const retry = /offset (\d+) and limit (\d+)/.exec(page.coverage.byteNote ?? "");
+          if (!retry) throw new Error(`no retry guidance in: ${page.coverage.byteNote}`);
+          expect(Number(retry[1])).toBe(offset);
+          offset = Number(retry[1]);
+          limit = Number(retry[2]);
+          continue;
+        }
+        if (page.nextOffset == null) break;
+        offset = page.nextOffset;
+      }
+      // Nothing was lost: every matched product was delivered somewhere in the walk.
+      expect(Array.from(seen).sort((x, y) => x - y)).toEqual(CATALOG.map((p) => p.id));
+    });
+
+    it("byteSkipped and identityMisses never double-count the SAME dropped row", async () => {
+      seedFatCatalog();
+      // Product 4 (last of page 1) has no readable identity: it is OMITTED, and the byte
+      // fit then drops one of the three rows that were ready. Two products are missing
+      // from this page for two DIFFERENT reasons, and each counter owns one of them —
+      // counting the omitted row as byte-skipped too would tell the reader three are gone.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      db.product.findMany.mockImplementation((args: any) =>
+        Promise.resolve(
+          ((args?.where?.id?.in ?? []) as number[])
+            .filter((id) => id !== 4)
+            .map((id) => ({ id, name: `Product ${id}`, deletedAt: null })),
+        ) as never,
+      );
+
+      const result = await assistantTools.find_product.run({ query: "product", limit: 4 }, TIGHT());
+      if (result.status !== "ok") throw new Error("not ok");
+      const page = result.data as FindPage;
+
+      expect(page.coverage.identityMisses).toBe(1);
+      expect(page.coverage.byteSkipped).toBe(3 - page.returned);
+      expect(page.coverage.byteSkipped! + page.coverage.identityMisses).toBe(4 - page.returned);
+    });
+
+    it("a page that fits carries NO byteSkipped/byteNote keys at all", async () => {
+      mockGetProducts.mockResolvedValue({ products: [product()], total: 1 });
+      const result = await assistantTools.find_product.run({ query: "abc" }, CTX);
+      if (result.status !== "ok") throw new Error("not ok");
+      const coverage = (result.data as FindPage).coverage;
+      expect(coverage.byteSkipped).toBeUndefined();
+      expect(coverage.byteNote).toBeUndefined();
+    });
+  });
+
   it("reports identityMisses: 0 on the normal path (a defined field, not a conditional one)", async () => {
     mockGetProducts.mockResolvedValue({ products: [product()], total: 1 });
     const result = await assistantTools.find_product.run({ query: "abc" }, CTX);

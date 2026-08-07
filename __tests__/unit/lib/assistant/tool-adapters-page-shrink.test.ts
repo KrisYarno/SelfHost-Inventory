@@ -355,4 +355,58 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
     expect(large.status).toBe("ok");
     expect(large.data!.rows!.length).toBeGreaterThan(tight.data!.rows!.length);
   });
+
+  // FD3-5: the case the pack's scaffold line called structurally impossible. FD2-2 made
+  // it reachable — under PER-COMPANY degradation a product with rows in both periods is
+  // measured and ranked while a product absent from one of them is unranked — and the
+  // two arrays then share ONE budget at the tightest point in the turn. Both the
+  // ranked-only and unranked-only cases were pinned; the case where the joint fitter has
+  // to divide a budget between two non-empty arrays was not tested anywhere.
+  it("BOTH arrays non-empty at a 5KB budget: each keeps rows AND the payload fits", async () => {
+    compareByProductMock.mockResolvedValue({
+      ranked: Array.from({ length: 200 }, (_v, i) => ({
+        productId: i + 1,
+        a: i,
+        b: i * 2,
+        delta: i,
+        pctChange: 1,
+      })),
+      // Products with no row in period A: unknown-base under degradation, never ranked.
+      unranked: Array.from({ length: 200 }, (_v, i) => ({
+        productId: 1_000 + i,
+        a: null,
+        b: i,
+        delta: null,
+        pctChange: null,
+        reasons: { a: "period A is not fully covered by sales_units data in every company" },
+      })),
+      reasons: { a: "period A is not fully covered by sales_units data in every company" },
+      periodCoverage: { a: "partial", b: "partial" },
+      unequalLengths: false,
+      companyCoverage: [
+        { companyId: "c1", salesDataStart: "2019-01-01" },
+        { companyId: "c2", salesDataStart: null },
+      ],
+      companyCoverageNote: "no sales data recorded for company c2; latest company start 2019-01-01",
+      excludedUnapprovedProducts: 0,
+    });
+
+    const tight = (await runOnce("compare_periods", compareArgs, CRAMPED)) as ExecResult & {
+      data?: { rows?: unknown[]; unranked?: unknown[]; unrankedTotal?: number };
+      meta?: { bytes: number };
+    };
+
+    // NEVER the truncated downgrade — that is the failure this fitter exists to prevent.
+    expect(tight.status).toBe("ok");
+    expect(tight.notice).toBeUndefined();
+    // Neither array is starved by the other: each keeps at least one 255-char-name row.
+    expect(tight.data!.rows!.length).toBeGreaterThan(0);
+    expect(tight.data!.unranked!.length).toBeGreaterThan(0);
+    // Both are PAGES of their arrays, not the whole thing.
+    expect(tight.data!.rows!.length).toBeLessThan(200);
+    expect(tight.data!.unranked!.length).toBeLessThan(200);
+    expect(tight.data!.unrankedTotal).toBe(200);
+    // ...and the completed payload fits the budget the adapter threaded in.
+    expect(tight.meta!.bytes).toBeLessThanOrEqual(CRAMPED);
+  });
 });

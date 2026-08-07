@@ -86,6 +86,14 @@ export interface ComparePeriodsResult {
   /** The sentence that goes with it: which companies degrade the window, and what the
    *  degradation does (zero legality only). Present exactly when companyCoverage is. */
   companyCoverageNote?: string;
+  /** FD3-3: source-level coverage per period, the SAME classification by_product has
+   *  always returned — machine-readable parity between the two modes. */
+  periodCoverage: { a: WindowCoverage; b: WindowCoverage };
+  /** FD3-3: present when the two periods are NOT covered by the same set of recording
+   *  companies, naming the company and its first-fact date. `delta` still computes (the
+   *  sums are measured, FD2-2); this says it is not like-for-like growth. Mirrored into
+   *  `reasons.delta`. */
+  coverageShift?: string;
   /** G5 disclosure (spec C13). Totals mode carries no product ids, so BOTH counts come
    *  from the contributor census, over BOTH periods (a product that contributed to
    *  either one is a contributor to this comparison). */
@@ -151,6 +159,11 @@ function productFilter(
 interface MetricCoverageSource {
   dataStart: string | null;
   companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
+  /** FD3-7: the SOURCE-level caller-wide first fact (sales metrics only), read for the
+   *  per-company question anyway. Under a `productId` the `dataStart` above is the
+   *  PRODUCT's own first fact, and a reason quoting it alone reads as a statement about
+   *  the data source — this is the other half of that sentence. */
+  sourceStart?: string | null;
 }
 
 /** MIN(dayKey) of ProductSalesFact for this caller's scope (company + optional product),
@@ -190,6 +203,7 @@ async function salesStarts(
   ]);
   return {
     dataStart: productId == null ? source.salesDataStart : scopedStart,
+    sourceStart: source.salesDataStart,
     ...(source.staggered ? { companyCoverage: source.perCompany } : {}),
   };
 }
@@ -417,6 +431,7 @@ function resolvePeriod(
   source: MetricCoverageSource,
   metric: CompareMetric,
   reasons: Record<string, string>,
+  productId?: number,
 ): number | null {
   const periodLabel = label === "a" ? "A" : "B";
   const dataStart = source.dataStart;
@@ -427,7 +442,12 @@ function resolvePeriod(
   // degrades the set outright.
   const coverage = periodCoverage(source, window);
   if (coverage === "none") {
-    reasons[label] = `no ${metric} data recorded`;
+    // FD3-4: under a `productId` the source read was PRODUCT-scoped, so "no sales_units
+    // data recorded" is a claim about the caller's whole sales history — false whenever
+    // the companies have been recording for years and this one product never sold.
+    reasons[label] = productId == null
+      ? `no ${metric} data recorded`
+      : `no ${metric} data recorded for this product`;
     return null;
   }
   // The caller-wide classification, asked SEPARATELY from the degraded one: it is what
@@ -436,7 +456,13 @@ function resolvePeriod(
   if (classifyWindowCoverage(dataStart, window.from) !== "full") {
     reasons[label] =
       dataStart! > window.to
-        ? `period${periodLabel} predates ${metric} data (starts ${dataStart})`
+        ? // FD3-7: a PRODUCT-scoped `dataStart` is the product's OWN first fact, and the
+          // source-level sentence made it read as the platform's. Both dates are already
+          // in hand (the per-company read is source-level by FD2-1), so both are said.
+          productId != null && source.sourceStart != null
+          ? `period${periodLabel} predates this product's recorded sales ` +
+            `(first fact ${dataStart}; your companies' sales data starts ${source.sourceStart})`
+          : `period${periodLabel} predates ${metric} data (starts ${dataStart})`
         : `period ${periodLabel} is not fully covered by ${metric} data (starts ${dataStart})`;
     return null;
   }
@@ -454,18 +480,99 @@ function resolvePeriod(
   return raw ?? 0;
 }
 
-/** The `companyCoverage` + note disclosure pair, present exactly when the caller's
- *  companies do not share one start (FD2-2). Spread into both modes' results. */
+/**
+ * The `companyCoverage` + note disclosure pair, present exactly when the caller's
+ * companies do not share one start (FD2-2). Spread into both modes' results.
+ *
+ * FD3-1: the MEASURED-note sentence ("degraded coverage governs ZERO legality only:
+ * sums shown are MEASURED... a period with no matching rows reads null + a reason") is a
+ * statement about a rule that FIRED. Staggered starts that both periods nevertheless
+ * cover classify "full" — no zero was withheld, no sum was qualified — so attaching it
+ * there describes this answer falsely. The plain per-company sentence still ships: the
+ * starts really do differ, and that is worth saying.
+ *
+ * FD3-4: and the whole pair is suppressed when the metric's own `dataStart` is null.
+ * That is the "there is nothing to be covered" case (a product-scoped comparison for a
+ * product with no facts, whose periods are null for that reason alone) — a staggered-
+ * membership disclosure there explains a degradation that had no part in the answer.
+ */
 function companyCoverageDisclosure(
   source: MetricCoverageSource,
+  periods: WindowCoverage[],
 ): Pick<ComparePeriodsResult, "companyCoverage" | "companyCoverageNote"> {
-  if (source.companyCoverage == null) return {};
+  if (source.companyCoverage == null || source.dataStart == null) return {};
+  const degraded = periods.includes("partial");
   return {
     companyCoverage: source.companyCoverage,
     companyCoverageNote:
-      `${companyCoverageDetail(source.companyCoverage)}; ` +
-      `${SALES_COMPANY_COVERAGE_NOTE} ${SALES_COMPANY_COVERAGE_MEASURED_NOTE}`,
+      `${companyCoverageDetail(source.companyCoverage)}; ${SALES_COMPANY_COVERAGE_NOTE}` +
+      (degraded ? ` ${SALES_COMPANY_COVERAGE_MEASURED_NOTE}` : ""),
   };
+}
+
+/** How much of ONE period a company that started recording on `start` can contribute to:
+ *  nothing at all, part of it, or the whole of it. */
+function contributionLevel(start: string, window: ResolvedWindow): 0 | 1 | 2 {
+  if (start > window.to) return 0; // began after the period ended
+  if (start <= window.from) return 2; // recording for the whole period
+  return 1; // began inside it
+}
+
+/**
+ * FD3-3 — the comparability qualification for `delta`.
+ *
+ * FD2-2 is right that a measured sum survives a degraded window, and that made the
+ * DERIVED figure the weak point: when c2's facts begin inside period B, `delta` compares
+ * "c1 alone" against "c1 + c2" and reads as growth in a business that grew by an
+ * accounting change. Nulling it would re-break FD2-2 (both sums are real), so the delta
+ * stands and is NAMED for what it is not.
+ *
+ * Two triggers, because neither sees the other's case: the periods' CLASSIFICATIONS
+ * differing catches a company whose start lands between the periods (each period is
+ * uniformly covered, differently); a start landing strictly inside either period catches
+ * the case where both classify the same and the contribution still moved.
+ */
+function coverageShiftNote(
+  source: MetricCoverageSource,
+  periodA: ResolvedWindow,
+  periodB: ResolvedWindow,
+  coverageA: WindowCoverage,
+  coverageB: WindowCoverage,
+): string | undefined {
+  const entries = (source.companyCoverage ?? []).filter(
+    (c): c is { companyId: string; salesDataStart: string } => c.salesDataStart != null,
+  );
+  const insidePeriod = entries.some(
+    (c) =>
+      contributionLevel(c.salesDataStart, periodA) === 1 ||
+      contributionLevel(c.salesDataStart, periodB) === 1,
+  );
+  if (coverageA === coverageB && !insidePeriod) return undefined;
+  // Name every company whose contribution differs between the two periods, with the date
+  // a reader can check. A start that covers both periods identically is not named.
+  const shifted = entries
+    .map((c) => ({
+      companyId: c.companyId,
+      start: c.salesDataStart,
+      a: contributionLevel(c.salesDataStart, periodA),
+      b: contributionLevel(c.salesDataStart, periodB),
+    }))
+    .filter((c) => c.a !== c.b)
+    .map((c) => {
+      const [more, less] = c.b > c.a ? (["B", "A"] as const) : (["A", "B"] as const);
+      const partly = Math.max(c.a, c.b) === 1 ? "partially " : "";
+      return (
+        `period ${more} ${partly}includes company ${c.companyId} ` +
+        `(sales facts begin ${c.start}) that period ${less} does not`
+      );
+    });
+  const detail =
+    shifted.length > 0
+      ? shifted.join("; ")
+      : // No company is nameable (the shift is the metric's OWN source moving inside one
+        // of the periods), so the classifications are quoted instead of inventing a name.
+        `period A and period B are not equally covered (period A: ${coverageA}, period B: ${coverageB})`;
+  return `${detail} — delta is not like-for-like growth`;
 }
 
 /**
@@ -489,8 +596,11 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
   ]);
 
   const reasons: Record<string, string> = {};
-  const a = resolvePeriod(rawA, periodA, "a", starts, metric, reasons);
-  const b = resolvePeriod(rawB, periodB, "b", starts, metric, reasons);
+  const a = resolvePeriod(rawA, periodA, "a", starts, metric, reasons, productId);
+  const b = resolvePeriod(rawB, periodB, "b", starts, metric, reasons, productId);
+  // FD3-3: the same source-level classification by_product returns, per period.
+  const coverageA = periodCoverage(starts, periodA);
+  const coverageB = periodCoverage(starts, periodB);
 
   let delta: number | null = null;
   let pctChange: number | null = null;
@@ -503,6 +613,11 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
     }
   }
 
+  // FD3-3: the delta is NEVER nulled for a coverage shift (the sums are measured) — it is
+  // qualified, in both the reason vocabulary and the coverage block.
+  const coverageShift = coverageShiftNote(starts, periodA, periodB, coverageA, coverageB);
+  if (coverageShift) reasons.delta = coverageShift;
+
   return {
     a,
     b,
@@ -510,7 +625,9 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
     pctChange,
     reasons,
     unequalLengths: periodA.days !== periodB.days,
-    ...companyCoverageDisclosure(starts),
+    periodCoverage: { a: coverageA, b: coverageB },
+    ...(coverageShift ? { coverageShift } : {}),
+    ...companyCoverageDisclosure(starts, [coverageA, coverageB]),
     excludedUnapprovedProducts: disclosure.excludedUnapprovedProducts,
     archivedProductsIncluded: disclosure.archivedProductsIncluded,
     approvalNote: APPROVED_UNIVERSE_NOTE,
@@ -570,6 +687,10 @@ export interface ComparePeriodsByProductResult {
    *  sentence, present ONLY when the caller's companies do not share one. */
   companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
   companyCoverageNote?: string;
+  /** FD3-3 mirrored to by_product (orchestrator seam-fix): a coverage shift is an
+   *  ENVELOPE-level fact — the joining company changes the denominator of EVERY row —
+   *  so the qualification rides once here, not per row. Same sentence as totals mode. */
+  coverageShift?: string;
   /** G5 disclosure, excluded half (spec C13). The ARCHIVED half is product-grain here —
    *  the tool layer counts it off the rows' own `lifecycle` after attaching identities. */
   excludedUnapprovedProducts: number;
@@ -740,13 +861,17 @@ export async function comparePeriodsByProduct(opts: {
   );
   unranked.sort((x, y) => x.productId - y.productId);
 
+  const coverageShift = coverageShiftNote(starts, periodA, periodB, coverageA, coverageB);
+  if (coverageShift) reasons.delta = coverageShift;
+
   return {
     ranked: directed,
     unranked,
     reasons,
     periodCoverage: { a: coverageA, b: coverageB },
     unequalLengths: periodA.days !== periodB.days,
-    ...companyCoverageDisclosure(starts),
+    ...companyCoverageDisclosure(starts, [coverageA, coverageB]),
+    ...(coverageShift ? { coverageShift } : {}),
     excludedUnapprovedProducts,
   };
 }

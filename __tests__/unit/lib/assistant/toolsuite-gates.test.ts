@@ -515,6 +515,16 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d("get_sales")).toMatch(/archivedProductsIncluded/);
     expect(d("get_sales")).toMatch(/archivedZeroRows/);
     expect(d("get_sales")).toMatch(/contributed nothing/i);
+    // FD3-2: a page that silently dropped matched products is a page the model will walk
+    // straight past — the repair has to be described where it routes, not only emitted.
+    expect(d("find_product")).toMatch(/coverage\.byteSkipped/);
+    expect(d("find_product")).toMatch(/coverage\.byteNote/);
+    expect(d("find_product")).toMatch(/same offset, smaller limit/i);
+    // FD3-3: a delta across periods with different company coverage reads as growth
+    // unless the qualification travels WITH it.
+    expect(d("compare_periods")).toMatch(/coverage\.periodCoverage/);
+    expect(d("compare_periods")).toMatch(/coverage\.coverageShift/);
+    expect(d("compare_periods")).toMatch(/not\s+like-for-like/i);
   });
 
   // Quality+reach C12 (Task 2.1): the mix fields are the composition a bare depletion

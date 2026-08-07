@@ -1159,6 +1159,80 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     expect(coverage.companyCoverageNote).toContain("c2");
   });
 
+  // FD3-3 at the TOOL layer: the module's parity fields have to reach the envelope, or a
+  // consumer can only learn "these two periods are not comparable" from by_product.
+  it("TOTALS mode carries periodCoverage AND the coverageShift qualification", async () => {
+    const MULTI = testCtx({ companyIds: ["c1", "c2"] });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) =>
+      Promise.resolve(
+        args?._min
+          ? { _min: { dayKey: "2020-01-01" } }
+          : { _sum: { orderedQty: args?.where?.dayKey?.gte === "2026-06-01" ? 100 : 160 } },
+      ) as never,
+    );
+    // c2's first fact is the first day of period B: it contributes to B and not to A.
+    db.productSalesFact.groupBy.mockResolvedValue([
+      { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+      { companyId: "c2", _min: { dayKey: "2026-06-08" } },
+    ] as never);
+    db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+
+    const result = await assistantTools.compare_periods.run(
+      {
+        metric: "sales_units",
+        periodA: { from: "2026-06-01", to: "2026-06-07" },
+        periodB: { from: "2026-06-08", to: "2026-06-14" },
+      },
+      MULTI,
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as Record<string, unknown>;
+    const coverage = data.coverage as Record<string, unknown>;
+
+    // The delta is NEVER nulled for this (FD2-2): both sums are measured.
+    expect(data.delta).toBe(60);
+    expect(coverage.periodCoverage).toEqual({ a: "partial", b: "full" });
+    expect(coverage.coverageShift).toContain("c2");
+    expect(coverage.coverageShift).toContain("2026-06-08");
+    expect(coverage.coverageShift).toContain("not like-for-like");
+    expect((data.reasons as Record<string, string>).delta).toBe(coverage.coverageShift);
+  });
+
+  it("TOTALS mode over equally-covered periods carries periodCoverage and NO shift key", async () => {
+    const MULTI = testCtx({ companyIds: ["c1", "c2"] });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) =>
+      Promise.resolve(args?._min ? { _min: { dayKey: "2020-01-01" } } : { _sum: { orderedQty: 7 } }) as never,
+    );
+    db.productSalesFact.groupBy.mockResolvedValue([
+      { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+      { companyId: "c2", _min: { dayKey: "2021-06-01" } },
+    ] as never);
+    db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+
+    const result = await assistantTools.compare_periods.run(
+      {
+        metric: "sales_units",
+        periodA: { from: "2026-06-01", to: "2026-06-07" },
+        periodB: { from: "2026-06-08", to: "2026-06-14" },
+      },
+      MULTI,
+    );
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as Record<string, unknown>;
+    const coverage = data.coverage as Record<string, unknown>;
+    expect(coverage.periodCoverage).toEqual({ a: "full", b: "full" });
+    expect(coverage.coverageShift).toBeUndefined();
+    expect((data.reasons as Record<string, string>).delta).toBeUndefined();
+    // FD3-1: staggered starts are still disclosed — without the measured-note sentence,
+    // because no period classified partial here.
+    expect(coverage.companyCoverage).toBeDefined();
+    expect(coverage.companyCoverageNote).not.toContain("MEASURED");
+  });
+
   it("JOINT byte fit — unranked-only (period predates the source) shrinks the unranked array", async () => {
     seedSales({
       dataStart: "2099-01-01",
