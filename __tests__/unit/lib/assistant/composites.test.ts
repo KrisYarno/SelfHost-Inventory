@@ -177,6 +177,12 @@ describe("getProductOverview — composition (spec §5 T-360)", () => {
     expect(r.movement30.status).toBe("ok");
     expect((r.movement30.totals as { net: number }).net).toBe(-40);
     expect(r.movement30.points).toBeUndefined();
+    // G2-3: the composite passes the approved id set like every other historical read —
+    // the SQL boundary no longer relies on the caller having resolved the product first.
+    expect(mMove.mock.calls[0][0]).toMatchObject({
+      productId: 1,
+      approvedIds: expect.any(Array),
+    });
 
     // sales30 is COMPANY-scoped and reads ProductSalesFact + caller-scoped coverage.
     expect(r.sales30.scope).toBe("company");

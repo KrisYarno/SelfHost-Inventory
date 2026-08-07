@@ -56,13 +56,18 @@ const FIXTURE: Row[] = [
 
 const WINDOW = win("2026-07-01", "2026-07-31");
 
+/** G2-3: `approvedIds` is REQUIRED on getMovementSeries. This suite is about the three
+ *  tools' DEFINITIONS diverging over ONE fixture, so it passes the fixture's own id. */
+const series = (opts: Omit<Parameters<typeof getMovementSeries>[0], "approvedIds">) =>
+  getMovementSeries({ ...opts, approvedIds: [1] });
+
 beforeEach(() => mockReset(db));
 
 describe("tri-tool ledger divergence (item 4) — one fixture, three documented outbound numbers", () => {
   it("get_movement_series: outbound family = 11, stockIn = -2, net = -13 (real classification)", async () => {
     db.inventory_logs.findMany.mockResolvedValue(FIXTURE as never);
 
-    const res = await getMovementSeries({ window: WINDOW, grain: "day" });
+    const res = await series({ window: WINDOW, grain: "day" });
     const t = res.totals;
 
     // The two wrong-signed folds land in their natural logType buckets.
@@ -117,7 +122,7 @@ describe("tri-tool ledger divergence (item 4) — one fixture, three documented 
 
   it("reconciliation: 16 (ledger outbound) = 11 (movement outbound family) + the two wrong-signed folds (2 + 3)", async () => {
     db.inventory_logs.findMany.mockResolvedValue(FIXTURE as never);
-    const t = (await getMovementSeries({ window: WINDOW, grain: "day" })).totals;
+    const t = (await series({ window: WINDOW, grain: "day" })).totals;
 
     const ledgerOutbound = Math.abs(
       FIXTURE.filter((r) => isPhysicalOutboundRow(r)).reduce((s, r) => s + r.delta, 0),

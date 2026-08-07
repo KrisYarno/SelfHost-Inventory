@@ -43,10 +43,12 @@ jest.mock("@/lib/reports/inventory-summary", () => ({ __esModule: true, getInven
 // and drives the tool's own paginate. groupBy:"day" avoids any prisma name-resolution.
 jest.mock("@/lib/analytics/queries", () => ({ __esModule: true, getSales: jest.fn() }));
 jest.mock("@/lib/analytics/serialize", () => ({ __esModule: true, serializeSalesRows: (rows: unknown[]) => rows }));
+// Only the QUERY is mocked; the pure classifiers (callerWindowCoverage) and the note
+// constants stay REAL, so this pin exercises the same coverage logic the tool ships with.
 jest.mock("@/lib/assistant/sales-coverage", () => ({
   __esModule: true,
+  ...jest.requireActual("@/lib/assistant/sales-coverage"),
   callerScopedSalesCoverage: jest.fn(),
-  SALES_ROWS_NOTE: "rows note",
 }));
 // C6 zero rows read the approved catalog + the shared identity map; both are prisma
 // reads, so the page-shrink pin stubs them and drives the tool's own paginate.
@@ -56,13 +58,22 @@ jest.mock("@/lib/reports/outbound-mix", () => ({
   approvedProductIds: jest.fn(),
   productIdentities: jest.fn(),
 }));
+// G2-5: the compare by_product fitter is driven through the ADAPTER (the only place the
+// over-budget downgrade actually happens), so the module's ranked rows are injected.
+jest.mock("@/lib/reports/compare-periods", () => ({
+  __esModule: true,
+  comparePeriods: jest.fn(),
+  comparePeriodsByProduct: jest.fn(),
+}));
 
+import prisma from "@/lib/prisma";
 import { createAiTools } from "@/lib/assistant/tool-adapters";
 import { getStockAsOf } from "@/lib/analytics/stock-asof";
 import { getInventorySummary } from "@/lib/reports/inventory-summary";
 import { getSales } from "@/lib/analytics/queries";
 import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
 import { approvedProductIds, productIdentities } from "@/lib/reports/outbound-mix";
+import { comparePeriodsByProduct } from "@/lib/reports/compare-periods";
 import type { ToolContext as ResolvedContext } from "@/lib/assistant/context";
 
 const asOfMock = getStockAsOf as jest.Mock;
@@ -71,6 +82,10 @@ const salesMock = getSales as jest.Mock;
 const salesCoverageMock = callerScopedSalesCoverage as jest.Mock;
 const approvedIdsMock = approvedProductIds as jest.Mock;
 const identitiesMock = productIdentities as jest.Mock;
+const compareByProductMock = comparePeriodsByProduct as jest.Mock;
+/** The post-pagination evidence lookup (get_sales' + compare's first-fact reads). */
+const prismaGroupBy = (prisma as unknown as { productSalesFact: { groupBy: jest.Mock } })
+  .productSalesFact.groupBy;
 
 const CTX: ResolvedContext = {
   userId: 1,
@@ -161,6 +176,7 @@ beforeEach(() => {
 type ExecResult = {
   status: string;
   notice?: string;
+  meta?: { bytes: number };
   data?: { rows?: unknown[]; totalRows?: number; nextOffset?: number | null; ranked?: { rows: unknown[]; totalRows: number; nextOffset: number | null } };
 };
 type ExecTool = { execute: (args: unknown) => Promise<ExecResult> };
@@ -246,5 +262,97 @@ describe("createAiTools — a tight remainingBytes shrinks the page, never trunc
     const largeSum = summaryMock.mock.calls[1][0].byteBudget as number;
     expect(tightSum).toBeLessThan(largeSum);
     expect(tightSum).toBeLessThan(TIGHT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G2-5 — the compare by_product JOINT fitter, at the ADAPTER (where the over-budget
+// downgrade really happens). The fitter used to page against a CONSTANT: the caller's
+// budget minus a fixed 8 KiB reserve, floored at 4 KiB. Below ~12 KiB of remaining turn
+// budget that floor is LARGER than the whole budget, so the fitter built a page the
+// caller had no room for and the adapter threw the completed result away — a truncation
+// notice in the one place the joint fitter exists to prevent one. Then the evidence fill
+// GREW the rows after they were measured, so even a correctly-sized page could overshoot.
+// ---------------------------------------------------------------------------
+
+describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", () => {
+  /** A 5 KB late-turn budget: smaller than the old 8 KiB reserve AND the 4 KiB floor. */
+  const CRAMPED = 5_000;
+  const RANKED_ROWS = 400;
+
+  beforeEach(() => {
+    // 255-char names: the widest a product name can be, so a handful of rows is already
+    // more than the budget holds.
+    identitiesMock.mockImplementation(async (ids: number[]) =>
+      new Map(ids.map((id) => [id, { name: "N".repeat(255), lifecycle: "active" }])),
+    );
+    compareByProductMock.mockReset();
+    compareByProductMock.mockResolvedValue({
+      ranked: Array.from({ length: RANKED_ROWS }, (_v, i) => ({
+        productId: i + 1,
+        a: i,
+        b: i * 2,
+        delta: i,
+        pctChange: 1,
+      })),
+      unranked: [],
+      reasons: { a: "measured", b: "measured" },
+      periodCoverage: { a: "full", b: "full" },
+      unequalLengths: false,
+      excludedUnapprovedProducts: 0,
+    });
+    // The post-pagination evidence fill returns a REAL day-key for every page id, so the
+    // rows grow after they were fit — which is what the re-fit exists to absorb.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (prismaGroupBy as jest.Mock).mockImplementation(async (args: any) =>
+      ((args?.where?.productId?.in ?? []) as number[]).map((id) => ({
+        productId: id,
+        _min: { dayKey: "2021-03-04" },
+      })),
+    );
+  });
+
+  const compareArgs = {
+    metric: "sales_units",
+    periodA: { relativeDays: 7 },
+    periodB: { relativeDays: 7 },
+    groupBy: "product",
+  };
+
+  it("a 5KB budget returns a SMALL ok page — never the truncated downgrade", async () => {
+    const tight = (await runOnce("compare_periods", compareArgs, CRAMPED)) as ExecResult & {
+      meta?: { bytes: number };
+    };
+
+    expect(tight.status).toBe("ok");
+    expect(tight.notice).toBeUndefined();
+    const rows = tight.data!.rows!;
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.length).toBeLessThan(RANKED_ROWS);
+    expect(tight.data!.nextOffset).not.toBeNull();
+    // The completed result FITS the budget the adapter threaded in — that is the whole
+    // claim: measured envelope + measured rows, not a constant that ignores both.
+    expect(tight.meta!.bytes).toBeLessThanOrEqual(CRAMPED);
+  });
+
+  it("the page it returns is the EVIDENCE-POPULATED one (fit survives the fill)", async () => {
+    const tight = (await runOnce("compare_periods", compareArgs, CRAMPED)) as ExecResult & {
+      meta?: { bytes: number };
+    };
+    const rows = tight.data!.rows! as Array<{ firstSaleDayKey: string | null; name: string }>;
+    // Every returned row carries its filled evidence and its full-width name...
+    for (const row of rows) {
+      expect(row.firstSaleDayKey).toBe("2021-03-04");
+      expect(row.name).toHaveLength(255);
+    }
+    // ...and the bytes the caller receives are still within budget AFTER that growth.
+    expect(tight.meta!.bytes).toBeLessThanOrEqual(CRAMPED);
+  });
+
+  it("a comfortable budget still returns a bigger page (the fit is budget-driven)", async () => {
+    const tight = await runOnce("compare_periods", compareArgs, CRAMPED);
+    const large = await runOnce("compare_periods", compareArgs, LARGE);
+    expect(large.status).toBe("ok");
+    expect(large.data!.rows!.length).toBeGreaterThan(tight.data!.rows!.length);
   });
 });

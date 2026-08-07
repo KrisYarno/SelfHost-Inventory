@@ -18,7 +18,10 @@
  *  3. Ledger/snapshot dataStarts and `snapshots.flaggedPairs` are GLOBAL (the
  *     physical ledger and snapshot table carry no company column) — labeled as such
  *     via distinct key names (`ledgerOutboundStart` etc. vs `ordersFirstSeen`) so no
- *     caller can misread a global figure as scoped to them.
+ *     caller can misread a global figure as scoped to them. "Global" means every
+ *     company, NOT every product: the dataStarts are narrowed to the APPROVED universe
+ *     (active + archived — the documented historical universe of this surface, G2-1),
+ *     because a product this surface never reports must not date what it reports.
  *
  * MUST stay Next-free (imported by the assistant-tool layer): no `next/*`, no
  * `@/lib/api-utils`.
@@ -28,6 +31,7 @@ import prisma from "@/lib/prisma";
 import { inventory_logs_logType } from "@prisma/client";
 import { PHYSICAL_OUTBOUND_WHERE } from "@/lib/reports/metrics-contract";
 import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
+import { approvedProductIds } from "@/lib/reports/outbound-mix";
 
 const toIso = (d: Date | null | undefined): string | null => (d ? d.toISOString() : null);
 
@@ -170,6 +174,13 @@ function aggregateFulfillmentSync(rows: SyncRow[]): {
  */
 export async function getFreshness(companyIds: string[]): Promise<FreshnessReport> {
   const scoped = companyIds.length > 0;
+  // G2-1: the ledger/snapshot dataStarts are a CLAIM about the universe this surface
+  // reports on, so they are narrowed to it — the DOCUMENTED historical universe, approved
+  // ACTIVE + ARCHIVED (an archived product's history is real and is reported by the
+  // historical tools; a pending-review product's is reported nowhere and must date
+  // nothing). Applied even when empty: `in: []` reads as "no rows in scope", which is
+  // exactly true, rather than silently reverting to a table-wide minimum.
+  const approvedScope = { productId: { in: await approvedProductIds({ includeArchived: true }) } };
 
   const [
     salesRebuildState,
@@ -208,19 +219,22 @@ export async function getFreshness(companyIds: string[]): Promise<FreshnessRepor
     // global and would leak cross-company order volume to a company-scoped caller.
     callerScopedSalesCoverage(companyIds),
     // dataStarts.ledgerOutboundStart (global): first physical-outbound ledger row.
-    prisma.inventory_logs.aggregate({ where: PHYSICAL_OUTBOUND_WHERE, _min: { changeTime: true } }),
+    prisma.inventory_logs.aggregate({
+      where: { ...PHYSICAL_OUTBOUND_WHERE, ...approvedScope },
+      _min: { changeTime: true },
+    }),
     // dataStarts.ledgerSaleStart (global): first in-platform SALE ledger row.
     prisma.inventory_logs.aggregate({
-      where: { logType: inventory_logs_logType.SALE, delta: { lt: 0 } },
+      where: { logType: inventory_logs_logType.SALE, delta: { lt: 0 }, ...approvedScope },
       _min: { changeTime: true },
     }),
     // dataStarts.ledgerReceiptStart (global): first STOCK_IN receipt row.
     prisma.inventory_logs.aggregate({
-      where: { logType: inventory_logs_logType.STOCK_IN },
+      where: { logType: inventory_logs_logType.STOCK_IN, ...approvedScope },
       _min: { changeTime: true },
     }),
     // dataStarts.snapshotStart (global): first snapshot dayKey (already a date string).
-    prisma.productStockSnapshot.aggregate({ _min: { dayKey: true } }),
+    prisma.productStockSnapshot.aggregate({ where: approvedScope, _min: { dayKey: true } }),
     // dataStarts.ordersFirstSeen (CALLER-SCOPED): MIN over externalCreatedAt ??
     // createdAt, mirroring lib/analytics/rebuild-sales.ts's full-rebuild floor
     // computation — Prisma has no coalesce-aggregate, so two candidate rows are compared

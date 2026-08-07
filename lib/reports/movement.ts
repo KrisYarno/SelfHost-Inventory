@@ -69,35 +69,43 @@ export interface MovementBuckets {
   net: number;
 }
 
+/** Every movement mode (spec C4 / contract-pack T4). */
+export type MovementMode = "series" | "receipts" | "by_product";
+
 /** The effective filter echo carried by EVERY movement envelope variant (spec C4 /
  *  contract-pack T4). `mode` is the envelope's discriminant and `filters.mode` ALWAYS
  *  equals the envelope's own `mode` — a mismatched pair is a contract violation.
- *  `productIds` is the batch scope (null until Task 2.4 populates it). */
-export interface MovementFilters {
+ *  `productIds` is the batch scope (null until Task 2.4 populates it).
+ *
+ *  G2-4: the mode is a TYPE PARAMETER, so each envelope pins its own literal and tsc
+ *  rejects a mismatched pair at compile time. The equality used to be a convention three
+ *  runtime tests policed; now the type system enforces it and the tests confirm it. */
+export interface MovementFilters<M extends MovementMode> {
   productId: number | null;
   productIds: number[] | null;
   locationId: number | null;
-  mode: "series" | "receipts" | "by_product";
+  mode: M;
 }
 
 export interface MovementSeriesResult {
   /** Envelope discriminant (spec C4 / T4). The receipts envelope is assembled in the
-   *  tool layer and carries `mode: "receipts"`. */
+   *  tool layer and carries `mode: "receipts"` (typed `MovementFilters<"receipts">`). */
   mode: "series";
   grain: "day" | "week" | "month";
   window: ResolvedWindow;
-  filters: MovementFilters;
+  filters: MovementFilters<"series">;
   points: Array<{ key: string } & MovementBuckets>;
   totals: MovementBuckets;
   coverage: {
     unclassifiedLegacyNote: string;
     reasonCodeNullRows: number;
-    // G5 disclosure (spec C13) — present ONLY when the caller scoped the read to an
-    // approved id set. get_product_overview's product-scoped movement30 section does
-    // not (its product is already resolved approved+active), so it never claims one.
-    excludedUnapprovedProducts?: number;
-    archivedProductsIncluded?: number;
-    approvalNote?: string;
+    // G5 disclosure (spec C13). ALWAYS present since G2-3 made `approvedIds` required:
+    // every caller of this read is on the assistant surface, so every result states the
+    // universe it covers. A product-scoped call reports 0/0 — a true statement about a
+    // scope that can hold nothing else — rather than omitting the claim.
+    excludedUnapprovedProducts: number;
+    archivedProductsIncluded: number;
+    approvalNote: string;
   };
 }
 
@@ -160,10 +168,17 @@ function classify(logType: string, delta: number, reasonCode: string | null): Bu
       return delta > 0 ? "countIn" : "countOut";
     case "ADJUSTMENT":
       if (delta > 0) return "adjustmentIn";
-      return reasonCode != null && SHRINKAGE_SET.has(reasonCode) ? "classifiedLoss" : "adjustmentUnclassified";
+      // OC-9 parity: the membership set is UPPERCASE — normalize the LOOKUP (never the
+      // stored value) exactly as outbound-mix.ts does, so the two classifiers that both
+      // promise "never diverge" actually cannot.
+      return reasonCode != null && SHRINKAGE_SET.has(reasonCode.toUpperCase())
+        ? "classifiedLoss"
+        : "adjustmentUnclassified";
     case "CORRECTION":
       if (delta > 0) return "correctionIn";
-      return reasonCode != null && SHRINKAGE_SET.has(reasonCode) ? "classifiedLoss" : "correctionUnclassified";
+      return reasonCode != null && SHRINKAGE_SET.has(reasonCode.toUpperCase())
+        ? "classifiedLoss"
+        : "correctionUnclassified";
     default:
       // Unreachable (logType is enum-constrained). Fold into the adjustment
       // buckets rather than drop the row, so `net === SUM(delta)` still holds.
@@ -179,17 +194,18 @@ function classify(logType: string, delta: number, reasonCode: string | null): Bu
  * @param opts.grain   day | week | month bucketing.
  * @param opts.productId  optional single-product scope (pre-validated).
  * @param opts.locationId optional location scope.
- * @param opts.approvedIds the G5 approved universe (spec C13). Applied at the SQL
- *   boundary so an unapproved product never moves a bucket, and echoed as the coverage
- *   disclosure. Omitted by the product-scoped composite caller, whose product is already
- *   resolved approved — see the coverage comment.
+ * @param opts.approvedIds the G5 approved universe (spec C13). REQUIRED (G2-3): this
+ *   function has NO web callers, so there is no legacy behavior to preserve and no reason
+ *   for the trust-boundary filter to be forgettable. The product-scoped composite caller
+ *   passes it too — its product is already approved, but "the caller checked" is an
+ *   assumption the SQL boundary should not have to make.
  */
 export async function getMovementSeries(opts: {
   productId?: number;
   locationId?: number;
   window: ResolvedWindow;
   grain: "day" | "week" | "month";
-  approvedIds?: number[];
+  approvedIds: number[];
 }): Promise<MovementSeriesResult> {
   const { productId, locationId, window, grain, approvedIds } = opts;
 
@@ -211,14 +227,10 @@ export async function getMovementSeries(opts: {
       // productId (already approval-checked by the caller's resolver) and the approved-id
       // set narrow the SAME column, so they combine as one IntFilter rather than one
       // silently overwriting the other.
-      ...(productId != null || approvedIds != null
-        ? {
-            productId: {
-              ...(productId != null ? { equals: productId } : {}),
-              ...(approvedIds != null ? { in: approvedIds } : {}),
-            },
-          }
-        : {}),
+      productId: {
+        ...(productId != null ? { equals: productId } : {}),
+        in: approvedIds,
+      },
     },
     select: { delta: true, changeTime: true, logType: true, reasonCode: true },
   });
@@ -261,22 +273,20 @@ export async function getMovementSeries(opts: {
       return { key, ...b };
     });
 
+  // Series points/totals carry NO product ids, so the archived half is the same
+  // window-scoped census as the excluded half (spec G5, non-product grain).
+  const disclosure = await approvalDisclosure({
+    relation: "inventory_logs",
+    some: windowPredicate,
+    productId,
+  });
   const coverage: MovementSeriesResult["coverage"] = {
     unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE,
     reasonCodeNullRows,
+    excludedUnapprovedProducts: disclosure.excludedUnapprovedProducts,
+    archivedProductsIncluded: disclosure.archivedProductsIncluded,
+    approvalNote: APPROVED_UNIVERSE_NOTE,
   };
-  if (approvedIds != null) {
-    // Series points/totals carry NO product ids, so the archived half is the same
-    // window-scoped census as the excluded half (spec G5, non-product grain).
-    const disclosure = await approvalDisclosure({
-      relation: "inventory_logs",
-      some: windowPredicate,
-      productId,
-    });
-    coverage.excludedUnapprovedProducts = disclosure.excludedUnapprovedProducts;
-    coverage.archivedProductsIncluded = disclosure.archivedProductsIncluded;
-    coverage.approvalNote = APPROVED_UNIVERSE_NOTE;
-  }
 
   return {
     mode: "series",
@@ -337,9 +347,10 @@ export async function getReceipts(opts: {
   limit?: number;
   offset?: number;
   byteBudget: number;
-  /** The G5 approved universe (spec C13). Present on the assistant surface always. */
-  approvedIds?: number[];
-}): Promise<DbPage<ReceiptRow> & { disclosure?: ApprovalDisclosure }> {
+  /** The G5 approved universe (spec C13). REQUIRED (G2-3) — no web callers, so the
+   *  trust-boundary filter is never optional here. */
+  approvedIds: number[];
+}): Promise<DbPage<ReceiptRow> & { disclosure: ApprovalDisclosure }> {
   const { window, productId, locationId, byteBudget, approvedIds } = opts;
   const limit = opts.limit ?? RECEIPTS_DEFAULT_LIMIT;
   const offset = opts.offset ?? 0;
@@ -352,14 +363,10 @@ export async function getReceipts(opts: {
     logType: "STOCK_IN" as const,
     delta: { gt: 0 },
     changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
-    ...(productId != null || approvedIds != null
-      ? {
-          productId: {
-            ...(productId != null ? { equals: productId } : {}),
-            ...(approvedIds != null ? { in: approvedIds } : {}),
-          },
-        }
-      : {}),
+    productId: {
+      ...(productId != null ? { equals: productId } : {}),
+      in: approvedIds,
+    },
     ...(locationId != null ? { locationId } : {}),
   };
 
@@ -367,19 +374,16 @@ export async function getReceipts(opts: {
   // so the archived count cannot come from result ids without describing one page as if
   // it were the whole answer. Both halves therefore use the window census, whose scope is
   // exactly this read's `where` (spec G5's contributor-census shape).
-  const disclosure =
-    approvedIds != null
-      ? await approvalDisclosure({
-          relation: "inventory_logs",
-          some: {
-            logType: "STOCK_IN",
-            delta: { gt: 0 },
-            changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
-            ...(locationId != null ? { locationId } : {}),
-          },
-          productId,
-        })
-      : undefined;
+  const disclosure = await approvalDisclosure({
+    relation: "inventory_logs",
+    some: {
+      logType: "STOCK_IN",
+      delta: { gt: 0 },
+      changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
+      ...(locationId != null ? { locationId } : {}),
+    },
+    productId,
+  });
 
   const page = await pageFromDb<ReceiptRow>({
     count: () => prisma.inventory_logs.count({ where }),
@@ -416,7 +420,7 @@ export async function getReceipts(opts: {
     limit,
     byteBudget,
   });
-  return disclosure ? { ...page, disclosure } : page;
+  return { ...page, disclosure };
 }
 
 // ---------------------------------------------------------------------------
@@ -443,7 +447,7 @@ export interface MovementProductRow extends MovementBuckets {
 export interface MovementByProductResult {
   mode: "by_product";
   window: ResolvedWindow;
-  filters: MovementFilters;
+  filters: MovementFilters<"by_product">;
   rows: MovementProductRow[];
   coverage: {
     unclassifiedLegacyNote: string;
@@ -483,14 +487,31 @@ export async function getMovementByProduct(opts: {
     ...(locationId != null ? { locationId } : {}),
   };
 
-  const rows = await prisma.inventory_logs.findMany({
-    where: {
-      ...windowPredicate,
-      productId: { in: idScope },
-    },
-    // The breakdown needs productId beside the classifier's inputs (spec C10).
-    select: { productId: true, delta: true, logType: true, reasonCode: true },
-  });
+  // AGGREGATED DB-SIDE (review OC-6). The breakdown used to stream EVERY ledger row in
+  // the window into memory to classify one at a time — the one unbounded read left on
+  // this surface, and the one whose cost grows with history rather than with the answer.
+  //
+  // Two groupBys, not one, because the buckets are SIGNED: a (productId, logType,
+  // reasonCode) group can hold both a shipment and its return, and a single group sum
+  // would classify their NET — silently moving units between buckets (a -500/+500 SALE
+  // pair would report 0 outbound instead of 500). Partitioning the window predicate by
+  // SIGN makes every group's sum unambiguous, so a group sum classifies exactly as its
+  // rows would have. Zero-delta rows are in NEITHER partition, which is the same "count
+  // nowhere" rule the row loop applied. `_count` preserves the reasonCode-null ROW count,
+  // which is a count of rows, not of units, and cannot be recovered from a sum.
+  const [negativeGroups, positiveGroups] = await Promise.all([
+    prisma.inventory_logs.groupBy({
+      by: ["productId", "logType", "reasonCode"],
+      where: { ...windowPredicate, productId: { in: idScope }, delta: { lt: 0 } },
+      _sum: { delta: true },
+      _count: true,
+    }),
+    prisma.inventory_logs.groupBy({
+      by: ["productId", "logType", "reasonCode"],
+      where: { ...windowPredicate, productId: { in: idScope }, delta: { gt: 0 } },
+      _sum: { delta: true },
+    }),
+  ]);
 
   const byProduct = new Map<number, { buckets: MovementBuckets; outboundUnits: number }>();
   const ensure = (productId: number) => {
@@ -505,20 +526,37 @@ export async function getMovementByProduct(opts: {
   // than a missing one.
   if (productIds) for (const id of productIds) ensure(id);
 
+  /** One (productId, logType, reasonCode) group, reduced to what the classifier reads. */
+  type MovementGroup = {
+    productId: number;
+    logType: string;
+    reasonCode: string | null;
+    _sum: { delta: number | null };
+    _count?: number | { _all?: number };
+  };
+  /** Rows behind a group — `_count: true` yields a number; a deep mock may yield the
+   *  `{ _all }` object shape, and a missing count must read as 0, never NaN. */
+  const rowsIn = (g: MovementGroup): number =>
+    typeof g._count === "number" ? g._count : (g._count?._all ?? 0);
+
   let reasonCodeNullRows = 0;
-  for (const row of rows ?? []) {
-    if (row.delta === 0) continue; // counts NOWHERE (same rule as the series)
-    if (
-      row.delta < 0 &&
-      (row.logType === "ADJUSTMENT" || row.logType === "CORRECTION") &&
-      row.reasonCode == null
-    ) {
-      reasonCodeNullRows += 1;
+  for (const g of (negativeGroups ?? []) as MovementGroup[]) {
+    const delta = g._sum?.delta ?? 0;
+    // Structurally impossible under `delta: { lt: 0 }` (a group of negative rows sums
+    // negative); a stubbed read is the only way here, and it must not be classified.
+    if (!(delta < 0)) continue;
+    if ((g.logType === "ADJUSTMENT" || g.logType === "CORRECTION") && g.reasonCode == null) {
+      reasonCodeNullRows += rowsIn(g);
     }
-    const entry = ensure(row.productId);
-    entry.buckets[classify(row.logType, row.delta, row.reasonCode)] += row.delta;
+    const entry = ensure(g.productId);
+    entry.buckets[classify(g.logType, delta, g.reasonCode)] += delta;
     // Sign-first: the SAME predicate the outbound mixes use (delta < 0, not TRANSFER).
-    if (row.delta < 0 && row.logType !== "TRANSFER") entry.outboundUnits += Math.abs(row.delta);
+    if (g.logType !== "TRANSFER") entry.outboundUnits += Math.abs(delta);
+  }
+  for (const g of (positiveGroups ?? []) as MovementGroup[]) {
+    const delta = g._sum?.delta ?? 0;
+    if (!(delta > 0)) continue;
+    ensure(g.productId).buckets[classify(g.logType, delta, g.reasonCode)] += delta;
   }
 
   const productRows: MovementProductRow[] = Array.from(byProduct.entries()).map(

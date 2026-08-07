@@ -17,6 +17,7 @@
 
 import prisma from "@/lib/prisma";
 import { approvedProductIds } from "@/lib/reports/outbound-mix";
+import { classifyWindowCoverage, type WindowCoverage } from "@/lib/reports/metrics-contract";
 
 /** The fixed bundle-revenue disclosure (spec §3 E2). */
 export const BUNDLE_REVENUE_DISCLOSURE = "excluded — bundle components carry units only";
@@ -55,11 +56,56 @@ export interface CallerScopedSalesCoverage {
   /**
    * The FIRST day-key with an attributed sales fact for this caller (spec C6) —
    * caller-scoped `_min(dayKey)` over ProductSalesFact, narrowed to the APPROVED
-   * product universe. null = this caller has no attributed sales facts at all.
+   * product universe THE CALLING TOOL REPORTS ON (OC-4: archived-inclusive for the
+   * historical get_sales, active-only for the current-state composites). null = this
+   * caller has no attributed sales facts at all.
    * It is what makes "no attributed sales RECORDED (since <date>)" a legal sentence
    * where "no sales ever" never was.
    */
   salesDataStart: string | null;
+  /**
+   * PER-COMPANY first-fact days (OC-3), present ONLY when the caller's companies do NOT
+   * share one start. `salesDataStart` is the EARLIEST across them, so a multi-membership
+   * caller whose second company started recording last month would otherwise read a
+   * window as fully covered for a company that has no data in most of it — and every
+   * silence in that company's window would become a MEASURED zero. Presence of this
+   * field IS the signal that the starts are staggered; the tool degrades coverage
+   * accordingly (see `callerWindowCoverage`).
+   */
+  companyCoverage?: Array<{ companyId: string; salesDataStart: string }>;
+}
+
+/** The extra sentence that rides with a staggered-start disclosure (OC-3). */
+export const SALES_COMPANY_COVERAGE_NOTE =
+  "coverage classified per company; the latest-starting company governs zero legality.";
+
+/**
+ * The caller-scoped windowCoverage (OC-3). `salesDataStart` alone classifies the EARLIEST
+ * company's coverage; when the caller's companies start at DIFFERENT days, the window is
+ * only fully covered if the LATEST-starting one covers it too — so a staggered caller
+ * degrades to "partial" and its zero rows stay null-with-a-reason instead of being
+ * manufactured as measured zeros for a company that was not recording yet.
+ */
+export function callerWindowCoverage(
+  coverage: Pick<CallerScopedSalesCoverage, "salesDataStart" | "companyCoverage">,
+  windowFrom: string,
+): WindowCoverage {
+  const base = classifyWindowCoverage(coverage.salesDataStart, windowFrom);
+  const perCompany = coverage.companyCoverage;
+  if (base !== "full" || perCompany == null || perCompany.length === 0) return base;
+  const latest = perCompany.reduce((a, b) => (a.salesDataStart >= b.salesDataStart ? a : b));
+  return classifyWindowCoverage(latest.salesDataStart, windowFrom);
+}
+
+/**
+ * Which approved universe `salesDataStart` is measured over (OC-4 / G2-2). It MUST match
+ * the universe of the totals it is relayed beside: a start date drawn from a product the
+ * figures exclude describes a window the figures never covered — and windowCoverage is
+ * derived from it, so the mismatch decides whether an absent product reads as a MEASURED
+ * zero. Default archived-inclusive (get_sales, the historical reader).
+ */
+export interface SalesCoverageScope {
+  includeArchived?: boolean;
 }
 
 /**
@@ -82,6 +128,7 @@ export interface CallerScopedSalesCoverage {
  */
 export async function callerScopedSalesCoverage(
   companyIds: string[],
+  scope: SalesCoverageScope = {},
 ): Promise<CallerScopedSalesCoverage> {
   if (companyIds.length === 0) {
     return {
@@ -110,7 +157,7 @@ export async function callerScopedSalesCoverage(
       where: { job: "sales" },
       select: { lastRunAt: true },
     }),
-    scopedSalesDataStart(companyIds),
+    scopedSalesDataStart(companyIds, scope),
   ]);
 
   return {
@@ -119,27 +166,56 @@ export async function callerScopedSalesCoverage(
     attributionNote: SALES_ATTRIBUTION_NOTE,
     bundleRevenue: BUNDLE_REVENUE_DISCLOSURE,
     lastRebuildAt: rebuildState?.lastRunAt ? rebuildState.lastRunAt.toISOString() : null,
-    salesDataStart,
+    salesDataStart: salesDataStart.salesDataStart,
+    ...(salesDataStart.staggered ? { companyCoverage: salesDataStart.perCompany } : {}),
   };
 }
 
 /**
- * `_min(dayKey)` over ProductSalesFact for this caller's companies (spec C6).
+ * `_min(dayKey)` over ProductSalesFact for this caller's companies (spec C6), PLUS the
+ * same minimum per company (OC-3).
  *
  * G5 FROM BIRTH (plan G4/G5, gate cluster A): this is a NEW read, so it carries the
  * APPROVED-id-set filter from the start — an unapproved product's facts must never move
  * `salesDataStart`, not even in the window between this task and Task 3.1's retrofit of
- * the pre-existing reads. Archived-but-approved products ARE included: this is a
- * HISTORICAL fact read, and their past sales really did happen.
+ * the pre-existing reads. Archived-but-approved products are included by DEFAULT (this is
+ * a HISTORICAL fact read for get_sales, and their past sales really did happen); a
+ * CURRENT-STATE caller passes `includeArchived: false` so its start date is measured over
+ * exactly the population its totals sum (OC-4 / G2-2).
  *
  * The id set is ALWAYS applied, even when empty: an empty approved universe must read
  * as "no facts in scope" (`in: []` matches nothing), never as an unfiltered read.
  */
-async function scopedSalesDataStart(companyIds: string[]): Promise<string | null> {
-  const approvedIds = await approvedProductIds({ includeArchived: true });
-  const row = await prisma.productSalesFact.aggregate({
-    where: { companyId: { in: companyIds }, productId: { in: approvedIds } },
-    _min: { dayKey: true },
+async function scopedSalesDataStart(
+  companyIds: string[],
+  scope: SalesCoverageScope,
+): Promise<{
+  salesDataStart: string | null;
+  perCompany: Array<{ companyId: string; salesDataStart: string }>;
+  staggered: boolean;
+}> {
+  const approvedIds = await approvedProductIds({
+    includeArchived: scope.includeArchived ?? true,
   });
-  return row?._min?.dayKey ?? null;
+  const where = { companyId: { in: companyIds }, productId: { in: approvedIds } };
+  const [row, groups] = await Promise.all([
+    prisma.productSalesFact.aggregate({ where, _min: { dayKey: true } }),
+    // PER-COMPANY starts (OC-3): the earliest day alone cannot tell a caller whose second
+    // company started recording last month that half their window is uncovered there.
+    prisma.productSalesFact.groupBy({
+      by: ["companyId"],
+      where,
+      _min: { dayKey: true },
+    }) as unknown as Promise<Array<{ companyId: string; _min: { dayKey: string | null } }>>,
+  ]);
+  const perCompany = (groups ?? [])
+    .filter((g) => g?._min?.dayKey != null)
+    .map((g) => ({ companyId: g.companyId, salesDataStart: g._min.dayKey as string }))
+    .sort((a, b) => (a.companyId < b.companyId ? -1 : a.companyId > b.companyId ? 1 : 0));
+  // A company with NO facts at all has no start to compare, so it cannot make the set
+  // "staggered" — its silence is already the `none`/absent case, not a later start.
+  const staggered =
+    perCompany.length > 1 &&
+    perCompany.some((g) => g.salesDataStart !== perCompany[0].salesDataStart);
+  return { salesDataStart: row?._min?.dayKey ?? null, perCompany, staggered };
 }

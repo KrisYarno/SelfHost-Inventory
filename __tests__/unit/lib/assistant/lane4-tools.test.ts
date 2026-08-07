@@ -97,6 +97,20 @@ beforeEach(() => {
   // location names come from the locations table. Benign empties by default.
   db.productStockSnapshot.groupBy.mockResolvedValue([] as never);
   db.location.findMany.mockResolvedValue([] as never);
+  // G2-6: find_product OMITS a matched product whose lifecycle it cannot read (it never
+  // synthesizes "active"), so the shared identity lookup — prisma.product.findMany over
+  // the ids just fetched — has to answer here. Id-less reads (the approved-id set) keep
+  // returning [] exactly as before.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db.product.findMany.mockImplementation((args: any) =>
+    Promise.resolve(
+      ((args?.where?.id?.in ?? []) as number[]).map((id) => ({
+        id,
+        name: `product ${id}`,
+        deletedAt: null,
+      })),
+    ) as never,
+  );
 });
 
 describe("find_product: APPROVED-only + caps", () => {
@@ -129,6 +143,45 @@ describe("find_product: APPROVED-only + caps", () => {
 
   it("rejects a limit above the cap (schema)", async () => {
     await expect(assistantTools.find_product.run({ query: "abc", limit: 999 }, CTX)).rejects.toThrow();
+  });
+
+  // G2-6: the old `?? "active"` default was a SYNTHESIZED lifecycle — sound only under an
+  // assumption the code cannot check. A product whose identity did not come back is now
+  // omitted and COUNTED, so a reader is told the list is short rather than handed a row
+  // claiming a state nobody read.
+  it("OMITS a matched product whose lifecycle could not be read, and counts it (never 'active')", async () => {
+    mockGetProducts.mockResolvedValue({
+      products: [product({ id: 1 }), product({ id: 2 })],
+      total: 2,
+    });
+    // The identity read answers for #1 only — #2's lifecycle is unknown.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.product.findMany.mockImplementation((_args: any) =>
+      Promise.resolve([{ id: 1, name: "Known", deletedAt: null }]) as never,
+    );
+
+    const result = await assistantTools.find_product.run({ query: "abc" }, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as {
+      products: Array<{ id: number; lifecycle: string }>;
+      coverage: { matched: number; identityMisses: number; identityNote?: string };
+    };
+    expect(data.products.map((p) => p.id)).toEqual([1]);
+    expect(data.products[0].lifecycle).toBe("active");
+    // The gap is DISCLOSED: matched still says 2, and the miss is counted + explained.
+    expect(data.coverage.matched).toBe(2);
+    expect(data.coverage.identityMisses).toBe(1);
+    expect(data.coverage.identityNote).toContain("never guesses");
+  });
+
+  it("reports identityMisses: 0 on the normal path (a defined field, not a conditional one)", async () => {
+    mockGetProducts.mockResolvedValue({ products: [product()], total: 1 });
+    const result = await assistantTools.find_product.run({ query: "abc" }, CTX);
+    if (result.status !== "ok") throw new Error("not ok");
+    const coverage = (result.data as { coverage: Record<string, unknown> }).coverage;
+    expect(coverage.identityMisses).toBe(0);
+    expect(coverage.identityNote).toBeUndefined();
   });
 
   it("rejects a too-short query (schema)", async () => {

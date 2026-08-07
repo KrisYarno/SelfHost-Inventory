@@ -489,7 +489,27 @@ describe("3.1 get_sales — the approved universe in every grain", () => {
     expect(ids).toContain(SILENT_ID);
     expect(ids).not.toContain(UNAPPROVED_ID);
     const silent = data.rows.find((r: any) => r.productId === SILENT_ID);
-    expect(silent._sum).toEqual({ orderedQty: 0, revenue: "0.00", orderCount: 0 });
+    // OC-7: "0" is what a MEASURED zero serializes to (Decimal(0).toString()).
+    expect(silent._sum).toEqual({ orderedQty: 0, revenue: "0", orderCount: 0 });
+  });
+
+  // OC-2: `archivedProductsIncluded` counts CONTRIBUTORS. The zero-row synthesis was
+  // folded into it, so a deleted product that contributed NOTHING inflated the count —
+  // "1 archived product's history is in these numbers" when the honest answer was 0.
+  it("archivedProductsIncluded counts MEASURED rows only; zero rows are counted separately", async () => {
+    const measuredOnly = await runTool("get_sales", { groupBy: "product" });
+    // ARCHIVED_ID really sold 40 units in the window; SILENT_ARCHIVED_ID has no facts.
+    expect(measuredOnly.coverage.archivedProductsIncluded).toBe(1);
+    expect(measuredOnly.coverage.archivedZeroRows).toBeUndefined(); // no zero rows here
+
+    const withZeros = await runTool("get_sales", { groupBy: "product", includeZeroRows: true });
+    // The count does NOT move when synthesized rows join the answer...
+    expect(withZeros.coverage.archivedProductsIncluded).toBe(1);
+    // ...and the archived zero-row population is disclosed on its own terms.
+    expect(withZeros.coverage.archivedZeroRows).toBe(1);
+    // The row is still THERE and still tagged — nothing was hidden by the correction.
+    const quiet = withZeros.rows.find((r: any) => r.productId === SILENT_ARCHIVED_ID);
+    expect(quiet.lifecycle).toBe("deleted");
   });
 
   it("G5 mechanics: an id-set filter on the fact read, a PRODUCT-SIDE census, and no ledger groupBy", async () => {
@@ -619,6 +639,109 @@ describe("3.1 get_business_snapshot — a CURRENT-STATE tool stays active-only",
   });
 });
 
+// ===========================================================================
+// G2-1 — the FRESHNESS aggregates. The rows of these tools were always approved-scoped;
+// their per-source data-starts were not, so a PENDING-REVIEW product's oldest ledger row
+// dated a report that excludes that product entirely. A disclosed data-start is a claim
+// about the universe being reported.
+// ===========================================================================
+
+describe("G2-1 — a pending-review product's oldest row moves NO dataStart", () => {
+  it("get_operations freshness is measured over the approved-ACTIVE universe", async () => {
+    const data = await runTool("get_operations", {});
+    // The unapproved product's oldest SALE is 400 days back; the approved floor is 200.
+    expect(data.freshness.ledgerSaleStart.slice(0, 10)).toBe(dayKeyAgo(200));
+    // Its oldest OUTBOUND row (a negative ADJUSTMENT) is 500 days back; approved: 300.
+    expect(data.freshness.outbound.slice(0, 10)).toBe(dayKeyAgo(300));
+    expect(data.freshness.adjustment.slice(0, 10)).toBe(dayKeyAgo(300));
+
+    // MECHANICS (seam S13): every dataStart aggregate carries the id-set filter, and for
+    // this CURRENT-STATE tool the universe is ACTIVE-only — the same population its rows
+    // come from, so the freshness block and the rows can never describe different sets.
+    const aggregates = callsTo("inventory_logs", "aggregate");
+    expect(aggregates.length).toBeGreaterThan(0);
+    for (const c of aggregates) {
+      expect(c.args.where.productId.in).toContain(ACTIVE_ID);
+      expect(c.args.where.productId.in).not.toContain(ARCHIVED_ID);
+      expect(c.args.where.productId.in).not.toContain(UNAPPROVED_ID);
+    }
+  });
+
+  it("get_data_freshness dataStarts are measured over the approved HISTORICAL universe", async () => {
+    const data = await runTool("get_data_freshness", {});
+    expect(data.dataStarts.ledgerSaleStart.slice(0, 10)).toBe(dayKeyAgo(200));
+    expect(data.dataStarts.ledgerOutboundStart.slice(0, 10)).toBe(dayKeyAgo(300));
+    expect(data.dataStarts.ledgerReceiptStart.slice(0, 10)).toBe(dayKeyAgo(5));
+
+    // This surface REPORTS archived history (get_sales, get_movement_series...), so its
+    // documented universe is active + archived — and never the unapproved product.
+    const aggregates = callsTo("inventory_logs", "aggregate");
+    expect(aggregates.length).toBeGreaterThan(0);
+    for (const c of aggregates) {
+      expect(c.args.where.productId.in).toEqual(
+        expect.arrayContaining([ACTIVE_ID, ARCHIVED_ID]),
+      );
+      expect(c.args.where.productId.in).not.toContain(UNAPPROVED_ID);
+    }
+  });
+});
+
+// ===========================================================================
+// OC-4 / G2-2 — the snapshot's sales section vs get_sales. The two tools answer the
+// same question over DIFFERENT universes by design; the snapshot never said so, and its
+// salesDataStart was measured over a population its totals do not sum.
+// ===========================================================================
+
+describe("OC-4 — the snapshot's ACTIVE-ONLY sales section discloses the gap", () => {
+  it("snapshot total <= get_sales total, and the difference is the disclosed archived history", async () => {
+    const snapshot = await runTool("get_business_snapshot", {});
+    const sales = await runTool("get_sales", { groupBy: "product", relativeDays: 30 });
+
+    const salesUnits = sales.rows.reduce((s: number, r: any) => s + (r._sum.orderedQty ?? 0), 0);
+    const snapshotUnits = snapshot.sales.last30d.orderedUnits;
+    expect(snapshotUnits).toBeLessThanOrEqual(salesUnits);
+    // ...and the gap is EXACTLY the archived product's 40 units, nothing unexplained.
+    expect(salesUnits - snapshotUnits).toBe(40);
+
+    // Both sides now state which universe they measured.
+    expect(sales.coverage.archivedProductsIncluded).toBe(1);
+    expect(snapshot.sales.coverage.archivedProductsIncluded).toBe(0);
+    expect(snapshot.sales.coverage.excludedUnapprovedProducts).toBe(1);
+    expect(snapshot.sales.coverage.approvalNote).toContain("ACTIVE-ONLY");
+    expect(snapshot.sales.coverage.approvalNote).toContain("get_sales");
+  });
+
+  it("G2-2: the snapshot's salesDataStart is measured over that SAME active-only universe", async () => {
+    await runTool("get_business_snapshot", {});
+    // The un-windowed fact aggregates are the salesDataStart reads (the windowed ones are
+    // the section totals). The snapshot's own read excludes the archived product; the
+    // freshness section keeps the historical universe, and neither ever sees an
+    // unapproved product.
+    const startReads = callsTo("productSalesFact", "aggregate").filter(
+      (c) => c.args?.where?.dayKey == null,
+    );
+    expect(startReads.length).toBeGreaterThan(0);
+    expect(
+      startReads.filter((c) => !c.args.where.productId.in.includes(ARCHIVED_ID)).length,
+    ).toBeGreaterThan(0);
+    for (const c of startReads) {
+      expect(c.args.where.productId.in).not.toContain(UNAPPROVED_ID);
+    }
+  });
+
+  it("get_product_overview's sales30 start is active-only too (its product is active)", async () => {
+    await runTool("get_product_overview", { productId: ACTIVE_ID });
+    const startReads = callsTo("productSalesFact", "aggregate").filter(
+      (c) => c.args?.where?.dayKey == null,
+    );
+    expect(startReads.length).toBeGreaterThan(0);
+    for (const c of startReads) {
+      expect(c.args.where.productId.in).toContain(ACTIVE_ID);
+      expect(c.args.where.productId.in).not.toContain(ARCHIVED_ID);
+    }
+  });
+});
+
 describe("3.1 seam S11 — the deprecated taxonomy re-export is gone", () => {
   it("lib/analytics/queries.ts no longer re-exports SHRINKAGE_CLASS_REASONS", async () => {
     const queries = await import("@/lib/analytics/queries");
@@ -718,7 +841,7 @@ describe("3.2 policy table — the FOUR historical tools DO see it, tagged", () 
     expect(ids).not.toContain(UNAPPROVED_ID);
     const quiet = data.rows.find((r: any) => r.productId === SILENT_ARCHIVED_ID);
     expect(quiet.lifecycle).toBe("deleted");
-    expect(quiet._sum).toEqual({ orderedQty: 0, revenue: "0.00", orderCount: 0 });
+    expect(quiet._sum).toEqual({ orderedQty: 0, revenue: "0", orderCount: 0 });
   });
 
   it("receipts rows carry name + lifecycle (W2 seam S14 closed)", async () => {

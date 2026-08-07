@@ -35,6 +35,24 @@ function num(input: unknown, key: string): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
+/** A boolean flag, strictly: only `true` counts (streamed args carry junk). */
+function flag(input: unknown, key: string): boolean {
+  return (input as Record<string, unknown> | null | undefined)?.[key] === true;
+}
+
+/**
+ * The bounded-set phrase for a productIds argument (OC-5): "products #1, #2, #3". A
+ * disclosure row that omits the set renders a bounded call exactly like the catalog-wide
+ * one, which is the scope claim spec C4 exists to prevent. Non-numeric entries are
+ * dropped rather than rendered — the phrase must stay inert for streamed/partial args.
+ */
+function productsPhrase(input: unknown, key: string): string {
+  const v = (input as Record<string, unknown> | null | undefined)?.[key];
+  if (!Array.isArray(v)) return "";
+  const ids = v.filter((n): n is number => typeof n === "number" && Number.isFinite(n));
+  return ids.length ? `products ${ids.map((n) => `#${n}`).join(", ")}` : "";
+}
+
 /** The window phrase for tools whose window resolver defaults to relativeDays 30
  *  (get_sales / get_movement_series / compare_periods' periods). */
 const DEFAULT_RELATIVE_WINDOW_PHRASE = "last 30 days (default)";
@@ -106,6 +124,9 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
         id ? `product #${id}` : "",
         range,
         groupBy ? `by ${groupBy}` : "",
+        // OC-5: includeZeroRows changes WHICH PRODUCTS the answer covers (the whole
+        // approved catalog, not just those with sales), so the row must say so.
+        flag(input, "includeZeroRows") ? "incl. zero-sales products" : "",
       ].filter(Boolean);
       return parts.join(", ");
     },
@@ -160,12 +181,17 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
       const locationId = num(input, "locationId");
       const range = dateRangePhrase(input, DEFAULT_RELATIVE_WINDOW_PHRASE);
       const groupBy = str(input, "groupBy");
-      const receipts = (input as Record<string, unknown> | null | undefined)?.receipts === true;
+      const receipts = flag(input, "receipts");
+      // OC-5: breakdownBy and productIds are the two arguments that change the SHAPE and
+      // the SCOPE of this answer (per-product rows; a bounded set) — rendering neither
+      // made a bounded per-product call look identical to a catalog-wide series.
+      const breakdown = str(input, "breakdownBy") ? "per product" : "";
       const parts = [
         id ? `product #${id}` : "",
+        productsPhrase(input, "productIds"),
         locationId ? `location #${locationId}` : "",
         range,
-        receipts ? "receipts" : groupBy ? `by ${groupBy}` : "",
+        receipts ? "receipts" : breakdown || (groupBy ? `by ${groupBy}` : ""),
       ].filter(Boolean);
       return parts.join(", ");
     },
@@ -193,10 +219,15 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
       // Render BOTH periods (it rendered neither): a comparison disclosure that names
       // no windows tells the reader nothing about what was compared.
       const rec = input as Record<string, unknown> | null | undefined;
+      const direction = str(input, "direction");
       const parts = [
         metric ? metric.replace(/_/g, " ") : "",
         `${periodPhrase(rec?.periodA)} vs ${periodPhrase(rec?.periodB)}`,
         id ? `product #${id}` : "",
+        // OC-5: groupBy:'product' returns a RANKED ROW SET (not one comparison) and
+        // direction FILTERS it before paging — both are scope, not decoration.
+        str(input, "groupBy") ? "per product" : "",
+        direction ? `${direction} only` : "",
       ].filter(Boolean);
       return parts.join(", ");
     },
@@ -252,7 +283,16 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     successLabel: "Built the reorder report",
     failureNoun: "reorder report",
     emptyCopy: "Nothing needs reordering right now.",
-    summarizeArgs: () => "",
+    // OC-5: this rendered "" for every call, so a NAMED-SET sizing (productIds) was
+    // disclosed exactly like the catalog-wide worklist. Both arguments change the
+    // population the answer covers.
+    summarizeArgs: (input) => {
+      const parts = [
+        productsPhrase(input, "productIds"),
+        flag(input, "includeHealthy") ? "incl. healthy" : "",
+      ].filter(Boolean);
+      return parts.join(", ");
+    },
   },
   get_product_overview: {
     pendingLabel: "Building the product overview…",

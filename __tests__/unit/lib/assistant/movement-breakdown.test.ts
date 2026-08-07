@@ -71,11 +71,53 @@ interface LedgerRow {
   reasonCode?: string | null;
 }
 
+/**
+ * OC-6: the breakdown now AGGREGATES DB-SIDE — two sign-partitioned groupBys over
+ * (productId, logType, reasonCode) instead of one unbounded findMany. Fixtures stay
+ * expressed as ROWS (that is what a reader can reason about), and this seed does the
+ * grouping the database would: filter by the where's sign + id scope, sum delta per key,
+ * count the rows behind it. A row-level fixture that survives the grouping is exactly the
+ * proof that group sums classify the same way the rows did.
+ */
 function seedLedger(rows: LedgerRow[]) {
-  db.inventory_logs.findMany.mockResolvedValue(
-    rows.map((r) => ({ ...r, reasonCode: r.reasonCode ?? null })) as never,
-  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db.inventory_logs.groupBy.mockImplementation((args: any) => {
+    const where = args?.where ?? {};
+    const ids: number[] | undefined = where.productId?.in;
+    const wantNegative = where.delta?.lt != null;
+    const selected = rows.filter(
+      (r) =>
+        (wantNegative ? r.delta < 0 : r.delta > 0) && (ids ? ids.includes(r.productId) : true),
+    );
+    const groups = new Map<
+      string,
+      { productId: number; logType: string; reasonCode: string | null; _sum: { delta: number }; _count: number }
+    >();
+    for (const r of selected) {
+      const reasonCode = r.reasonCode ?? null;
+      const key = `${r.productId}|${r.logType}|${reasonCode}`;
+      const g = groups.get(key);
+      if (g) {
+        g._sum.delta += r.delta;
+        g._count += 1;
+      } else {
+        groups.set(key, {
+          productId: r.productId,
+          logType: r.logType,
+          reasonCode,
+          _sum: { delta: r.delta },
+          _count: 1,
+        });
+      }
+    }
+    return Promise.resolve(Array.from(groups.values())) as never;
+  });
 }
+
+/** The ledger reads the breakdown issues: the two sign partitions, in call order. */
+const ledgerGroupCalls = () =>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db.inventory_logs.groupBy.mock.calls.map((c) => c[0] as any);
 
 const okData = async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
   const result = await assistantTools.get_movement_series.run(args, CTX);
@@ -157,6 +199,43 @@ describe("row integrity — the FULL partition, per product", () => {
     expect(rows[1].outboundUnits).toBe(100);
   });
 
+  // OC-6: the breakdown used to stream every ledger row in the window into memory. It now
+  // aggregates DB-side — and because the buckets are SIGNED, that only works if the
+  // window predicate is partitioned by SIGN: a single groupBy over (productId, logType,
+  // reasonCode) would net a shipment against its return and report 0 units out.
+  it("aggregates DB-SIDE via TWO sign-partitioned groupBys — a mixed-sign key is never netted", async () => {
+    seedCatalog([{ id: 1, name: "Churner" }]);
+    seedLedger([
+      // Same (productId, logType, reasonCode) KEY, opposite signs: one groupBy would
+      // collapse these to 0 and lose 500 units of real outbound movement.
+      { productId: 1, delta: -500, logType: "SALE" },
+      { productId: 1, delta: 500, logType: "SALE" },
+      { productId: 1, delta: -4, logType: "ADJUSTMENT", reasonCode: null },
+      { productId: 1, delta: -6, logType: "ADJUSTMENT", reasonCode: null },
+      { productId: 1, delta: 0, logType: "COUNT" }, // counts NOWHERE (neither partition)
+    ]);
+
+    const data = await okData({ breakdownBy: "product" });
+    const row = (data.rows as Array<Record<string, number>>)[0];
+    expect(row.outboundUnits).toBe(510); // 500 shipped + 10 adjusted out
+    expect(row.sale).toBe(0); // ...while the SIGNED bucket still nets honestly
+    expect(row.adjustmentUnclassified).toBe(-10);
+    expect(row.net).toBe(-10); // net === sum of buckets, unchanged by the regroup
+
+    // The unbounded read is GONE, replaced by exactly two sign-partitioned groupBys.
+    expect(db.inventory_logs.findMany).not.toHaveBeenCalled();
+    const calls = ledgerGroupCalls();
+    expect(calls.length).toBe(2);
+    expect(calls.map((c) => c.where.delta)).toEqual([{ lt: 0 }, { gt: 0 }]);
+    for (const call of calls) {
+      expect(call.by).toEqual(["productId", "logType", "reasonCode"]);
+      expect(call._sum).toEqual({ delta: true });
+    }
+    // The reasonCode-null figure is a ROW count, not a unit sum — it cannot be recovered
+    // from a delta, so the negative partition carries `_count` to preserve it.
+    expect((data.coverage as { reasonCodeNullRows: number }).reasonCodeNullRows).toBe(2);
+  });
+
   it("a TRANSFER leg is NOT outbound for ranking (internal relocation, spec C10)", async () => {
     seedCatalog([
       { id: 1, name: "Mover" },
@@ -204,11 +283,10 @@ describe("the bounded batch — resolution, zero rows, and the rejected echo", (
       { productId: 2, reason: "unknown_id" },
       { productId: 4242, reason: "unknown_id" },
     ]);
-    // ...and the ledger read only ever saw the RESOLVED id.
-    const ledgerArgs = db.inventory_logs.findMany.mock.calls[0][0] as {
-      where: { productId: { in: number[] } };
-    };
-    expect(ledgerArgs.where.productId).toEqual({ in: [1] });
+    // ...and EVERY ledger read only ever saw the RESOLVED id (both sign partitions).
+    const ledgerCalls = ledgerGroupCalls();
+    expect(ledgerCalls.length).toBe(2);
+    for (const call of ledgerCalls) expect(call.where.productId).toEqual({ in: [1] });
   });
 
   it("an ARCHIVED-approved id resolves for this HISTORICAL read and is tagged", async () => {
@@ -230,12 +308,9 @@ describe("the bounded batch — resolution, zero rows, and the rejected echo", (
     seedLedger([{ productId: 1, delta: -2, logType: "SALE" }]);
 
     await okData({ breakdownBy: "product" });
-    const ledgerArgs = db.inventory_logs.findMany.mock.calls[0][0] as {
-      where: { productId: { in: number[] } };
-    };
     // The unapproved product is filtered at the SQL boundary — never in a row, never
     // in a total, not even before Task 3.1 retrofits the reads beside this one.
-    expect(ledgerArgs.where.productId).toEqual({ in: [1] });
+    for (const call of ledgerGroupCalls()) expect(call.where.productId).toEqual({ in: [1] });
   });
 
   it("filters echo the RESOLVED scope (not the request), and filters.mode === mode (T4)", async () => {
@@ -267,9 +342,26 @@ describe("the bounded batch — resolution, zero rows, and the rejected echo", (
   });
 });
 
-describe("G1 asserts — all four, and all BEFORE the receipts branch", () => {
+describe("G1 asserts — all five, and all BEFORE the receipts branch", () => {
   it("breakdownBy x groupBy is rejected with a hint", async () => {
     expect(await hintOf({ breakdownBy: "product", groupBy: "week" })).toMatch(/mutually exclusive/);
+  });
+
+  // OC-1: `movementByProduct` reads `productIds` and never `productId`, so the singular
+  // id used to be SILENTLY DROPPED — a caller asking "break down product 7" got the whole
+  // catalog's breakdown back, correctly shaped and about the wrong population. The
+  // rejection is the fix; aliasing it to productIds:[7] would have been a guess.
+  it("breakdownBy x productId is rejected (never silently aliased to productIds)", async () => {
+    seedCatalog([{ id: 7, name: "Seven" }, { id: 8, name: "Eight" }]);
+    seedLedger([{ productId: 8, delta: -5, logType: "SALE" }]);
+
+    const message = await hintOf({ breakdownBy: "product", productId: 7 });
+    expect(message).toMatch(/mutually exclusive/);
+    // The hint mirrors assertCompareGrain's shape: it names BOTH legal repairs.
+    expect(message).toContain("productIds:[id]");
+    expect(message).toMatch(/drop breakdownBy/);
+    // Nothing was read: no catalog-wide breakdown was computed and then discarded.
+    expect(db.inventory_logs.groupBy).not.toHaveBeenCalled();
   });
 
   it("breakdownBy x receipts is rejected with a hint — the receipts branch never wins", async () => {
@@ -281,9 +373,9 @@ describe("G1 asserts — all four, and all BEFORE the receipts branch", () => {
   });
 
   it("productId x productIds is rejected with a hint", async () => {
-    expect(await hintOf({ breakdownBy: "product", productId: 1, productIds: [2] })).toMatch(
-      /mutually exclusive/,
-    );
+    // No breakdownBy here on purpose: with it, the OC-1 rule above fires first and this
+    // case would pass without ever exercising its own rule.
+    expect(await hintOf({ productId: 1, productIds: [2] })).toMatch(/mutually exclusive/);
   });
 
   it("productIds WITHOUT breakdownBy is rejected (REV-4 narrowing — never a silent catalog aggregate)", async () => {
@@ -291,6 +383,7 @@ describe("G1 asserts — all four, and all BEFORE the receipts branch", () => {
     expect(message).toMatch(/requires breakdownBy/);
     expect(message).toMatch(/whole-catalog aggregate/);
     // Nothing was read: the rejection happens before any branch.
+    expect(db.inventory_logs.groupBy).not.toHaveBeenCalled();
     expect(db.inventory_logs.findMany).not.toHaveBeenCalled();
   });
 

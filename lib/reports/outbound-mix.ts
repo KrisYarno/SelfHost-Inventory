@@ -95,6 +95,11 @@ export function outboundBucketOf(row: OutboundRow): keyof OutboundMix {
         "filter to outbound rows before classifying (precondition: delta < 0 AND logType != TRANSFER)",
     );
   }
+  // OC-9: the membership set is UPPERCASE, so a reasonCode that differs only in case
+  // ("damage" from an import, a hand-written adjustment) would fall through to the
+  // unclassified bucket — a real classified loss reported as unclassified depletion.
+  // Normalize the LOOKUP, never the row: the value the ledger stores is untouched.
+  const reasonCode = row.reasonCode == null ? null : row.reasonCode.toUpperCase();
   switch (row.logType) {
     case "SALE":
       return "sale";
@@ -105,11 +110,11 @@ export function outboundBucketOf(row: OutboundRow): keyof OutboundMix {
     case "COUNT":
       return "countOut";
     case "ADJUSTMENT":
-      return row.reasonCode != null && SHRINKAGE_SET.has(row.reasonCode)
+      return reasonCode != null && SHRINKAGE_SET.has(reasonCode)
         ? "classifiedLoss"
         : "adjustmentUnclassified";
     case "CORRECTION":
-      return row.reasonCode != null && SHRINKAGE_SET.has(row.reasonCode)
+      return reasonCode != null && SHRINKAGE_SET.has(reasonCode)
         ? "classifiedLoss"
         : "correctionUnclassified";
     default:

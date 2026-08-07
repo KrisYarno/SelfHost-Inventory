@@ -239,6 +239,10 @@ export async function getReorderReport(
         approvalStatus: "APPROVED",
         ...(activeRequestedIds != null ? { id: { in: activeRequestedIds } } : {}),
       },
+      // OC-8: a DB-level order, so the population arrives deterministically instead of in
+      // whatever order the engine returns — the row sorts below are the presentation
+      // order, not a substitute for a stable read.
+      orderBy: { id: "asc" },
       select: {
         id: true,
         name: true,
@@ -404,13 +408,20 @@ export async function getReorderReport(
 
   // Suggested first, most-urgent first (then largest need, then name); unavailable
   // after, by name; the requested-id rows last (an unknown id has no name to sort by).
+  // OC-8: productId is the FINAL tiebreak in both sorts — two products with the same
+  // urgency, need, and name (variants routinely share one) would otherwise page in an
+  // order the DB happened to return, so offset paging could show a row twice or never.
   suggested.sort(
     (a, b) =>
       URGENCY_RANK[b.urgency] - URGENCY_RANK[a.urgency] ||
       b.grossReplenishmentNeed - a.grossReplenishmentNeed ||
-      a.productName.localeCompare(b.productName),
+      a.productName.localeCompare(b.productName) ||
+      a.productId - b.productId,
   );
-  unavailable.sort((a, b) => (a.productName ?? "").localeCompare(b.productName ?? ""));
+  unavailable.sort(
+    (a, b) =>
+      (a.productName ?? "").localeCompare(b.productName ?? "") || a.productId - b.productId,
+  );
   requestedRows.sort((a, b) => a.productId - b.productId);
 
   const allRows: ReorderRow[] = [...suggested, ...unavailable, ...requestedRows];

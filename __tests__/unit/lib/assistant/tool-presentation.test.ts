@@ -157,6 +157,76 @@ describe("compare_periods disclosure row renders BOTH periods (spec C4)", () => 
   });
 });
 
+// ---------------------------------------------------------------------------
+// OC-5 — the arguments that change WHICH POPULATION an answer covers. Each of these
+// rendered nothing, so a bounded/expanded call was disclosed exactly like the plain
+// one: "Looked up sales, last 30 days" for a catalog-wide zero-row sweep, and a bare
+// "Built the reorder report" for a five-product sizing.
+// ---------------------------------------------------------------------------
+
+describe("OC-5 — scope-changing arguments are disclosed", () => {
+  it("get_sales renders includeZeroRows (the answer covers the whole approved catalog)", () => {
+    const s = summarize("get_sales", { groupBy: "product", includeZeroRows: true });
+    expect(s).toContain("incl. zero-sales products");
+    expect(s).toContain("by product");
+    // Absent/false renders nothing — the phrase is a claim, not decoration.
+    expect(summarize("get_sales", { groupBy: "product" })).not.toContain("zero-sales");
+    expect(summarize("get_sales", { includeZeroRows: false })).not.toContain("zero-sales");
+  });
+
+  it("get_movement_series renders breakdownBy and the productIds set", () => {
+    const s = summarize("get_movement_series", {
+      breakdownBy: "product",
+      productIds: [7, 8, 9],
+      relativeDays: 14,
+    });
+    expect(s).toContain("per product");
+    expect(s).toContain("products #7, #8, #9");
+    expect(s).toContain("last 14 days");
+    // receipts still wins the shape slot; the plain series is unchanged.
+    expect(summarize("get_movement_series", { receipts: true })).toContain("receipts");
+    expect(summarize("get_movement_series", { groupBy: "week" })).toContain("by week");
+    expect(summarize("get_movement_series", {})).not.toContain("per product");
+  });
+
+  it("compare_periods renders groupBy:'product' and direction", () => {
+    const s = summarize("compare_periods", {
+      metric: "sales_units",
+      periodA: { relativeDays: 7 },
+      periodB: { relativeDays: 7 },
+      groupBy: "product",
+      direction: "increase",
+    });
+    expect(s).toContain("per product");
+    expect(s).toContain("increase only");
+    // Totals mode says neither.
+    const totals = summarize("compare_periods", {
+      metric: "sales_units",
+      periodA: { relativeDays: 7 },
+      periodB: { relativeDays: 7 },
+    });
+    expect(totals).not.toContain("per product");
+    expect(totals).not.toContain("only");
+  });
+
+  it("reorder_report renders productIds / includeHealthy (it rendered nothing at all)", () => {
+    expect(summarize("reorder_report", { productIds: [3, 12] })).toContain("products #3, #12");
+    expect(summarize("reorder_report", { includeHealthy: true })).toContain("incl. healthy");
+    const both = summarize("reorder_report", { productIds: [4], includeHealthy: true });
+    expect(both).toBe("products #4, incl. healthy");
+    // The catalog-wide worklist still renders the empty phrase.
+    expect(summarize("reorder_report", {})).toBe("");
+    expect(summarize("reorder_report", { includeOkay: true })).toBe("");
+  });
+
+  it("id lists stay inert for junk / partial streamed args", () => {
+    expect(summarize("reorder_report", { productIds: "nonsense" })).toBe("");
+    expect(summarize("reorder_report", { productIds: [] })).toBe("");
+    expect(summarize("reorder_report", { productIds: [1, "x", null] })).toBe("products #1");
+    expect(summarize("get_movement_series", { productIds: [Number.NaN] })).not.toContain("products");
+  });
+});
+
 describe("every registered presentation entry stays inert + total", () => {
   it("summarizeArgs never throws for an empty / null / junk input", () => {
     for (const [name, p] of Object.entries(TOOL_PRESENTATION)) {

@@ -24,6 +24,9 @@
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {
+    // G2-1: the ledger/snapshot dataStarts are narrowed to the APPROVED universe
+    // (active + archived), so the approved-id read is part of this module's read graph.
+    product: { findMany: jest.fn(async () => []) },
     analyticsRebuildState: { findUnique: jest.fn() },
     // IN-WAVE FIX (W1-INT): fulfillmentSync now aggregates across ALL rows (two Woo
     // stores in prod) — the query is findMany, not findFirst.

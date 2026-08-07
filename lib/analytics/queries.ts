@@ -219,11 +219,23 @@ function absOutByProduct(rows: { productId: number; _sum: { delta: number | null
  * sale data" flag that could flip every product to a confident zero the instant
  * one SALE row lands. The velocity denominator is clamped to the window actually
  * covered by outbound data, so a freshly-started data source cannot inflate it.
+ *
+ * `approvedIds` (G2-1) narrows the per-source `dataStarts` aggregates to the caller's
+ * approved universe. The ROWS were always approved-active (the product read filters
+ * them); the data-starts were not, so an excluded product could still date the report.
  */
 export async function getOperationsRows(
-  opts: { windowDays?: 30 | 90 } = {}
+  opts: { windowDays?: 30 | 90; approvedIds?: number[] } = {}
 ): Promise<{ rows: OperationsRow[]; dataStarts: OperationsDataStarts; velocityDefinition: string }> {
   const windowDays = opts.windowDays === 30 ? 30 : 90;
+  // G2-1: the per-source dataStarts are AGGREGATES over the whole ledger/snapshot table,
+  // so unlike the product rows above them they were never narrowed by the approved
+  // universe — a pending-review product's oldest row set `freshness.ledgerSaleStart` for
+  // a report that excludes that product entirely. A disclosed data-start is a claim about
+  // the universe being reported, so it obeys the same filter the rows do. Caller-supplied
+  // per call (the tool's policy row decides the universe; the web analytics route is out
+  // of this lane's scope and keeps today's unfiltered behavior by not passing it).
+  const approvedScope = opts.approvedIds ? { productId: { in: opts.approvedIds } } : {};
   const now = new Date();
   const start30 = new Date(now.getTime() - 30 * DAY_MS);
   const start90 = new Date(now.getTime() - 90 * DAY_MS);
@@ -309,25 +321,26 @@ export async function getOperationsRows(
     }),
     latestReceiptCostByProduct(),
     prisma.inventory_logs.aggregate({
-      where: { logType: inventory_logs_logType.SALE, delta: { lt: 0 } },
+      where: { logType: inventory_logs_logType.SALE, delta: { lt: 0 }, ...approvedScope },
       _min: { changeTime: true },
     }),
     prisma.inventory_logs.aggregate({
-      where: PHYSICAL_OUTBOUND_WHERE,
+      where: { ...PHYSICAL_OUTBOUND_WHERE, ...approvedScope },
       _min: { changeTime: true },
     }),
     prisma.inventory_logs.aggregate({
       where: {
         logType: { in: [inventory_logs_logType.ADJUSTMENT, inventory_logs_logType.CORRECTION] },
         delta: { lt: 0 },
+        ...approvedScope,
       },
       _min: { changeTime: true },
     }),
     prisma.inventory_logs.aggregate({
-      where: { logType: inventory_logs_logType.STOCK_IN },
+      where: { logType: inventory_logs_logType.STOCK_IN, ...approvedScope },
       _min: { changeTime: true },
     }),
-    prisma.productStockSnapshot.aggregate({ _min: { dayKey: true } }),
+    prisma.productStockSnapshot.aggregate({ where: approvedScope, _min: { dayKey: true } }),
   ]);
 
   const dataStarts: OperationsDataStarts = {

@@ -37,6 +37,19 @@ beforeEach(() => {
   mockReset(db);
   jest.clearAllMocks();
   db.systemSetting.findUnique.mockResolvedValue(null as never);
+  // G2-6: find_product omits a matched product whose lifecycle it cannot read, so the
+  // shared identity lookup answers for the ids under test — and it must relay the
+  // adversarial NAME verbatim too (the identity read is where names come from).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  db.product.findMany.mockImplementation((args: any) =>
+    Promise.resolve(
+      ((args?.where?.id?.in ?? []) as number[]).map((id) => ({
+        id,
+        name: ADVERSARIAL,
+        deletedAt: null,
+      })),
+    ) as never,
+  );
 });
 
 describe("buildSystemPrompt: static, no tool output", () => {

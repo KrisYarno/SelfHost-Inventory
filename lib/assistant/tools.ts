@@ -53,8 +53,13 @@ import {
 } from "@/lib/stock-threshold";
 import { resolveWindow, type ResolvedWindow } from "@/lib/assistant/window";
 import { resolveAssistantProduct, resolveAssistantProducts } from "@/lib/assistant/resolve-product";
-import { callerScopedSalesCoverage, SALES_ROWS_NOTE } from "@/lib/assistant/sales-coverage";
-import { classifyWindowCoverage, type WindowCoverage } from "@/lib/reports/metrics-contract";
+import {
+  callerScopedSalesCoverage,
+  callerWindowCoverage,
+  SALES_ROWS_NOTE,
+  SALES_COMPANY_COVERAGE_NOTE,
+} from "@/lib/assistant/sales-coverage";
+import { type WindowCoverage } from "@/lib/reports/metrics-contract";
 import {
   approvedProductIds,
   productIdentities,
@@ -67,7 +72,12 @@ import {
 // Wave-1 breadth modules (W1-VAL/MOVE/SUM/POL/FRESH) — each is a self-contained,
 // Next-free data layer; this file is the ONLY place they are wired into a tool.
 import { getValuation } from "@/lib/analytics/valuation";
-import { getMovementSeries, getReceipts, getMovementByProduct } from "@/lib/reports/movement";
+import {
+  getMovementSeries,
+  getReceipts,
+  getMovementByProduct,
+  type MovementFilters,
+} from "@/lib/reports/movement";
 import { getInventorySummary } from "@/lib/reports/inventory-summary";
 import { getPolicy } from "@/lib/reports/policy";
 import { getFreshness } from "@/lib/assistant/freshness";
@@ -359,9 +369,17 @@ function assertCompareGrain(args: {
 }
 
 /**
- * get_movement_series mode legality (spec C10, G1). All four rules run BEFORE the
+ * get_movement_series mode legality (spec C10, G1). All five rules run BEFORE the
  * receipts branch, so an illegal combination is rejected with a self-correcting hint
  * instead of silently taking whichever branch happens to be checked first.
+ *
+ * The THIRD rule (review OC-1) is the counterpart of assertCompareGrain's
+ * groupBy×productId exclusion: `breakdownBy:'product'` partitions a POPULATION, and a
+ * `productId` narrows to one member of it. The combination has no defined execution
+ * path — `movementByProduct` reads `productIds`, never `productId`, so the singular id
+ * was silently DROPPED and a catalog-wide breakdown came back wearing a single-product
+ * request. It is rejected, never aliased to `productIds:[id]`: guessing which of the two
+ * readings the caller meant is how a bounded question gets a catalog answer.
  *
  * The last rule is the REV-4 narrowing: `productIds` REQUIRES `breakdownBy:'product'`.
  * Series-mode narrowing has no defined execution path, and a bare `productIds` that
@@ -388,6 +406,13 @@ function assertMovementModes(args: {
     reject(
       "breakdownBy",
       "breakdownBy:'product' and receipts:true are mutually exclusive: receipts is a per-EVENT listing, not a partition",
+    );
+  }
+  if (args.breakdownBy != null && args.productId != null) {
+    reject(
+      "breakdownBy",
+      "breakdownBy:'product' and productId are mutually exclusive: pass productIds:[id] for a " +
+        "bounded set, or drop breakdownBy for that product's series",
     );
   }
   if (args.productId != null && args.productIds != null) {
@@ -828,13 +853,13 @@ async function withZeroSalesRows(
   rows: object[],
   salesDataStart: string | null,
   windowCoverage: WindowCoverage,
-): Promise<object[]> {
+): Promise<{ rows: object[]; zeros: ZeroSalesRow[] }> {
   const present = new Set(
     rows.map((r) => (r as { productId?: number }).productId).filter((id): id is number => id != null),
   );
   const populationIds = await approvedProductIds({ includeArchived: true });
   const missing = populationIds.filter((id) => !present.has(id));
-  if (missing.length === 0) return rows;
+  if (missing.length === 0) return { rows, zeros: [] };
   const identities = await productIdentities(missing);
   // A fully-covered window makes silence measurable; anything else leaves it unknown
   // (nulls + a named reason), because a partial sum can never stand in for the whole.
@@ -850,8 +875,12 @@ async function withZeroSalesRows(
       productId: id,
       name: identity?.name ?? null,
       lifecycle: identity?.lifecycle ?? null,
+      // OC-7: "0" — what `Prisma.Decimal(0).toString()` produces, which is exactly how a
+      // MEASURED zero-revenue row serializes through serialize.ts. The old "0.00" made a
+      // synthesized row distinguishable from a real one by FORMAT alone, which is the
+      // kind of tell a reader (or a diff) reasonably mistakes for a different value.
       _sum: measured
-        ? { orderedQty: 0, revenue: "0.00", orderCount: 0 }
+        ? { orderedQty: 0, revenue: "0", orderCount: 0 }
         : { orderedQty: null, revenue: null, orderCount: null },
       firstSaleDayKey: null,
     };
@@ -859,9 +888,10 @@ async function withZeroSalesRows(
     return row;
   });
   // ONE deterministic order across real + synthesised rows, so offset paging is stable.
-  return [...rows, ...zeros].sort(
+  const merged = [...rows, ...zeros].sort(
     (a, b) => ((a as { productId?: number }).productId ?? 0) - ((b as { productId?: number }).productId ?? 0),
   );
+  return { rows: merged, zeros };
 }
 
 /**
@@ -955,11 +985,19 @@ async function fillCompareEvidence(
  * ordered SERVER-side, so the model never loops a per-product tool over the catalog nor
  * ranks deltas itself (review #3's most expensive failure class).
  *
- * JOINT BYTE FIT (G2-8): `rows` and `unranked` share ONE budget — ranked fits against
- * 70% of it, then unranked fits against the MEASURED remainder. Only ONE of the two is
- * ever non-empty (coverage is all-or-nothing per period), so the split simply decides
- * how much the populated array may use; the last-resort `ok()` truncation must never
- * fire for this tool.
+ * JOINT BYTE FIT (G2-8, corrected by review G2-5): `rows` and `unranked` share ONE budget
+ * — ranked fits against 70% of it, then unranked fits against the MEASURED remainder.
+ * Only ONE of the two is ever non-empty (coverage is all-or-nothing per period), so the
+ * split simply decides how much the populated array may use.
+ *
+ * The budget is the EXACT room this result has: `byteBudget(ctx)` minus the MEASURED
+ * envelope, never a fixed 8 KiB reserve floored at 4 KiB. Both of those were bigger than
+ * a tight late-turn budget itself, so the fitter would happily build a page the caller
+ * had no room for and the adapter would discard the WHOLE result as over-budget — the
+ * exact "truncation instead of a smaller page" failure the fitter exists to prevent.
+ * And because `fillCompareEvidence` GROWS rows after they were fit (null placeholders
+ * become real dates), each page is RE-FIT against the same budget once populated: the
+ * bytes that were measured are the bytes the caller receives.
  */
 async function compareByProduct(
   args: {
@@ -990,54 +1028,91 @@ async function compareByProduct(
   const rankedShaped = await shapeCompareRows(result.ranked);
   const unrankedShaped = await shapeCompareRows(result.unranked);
 
-  const budget = Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES);
-  const rankedPage = paginate(
-    rankedShaped,
-    offset,
-    limit,
-    Math.max(Math.floor(budget * COMPARE_RANKED_BUDGET_SHARE), MIN_RANK_PAGE_BYTES),
-  );
-  // The MEASURED remainder — what the ranked page actually consumed, not its allowance.
-  const remainder = Math.max(budget - byteLengthOf(rankedPage.rows), MIN_RANK_PAGE_BYTES);
-  const unrankedPage = paginate(unrankedShaped, 0, limit, remainder);
-
-  await fillCompareEvidence(rankedPage.rows, { isSales, companyIds: ctx.companyIds });
-  await fillCompareEvidence(unrankedPage.rows, { isSales, companyIds: ctx.companyIds });
-
-  return ok(
-    {
-      mode: "by_product",
-      metric: args.metric,
-      periodA,
-      periodB,
+  // The envelope, MEASURED (G2-5): build the payload with both arrays empty and weigh it,
+  // so the row budget is `whatever room is actually left` rather than a constant that can
+  // exceed the caller's whole budget.
+  const envelopeOf = (ranked: Page<CompareProductToolRow>, unranked: Page<CompareProductToolRow>) => ({
+    mode: "by_product",
+    metric: args.metric,
+    periodA,
+    periodB,
+    unequalLengths: result.unequalLengths,
+    rows: ranked.rows,
+    returned: ranked.returned,
+    totalRows: ranked.totalRows,
+    nextOffset: ranked.nextOffset,
+    unranked: unranked.rows,
+    unrankedReturned: unranked.returned,
+    unrankedTotal: unranked.totalRows,
+    reasons: result.reasons,
+    coverage: {
+      metricScope: metricScopeNote,
+      metricScopes: { sales: "company", ledger: "global" },
+      // Source-level coverage per period — the SAME classification get_sales uses.
+      periodCoverage: result.periodCoverage,
+      reasonsKeys: "a = periodA, b = periodB, pctChange = percent change",
       unequalLengths: result.unequalLengths,
-      rows: rankedPage.rows,
-      returned: rankedPage.returned,
-      totalRows: rankedPage.totalRows,
-      nextOffset: rankedPage.nextOffset,
-      unranked: unrankedPage.rows,
-      unrankedReturned: unrankedPage.returned,
-      unrankedTotal: unrankedPage.totalRows,
-      reasons: result.reasons,
-      coverage: {
-        metricScope: metricScopeNote,
-        metricScopes: { sales: "company", ledger: "global" },
-        // Source-level coverage per period — the SAME classification get_sales uses.
-        periodCoverage: result.periodCoverage,
-        reasonsKeys: "a = periodA, b = periodB, pctChange = percent change",
-        unequalLengths: result.unequalLengths,
-        unrankedNote: COMPARE_UNRANKED_NOTE,
-        evidenceNote: COMPARE_EVIDENCE_NOTE,
-        // G5 disclosure (spec C13): PRODUCT grain, so the archived half is a JS count
-        // over the shaped rows' own `lifecycle` (both arrays — a coverage-artifact row
-        // is still a contributing product), and only the excluded half needs the census.
-        excludedUnapprovedProducts: result.excludedUnapprovedProducts,
-        archivedProductsIncluded: archivedCountOf([...rankedShaped, ...unrankedShaped]),
-        approvalNote: APPROVED_UNIVERSE_NOTE,
-      },
+      unrankedNote: COMPARE_UNRANKED_NOTE,
+      evidenceNote: COMPARE_EVIDENCE_NOTE,
+      // G5 disclosure (spec C13): PRODUCT grain, so the archived half is a JS count
+      // over the shaped rows' own `lifecycle` (both arrays — a coverage-artifact row
+      // is still a contributing product), and only the excluded half needs the census.
+      excludedUnapprovedProducts: result.excludedUnapprovedProducts,
+      archivedProductsIncluded: archivedCountOf([...rankedShaped, ...unrankedShaped]),
+      approvalNote: APPROVED_UNIVERSE_NOTE,
     },
-    { scope: "mixed" },
+  });
+
+  // Measured with the WIDEST counters this call can emit (the real array lengths), so the
+  // envelope estimate is never smaller than the envelope actually shipped.
+  const counterOf = (rows: CompareProductToolRow[]): Page<CompareProductToolRow> => ({
+    rows: [],
+    returned: rows.length,
+    totalRows: rows.length,
+    nextOffset: rows.length,
+  });
+  const envelopeBytes = byteLengthOf(
+    envelopeOf(counterOf(rankedShaped), counterOf(unrankedShaped)),
   );
+  // NEVER floored above what is left: a floor bigger than the remaining budget builds a
+  // page the caller cannot receive.
+  const budget = Math.max(byteBudget(ctx) - envelopeBytes, 0);
+  const rankedBudget = Math.min(
+    Math.max(Math.floor(budget * COMPARE_RANKED_BUDGET_SHARE), MIN_RANK_PAGE_BYTES),
+    budget,
+  );
+  const rankedFit = paginate(rankedShaped, offset, limit, rankedBudget);
+  // The MEASURED remainder — what the ranked page actually consumed, not its allowance.
+  const remainder = Math.max(budget - byteLengthOf(rankedFit.rows), 0);
+  const unrankedFit = paginate(unrankedShaped, 0, limit, remainder);
+
+  await fillCompareEvidence(rankedFit.rows, { isSales, companyIds: ctx.companyIds });
+  await fillCompareEvidence(unrankedFit.rows, { isSales, companyIds: ctx.companyIds });
+
+  // RE-FIT the now-populated rows (G2-5): evidence can only make a row bigger, so the
+  // page can only shrink — and the cursor must follow it, or `nextOffset` would skip the
+  // rows the re-fit dropped.
+  const rankedPage = refitPage(rankedFit, offset, rankedBudget);
+  const unrankedPage = refitPage(unrankedFit, 0, Math.max(budget - byteLengthOf(rankedPage.rows), 0));
+
+  return ok(envelopeOf(rankedPage, unrankedPage), { scope: "mixed" });
+}
+
+/**
+ * Re-fit an ALREADY-PAGED array whose rows grew after the fit (compare's post-pagination
+ * evidence fill, G2-5). Rows can only be DROPPED from the end, so `totalRows` is
+ * unchanged and `nextOffset` moves back to the first row this page no longer carries.
+ */
+function refitPage<T>(page: Page<T>, offset: number, byteBudget: number): Page<T> {
+  const refit = paginate(page.rows, 0, page.rows.length, byteBudget);
+  if (refit.returned === page.returned) return page;
+  const consumedEnd = offset + refit.returned;
+  return {
+    rows: refit.rows,
+    returned: refit.returned,
+    totalRows: page.totalRows,
+    nextOffset: consumedEnd < page.totalRows ? consumedEnd : null,
+  };
 }
 
 /**
@@ -1290,6 +1365,13 @@ const PAGING_POSTURE =
 const FIND_PRODUCT_DELETED_NOTE =
   "deleted product — current stock not reported; history remains queryable";
 
+/** Disclosure for the G2-6 identity gap: matched products whose lifecycle could not be
+ *  read are OMITTED rather than defaulted to 'active', so the reader is told the list is
+ *  shorter than `matched` instead of being handed a synthesized state. */
+const FIND_PRODUCT_IDENTITY_MISS_NOTE =
+  "some matched products are omitted: their lifecycle could not be read, and this surface " +
+  "never guesses one — retry, or narrow the query.";
+
 export const assistantTools: Record<string, AssistantToolDef> = {
   find_product: {
     description:
@@ -1333,11 +1415,20 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // producer, so a row here can never disagree with the same product's row in a
       // history tool.
       const identities = await productIdentities(products.map((p) => p.id));
-      const rows = products.map((p) => {
-        // The "active" default is SOUND, not a guess: without includeArchived the DB
-        // predicate can only return non-deleted rows, and the identity read covers exactly
-        // the ids just fetched. It exists so a row never ships a null lifecycle.
-        const lifecycle = identities.get(p.id)?.lifecycle ?? "active";
+      // G2-6: a lifecycle is NEVER synthesized. The old `?? "active"` default was sound
+      // only under an assumption the code cannot check (that the identity read covered
+      // every id just fetched) — and if that assumption ever broke (a race with a delete,
+      // a partial read), the row would claim "active" about a product whose state is
+      // simply unknown. A missing identity now OMITS the row and is COUNTED, so the gap
+      // is disclosed instead of papered over with a plausible value.
+      let identityMisses = 0;
+      const rows = products.flatMap((p) => {
+        const identity = identities.get(p.id);
+        if (!identity) {
+          identityMisses += 1;
+          return [];
+        }
+        const lifecycle = identity.lifecycle;
         const base = {
           id: p.id,
           name: p.name,
@@ -1377,7 +1468,15 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           returned: page.returned,
           totalRows: total,
           nextOffset: consumed < total ? consumed : null,
-          coverage: { matched: total, scope: "approved products; name/baseName/variant match" },
+          coverage: {
+            matched: total,
+            scope: "approved products; name/baseName/variant match",
+            // G2-6: how many matched products were dropped for want of an identity. 0 is
+            // the normal reading; a non-zero count is the disclosure that `matched` and
+            // the rows disagree — never a silently shortened list.
+            identityMisses,
+            ...(identityMisses > 0 ? { identityNote: FIND_PRODUCT_IDENTITY_MISS_NOTE } : {}),
+          },
         },
         { scope: "global" },
       );
@@ -1574,6 +1673,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `or straddles that start, so a zero row's sums are null with a reason — never read ` +
       `as zero), or 'none' (no attributed sales data at all). A zero row's ` +
       `firstSaleDayKey is its first attributed fact — EVIDENCE, never a creation date. ` +
+      `coverage.archivedProductsIncluded counts deleted products whose REAL facts are in ` +
+      `these figures; archivedZeroRows (includeZeroRows only) counts deleted products ` +
+      `present ONLY as synthesized zero rows — they contributed nothing. ` +
       `${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getSalesSchema,
     run: async (input, ctx) => {
@@ -1627,7 +1729,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             ...(productLifecycle ? { lifecycle: productLifecycle } : {}),
             coverage: {
               ...coverage,
-              windowCoverage: classifyWindowCoverage(coverage.salesDataStart, window.from),
+              windowCoverage: callerWindowCoverage(coverage, window.from),
               rowsNote: SALES_ROWS_NOTE,
               // A caller with NO company access has no sales population at all, so
               // nothing was excluded and nothing archived contributed. Reported as the
@@ -1663,10 +1765,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // C6: does the sales source cover this whole window? The answer decides whether
       // an absent product is a MEASURED zero or an UNKNOWN — the ONE classifier
       // compare_periods uses too, so the two tools can never disagree about a source.
-      const windowCoverage = classifyWindowCoverage(coverage.salesDataStart, window.from);
-      const withZeros = args.includeZeroRows
+      // OC-3: with STAGGERED per-company starts the LATEST one governs, so a zero is
+      // never manufactured for a company that was not yet recording.
+      const windowCoverage = callerWindowCoverage(coverage, window.from);
+      const zeroRowResult = args.includeZeroRows
         ? await withZeroSalesRows(serialized, coverage.salesDataStart, windowCoverage)
-        : serialized;
+        : { rows: serialized, zeros: [] as object[] };
+      const withZeros = zeroRowResult.rows;
       // G5 disclosure, PER GRAIN (spec C13). The product grain's rows carry `lifecycle`
       // already, so its archived count is a JS count over the FULL result set (before
       // paging — the disclosure describes the answer, not the page). Every other grain
@@ -1679,11 +1784,26 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         },
         productId: args.productId,
       };
+      // OC-3: `archivedProductsIncluded` counts CONTRIBUTORS — products whose real facts
+      // moved a total — so it is computed over the MEASURED rows only, BEFORE the zero-row
+      // synthesis. A synthesized zero row proves the opposite of a contribution, and
+      // folding it in made the count read as "N archived products' history is in these
+      // numbers" when the honest answer was 0. The zero-row population is disclosed
+      // SEPARATELY (`archivedZeroRows`) so nothing is hidden by the correction.
       const approval =
         groupBy === "product"
           ? {
               excludedUnapprovedProducts: await excludedUnapprovedProductCount(salesCensus),
-              archivedProductsIncluded: archivedCountOf(withZeros as Array<{ lifecycle?: string | null }>),
+              archivedProductsIncluded: archivedCountOf(
+                serialized as Array<{ lifecycle?: string | null }>,
+              ),
+              ...(args.includeZeroRows
+                ? {
+                    archivedZeroRows: archivedCountOf(
+                      zeroRowResult.zeros as Array<{ lifecycle?: string | null }>,
+                    ),
+                  }
+                : {}),
             }
           : await approvalDisclosure(salesCensus);
       // W3 seam-fix item 1: ctx-aware reserved budget so a tight late-turn read shrinks
@@ -1705,7 +1825,11 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         coverage: {
           ...coverage,
           windowCoverage,
-          rowsNote: SALES_ROWS_NOTE,
+          // OC-3: the staggered-start sentence rides ONLY when companyCoverage is present,
+          // so the note never claims a per-company classification that did not happen.
+          rowsNote: coverage.companyCoverage
+            ? `${SALES_ROWS_NOTE} ${SALES_COMPANY_COVERAGE_NOTE}`
+            : SALES_ROWS_NOTE,
           ...approval,
           approvalNote: APPROVED_UNIVERSE_NOTE,
         },
@@ -1751,7 +1875,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         const product = await resolveAssistantProduct(args.productId);
         if (!product) return notFound("product", args.productId);
       }
-      const { rows, dataStarts, velocityDefinition } = await getOperationsRows({ windowDays });
+      // G2-1: get_operations reports the approved-ACTIVE population, so its freshness
+      // block is measured over that same universe — a pending-review product's oldest
+      // ledger row must not date a report that excludes it.
+      const { rows, dataStarts, velocityDefinition } = await getOperationsRows({
+        windowDays,
+        approvedIds: await approvedProductIds(),
+      });
       const ranked =
         args.productId != null
           ? rows.filter((r) => r.productId === args.productId)
@@ -1895,7 +2025,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `per product, ranked by outboundUnits (the SIGN-FIRST magnitude of negative ` +
       `non-TRANSFER movement, so a returned SALE never cancels it); that is the ONE ` +
       `call for "which products moved", never a loop. Add productIds (max 20, requires ` +
-      `breakdownBy:'product') to narrow it to a named set — a requested product with no ` +
+      `breakdownBy:'product') to narrow it to a named set — productId is the SERIES ` +
+      `scope and is REJECTED beside breakdownBy, so use productIds:[id] for one product's ` +
+      `breakdown row — a requested product with no ` +
       `movement comes back as an ALL-ZERO row (that is how "0 deductions recorded" is ` +
       `answerable), and ids that cannot be resolved are echoed in coverage.requested ` +
       `rather than silently dropped. The result's mode is 'series', 'receipts', or ` +
@@ -1935,6 +2067,15 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // `budget − ENVELOPE_RESERVE_BYTES` so the added window/coverage/counts envelope
       // cannot push the completed result past the threaded budget and get it discarded.
       if (args.receipts) {
+        // T4 / G2-4: the receipts envelope is assembled HERE, so its filter echo is typed
+        // with the receipts literal — tsc now rejects a mode/filters.mode mismatch that
+        // used to be policed only by a runtime assertion.
+        const receiptsFilters: MovementFilters<"receipts"> = {
+          productId: args.productId ?? null,
+          productIds: null,
+          locationId: args.locationId ?? null,
+          mode: "receipts",
+        };
         const page = await getReceipts({
           window,
           productId: args.productId,
@@ -1953,12 +2094,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             ...(productLifecycle ? { lifecycle: productLifecycle } : {}),
             // C4 / T4: the SAME filters echo the series envelope carries, with the
             // receipts discriminant — `filters.mode === mode` on every variant.
-            filters: {
-              productId: args.productId ?? null,
-              productIds: null,
-              locationId: args.locationId ?? null,
-              mode: "receipts",
-            },
+            filters: receiptsFilters,
             rows: page.rows,
             returned: page.returned,
             totalRows: page.totalRows,
@@ -1971,7 +2107,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
                 "unitCostCents/batchId are frozen at receipt — null when not recorded, never 0.",
               // G5 disclosure over the WHOLE matching set (the listing is DB-paged, so a
               // page-derived count would describe one page as if it were the answer).
-              ...(page.disclosure ?? {}),
+              ...page.disclosure,
               approvalNote: APPROVED_UNIVERSE_NOTE,
             },
           },

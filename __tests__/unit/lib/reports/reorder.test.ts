@@ -332,3 +332,52 @@ describe("demand mix on suggested rows (spec C12)", () => {
     expect(Object.values(row.demandMix!).reduce((a, b) => a + b, 0)).toBe(row.demandUnits);
   });
 });
+
+// ---------------------------------------------------------------------------
+// OC-8 — DETERMINISM. The rows are paginated by offset at the tool boundary, so any
+// order the sort leaves undecided is decided by whatever the DB returned: two calls can
+// show the same product twice, or never. Variants routinely share a name, and a
+// same-urgency/same-need pair is common in a small catalog.
+// ---------------------------------------------------------------------------
+
+describe("OC-8 deterministic ordering", () => {
+  it("reads the population with an explicit DB order (never engine-dependent)", async () => {
+    seed([{ id: 2, name: "B", costPrice: null, stock: 0 }]);
+    await getReorderReport({});
+    const args = db.product.findMany.mock.calls[0][0] as { orderBy?: unknown };
+    expect(args.orderBy).toEqual({ id: "asc" });
+  });
+
+  it("breaks a same-urgency, same-need, SAME-NAME tie by productId in the suggested sort", async () => {
+    const demand = { avgDailyDemand: 2, outboundEvents: 10, daysCovered: 30 };
+    // Identical in every sort key the report had: urgency (OUT), need, and name.
+    seed([
+      { id: 9, name: "TIRZ 10mg", costPrice: null, stock: 0, demand },
+      { id: 3, name: "TIRZ 10mg", costPrice: null, stock: 0, demand },
+      { id: 7, name: "TIRZ 10mg", costPrice: null, stock: 0, demand },
+    ]);
+    const report = await getReorderReport({});
+    expect(report.rows.map((r) => r.productId)).toEqual([3, 7, 9]);
+  });
+
+  it("breaks the same tie in the unavailable sort too", async () => {
+    seed([
+      { id: 9, name: "Idle", costPrice: null, stock: 5 },
+      { id: 3, name: "Idle", costPrice: null, stock: 5 },
+      { id: 7, name: "Idle", costPrice: null, stock: 5 },
+    ]);
+    const report = await getReorderReport({});
+    expect(report.rows.map((r) => r.productId)).toEqual([3, 7, 9]);
+  });
+
+  it("the tiebreak is LAST: it never reorders rows the real keys already separate", async () => {
+    seed([
+      // id 1 is CRITICAL (stock below lead-time demand); id 2 is merely REORDER_NOW.
+      { id: 1, name: "Zed", costPrice: null, stock: 1, demand: { avgDailyDemand: 2, outboundEvents: 10, daysCovered: 30 } },
+      { id: 2, name: "Abe", costPrice: null, stock: 0, demand: { avgDailyDemand: 2, outboundEvents: 10, daysCovered: 30 } },
+    ]);
+    const report = await getReorderReport({});
+    // OUT (stock 0) outranks CRITICAL regardless of id or name.
+    expect(report.rows.map((r) => r.productId)).toEqual([2, 1]);
+  });
+});

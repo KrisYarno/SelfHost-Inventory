@@ -252,7 +252,13 @@ describe("POST /mcp — tool round-trip", () => {
         returned: 0,
         totalRows: 0,
         nextOffset: null,
-        coverage: { matched: 0, scope: "approved products; name/baseName/variant match" },
+        // G2-6: identityMisses rides on every find_product coverage block (0 is the
+        // normal reading; it is a defined field, never a conditional one).
+        coverage: {
+          matched: 0,
+          scope: "approved products; name/baseName/variant match",
+          identityMisses: 0,
+        },
       });
       // context was resolved from the token owner + telemetry recorded
       expect(p.userCompany.findMany).toHaveBeenCalled();
@@ -826,7 +832,9 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
       productId: 8,
       name: "Silent",
       lifecycle: "active",
-      _sum: { orderedQty: 0, revenue: "0.00", orderCount: 0 },
+      // OC-7: "0" — byte-identical to what a MEASURED Decimal(0) serializes to, so a
+      // synthesized zero is not distinguishable from a real one by FORMAT.
+      _sum: { orderedQty: 0, revenue: "0", orderCount: 0 },
       firstSaleDayKey: null,
     });
     expect(toolResult.data.totalRows).toBe(2);
@@ -908,10 +916,19 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
       ];
       return where.id?.in ? catalog.filter((c) => where.id!.in.includes(c.id)) : catalog;
     });
-    p.inventory_logs.findMany.mockResolvedValueOnce([
-      { productId: 1, delta: -12, logType: "SALE", reasonCode: null },
-      { productId: 1, delta: 4, logType: "SALE", reasonCode: null }, // a return
-    ]);
+    // OC-6: the breakdown AGGREGATES DB-side over two sign-partitioned groupBys, so the
+    // wire fixture is expressed as GROUPS. The 12-out/4-back pair sits in the two
+    // partitions on purpose: it is the case a single netted groupBy would get wrong.
+    p.inventory_logs.groupBy.mockImplementation(async (args: Record<string, unknown>) => {
+      const where = (args.where ?? {}) as { delta?: { lt?: number; gt?: number } };
+      if (where.delta?.lt != null) {
+        return [{ productId: 1, logType: "SALE", reasonCode: null, _sum: { delta: -12 }, _count: 1 }];
+      }
+      if (where.delta?.gt != null) {
+        return [{ productId: 1, logType: "SALE", reasonCode: null, _sum: { delta: 4 }, _count: 1 }];
+      }
+      return [];
+    });
 
     const toolResult = await roundTrip("get_movement_series", {
       breakdownBy: "product",
@@ -953,10 +970,40 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     expect(toolResult.hint).toContain("requires breakdownBy:'product'");
   });
 
+  // OC-1: breakdownBy + productId used to be ACCEPTED on this wire — the singular id was
+  // dropped and a CATALOG-wide breakdown came back looking like a single-product answer.
+  // The round-trip proves the sidecar surfaces the rejection (and its repair) too.
+  it("get_movement_series breakdownBy + productId is rejected with a self-correcting hint (OC-1)", async () => {
+    const toolResult = await roundTrip("get_movement_series", {
+      breakdownBy: "product",
+      productId: 1,
+    });
+    expect(toolResult.status).toBe("error");
+    expect(toolResult.code).toBe("TOOL_ERROR");
+    expect(toolResult.hint).toContain("mutually exclusive");
+    expect(toolResult.hint).toContain("productIds:[id]");
+    // No rows: the rejection replaces the answer, it does not ride beside one.
+    expect(toolResult.data).toBeUndefined();
+  });
+
   it("get_operations: outboundMix30 decomposes unitsOut30 on the wire (C12)", async () => {
-    p.product.findMany.mockResolvedValueOnce([
-      { id: 1, name: "TIRZ", costPrice: null, lowStockThreshold: null, product_locations: [{ quantity: 40 }] },
-    ]);
+    // G2-1: the tool reads the approved-ACTIVE id set FIRST (it narrows the freshness
+    // dataStarts), so the product read is dispatched on shape rather than call order —
+    // a `mockResolvedValueOnce` would now be consumed by the id-set read.
+    p.product.findMany.mockImplementation(async (args: Record<string, unknown>) => {
+      const select = (args.select ?? {}) as Record<string, unknown>;
+      const catalog = [
+        {
+          id: 1,
+          name: "TIRZ",
+          costPrice: null,
+          lowStockThreshold: null,
+          product_locations: [{ quantity: 40 }],
+        },
+      ];
+      // The approved-id set selects `id` only; the operations row read selects the rest.
+      return Object.keys(select).length === 1 ? catalog.map((p2) => ({ id: p2.id })) : catalog;
+    });
     // The ONE regrouped 30-day read: (productId, logType, reasonCode) groups. Every other
     // groupBy on this delegate stays benign, so the mix here is the only seeded source.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

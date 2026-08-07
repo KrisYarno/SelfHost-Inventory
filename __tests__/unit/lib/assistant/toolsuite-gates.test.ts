@@ -94,6 +94,7 @@ jest.mock("@/lib/prisma", () => {
   };
 });
 
+import { ZodError } from "zod";
 import {
   assistantTools,
   TOOL_SCOPES,
@@ -245,6 +246,41 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
   get_product_overview: [{ productId: 1 }, { productId: PENDING_REVIEW_FIXTURE_ID }],
   get_business_snapshot: [{}],
 };
+
+/**
+ * MISUSE fixtures (review OC-1) — argument combinations that must be REJECTED. They live
+ * beside TOOL_GATE_FIXTURES rather than inside it because the two matrices assert
+ * OPPOSITE outcomes: a gate fixture must COMPLETE (status ok/truncated/error), a misuse
+ * fixture must THROW a ZodError before any read happens. Folding the second kind into the
+ * first would have meant teaching the no-throw gate to tolerate throws — weakening the
+ * gate for all 17 tools to pin one rule.
+ *
+ * Each entry: the illegal args + a fragment of the self-correcting hint the caller gets.
+ */
+const TOOL_MISUSE_FIXTURES: Array<[string, Record<string, unknown>, RegExp]> = [
+  // C10 / OC-1: breakdownBy partitions a POPULATION; productId narrows to one member.
+  // The combination silently dropped the id and returned a CATALOG-wide breakdown.
+  ["get_movement_series", { breakdownBy: "product", productId: 1 }, /mutually exclusive/],
+  ["get_movement_series", { breakdownBy: "product", groupBy: "week" }, /mutually exclusive/],
+  ["get_movement_series", { breakdownBy: "product", receipts: true }, /mutually exclusive/],
+  ["get_movement_series", { productId: 1, productIds: [2] }, /mutually exclusive/],
+  ["get_movement_series", { productIds: [1, 2] }, /requires breakdownBy/],
+  ["get_sales", { groupBy: "day", includeZeroRows: true }, /includeZeroRows requires/],
+  // (get_sales' includeZeroRows×productId rule is pinned in the C6 suite instead: here
+  // the fail-closed proxy resolves every productId to null, so the tool short-circuits to
+  // notFound before the assert — an ordering property, not a missing rule.)
+  [
+    "compare_periods",
+    { metric: "sales_units", periodA: {}, periodB: {}, groupBy: "product", productId: 1 },
+    /mutually exclusive/,
+  ],
+  [
+    "compare_periods",
+    { metric: "sales_units", periodA: {}, periodB: {}, direction: "increase" },
+    /requires groupBy/,
+  ],
+  ["reorder_report", { productIds: [] }, /must not be empty/],
+];
 
 /**
  * Temporary, SHRINKING coverage/definition exemptions (spec §7). Each W0 task removes
@@ -469,6 +505,16 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d("find_product")).toMatch(/lifecycle/);
     expect(d("find_product")).toMatch(/DELETED products are ABSENT\s+by default/i);
     expect(d("find_product")).toMatch(/HISTORY stays queryable/i);
+    // OC-1: the breakdown/productId exclusion is a REJECTION, so the description has to
+    // name the legal repair — a model that learns the rule only from an error message
+    // pays a round-trip for something the tool could have said up front.
+    expect(d("get_movement_series")).toMatch(/productId is the SERIES\s+scope/i);
+    expect(d("get_movement_series")).toMatch(/productIds:\[id\]/);
+    // OC-2: the two archived counts mean DIFFERENT things; a description that named only
+    // one of them would leave the second reading as more contributing history.
+    expect(d("get_sales")).toMatch(/archivedProductsIncluded/);
+    expect(d("get_sales")).toMatch(/archivedZeroRows/);
+    expect(d("get_sales")).toMatch(/contributed nothing/i);
   });
 
   // Quality+reach C12 (Task 2.1): the mix fields are the composition a bare depletion
@@ -532,6 +578,28 @@ describe("READ-ONLY gate — every tool completes without throwing (fail-closed 
       expect(["ok", "truncated", "error"]).toContain((result as ToolResult).status);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// (1a-ii) MISUSE gate (OC-1) — an illegal argument combination is REJECTED with a
+// self-correcting hint, BEFORE any read. A rule that only rejects after reading has
+// already paid for (and could still return) the answer to a question nobody asked.
+// ---------------------------------------------------------------------------
+
+describe("MISUSE gate — illegal argument combinations reject before any read", () => {
+  it.each(TOOL_MISUSE_FIXTURES)(
+    "%s rejects %j with a self-correcting hint and reads nothing",
+    async (name, fixture, hint) => {
+      prismaCtl.__reset();
+      await expect(assistantTools[name].run(fixture, CTX)).rejects.toBeInstanceOf(ZodError);
+      // The hint is what the adapter surfaces as `hint`, so it must name the repair.
+      await assistantTools[name].run(fixture, CTX).catch((err: unknown) => {
+        expect((err as ZodError).errors[0]?.message).toMatch(hint);
+      });
+      // Nothing was read: no partial answer was computed and then thrown away.
+      expect(prismaCtl.__calls).toEqual([]);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

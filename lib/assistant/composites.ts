@@ -38,7 +38,11 @@ import { getReorderReport } from "@/lib/reports/reorder";
 import { getFreshness } from "@/lib/assistant/freshness";
 import { getOrderPipeline } from "@/lib/reports/order-pipeline";
 import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
-import { approvedProductIds } from "@/lib/reports/outbound-mix";
+import {
+  approvedProductIds,
+  excludedUnapprovedProductCount,
+  APPROVED_UNIVERSE_NOTE,
+} from "@/lib/reports/outbound-mix";
 import { resolveWindow } from "@/lib/assistant/window";
 import {
   PHYSICAL_OUTBOUND_WHERE,
@@ -46,6 +50,18 @@ import {
   daysCovered,
 } from "@/lib/reports/metrics-contract";
 import { getLowStockDefault, effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
+
+/**
+ * The snapshot sales section's approval note (OC-4). The shared universe note plus this
+ * tool's OWN policy row: get_business_snapshot is a CURRENT-STATE read, so an archived
+ * product's real past sales are EXCLUDED here while get_sales includes them. Without this
+ * sentence the two tools disagree by design and the reader has no way to know why.
+ */
+export const SNAPSHOT_SALES_APPROVAL_NOTE =
+  `${APPROVED_UNIVERSE_NOTE} This snapshot section is ACTIVE-ONLY: archived products' ` +
+  "sales are excluded (archivedProductsIncluded is 0 by construction, not by " +
+  "measurement), so these totals can be LOWER than get_sales over the same window — use " +
+  "get_sales for archived-inclusive historical figures.";
 
 const DAY_MS = 86_400_000;
 const VELOCITY_WINDOW_DAYS = 30;
@@ -274,9 +290,19 @@ export async function getProductOverview(
 
     // movement30 (global): 30-day ledger partition TOTALS only (a summary — the point
     // series is get_movement_series). Coverage relays the legacy-unclassified note.
+    //
+    // G2-3: the approved id set is passed like every other historical read on this
+    // surface — active+archived, because a ledger partition is HISTORY. The product is
+    // already resolved approved, so the filter changes no number here; what it changes is
+    // that the SQL boundary no longer depends on the caller having checked.
     runSection("global", async () => {
       const window = resolveWindow({ relativeDays: VELOCITY_WINDOW_DAYS }, now, VELOCITY_WINDOW_DAYS);
-      const result = await getMovementSeries({ productId, window, grain: "day" });
+      const result = await getMovementSeries({
+        productId,
+        window,
+        grain: "day",
+        approvedIds: await approvedProductIds({ includeArchived: true }),
+      });
       return { window: result.window, totals: result.totals, coverage: result.coverage };
     }),
 
@@ -286,7 +312,11 @@ export async function getProductOverview(
       const window = resolveWindow({ relativeDays: SALES_WINDOW_DAYS }, now, SALES_WINDOW_DAYS);
       const scoped = ctx.companyIds.length > 0;
       const [coverage, agg] = await Promise.all([
-        callerScopedSalesCoverage(ctx.companyIds),
+        // ACTIVE-ONLY (OC-4 / G2-2): this section's product is resolved approved+ACTIVE,
+        // so its salesDataStart must be measured over that same universe. An
+        // archived-inclusive start would date the coverage of a population these figures
+        // do not sum.
+        callerScopedSalesCoverage(ctx.companyIds, { includeArchived: false }),
         scoped
           ? prisma.productSalesFact.aggregate({
               where: {
@@ -417,12 +447,36 @@ export async function getBusinessSnapshot(
       // and NOT AT ALL for a caller with no company access (there is no sales population
       // to scope, and that caller's snapshot has always resolved without querying).
       const approvedActiveIds = ctx.companyIds.length > 0 ? await approvedProductIds() : [];
-      const [last7d, last30d, coverage] = await Promise.all([
+      const [last7d, last30d, coverage, excludedUnapprovedProducts] = await Promise.all([
         salesTotals(ctx.companyIds, win7.from, win7.to, approvedActiveIds),
         salesTotals(ctx.companyIds, win30.from, win30.to, approvedActiveIds),
-        callerScopedSalesCoverage(ctx.companyIds),
+        // ACTIVE-ONLY start (OC-4 / G2-2): matches the universe the totals above sum.
+        callerScopedSalesCoverage(ctx.companyIds, { includeArchived: false }),
+        // G5 census over the WIDER of the two windows (win7 is inside win30, both end
+        // today), so one count covers both sections' exclusions.
+        ctx.companyIds.length > 0
+          ? excludedUnapprovedProductCount({
+              relation: "salesFacts",
+              some: {
+                companyId: { in: ctx.companyIds },
+                dayKey: { gte: win30.from, lte: win30.to },
+              },
+            })
+          : Promise.resolve(0),
       ]);
-      return { last7d: { ...last7d, window: win7 }, last30d: { ...last30d, window: win30 }, coverage };
+      return {
+        last7d: { ...last7d, window: win7 },
+        last30d: { ...last30d, window: win30 },
+        coverage: {
+          ...coverage,
+          // The disclosure TRIPLE (OC-4): what was excluded, what archived history is in
+          // here (nothing — the id set is active-only, so this is 0 BY CONSTRUCTION, not
+          // by measurement), and the note that says which tool to ask for the rest.
+          excludedUnapprovedProducts,
+          archivedProductsIncluded: 0,
+          approvalNote: SNAPSHOT_SALES_APPROVAL_NOTE,
+        },
+      };
     }),
 
     // order pipeline summary (COMPANY-scoped): counts + revenue by status + open-order

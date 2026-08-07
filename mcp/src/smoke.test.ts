@@ -39,7 +39,13 @@ describe("mcp skeleton: shared tool runs via the @ alias", () => {
         returned: 0,
         totalRows: 0,
         nextOffset: null,
-        coverage: { matched: 0, scope: "approved products; name/baseName/variant match" },
+        // G2-6: identityMisses rides on every find_product coverage block (0 is the
+        // normal reading; it is a defined field, never a conditional one).
+        coverage: {
+          matched: 0,
+          scope: "approved products; name/baseName/variant match",
+          identityMisses: 0,
+        },
       });
       expect(result.meta.scope).toBe("global");
     }

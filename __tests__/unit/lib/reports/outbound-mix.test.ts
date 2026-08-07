@@ -31,7 +31,7 @@
 
 import { mockReset, type DeepMockProxy } from "jest-mock-extended";
 import { ZodError } from "zod";
-import type { PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 
 jest.mock("@/lib/prisma", () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -148,6 +148,26 @@ describe("C12 classifyOutboundMix — the six-bucket partition (contract pack T1
     expect(classifyOutboundMix([{ delta: -4, logType: "CORRECTION", reasonCode: "SOMETHING_ELSE" }])).toEqual({
       ...ZERO,
       correctionUnclassified: 4,
+    });
+  });
+
+  // OC-9: the shrinkage set is UPPERCASE, so a lowercase reasonCode fell through to the
+  // unclassified bucket — a REAL classified loss reported as unclassified depletion, in
+  // the one place this lane exists to keep honest.
+  it("matches the shrinkage set CASE-INSENSITIVELY ('damage' is classifiedLoss)", () => {
+    expect(classifyOutboundMix([{ delta: -5, logType: "ADJUSTMENT", reasonCode: "damage" }])).toEqual({
+      ...ZERO,
+      classifiedLoss: 5,
+    });
+    expect(classifyOutboundMix([{ delta: -2, logType: "CORRECTION", reasonCode: "Theft" }])).toEqual({
+      ...ZERO,
+      classifiedLoss: 2,
+    });
+    // ...and a genuinely unrecognised reason is STILL unclassified (the normalization
+    // widens the match, it does not soften the taxonomy).
+    expect(classifyOutboundMix([{ delta: -3, logType: "ADJUSTMENT", reasonCode: "damaged" }])).toEqual({
+      ...ZERO,
+      adjustmentUnclassified: 3,
     });
   });
 
@@ -330,15 +350,22 @@ describe("C6 get_sales — salesDataStart / windowCoverage / includeZeroRows (Ta
     facts?: Array<{ productId: number; _sum: Record<string, unknown> }>;
     catalog?: Array<{ id: number; name: string }>;
     firstSale?: Array<{ productId: number; _min: { dayKey: string } }>;
+    /** OC-3: the PER-COMPANY first-fact days behind `salesDataStart` (which is their min). */
+    companyStarts?: Array<{ companyId: string; _min: { dayKey: string } }>;
   }) {
     db.externalOrder.count.mockResolvedValue(0 as never);
     db.analyticsRebuildState.findUnique.mockResolvedValue(null as never);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     db.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: opts.salesDataStart } } as any);
+    // THREE different groupBys now share this delegate — the per-company starts (by
+    // companyId), the post-pagination firstSale evidence (_min), and the facts read —
+    // so the seed dispatches on the SHAPE each one actually sends.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    db.productSalesFact.groupBy.mockImplementation((args: any) =>
-      args._min ? (Promise.resolve(opts.firstSale ?? []) as never) : (Promise.resolve(opts.facts ?? []) as never),
-    );
+    db.productSalesFact.groupBy.mockImplementation((args: any) => {
+      if (args?.by?.[0] === "companyId") return Promise.resolve(opts.companyStarts ?? []) as never;
+      if (args?._min) return Promise.resolve(opts.firstSale ?? []) as never;
+      return Promise.resolve(opts.facts ?? []) as never;
+    });
     db.product.findMany.mockResolvedValue((opts.catalog ?? []) as never);
   }
 
@@ -373,7 +400,7 @@ describe("C6 get_sales — salesDataStart / windowCoverage / includeZeroRows (Ta
     expect(coverage.windowCoverage).toBe("none");
   });
 
-  it("FULL coverage: a product with no facts emits a MEASURED zero row (0 / '0.00' / 0)", async () => {
+  it("FULL coverage: a product with no facts emits a MEASURED zero row (0 / '0' / 0)", async () => {
     seedSales({
       salesDataStart: "2020-01-01",
       facts: [{ productId: 1, _sum: { orderedQty: 5, revenue: "10.00", orderCount: 2 } }],
@@ -385,9 +412,56 @@ describe("C6 get_sales — salesDataStart / windowCoverage / includeZeroRows (Ta
     const data = await okData({ groupBy: "product", includeZeroRows: true, relativeDays: 30 });
     const rows = data.rows as Array<Record<string, unknown>>;
     const zero = rows.find((r) => r.productId === 2)!;
-    expect(zero._sum).toEqual({ orderedQty: 0, revenue: "0.00", orderCount: 0 });
+    expect(zero._sum).toEqual({ orderedQty: 0, revenue: "0", orderCount: 0 });
     expect(zero.reason).toBeUndefined(); // a measured 0 carries no reason
     expect(zero.name).toBe("Silent");
+  });
+
+  // OC-7: the synthesized zero row used to emit "0.00" while a MEASURED zero — a real
+  // Prisma.Decimal(0) through serialize.ts — emits "0". Same value, two formats, and the
+  // format was the only thing distinguishing a real row from a synthesized one.
+  it("a synthesized zero's revenue matches what a REAL Decimal(0) serializes to", async () => {
+    seedSales({
+      salesDataStart: "2020-01-01",
+      // A genuine measured zero: the fact row's revenue is a real Prisma.Decimal, which
+      // is what the sales read returns in production (serialize.ts calls .toString()).
+      facts: [
+        {
+          productId: 1,
+          _sum: { orderedQty: 0, revenue: new Prisma.Decimal(0), orderCount: 0 },
+        },
+      ],
+      catalog: [
+        { id: 1, name: "Measured zero" },
+        { id: 2, name: "Silent" },
+      ],
+    });
+    const data = await okData({ groupBy: "product", includeZeroRows: true, relativeDays: 30 });
+    const byId = Object.fromEntries(
+      (data.rows as Array<Record<string, unknown>>).map((r) => [r.productId, r]),
+    );
+    const measured = (byId[1] as { _sum: { revenue: unknown } })._sum.revenue;
+    const synthesized = (byId[2] as { _sum: { revenue: unknown } })._sum.revenue;
+    expect(measured).toBe("0"); // Decimal(0).toString() — the format the tool really emits
+    expect(synthesized).toBe(measured);
+  });
+
+  it("serializes a non-integer Decimal through the SAME path (no format drift)", async () => {
+    seedSales({
+      salesDataStart: "2020-01-01",
+      facts: [
+        {
+          productId: 1,
+          _sum: { orderedQty: 3, revenue: new Prisma.Decimal("12.50"), orderCount: 1 },
+        },
+      ],
+      catalog: [{ id: 1, name: "Sold" }],
+    });
+    const data = await okData({ groupBy: "product", relativeDays: 30 });
+    const row = (data.rows as Array<{ _sum: { revenue: unknown } }>)[0];
+    // Decimal keeps its own canonical form ("12.5"): the tool relays .toString(), it does
+    // not re-format money — so this is the string a consumer must be ready to parse.
+    expect(row._sum.revenue).toBe(new Prisma.Decimal("12.50").toString());
   });
 
   it("PARTIAL coverage: the zero row's sums are NULL + a reason naming the recording boundary", async () => {
@@ -439,6 +513,91 @@ describe("C6 get_sales — salesDataStart / windowCoverage / includeZeroRows (Ta
     await expect(
       assistantTools.get_sales.run({ groupBy: "product", productId: 1, includeZeroRows: true }, CTX),
     ).rejects.toBeDefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // OC-3 — MULTI-MEMBERSHIP coverage. `salesDataStart` is the EARLIEST across the
+  // caller's companies, so a caller in two companies whose second one started
+  // recording last month read the whole window as "full" — and every silence in that
+  // company's window became a MEASURED zero for a period it has no data for.
+  // -------------------------------------------------------------------------
+
+  describe("OC-3 multi-membership: the LATEST-starting company governs zero legality", () => {
+    const MULTI = testCtx({ companyIds: ["c1", "c2"] });
+
+    const multiData = async (args: Record<string, unknown>): Promise<Record<string, unknown>> => {
+      const result = await assistantTools.get_sales.run(args, MULTI);
+      expect(result.status).toBe("ok");
+      if (result.status !== "ok") throw new Error("not ok");
+      return result.data as Record<string, unknown>;
+    };
+
+    it("STAGGERED starts degrade the window to 'partial' and disclose the per-company starts", async () => {
+      seedSales({
+        // c1 has recorded since 2020; c2 only since a day inside the 30-day window.
+        salesDataStart: "2020-01-01",
+        companyStarts: [
+          { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+          { companyId: "c2", _min: { dayKey: "2099-01-01" } },
+        ],
+        catalog: [{ id: 2, name: "Silent" }],
+      });
+      const data = await multiData({ groupBy: "product", includeZeroRows: true, relativeDays: 30 });
+      const coverage = data.coverage as Record<string, unknown>;
+
+      // The earliest start alone would have said "full" — and manufactured zeros.
+      expect(coverage.windowCoverage).toBe("partial");
+      expect(coverage.companyCoverage).toEqual([
+        { companyId: "c1", salesDataStart: "2020-01-01" },
+        { companyId: "c2", salesDataStart: "2099-01-01" },
+      ]);
+      expect(coverage.rowsNote).toContain(
+        "coverage classified per company; the latest-starting company governs zero legality",
+      );
+
+      // ...and NO measured zero was manufactured for the late company's window.
+      const zero = (data.rows as Array<Record<string, unknown>>).find((r) => r.productId === 2)!;
+      expect(zero._sum).toEqual({ orderedQty: null, revenue: null, orderCount: null });
+      expect(zero.reason).toEqual(expect.any(String));
+    });
+
+    it("SHARED starts keep 'full' coverage, measured zeros, and no per-company noise", async () => {
+      seedSales({
+        salesDataStart: "2020-01-01",
+        companyStarts: [
+          { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+          { companyId: "c2", _min: { dayKey: "2020-01-01" } },
+        ],
+        catalog: [{ id: 2, name: "Silent" }],
+      });
+      const data = await multiData({ groupBy: "product", includeZeroRows: true, relativeDays: 30 });
+      const coverage = data.coverage as Record<string, unknown>;
+      expect(coverage.windowCoverage).toBe("full");
+      // Presence of companyCoverage IS the stagger signal — absent when they agree.
+      expect(coverage.companyCoverage).toBeUndefined();
+      expect(coverage.rowsNote).not.toContain("per company");
+      const zero = (data.rows as Array<Record<string, unknown>>).find((r) => r.productId === 2)!;
+      expect(zero._sum).toEqual({ orderedQty: 0, revenue: "0", orderCount: 0 });
+    });
+
+    it("a staggered set whose LATEST start still covers the window stays 'full'", async () => {
+      seedSales({
+        salesDataStart: "2020-01-01",
+        companyStarts: [
+          { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+          { companyId: "c2", _min: { dayKey: "2021-06-01" } }, // still well before the window
+        ],
+        catalog: [{ id: 2, name: "Silent" }],
+      });
+      const data = await multiData({ groupBy: "product", includeZeroRows: true, relativeDays: 30 });
+      const coverage = data.coverage as Record<string, unknown>;
+      expect(coverage.windowCoverage).toBe("full");
+      // The starts DIFFER, so they are disclosed — the degradation is about coverage,
+      // not about hiding the difference.
+      expect(coverage.companyCoverage).toHaveLength(2);
+      const zero = (data.rows as Array<Record<string, unknown>>).find((r) => r.productId === 2)!;
+      expect(zero._sum).toEqual({ orderedQty: 0, revenue: "0", orderCount: 0 });
+    });
   });
 });
 
