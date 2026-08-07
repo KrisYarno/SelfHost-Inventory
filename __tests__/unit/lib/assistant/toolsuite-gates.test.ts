@@ -381,6 +381,20 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d).toMatch(/independently/i); // sections degrade independently
   });
 
+  // Quality+reach lane C2 (W0 slice): the guardrails that stop the review-#3 failure
+  // classes — per-product looping for catalog questions, unresolved productIds, and
+  // physical depletion presented as verified sales. Later tasks APPEND to this case as
+  // they add the fields their sentences describe (2.2/2.3/2.4/2.5/3.2).
+  it("descriptions carry the review-#3 guardrails", () => {
+    const d = (n: string) => assistantTools[n].description;
+    expect(d("get_sales")).toMatch(/ONE ROW PER PRODUCT/i);
+    expect(d("get_sales")).toMatch(/never pass a productId you did not resolve/i);
+    expect(d("compare_periods")).toMatch(/productId is OPTIONAL/);
+    expect(d("get_operations")).toMatch(/PHYSICAL DEPLETION, not\s+verified sales/i);
+    expect(d("get_operations")).toMatch(/never present these as 'sold'/i);
+    expect(d("reorder_report")).toMatch(/demand may be entirely unclassified/i);
+  });
+
   it("get_business_snapshot frames itself as one-call, names the section tools, and discloses mixed scope + independent degradation", () => {
     const d = desc("get_business_snapshot");
     expect(d).toMatch(/one call/i);

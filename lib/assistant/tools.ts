@@ -969,9 +969,14 @@ export const assistantTools: Record<string, AssistantToolDef> = {
   get_sales: {
     description:
       `Sales aggregates scoped to the companies you can access. productId is OPTIONAL — ` +
-      `omit to aggregate across ALL products; for trend questions use groupBy ` +
+      `omit it with groupBy:'product' for ONE ROW PER PRODUCT across the catalog ` +
+      `(paginated); that is the ONE call that answers a catalog or set question — never ` +
+      `call this once per product to build the answer yourself. NEVER pass a productId ` +
+      `you did not resolve via find_product. For trend questions use groupBy ` +
       `'day' | 'week' | 'month'. Grain via groupBy: product | day | week | month | ` +
-      `integration | company | company_day. Omitting dates uses relativeDays (default ` +
+      `integration | company | company_day; only groupBy:'product' carries orderCount ` +
+      `(at every other grain it is null, because a multi-product order counts once per ` +
+      `product). Omitting dates uses relativeDays (default ` +
       `30) ending today; the resolved window (from/to/days/source) is returned. Figures ` +
       `are GROSS ordered, attributed; refunds are not netted. Revenue is a string. ` +
       `coverage.unattributedOrders is caller-scoped. ${PAGING_POSTURE} ${DATA_POSTURE}`,
@@ -1056,6 +1061,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `Global physical pool. freshness.ledgerSaleStart ` +
       `is the first in-platform SALE ledger row — NOT the start of order/sales history ` +
       `(see get_sales). velocityDefinition states how avgDailyOutbound30 is computed. ` +
+      `unitsOut30/unitsOut90/avgDailyOutbound30 measure PHYSICAL DEPLETION, not ` +
+      `verified sales: legacy unclassified adjustments, corrections, and count ` +
+      `depletion are all included — never present these as 'sold'. ` +
       `Outbound/velocity here count ALL negative non-transfer deltas over a ROLLING ` +
       `window ending now; get_movement_series instead partitions the ledger into ` +
       `CALENDAR-DAY buckets (wrong-signed rows folded into their natural bucket), so a ` +
@@ -1433,8 +1441,11 @@ export const assistantTools: Record<string, AssistantToolDef> = {
   reorder_report: {
     description:
       `Reorder report — answers "what needs reordering?": DEMAND-based suggested order ` +
-      `quantities (distinct from low_stock_report, which is threshold-based). Each ` +
-      `'suggested' row shows every ` +
+      `quantities (distinct from low_stock_report, which is threshold-based). Demand ` +
+      `here is PHYSICAL DEPLETION you must replace, not verified sales — it counts ` +
+      `every negative non-transfer ledger row except CORRECTION reversals, so a ` +
+      `product's demand may be entirely unclassified adjustments; never present it as ` +
+      `units sold. Each 'suggested' row shows every ` +
       `input so the number is auditable: avgDailyDemand, daysCovered, leadTimeDays + ` +
       `leadTimeSource, bufferDays, reorderPoint, targetLevel, grossReplenishmentNeed, ` +
       `minOrderQuantity, urgency (OUT/CRITICAL/REORDER_NOW/APPROACHING), and cost. ` +
@@ -1531,7 +1542,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `sales_units | sales_revenue (scoped to YOUR companies) | outbound_units | ` +
       `inbound_units (GLOBAL physical ledger). This is a MIXED-scope tool: sales ` +
       `metrics filter by the companies you can access, ledger metrics are global. ` +
-      `periodA/periodB each take {from,to} or relativeDays. A period with NO rows ` +
+      `periodA/periodB each take {from,to} or relativeDays. productId is OPTIONAL — ` +
+      `omit it for totals across ALL products (company-scoped for the sales metrics, ` +
+      `global for the ledger metrics); pass one only to narrow BOTH periods to that ` +
+      `product, and only when you resolved it via find_product. A period with NO rows ` +
       `counts as 0 ONLY when the metric's data covers the whole interval; a period ` +
       `that predates (or straddles) the data reads as null + a reason — growth from a ` +
       `pre-history period is UNKNOWN, never "growth from zero". pctChange is null when ` +
