@@ -34,7 +34,12 @@ jest.mock("@/lib/analytics/queries", () => ({
 jest.mock("@/lib/reports/low-stock", () => ({ __esModule: true, getLowStockReport: jest.fn() }));
 
 import prisma from "@/lib/prisma";
-import { assistantTools, PER_TOOL_RESULT_CAP_BYTES, testCtx } from "@/lib/assistant/tools";
+import {
+  assistantTools,
+  deriveThresholdSource,
+  PER_TOOL_RESULT_CAP_BYTES,
+  testCtx,
+} from "@/lib/assistant/tools";
 import { buildSystemPrompt } from "@/lib/assistant/prompt";
 import { getSales, getOperationsRows } from "@/lib/analytics/queries";
 import { getLowStockReport } from "@/lib/reports/low-stock";
@@ -293,8 +298,10 @@ describe("low_stock_report naming (review M1)", () => {
     mockGetLowStock.mockResolvedValue({
       threshold: 10,
       alerts: [
-        { productId: 1, productName: "A", currentStock: 0, threshold: 10, percentageRemaining: 0, averageDailyUsage: 0, daysUntilEmpty: null },
-        { productId: 2, productName: "B", currentStock: 1, threshold: 50, percentageRemaining: 2, averageDailyUsage: 0.1, daysUntilEmpty: 10 },
+        // spec C8: thresholdSource is derived from rawThreshold (null = inherited),
+        // never from an effective-vs-default comparison.
+        { productId: 1, productName: "A", currentStock: 0, threshold: 10, rawThreshold: null, percentageRemaining: 0, averageDailyUsage: 0, daysUntilEmpty: null },
+        { productId: 2, productName: "B", currentStock: 1, threshold: 50, rawThreshold: 50, percentageRemaining: 2, averageDailyUsage: 0.1, daysUntilEmpty: 10 },
       ],
     });
 
@@ -313,6 +320,37 @@ describe("low_stock_report naming (review M1)", () => {
       expect(data.alerts[1].effectiveThreshold).toBe(50);
       expect(data.alerts[1].thresholdSource).toBe("product_override");
     }
+  });
+
+  // spec C8 / review F5 — the case the old equality inference LIED about: a product
+  // that explicitly sets the same number the shop defaults to is still an override,
+  // and a later default change would move it. The old branch reported system_default.
+  it("an override EQUAL to the system default is reported as product_override (review F5)", async () => {
+    mockGetLowStock.mockResolvedValue({
+      threshold: 10,
+      alerts: [
+        { productId: 1, productName: "Equal", currentStock: 4, threshold: 10, rawThreshold: 10, percentageRemaining: 40, averageDailyUsage: null, usageKnown: false, daysUntilEmpty: null },
+      ],
+    });
+
+    const result = await assistantTools.low_stock_report.run({}, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as { alerts: Array<Record<string, unknown>> };
+    expect(data.alerts[0].effectiveThreshold).toBe(10);
+    expect(data.alerts[0].thresholdSource).toBe("product_override");
+    // The raw value rides along as the evidence for the claim.
+    expect(data.alerts[0].rawThreshold).toBe(10);
+  });
+
+  // Two-part 0-override pin, part 2: getLowStockReport NEVER emits a row for a
+  // 0-threshold product (part 1, pinned in lane4-low-stock-extraction.test.ts), so
+  // the 0 case is unobservable end-to-end and must be pinned on the derivation
+  // function directly — a synthetic alert, not a report row.
+  it("deriveThresholdSource maps an explicit 0 override to product_override (never system_default)", () => {
+    expect(deriveThresholdSource({ rawThreshold: 0 })).toBe("product_override");
+    expect(deriveThresholdSource({ rawThreshold: null })).toBe("system_default");
+    expect(deriveThresholdSource({ rawThreshold: 10 })).toBe("product_override");
   });
 });
 

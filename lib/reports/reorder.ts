@@ -75,8 +75,34 @@ export interface ReorderReport {
     targetCoverageMultiple: number;
     demandDefinition: string;
   };
-  coverage: { total: number; suggested: number; unavailable: number; costed: number };
+  /**
+   * Accounting over the approved-ACTIVE population (spec C5, review F3). NORMATIVE
+   * invariant: `total = suggested + unavailable + healthy + approachingOmitted`.
+   * Category definitions are BINDING (contract pack T5/CP-4):
+   *   - `suggested`          emitted suggested rows
+   *   - `unavailable`        emitted no_demand_signal / insufficient_history rows
+   *   - `healthy`            FINAL urgency null (classifyUrgency returned null) AND not emitted
+   *   - `approachingOmitted` APPROACHING dropped by includeOkay=false
+   * `costed` is a property of the suggested rows, NOT a partition member.
+   */
+  coverage: {
+    total: number;
+    suggested: number;
+    unavailable: number;
+    healthy: number;
+    approachingOmitted: number;
+    costed: number;
+  };
+  /** Prose for the coverage block — states what `healthy` means and when it is a row. */
+  coverageNote: string;
 }
+
+/** Spec C5 verbatim. `healthy` is defined by FINAL urgency null, never by a
+ *  stock-vs-reorderPoint phrase (which would overlap APPROACHING's band). */
+export const REORDER_COVERAGE_NOTE =
+  "healthy = final urgency null (classifyUrgency returned null — stock comfortably " +
+  "above 1.2x the reorder point) — counted, and a row ONLY when explicitly requested " +
+  "(productIds) or includeHealthy is set.";
 
 // The reorder-demand definition prose now lives in the metrics contract (spec §2 D3)
 // so reorder, low-stock, ops, and every tool draw the same text. The duplicate string
@@ -169,6 +195,10 @@ export async function getReorderReport(
   const suggested: Extract<ReorderRow, { status: "suggested" }>[] = [];
   const unavailable: Extract<ReorderRow, { status: "unavailable" }>[] = [];
   const total = products.length;
+  // C5 accounting: the two NON-emitted outcomes, so every approved-active product is
+  // accounted for instead of silently vanishing from the coverage block.
+  let healthy = 0;
+  let approachingOmitted = 0;
 
   for (const product of products) {
     const currentStock = product.product_locations.reduce((s, l) => s + l.quantity, 0);
@@ -227,9 +257,17 @@ export async function getReorderReport(
     );
 
     const urgency = classifyUrgency(currentStock, leadTimeDemand, reorderPoint);
-    // Healthy products are never rows; APPROACHING only when includeOkay.
-    if (urgency === null) continue;
-    if (urgency === "APPROACHING" && !includeOkay) continue;
+    // Healthy products are never rows; APPROACHING only when includeOkay. Both
+    // outcomes are COUNTED (C5) — a product that leaves the row set must still be
+    // accounted for, and the two reasons are never conflated.
+    if (urgency === null) {
+      healthy += 1;
+      continue;
+    }
+    if (urgency === "APPROACHING" && !includeOkay) {
+      approachingOmitted += 1;
+      continue;
+    }
 
     const costPrice = product.costPrice == null ? null : Number(product.costPrice);
     const orderValue = costPrice == null ? null : costPrice * grossReplenishmentNeed;
@@ -282,7 +320,10 @@ export async function getReorderReport(
       total,
       suggested: suggested.length,
       unavailable: unavailable.length,
+      healthy,
+      approachingOmitted,
       costed: suggested.filter((r) => r.costPrice != null).length,
     },
+    coverageNote: REORDER_COVERAGE_NOTE,
   };
 }

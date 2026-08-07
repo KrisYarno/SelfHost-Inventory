@@ -8,8 +8,12 @@
  * qty-0 preserved). This is intentionally NOT `isLowStock` (which floors at qty>0
  * for the low-stock badge); a reorder report must not silently drop stockouts.
  *
- * The route is now a thin caller: its JSON response is byte-identical (same key
- * order, same sort, same `threshold`, incl. the `?threshold=` override path). The
+ * The route is now a thin caller: same key order, same sort, same `threshold`, incl.
+ * the `?threshold=` override path. The former "byte-identical" guarantee is
+ * CONSCIOUSLY AMENDED as of spec C8 — every alert row additionally carries
+ * `rawThreshold` (the per-product column verbatim, null = inherited), an additive
+ * field the web API intentionally gains so no consumer has to infer a threshold
+ * source by comparing the effective value to the default. The
  * assistant/MCP `low_stock_report` tool calls this with a `limit`.
  *
  * NOTE (spec amendment recorded): the derived sort computes over the approved set
@@ -117,6 +121,11 @@ export async function getLowStockReport(
         productName: product.name,
         currentStock,
         threshold: productThreshold,
+        // spec C8: the RAW column, unresolved. Consumers derive thresholdSource from
+        // this (null = inherited) instead of comparing the effective value to the
+        // default — a comparison that reports an override equal to the default, or an
+        // explicit 0, as "system_default".
+        rawThreshold: product.lowStockThreshold ?? null,
         percentageRemaining: Math.round(percentageRemaining),
         averageDailyUsage,
         usageKnown,

@@ -85,6 +85,46 @@ describe("getLowStockReport: qty-0 preserved + threshold override", () => {
     expect(report.alerts.find((a) => a.productId === 1)?.threshold).toBe(5);
   });
 
+  // spec C8: `rawThreshold` is the per-product column VERBATIM (null = inherit), the
+  // only truthful basis for thresholdSource. The old tool-layer equality inference
+  // ("effective != default => override") lied whenever an override equalled the default.
+  it("carries the RAW per-product threshold beside the effective one (spec C8)", async () => {
+    seedProducts();
+    const report = await getLowStockReport({});
+    // Product 1 has an explicit 5; product 2 inherits (column is NULL).
+    expect(report.alerts.find((a) => a.productId === 1)?.rawThreshold).toBe(5);
+    expect(report.alerts.find((a) => a.productId === 2)?.rawThreshold).toBeNull();
+  });
+
+  it("an override EQUAL to the system default is still a raw override (not null)", async () => {
+    db.product.findMany.mockResolvedValue([
+      // Explicit 10, and the system default is also 10 — indistinguishable by equality.
+      { id: 1, name: "Equal", lowStockThreshold: 10, product_locations: [{ quantity: 4 }] },
+    ] as never);
+    db.systemSetting.findUnique.mockResolvedValue(null as never); // default 10
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+
+    const report = await getLowStockReport({});
+    expect(report.threshold).toBe(10);
+    expect(report.alerts[0].threshold).toBe(10);
+    expect(report.alerts[0].rawThreshold).toBe(10);
+  });
+
+  // Two-part 0-override pin, part 1 (the property is UNOBSERVABLE through the report,
+  // so it must be pinned here AND on the derivation function — see the tool suite).
+  it("a 0 override is NEVER an alert row (disabled), so rawThreshold:0 cannot be observed here", async () => {
+    db.product.findMany.mockResolvedValue([
+      { id: 1, name: "Disabled", lowStockThreshold: 0, product_locations: [{ quantity: 0 }] },
+      { id: 2, name: "Live", lowStockThreshold: 5, product_locations: [{ quantity: 0 }] },
+    ] as never);
+    db.systemSetting.findUnique.mockResolvedValue(null as never);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+
+    const report = await getLowStockReport({});
+    expect(report.alerts.map((a) => a.productId)).toEqual([2]);
+    expect(report.alerts.some((a) => a.rawThreshold === 0)).toBe(false);
+  });
+
   it("caps the alert list at `limit`", async () => {
     seedProducts();
     const report = await getLowStockReport({ limit: 1 });
@@ -151,6 +191,9 @@ describe("route parity: GET /api/reports/low-stock is a thin caller", () => {
           productName: "A",
           currentStock: 0,
           threshold: 5,
+          // spec C8: the web API intentionally gains rawThreshold (additive; the
+          // "byte-identical" route contract is consciously amended).
+          rawThreshold: 5,
           percentageRemaining: 0,
           averageDailyUsage: null,
           usageKnown: false,
@@ -161,6 +204,7 @@ describe("route parity: GET /api/reports/low-stock is a thin caller", () => {
           productName: "B",
           currentStock: 8,
           threshold: 10,
+          rawThreshold: null,
           percentageRemaining: 80,
           averageDailyUsage: null,
           usageKnown: false,

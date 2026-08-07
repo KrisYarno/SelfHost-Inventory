@@ -90,6 +90,12 @@ export interface LowStockAlert {
   productName: string;
   currentStock: number;
   threshold: number;
+  /** The per-product `lowStockThreshold` column VERBATIM (spec C8): `null` = inherits
+   *  the system default, a number = an explicit override (INCLUDING an explicit 0, and
+   *  including an override that happens to EQUAL the current default). This is the only
+   *  truthful basis for a threshold-source claim — an effective-vs-default comparison
+   *  cannot distinguish "set to 10" from "inherits 10". */
+  rawThreshold: number | null;
   percentageRemaining: number;
   // null = usage UNKNOWN (no qualifying outbound movement), never a fabricated 0/day
   // (spec §2 D4). `usageKnown` distinguishes a measured 0 from an unknown rate.
