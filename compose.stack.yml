@@ -4,11 +4,14 @@
 #   docker compose -f docker-compose.yml -f compose.stack.yml --env-file .env up -d
 #
 # Notes:
-# - ENVIRONMENT-NEUTRAL (2026-08-07 convergence): the public host and auth URL come
-#   from the server-owned .env — set NEXTAUTH_URL and CADDY_HOST there. No deployment
-#   identity is hardcoded in this tracked file.
+# - ENVIRONMENT-NEUTRAL (2026-08-07 convergence): the auth URL comes from the
+#   server-owned .env (NEXTAUTH_URL). No deployment identity in this tracked file.
+# - Ingress = the `inventory` alias on the external network — that name is what the
+#   front (static Caddyfile / cloudflared tunnel) resolves. NO routing labels here:
+#   label-driven routing would need caddy-docker-proxy, which this stack does not run,
+#   and a second source of routing truth is worse than none (verified 2026-08-07).
 # - Expects an external network (default: "stack_network"). Set STACK_NETWORK_NAME to
-#   override. The `inventory` alias on that network is what the reverse proxy resolves.
+#   override.
 # - restart policies live HERE (the server adopts this file verbatim; nothing should
 #   stay down after a host reboot).
 
@@ -21,11 +24,6 @@ services:
       stack_network:
         aliases: [inventory]
       internal:
-    labels:
-      caddy: ${CADDY_HOST}
-      caddy.encode: "gzip zstd"
-      caddy.reverse_proxy: "{{upstreams 3000}}"
-      caddy.reverse_proxy.header_up: "-x-middleware-subrequest"
 
   db:
     restart: unless-stopped
