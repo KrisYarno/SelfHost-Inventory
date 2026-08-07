@@ -40,7 +40,7 @@ import prisma from "@/lib/prisma";
 import { dayKeyStart, nextDayStart, toDayKey } from "@/lib/analytics/dates";
 import { weekStartKey, monthKey, byStringKey } from "@/lib/analytics/date-grain";
 import type { ResolvedWindow } from "@/lib/assistant/window";
-import { SHRINKAGE_CLASS_REASONS } from "@/lib/reports/metrics-contract";
+import { shrinkageReasonOf } from "@/lib/reports/metrics-contract";
 import {
   approvalDisclosure,
   archivedCountOf,
@@ -87,13 +87,24 @@ export interface MovementFilters<M extends MovementMode> {
   mode: M;
 }
 
-export interface MovementSeriesResult {
-  /** Envelope discriminant (spec C4 / T4). The receipts envelope is assembled in the
-   *  tool layer and carries `mode: "receipts"` (typed `MovementFilters<"receipts">`). */
-  mode: "series";
+/**
+ * The mode-BINDING envelope skeleton every movement variant is built on (T4 / G2-4
+ * completed by FD-6). `MovementFilters<M>` alone pinned the INNER `mode` to whatever
+ * literal each interface happened to declare — nothing tied it to the OUTER discriminant,
+ * so an envelope could still be assembled (by hand, in the tool layer, where the receipts
+ * variant lives) with `mode: "series"` beside a receipts filter echo and compile. Sharing
+ * ONE type parameter across both makes `filters.mode === mode` a compile error to break.
+ */
+export interface MovementEnvelope<M extends MovementMode> {
+  /** Envelope discriminant (spec C4 / T4). */
+  mode: M;
+  /** Effective-scope echo — its `mode` is the SAME parameter as the discriminant. */
+  filters: MovementFilters<M>;
+}
+
+export interface MovementSeriesResult extends MovementEnvelope<"series"> {
   grain: "day" | "week" | "month";
   window: ResolvedWindow;
-  filters: MovementFilters<"series">;
   points: Array<{ key: string } & MovementBuckets>;
   totals: MovementBuckets;
   coverage: {
@@ -114,9 +125,6 @@ export interface MovementSeriesResult {
 const UNCLASSIFIED_LEGACY_NOTE =
   "Legacy negative ADJUSTMENT is how this shop shipped product pre-Lane-4 — " +
   "unclassified outbound, not classifiable as sales.";
-
-/** Shrinkage-class reasons as a membership set (shared with queries.ts). */
-const SHRINKAGE_SET: ReadonlySet<string> = new Set(SHRINKAGE_CLASS_REASONS as readonly string[]);
 
 /** The 11 signed-sum buckets (everything except the derived `net`). */
 const BUCKET_KEYS = [
@@ -168,17 +176,13 @@ function classify(logType: string, delta: number, reasonCode: string | null): Bu
       return delta > 0 ? "countIn" : "countOut";
     case "ADJUSTMENT":
       if (delta > 0) return "adjustmentIn";
-      // OC-9 parity: the membership set is UPPERCASE — normalize the LOOKUP (never the
-      // stored value) exactly as outbound-mix.ts does, so the two classifiers that both
-      // promise "never diverge" actually cannot.
-      return reasonCode != null && SHRINKAGE_SET.has(reasonCode.toUpperCase())
-        ? "classifiedLoss"
-        : "adjustmentUnclassified";
+      // OC-9 / FD-5 parity: the loss decision routes through the ONE shared rule
+      // (`shrinkageReasonOf`, metrics-contract) exactly as outbound-mix.ts does, so the
+      // two classifiers that both promise "never diverge" actually cannot.
+      return shrinkageReasonOf(reasonCode) != null ? "classifiedLoss" : "adjustmentUnclassified";
     case "CORRECTION":
       if (delta > 0) return "correctionIn";
-      return reasonCode != null && SHRINKAGE_SET.has(reasonCode.toUpperCase())
-        ? "classifiedLoss"
-        : "correctionUnclassified";
+      return shrinkageReasonOf(reasonCode) != null ? "classifiedLoss" : "correctionUnclassified";
     default:
       // Unreachable (logType is enum-constrained). Fold into the adjustment
       // buckets rather than drop the row, so `net === SUM(delta)` still holds.
@@ -444,10 +448,8 @@ export interface MovementProductRow extends MovementBuckets {
   outboundUnits: number;
 }
 
-export interface MovementByProductResult {
-  mode: "by_product";
+export interface MovementByProductResult extends MovementEnvelope<"by_product"> {
   window: ResolvedWindow;
-  filters: MovementFilters<"by_product">;
   rows: MovementProductRow[];
   coverage: {
     unclassifiedLegacyNote: string;

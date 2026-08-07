@@ -28,7 +28,7 @@ jest.mock("@/lib/prisma", () => {
 });
 
 import prisma from "@/lib/prisma";
-import { comparePeriods } from "@/lib/reports/compare-periods";
+import { comparePeriods, comparePeriodsByProduct } from "@/lib/reports/compare-periods";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 
@@ -365,5 +365,199 @@ describe("per-metric predicate", () => {
     });
     const revenueValueCall = db.productSalesFact.aggregate.mock.calls[1][0] as { _sum: Record<string, unknown> };
     expect(revenueValueCall._sum).toEqual({ revenue: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD-1 — STAGGERED COMPANY STARTS, in BOTH modes (seam S8).
+//
+// get_sales classifies a multi-membership caller's window PER COMPANY: the
+// latest-starting company governs, because a silence in a company that was not yet
+// recording is not a measured zero. compare_periods read the CALLER-WIDE minimum alone,
+// so the same seeded source was "fully covered" here and "partial" there — and the
+// disagreement was not cosmetic: it decided whether a period's absent sum became a
+// measured 0 (scalar delta computed from a manufactured base) and whether a by_product
+// row got a measured 0 for a company that had no data in that window.
+//
+// Both modes now route through the SAME classifier (`callerWindowCoverage`), so one
+// seeded source can only ever produce one verdict.
+// ---------------------------------------------------------------------------
+
+describe("FD-1 staggered company starts — the latest company governs in BOTH modes", () => {
+  const PERIOD_A = win("2026-06-01", "2026-06-07");
+  const PERIOD_B = win("2026-06-08", "2026-06-14");
+
+  /** One seeded sales source: a caller-wide start plus the per-company starts, and (for
+   *  by_product) the per-product sums. The groupBy delegate is shared by the per-company
+   *  starts read and the per-product sums, so it dispatches on the SHAPE each one sends. */
+  function seedStaggered(opts: {
+    callerWide: string | null;
+    companyStarts: Array<{ companyId: string; _min: { dayKey: string | null } }>;
+    a?: Array<{ productId: number; _sum: { orderedQty: number } }>;
+    b?: Array<{ productId: number; _sum: { orderedQty: number } }>;
+  }) {
+    db.productSalesFact.aggregate.mockResolvedValue({
+      _min: { dayKey: opts.callerWide },
+      _sum: { orderedQty: null },
+    } as never);
+    let periodCall = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.groupBy.mockImplementation((args: any) => {
+      if (args?.by?.[0] === "companyId") return Promise.resolve(opts.companyStarts) as never;
+      return Promise.resolve((periodCall++ === 0 ? opts.a : opts.b) ?? []) as never;
+    });
+    db.product.findMany.mockResolvedValue([{ id: 1 }, { id: 2 }] as never);
+  }
+
+  it("SCALAR: a late-starting company leaves BOTH periods null with a per-company reason", async () => {
+    seedStaggered({
+      // c1 has recorded since 2020 — the caller-wide minimum says "fully covered".
+      callerWide: "2020-01-01",
+      companyStarts: [
+        { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+        { companyId: "c2", _min: { dayKey: "2099-01-01" } },
+      ],
+    });
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.a).toBeNull();
+    expect(res.b).toBeNull();
+    expect(res.delta).toBeNull();
+    expect(res.pctChange).toBeNull();
+    // The reason names the REAL cause: not "predates the data" (the caller-wide start is
+    // six years before the window), but a member company that was not recording.
+    expect(res.reasons.a).toContain("in every company");
+    expect(res.reasons.a).toContain("latest-starting company governs");
+    expect(res.reasons.b).toContain("in every company");
+  });
+
+  it("SCALAR: a company with NO facts at all governs just as hard", async () => {
+    seedStaggered({
+      callerWide: "2020-01-01",
+      // c2 has no facts, so the per-company read returns no group for it.
+      companyStarts: [{ companyId: "c1", _min: { dayKey: "2020-01-01" } }],
+    });
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.a).toBeNull();
+    expect(res.b).toBeNull();
+    expect(res.reasons.a).toContain("in every company");
+  });
+
+  it("SCALAR: a staggered set whose LATEST start still covers the window measures normally", async () => {
+    seedStaggered({
+      callerWide: "2020-01-01",
+      companyStarts: [
+        { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+        { companyId: "c2", _min: { dayKey: "2021-06-01" } }, // still well before the window
+      ],
+    });
+    db.productSalesFact.aggregate
+      .mockResolvedValueOnce({ _min: { dayKey: "2020-01-01" } } as never)
+      .mockResolvedValueOnce({ _sum: { orderedQty: 10 } } as never)
+      .mockResolvedValueOnce({ _sum: { orderedQty: 15 } } as never);
+
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.a).toBe(10);
+    expect(res.b).toBe(15);
+    expect(res.delta).toBe(5);
+    expect(res.reasons.a).toBeUndefined();
+  });
+
+  it("BY_PRODUCT: a degraded window leaves EVERY row unknown — never a measured 0", async () => {
+    seedStaggered({
+      callerWide: "2020-01-01",
+      companyStarts: [
+        { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+        { companyId: "c2", _min: { dayKey: "2099-01-01" } },
+      ],
+      a: [{ productId: 1, _sum: { orderedQty: 10 } }],
+      // Product 2 sold in B only. Under the caller-wide start alone it was a RANKED
+      // "started moving" row with a MEASURED a of 0 — growth from a base nobody measured.
+      b: [
+        { productId: 1, _sum: { orderedQty: 30 } },
+        { productId: 2, _sum: { orderedQty: 12 } },
+      ],
+    });
+
+    const res = await comparePeriodsByProduct({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.periodCoverage).toEqual({ a: "partial", b: "partial" });
+    expect(res.ranked).toEqual([]);
+    expect(res.unranked.map((r) => r.productId)).toEqual([1, 2]);
+    for (const row of res.unranked) {
+      expect(row.a).toBeNull();
+      expect(row.b).toBeNull();
+      expect(row.delta).toBeNull();
+      expect(row.pctChange).toBeNull();
+    }
+    expect(res.reasons.a).toContain("in every company");
+  });
+
+  it("BY_PRODUCT: an un-staggered caller still measures zeros (the rule only DEGRADES)", async () => {
+    seedStaggered({
+      callerWide: "2020-01-01",
+      companyStarts: [
+        { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+        { companyId: "c2", _min: { dayKey: "2020-01-01" } },
+      ],
+      a: [],
+      b: [{ productId: 2, _sum: { orderedQty: 12 } }],
+    });
+
+    const res = await comparePeriodsByProduct({
+      metric: "sales_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.periodCoverage).toEqual({ a: "full", b: "full" });
+    expect(res.unranked).toEqual([]);
+    expect(res.ranked).toHaveLength(1);
+    expect(res.ranked[0].a).toBe(0); // a MEASURED zero: both companies covered period A
+    expect(res.ranked[0].b).toBe(12);
+  });
+
+  it("LEDGER metrics have no company dimension, so the per-company rule never fires", async () => {
+    // Same staggered membership; an inventory metric is global, so the ledger dataStart
+    // alone decides — and no per-company read is issued for it at all.
+    db.productSalesFact.groupBy.mockResolvedValue([] as never);
+    mockLedger(new Date("2020-01-01T00:00:00.000Z"), -10, -25);
+    db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+
+    const res = await comparePeriods({
+      metric: "outbound_units",
+      periodA: PERIOD_A,
+      periodB: PERIOD_B,
+      companyIds: ["c1", "c2"],
+    });
+
+    expect(res.a).toBe(10);
+    expect(res.b).toBe(25);
+    expect(db.productSalesFact.groupBy).not.toHaveBeenCalled();
   });
 });

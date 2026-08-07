@@ -213,16 +213,37 @@ describe("OC-5 — scope-changing arguments are disclosed", () => {
     expect(summarize("reorder_report", { productIds: [3, 12] })).toContain("products #3, #12");
     expect(summarize("reorder_report", { includeHealthy: true })).toContain("incl. healthy");
     const both = summarize("reorder_report", { productIds: [4], includeHealthy: true });
-    expect(both).toBe("products #4, incl. healthy");
-    // The catalog-wide worklist still renders the empty phrase.
-    expect(summarize("reorder_report", {})).toBe("");
-    expect(summarize("reorder_report", { includeOkay: true })).toBe("");
+    expect(both).toBe("products #4, incl. approaching, incl. healthy");
+  });
+
+  // FD-8: this case used to PIN THE BUG — it asserted "" for a call that omits
+  // includeOkay and "" again for includeOkay:true, i.e. it locked in the very omission
+  // OC-5 set out to fix. includeOkay defaults to TRUE at the tool boundary, so passing
+  // FALSE narrows the report to the urgent worklist and drops every APPROACHING row.
+  // A disclosure row that reads the same either way hides which rows are missing.
+  it("reorder_report renders includeOkay BOTH ways (population-changing, so never silent)", () => {
+    // Explicitly narrowed: the APPROACHING rows are gone, and the row says so.
+    expect(summarize("reorder_report", { includeOkay: false })).toBe("worklist only");
+    // Omitted or true — the same population, stated the same way.
+    expect(summarize("reorder_report", {})).toBe("incl. approaching");
+    expect(summarize("reorder_report", { includeOkay: true })).toBe("incl. approaching");
+    // The two states must never render alike, whatever else rides along.
+    const narrowed = summarize("reorder_report", { productIds: [4], includeOkay: false });
+    const wide = summarize("reorder_report", { productIds: [4], includeOkay: true });
+    expect(narrowed).not.toBe(wide);
+    expect(narrowed).toBe("products #4, worklist only");
   });
 
   it("id lists stay inert for junk / partial streamed args", () => {
-    expect(summarize("reorder_report", { productIds: "nonsense" })).toBe("");
-    expect(summarize("reorder_report", { productIds: [] })).toBe("");
-    expect(summarize("reorder_report", { productIds: [1, "x", null] })).toBe("products #1");
+    // The default population phrase rides along; only the ID LIST is under test here, and
+    // a junk/empty list must contribute NOTHING to it.
+    expect(summarize("reorder_report", { productIds: "nonsense" })).toBe("incl. approaching");
+    expect(summarize("reorder_report", { productIds: [] })).toBe("incl. approaching");
+    expect(summarize("reorder_report", { productIds: [1, "x", null] })).toBe(
+      "products #1, incl. approaching",
+    );
+    // Streamed junk in includeOkay is NOT an explicit false: it reads as the default.
+    expect(summarize("reorder_report", { includeOkay: "nope" })).toBe("incl. approaching");
     expect(summarize("get_movement_series", { productIds: [Number.NaN] })).not.toContain("products");
   });
 });

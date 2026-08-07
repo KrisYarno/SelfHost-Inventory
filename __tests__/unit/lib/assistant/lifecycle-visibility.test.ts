@@ -303,6 +303,8 @@ jest.mock("@/lib/prisma", () => {
 });
 
 import { assistantTools, testCtx, type ToolResult } from "@/lib/assistant/tools";
+import { SNAPSHOT_SALES_APPROVAL_NOTE } from "@/lib/assistant/composites";
+import { APPROVED_UNIVERSE_NOTE } from "@/lib/reports/outbound-mix";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const prismaCtl = jest.requireMock("@/lib/prisma") as {
@@ -709,6 +711,34 @@ describe("OC-4 — the snapshot's ACTIVE-ONLY sales section discloses the gap", 
     expect(snapshot.sales.coverage.excludedUnapprovedProducts).toBe(1);
     expect(snapshot.sales.coverage.approvalNote).toContain("ACTIVE-ONLY");
     expect(snapshot.sales.coverage.approvalNote).toContain("get_sales");
+  });
+
+  // FD-4: the note used to be `${APPROVED_UNIVERSE_NOTE} ...ACTIVE-ONLY...`, and the
+  // shared note it inherited says archived history "IS included, tagged lifecycle
+  // 'deleted'". So one paragraph told the reader both that archived sales are in these
+  // totals and that they are not. The pin below is the CONTRACT, not the wording: every
+  // claim this note makes about ARCHIVED products must be an EXCLUSION claim, because
+  // that is the only thing true of a current-state read.
+  it("makes ONE archived claim, and it is exclusion (no inherited 'IS included' clause)", () => {
+    const note = SNAPSHOT_SALES_APPROVAL_NOTE;
+    // Sentences about archived products, minus the pointer at the other tool (that
+    // sentence describes get_sales' universe, not this section's).
+    const archivedClaims = note
+      .split(". ")
+      .filter((s) => /archived/i.test(s) && !/get_sales/.test(s));
+    expect(archivedClaims.length).toBeGreaterThan(0);
+    for (const claim of archivedClaims) {
+      expect(claim).toMatch(/exclud/i);
+      expect(claim).not.toMatch(/\bIS included\b|\bare included\b|history is real/i);
+    }
+    // ...and it does not inherit the note that makes the OPPOSITE claim.
+    expect(note).not.toContain(APPROVED_UNIVERSE_NOTE);
+    expect(note).not.toContain("IS included");
+    // The shared note really does make that opposite claim — which is why inheriting it
+    // here was a contradiction rather than a stylistic quibble.
+    expect(APPROVED_UNIVERSE_NOTE).toContain("IS included");
+    // The approval half is still stated, in this note's OWN words.
+    expect(note).toContain("excludedUnapprovedProducts");
   });
 
   it("G2-2: the snapshot's salesDataStart is measured over that SAME active-only universe", async () => {

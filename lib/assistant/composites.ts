@@ -38,11 +38,7 @@ import { getReorderReport } from "@/lib/reports/reorder";
 import { getFreshness } from "@/lib/assistant/freshness";
 import { getOrderPipeline } from "@/lib/reports/order-pipeline";
 import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
-import {
-  approvedProductIds,
-  excludedUnapprovedProductCount,
-  APPROVED_UNIVERSE_NOTE,
-} from "@/lib/reports/outbound-mix";
+import { approvedProductIds, excludedUnapprovedProductCount } from "@/lib/reports/outbound-mix";
 import { resolveWindow } from "@/lib/assistant/window";
 import {
   PHYSICAL_OUTBOUND_WHERE,
@@ -52,16 +48,27 @@ import {
 import { getLowStockDefault, effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
 
 /**
- * The snapshot sales section's approval note (OC-4). The shared universe note plus this
- * tool's OWN policy row: get_business_snapshot is a CURRENT-STATE read, so an archived
- * product's real past sales are EXCLUDED here while get_sales includes them. Without this
- * sentence the two tools disagree by design and the reader has no way to know why.
+ * The snapshot sales section's approval note (OC-4, rewritten by FD-4).
+ *
+ * It used to be the SHARED universe note (outbound-mix's APPROVED_UNIVERSE_NOTE) followed
+ * by this tool's policy row. But the shared note's archived clause says an archived
+ * product's "history is real and IS included, tagged lifecycle 'deleted'", the exact
+ * OPPOSITE of what this section does. One paragraph then told the reader both that
+ * archived sales are included and that they are excluded, and the disclosure that exists
+ * to explain a gap between two tools instead became the ambiguity.
+ *
+ * So this note is SELF-CONTAINED and states only what is true of a CURRENT-STATE read:
+ * the approval half in its own words, then the active-only half, then where the rest of
+ * the history lives. Nothing is inherited.
  */
 export const SNAPSHOT_SALES_APPROVAL_NOTE =
-  `${APPROVED_UNIVERSE_NOTE} This snapshot section is ACTIVE-ONLY: archived products' ` +
-  "sales are excluded (archivedProductsIncluded is 0 by construction, not by " +
-  "measurement), so these totals can be LOWER than get_sales over the same window — use " +
-  "get_sales for archived-inclusive historical figures.";
+  "figures cover the APPROVED, currently-ACTIVE product universe only. " +
+  "excludedUnapprovedProducts counts products with activity in this window that are NOT " +
+  "approved — their rows and their contribution to every total are excluded. " +
+  "This snapshot section is ACTIVE-ONLY, so archived (soft-deleted) products' sales are " +
+  "excluded from it as well and archivedProductsIncluded reads 0 by construction, not by " +
+  "measurement. These totals can therefore be LOWER than the same window in get_sales, " +
+  "which is the archived-inclusive historical read.";
 
 const DAY_MS = 86_400_000;
 const VELOCITY_WINDOW_DAYS = 30;

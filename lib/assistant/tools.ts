@@ -76,7 +76,7 @@ import {
   getMovementSeries,
   getReceipts,
   getMovementByProduct,
-  type MovementFilters,
+  type MovementEnvelope,
 } from "@/lib/reports/movement";
 import { getInventorySummary } from "@/lib/reports/inventory-summary";
 import { getPolicy } from "@/lib/reports/policy";
@@ -231,6 +231,24 @@ const COMPARE_ROWS_DEFAULT = 25;
 // to `unranked`; the two are never both non-empty (coverage is all-or-nothing), so this
 // split only ever decides how much of the budget the ONE populated array may use.
 const COMPARE_RANKED_BUDGET_SHARE = 0.7;
+
+/**
+ * The ranked array's slice of an ALREADY-MEASURED row budget (G2-8, corrected by FD-7).
+ *
+ * It used to be floored at MIN_RANK_PAGE_BYTES: `max(floor(budget * 0.7), 4096)`. That
+ * floor re-introduced, inside the fitter, the exact bug the measured envelope removed
+ * around it — at any row budget below ~5.9 KiB the "70% share" became 100% of the budget
+ * (and at budgets under 4 KiB, MORE than the caller has room for), so `unranked` was
+ * measured against a remainder of 0 and a tight late-turn compare shipped a page nobody
+ * could receive. The share is now exactly the share; `paginate` already guarantees at
+ * least one row, so a tiny budget shrinks the page instead of overrunning it.
+ *
+ * Exported so the RATIO is pinned directly — a final-bytes assertion cannot tell a 70%
+ * share from a floored 100% one at the budgets where they differ.
+ */
+export function compareRankedShare(rowBudget: number): number {
+  return Math.min(Math.floor(rowBudget * COMPARE_RANKED_BUDGET_SHARE), rowBudget);
+}
 // get_movement_series breakdown (spec C10): the bounded batch cap and the per-product
 // page size. A batch is BOUNDED on purpose — an unbounded id list is how a caller
 // would rebuild the catalog scan the breakdown exists to replace.
@@ -1075,12 +1093,9 @@ async function compareByProduct(
     envelopeOf(counterOf(rankedShaped), counterOf(unrankedShaped)),
   );
   // NEVER floored above what is left: a floor bigger than the remaining budget builds a
-  // page the caller cannot receive.
+  // page the caller cannot receive (FD-7 removed the last such floor, inside the share).
   const budget = Math.max(byteBudget(ctx) - envelopeBytes, 0);
-  const rankedBudget = Math.min(
-    Math.max(Math.floor(budget * COMPARE_RANKED_BUDGET_SHARE), MIN_RANK_PAGE_BYTES),
-    budget,
-  );
+  const rankedBudget = compareRankedShare(budget);
   const rankedFit = paginate(rankedShaped, offset, limit, rankedBudget);
   // The MEASURED remainder — what the ranked page actually consumed, not its allowance.
   const remainder = Math.max(budget - byteLengthOf(rankedFit.rows), 0);
@@ -1422,12 +1437,19 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // simply unknown. A missing identity now OMITS the row and is COUNTED, so the gap
       // is disclosed instead of papered over with a plausible value.
       let identityMisses = 0;
-      const rows = products.flatMap((p) => {
+      // FD-3: the SOURCE index behind every EMITTED row. The omission above makes `rows`
+      // shorter than the DB page it came from, so a cursor counted in emitted rows would
+      // (a) point back at rows this page already consumed and (b) stop being a multiple of
+      // `limit` — which `assertPageAligned` rejects, making `nextOffset` an ILLEGAL cursor
+      // the moment one identity goes missing. The cursor is counted in source rows.
+      const sourceIndexOf: number[] = [];
+      const rows = products.flatMap((p, sourceIndex) => {
         const identity = identities.get(p.id);
         if (!identity) {
           identityMisses += 1;
           return [];
         }
+        sourceIndexOf.push(sourceIndex);
         const lifecycle = identity.lifecycle;
         const base = {
           id: p.id,
@@ -1461,7 +1483,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // W3 seam-fix item 1: page against the ctx-aware reserved budget so a tight late-turn
       // read shrinks the page instead of the completed result being discarded whole.
       const page = paginate(rows, 0, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
-      const consumed = offset + page.returned;
+      // FD-3: SOURCE rows consumed, not emitted rows. Every emitted row that survived the
+      // byte fit consumed its own source row PLUS any omitted rows before it; when the
+      // whole page fit, the whole DB page was consumed (so a page of nothing but omitted
+      // rows still advances — the alternative is a cursor that never moves).
+      const sourceConsumed =
+        page.returned === rows.length ? products.length : sourceIndexOf[page.returned];
+      const consumed = offset + sourceConsumed;
       return ok(
         {
           products: page.rows,
@@ -2067,14 +2095,19 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // `budget − ENVELOPE_RESERVE_BYTES` so the added window/coverage/counts envelope
       // cannot push the completed result past the threaded budget and get it discarded.
       if (args.receipts) {
-        // T4 / G2-4: the receipts envelope is assembled HERE, so its filter echo is typed
-        // with the receipts literal — tsc now rejects a mode/filters.mode mismatch that
-        // used to be policed only by a runtime assertion.
-        const receiptsFilters: MovementFilters<"receipts"> = {
-          productId: args.productId ?? null,
-          productIds: null,
-          locationId: args.locationId ?? null,
+        // T4 / G2-4 / FD-6: the receipts envelope is assembled HERE — the one variant with
+        // no module-side interface to pin it — so it is typed as the SHARED
+        // `MovementEnvelope<"receipts">`. The discriminant and the filter echo now read
+        // their mode from ONE type parameter, so a mismatched pair cannot compile here any
+        // more than it can in the two module-side variants.
+        const receiptsEnvelope: MovementEnvelope<"receipts"> = {
           mode: "receipts",
+          filters: {
+            productId: args.productId ?? null,
+            productIds: null,
+            locationId: args.locationId ?? null,
+            mode: "receipts",
+          },
         };
         const page = await getReceipts({
           window,
@@ -2089,12 +2122,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         });
         return ok(
           {
-            mode: "receipts",
+            // C4 / T4: the SAME filters echo the series envelope carries, with the
+            // receipts discriminant — `filters.mode === mode` on every variant, now by
+            // construction (the pair is spread from ONE mode-bound value).
+            ...receiptsEnvelope,
             window,
             ...(productLifecycle ? { lifecycle: productLifecycle } : {}),
-            // C4 / T4: the SAME filters echo the series envelope carries, with the
-            // receipts discriminant — `filters.mode === mode` on every variant.
-            filters: receiptsFilters,
             rows: page.rows,
             returned: page.returned,
             totalRows: page.totalRows,

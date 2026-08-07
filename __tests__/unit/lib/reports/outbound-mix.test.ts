@@ -46,9 +46,12 @@ jest.mock("@/lib/reports/low-stock", () => ({ __esModule: true, getLowStockRepor
 
 import prisma from "@/lib/prisma";
 import { classifyOutboundMix, productIdentities, type OutboundMix } from "@/lib/reports/outbound-mix";
-import { getOperationsRows } from "@/lib/analytics/queries";
+import { getOperationsRows, getShrinkageSummary } from "@/lib/analytics/queries";
 import { reorderDemand } from "@/lib/reports/demand";
-import { assistantTools, testCtx } from "@/lib/assistant/tools";
+import { getMovementSeries } from "@/lib/reports/movement";
+import { shrinkageReasonOf } from "@/lib/reports/metrics-contract";
+import { toDayKey } from "@/lib/analytics/dates";
+import { assistantTools, testCtx, compareRankedShare } from "@/lib/assistant/tools";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 
@@ -292,6 +295,147 @@ describe("C12 caller populations — each consumer feeds its OWN predicate's row
       mix: null,
     });
     expect(map.get(2)!.mix).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD-5 — ONE lowercase 'damage' row, FOUR shrinkage-classification consumers.
+//
+// OC-9 normalized the two JS classifiers (mix + movement) and stopped there. The other
+// two consumers kept their own rules: get_shrinkage compared the raw reasonCode against
+// an UPPERCASE list in JS (case-sensitive), and the operations 90-day shrink read
+// classified at the SQL boundary with `reasonCode: { in: [...] }` — which delegates the
+// decision to the column's collation. So the SAME row was a classified loss in two tools
+// and unclassified depletion in the others, which is the "shrinkage is 0 but 16k units
+// left the building" ambiguity this lane exists to kill, in miniature.
+//
+// The rule now lives in ONE function (`shrinkageReasonOf`), SQL only narrows, and this
+// fixture is the cross-tool proof.
+// ---------------------------------------------------------------------------
+
+describe("FD-5 cross-tool: a lowercase 'damage' row classifies IDENTICALLY everywhere", () => {
+  /** The one row every consumer below sees, in whatever shape that consumer reads. */
+  const ROW = { productId: 1, delta: -5, logType: "ADJUSTMENT", reasonCode: "damage" as string | null };
+
+  it("get_shrinkage counts it as DAMAGE loss, not as unclassified outbound", async () => {
+    db.inventory_logs.groupBy.mockResolvedValue([
+      { productId: ROW.productId, reasonCode: ROW.reasonCode, _sum: { delta: ROW.delta } },
+    ] as never);
+    db.inventory_logs.aggregate.mockResolvedValue({ _min: { changeTime: daysAgo(200) } } as never);
+    db.product.findMany.mockResolvedValue([{ id: 1, costPrice: null }] as never);
+
+    const summary = await getShrinkageSummary({ days: 30 });
+    expect(summary.byReason.DAMAGE.units).toBe(5);
+    expect(summary.totalUnits).toBe(5);
+    // The whole point: it is NOT reported as depletion nobody classified.
+    expect(summary.coverage.unclassifiedOutboundUnits).toBe(0);
+  });
+
+  it("get_operations reports it in outboundMix30.classifiedLoss AND in shrinkage90", async () => {
+    db.product.findMany.mockResolvedValue([
+      { id: 1, name: "Widget", costPrice: null, lowStockThreshold: null, product_locations: [{ quantity: 50 }] },
+    ] as never);
+    db.systemSetting.findUnique.mockResolvedValue(null as never);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+    db.productStockSnapshot.findMany.mockResolvedValue([] as never);
+    db.productStockSnapshot.aggregate.mockResolvedValue({ _min: { dayKey: null } } as never);
+    db.inventory_logs.aggregate.mockResolvedValue({ _min: { changeTime: daysAgo(200) } } as never);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.inventory_logs.groupBy.mockImplementation((args: any) => {
+      const by = (args.by ?? []) as string[];
+      // The regrouped 30-day physical-outbound read (productId, logType, reasonCode).
+      if (by.length === 3) {
+        return Promise.resolve([
+          {
+            productId: ROW.productId,
+            logType: ROW.logType,
+            reasonCode: ROW.reasonCode,
+            _sum: { delta: ROW.delta },
+            _min: { changeTime: daysAgo(3) },
+          },
+        ]) as never;
+      }
+      // FD-5: the 90-day shrink read now carries the reason in the GROUP KEY and is
+      // classified in JS — SQL no longer decides what counts as a loss.
+      if (by.includes("reasonCode")) {
+        return Promise.resolve([
+          { productId: ROW.productId, reasonCode: ROW.reasonCode, _sum: { delta: ROW.delta } },
+        ]) as never;
+      }
+      return Promise.resolve([]) as never;
+    });
+
+    const { rows } = await getOperationsRows({ windowDays: 30 });
+    const row = rows.find((r) => r.productId === 1)!;
+    expect(row.outboundMix30).toEqual({ ...ZERO, classifiedLoss: 5 });
+    // ...and the 90-day shrinkage figure beside it agrees (it is the same row).
+    expect(row.shrinkage90).toEqual({ units: 5, valueAtCurrentCostCents: null });
+  });
+
+  it("get_movement_series buckets it as classifiedLoss", async () => {
+    db.inventory_logs.findMany.mockResolvedValue([
+      { delta: ROW.delta, logType: ROW.logType, reasonCode: ROW.reasonCode, changeTime: daysAgo(3) },
+    ] as never);
+    db.product.findMany.mockResolvedValue([] as never);
+
+    const res = await getMovementSeries({
+      window: {
+        from: toDayKey(daysAgo(30)),
+        to: toDayKey(new Date()),
+        days: 31,
+        source: "explicit",
+      },
+      grain: "day",
+      approvedIds: [1],
+    });
+    // Movement's buckets are SIGNED (G3) — the magnitude is the same 5.
+    expect(res.totals.classifiedLoss).toBe(-5);
+    expect(res.totals.adjustmentUnclassified).toBe(0);
+  });
+
+  it("reorder demandMix buckets it as classifiedLoss", async () => {
+    db.inventory_logs.findMany.mockResolvedValue([
+      {
+        productId: ROW.productId,
+        delta: ROW.delta,
+        changeTime: daysAgo(3),
+        logType: ROW.logType,
+        reasonCode: ROW.reasonCode,
+      },
+    ] as never);
+
+    const map = await reorderDemand([1], 90);
+    expect(map.get(1)!.mix).toEqual({ ...ZERO, classifiedLoss: 5 });
+  });
+
+  it("the shared rule is the ONLY rule: canonical, cased, and unknown reasons agree", () => {
+    // Normalizing the LOOKUP widens the match; it must not soften the taxonomy.
+    expect(shrinkageReasonOf("DAMAGE")).toBe("DAMAGE");
+    expect(shrinkageReasonOf("damage")).toBe("DAMAGE");
+    expect(shrinkageReasonOf("Theft")).toBe("THEFT");
+    expect(shrinkageReasonOf("damaged")).toBeNull();
+    expect(shrinkageReasonOf("CORRECTION")).toBeNull();
+    expect(shrinkageReasonOf(null)).toBeNull();
+  });
+
+  it("no classification site decides at the SQL boundary (reasonCode is never an IN filter)", async () => {
+    // The collation assumption is the hazard: `reasonCode: { in: [...] }` is only
+    // case-insensitive under a _ci collation, and nothing in the code can check that. So
+    // the shrink read must narrow by DOMAIN (logType/delta/window) and nothing else.
+    db.product.findMany.mockResolvedValue([] as never);
+    db.systemSetting.findUnique.mockResolvedValue(null as never);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+    db.inventory_logs.groupBy.mockResolvedValue([] as never);
+    db.productStockSnapshot.findMany.mockResolvedValue([] as never);
+    db.productStockSnapshot.aggregate.mockResolvedValue({ _min: { dayKey: null } } as never);
+    db.inventory_logs.aggregate.mockResolvedValue({ _min: { changeTime: null } } as never);
+
+    await getOperationsRows({ windowDays: 30 });
+
+    for (const call of db.inventory_logs.groupBy.mock.calls) {
+      const where = (call[0] as { where?: Record<string, unknown> }).where ?? {};
+      expect(where.reasonCode).not.toEqual(expect.objectContaining({ in: expect.anything() }));
+    }
   });
 });
 
@@ -580,6 +724,33 @@ describe("C6 get_sales — salesDataStart / windowCoverage / includeZeroRows (Ta
       expect(zero._sum).toEqual({ orderedQty: 0, revenue: "0", orderCount: 0 });
     });
 
+    // FD-2: the case the per-company rule could not see. A company with NO facts is
+    // ABSENT from the per-company read, so it used to vanish from companyCoverage, leave
+    // the set "unstaggered", and inherit c1's start — the window read as fully covered
+    // for a company that never recorded anything, and every silence became a measured 0.
+    it("a company with NO facts AT ALL degrades the window and is listed with a null start", async () => {
+      seedSales({
+        // c1 has recorded since 2020; c2 returns NO group (no facts ever).
+        salesDataStart: "2020-01-01",
+        companyStarts: [{ companyId: "c1", _min: { dayKey: "2020-01-01" } }],
+        catalog: [{ id: 2, name: "Silent" }],
+      });
+      const data = await multiData({ groupBy: "product", includeZeroRows: true, relativeDays: 30 });
+      const coverage = data.coverage as Record<string, unknown>;
+
+      expect(coverage.windowCoverage).toBe("partial");
+      expect(coverage.companyCoverage).toEqual([
+        { companyId: "c1", salesDataStart: "2020-01-01" },
+        { companyId: "c2", salesDataStart: null },
+      ]);
+      expect(coverage.rowsNote).toContain("coverage classified per company");
+
+      // NO measured zero was manufactured for the company that never recorded.
+      const zero = (data.rows as Array<Record<string, unknown>>).find((r) => r.productId === 2)!;
+      expect(zero._sum).toEqual({ orderedQty: null, revenue: null, orderCount: null });
+      expect(zero.reason).toEqual(expect.any(String));
+    });
+
     it("a staggered set whose LATEST start still covers the window stays 'full'", async () => {
       seedSales({
         salesDataStart: "2020-01-01",
@@ -616,20 +787,32 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     return result.data as Record<string, unknown>;
   };
 
-  /** Seed the sales source: one dataStart + per-product sums per period. */
+  /** Seed the sales source: one dataStart + per-product sums per period.
+   *
+   *  FD-1: compare's sales coverage now reads the PER-COMPANY starts (by companyId), the
+   *  same read get_sales makes, so TWO groupBy shapes share this delegate — the seed
+   *  dispatches on the shape each one sends rather than on call order. `companyStarts`
+   *  defaults to the caller's single company sharing `dataStart` (the un-staggered case
+   *  every pre-existing assertion in this suite assumes). */
   function seedSales(opts: {
     dataStart: string | null;
     a: Array<{ productId: number; _sum: { orderedQty: number } }>;
     b: Array<{ productId: number; _sum: { orderedQty: number } }>;
     names?: Array<{ id: number; name: string; deletedAt: Date | null }>;
+    companyStarts?: Array<{ companyId: string; _min: { dayKey: string | null } }>;
   }) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     db.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: opts.dataStart } } as any);
     let call = 0;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    db.productSalesFact.groupBy.mockImplementation(() =>
-      Promise.resolve(call++ === 0 ? opts.a : opts.b) as never,
-    );
+    db.productSalesFact.groupBy.mockImplementation((args: any) => {
+      if (args?.by?.[0] === "companyId") {
+        return Promise.resolve(
+          opts.companyStarts ?? [{ companyId: "c1", _min: { dayKey: opts.dataStart } }],
+        ) as never;
+      }
+      return Promise.resolve(call++ === 0 ? opts.a : opts.b) as never;
+    });
     db.product.findMany.mockResolvedValue((opts.names ?? []) as never);
   }
 
@@ -869,5 +1052,36 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     expect(data.rows).toEqual([]);
     expect((data.unranked as unknown[]).length).toBeGreaterThan(0);
     expect((data.unranked as unknown[]).length).toBeLessThan(40);
+  });
+
+  // FD-7: the ranked share was `max(floor(budget * 0.7), 4096)` — a FLOOR inside the
+  // fitter, re-introducing the very bug the measured envelope removed around it. Below
+  // ~5.9 KiB of row budget the "70% share" silently became 100% (and under 4 KiB, MORE
+  // than the caller has), so `unranked` was fit against a remainder of 0 and a tight
+  // late-turn compare built a page nobody could receive.
+  //
+  // A final-bytes assertion cannot see this: at a tiny budget the page is one row either
+  // way. The RATIO is what changed, so the ratio is what is pinned.
+  describe("FD-7 the ranked share is a SHARE at every budget (no 4 KiB floor)", () => {
+    it.each([
+      [10_000, 7_000],
+      [5_000, 3_500], // under the old floor's crossover: floored to 5000 (100%) before
+      [1_000, 700], // far under 4096: the floor exceeded the WHOLE budget
+      [100, 70],
+      [3, 2], // floor(2.1)
+      [0, 0],
+    ])("rowBudget %s -> ranked share %s", (budget, share) => {
+      expect(compareRankedShare(budget)).toBe(share);
+    });
+
+    it("never exceeds the budget it is a share OF, and leaves a real remainder", () => {
+      for (const budget of [0, 1, 100, 1_000, 4_095, 4_096, 10_000, 1_000_000]) {
+        const share = compareRankedShare(budget);
+        expect(share).toBeLessThanOrEqual(budget);
+        // The remainder is what `unranked` is fit against — it must not be zeroed out by
+        // the ranked allowance at any budget above a couple of bytes.
+        if (budget >= 10) expect(budget - share).toBeGreaterThan(0);
+      }
+    });
   });
 });

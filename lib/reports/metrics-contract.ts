@@ -40,6 +40,32 @@ const DAY_MS = 86_400_000;
 export type ShrinkageReason = "DAMAGE" | "THEFT" | "EXPIRY" | "COUNT";
 export const SHRINKAGE_CLASS_REASONS = ["DAMAGE", "THEFT", "EXPIRY", "COUNT"] as const;
 
+/** The taxonomy as a membership set, keyed by the CANONICAL uppercase spelling. */
+const SHRINKAGE_SET: ReadonlySet<string> = new Set(SHRINKAGE_CLASS_REASONS as readonly string[]);
+
+/**
+ * THE shrinkage-classification rule, in ONE function (FD-5). Every consumer that decides
+ * "is this row a classified loss?" routes through it — the mix classifier, movement's
+ * bucket classifier, get_shrinkage's per-reason accumulator, and the operations 90-day
+ * shrink fold — so a `damage` row can never be a loss in one tool and unclassified
+ * depletion in another.
+ *
+ * The LOOKUP is normalized, never the row: the ledger keeps whatever casing it stored.
+ * Returns the CANONICAL reason (so a caller can key a per-reason bucket with it) or null
+ * when the row is not a classified loss.
+ *
+ * COLLATION NOTE (binding on every SQL site): this is a JS decision on purpose. A
+ * `reasonCode: { in: SHRINKAGE_CLASS_REASONS }` filter delegates the same decision to the
+ * column's collation — case-insensitive under MySQL's `*_ci` default, case-SENSITIVE the
+ * moment that column or connection is `_bin`/`_cs`. No classification site may depend on
+ * that assumption: SQL narrows, JS classifies.
+ */
+export function shrinkageReasonOf(reasonCode: string | null | undefined): ShrinkageReason | null {
+  if (reasonCode == null) return null;
+  const canonical = reasonCode.toUpperCase();
+  return SHRINKAGE_SET.has(canonical) ? (canonical as ShrinkageReason) : null;
+}
+
 /** A single inventory-log row, reduced to the fields the predicates read. */
 export interface LedgerRow {
   delta: number;

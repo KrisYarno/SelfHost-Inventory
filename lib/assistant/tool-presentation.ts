@@ -40,6 +40,12 @@ function flag(input: unknown, key: string): boolean {
   return (input as Record<string, unknown> | null | undefined)?.[key] === true;
 }
 
+/** A boolean flag whose DEFAULT is true, strictly: only an explicit `false` narrows.
+ *  Anything else — absent, true, streamed junk — is the default population (FD-8). */
+function offFlag(input: unknown, key: string): boolean {
+  return (input as Record<string, unknown> | null | undefined)?.[key] === false;
+}
+
 /**
  * The bounded-set phrase for a productIds argument (OC-5): "products #1, #2, #3". A
  * disclosure row that omits the set renders a bounded call exactly like the catalog-wide
@@ -284,11 +290,17 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     failureNoun: "reorder report",
     emptyCopy: "Nothing needs reordering right now.",
     // OC-5: this rendered "" for every call, so a NAMED-SET sizing (productIds) was
-    // disclosed exactly like the catalog-wide worklist. Both arguments change the
-    // population the answer covers.
+    // disclosed exactly like the catalog-wide worklist. EVERY argument that changes the
+    // population the answer covers is rendered.
+    //
+    // FD-8: includeOkay is one of them and was omitted. It defaults to TRUE, so
+    // `includeOkay:false` is a caller NARROWING the report to the urgent worklist —
+    // dropping the APPROACHING rows — and the disclosure row read identically either way.
+    // Both states are stated, because "which rows are missing" is not decoration.
     summarizeArgs: (input) => {
       const parts = [
         productsPhrase(input, "productIds"),
+        offFlag(input, "includeOkay") ? "worklist only" : "incl. approaching",
         flag(input, "includeHealthy") ? "incl. healthy" : "",
       ].filter(Boolean);
       return parts.join(", ");

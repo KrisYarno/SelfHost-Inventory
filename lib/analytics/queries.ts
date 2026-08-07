@@ -7,7 +7,7 @@ import {
   PHYSICAL_OUTBOUND_WHERE,
   daysCovered,
   PHYSICAL_OUTBOUND_DEFINITION,
-  SHRINKAGE_CLASS_REASONS,
+  shrinkageReasonOf,
   type ShrinkageReason,
 } from "@/lib/reports/metrics-contract";
 import {
@@ -207,6 +207,24 @@ function absOutByProduct(rows: { productId: number; _sum: { delta: number | null
 }
 
 /**
+ * Classified-loss units per product over (productId, reasonCode) groups (FD-5). The
+ * classification is a JS decision through the ONE shared rule — the SQL read that feeds
+ * this only narrows to the negative ADJUSTMENT/CORRECTION domain, so a lowercase legacy
+ * `damage` row is loss here exactly as it is in get_shrinkage, outboundMix30, and the
+ * movement buckets. Unclassified reasons contribute nothing (they are not loss).
+ */
+function shrinkUnitsByProduct(
+  rows: Array<{ productId: number; reasonCode: string | null; _sum: { delta: number | null } }>,
+): Map<number, number> {
+  const m = new Map<number, number>();
+  for (const r of rows ?? []) {
+    if (shrinkageReasonOf(r.reasonCode) == null) continue;
+    m.set(r.productId, (m.get(r.productId) ?? 0) + Math.abs(r._sum?.delta ?? 0));
+  }
+  return m;
+}
+
+/**
  * Tier-1 per-product Operations rows + per-source data-starts. `windowDays`
  * (default 90) sets the turns window; unitsOut30/unitsOut90 are always both
  * computed. Units-out uses the shared OUTBOUND predicate (`delta<0 AND logType !=
@@ -300,12 +318,17 @@ export async function getOperationsRows(
       where: PHYSICAL_OUTBOUND_WHERE,
       _max: { changeTime: true },
     }),
+    // FD-5: the 90-day shrink read used to CLASSIFY at the SQL boundary
+    // (`reasonCode: { in: SHRINKAGE_CLASS_REASONS }`), which delegates the loss decision
+    // to the column's collation — a `damage` row counted as shrinkage here only if MySQL
+    // happened to be case-insensitive, while the JS classifiers beside it always counted
+    // it. SQL now only NARROWS to the negative ADJUSTMENT/CORRECTION domain; the reason is
+    // carried into the group key and classified in JS by the ONE shared rule.
     prisma.inventory_logs.groupBy({
-      by: ["productId"],
+      by: ["productId", "reasonCode"],
       where: {
         logType: { in: [inventory_logs_logType.ADJUSTMENT, inventory_logs_logType.CORRECTION] },
         delta: { lt: 0 },
-        reasonCode: { in: SHRINKAGE_CLASS_REASONS as unknown as string[] },
         changeTime: { gte: start90 },
       },
       _sum: { delta: true },
@@ -395,7 +418,15 @@ export async function getOperationsRows(
     }
   }
   const out90 = absOutByProduct(outbound90);
-  const shrinkUnits = absOutByProduct(shrink90);
+  // FD-5: classify the (productId, reasonCode) groups in JS — same rule the mix and
+  // movement classifiers use — and sum only the classified-loss magnitudes.
+  const shrinkUnits = shrinkUnitsByProduct(
+    shrink90 as unknown as Array<{
+      productId: number;
+      reasonCode: string | null;
+      _sum: { delta: number | null };
+    }>,
+  );
   const inboundAt = new Map<number, Date | null>(inbound.map((r) => [r.productId, r._max.changeTime]));
   const outboundAt = new Map<number, Date | null>(lastOutbound.map((r) => [r.productId, r._max.changeTime]));
   const correctionsCount = new Map<number, number>(
@@ -589,7 +620,6 @@ export async function getShrinkageSummary(
     }),
   ]);
 
-  const CLASSIFIED = SHRINKAGE_CLASS_REASONS as unknown as string[];
   const acc: Record<
     ShrinkageReason,
     { units: number; value: number; hasCost: boolean; costedUnits: number }
@@ -613,9 +643,13 @@ export async function getShrinkageSummary(
 
   for (const g of grouped) {
     const units = Math.abs(g._sum?.delta ?? 0);
-    const rc = g.reasonCode;
-    if (rc !== null && CLASSIFIED.includes(rc)) {
-      const bucket = acc[rc as ShrinkageReason];
+    // FD-5: the reason is classified by the ONE shared rule, which normalizes the LOOKUP
+    // and hands back the CANONICAL bucket key. A raw `CLASSIFIED.includes(g.reasonCode)`
+    // was case-SENSITIVE, so a legacy `damage` row landed in unclassifiedOutboundUnits
+    // here while the mix/movement classifiers beside it called the same row a loss.
+    const reason = shrinkageReasonOf(g.reasonCode);
+    if (reason !== null) {
+      const bucket = acc[reason];
       bucket.units += units;
       const cost = costByProduct.get(g.productId);
       if (cost != null) {

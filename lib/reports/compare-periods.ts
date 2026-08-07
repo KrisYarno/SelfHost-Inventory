@@ -38,6 +38,11 @@ import {
   excludedUnapprovedProductCount,
   APPROVED_UNIVERSE_NOTE,
 } from "@/lib/reports/outbound-mix";
+import {
+  callerWindowCoverage,
+  salesDataStartsByCompany,
+  SALES_COMPANY_COVERAGE_NOTE,
+} from "@/lib/assistant/sales-coverage";
 
 export type CompareMetric = "sales_units" | "sales_revenue" | "outbound_units" | "inbound_units";
 
@@ -111,23 +116,40 @@ function productFilter(
   };
 }
 
+/**
+ * A metric's coverage SOURCE: the caller-wide data-start, plus (sales metrics only) the
+ * PER-COMPANY starts that govern zero legality (FD-1, seam S8).
+ *
+ * The ledger metrics have no company dimension at all, so they carry a bare data-start —
+ * `companyCoverage` is absent and the classification is the plain one.
+ */
+interface MetricCoverageSource {
+  dataStart: string | null;
+  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
+}
+
 /** MIN(dayKey) of ProductSalesFact for this caller's scope (company + optional product),
- *  narrowed to the G5 approved universe. An unapproved product's older fact must never
- *  move a disclosed data-start any more than it may move a total. */
-async function salesDataStart(
+ *  narrowed to the G5 approved universe, PLUS the per-company starts (FD-1). An
+ *  unapproved product's older fact must never move a disclosed data-start any more than
+ *  it may move a total.
+ *
+ *  FD-1: this used to return the caller-wide minimum alone, so a caller in two companies
+ *  whose second one started recording last month read BOTH periods as fully covered —
+ *  and every silence became a measured 0 (a by_product row of 0, a scalar delta computed
+ *  from a manufactured base). get_sales degrades exactly this case; comparing the same
+ *  facts over the same window had to classify it identically or the two tools contradict
+ *  each other over ONE seeded source. */
+async function salesStarts(
   companyIds: string[],
   productId: number | undefined,
   approvedIds?: number[],
-): Promise<string | null> {
-  if (companyIds.length === 0) return null;
-  const row = await prisma.productSalesFact.aggregate({
-    where: {
-      companyId: { in: companyIds },
-      ...productFilter(productId, approvedIds),
-    },
-    _min: { dayKey: true },
-  });
-  return row._min.dayKey ?? null;
+): Promise<MetricCoverageSource> {
+  if (companyIds.length === 0) return { dataStart: null };
+  const starts = await salesDataStartsByCompany(companyIds, productFilter(productId, approvedIds));
+  return {
+    dataStart: starts.salesDataStart,
+    ...(starts.staggered ? { companyCoverage: starts.perCompany } : {}),
+  };
 }
 
 /** Sum of ProductSalesFact.orderedQty over a window, company + optional product scoped. */
@@ -209,26 +231,32 @@ function metricSource(
   companyIds: string[],
   productId: number | undefined,
   approvedIds: number[],
-): { dataStart: () => Promise<string | null>; value: (window: ResolvedWindow) => Promise<number | null> } {
+): {
+  starts: () => Promise<MetricCoverageSource>;
+  value: (window: ResolvedWindow) => Promise<number | null>;
+} {
+  const ledgerStarts = async (where: Prisma.inventory_logsWhereInput) => ({
+    dataStart: await ledgerDataStart(where, productId, approvedIds),
+  });
   switch (metric) {
     case "sales_units":
       return {
-        dataStart: () => salesDataStart(companyIds, productId, approvedIds),
+        starts: () => salesStarts(companyIds, productId, approvedIds),
         value: (window) => salesUnitsValue(companyIds, productId, window, approvedIds),
       };
     case "sales_revenue":
       return {
-        dataStart: () => salesDataStart(companyIds, productId, approvedIds),
+        starts: () => salesStarts(companyIds, productId, approvedIds),
         value: (window) => salesRevenueValue(companyIds, productId, window, approvedIds),
       };
     case "outbound_units":
       return {
-        dataStart: () => ledgerDataStart(PHYSICAL_OUTBOUND_WHERE, productId, approvedIds),
+        starts: () => ledgerStarts(PHYSICAL_OUTBOUND_WHERE),
         value: (window) => ledgerValue(PHYSICAL_OUTBOUND_WHERE, productId, window, approvedIds),
       };
     case "inbound_units":
       return {
-        dataStart: () => ledgerDataStart(INBOUND_UNITS_WHERE, productId, approvedIds),
+        starts: () => ledgerStarts(INBOUND_UNITS_WHERE),
         value: (window) => ledgerValue(INBOUND_UNITS_WHERE, productId, window, approvedIds),
       };
   }
@@ -276,6 +304,20 @@ function comparisonCensusScope(
 }
 
 /**
+ * ONE period's coverage under the SAME rule get_sales applies (FD-1, seam S8): the
+ * caller-wide start classifies the period, and for a SALES metric the per-company starts
+ * can only degrade it further (`callerWindowCoverage` — the latest-starting company
+ * governs, and a company with no facts governs hardest). Ledger metrics carry no
+ * `companyCoverage`, so this is the plain classification for them.
+ */
+function periodCoverage(source: MetricCoverageSource, window: ResolvedWindow): WindowCoverage {
+  return callerWindowCoverage(
+    { salesDataStart: source.dataStart, companyCoverage: source.companyCoverage },
+    window.from,
+  );
+}
+
+/**
  * Resolve one period's raw aggregate into the zero-vs-unknown result. Coverage is
  * checked FIRST, before ever looking at `raw` — a real sum is only trustworthy
  * when the source covers the WHOLE interval (`dataStart <= window.from`); a period
@@ -288,29 +330,36 @@ function resolvePeriod(
   raw: number | null,
   window: ResolvedWindow,
   label: "a" | "b",
-  dataStart: string | null,
+  source: MetricCoverageSource,
   metric: CompareMetric,
   reasons: Record<string, string>,
 ): number | null {
   const periodLabel = label === "a" ? "A" : "B";
+  const dataStart = source.dataStart;
   // The zero-vs-unknown decision routes through the SHARED classifier (seam S8), so
   // get_sales' windowCoverage and this tool can never classify one seeded source
-  // differently. The reason TEXT still distinguishes predates-vs-straddles below —
-  // that distinction is prose, not a different verdict.
-  const coverage = classifyWindowCoverage(dataStart, window.from);
+  // differently — INCLUDING the per-company degradation (FD-1): with staggered company
+  // starts the LATEST-starting company governs, and a company with no facts at all
+  // degrades the set outright. The reason TEXT still distinguishes predates-vs-straddles
+  // vs per-company below — that distinction is prose, not a different verdict.
+  const coverage = periodCoverage(source, window);
   if (coverage === "none") {
     reasons[label] = `no ${metric} data recorded`;
     return null;
   }
   if (coverage === "partial") {
     // Source does not cover the whole interval — either the period predates the
-    // data entirely (dataStart > window.to) or straddles it (dataStart falls
-    // inside the window). Either way `raw` (even a non-null partial sum) is
-    // discarded: it cannot stand in for the whole period.
+    // data entirely (dataStart > window.to), straddles it (dataStart falls
+    // inside the window), or the caller-wide start covers it while a MEMBER COMPANY's
+    // does not. Either way `raw` (even a non-null partial sum) is discarded: it cannot
+    // stand in for the whole period.
     reasons[label] =
-      dataStart! > window.to
-        ? `period${periodLabel} predates ${metric} data (starts ${dataStart})`
-        : `period ${periodLabel} is not fully covered by ${metric} data (starts ${dataStart})`;
+      classifyWindowCoverage(dataStart, window.from) === "full"
+        ? `period ${periodLabel} is not fully covered by ${metric} data in every company ` +
+          `(${SALES_COMPANY_COVERAGE_NOTE})`
+        : dataStart! > window.to
+          ? `period${periodLabel} predates ${metric} data (starts ${dataStart})`
+          : `period ${periodLabel} is not fully covered by ${metric} data (starts ${dataStart})`;
     return null;
   }
   // dataStart <= window.from: source is complete for the whole interval, so an
@@ -331,16 +380,16 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
   const approvedIds = await approvedProductIds({ includeArchived: true });
   const source = metricSource(metric, companyIds, productId, approvedIds);
 
-  const [dataStart, rawA, rawB, disclosure] = await Promise.all([
-    source.dataStart(),
+  const [starts, rawA, rawB, disclosure] = await Promise.all([
+    source.starts(),
     source.value(periodA),
     source.value(periodB),
     approvalDisclosure(comparisonCensusScope(metric, companyIds, periodA, periodB, productId)),
   ]);
 
   const reasons: Record<string, string> = {};
-  const a = resolvePeriod(rawA, periodA, "a", dataStart, metric, reasons);
-  const b = resolvePeriod(rawB, periodB, "b", dataStart, metric, reasons);
+  const a = resolvePeriod(rawA, periodA, "a", starts, metric, reasons);
+  const b = resolvePeriod(rawB, periodB, "b", starts, metric, reasons);
 
   let delta: number | null = null;
   let pctChange: number | null = null;
@@ -473,14 +522,18 @@ export async function comparePeriodsByProduct(opts: {
   const approvedIds = await approvedProductIds({ includeArchived: true });
   const isSales = metric === "sales_units" || metric === "sales_revenue";
 
-  const [dataStart, aByProduct, bByProduct, excludedUnapprovedProducts] = await Promise.all([
+  const [starts, aByProduct, bByProduct, excludedUnapprovedProducts] = await Promise.all([
+    // FD-1: the SAME coverage source the scalar mode resolves — including the per-company
+    // starts for a sales metric. A degraded window must leave EVERY row's a/b null; a
+    // by_product row carrying a measured 0 under a staggered membership is precisely the
+    // manufactured zero this rule exists to prevent, per product.
     isSales
-      ? salesDataStart(companyIds, undefined, approvedIds)
+      ? salesStarts(companyIds, undefined, approvedIds)
       : ledgerDataStart(
           metric === "outbound_units" ? PHYSICAL_OUTBOUND_WHERE : INBOUND_UNITS_WHERE,
           undefined,
           approvedIds,
-        ),
+        ).then((dataStart) => ({ dataStart })),
     isSales
       ? salesUnitsByProduct(companyIds, approvedIds, periodA, metric === "sales_units" ? "orderedQty" : "revenue")
       : ledgerByProduct(
@@ -500,11 +553,11 @@ export async function comparePeriodsByProduct(opts: {
 
   // Source-level coverage, computed ONCE per period (the erratum's all-or-nothing).
   const reasons: Record<string, string> = {};
-  const coverageA = classifyWindowCoverage(dataStart, periodA.from);
-  const coverageB = classifyWindowCoverage(dataStart, periodB.from);
+  const coverageA = periodCoverage(starts, periodA);
+  const coverageB = periodCoverage(starts, periodB);
   // Reuse the scalar reason vocabulary verbatim: same strings, same meanings.
-  resolvePeriod(null, periodA, "a", dataStart, metric, reasons);
-  resolvePeriod(null, periodB, "b", dataStart, metric, reasons);
+  resolvePeriod(null, periodA, "a", starts, metric, reasons);
+  resolvePeriod(null, periodB, "b", starts, metric, reasons);
 
   // The product universe: everything with a qualifying row in EITHER window.
   const productIds = Array.from(

@@ -29,7 +29,12 @@ jest.mock("@/lib/prisma", () => {
 });
 
 import prisma from "@/lib/prisma";
-import { getMovementSeries, getReceipts, type MovementFilters } from "@/lib/reports/movement";
+import {
+  getMovementSeries,
+  getReceipts,
+  type MovementFilters,
+  type MovementEnvelope,
+} from "@/lib/reports/movement";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 
@@ -490,6 +495,45 @@ describe("G2-4 — MovementFilters<M> pins each envelope's mode at compile time"
     const res = await series({ window: win("2026-07-01", "2026-07-31"), grain: "day" });
     expect(res.filters.mode).toBe(res.mode);
     expect(mismatched.mode).toBe("receipts"); // the value is irrelevant; the pin is above
+  });
+
+  // FD-6: the assertion above only proves a filter echo cannot contradict ITS OWN
+  // annotation. It never touched the pair the contract is actually about — the OUTER
+  // discriminant vs the INNER filters.mode — so an envelope assembled by hand (which is
+  // exactly how the receipts variant is built, in the tool layer) could still declare
+  // `mode: "series"` beside a receipts filter echo and compile. `MovementEnvelope<M>`
+  // binds both to ONE parameter; these are the compile-time assertions for that.
+  it("binds OUTER mode to INNER filters.mode: a mismatched PAIR does not compile", async () => {
+    const receiptsEnvelope: MovementEnvelope<"receipts"> = {
+      mode: "receipts",
+      filters: { productId: null, productIds: null, locationId: null, mode: "receipts" },
+    };
+    const seriesEnvelope: MovementEnvelope<"series"> = {
+      mode: "series",
+      filters: { productId: null, productIds: null, locationId: null, mode: "series" },
+    };
+
+    const mismatchedPair: MovementEnvelope<"series"> = {
+      mode: "series",
+      // @ts-expect-error — OUTER "series" carrying an INNER receipts echo. This is the
+      // pair T4 forbids and the one a hand-assembled envelope can get wrong.
+      filters: receiptsEnvelope.filters,
+    };
+    const mismatchedOther: MovementEnvelope<"receipts"> = {
+      mode: "receipts",
+      // @ts-expect-error — and the mirror image, so neither direction is legal.
+      filters: seriesEnvelope.filters,
+    };
+
+    // The three REAL envelopes satisfy the bound type, each with its own literal.
+    setRows([]);
+    const seriesResult: MovementEnvelope<"series"> = await series({
+      window: win("2026-07-01", "2026-07-31"),
+      grain: "day",
+    });
+    expect(seriesResult.filters.mode).toBe(seriesResult.mode);
+    expect(mismatchedPair.mode).toBe("series"); // values are irrelevant; the pins are above
+    expect(mismatchedOther.mode).toBe("receipts");
   });
 });
 

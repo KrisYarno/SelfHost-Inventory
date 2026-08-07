@@ -853,6 +853,10 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     // dataStart covers both windows => every row is RANKED (measured), unranked empty.
     p.productSalesFact.aggregate.mockResolvedValueOnce({ _min: { dayKey: "2019-01-01" } });
     p.productSalesFact.groupBy
+      // FD-1: compare now classifies sales coverage with the SAME per-company rule
+      // get_sales uses, so the FIRST groupBy is the per-company starts read (by
+      // companyId). One company, sharing the caller-wide start => coverage is undegraded.
+      .mockResolvedValueOnce([{ companyId: "c1", _min: { dayKey: "2019-01-01" } }])
       .mockResolvedValueOnce([
         { productId: 1, _sum: { orderedQty: 10 } },
         { productId: 2, _sum: { orderedQty: 10 } },

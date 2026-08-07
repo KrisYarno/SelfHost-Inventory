@@ -175,6 +175,104 @@ describe("find_product: APPROVED-only + caps", () => {
     expect(data.coverage.identityNote).toContain("never guesses");
   });
 
+  // FD-3: the omission above and PAGING are the same mechanism seen twice. `nextOffset`
+  // was counted in EMITTED rows, so one omitted identity made the cursor point back at a
+  // source row this page already consumed AND stop being a multiple of `limit` — and
+  // `assertPageAligned` REJECTS a non-aligned offset, so the tool handed back a cursor its
+  // own schema refuses. The cursor counts SOURCE rows: the page it names is the next one.
+  it("nextOffset stays a LEGAL, non-overlapping cursor when page 1 omits an identity", async () => {
+    const CATALOG = [1, 2, 3, 4, 5, 6].map((id) => product({ id, name: `Product ${id}` }));
+    // Page-aware source: exactly what getProductsWithQuantities does with page/pageSize.
+    mockGetProducts.mockImplementation(
+      (filters: { page: number; pageSize: number }) => ({
+        products: CATALOG.slice(
+          (filters.page - 1) * filters.pageSize,
+          filters.page * filters.pageSize,
+        ),
+        total: CATALOG.length,
+      }),
+    );
+    // Product #2's lifecycle cannot be read — the row is omitted, never synthesized.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.product.findMany.mockImplementation((args: any) =>
+      Promise.resolve(
+        ((args?.where?.id?.in ?? []) as number[])
+          .filter((id) => id !== 2)
+          .map((id) => ({ id, name: `Product ${id}`, deletedAt: null })),
+      ) as never,
+    );
+
+    const first = await assistantTools.find_product.run({ query: "product", limit: 3 }, CTX);
+    if (first.status !== "ok") throw new Error("page 1 not ok");
+    const page1 = first.data as {
+      products: Array<{ id: number }>;
+      returned: number;
+      totalRows: number;
+      nextOffset: number | null;
+      coverage: { identityMisses: number };
+    };
+
+    // The omission itself is unchanged: two rows, the gap counted.
+    expect(page1.products.map((p) => p.id)).toEqual([1, 3]);
+    expect(page1.returned).toBe(2);
+    expect(page1.coverage.identityMisses).toBe(1);
+    // The cursor names SOURCE rows consumed (3), not emitted rows (2) — and 3 is a legal
+    // page-aligned offset for limit 3, which 2 is not.
+    expect(page1.nextOffset).toBe(3);
+
+    // ...and CALLING it works: the schema's page-alignment assert accepts it, and the
+    // page it returns is the NEXT one — no row repeated, none skipped.
+    const second = await assistantTools.find_product.run(
+      { query: "product", limit: 3, offset: page1.nextOffset! },
+      CTX,
+    );
+    if (second.status !== "ok") throw new Error("page 2 not ok");
+    const page2 = second.data as { products: Array<{ id: number }>; nextOffset: number | null };
+    expect(page2.products.map((p) => p.id)).toEqual([4, 5, 6]);
+    expect(page2.products.map((p) => p.id)).not.toContain(1);
+    expect(page2.products.map((p) => p.id)).not.toContain(3);
+    // Six source rows consumed of six matched: the walk terminates.
+    expect(page2.nextOffset).toBeNull();
+  });
+
+  it("a page of NOTHING BUT omitted rows still advances the cursor (never a stuck walk)", async () => {
+    const CATALOG = [1, 2, 3, 4].map((id) => product({ id, name: `Product ${id}` }));
+    mockGetProducts.mockImplementation((filters: { page: number; pageSize: number }) => ({
+      products: CATALOG.slice((filters.page - 1) * filters.pageSize, filters.page * filters.pageSize),
+      total: CATALOG.length,
+    }));
+    // NOTHING on page 1 resolves; page 2 resolves normally.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.product.findMany.mockImplementation((args: any) =>
+      Promise.resolve(
+        ((args?.where?.id?.in ?? []) as number[])
+          .filter((id) => id > 2)
+          .map((id) => ({ id, name: `Product ${id}`, deletedAt: null })),
+      ) as never,
+    );
+
+    const first = await assistantTools.find_product.run({ query: "product", limit: 2 }, CTX);
+    if (first.status !== "ok") throw new Error("page 1 not ok");
+    const page1 = first.data as {
+      products: unknown[];
+      nextOffset: number | null;
+      coverage: { identityMisses: number };
+    };
+    expect(page1.products).toEqual([]);
+    expect(page1.coverage.identityMisses).toBe(2);
+    // An empty page whose cursor did not move is an infinite walk; it moves past both.
+    expect(page1.nextOffset).toBe(2);
+
+    const second = await assistantTools.find_product.run(
+      { query: "product", limit: 2, offset: page1.nextOffset! },
+      CTX,
+    );
+    if (second.status !== "ok") throw new Error("page 2 not ok");
+    expect((second.data as { products: Array<{ id: number }> }).products.map((p) => p.id)).toEqual([
+      3, 4,
+    ]);
+  });
+
   it("reports identityMisses: 0 on the normal path (a defined field, not a conditional one)", async () => {
     mockGetProducts.mockResolvedValue({ products: [product()], total: 1 });
     const result = await assistantTools.find_product.run({ query: "abc" }, CTX);

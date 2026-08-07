@@ -24,6 +24,7 @@ jest.mock("@/lib/prisma", () => {
 import prisma from "@/lib/prisma";
 import {
   callerScopedSalesCoverage,
+  callerWindowCoverage,
   BUNDLE_REVENUE_DISCLOSURE,
   SALES_ATTRIBUTION_NOTE,
 } from "@/lib/assistant/sales-coverage";
@@ -181,5 +182,124 @@ describe("salesDataStart — the recording boundary, scoped from birth (spec C6 
     const coverage = await callerScopedSalesCoverage([]);
     expect(coverage.salesDataStart).toBeNull();
     expect(db.productSalesFact.aggregate).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD-2 — the per-company detection MATERIALIZES every requested company.
+//
+// The per-company read only returns companies that HAVE facts. A company with none was
+// therefore absent from `companyCoverage` entirely, could not make the set "staggered",
+// and so INHERITED the recording company's start: its window read as fully covered and
+// every silence in it became a MEASURED zero — for a company that never recorded a thing.
+// That is the strongest form of the manufactured zero the per-company rule exists to
+// prevent, and it was the one case the rule did not see.
+// ---------------------------------------------------------------------------
+
+describe("FD-2 companyCoverage — a company with NO facts is a null start, not an absence", () => {
+  /** Seed the per-company groupBy: only the companies listed have facts. */
+  function seedStarts(
+    groups: Array<{ companyId: string; _min: { dayKey: string | null } }>,
+    callerWide: string | null,
+  ) {
+    seed({ unattributed: 0, total: 0 });
+    db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+    db.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: callerWide } } as never);
+    db.productSalesFact.groupBy.mockResolvedValue(groups as never);
+  }
+
+  it("lists the silent company with salesDataStart null and DEGRADES the window", async () => {
+    // c1 has recorded since 2020; c2 has no facts at all.
+    seedStarts([{ companyId: "c1", _min: { dayKey: "2020-01-01" } }], "2020-01-01");
+
+    const coverage = await callerScopedSalesCoverage(["c1", "c2"]);
+
+    expect(coverage.salesDataStart).toBe("2020-01-01");
+    expect(coverage.companyCoverage).toEqual([
+      { companyId: "c1", salesDataStart: "2020-01-01" },
+      { companyId: "c2", salesDataStart: null },
+    ]);
+    // The caller-wide start alone says "full"; the silent company makes it partial —
+    // NOT "none" (c1's data really does cover the window, and saying otherwise would be
+    // its own lie).
+    expect(callerWindowCoverage(coverage, "2026-07-01")).toBe("partial");
+  });
+
+  it("materializes every requested company even when NONE of them recorded", async () => {
+    seedStarts([], null);
+    const coverage = await callerScopedSalesCoverage(["c2", "c1"]);
+    // Sorted by companyId, both present, both null — and the caller-wide verdict is the
+    // honest "none", not a stagger.
+    expect(coverage.companyCoverage).toBeUndefined(); // they SHARE a start (nothing)
+    expect(coverage.salesDataStart).toBeNull();
+    expect(callerWindowCoverage(coverage, "2026-07-01")).toBe("none");
+  });
+
+  it("a single company is never 'staggered' with itself", async () => {
+    seedStarts([{ companyId: "c1", _min: { dayKey: "2020-01-01" } }], "2020-01-01");
+    const coverage = await callerScopedSalesCoverage(["c1"]);
+    expect(coverage.companyCoverage).toBeUndefined();
+    expect(callerWindowCoverage(coverage, "2026-07-01")).toBe("full");
+  });
+
+  it("the per-company read carries the SAME company + approved-id narrowing as the total", async () => {
+    seedStarts([{ companyId: "c1", _min: { dayKey: "2020-01-01" } }], "2020-01-01");
+    await callerScopedSalesCoverage(["c1", "c2"]);
+    const args = db.productSalesFact.groupBy.mock.calls[0][0] as {
+      by: string[];
+      where: { companyId: unknown; productId: unknown };
+      _min: unknown;
+    };
+    expect(args.by).toEqual(["companyId"]);
+    expect(args.where.companyId).toEqual({ in: ["c1", "c2"] });
+    expect(args.where.productId).toEqual({ in: [1] });
+    expect(args._min).toEqual({ dayKey: true });
+  });
+});
+
+describe("FD-2 callerWindowCoverage — the governing start, including the null one", () => {
+  const perCompany = (starts: Array<[string, string | null]>) =>
+    starts.map(([companyId, salesDataStart]) => ({ companyId, salesDataStart }));
+
+  it("a null start governs over any recorded one (mixed => partial)", () => {
+    expect(
+      callerWindowCoverage(
+        {
+          salesDataStart: "2020-01-01",
+          companyCoverage: perCompany([
+            ["c1", "2020-01-01"],
+            ["c2", null],
+          ]),
+        },
+        "2026-07-01",
+      ),
+    ).toBe("partial");
+  });
+
+  it("the LATEST recorded start still governs when every company has one", () => {
+    expect(
+      callerWindowCoverage(
+        {
+          salesDataStart: "2020-01-01",
+          companyCoverage: perCompany([
+            ["c1", "2020-01-01"],
+            ["c2", "2099-01-01"],
+          ]),
+        },
+        "2026-07-01",
+      ),
+    ).toBe("partial");
+    expect(
+      callerWindowCoverage(
+        {
+          salesDataStart: "2020-01-01",
+          companyCoverage: perCompany([
+            ["c1", "2020-01-01"],
+            ["c2", "2021-06-01"],
+          ]),
+        },
+        "2026-07-01",
+      ),
+    ).toBe("full");
   });
 });

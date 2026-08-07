@@ -62,7 +62,11 @@ function setupOps(f: OpsFixtures) {
   m.inventory_logs.groupBy.mockImplementation((args: any) => {
     const w = args.where ?? {};
     if (w.logType === "STOCK_IN" && args._max) return Promise.resolve(f.receiptMax ?? []);
-    if (w.reasonCode?.in && args._sum) return Promise.resolve(f.shrink90 ?? []); // classified shrink90
+    // FD-5: the 90-day shrink read no longer classifies at the SQL boundary. It narrows
+    // to the negative ADJUSTMENT/CORRECTION DOMAIN and carries `reasonCode` in the group
+    // key, so the loss decision happens in JS through the ONE shared rule. The fixture
+    // groups therefore carry a reasonCode — that is what is being classified.
+    if (w.logType?.in && w.delta?.lt === 0 && args._sum) return Promise.resolve(f.shrink90 ?? []);
     if (w.reasonCode === "CORRECTION" && args._count) return Promise.resolve(f.corrections90 ?? []);
     if (w.delta?.gt === 0 && args._max) return Promise.resolve(f.inbound ?? []);
     // OUTBOUND predicate = delta<0 AND logType != TRANSFER.
@@ -279,7 +283,7 @@ describe("getOperationsRows — cost null propagation (review B2 / D-T2)", () =>
     setupOps({
       products: [product({ costPrice: null })],
       adjustmentStart: daysAgo(40),
-      shrink90: [{ productId: 1, _sum: { delta: -4 } }],
+      shrink90: [{ productId: 1, reasonCode: "DAMAGE", _sum: { delta: -4 } }],
     });
     const { rows } = await getOperationsRows({ windowDays: 90 });
     expect(rows[0].shrinkage90).toEqual({ units: 4, valueAtCurrentCostCents: null });
@@ -289,10 +293,29 @@ describe("getOperationsRows — cost null propagation (review B2 / D-T2)", () =>
     setupOps({
       products: [product({ costPrice: 2.5 })], // 250 cents
       adjustmentStart: daysAgo(40),
-      shrink90: [{ productId: 1, _sum: { delta: -4 } }],
+      shrink90: [{ productId: 1, reasonCode: "DAMAGE", _sum: { delta: -4 } }],
     });
     const { rows } = await getOperationsRows({ windowDays: 90 });
     expect(rows[0].shrinkage90).toEqual({ units: 4, valueAtCurrentCostCents: 1000 });
+  });
+
+  // FD-5: shrinkage90 used to be classified by SQL (`reasonCode: { in: [...] }`), which
+  // makes the loss decision a property of the column's COLLATION rather than of the code.
+  // It is a JS decision now, through the same rule every other consumer uses.
+  test("classifies the shrink groups in JS: lowercase reasons count, unrecognised ones do not", async () => {
+    setupOps({
+      products: [product({ costPrice: null })],
+      adjustmentStart: daysAgo(40),
+      shrink90: [
+        { productId: 1, reasonCode: "damage", _sum: { delta: -4 } }, // legacy casing: loss
+        { productId: 1, reasonCode: "THEFT", _sum: { delta: -1 } }, // canonical: loss
+        { productId: 1, reasonCode: null, _sum: { delta: -50 } }, // unclassified: NOT loss
+        { productId: 1, reasonCode: "CORRECTION", _sum: { delta: -9 } }, // not a loss reason
+      ],
+    });
+    const { rows } = await getOperationsRows({ windowDays: 90 });
+    // 4 + 1 — never 64, and never 5-only-if-MySQL-is-case-insensitive.
+    expect(rows[0].shrinkage90).toEqual({ units: 5, valueAtCurrentCostCents: null });
   });
 });
 

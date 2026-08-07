@@ -16,6 +16,7 @@
  */
 
 import prisma from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 import { approvedProductIds } from "@/lib/reports/outbound-mix";
 import { classifyWindowCoverage, type WindowCoverage } from "@/lib/reports/metrics-contract";
 
@@ -71,8 +72,14 @@ export interface CallerScopedSalesCoverage {
    * silence in that company's window would become a MEASURED zero. Presence of this
    * field IS the signal that the starts are staggered; the tool degrades coverage
    * accordingly (see `callerWindowCoverage`).
+   *
+   * FD-2: EVERY requested company appears here, including one with NO facts at all —
+   * as `salesDataStart: null`. A company absent from the per-company read used to be
+   * absent from this list too, so it silently INHERITED the recording company's start
+   * and its window read as fully covered: exactly the manufactured-zero the per-company
+   * rule exists to prevent, in the one case where nothing was ever recorded.
    */
-  companyCoverage?: Array<{ companyId: string; salesDataStart: string }>;
+  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
 }
 
 /** The extra sentence that rides with a staggered-start disclosure (OC-3). */
@@ -93,8 +100,71 @@ export function callerWindowCoverage(
   const base = classifyWindowCoverage(coverage.salesDataStart, windowFrom);
   const perCompany = coverage.companyCoverage;
   if (base !== "full" || perCompany == null || perCompany.length === 0) return base;
-  const latest = perCompany.reduce((a, b) => (a.salesDataStart >= b.salesDataStart ? a : b));
-  return classifyWindowCoverage(latest.salesDataStart, windowFrom);
+  // FD-2: a company with NO facts has no start that could cover anything, so it degrades
+  // the set to "partial" — NOT to "none" (the caller-wide source really does cover the
+  // window for at least one company, and claiming otherwise would be its own lie).
+  if (perCompany.some((c) => c.salesDataStart == null)) return "partial";
+  const starts = perCompany.map((c) => c.salesDataStart as string);
+  const latest = starts.reduce((a, b) => (a >= b ? a : b));
+  return classifyWindowCoverage(latest, windowFrom);
+}
+
+/** Per-company first-fact days plus the caller-wide minimum (OC-3 / FD-2). */
+export interface SalesDataStarts {
+  /** The EARLIEST start across the caller's companies; null when none recorded. */
+  salesDataStart: string | null;
+  /** EVERY requested company, in id order — a company with no facts carries null. */
+  perCompany: Array<{ companyId: string; salesDataStart: string | null }>;
+  /** True when the companies do NOT share one start (a null start counts as different). */
+  staggered: boolean;
+}
+
+/**
+ * `_min(dayKey)` over ProductSalesFact for a caller's companies, BOTH caller-wide and
+ * PER COMPANY, over ONE fact scope (OC-3 / FD-2 / seam S8).
+ *
+ * Exported because `compare_periods` classifies the same sales sources against the same
+ * windows: if it kept using the caller-wide minimum alone, a staggered caller would read
+ * a period as fully covered — and every per-product silence in the late company's window
+ * would become a measured 0 in one tool and a null in the other, over one seeded source.
+ *
+ * `scopeWhere` is the CALLER's own narrowing (approved-id set, optional productId). The
+ * company predicate is applied HERE and cannot be widened by a caller.
+ */
+export async function salesDataStartsByCompany(
+  companyIds: string[],
+  scopeWhere: Prisma.ProductSalesFactWhereInput = {},
+): Promise<SalesDataStarts> {
+  if (companyIds.length === 0) return { salesDataStart: null, perCompany: [], staggered: false };
+  const where: Prisma.ProductSalesFactWhereInput = {
+    ...scopeWhere,
+    companyId: { in: companyIds },
+  };
+  const [row, groups] = await Promise.all([
+    prisma.productSalesFact.aggregate({ where, _min: { dayKey: true } }),
+    // PER-COMPANY starts (OC-3): the earliest day alone cannot tell a caller whose second
+    // company started recording last month that half their window is uncovered there.
+    prisma.productSalesFact.groupBy({
+      by: ["companyId"],
+      where,
+      _min: { dayKey: true },
+    }) as unknown as Promise<Array<{ companyId: string; _min: { dayKey: string | null } }>>,
+  ]);
+  const found = new Map<string, string | null>(
+    (groups ?? []).map((g) => [g.companyId, g?._min?.dayKey ?? null]),
+  );
+  // FD-2: MATERIALIZE every requested company. The read only returns companies that HAVE
+  // facts, so a silent company used to vanish from the disclosure entirely and inherit
+  // the recording company's start.
+  const perCompany = Array.from(new Set(companyIds))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    .map((companyId) => ({ companyId, salesDataStart: found.get(companyId) ?? null }));
+  // "Staggered" = the companies do not share ONE start. A null start (no facts at all) is
+  // a DIFFERENT start, not an absent one: it is the strongest possible degradation.
+  const staggered =
+    perCompany.length > 1 &&
+    perCompany.some((g) => g.salesDataStart !== perCompany[0].salesDataStart);
+  return { salesDataStart: row?._min?.dayKey ?? null, perCompany, staggered };
 }
 
 /**
@@ -189,33 +259,9 @@ export async function callerScopedSalesCoverage(
 async function scopedSalesDataStart(
   companyIds: string[],
   scope: SalesCoverageScope,
-): Promise<{
-  salesDataStart: string | null;
-  perCompany: Array<{ companyId: string; salesDataStart: string }>;
-  staggered: boolean;
-}> {
+): Promise<SalesDataStarts> {
   const approvedIds = await approvedProductIds({
     includeArchived: scope.includeArchived ?? true,
   });
-  const where = { companyId: { in: companyIds }, productId: { in: approvedIds } };
-  const [row, groups] = await Promise.all([
-    prisma.productSalesFact.aggregate({ where, _min: { dayKey: true } }),
-    // PER-COMPANY starts (OC-3): the earliest day alone cannot tell a caller whose second
-    // company started recording last month that half their window is uncovered there.
-    prisma.productSalesFact.groupBy({
-      by: ["companyId"],
-      where,
-      _min: { dayKey: true },
-    }) as unknown as Promise<Array<{ companyId: string; _min: { dayKey: string | null } }>>,
-  ]);
-  const perCompany = (groups ?? [])
-    .filter((g) => g?._min?.dayKey != null)
-    .map((g) => ({ companyId: g.companyId, salesDataStart: g._min.dayKey as string }))
-    .sort((a, b) => (a.companyId < b.companyId ? -1 : a.companyId > b.companyId ? 1 : 0));
-  // A company with NO facts at all has no start to compare, so it cannot make the set
-  // "staggered" — its silence is already the `none`/absent case, not a later start.
-  const staggered =
-    perCompany.length > 1 &&
-    perCompany.some((g) => g.salesDataStart !== perCompany[0].salesDataStart);
-  return { salesDataStart: row?._min?.dayKey ?? null, perCompany, staggered };
+  return salesDataStartsByCompany(companyIds, { productId: { in: approvedIds } });
 }

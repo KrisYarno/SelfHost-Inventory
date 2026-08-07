@@ -24,7 +24,7 @@
  */
 
 import prisma from "@/lib/prisma";
-import { SHRINKAGE_CLASS_REASONS } from "@/lib/reports/metrics-contract";
+import { shrinkageReasonOf } from "@/lib/reports/metrics-contract";
 
 /**
  * The six-bucket outbound composition (spec C12 / contract pack T1). ABSOLUTE unit
@@ -39,9 +39,6 @@ export interface OutboundMix {
   countOut: number;
   stockInReversal: number;
 }
-
-/** Shrinkage-class reasons as a membership set (the shared taxonomy). */
-const SHRINKAGE_SET: ReadonlySet<string> = new Set(SHRINKAGE_CLASS_REASONS as readonly string[]);
 
 /** A ledger row reduced to the fields the classifier reads. */
 export interface OutboundRow {
@@ -95,11 +92,12 @@ export function outboundBucketOf(row: OutboundRow): keyof OutboundMix {
         "filter to outbound rows before classifying (precondition: delta < 0 AND logType != TRANSFER)",
     );
   }
-  // OC-9: the membership set is UPPERCASE, so a reasonCode that differs only in case
-  // ("damage" from an import, a hand-written adjustment) would fall through to the
-  // unclassified bucket — a real classified loss reported as unclassified depletion.
-  // Normalize the LOOKUP, never the row: the value the ledger stores is untouched.
-  const reasonCode = row.reasonCode == null ? null : row.reasonCode.toUpperCase();
+  // OC-9 / FD-5: the membership set is UPPERCASE, so a reasonCode that differs only in
+  // case ("damage" from an import, a hand-written adjustment) would fall through to the
+  // unclassified bucket — a real classified loss reported as unclassified depletion. The
+  // decision routes through the ONE shared rule (`shrinkageReasonOf`), which normalizes
+  // the LOOKUP and never the row: the value the ledger stores is untouched.
+  const classifiedLoss = shrinkageReasonOf(row.reasonCode) != null;
   switch (row.logType) {
     case "SALE":
       return "sale";
@@ -110,13 +108,9 @@ export function outboundBucketOf(row: OutboundRow): keyof OutboundMix {
     case "COUNT":
       return "countOut";
     case "ADJUSTMENT":
-      return reasonCode != null && SHRINKAGE_SET.has(reasonCode)
-        ? "classifiedLoss"
-        : "adjustmentUnclassified";
+      return classifiedLoss ? "classifiedLoss" : "adjustmentUnclassified";
     case "CORRECTION":
-      return reasonCode != null && SHRINKAGE_SET.has(reasonCode)
-        ? "classifiedLoss"
-        : "correctionUnclassified";
+      return classifiedLoss ? "classifiedLoss" : "correctionUnclassified";
     default:
       // Unreachable for real rows (logType is the Prisma enum inventory_logs_logType).
       // Mirrors movement.ts's negative-side default so the two can never diverge.
