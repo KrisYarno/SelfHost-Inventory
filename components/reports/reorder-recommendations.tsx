@@ -33,11 +33,24 @@ const URGENCY_CONFIG: Record<
   CRITICAL: { label: "Critical", variant: "destructive", rank: 3 },
   REORDER_NOW: { label: "Reorder now", variant: "warning", rank: 2 },
   APPROACHING: { label: "Approaching", variant: "secondary", rank: 1 },
+  // OK is an ASSISTANT-only outcome (spec C11 / OC-16): this page pins includeOkay:true,
+  // never sets includeHealthy, and its urgency filter has no OK option — so no OK row
+  // can reach this table. The entry exists to satisfy the exhaustive Record; web
+  // behavior is UNCHANGED.
+  OK: { label: "Healthy", variant: "secondary", rank: 0 },
 };
 
-const REASON_LABEL: Record<"no_demand_signal" | "insufficient_history", string> = {
+const REASON_LABEL: Record<
+  "no_demand_signal" | "insufficient_history" | "not_active" | "unknown_id",
+  string
+> = {
   no_demand_signal: "No demand signal — no outbound movement to base a suggestion on",
   insufficient_history: "Insufficient history — too few movements to stand behind a number",
+  // The two requested-id reasons (spec C11). Assistant-only in practice — this page
+  // never passes productIds — but the lookup is exhaustive, so they are spelled out
+  // rather than left to crash a future caller.
+  not_active: "Not an active product — archived, so its history remains but it is never sized",
+  unknown_id: "Unknown product id — no approved product matched it",
 };
 
 const currency = new Intl.NumberFormat("en-US", {
@@ -76,7 +89,7 @@ export function ReorderRecommendations() {
   );
 
   const counts = useMemo(() => {
-    const c: Record<ReorderUrgency, number> = { OUT: 0, CRITICAL: 0, REORDER_NOW: 0, APPROACHING: 0 };
+    const c: Record<ReorderUrgency, number> = { OUT: 0, CRITICAL: 0, REORDER_NOW: 0, APPROACHING: 0, OK: 0 };
     for (const r of suggested) c[r.urgency] += 1;
     return c;
   }, [suggested]);
@@ -286,8 +299,11 @@ export function ReorderRecommendations() {
                 <TableBody>
                   {unavailable.map((r) => (
                     <TableRow key={r.productId}>
-                      <TableCell className="font-medium">{r.productName}</TableCell>
-                      <TableCell className="text-right">{r.currentStock}</TableCell>
+                      {/* An unknown id has no name and a non-active product has no
+                          current stock this report can stand behind — render the blank
+                          rather than a fabricated placeholder (spec C11). */}
+                      <TableCell className="font-medium">{r.productName ?? "—"}</TableCell>
+                      <TableCell className="text-right">{r.currentStock ?? "—"}</TableCell>
                       <TableCell className="text-muted-foreground text-sm">{REASON_LABEL[r.reason]}</TableCell>
                     </TableRow>
                   ))}

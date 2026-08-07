@@ -65,12 +65,15 @@ export const GET = apiHandler(async (_request: NextRequest) => {
   for (const r of report.rows) {
     if (r.status === "unavailable") {
       // Excluded product: state + reason filled, every number left blank (truthful).
+      // The requested-id variants (spec C11) carry a NULL name (unknown_id) and a NULL
+      // currentStock (not_active / unknown_id) — both render as an EMPTY cell, never as
+      // "null" text and never as a 0 a reader would take for a real on-hand figure.
       rows.push([
-        r.productName,
+        r.productName ?? "",
         "unavailable",
         r.reason,
         "",
-        r.currentStock,
+        r.currentStock ?? "",
         "", "", "", "", "", "", "", "", "", "", "",
       ]);
     } else {

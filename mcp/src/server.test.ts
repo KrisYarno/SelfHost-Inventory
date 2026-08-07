@@ -76,6 +76,8 @@ import { RateLimiter } from "./rate-limit";
 import { assistantTools } from "@/lib/assistant/tools";
 import { registerMcpTools } from "@/lib/assistant/tool-adapters";
 import { recordAssistantRun } from "@/lib/assistant/telemetry";
+// The tsup MCP_BUILD_MOCK stand-in, imported ONLY to compare its surface (Task 2.6).
+import prismaMock from "./prisma-mock";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const p: any = prisma;
@@ -594,6 +596,10 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     p.product.findUnique.mockResolvedValue(null);
     p.productSalesFact.groupBy.mockReset();
     p.productSalesFact.groupBy.mockResolvedValue([]);
+    // Task 2.2 owns this one: get_sales' coverage now reads salesDataStart through
+    // productSalesFact.aggregate, so it must be per-test isolated like the rest.
+    p.productSalesFact.aggregate.mockReset();
+    p.productSalesFact.aggregate.mockResolvedValue({ _min: {}, _max: {}, _sum: {}, _count: {} });
     p.externalOrder.count.mockReset();
     p.externalOrder.count.mockResolvedValue(0);
     p.inventory_logs.findMany.mockReset();
@@ -776,6 +782,313 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     // The NORMATIVE invariant, asserted on the wire payload itself.
     const c = toolResult.data.coverage;
     expect(c.suggested + c.unavailable + c.healthy + c.approachingOmitted).toBe(c.total);
+  });
+
+  it("get_sales: coverage carries salesDataStart + windowCoverage + rowsNote (C6)", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    p.product.findMany.mockResolvedValue([{ id: 1, name: "TIRZ 10mg" }]); // approved-id set + names
+    p.productSalesFact.aggregate.mockResolvedValueOnce({ _min: { dayKey: "2019-01-01" } });
+
+    const toolResult = await roundTrip("get_sales", { groupBy: "product" });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.coverage.salesDataStart).toBe("2019-01-01");
+    // The window is the default last-30-days, well after 2019 => the source covers it.
+    expect(toolResult.data.coverage.windowCoverage).toBe("full");
+    expect(toolResult.data.coverage.rowsNote).toContain("includeZeroRows");
+    // G5 FROM BIRTH: the dataStart aggregate is narrowed by the approved-id set.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const aggArgs = p.productSalesFact.aggregate.mock.calls[0][0] as any;
+    expect(aggArgs.where.productId).toEqual({ in: [1] });
+  });
+
+  it("get_sales includeZeroRows: a silent product is a MEASURED zero row on the wire (C6)", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    p.productSalesFact.aggregate.mockResolvedValueOnce({ _min: { dayKey: "2019-01-01" } });
+    // Product 7 sold; product 8 did not. Both are approved+active.
+    p.productSalesFact.groupBy.mockImplementation(async (args: Record<string, unknown>) =>
+      args._min
+        ? [] // the post-pagination firstSaleDayKey lookup: no facts for the zero row
+        : [{ productId: 7, _sum: { orderedQty: 12, revenue: "24.00", orderCount: 3 } }],
+    );
+    p.product.findMany.mockResolvedValue([
+      { id: 7, name: "Sold", deletedAt: null },
+      { id: 8, name: "Silent", deletedAt: null },
+    ]);
+
+    const toolResult = await roundTrip("get_sales", { groupBy: "product", includeZeroRows: true });
+    expect(toolResult.status).toBe("ok");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const byId = Object.fromEntries((toolResult.data.rows as any[]).map((r) => [r.productId, r]));
+    expect(byId[7]._sum.orderedQty).toBe(12);
+    // The C6 payoff: an ABSENT product becomes a MEASURED zero (full coverage), named,
+    // tagged, with no fabricated reason — and firstSaleDayKey null as honest evidence.
+    expect(byId[8]).toEqual({
+      productId: 8,
+      name: "Silent",
+      lifecycle: "active",
+      _sum: { orderedQty: 0, revenue: "0.00", orderCount: 0 },
+      firstSaleDayKey: null,
+    });
+    expect(toolResult.data.totalRows).toBe(2);
+  });
+
+  it("get_sales includeZeroRows at the wrong grain is rejected with a self-correcting hint (G1)", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    const toolResult = await roundTrip("get_sales", { groupBy: "day", includeZeroRows: true });
+    expect(toolResult.status).toBe("error");
+    expect(toolResult.code).toBe("TOOL_ERROR");
+    expect(toolResult.hint).toContain("includeZeroRows requires groupBy:'product'");
+  });
+
+  it("compare_periods by_product: server-ranked per-product deltas on the wire (C9)", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    // dataStart covers both windows => every row is RANKED (measured), unranked empty.
+    p.productSalesFact.aggregate.mockResolvedValueOnce({ _min: { dayKey: "2019-01-01" } });
+    p.productSalesFact.groupBy
+      .mockResolvedValueOnce([
+        { productId: 1, _sum: { orderedQty: 10 } },
+        { productId: 2, _sum: { orderedQty: 10 } },
+      ])
+      .mockResolvedValueOnce([
+        { productId: 1, _sum: { orderedQty: 40 } }, // +30
+        { productId: 2, _sum: { orderedQty: 4 } }, // -6
+      ])
+      .mockResolvedValueOnce([]); // post-pagination firstSaleDayKey lookup
+    p.product.findMany.mockResolvedValue([
+      { id: 1, name: "Grower", deletedAt: null },
+      { id: 2, name: "Decliner", deletedAt: null },
+    ]);
+
+    const toolResult = await roundTrip("compare_periods", {
+      metric: "sales_units",
+      periodA: { relativeDays: 30 },
+      periodB: { relativeDays: 30 },
+      groupBy: "product",
+    });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.mode).toBe("by_product");
+    // Ranked SERVER-side by |delta| desc — the model never does this arithmetic.
+    expect(toolResult.data.rows.map((r: { productId: number }) => r.productId)).toEqual([1, 2]);
+    expect(toolResult.data.rows[0].delta).toBe(30);
+    expect(toolResult.data.rows[0].name).toBe("Grower");
+    expect(toolResult.data.rows[0].lifecycle).toBe("active");
+    expect(toolResult.data.rows[1].delta).toBe(-6);
+    expect(toolResult.data.totalRows).toBe(2);
+    // Full coverage => nothing unknown-base, and the coverage says so machine-readably.
+    expect(toolResult.data.unranked).toEqual([]);
+    expect(toolResult.data.coverage.periodCoverage).toEqual({ a: "full", b: "full" });
+    expect(toolResult.data.coverage.unrankedNote).toContain("COVERAGE artifact");
+  });
+
+  it("compare_periods totals mode gains its `mode` discriminant (ADDITIVE, C9)", async () => {
+    p.inventory_logs.aggregate
+      .mockResolvedValueOnce({ _min: { changeTime: new Date("2020-01-01T00:00:00.000Z") } })
+      .mockResolvedValueOnce({ _sum: { delta: -10 } })
+      .mockResolvedValueOnce({ _sum: { delta: -25 } });
+
+    const toolResult = await roundTrip("compare_periods", {
+      metric: "outbound_units",
+      periodA: { relativeDays: 30 },
+      periodB: { relativeDays: 30 },
+    });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.mode).toBe("totals");
+    expect(toolResult.data.a).toBe(10);
+    expect(toolResult.data.b).toBe(25);
+  });
+
+  it("get_movement_series breakdownBy:'product': per-product rows + a rejected-id echo (C10)", async () => {
+    // Approved catalog = {1, 2}; id 4242 does not exist. The batch resolver and the
+    // identity map both read product.findMany, so the mock honors the id filter.
+    p.product.findMany.mockImplementation(async (args: Record<string, unknown>) => {
+      const where = (args.where ?? {}) as { id?: { in: number[] } };
+      const catalog = [
+        { id: 1, name: "Shipper", deletedAt: null },
+        { id: 2, name: "Silent", deletedAt: null },
+      ];
+      return where.id?.in ? catalog.filter((c) => where.id!.in.includes(c.id)) : catalog;
+    });
+    p.inventory_logs.findMany.mockResolvedValueOnce([
+      { productId: 1, delta: -12, logType: "SALE", reasonCode: null },
+      { productId: 1, delta: 4, logType: "SALE", reasonCode: null }, // a return
+    ]);
+
+    const toolResult = await roundTrip("get_movement_series", {
+      breakdownBy: "product",
+      productIds: [1, 2, 4242],
+    });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.mode).toBe("by_product");
+    // filters echoes the REAL scope of the rows — the RESOLVED ids. The unresolvable
+    // one is accounted for in coverage.requested below, never smuggled into the scope
+    // echo (which would claim the result covers a product it never read).
+    expect(toolResult.data.filters).toEqual({
+      productId: null,
+      productIds: [1, 2],
+      locationId: null,
+      mode: "by_product",
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const byId = Object.fromEntries((toolResult.data.rows as any[]).map((r) => [r.productId, r]));
+    // Sign-first: the 4-unit return does NOT cancel the 12 units that shipped.
+    expect(byId[1].outboundUnits).toBe(12);
+    expect(byId[1].sale).toBe(-8); // the SIGNED bucket still nets out honestly
+    expect(byId[1].name).toBe("Shipper");
+    expect(byId[1].lifecycle).toBe("active");
+    // The requested-but-silent product is an ALL-ZERO row, not an absence.
+    expect(byId[2].outboundUnits).toBe(0);
+    expect(byId[2].net).toBe(0);
+    // The unresolvable id is ECHOED, never silently dropped.
+    expect(toolResult.data.coverage.requested).toEqual({
+      requested: 3,
+      resolved: 2,
+      rejected: [{ productId: 4242, reason: "unknown_id" }],
+    });
+  });
+
+  it("get_movement_series productIds WITHOUT breakdownBy is rejected with a hint (C10 narrowing)", async () => {
+    const toolResult = await roundTrip("get_movement_series", { productIds: [1, 2] });
+    expect(toolResult.status).toBe("error");
+    expect(toolResult.code).toBe("TOOL_ERROR");
+    expect(toolResult.hint).toContain("requires breakdownBy:'product'");
+  });
+
+  it("get_operations: outboundMix30 decomposes unitsOut30 on the wire (C12)", async () => {
+    p.product.findMany.mockResolvedValueOnce([
+      { id: 1, name: "TIRZ", costPrice: null, lowStockThreshold: null, product_locations: [{ quantity: 40 }] },
+    ]);
+    // The ONE regrouped 30-day read: (productId, logType, reasonCode) groups. Every other
+    // groupBy on this delegate stays benign, so the mix here is the only seeded source.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    p.inventory_logs.groupBy.mockImplementation(async (args: any) => {
+      if ((args?.by ?? []).length === 3) {
+        return [
+          { productId: 1, logType: "SALE", reasonCode: null, _sum: { delta: -4 }, _min: { changeTime: new Date(Date.now() - 10 * 86_400_000) } },
+          { productId: 1, logType: "ADJUSTMENT", reasonCode: null, _sum: { delta: -16 }, _min: { changeTime: new Date(Date.now() - 5 * 86_400_000) } },
+        ];
+      }
+      return [];
+    });
+
+    const toolResult = await roundTrip("get_operations", { windowDays: 30 });
+    expect(toolResult.status).toBe("ok");
+    const row = toolResult.data.rows[0];
+    expect(row.unitsOut30).toBe(20);
+    // The review-F2 shape, made visible: only 4 of 20 depleted units were a SALE row.
+    expect(row.outboundMix30).toEqual({
+      sale: 4,
+      classifiedLoss: 0,
+      adjustmentUnclassified: 16,
+      correctionUnclassified: 0,
+      countOut: 0,
+      stockInReversal: 0,
+    });
+    // NORMATIVE (spec C12), asserted on the wire payload itself.
+    const mix = row.outboundMix30 as Record<string, number>;
+    expect(Object.values(mix).reduce((a, b) => a + b, 0)).toBe(row.unitsOut30);
+    // The definition string relayed beside it now points at the mix FIELDS.
+    expect(toolResult.data.velocityDefinition).toContain("outboundMix30");
+  });
+
+  it("reorder_report: demandUnits + demandMix ride with the rate they explain (C12)", async () => {
+    p.product.findMany.mockResolvedValueOnce([
+      { id: 1, name: "A", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
+    ]);
+    const recent = (d: number) => new Date(Date.now() - d * 86_400_000);
+    // reorderDemand's ONE findMany: the mix is composed from these very rows.
+    p.inventory_logs.findMany.mockResolvedValueOnce([
+      { productId: 1, delta: -2, changeTime: recent(6), logType: "SALE", reasonCode: null },
+      { productId: 1, delta: -5, changeTime: recent(4), logType: "ADJUSTMENT", reasonCode: null },
+      { productId: 1, delta: -3, changeTime: recent(2), logType: "ADJUSTMENT", reasonCode: "DAMAGE" },
+    ]);
+
+    const toolResult = await roundTrip("reorder_report", {});
+    expect(toolResult.status).toBe("ok");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const row = (toolResult.data.rows as any[]).find((r) => r.status === "suggested");
+    expect(row).toBeDefined();
+    expect(row.demandUnits).toBe(10);
+    expect(row.demandMix).toEqual({
+      sale: 2,
+      classifiedLoss: 3,
+      adjustmentUnclassified: 5,
+      correctionUnclassified: 0,
+      countOut: 0,
+      stockInReversal: 0,
+    });
+    expect(Object.values(row.demandMix as Record<string, number>).reduce((a, b) => a + b, 0)).toBe(
+      row.demandUnits,
+    );
+  });
+
+  it("reorder_report productIds: OK row + not_active/unknown_id rows + requested accounting (C11)", async () => {
+    // Approved catalog: 1 (active, healthy) and 9 (archived). 4242 does not exist.
+    p.product.findMany.mockImplementation(async (args: Record<string, unknown>) => {
+      const where = (args.where ?? {}) as { id?: { in: number[] }; deletedAt?: null };
+      const select = (args.select ?? {}) as { product_locations?: boolean };
+      const catalog = [
+        { id: 1, name: "Healthy One", deletedAt: null },
+        { id: 9, name: "Archived Product", deletedAt: new Date("2026-01-01T00:00:00.000Z") },
+      ];
+      let rows = catalog;
+      if (where.deletedAt === null) rows = rows.filter((c) => c.deletedAt == null);
+      if (where.id?.in) rows = rows.filter((c) => where.id!.in.includes(c.id));
+      if (select.product_locations) {
+        // The population read: stock far above the reorder point => FINAL urgency null.
+        return rows.map((c) => ({
+          id: c.id,
+          name: c.name,
+          costPrice: null,
+          product_locations: [{ quantity: 5000 }],
+          reorderConfig: null,
+        }));
+      }
+      return rows;
+    });
+    const recent = (d: number) => new Date(Date.now() - d * 86_400_000);
+    p.inventory_logs.findMany.mockResolvedValueOnce([
+      { productId: 1, delta: -1, changeTime: recent(3), logType: "SALE", reasonCode: null },
+      { productId: 1, delta: -1, changeTime: recent(2), logType: "SALE", reasonCode: null },
+      { productId: 1, delta: -1, changeTime: recent(1), logType: "SALE", reasonCode: null },
+    ]);
+
+    const toolResult = await roundTrip("reorder_report", { productIds: [1, 9, 4242] });
+    expect(toolResult.status).toBe("ok");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const byId = Object.fromEntries((toolResult.data.rows as any[]).map((r) => [r.productId, r]));
+    // A requested HEALTHY product answers with real numbers under urgency OK.
+    expect(byId[1].status).toBe("suggested");
+    expect(byId[1].urgency).toBe("OK");
+    expect(typeof byId[1].grossReplenishmentNeed).toBe("number");
+    // The archived id is NAMED but never sized.
+    expect(byId[9]).toEqual({
+      status: "unavailable",
+      productId: 9,
+      productName: "Archived Product",
+      currentStock: null,
+      reason: "not_active",
+    });
+    // The unknown id carries NO fabricated fields.
+    expect(byId[4242]).toEqual({
+      status: "unavailable",
+      productId: 4242,
+      productName: null,
+      currentStock: null,
+      reason: "unknown_id",
+    });
+    // Accounting: the two non-population rows live ONLY in `requested`...
+    expect(toolResult.data.coverage.requested).toEqual({ requested: 3, notActive: 1, unknownIds: 1 });
+    expect(toolResult.data.coverage.unavailable).toBe(0);
+    // ...so the C5 invariant still holds on the wire.
+    const c = toolResult.data.coverage;
+    expect(c.suggested + c.unavailable + c.healthy + c.approachingOmitted).toBe(c.total);
+    expect(c.total).toBe(1); // only the resolved-ACTIVE product
+  });
+
+  it("reorder_report with an EMPTY productIds array is rejected with a hint (G1)", async () => {
+    const toolResult = await roundTrip("reorder_report", { productIds: [] });
+    expect(toolResult.status).toBe("error");
+    expect(toolResult.hint).toContain("productIds must not be empty");
   });
 
   it("low_stock_report: thresholdSource comes from the RAW override, not equality (C8)", async () => {
@@ -1048,5 +1361,37 @@ describe("start() disabled mode", () => {
       if (originalPort === undefined) delete process.env.MCP_PORT;
       else process.env.MCP_PORT = originalPort;
     }
+  });
+});
+
+describe("MCP mock-layer parity (Task 2.6 consolidation — seam S12/CP-7)", () => {
+  // WHY THIS IS STRUCTURAL, not another round-trip: the jest round-trips above run
+  // against the INLINE mock, so they physically cannot detect a method missing from
+  // mcp/src/prisma-mock.ts — the tsup MCP_BUILD_MOCK bundle's stand-in. The two layers
+  // drift silently, and the first symptom is the SHIPPED artifact failing on a tool
+  // every test suite says is green. So: compare the method SETS directly.
+  const delegateShape = (client: Record<string, unknown>): Record<string, string[]> =>
+    Object.fromEntries(
+      Object.entries(client)
+        .filter(([, value]) => value !== null && typeof value === "object")
+        .map(([model, value]) => [model, Object.keys(value as object).sort()]),
+    );
+
+  const rootFunctions = (client: Record<string, unknown>): string[] =>
+    Object.entries(client)
+      .filter(([, value]) => typeof value === "function")
+      .map(([key]) => key)
+      .sort();
+
+  it("the built-bundle mock exposes EXACTLY the inline mock's model+method surface", () => {
+    expect(delegateShape(prismaMock as Record<string, unknown>)).toEqual(
+      delegateShape(p as Record<string, unknown>),
+    );
+  });
+
+  it("...and the same root-level client functions ($queryRaw et al)", () => {
+    expect(rootFunctions(prismaMock as Record<string, unknown>)).toEqual(
+      rootFunctions(p as Record<string, unknown>),
+    );
   });
 });

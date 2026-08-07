@@ -51,20 +51,26 @@ import {
   getLowStockDefault,
   isLowStock,
 } from "@/lib/stock-threshold";
-import { resolveWindow } from "@/lib/assistant/window";
-import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
-import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
+import { resolveWindow, type ResolvedWindow } from "@/lib/assistant/window";
+import { resolveAssistantProduct, resolveAssistantProducts } from "@/lib/assistant/resolve-product";
+import { callerScopedSalesCoverage, SALES_ROWS_NOTE } from "@/lib/assistant/sales-coverage";
+import { classifyWindowCoverage, type WindowCoverage } from "@/lib/reports/metrics-contract";
+import { approvedProductIds, productIdentities } from "@/lib/reports/outbound-mix";
 // Wave-1 breadth modules (W1-VAL/MOVE/SUM/POL/FRESH) — each is a self-contained,
 // Next-free data layer; this file is the ONLY place they are wired into a tool.
 import { getValuation } from "@/lib/analytics/valuation";
-import { getMovementSeries, getReceipts } from "@/lib/reports/movement";
+import { getMovementSeries, getReceipts, getMovementByProduct } from "@/lib/reports/movement";
 import { getInventorySummary } from "@/lib/reports/inventory-summary";
 import { getPolicy } from "@/lib/reports/policy";
 import { getFreshness } from "@/lib/assistant/freshness";
 // Wave-2 breadth modules (W2-ASOF/CMP/ORD, + W2-RCPT extends movement above) — each
 // is a self-contained, Next-free data layer wired into a tool ONLY here.
 import { getStockAsOf } from "@/lib/analytics/stock-asof";
-import { comparePeriods } from "@/lib/reports/compare-periods";
+import {
+  comparePeriods,
+  comparePeriodsByProduct,
+  type ComparePeriodsProductRow,
+} from "@/lib/reports/compare-periods";
 import { getOrderPipeline, type OrderPipelineGroupBy } from "@/lib/reports/order-pipeline";
 // Wave-3 composites (W3-A): server-side composition over the W1/W2 module functions.
 // TOOL_SCOPES stays "global"; each result carries meta.scope "mixed" (its sales/order
@@ -199,6 +205,21 @@ const SUMMARY_RANK_MAX = 50;
 // get_movement_series receipts-detail page — both paginated at the tool boundary.
 const STOCK_ASOF_MAX = 100;
 const RECEIPTS_MAX = 100;
+// compare_periods by_product page (spec C9): max 100 rows, default 25 — the two arrays
+// share ONE byte budget, so the default stays modest.
+const COMPARE_ROWS_MAX = 100;
+const COMPARE_ROWS_DEFAULT = 25;
+// The ranked array's share of the JOINT byte budget (G2-8). The measured REMAINDER goes
+// to `unranked`; the two are never both non-empty (coverage is all-or-nothing), so this
+// split only ever decides how much of the budget the ONE populated array may use.
+const COMPARE_RANKED_BUDGET_SHARE = 0.7;
+// get_movement_series breakdown (spec C10): the bounded batch cap and the per-product
+// page size. A batch is BOUNDED on purpose — an unbounded id list is how a caller
+// would rebuild the catalog scan the breakdown exists to replace.
+const MOVEMENT_BATCH_MAX = 20;
+const MOVEMENT_BREAKDOWN_MAX = 100;
+// reorder_report named-product sizing (spec C11) — bounded like the movement batch.
+const REORDER_BATCH_MAX = 20;
 // DB-level `take` for the snapshot series rows. Reconciled with the budget (D-T7): a
 // point serializes to ~52 bytes, so 1000 points ≈ 51 KiB < the reserved row-page budget
 // (per-tool cap − envelope reserve ≈ 56 KiB) < the per-tool cap (64 KiB) < the turn
@@ -254,6 +275,141 @@ function assertWindow(from?: string, to?: string): void {
   if (toMs - fromMs > (MAX_WINDOW_DAYS - 1) * DAY_MS) {
     throw new z.ZodError([
       { code: z.ZodIssueCode.custom, path: ["to"], message: `date window must be <= ${MAX_WINDOW_DAYS} day-keys` },
+    ]);
+  }
+}
+
+/**
+ * `includeZeroRows` legality (spec C6, G1): the flag synthesises ONE ROW PER PRODUCT,
+ * so it is meaningless at any other grain (a "zero day" is not a thing this tool can
+ * enumerate) and self-contradictory beside a productId (a single-product call already
+ * knows its answer is about one product). Enforced OUTSIDE the object schema so the
+ * schema stays a plain ZodObject for MCP registerTool.
+ */
+function assertZeroRowsGrain(includeZeroRows: boolean | undefined, groupBy: string, productId?: number): void {
+  if (!includeZeroRows) return;
+  if (groupBy !== "product") {
+    throw new z.ZodError([
+      {
+        code: z.ZodIssueCode.custom,
+        path: ["includeZeroRows"],
+        message: "includeZeroRows requires groupBy:'product' (it emits one row per product)",
+      },
+    ]);
+  }
+  if (productId != null) {
+    throw new z.ZodError([
+      {
+        code: z.ZodIssueCode.custom,
+        path: ["includeZeroRows"],
+        message: "includeZeroRows is catalog-wide: omit productId (a product-scoped call has no zero rows to add)",
+      },
+    ]);
+  }
+}
+
+/**
+ * compare_periods grain legality (spec C9, G1). `groupBy:'product'` answers "WHICH
+ * products moved", so a productId (which already narrows to one) contradicts it; and
+ * `direction`/`limit`/`offset` only mean anything against a ranked ROW SET, so passing
+ * them without groupBy would silently do nothing.
+ */
+function assertCompareGrain(args: {
+  groupBy?: string;
+  productId?: number;
+  direction?: string;
+  limit?: number;
+  offset?: number;
+}): void {
+  if (args.groupBy != null && args.productId != null) {
+    throw new z.ZodError([
+      {
+        code: z.ZodIssueCode.custom,
+        path: ["groupBy"],
+        message:
+          "groupBy:'product' and productId are mutually exclusive: omit productId for per-product deltas across the catalog",
+      },
+    ]);
+  }
+  if (args.groupBy == null) {
+    for (const [key, value] of [
+      ["direction", args.direction],
+      ["limit", args.limit],
+      ["offset", args.offset],
+    ] as const) {
+      if (value != null) {
+        throw new z.ZodError([
+          {
+            code: z.ZodIssueCode.custom,
+            path: [key],
+            message: `${key} requires groupBy:'product' (totals mode returns a single comparison, not a row set)`,
+          },
+        ]);
+      }
+    }
+  }
+}
+
+/**
+ * get_movement_series mode legality (spec C10, G1). All four rules run BEFORE the
+ * receipts branch, so an illegal combination is rejected with a self-correcting hint
+ * instead of silently taking whichever branch happens to be checked first.
+ *
+ * The last rule is the REV-4 narrowing: `productIds` REQUIRES `breakdownBy:'product'`.
+ * Series-mode narrowing has no defined execution path, and a bare `productIds` that
+ * silently returned WHOLE-CATALOG aggregates would be the worst possible failure —
+ * a catalog answer wearing a bounded-set label.
+ */
+function assertMovementModes(args: {
+  breakdownBy?: string;
+  groupBy?: string;
+  receipts?: boolean;
+  productId?: number;
+  productIds?: number[];
+}): void {
+  const reject = (path: string, message: string): never => {
+    throw new z.ZodError([{ code: z.ZodIssueCode.custom, path: [path], message }]);
+  };
+  if (args.breakdownBy != null && args.groupBy != null) {
+    reject(
+      "breakdownBy",
+      "breakdownBy:'product' and groupBy are mutually exclusive: the breakdown is per PRODUCT, groupBy is per time grain",
+    );
+  }
+  if (args.breakdownBy != null && args.receipts) {
+    reject(
+      "breakdownBy",
+      "breakdownBy:'product' and receipts:true are mutually exclusive: receipts is a per-EVENT listing, not a partition",
+    );
+  }
+  if (args.productId != null && args.productIds != null) {
+    reject(
+      "productIds",
+      "productId and productIds are mutually exclusive: pass productIds alone for a bounded set",
+    );
+  }
+  if (args.productIds != null && args.breakdownBy !== "product") {
+    reject(
+      "productIds",
+      "productIds requires breakdownBy:'product' (without it the result would be a whole-catalog aggregate, not your set)",
+    );
+  }
+}
+
+/**
+ * reorder_report `productIds` legality (spec C11, G1). An EMPTY array is rejected
+ * rather than silently treated as "no filter": the two mean opposite things (an empty
+ * requested set vs the whole catalog), and guessing which one the caller meant is
+ * exactly how a bounded question gets answered with a catalog-wide worklist.
+ */
+function assertReorderProductIds(productIds: number[] | undefined): void {
+  if (productIds != null && productIds.length === 0) {
+    throw new z.ZodError([
+      {
+        code: z.ZodIssueCode.custom,
+        path: ["productIds"],
+        message: "productIds must not be empty: omit it entirely for the whole approved-active population",
+      },
     ]);
   }
 }
@@ -614,6 +770,312 @@ async function shapeSalesRows(
   }
 }
 
+/**
+ * The zero-sales row (spec C6). A product with no attributed fact in the window is
+ * either a MEASURED zero or an UNKNOWN, and WHICH ONE is decided by the source, never
+ * by the row: only a window the sales source fully covers can turn silence into `0`.
+ */
+type ZeroSalesRow = {
+  productId: number;
+  name: string | null;
+  lifecycle: "active" | "deleted" | null;
+  _sum: { orderedQty: number | null; revenue: string | null; orderCount: number | null };
+  firstSaleDayKey: string | null;
+  reason?: string;
+};
+
+/**
+ * Append one row per approved product that has NO attributed sales fact in the window.
+ *
+ * Population (OC-6): SELF-CONTAINED — the approved ACTIVE catalog. Archived-approved
+ * products join it in Task 3.2 (SEAMS: the historical-fact policy row says they belong
+ * here, tagged; W2 ships the active-only half so nothing is emitted untagged).
+ *
+ * Names + lifecycle come from `productIdentities` — the ONE identity lookup — so no
+ * caller ever hardcodes a lifecycle value.
+ */
+async function withZeroSalesRows(
+  rows: object[],
+  salesDataStart: string | null,
+  windowCoverage: WindowCoverage,
+): Promise<object[]> {
+  const present = new Set(
+    rows.map((r) => (r as { productId?: number }).productId).filter((id): id is number => id != null),
+  );
+  const activeIds = await approvedProductIds();
+  const missing = activeIds.filter((id) => !present.has(id));
+  if (missing.length === 0) return rows;
+  const identities = await productIdentities(missing);
+  // A fully-covered window makes silence measurable; anything else leaves it unknown
+  // (nulls + a named reason), because a partial sum can never stand in for the whole.
+  const measured = windowCoverage === "full";
+  const reason =
+    salesDataStart == null
+      ? // No truthful substitution exists for the starts-<date> template.
+        "no attributed sales data recorded"
+      : `window predates/straddles sales data (starts ${salesDataStart})`;
+  const zeros: ZeroSalesRow[] = missing.map((id) => {
+    const identity = identities.get(id);
+    const row: ZeroSalesRow = {
+      productId: id,
+      name: identity?.name ?? null,
+      lifecycle: identity?.lifecycle ?? null,
+      _sum: measured
+        ? { orderedQty: 0, revenue: "0.00", orderCount: 0 }
+        : { orderedQty: null, revenue: null, orderCount: null },
+      firstSaleDayKey: null,
+    };
+    if (!measured) row.reason = reason;
+    return row;
+  });
+  // ONE deterministic order across real + synthesised rows, so offset paging is stable.
+  return [...rows, ...zeros].sort(
+    (a, b) => ((a as { productId?: number }).productId ?? 0) - ((b as { productId?: number }).productId ?? 0),
+  );
+}
+
+/**
+ * Fill `firstSaleDayKey` on THIS PAGE's zero rows (spec C6, OC-14): the first
+ * attributed fact for each product, as EVIDENCE — explicitly NOT a creation date (this
+ * schema cannot see those). Runs post-pagination over the page's ids only, so a
+ * catalog-wide all-time scan never happens for rows the caller will not read.
+ */
+async function fillFirstSaleDayKeys(rows: object[], companyIds: string[]): Promise<void> {
+  const zeroRows = rows.filter((r): r is ZeroSalesRow => "firstSaleDayKey" in (r as object));
+  const ids = zeroRows.map((r) => r.productId);
+  if (ids.length === 0 || companyIds.length === 0) return;
+  const firsts = (await prisma.productSalesFact.groupBy({
+    by: ["productId"],
+    where: { companyId: { in: companyIds }, productId: { in: ids } },
+    _min: { dayKey: true },
+  })) as unknown as Array<{ productId: number; _min: { dayKey: string | null } }>;
+  const byId = new Map((firsts ?? []).map((f) => [f.productId, f._min?.dayKey ?? null]));
+  for (const row of zeroRows) row.firstSaleDayKey = byId.get(row.productId) ?? null;
+}
+
+/** The tool-level per-product comparison row (spec C9). Identity and evidence fields
+ *  are the TOOL's to fill: the module computes numbers, not names. */
+type CompareProductToolRow = ComparePeriodsProductRow & {
+  name: string | null;
+  lifecycle: "active" | "deleted" | null;
+  /** Sales metrics fill this; ledger metrics leave it null (and vice versa). Both are
+   *  EVIDENCE of first recorded activity — explicitly NOT creation dates. */
+  firstSaleDayKey: string | null;
+  firstLedgerAt: string | null;
+};
+
+const COMPARE_EVIDENCE_NOTE =
+  "firstSaleDayKey/firstLedgerAt are the FIRST RECORDED ACTIVITY for a product in this " +
+  "metric's source — evidence, NOT creation dates (this platform cannot see when a " +
+  "product was created). A row with a measured a of 0 means no recorded activity in " +
+  "period A, never that the product did not exist.";
+
+const COMPARE_UNRANKED_NOTE =
+  "unranked rows are a COVERAGE artifact, not a result: they appear only when the " +
+  "metric's source does not cover a whole period, and then for EVERY product alike. " +
+  "Cite them as unknown-base — never as growth, decline, or 'newly active'.";
+
+/** Attach identity to every row BEFORE byte-fitting, so the fitter measures the shape
+ *  the caller actually receives. Evidence fields ride as null placeholders here and are
+ *  VALUE-filled post-pagination (OC-14) — same bytes, one bounded extra read. */
+async function shapeCompareRows(rows: ComparePeriodsProductRow[]): Promise<CompareProductToolRow[]> {
+  const identities = await productIdentities(rows.map((r) => r.productId));
+  return rows.map((r) => ({
+    ...r,
+    name: identities.get(r.productId)?.name ?? null,
+    lifecycle: identities.get(r.productId)?.lifecycle ?? null,
+    firstSaleDayKey: null,
+    firstLedgerAt: null,
+  }));
+}
+
+/** Fill the evidence fields over THIS PAGE's ids only (OC-14): the all-time first-fact
+ *  lookups have no serving index, so they never run for rows the caller will not see. */
+async function fillCompareEvidence(
+  rows: CompareProductToolRow[],
+  opts: { isSales: boolean; companyIds: string[] },
+): Promise<void> {
+  const ids = rows.map((r) => r.productId);
+  if (ids.length === 0) return;
+  if (opts.isSales) {
+    if (opts.companyIds.length === 0) return;
+    const firsts = (await prisma.productSalesFact.groupBy({
+      by: ["productId"],
+      where: { companyId: { in: opts.companyIds }, productId: { in: ids } },
+      _min: { dayKey: true },
+    })) as unknown as Array<{ productId: number; _min: { dayKey: string | null } }>;
+    const byId = new Map((firsts ?? []).map((f) => [f.productId, f._min?.dayKey ?? null]));
+    for (const row of rows) row.firstSaleDayKey = byId.get(row.productId) ?? null;
+    return;
+  }
+  const firsts = (await prisma.inventory_logs.groupBy({
+    by: ["productId"],
+    where: { productId: { in: ids } },
+    _min: { changeTime: true },
+  })) as unknown as Array<{ productId: number; _min: { changeTime: Date | null } }>;
+  const byId = new Map((firsts ?? []).map((f) => [f.productId, f._min?.changeTime ?? null]));
+  for (const row of rows) {
+    const at = byId.get(row.productId);
+    row.firstLedgerAt = at ? at.toISOString() : null;
+  }
+}
+
+/**
+ * compare_periods `groupBy:'product'` (spec C9). Ranked per-product deltas computed and
+ * ordered SERVER-side, so the model never loops a per-product tool over the catalog nor
+ * ranks deltas itself (review #3's most expensive failure class).
+ *
+ * JOINT BYTE FIT (G2-8): `rows` and `unranked` share ONE budget — ranked fits against
+ * 70% of it, then unranked fits against the MEASURED remainder. Only ONE of the two is
+ * ever non-empty (coverage is all-or-nothing per period), so the split simply decides
+ * how much the populated array may use; the last-resort `ok()` truncation must never
+ * fire for this tool.
+ */
+async function compareByProduct(
+  args: {
+    metric: "sales_units" | "sales_revenue" | "outbound_units" | "inbound_units";
+    direction?: "increase" | "decrease";
+    limit?: number;
+    offset?: number;
+  },
+  env: {
+    periodA: ResolvedWindow;
+    periodB: ResolvedWindow;
+    ctx: ToolContext;
+    isSales: boolean;
+    metricScopeNote: string;
+  },
+): Promise<ToolResult> {
+  const { periodA, periodB, ctx, isSales, metricScopeNote } = env;
+  const limit = args.limit ?? COMPARE_ROWS_DEFAULT;
+  const offset = args.offset ?? 0;
+  const result = await comparePeriodsByProduct({
+    metric: args.metric,
+    periodA,
+    periodB,
+    companyIds: ctx.companyIds,
+    direction: args.direction,
+  });
+
+  const rankedShaped = await shapeCompareRows(result.ranked);
+  const unrankedShaped = await shapeCompareRows(result.unranked);
+
+  const budget = Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES);
+  const rankedPage = paginate(
+    rankedShaped,
+    offset,
+    limit,
+    Math.max(Math.floor(budget * COMPARE_RANKED_BUDGET_SHARE), MIN_RANK_PAGE_BYTES),
+  );
+  // The MEASURED remainder — what the ranked page actually consumed, not its allowance.
+  const remainder = Math.max(budget - byteLengthOf(rankedPage.rows), MIN_RANK_PAGE_BYTES);
+  const unrankedPage = paginate(unrankedShaped, 0, limit, remainder);
+
+  await fillCompareEvidence(rankedPage.rows, { isSales, companyIds: ctx.companyIds });
+  await fillCompareEvidence(unrankedPage.rows, { isSales, companyIds: ctx.companyIds });
+
+  return ok(
+    {
+      mode: "by_product",
+      metric: args.metric,
+      periodA,
+      periodB,
+      unequalLengths: result.unequalLengths,
+      rows: rankedPage.rows,
+      returned: rankedPage.returned,
+      totalRows: rankedPage.totalRows,
+      nextOffset: rankedPage.nextOffset,
+      unranked: unrankedPage.rows,
+      unrankedReturned: unrankedPage.returned,
+      unrankedTotal: unrankedPage.totalRows,
+      reasons: result.reasons,
+      coverage: {
+        metricScope: metricScopeNote,
+        metricScopes: { sales: "company", ledger: "global" },
+        // Source-level coverage per period — the SAME classification get_sales uses.
+        periodCoverage: result.periodCoverage,
+        reasonsKeys: "a = periodA, b = periodB, pctChange = percent change",
+        unequalLengths: result.unequalLengths,
+        unrankedNote: COMPARE_UNRANKED_NOTE,
+        evidenceNote: COMPARE_EVIDENCE_NOTE,
+      },
+    },
+    { scope: "mixed" },
+  );
+}
+
+/**
+ * get_movement_series `breakdownBy:'product'` (spec C10). ONE call answers "which
+ * products moved, and how" — with the FULL signed 12-bucket partition per product, so
+ * the answer is auditable rather than a single ranked number.
+ *
+ * The bounded-batch path resolves its ids FIRST (contract pack T3): ids that fail
+ * resolution are never queried — a raw `{ in: [...] }` over caller input would leak an
+ * unapproved product's history to anyone who guessed an id — and are echoed in
+ * `coverage.requested` so the caller learns exactly what went unanswered.
+ */
+async function movementByProduct(
+  args: { productIds?: number[]; locationId?: number; limit?: number; offset?: number },
+  env: { window: ResolvedWindow; ctx: ToolContext },
+): Promise<ToolResult> {
+  const { window, ctx } = env;
+  const limit = args.limit ?? MOVEMENT_BREAKDOWN_MAX;
+  const offset = args.offset ?? 0;
+
+  let resolvedIds: number[] | undefined;
+  let requested: { requested: number; resolved: number; rejected: Array<{ productId: number; reason: string }> } | undefined;
+  if (args.productIds != null) {
+    // allowArchived: this is a HISTORICAL read — an archived product's movement really
+    // happened, and the row carries lifecycle so it is never mistaken for current state.
+    const batch = await resolveAssistantProducts(args.productIds, { allowArchived: true });
+    resolvedIds = batch.resolved.map((r) => r.id);
+    requested = {
+      requested: new Set(args.productIds).size,
+      resolved: batch.resolved.length,
+      rejected: batch.rejected,
+    };
+  }
+
+  // Catalog-wide: the G5 approved universe, active+archived (historical policy row).
+  const approvedIds = resolvedIds == null ? await approvedProductIds({ includeArchived: true }) : [];
+  const identities = await productIdentities(resolvedIds ?? approvedIds);
+  const result = await getMovementByProduct({
+    window,
+    locationId: args.locationId,
+    productIds: resolvedIds,
+    approvedIds,
+    identities,
+  });
+
+  const page = paginate(
+    result.rows,
+    offset,
+    limit,
+    Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
+  );
+  return ok(
+    {
+      mode: result.mode,
+      window: result.window,
+      // T4: `filters.mode === mode` on EVERY variant, and productIds echoes the REAL
+      // batch scope — never `productId: null` alone for a bounded call.
+      filters: result.filters,
+      rows: page.rows,
+      returned: page.returned,
+      totalRows: page.totalRows,
+      nextOffset: page.nextOffset,
+      coverage: {
+        ...result.coverage,
+        rankNote:
+          "rows are ranked by outboundUnits — the SIGN-FIRST magnitude of each product's " +
+          "negative non-TRANSFER movement. A positive SALE row (a return) never cancels it.",
+        ...(requested ? { requested } : {}),
+      },
+    },
+    { scope: "global" },
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
@@ -641,6 +1103,11 @@ const getSalesSchema = z.object({
   to: isoDay.optional(),
   relativeDays: z.number().int().min(1).max(MAX_WINDOW_DAYS).optional(),
   groupBy: z.enum(["product", "day", "week", "month", "integration", "company", "company_day"]).optional(),
+  // C6: emit a row for every approved product with NO attributed sales in the window,
+  // so "which products sold nothing?" is answerable from ONE call. Legal only at the
+  // product grain and only catalog-wide (assertZeroRowsGrain) — a plain z.object so
+  // the MCP adapter keeps its raw `.shape`.
+  includeZeroRows: z.boolean().optional(),
   limit: z.number().int().positive().max(SALES_ROWS_MAX).optional(),
   offset: nonNegInt.optional(),
 });
@@ -677,6 +1144,10 @@ const getMovementSeriesSchema = z.object({
   relativeDays: z.number().int().min(1).max(MAX_WINDOW_DAYS).optional(),
   groupBy: z.enum(["day", "week", "month"]).optional(),
   receipts: z.boolean().optional(),
+  // C10: per-product breakdown + the bounded batch that narrows it. Plain z.object
+  // (MCP `.shape`); the four cross-field rules are post-parse (assertMovementModes).
+  breakdownBy: z.enum(["product"]).optional(),
+  productIds: z.array(positiveInt).max(MOVEMENT_BATCH_MAX).optional(),
   limit: z.number().int().positive().max(RECEIPTS_MAX).optional(),
   offset: nonNegInt.optional(),
 });
@@ -704,6 +1175,12 @@ const comparePeriodsSchema = z.object({
   periodA: periodSchema,
   periodB: periodSchema,
   productId: positiveInt.optional(),
+  // C9: per-product deltas, ranked SERVER-side. Plain z.object (MCP `.shape`); the
+  // cross-field rules are post-parse asserts (assertCompareGrain).
+  groupBy: z.enum(["product"]).optional(),
+  direction: z.enum(["increase", "decrease"]).optional(),
+  limit: z.number().int().positive().max(COMPARE_ROWS_MAX).optional(),
+  offset: nonNegInt.optional(),
 });
 
 // get_order_pipeline (spec §5 T-ORD): company-scoped order-pipeline aggregate over a
@@ -749,6 +1226,10 @@ const lowStockSchema = z.object({
 
 const reorderSchema = z.object({
   includeOkay: z.boolean().optional(),
+  // C11: size a NAMED set (max 20, deduped, non-empty) and/or surface healthy products
+  // as OK rows. Plain z.object (MCP `.shape`); the non-empty rule is a post-parse assert.
+  productIds: z.array(positiveInt).max(REORDER_BATCH_MAX).optional(),
+  includeHealthy: z.boolean().optional(),
   limit: z.number().int().positive().max(REORDER_MAX).optional(),
   offset: nonNegInt.optional(),
 });
@@ -1008,7 +1489,16 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `product). Omitting dates uses relativeDays (default ` +
       `30) ending today; the resolved window (from/to/days/source) is returned. Figures ` +
       `are GROSS ordered, attributed; refunds are not netted. Revenue is a string. ` +
-      `coverage.unattributedOrders is caller-scoped. ${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `coverage.unattributedOrders is caller-scoped. Products with NO attributed sales ` +
+      `in the window are ABSENT by default — pass includeZeroRows:true (groupBy:'product', ` +
+      `no productId) to get a row for every approved product instead, which is how you ` +
+      `answer "which products sold nothing". coverage.salesDataStart is the first day ` +
+      `with any attributed sales fact for you, and coverage.windowCoverage says whether ` +
+      `the window is 'full' (silence is a MEASURED zero), 'partial' (the window predates ` +
+      `or straddles that start, so a zero row's sums are null with a reason — never read ` +
+      `as zero), or 'none' (no attributed sales data at all). A zero row's ` +
+      `firstSaleDayKey is its first attributed fact — EVIDENCE, never a creation date. ` +
+      `${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getSalesSchema,
     run: async (input, ctx) => {
       const args = getSalesSchema.parse(input);
@@ -1036,9 +1526,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       const groupBy = (args.groupBy ?? "product") as SalesToolGroupBy;
       const limit = args.limit ?? SALES_ROWS_MAX;
       const offset = args.offset ?? 0;
+      assertZeroRowsGrain(args.includeZeroRows, groupBy, args.productId);
 
       if (ctx.companyIds.length === 0) {
         // Empty companyIds → no query; coverage is the []-fast shape (unattributed 0).
+        // No zero rows either (spec C6): a caller with no company access has no
+        // attributed sales data at all, so windowCoverage is "none" and synthesising
+        // a catalog of zeros would manufacture an answer out of an access boundary.
         const coverage = await callerScopedSalesCoverage(ctx.companyIds);
         return ok(
           {
@@ -1049,7 +1543,11 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             groupBy,
             window,
             productScope,
-            coverage,
+            coverage: {
+              ...coverage,
+              windowCoverage: classifyWindowCoverage(coverage.salesDataStart, window.from),
+              rowsNote: SALES_ROWS_NOTE,
+            },
             note: "You have no company access, so there are no sales to report.",
           },
           { scope: "company" },
@@ -1066,13 +1564,23 @@ export const assistantTools: Record<string, AssistantToolDef> = {
 
       const shaped = await shapeSalesRows(raw, groupBy);
       const serialized = serializeSalesRows(shaped.rows as object[]);
-      // W3 seam-fix item 1: ctx-aware reserved budget so a tight late-turn read shrinks
-      // the page instead of the completed result being discarded whole.
-      const page = paginate(serialized, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
       // Caller-scoped coverage (spec §3 E2): live unattributed-order count for THIS
       // caller's companies (never the global rebuild count), the bundle-revenue
-      // disclosure, and the (global) rebuild recency.
+      // disclosure, the (global) rebuild recency, and (C6) the caller's salesDataStart.
       const coverage = await callerScopedSalesCoverage(ctx.companyIds);
+      // C6: does the sales source cover this whole window? The answer decides whether
+      // an absent product is a MEASURED zero or an UNKNOWN — the ONE classifier
+      // compare_periods uses too, so the two tools can never disagree about a source.
+      const windowCoverage = classifyWindowCoverage(coverage.salesDataStart, window.from);
+      const withZeros = args.includeZeroRows
+        ? await withZeroSalesRows(serialized, coverage.salesDataStart, windowCoverage)
+        : serialized;
+      // W3 seam-fix item 1: ctx-aware reserved budget so a tight late-turn read shrinks
+      // the page instead of the completed result being discarded whole.
+      const page = paginate(withZeros, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
+      // Evidence fields are filled POST-pagination over THIS PAGE's ids only (OC-14) —
+      // never a catalog-wide all-time scan for rows the caller will not see.
+      if (args.includeZeroRows) await fillFirstSaleDayKeys(page.rows, ctx.companyIds);
       const data: Record<string, unknown> = {
         groupBy,
         window,
@@ -1081,7 +1589,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         returned: page.returned,
         totalRows: page.totalRows,
         nextOffset: page.nextOffset,
-        coverage,
+        coverage: { ...coverage, windowCoverage, rowsNote: SALES_ROWS_NOTE },
       };
       if (shaped.orderCountNote) data.orderCountNote = shaped.orderCountNote;
       return ok(data, { scope: "company" });
@@ -1098,12 +1606,18 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `(see get_sales). velocityDefinition states how avgDailyOutbound30 is computed. ` +
       `unitsOut30/unitsOut90/avgDailyOutbound30 measure PHYSICAL DEPLETION, not ` +
       `verified sales: legacy unclassified adjustments, corrections, and count ` +
-      `depletion are all included — never present these as 'sold'. scope echoes the ` +
+      `depletion are all included — never present these as 'sold'. outboundMix30 ` +
+      `breaks unitsOut30 into sale / classifiedLoss / adjustmentUnclassified / ` +
+      `correctionUnclassified / countOut / stockInReversal (absolute units summing to ` +
+      `unitsOut30, null exactly when unitsOut30 is null) — read it before calling any ` +
+      `of it sales, and relay it when the sale bucket is a small share. scope echoes the ` +
       `effective { productId, windowDays } this row set was computed over. ` +
       `Outbound/velocity here count ALL negative non-transfer deltas over a ROLLING ` +
       `window ending now; get_movement_series instead partitions the ledger into ` +
       `CALENDAR-DAY buckets (wrong-signed rows folded into their natural bucket), so a ` +
       `small divergence between the two tools is the two DEFINITIONS, not a contradiction. ` +
+      `The same applies to the mix: mixes use a ROLLING window ending now and ABSOLUTE ` +
+      `units, get_movement_series uses CALENDAR-DAY buckets and SIGNED sums. ` +
       `${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getOperationsSchema,
     run: async (input, ctx) => {
@@ -1251,11 +1765,24 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `window, so a small divergence from that tool is the two DEFINITIONS, not a ` +
       `contradiction. Pass receipts:true for the STOCK_IN RECEIPTS DETAIL instead of the ` +
       `partition — individual receipt events (delta > 0) with frozen unitCostCents/batchId, ` +
-      `newest-first and paginated via limit/offset. Omitting dates uses relativeDays ` +
-      `(default 30). ${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `newest-first and paginated via limit/offset. Pass breakdownBy:'product' for ONE ` +
+      `ROW PER PRODUCT instead of per time bucket — the same signed 12-bucket partition, ` +
+      `per product, ranked by outboundUnits (the SIGN-FIRST magnitude of negative ` +
+      `non-TRANSFER movement, so a returned SALE never cancels it); that is the ONE ` +
+      `call for "which products moved", never a loop. Add productIds (max 20, requires ` +
+      `breakdownBy:'product') to narrow it to a named set — a requested product with no ` +
+      `movement comes back as an ALL-ZERO row (that is how "0 deductions recorded" is ` +
+      `answerable), and ids that cannot be resolved are echoed in coverage.requested ` +
+      `rather than silently dropped. The result's mode is 'series', 'receipts', or ` +
+      `'by_product', and filters echoes the scope actually queried. Omitting dates uses ` +
+      `relativeDays (default 30). ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: getMovementSeriesSchema,
     run: async (input, ctx) => {
       const args = getMovementSeriesSchema.parse(input);
+      // C10/G1: every illegal mode combination is rejected HERE — before the receipts
+      // branch below, which would otherwise win by position and answer a question the
+      // caller did not ask.
+      assertMovementModes(args);
       // Shared window resolver (W0-WIN): from/to/relativeDays -> N day-keys; throws on
       // the from+relativeDays contradiction; echoes its source.
       const window = resolveWindow(
@@ -1267,6 +1794,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       if (args.productId != null) {
         const product = await resolveAssistantProduct(args.productId);
         if (!product) return notFound("product", args.productId);
+      }
+      if (args.breakdownBy === "product") {
+        return movementByProduct(args, { window, ctx });
       }
       // W2-RCPT: receipts:true switches to the STOCK_IN receipts-DETAIL listing —
       // DB-side skip/take paging inside getReceipts (never materialize the full event
@@ -1500,7 +2030,16 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `units sold. Each 'suggested' row shows every ` +
       `input so the number is auditable: avgDailyDemand, daysCovered, leadTimeDays + ` +
       `leadTimeSource, bufferDays, reorderPoint, targetLevel, grossReplenishmentNeed, ` +
-      `minOrderQuantity, urgency (OUT/CRITICAL/REORDER_NOW/APPROACHING), and cost. ` +
+      `minOrderQuantity, urgency (OUT/CRITICAL/REORDER_NOW/APPROACHING), and cost — ` +
+      `plus demandUnits (the raw numerator behind avgDailyDemand) and demandMix, its ` +
+      `six-bucket composition (sale / classifiedLoss / adjustmentUnclassified / ` +
+      `correctionUnclassified / countOut / stockInReversal, absolute units summing to ` +
+      `demandUnits). A demand that is entirely adjustmentUnclassified is depletion you ` +
+      `must replace, NOT units sold — relay the mix rather than the bare rate. ` +
+      `demandMix excludes CORRECTION-reasoned rows by predicate while get_operations' ` +
+      `outboundMix30 includes them, and mixes use a ROLLING window ending now with ` +
+      `ABSOLUTE units while get_movement_series uses CALENDAR-DAY buckets and SIGNED ` +
+      `sums — divergence between them is the DEFINITIONS, not a contradiction. ` +
       `'unavailable' rows carry NO numbers — only a reason (no_demand_signal | ` +
       `insufficient_history). Quantities are GROSS: inventoryPositionKnown is false, so ` +
       `they do NOT subtract stock already on order. costPrice/orderValue are null when ` +
@@ -1508,16 +2047,35 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `bufferDays, targetCoverageMultiple, and demand definition — relay them. 'coverage' ` +
       `counts total/suggested/unavailable/healthy/approachingOmitted/costed and satisfies ` +
       `total = suggested + unavailable + healthy + approachingOmitted; healthy products ` +
-      `are counted, never rows — coverageNote states the definition, relay it. ` +
+      `are counted, never rows by default — coverageNote states the definition, relay it. ` +
+      `Pass includeHealthy:true to emit healthy products as rows with urgency 'OK' and ` +
+      `their real (possibly 0) grossReplenishmentNeed, so "is X fine?" gets numbers ` +
+      `instead of silence. Pass productIds (max 20) to size a NAMED set: the population ` +
+      `becomes exactly those ids, every resolved ACTIVE one gets a row regardless of ` +
+      `urgency, and coverage.requested { requested, notActive, unknownIds } accounts for ` +
+      `the rest. An id that resolves to an ARCHIVED product returns an 'unavailable' row ` +
+      `with reason 'not_active', its real name, and currentStock null — never a sizing; ` +
+      `an unresolvable id returns reason 'unknown_id' with productName null (never a ` +
+      `fabricated name). Those rows are counted ONLY in coverage.requested, never in ` +
+      `coverage.unavailable, so the invariant above holds in every combination. ` +
+      `All sizing uses the CONFIGURED assumptions only — this tool cannot apply ` +
+      `custom lead times or buffers. ` +
       `${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: reorderSchema,
     run: async (input, ctx) => {
       const args = reorderSchema.parse(input);
+      assertReorderProductIds(args.productIds);
       const limit = args.limit ?? REORDER_MAX;
       const offset = args.offset ?? 0;
       // Fetch the whole report (worklist + approaching + excluded) so offset paging is
       // meaningful; the shop's approved set is small, so this stays cheap.
-      const report = await getReorderReport({ includeOkay: args.includeOkay ?? true });
+      const report = await getReorderReport({
+        includeOkay: args.includeOkay ?? true,
+        includeHealthy: args.includeHealthy,
+        // Deduped at the boundary so `coverage.requested.requested` counts DISTINCT ids
+        // (a repeated id is one question, not two).
+        productIds: args.productIds ? Array.from(new Set(args.productIds)) : undefined,
+      });
       // W3 seam-fix item 1: ctx-aware reserved budget (was the fixed row budget).
       const page = paginate(report.rows, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
       return ok(
@@ -1603,7 +2161,17 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `periodA/periodB each take {from,to} or relativeDays. productId is OPTIONAL — ` +
       `omit it for totals across ALL products (company-scoped for the sales metrics, ` +
       `global for the ledger metrics); pass one only to narrow BOTH periods to that ` +
-      `product, and only when you resolved it via find_product. A period with NO rows ` +
+      `product, and only when you resolved it via find_product. Pass ` +
+      `groupBy:'product' (no productId) for PER-PRODUCT deltas ranked server-side by ` +
+      `|delta| — that is the ONE call that answers "which products grew, declined, ` +
+      `started or stopped moving"; never loop a per-product tool or rank deltas ` +
+      `yourself. direction:'increase'|'decrease' filters the ranked set BEFORE paging, ` +
+      `and limit/offset page it. A ranked row with a MEASURED a of 0 and b > 0 is the ` +
+      `"started moving" case (say 'no recorded activity in period A', never 'new ` +
+      `product'). The separate 'unranked' array is a COVERAGE artifact — it fills only ` +
+      `when the metric's source does not cover a whole period, and then for every ` +
+      `product alike; cite those rows as unknown-base, NEVER as growth. mode is ` +
+      `'totals' or 'by_product'. A period with NO rows ` +
       `counts as 0 ONLY when the metric's data covers the whole interval; a period ` +
       `that predates (or straddles) the data reads as null + a reason — growth from a ` +
       `pre-history period is UNKNOWN, never "growth from zero". pctChange is null when ` +
@@ -1620,6 +2188,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // TWO independent window resolutions (W0-WIN): the module takes two already-
       // resolved windows; either resolve() throws on the from+relativeDays contradiction.
       const now = new Date();
+      assertCompareGrain(args);
       const periodA = resolveWindow(args.periodA, now, DEFAULT_RELATIVE_DAYS);
       const periodB = resolveWindow(args.periodB, now, DEFAULT_RELATIVE_DAYS);
       assertWindow(periodA.from, periodA.to);
@@ -1630,6 +2199,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         if (!product) return notFound("product", args.productId);
       }
       const isSales = args.metric === "sales_units" || args.metric === "sales_revenue";
+      const metricScopeNote = isSales
+        ? "sales metric — scoped to your companies"
+        : "physical-ledger metric — global (inventory has no company dimension)";
+
+      if (args.groupBy === "product") {
+        return compareByProduct(args, { periodA, periodB, ctx, isSales, metricScopeNote });
+      }
       // Sales metrics are company-scoped INSIDE the module (mandatory) — pass ctx.companyIds;
       // ledger metrics ignore it (no company dimension).
       const result = await comparePeriods({
@@ -1644,6 +2220,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // company-scoped (or vice versa).
       return ok(
         {
+          // Envelope discriminant (spec C9): totals mode is otherwise UNCHANGED — the
+          // field is additive so a consumer can branch on one key across both modes.
+          mode: "totals",
           metric: args.metric,
           a: result.a,
           b: result.b,
@@ -1654,9 +2233,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           periodA,
           periodB,
           coverage: {
-            metricScope: isSales
-              ? "sales metric — scoped to your companies"
-              : "physical-ledger metric — global (inventory has no company dimension)",
+            metricScope: metricScopeNote,
             // W2 seam-fix item 3: machine-readable scopes alongside the prose above, so a
             // consumer never has to parse the sentence to learn which pool each metric
             // reads (sales metrics = your companies; ledger metrics = the global pool).

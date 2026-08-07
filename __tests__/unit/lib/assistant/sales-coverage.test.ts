@@ -124,6 +124,62 @@ describe("the coverage block stays ADDITIVE (contract pack T5/S18)", () => {
       attributionNote: SALES_ATTRIBUTION_NOTE,
       bundleRevenue: BUNDLE_REVENUE_DISCLOSURE,
       lastRebuildAt: "2026-07-01T12:00:00.000Z",
+      // Task 2.2 (C6) additive step in the S18 chain. Null here because this fixture
+      // seeds no approved catalog — the field is present regardless, never omitted.
+      salesDataStart: null,
     });
+  });
+});
+
+describe("salesDataStart — the recording boundary, scoped from birth (spec C6 / G5)", () => {
+  it("returns the caller-scoped _min(dayKey) over ProductSalesFact", async () => {
+    seed({ unattributed: 0, total: 0 });
+    db.product.findMany.mockResolvedValue([{ id: 1 }, { id: 2 }] as never);
+    db.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: "2024-03-01" } } as never);
+
+    const coverage = await callerScopedSalesCoverage(["c1"]);
+    expect(coverage.salesDataStart).toBe("2024-03-01");
+  });
+
+  it("carries the G5 APPROVED-id-set filter FROM BIRTH — an unapproved product's facts can never move it", async () => {
+    seed({ unattributed: 0, total: 0 });
+    // The approved universe is {1, 2}; product 3 is unapproved and must never be read.
+    db.product.findMany.mockResolvedValue([{ id: 1 }, { id: 2 }] as never);
+    db.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: "2024-03-01" } } as never);
+
+    await callerScopedSalesCoverage(["c1"]);
+
+    // The id set comes from an approval-filtered read...
+    const idSetArgs = db.product.findMany.mock.calls[0][0] as { where: Record<string, unknown>; select: unknown };
+    expect(idSetArgs.where).toMatchObject({ approvalStatus: "APPROVED" });
+    expect(idSetArgs.select).toEqual({ id: true });
+    // ...ARCHIVED products are included (this is a HISTORICAL fact read — their past
+    // sales really happened), so the filter must NOT carry deletedAt: null.
+    expect(idSetArgs.where).not.toHaveProperty("deletedAt");
+    // ...and the aggregate is narrowed by that set AND the caller's companies.
+    const aggArgs = db.productSalesFact.aggregate.mock.calls[0][0] as {
+      where: { companyId: unknown; productId: unknown };
+      _min: unknown;
+    };
+    expect(aggArgs.where.productId).toEqual({ in: [1, 2] });
+    expect(aggArgs.where.companyId).toEqual({ in: ["c1"] });
+    expect(aggArgs._min).toEqual({ dayKey: true });
+  });
+
+  it("an EMPTY approved universe still filters (in: []) — never an unfiltered read", async () => {
+    seed({ unattributed: 0, total: 0 });
+    db.product.findMany.mockResolvedValue([] as never);
+    db.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: null } } as never);
+
+    const coverage = await callerScopedSalesCoverage(["c1"]);
+    expect(coverage.salesDataStart).toBeNull();
+    const aggArgs = db.productSalesFact.aggregate.mock.calls[0][0] as { where: { productId: unknown } };
+    expect(aggArgs.where.productId).toEqual({ in: [] });
+  });
+
+  it("is null on the empty-membership short circuit (no query at all)", async () => {
+    const coverage = await callerScopedSalesCoverage([]);
+    expect(coverage.salesDataStart).toBeNull();
+    expect(db.productSalesFact.aggregate).not.toHaveBeenCalled();
   });
 });

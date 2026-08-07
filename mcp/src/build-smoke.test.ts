@@ -110,6 +110,46 @@ describe("built artifact", () => {
   );
 
   it(
+    "serves get_sales from the bundle — the W2 mock surfaces exist in the BUILT artifact",
+    async () => {
+      // Task 2.6: get_sales is the tool whose W2 read graph grew the most
+      // (productSalesFact.groupBy + aggregate, product.findMany for the approved-id set
+      // and identities). If mcp/src/prisma-mock.ts drifts from the inline jest mock,
+      // every jest round-trip still passes and THIS is where it shows up.
+      const port = await freePort();
+      spawnServer({ ENABLE_MCP: "1", MCP_PORT: String(port) });
+      await waitForHealth(port);
+
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${VALID_TOKEN}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2025-06-18",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "get_sales", arguments: { groupBy: "product", includeZeroRows: true } },
+        }),
+      });
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rpc = (await res.json()) as any;
+      const toolResult = JSON.parse(rpc.result.content[0].text);
+      // The mock build has no memberships, so this is the empty-scope shape — but it is
+      // an OK RESULT, which is only possible if every read the tool issues resolved.
+      expect(toolResult.status).toBe("ok");
+      expect(toolResult.data.rows).toEqual([]);
+      expect(toolResult.data.coverage.windowCoverage).toBe("none");
+      expect(toolResult.data.coverage.rowsNote).toContain("includeZeroRows");
+    },
+    30_000,
+  );
+
+  it(
     "exits 0 cleanly in disabled mode (ENABLE_MCP != '1')",
     async () => {
       const child = spawnServer({ ENABLE_MCP: "0" });

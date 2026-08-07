@@ -155,6 +155,9 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
     { groupBy: "week" },
     { groupBy: "month" },
     { groupBy: "company" },
+    // C6 (Task 2.2): the zero-row synthesis branch — a NEW read path that must stay
+    // write-free and complete over the fail-closed proxy like every other mode.
+    { groupBy: "product", includeZeroRows: true },
   ],
   // fixture[0] is the HAPPY path used by the coverage/definition gates — keep it argless
   // (or product-resolving) so it reaches an OK result; the pending-review productId case
@@ -175,6 +178,9 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
     // W2-RCPT: the receipts-detail branch (getReceipts DB-side paging).
     { receipts: true },
     { productId: PENDING_REVIEW_FIXTURE_ID },
+    // C10 (Task 2.4): the per-product breakdown — catalog-wide and bounded-batch.
+    { breakdownBy: "product" },
+    { breakdownBy: "product", productIds: [1, 2] },
   ],
   get_inventory_summary: [
     {},
@@ -186,7 +192,14 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
   get_inventory_policy: [{}, { productId: PENDING_REVIEW_FIXTURE_ID }],
   get_data_freshness: [{}],
   low_stock_report: [{}],
-  reorder_report: [{}, { includeOkay: false }],
+  // C11 (Task 2.5): the healthy-row and named-set branches (the latter runs the batch
+  // resolver + the requested-id accounting) must complete write-free like the rest.
+  reorder_report: [
+    {},
+    { includeOkay: false },
+    { includeHealthy: true },
+    { productIds: [1, 2] },
+  ],
   // Wave-2 breadth. fixture[0] is the HAPPY path (coverage/definition gates) — a
   // COMPLETED past dayKey / argless case that reaches an OK result; the pending-review
   // productId case is a LATER fixture (read-only gate only), returning the notFound shape.
@@ -204,6 +217,16 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
       periodA: { relativeDays: 7 },
       periodB: { relativeDays: 7 },
       productId: PENDING_REVIEW_FIXTURE_ID,
+    },
+    // C9 (Task 2.3): the by_product branch — a NEW read path (per-product groupBys +
+    // identities + evidence lookups) that must stay write-free like every other mode.
+    { metric: "sales_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 }, groupBy: "product" },
+    {
+      metric: "outbound_units",
+      periodA: { relativeDays: 7 },
+      periodB: { relativeDays: 7 },
+      groupBy: "product",
+      direction: "increase",
     },
   ],
   get_order_pipeline: [
@@ -264,6 +287,21 @@ describe("registration", () => {
     for (const [tool, gates] of Object.entries(GATE_EXEMPTIONS)) {
       expect(GATE_EXEMPTIONS_BASELINE[tool]).toBeDefined(); // no NEWLY-exempted tool
       for (const g of gates) expect(GATE_EXEMPTIONS_BASELINE[tool]).toContain(g); // no NEW gate
+    }
+  });
+
+  // G1 PROOF (spec §7 / Task 2.6). The MCP adapter registers a tool by reading its
+  // schema's raw `.shape` (tool-adapters.ts:112). A `.refine`/`.superRefine` anywhere in
+  // an input schema produces a ZodEffects, which has NO `.shape` — so the tool would
+  // register with an EMPTY input schema (or throw) on the sidecar while every web-side
+  // test stayed green. This is why cross-field rules are post-parse assert* helpers.
+  it("every registered tool's inputSchema exposes a raw `.shape` (MCP registerTool contract)", () => {
+    for (const name of TOOL_NAMES) {
+      const schema = assistantTools[name].inputSchema as unknown as { shape?: Record<string, unknown> };
+      expect(typeof schema.shape).toBe("object");
+      expect(schema.shape).not.toBeNull();
+      // A ZodEffects wrapper is the exact failure mode; it exposes `_def.schema` instead.
+      expect((schema as unknown as { _def: { typeName?: string } })._def.typeName).toBe("ZodObject");
     }
   });
 
@@ -393,6 +431,71 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d("get_operations")).toMatch(/PHYSICAL DEPLETION, not\s+verified sales/i);
     expect(d("get_operations")).toMatch(/never present these as 'sold'/i);
     expect(d("reorder_report")).toMatch(/demand may be entirely unclassified/i);
+    // Task 2.2 (C6): the zero-row + dataStart affordances, described where the model
+    // reads them — an affordance nobody is told about is an affordance nobody uses.
+    expect(d("get_sales")).toMatch(/includeZeroRows/);
+    expect(d("get_sales")).toMatch(/salesDataStart/);
+    expect(d("get_sales")).toMatch(/windowCoverage/);
+    expect(d("get_sales")).toMatch(/never a creation date/i);
+    // Task 2.3 (C9): the per-product mode + the erratum's unranked semantics. Without
+    // the "coverage artifact" sentence a model reads unranked rows as growth.
+    expect(d("compare_periods")).toMatch(/groupBy:'product'/);
+    expect(d("compare_periods")).toMatch(/ranked server-side/i);
+    expect(d("compare_periods")).toMatch(/unranked/);
+    expect(d("compare_periods")).toMatch(/COVERAGE artifact/i);
+    expect(d("compare_periods")).toMatch(/never as growth/i);
+    expect(d("compare_periods")).toMatch(/never 'new product'/i);
+    // Task 2.4 (C10): the breakdown + bounded-batch affordances and the sign-first rank.
+    expect(d("get_movement_series")).toMatch(/breakdownBy:'product'/);
+    expect(d("get_movement_series")).toMatch(/productIds/);
+    expect(d("get_movement_series")).toMatch(/ALL-ZERO row/i);
+    expect(d("get_movement_series")).toMatch(/SIGN-FIRST/i);
+    expect(d("get_movement_series")).toMatch(/coverage\.requested/);
+    // Task 2.5 (C11): named-product sizing, the OK urgency, and the accounting rule
+    // that keeps the C5 invariant true when requested ids are in play.
+    expect(d("reorder_report")).toMatch(/includeHealthy/);
+    expect(d("reorder_report")).toMatch(/productIds/);
+    expect(d("reorder_report")).toMatch(/urgency 'OK'/);
+    expect(d("reorder_report")).toMatch(/not_active/);
+    expect(d("reorder_report")).toMatch(/unknown_id/);
+    expect(d("reorder_report")).toMatch(/never in\s+coverage\.unavailable/i);
+    expect(d("reorder_report")).toMatch(/CONFIGURED assumptions only/i);
+  });
+
+  // Quality+reach C12 (Task 2.1): the mix fields are the composition a bare depletion
+  // figure cannot carry, so both mix-bearing tools must NAME them — and both must carry
+  // the G3 rolling-vs-calendar divergence sentence so the mix is never read as a
+  // contradiction of get_movement_series' signed calendar buckets.
+  it("the mix-bearing descriptions name their buckets + the G3 rolling-vs-calendar divergence", () => {
+    const ops = desc("get_operations");
+    const reorder = desc("reorder_report");
+    expect(ops).toMatch(/outboundMix30/);
+    expect(reorder).toMatch(/demandMix/);
+    expect(reorder).toMatch(/demandUnits/);
+    for (const d of [ops, reorder]) {
+      // Every bucket named, so a reader knows what the six numbers are.
+      for (const bucket of [
+        "sale",
+        "classifiedLoss",
+        "adjustmentUnclassified",
+        "correctionUnclassified",
+        "countOut",
+        "stockInReversal",
+      ]) {
+        expect(d).toContain(bucket);
+      }
+      // G3: absolute-units + rolling window vs movement's signed calendar buckets.
+      expect(d).toMatch(/ABSOLUTE units/i);
+      expect(d).toMatch(/ROLLING/i);
+      expect(d).toMatch(/CALENDAR-DAY/i);
+      expect(d).toMatch(/SIGNED/i);
+      expect(d).toContain("get_movement_series");
+      expect(d).toMatch(/contradiction/i);
+    }
+    // The two mixes partition DIFFERENT populations by design (spec C12) — said out loud
+    // where the narrower one lives, so the divergence never reads as a bug.
+    expect(reorder).toMatch(/CORRECTION-reasoned rows/i);
+    expect(reorder).toContain("outboundMix30");
   });
 
   it("get_business_snapshot frames itself as one-call, names the section tools, and discloses mixed scope + independent degradation", () => {
@@ -526,6 +629,8 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
     "lib/reports/reorder.ts",
     "lib/reports/demand.ts",
     "lib/reports/metrics-contract.ts",
+    // quality+reach Task 2.1: the mix classifier + the shared identities lookup.
+    "lib/reports/outbound-mix.ts",
     // Wave-1 breadth modules wired into the read path by W1-INT (all read-only).
     "lib/analytics/valuation.ts",
     "lib/reports/movement.ts",

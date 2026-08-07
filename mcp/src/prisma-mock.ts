@@ -70,8 +70,14 @@ const prismaMock: any = {
     findMany: async () => [],
   },
   // Wave-2: compare_periods sales metrics read ProductSalesFact aggregates.
+  // quality+reach W2 (Task 2.6 consolidation): `groupBy` is the surface get_sales'
+  // product grain + zero-row firstSaleDayKey lookup and compare_periods' by_product
+  // mode all read. The inline jest mock gained it per-task; the BUILT bundle needs it
+  // too or the shipped artifact 500s on those tools while every jest round-trip passes
+  // (an inline round-trip structurally cannot detect a missing build-mock method).
   productSalesFact: {
     aggregate: async () => ({ _min: {}, _max: {}, _sum: {}, _count: {} }),
+    groupBy: async () => [],
   },
   externalOrder: {
     findFirst: async () => null,

@@ -106,3 +106,53 @@ test("null cost and unavailable rows export as blank cells, never $0", async () 
   expect(unavailableLine).toContain("Idle");
   expect(unavailableLine).toContain("no_demand_signal");
 });
+
+// Quality+reach C11 (Task 2.5, named ride-along): the widened unavailable union carries
+// a NULL productName (unknown_id) and a NULL currentStock (both new variants). The CSV
+// must render those as EMPTY cells — "null" text or a 0 would both read as data.
+test("the requested-id variants export as BLANK cells, never 'null' and never 0", async () => {
+  mockReport.mockResolvedValue({
+    rows: [
+      {
+        status: "unavailable",
+        productId: 9,
+        productName: "Archived Product",
+        currentStock: null,
+        reason: "not_active",
+      },
+      {
+        status: "unavailable",
+        productId: 4242,
+        productName: null,
+        currentStock: null,
+        reason: "unknown_id",
+      },
+    ],
+    inventoryPositionKnown: false,
+    assumptions: { windowDays: 90, bufferDaysDefault: 7, targetCoverageMultiple: 2, demandDefinition: "x" },
+    coverage: {
+      total: 0,
+      suggested: 0,
+      unavailable: 0,
+      healthy: 0,
+      approachingOmitted: 0,
+      costed: 0,
+      requested: { requested: 2, notActive: 1, unknownIds: 1 },
+    },
+  });
+
+  const res = await GET(new NextRequest("http://x/api/reports/reorder-recommendations/export"));
+  expect(res.status).toBe(200);
+  const csv = await res.text();
+  const lines = csv.trim().split("\n");
+  const archived = lines.find((l) => l.startsWith("Archived Product"))!;
+  const unknown = lines.find((l) => l.includes("unknown_id"))!;
+
+  // not_active: the real name is reported; the stock cell is EMPTY (no fabricated 0).
+  expect(archived.split(",")[0]).toBe("Archived Product");
+  expect(archived.split(",")[4]).toBe("");
+  expect(archived).not.toMatch(/null/);
+  // unknown_id: no name, no stock — two empty leading cells, reason intact.
+  expect(unknown.startsWith(",unavailable,unknown_id,,")).toBe(true);
+  expect(unknown).not.toMatch(/null/);
+});

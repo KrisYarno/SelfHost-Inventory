@@ -23,7 +23,13 @@ jest.mock("ai", () => ({ __esModule: true, tool: (def: unknown) => def }));
 
 // The two module functions are mocked, so their prisma reads never run; a bare stub
 // satisfies the tools.ts import graph.
-jest.mock("@/lib/prisma", () => ({ __esModule: true, default: {} }));
+// productSalesFact.groupBy is the ONLY direct prisma read the tools under test reach
+// (get_sales fills zero rows' firstSaleDayKey post-pagination); everything else runs
+// through the mocked module functions below.
+jest.mock("@/lib/prisma", () => ({
+  __esModule: true,
+  default: { productSalesFact: { groupBy: jest.fn(async () => []) } },
+}));
 jest.mock("@/lib/analytics/stock-asof", () => ({ __esModule: true, getStockAsOf: jest.fn() }));
 jest.mock("@/lib/reports/inventory-summary", () => ({ __esModule: true, getInventorySummary: jest.fn() }));
 // W3 seam-fix item 1: get_sales byte-fits IN-MEMORY via paginate (no module byteBudget
@@ -31,19 +37,34 @@ jest.mock("@/lib/reports/inventory-summary", () => ({ __esModule: true, getInven
 // and drives the tool's own paginate. groupBy:"day" avoids any prisma name-resolution.
 jest.mock("@/lib/analytics/queries", () => ({ __esModule: true, getSales: jest.fn() }));
 jest.mock("@/lib/analytics/serialize", () => ({ __esModule: true, serializeSalesRows: (rows: unknown[]) => rows }));
-jest.mock("@/lib/assistant/sales-coverage", () => ({ __esModule: true, callerScopedSalesCoverage: jest.fn() }));
+jest.mock("@/lib/assistant/sales-coverage", () => ({
+  __esModule: true,
+  callerScopedSalesCoverage: jest.fn(),
+  SALES_ROWS_NOTE: "rows note",
+}));
+// C6 zero rows read the approved catalog + the shared identity map; both are prisma
+// reads, so the page-shrink pin stubs them and drives the tool's own paginate.
+jest.mock("@/lib/reports/outbound-mix", () => ({
+  __esModule: true,
+  ...jest.requireActual("@/lib/reports/outbound-mix"),
+  approvedProductIds: jest.fn(),
+  productIdentities: jest.fn(),
+}));
 
 import { createAiTools } from "@/lib/assistant/tool-adapters";
 import { getStockAsOf } from "@/lib/analytics/stock-asof";
 import { getInventorySummary } from "@/lib/reports/inventory-summary";
 import { getSales } from "@/lib/analytics/queries";
 import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
+import { approvedProductIds, productIdentities } from "@/lib/reports/outbound-mix";
 import type { ToolContext as ResolvedContext } from "@/lib/assistant/context";
 
 const asOfMock = getStockAsOf as jest.Mock;
 const summaryMock = getInventorySummary as jest.Mock;
 const salesMock = getSales as jest.Mock;
 const salesCoverageMock = callerScopedSalesCoverage as jest.Mock;
+const approvedIdsMock = approvedProductIds as jest.Mock;
+const identitiesMock = productIdentities as jest.Mock;
 
 const CTX: ResolvedContext = {
   userId: 1,
@@ -78,7 +99,19 @@ beforeEach(() => {
   summaryMock.mockReset();
   salesMock.mockReset();
   salesCoverageMock.mockReset();
-  salesCoverageMock.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "excluded", lastRebuildAt: null });
+  salesCoverageMock.mockResolvedValue({
+    unattributedOrders: 0,
+    bundleRevenue: "excluded",
+    lastRebuildAt: null,
+    // FULL coverage, so the zero rows below are MEASURED zeros (the heavier shape).
+    salesDataStart: "2019-01-01",
+  });
+  approvedIdsMock.mockReset();
+  approvedIdsMock.mockResolvedValue(Array.from({ length: SALES_TOTAL }, (_v, i) => i + 1));
+  identitiesMock.mockReset();
+  identitiesMock.mockImplementation(async (ids: number[]) =>
+    new Map(ids.map((id) => [id, { name: `Product ${"x".repeat(60)} ${id}`, lifecycle: "active" }])),
+  );
   // Day-grain raw rows, each padded so BOTH budgets are byte-bound (page < the 500-row
   // limit), proving the byte budget — not the row limit — shrinks the tight page.
   salesMock.mockImplementation(async () =>
@@ -173,6 +206,22 @@ describe("createAiTools — a tight remainingBytes shrinks the page, never trunc
     // SAME page (limit-bound), never a tighter one.
     expect(large.status).toBe("ok");
     expect(large.data!.nextOffset).not.toBeNull();
+  });
+
+  it("get_sales includeZeroRows (C6, a NEW list mode): tight budget -> smaller page + nextOffset, status ok", async () => {
+    // G2 is NORMATIVE for every new list mode: the synthesised zero rows page through
+    // the SAME byte fitter, so a late-turn catalog-wide zero-row read shrinks instead of
+    // returning the last-resort truncation notice.
+    salesMock.mockImplementation(async () => []); // no real facts => every product is a zero row
+    const tight = await runOnce("get_sales", { groupBy: "product", includeZeroRows: true }, TIGHT);
+    const large = await runOnce("get_sales", { groupBy: "product", includeZeroRows: true }, LARGE);
+
+    expect(tight.status).toBe("ok");
+    expect(tight.notice).toBeUndefined();
+    expect(tight.data!.totalRows).toBe(SALES_TOTAL);
+    expect(tight.data!.rows!.length).toBeLessThan(tight.data!.totalRows!);
+    expect(tight.data!.nextOffset).not.toBeNull();
+    expect(tight.data!.rows!.length).toBeLessThan(large.data!.rows!.length);
   });
 
   it("the ctx budget is threaded through with the envelope reserve subtracted (both tools)", async () => {
