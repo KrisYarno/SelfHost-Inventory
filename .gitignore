@@ -82,3 +82,10 @@ scratch/
 ### Local-only compose/staging overlays (e.g. the deleted staging test env)
 compose.staging-local.yml
 CLAUDE.local.md
+
+# Local/business docs + env-specific compose (kept out of the public repo, 2026-08-07)
+docs/
+*.md
+compose.dev.lan.yml
+compose.qa.yml
+compose.stack.yml
