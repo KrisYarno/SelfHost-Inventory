@@ -88,4 +88,5 @@ docs/
 *.md
 compose.dev.lan.yml
 compose.qa.yml
-compose.stack.yml
+# compose.stack.yml is TRACKED again (2026-08-07): rewritten environment-neutral
+# (host/URL come from the server-owned .env), so it carries no deployment identity.

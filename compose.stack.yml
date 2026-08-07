@@ -1,0 +1,51 @@
+# Production stack override (reverse proxy runs in an external Docker network).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f compose.stack.yml --env-file .env up -d
+#
+# Notes:
+# - ENVIRONMENT-NEUTRAL (2026-08-07 convergence): the public host and auth URL come
+#   from the server-owned .env — set NEXTAUTH_URL and CADDY_HOST there. No deployment
+#   identity is hardcoded in this tracked file.
+# - Expects an external network (default: "stack_network"). Set STACK_NETWORK_NAME to
+#   override. The `inventory` alias on that network is what the reverse proxy resolves.
+# - restart policies live HERE (the server adopts this file verbatim; nothing should
+#   stay down after a host reboot).
+
+services:
+  app:
+    restart: unless-stopped
+    environment:
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+    networks:
+      stack_network:
+        aliases: [inventory]
+      internal:
+    labels:
+      caddy: ${CADDY_HOST}
+      caddy.encode: "gzip zstd"
+      caddy.reverse_proxy: "{{upstreams 3000}}"
+      caddy.reverse_proxy.header_up: "-x-middleware-subrequest"
+
+  db:
+    restart: unless-stopped
+
+  backup:
+    restart: unless-stopped
+
+  sync:
+    restart: unless-stopped
+
+  analytics-rebuild:
+    restart: unless-stopped
+
+  # Only correct while ENABLE_FULFILLMENT_SYNC=1 (the script runs a real loop).
+  # If the flag ever goes back to 0, REMOVE this — the disabled path exits 0
+  # and would crash-loop under a restart policy.
+  fulfillment-sync:
+    restart: unless-stopped
+
+networks:
+  stack_network:
+    external: true
+    name: ${STACK_NETWORK_NAME:-stack_network}

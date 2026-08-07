@@ -88,9 +88,9 @@ services:
       SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
       SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-}
       TEMPLATE_ID: ${TEMPLATE_ID:-}
-      ANALYTICS_SNAPSHOT_NIGHTLY_DAYS: ${ANALYTICS_SNAPSHOT_NIGHTLY_DAYS:-}
-      ANALYTICS_SALES_NIGHTLY_ROLLING_DAYS: ${ANALYTICS_SALES_NIGHTLY_ROLLING_DAYS:-}
-      ANALYTICS_SALES_NIGHTLY_LOOKBACK_HOURS: ${ANALYTICS_SALES_NIGHTLY_LOOKBACK_HOURS:-}
+      ANALYTICS_SNAPSHOT_NIGHTLY_DAYS: ${ANALYTICS_SNAPSHOT_NIGHTLY_DAYS:-3}
+      ANALYTICS_SALES_NIGHTLY_ROLLING_DAYS: ${ANALYTICS_SALES_NIGHTLY_ROLLING_DAYS:-14}
+      ANALYTICS_SALES_NIGHTLY_LOOKBACK_HOURS: ${ANALYTICS_SALES_NIGHTLY_LOOKBACK_HOURS:-36}
     expose:
       - "3000"
     depends_on:
@@ -105,6 +105,10 @@ services:
       - db_backups:/backup
 
   mcp:
+    # Gated out of normal deploys (2026-08-07 convergence): with ENABLE_MCP=0 the
+    # server never listens, so an always-on container would sit unhealthy forever.
+    # Opt in with: docker compose --profile mcp up -d mcp
+    profiles: [mcp]
     build:
       context: .
       dockerfile: Dockerfile.mcp
