@@ -26,6 +26,8 @@
 import prisma from "@/lib/prisma";
 import { reorderDemand } from "@/lib/reports/demand";
 import { REORDER_DEMAND_DEFINITION } from "@/lib/reports/metrics-contract";
+import { resolveAssistantProducts } from "@/lib/assistant/resolve-product";
+import type { OutboundMix } from "@/lib/reports/outbound-mix";
 import {
   getGlobalReorderSettings,
   resolveReorderConfig,
@@ -37,7 +39,10 @@ import {
  *  span, not this window. Disclosed in `assumptions.windowDays`. */
 export const REORDER_WINDOW_DAYS = 90;
 
-export type ReorderUrgency = "OUT" | "CRITICAL" | "REORDER_NOW" | "APPROACHING";
+/** `OK` (spec C11) is the urgency of a HEALTHY product emitted on request — it exists
+ *  so an explicitly-asked-for product always answers with real numbers instead of
+ *  vanishing into a coverage count. It ranks BELOW APPROACHING so OK rows sort last. */
+export type ReorderUrgency = "OUT" | "CRITICAL" | "REORDER_NOW" | "APPROACHING" | "OK";
 
 export type ReorderRow =
   | {
@@ -57,6 +62,15 @@ export type ReorderRow =
       urgency: ReorderUrgency;
       costPrice: number | null;
       orderValue: number | null;
+      /** The RAW numerator behind avgDailyDemand (spec C12) — units out over the
+       *  window's qualifying rows, so the rate is auditable. */
+      demandUnits: number;
+      /** The six-bucket composition of those SAME rows (spec C12): a demand figure
+       *  that is entirely `adjustmentUnclassified` must never read as "units sold".
+       *  CORRECTION-reasoned rows are absent BY PREDICATE (they appear in
+       *  get_operations' outboundMix30 instead — the two mixes partition DIFFERENT
+       *  populations by design). */
+      demandMix: OutboundMix | null;
     }
   | {
       status: "unavailable";
@@ -64,6 +78,25 @@ export type ReorderRow =
       productName: string;
       currentStock: number;
       reason: "no_demand_signal" | "insufficient_history";
+    }
+  // The TWO requested-id variants (spec C11 / contract pack T6). The name/reason
+  // cross-product is constrained BY CONSTRUCTION, not by convention: an archived
+  // product has a real name to report, an unknown id has none and must never be given
+  // a fabricated one. Both carry `currentStock: null` — a product outside the active
+  // population has no current stock this report can stand behind.
+  | {
+      status: "unavailable";
+      productId: number;
+      productName: string;
+      currentStock: null;
+      reason: "not_active";
+    }
+  | {
+      status: "unavailable";
+      productId: number;
+      productName: null;
+      currentStock: null;
+      reason: "unknown_id";
     };
 
 export interface ReorderReport {
@@ -92,6 +125,14 @@ export interface ReorderReport {
     healthy: number;
     approachingOmitted: number;
     costed: number;
+    /**
+     * Requested-id accounting (spec C11 / OC-15), present only when `productIds` was
+     * passed. It sits OUTSIDE the invariant on purpose: `notActive`/`unknownIds` rows
+     * are not members of the approved-ACTIVE population, so counting them in
+     * `unavailable` would break `total = suggested + unavailable + healthy +
+     * approachingOmitted` in exactly the combination a caller is most likely to use.
+     */
+    requested?: { requested: number; notActive: number; unknownIds: number };
   };
   /** Prose for the coverage block — states what `healthy` means and when it is a row. */
   coverageNote: string;
@@ -113,6 +154,9 @@ const URGENCY_RANK: Record<ReorderUrgency, number> = {
   CRITICAL: 3,
   REORDER_NOW: 2,
   APPROACHING: 1,
+  // Below APPROACHING (spec C11): an OK row is an answer, not a worklist item, so it
+  // sorts last deterministically instead of interleaving with things that need buying.
+  OK: 0,
 };
 
 /** Round a gross need UP to a whole multiple of the minimum order quantity. */
@@ -162,14 +206,39 @@ interface ProductRow {
  *   urgency, then unavailable) — the Lane-6 pagination shape reused by the tool.
  */
 export async function getReorderReport(
-  opts: { includeOkay?: boolean; limit?: number; offset?: number } = {},
+  opts: {
+    includeOkay?: boolean;
+    includeHealthy?: boolean;
+    productIds?: number[];
+    limit?: number;
+    offset?: number;
+  } = {},
 ): Promise<ReorderReport> {
   const includeOkay = opts.includeOkay ?? false;
+  const requestedIds = opts.productIds != null ? Array.from(new Set(opts.productIds)) : null;
+
+  // Requested ids resolve through the SHARED batch resolver (contract pack T3) with
+  // allowArchived for IDENTITY ONLY: an archived product is named honestly and then
+  // classified `not_active` here — it is never sized, because a buying suggestion for a
+  // product you have deleted is not an answer, it is a mistake waiting to be actioned.
+  const batch =
+    requestedIds != null
+      ? await resolveAssistantProducts(requestedIds, { allowArchived: true })
+      : null;
+  const activeRequestedIds = batch ? batch.resolved.filter((r) => r.lifecycle === "active").map((r) => r.id) : null;
+  // A requested id is FORCE-EMITTED regardless of urgency; healthy products join the
+  // rows when explicitly requested or when includeHealthy asks for them.
+  const emitHealthy = opts.includeHealthy === true || requestedIds != null;
+  const emitApproaching = includeOkay || requestedIds != null;
 
   const [globals, products] = await Promise.all([
     getGlobalReorderSettings(),
     prisma.product.findMany({
-      where: { deletedAt: null, approvalStatus: "APPROVED" },
+      where: {
+        deletedAt: null,
+        approvalStatus: "APPROVED",
+        ...(activeRequestedIds != null ? { id: { in: activeRequestedIds } } : {}),
+      },
       select: {
         id: true,
         name: true,
@@ -206,6 +275,8 @@ export async function getReorderReport(
       avgDailyDemand: null,
       outboundEvents: 0,
       daysCovered: 0,
+      demandUnits: 0,
+      mix: null,
     };
     const config = resolveReorderConfig(product.reorderConfig, globals);
 
@@ -256,18 +327,21 @@ export async function getReorderReport(
       config.minOrderQuantity,
     );
 
-    const urgency = classifyUrgency(currentStock, leadTimeDemand, reorderPoint);
-    // Healthy products are never rows; APPROACHING only when includeOkay. Both
+    const classified = classifyUrgency(currentStock, leadTimeDemand, reorderPoint);
+    // Healthy products are not rows by default; APPROACHING only when includeOkay. Both
     // outcomes are COUNTED (C5) — a product that leaves the row set must still be
     // accounted for, and the two reasons are never conflated.
-    if (urgency === null) {
+    if (classified === null && !emitHealthy) {
       healthy += 1;
       continue;
     }
-    if (urgency === "APPROACHING" && !includeOkay) {
+    if (classified === "APPROACHING" && !emitApproaching) {
       approachingOmitted += 1;
       continue;
     }
+    // An emitted healthy product carries urgency OK and its REAL, possibly-0 need under
+    // the CONFIGURED assumptions only — never a what-if the caller supplied.
+    const urgency: ReorderUrgency = classified ?? "OK";
 
     const costPrice = product.costPrice == null ? null : Number(product.costPrice);
     const orderValue = costPrice == null ? null : costPrice * grossReplenishmentNeed;
@@ -289,20 +363,57 @@ export async function getReorderReport(
       urgency,
       costPrice,
       orderValue,
+      // Surfaced from ProductDemand (computed in ONE pass inside computeDemand): the
+      // raw numerator and its composition ride WITH the rate they explain.
+      demandUnits: demand.demandUnits ?? 0,
+      demandMix: demand.mix ?? null,
     });
   }
 
+  // Requested ids that are NOT part of the active population get their own rows (spec
+  // C11): named-but-archived, or unresolvable. They are rows so the caller sees an
+  // answer for every id it asked about, and they carry NO numbers so none can be read
+  // as a suggestion.
+  const requestedRows: Extract<ReorderRow, { status: "unavailable" }>[] = [];
+  let notActive = 0;
+  let unknownIds = 0;
+  if (batch != null) {
+    for (const r of batch.resolved) {
+      if (r.lifecycle !== "deleted") continue;
+      notActive += 1;
+      requestedRows.push({
+        status: "unavailable",
+        productId: r.id,
+        productName: r.name, // the REAL name — resolution succeeded, sizing did not
+        currentStock: null,
+        reason: "not_active",
+      });
+    }
+    for (const r of batch.rejected) {
+      unknownIds += 1;
+      requestedRows.push({
+        status: "unavailable",
+        productId: r.productId,
+        // Never fabricated: an id we could not resolve has no name to report.
+        productName: null,
+        currentStock: null,
+        reason: "unknown_id",
+      });
+    }
+  }
+
   // Suggested first, most-urgent first (then largest need, then name); unavailable
-  // after, by name. Deterministic so offset paging is stable.
+  // after, by name; the requested-id rows last (an unknown id has no name to sort by).
   suggested.sort(
     (a, b) =>
       URGENCY_RANK[b.urgency] - URGENCY_RANK[a.urgency] ||
       b.grossReplenishmentNeed - a.grossReplenishmentNeed ||
       a.productName.localeCompare(b.productName),
   );
-  unavailable.sort((a, b) => a.productName.localeCompare(b.productName));
+  unavailable.sort((a, b) => (a.productName ?? "").localeCompare(b.productName ?? ""));
+  requestedRows.sort((a, b) => a.productId - b.productId);
 
-  const allRows: ReorderRow[] = [...suggested, ...unavailable];
+  const allRows: ReorderRow[] = [...suggested, ...unavailable, ...requestedRows];
   const offset = Math.max(0, opts.offset ?? 0);
   const rows =
     opts.limit != null ? allRows.slice(offset, offset + opts.limit) : allRows.slice(offset);
@@ -317,12 +428,19 @@ export async function getReorderReport(
       demandDefinition: REORDER_DEMAND_DEFINITION,
     },
     coverage: {
+      // The invariant buckets count the approved-ACTIVE population ONLY (with
+      // productIds: the resolved-active subset). not_active / unknown_id rows live in
+      // `requested` and NEVER in `unavailable`, so the C5 invariant holds in every
+      // combination of includeOkay x includeHealthy x productIds.
       total,
       suggested: suggested.length,
       unavailable: unavailable.length,
       healthy,
       approachingOmitted,
       costed: suggested.filter((r) => r.costPrice != null).length,
+      ...(requestedIds != null
+        ? { requested: { requested: requestedIds.length, notActive, unknownIds } }
+        : {}),
     },
     coverageNote: REORDER_COVERAGE_NOTE,
   };

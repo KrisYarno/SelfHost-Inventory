@@ -24,6 +24,22 @@ import { Prisma, inventory_logs_logType } from "@prisma/client";
 
 const DAY_MS = 86_400_000;
 
+/**
+ * Classified shrinkage reasons (Lane 6 / review B1 / D-T3). ONLY a row that carries
+ * one of these reason codes is loss. Every other negative movement — a null
+ * reasonCode, a bare CORRECTION, and above all the negative ADJUSTMENT rows this
+ * business uses to SHIP product — is unclassified outbound, surfaced as a coverage
+ * figure and NEVER bucketed as shrinkage.
+ *
+ * MOVED HERE from lib/analytics/queries.ts (quality+reach Task 2.1 / G2-5): the mix
+ * classifier (lib/reports/outbound-mix.ts) needs the taxonomy, and queries.ts imports
+ * the mix classifier — leaving the constant there would close a module cycle
+ * (queries -> outbound-mix -> queries). queries.ts keeps a DEPRECATED re-export for
+ * existing importers.
+ */
+export type ShrinkageReason = "DAMAGE" | "THEFT" | "EXPIRY" | "COUNT";
+export const SHRINKAGE_CLASS_REASONS = ["DAMAGE", "THEFT", "EXPIRY", "COUNT"] as const;
+
 /** A single inventory-log row, reduced to the fields the predicates read. */
 export interface LedgerRow {
   delta: number;
@@ -94,6 +110,33 @@ export function daysCovered(firstEventMs: number, nowMs: number, windowDays: num
 }
 
 /**
+ * How much of a requested window the underlying SOURCE actually covers (spec C6).
+ *   full    — the source starts on or before the window's first day: silence in the
+ *             window is a MEASURED zero.
+ *   partial — the source starts INSIDE or AFTER the window: any sum is at best a
+ *             partial one, so absence is UNKNOWN, never zero.
+ *   none    — the source has no rows at all for this caller: nothing is measurable.
+ */
+export type WindowCoverage = "full" | "partial" | "none";
+
+/**
+ * THE source-level zero-vs-unknown decision, in ONE place (spec C6/C9, seam S8).
+ * get_sales' `coverage.windowCoverage` and compare_periods' per-period resolution
+ * BOTH route through this, so the two surfaces can never classify the same seeded
+ * source differently. Day-key granularity throughout (never sub-day), matching every
+ * other window in this codebase.
+ *
+ * NOTE the deliberate coarseness: a window that PREDATES the source entirely and one
+ * that STRADDLES its start are both `partial` here — neither can yield a trustworthy
+ * total. Callers that need to say WHICH (compare_periods' reason strings) compare
+ * `dataStart` against the window's `to` themselves.
+ */
+export function classifyWindowCoverage(dataStart: string | null, windowFrom: string): WindowCoverage {
+  if (dataStart == null) return "none";
+  return dataStart <= windowFrom ? "full" : "partial";
+}
+
+/**
  * Definition string for physicalOutbound velocity (spec §2 D3). The exact prose a
  * tool relays next to any units-out / avgDailyOutbound figure it carries.
  */
@@ -101,8 +144,9 @@ export const PHYSICAL_OUTBOUND_DEFINITION =
   "Physical outbound = every ledger row with delta < 0 and logType != TRANSFER — " +
   "sales, classified losses (DAMAGE/THEFT/EXPIRY/COUNT), unclassified adjustments/" +
   "corrections, count depletion, and rare wrong-signed receipt reversals alike. It is " +
-  "NOT evidence of verified sales; see get_movement_series's outbound buckets for " +
-  "composition.";
+  "NOT evidence of verified sales; outboundMix30 breaks the SAME rows into sale / " +
+  "classifiedLoss / adjustmentUnclassified / correctionUnclassified / countOut / " +
+  "stockInReversal so the composition is visible instead of assumed.";
 
 /**
  * Definition string for reorderDemand (spec §2 D3). reorder.ts's duplicate string

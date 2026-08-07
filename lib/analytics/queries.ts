@@ -7,7 +7,10 @@ import {
   PHYSICAL_OUTBOUND_WHERE,
   daysCovered,
   PHYSICAL_OUTBOUND_DEFINITION,
+  SHRINKAGE_CLASS_REASONS,
+  type ShrinkageReason,
 } from "@/lib/reports/metrics-contract";
+import { classifyOutboundMix, type OutboundMix } from "@/lib/reports/outbound-mix";
 
 export type SalesGroupBy = "product" | "day" | "integration" | "company";
 
@@ -74,14 +77,13 @@ const TURNS_COVERAGE_FLOOR = 0.8; // R-L10: turns null below 80% snapshot covera
 const AGING_OUTLIER_DAYS = 90; // aligns with DEAD_STOCK_DAYS.
 
 /**
- * Classified shrinkage reasons (Lane 6 / review B1 / D-T3). ONLY a row that
- * carries one of these reason codes is loss. Every other negative movement —
- * a null reasonCode, a bare CORRECTION, and above all the negative ADJUSTMENT
- * rows this business uses to SHIP product — is unclassified outbound, surfaced
- * as a coverage figure and NEVER bucketed as shrinkage.
+ * DEPRECATED re-export (quality+reach Task 2.1 / G2-5). The shrinkage taxonomy now
+ * lives in lib/reports/metrics-contract.ts — the mix classifier needs it, and this
+ * module imports the mix classifier, so keeping the definition here would close a
+ * module cycle. Existing importers keep working through this re-export; it is
+ * removed once the last consumer migrates (SEAMS: after Task 3.1).
  */
-export type ShrinkageReason = "DAMAGE" | "THEFT" | "EXPIRY" | "COUNT";
-export const SHRINKAGE_CLASS_REASONS = ["DAMAGE", "THEFT", "EXPIRY", "COUNT"] as const;
+export { SHRINKAGE_CLASS_REASONS, type ShrinkageReason };
 
 // The ONE outbound (units-out / velocity) predicate now lives in the metrics
 // contract (spec §2 D1): `PHYSICAL_OUTBOUND_WHERE` = delta<0 AND logType != TRANSFER
@@ -114,6 +116,10 @@ export interface OperationsRow {
   currentStock: number;
   unitsOut30: number | null;
   unitsOut90: number | null;
+  // The six-bucket composition of the SAME rows unitsOut30 sums (spec C12), so a
+  // depletion figure can never be read as "units sold". ABSOLUTE magnitudes (G3);
+  // null EXACTLY when unitsOut30 is null.
+  outboundMix30: OutboundMix | null;
   // Per-product velocity (spec §2 D2): units out over the last 30 days divided by that
   // product's OWN days-covered (span from its first qualifying outbound in the window),
   // NEVER a flat /30. Renamed from avgDaily30 so every consumer re-reads the meaning.
@@ -240,12 +246,18 @@ export async function getOperationsRows(
       },
     }),
     getLowStockDefault(),
+    // ONE regrouped 30-day physical-outbound read (spec C12 / OC-12). Grouping by
+    // (productId, logType, reasonCode) instead of productId alone yields THREE
+    // derivations from the SAME scan — unitsOut30, the per-product first-outbound, and
+    // outboundMix30 — so the mix can never disagree with the units it decomposes (a
+    // second query against a sliding window could partition different rows).
     prisma.inventory_logs.groupBy({
-      by: ["productId"],
+      by: ["productId", "logType", "reasonCode"],
       where: { ...PHYSICAL_OUTBOUND_WHERE, changeTime: { gte: start30 } },
       _sum: { delta: true },
       // Per-product FIRST qualifying outbound IN the 30-day window (spec §2 D2): the
       // velocity denominator is this product's own days-covered, not a global dataStart.
+      // Per GROUP here — the per-product value is the MIN across its groups (below).
       _min: { changeTime: true },
     }),
     prisma.inventory_logs.groupBy({
@@ -315,18 +327,48 @@ export async function getOperationsRows(
   const hasAdjustmentData = dataStarts.adjustment !== null;
   const hasSnapshotData = dataStarts.snapshot !== null;
 
-  const out30 = absOutByProduct(outbound30);
-  const out90 = absOutByProduct(outbound90);
-
-  // PER-PRODUCT velocity denominator (spec §2 D2): each product's own first qualifying
-  // outbound WITHIN the 30-day window drives its days-covered — NEVER a global flat /30
-  // and never the global outbound dataStart. A product whose only movement is a burst in
-  // the last few days divides by those few days, not by 30 (which would understate its
-  // real velocity). Corrections are included (physicalOutbound predicate).
+  // Fold the ONE regrouped 30-day read into its three derivations. Every group is a
+  // (product, logType, reasonCode) bucket of rows that all satisfy delta < 0, so a
+  // group's summed delta is itself negative and its magnitude is the group's units out.
+  //
+  //  - unitsOut30      = sum of the group magnitudes (identical to the old by-productId
+  //                      `_sum` — the same rows, summed in two steps).
+  //  - firstOutbound30 = MIN of the group `_min(changeTime)` values — LOAD-BEARING for
+  //                      avgDailyOutbound30's days-covered denominator, which must not
+  //                      change under the regroup.
+  //  - outboundMix30   = the six-bucket composition of exactly those rows (spec C12).
+  const out30 = new Map<number, number>();
   const firstOutbound30 = new Map<number, Date>();
-  for (const r of outbound30 as { productId: number; _min?: { changeTime: Date | null } }[]) {
-    if (r._min?.changeTime) firstOutbound30.set(r.productId, r._min.changeTime);
+  const mixRows30 = new Map<number, Array<{ delta: number; logType: string; reasonCode: string | null }>>();
+  for (const g of outbound30 as Array<{
+    productId: number;
+    logType: string;
+    reasonCode: string | null;
+    _sum: { delta: number | null };
+    _min?: { changeTime: Date | null };
+  }>) {
+    const delta = g._sum?.delta ?? 0;
+    // A zero/absent group sum carries no units and would violate the classifier's
+    // negative-delta precondition; it can only come from an empty group (impossible
+    // under the delta<0 where) or a stubbed read.
+    if (delta < 0) {
+      out30.set(g.productId, (out30.get(g.productId) ?? 0) + Math.abs(delta));
+      const rows = mixRows30.get(g.productId);
+      const row = { delta, logType: g.logType, reasonCode: g.reasonCode ?? null };
+      if (rows) rows.push(row);
+      else mixRows30.set(g.productId, [row]);
+    }
+    const first = g._min?.changeTime;
+    if (first) {
+      const prev = firstOutbound30.get(g.productId);
+      // PER-PRODUCT velocity denominator (spec §2 D2): each product's own first
+      // qualifying outbound WITHIN the 30-day window drives its days-covered — NEVER a
+      // global flat /30 and never the global outbound dataStart. Under the regroup that
+      // value is the EARLIEST across the product's groups.
+      if (prev === undefined || first < prev) firstOutbound30.set(g.productId, first);
+    }
   }
+  const out90 = absOutByProduct(outbound90);
   const shrinkUnits = absOutByProduct(shrink90);
   const inboundAt = new Map<number, Date | null>(inbound.map((r) => [r.productId, r._max.changeTime]));
   const outboundAt = new Map<number, Date | null>(lastOutbound.map((r) => [r.productId, r._max.changeTime]));
@@ -354,6 +396,11 @@ export async function getOperationsRows(
     // never flips another product's honest null to a confident 0.
     const unitsOut30 = out30.has(p.id) ? out30.get(p.id)! : null;
     const unitsOut90 = out90.has(p.id) ? out90.get(p.id)! : null;
+    // Mix composition of the SAME rows unitsOut30 sums (spec C12). NORMATIVE: bucket
+    // sum == unitsOut30, and the mix is null EXACTLY when unitsOut30 is null — never a
+    // zero-filled mix standing in for "we did not measure anything".
+    const outboundMix30 =
+      unitsOut30 === null ? null : classifyOutboundMix(mixRows30.get(p.id) ?? []);
     // Per-product days-covered denominator (spec §2 D2): span from THIS product's first
     // in-window outbound to now, clamped [1, 30]. Null when it has no outbound at all.
     const firstMs = firstOutbound30.get(p.id);
@@ -414,6 +461,7 @@ export async function getOperationsRows(
       currentStock,
       unitsOut30,
       unitsOut90,
+      outboundMix30,
       avgDailyOutbound30,
       daysOfSupply,
       turns,

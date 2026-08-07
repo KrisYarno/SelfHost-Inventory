@@ -12,7 +12,7 @@
  *
  * `classifiedLoss` is the reason-coded subset of NEGATIVE ADJUSTMENT/CORRECTION
  * whose reasonCode is in SHRINKAGE_CLASS_REASONS (DAMAGE/THEFT/EXPIRY/COUNT — the
- * shared shrinkage set from lib/analytics/queries). A DAMAGE-reasoned negative
+ * shared shrinkage set from lib/reports/metrics-contract). A DAMAGE-reasoned negative
  * ADJUSTMENT is classifiedLoss ONLY — never also adjustmentUnclassified.
  *
  * NORMATIVE INVARIANT (reconciliation test): `net === SUM(delta)` over EVERY
@@ -40,7 +40,7 @@ import prisma from "@/lib/prisma";
 import { dayKeyStart, nextDayStart, toDayKey } from "@/lib/analytics/dates";
 import { weekStartKey, monthKey, byStringKey } from "@/lib/analytics/date-grain";
 import type { ResolvedWindow } from "@/lib/assistant/window";
-import { SHRINKAGE_CLASS_REASONS } from "@/lib/analytics/queries";
+import { SHRINKAGE_CLASS_REASONS } from "@/lib/reports/metrics-contract";
 import { pageFromDb, type DbPage } from "@/lib/assistant/tools";
 
 /** getReceipts default page size when the caller omits `limit` (spec §5 T-RCPT). */
@@ -69,7 +69,7 @@ export interface MovementFilters {
   productId: number | null;
   productIds: number[] | null;
   locationId: number | null;
-  mode: "series" | "receipts";
+  mode: "series" | "receipts" | "by_product";
 }
 
 export interface MovementSeriesResult {
@@ -323,4 +323,126 @@ export async function getReceipts(opts: {
     limit,
     byteBudget,
   });
+}
+
+// ---------------------------------------------------------------------------
+// PER-PRODUCT breakdown (spec C10). The series above answers "what moved, when";
+// this answers "WHICH products moved" in ONE call — the alternative was looping a
+// per-product tool over the catalog (review #3's F7).
+// ---------------------------------------------------------------------------
+
+/** One product's full signed window partition, plus the ranking key. */
+export interface MovementProductRow extends MovementBuckets {
+  productId: number;
+  name: string | null;
+  lifecycle: "active" | "deleted" | null;
+  /**
+   * SIGN-FIRST outbound magnitude (spec C10 / G3): the summed |delta| of this product's
+   * NEGATIVE non-TRANSFER rows — the same population the outbound mixes classify. It is
+   * the RANK key, exposed so the ordering is auditable rather than asserted. A positive
+   * SALE row (a return) can never cancel outbound here, which is exactly the point: a
+   * product that shipped 500 and took 500 back still MOVED 500 out.
+   */
+  outboundUnits: number;
+}
+
+export interface MovementByProductResult {
+  mode: "by_product";
+  window: ResolvedWindow;
+  filters: MovementFilters;
+  rows: MovementProductRow[];
+  coverage: { unclassifiedLegacyNote: string; reasonCodeNullRows: number };
+}
+
+/**
+ * Per-product movement over a RESOLVED window.
+ *
+ * @param opts.productIds  the ALREADY-RESOLVED bounded set (visibility-checked by the
+ *   caller's batch resolver). Each one gets a row even with NO ledger activity — an
+ *   all-zero row is the honest answer to "how much did X move?", and it is what makes
+ *   "0 deductions recorded" answerable in one call instead of an ambiguous absence.
+ * @param opts.approvedIds the G5 approved universe for the CATALOG-WIDE case (no
+ *   productIds). Applied at the SQL boundary so an unapproved product never contributes
+ *   to a row nor to the coverage counts.
+ * @param opts.identities  name/lifecycle for the rows (the shared T2 lookup).
+ */
+export async function getMovementByProduct(opts: {
+  window: ResolvedWindow;
+  locationId?: number;
+  productIds?: number[];
+  approvedIds: number[];
+  identities: Map<number, { name: string; lifecycle: "active" | "deleted" }>;
+}): Promise<MovementByProductResult> {
+  const { window, locationId, productIds, approvedIds, identities } = opts;
+  // A bounded request reads exactly its resolved ids; a catalog-wide one reads the
+  // approved universe. Either way the id set is EXPLICIT — never raw caller input.
+  const idScope = productIds ?? approvedIds;
+
+  const rows = await prisma.inventory_logs.findMany({
+    where: {
+      changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
+      productId: { in: idScope },
+      ...(locationId != null ? { locationId } : {}),
+    },
+    // The breakdown needs productId beside the classifier's inputs (spec C10).
+    select: { productId: true, delta: true, logType: true, reasonCode: true },
+  });
+
+  const byProduct = new Map<number, { buckets: MovementBuckets; outboundUnits: number }>();
+  const ensure = (productId: number) => {
+    let entry = byProduct.get(productId);
+    if (!entry) {
+      entry = { buckets: emptyBuckets(), outboundUnits: 0 };
+      byProduct.set(productId, entry);
+    }
+    return entry;
+  };
+  // Requested products materialize FIRST, so a silent one is an all-zero row rather
+  // than a missing one.
+  if (productIds) for (const id of productIds) ensure(id);
+
+  let reasonCodeNullRows = 0;
+  for (const row of rows ?? []) {
+    if (row.delta === 0) continue; // counts NOWHERE (same rule as the series)
+    if (
+      row.delta < 0 &&
+      (row.logType === "ADJUSTMENT" || row.logType === "CORRECTION") &&
+      row.reasonCode == null
+    ) {
+      reasonCodeNullRows += 1;
+    }
+    const entry = ensure(row.productId);
+    entry.buckets[classify(row.logType, row.delta, row.reasonCode)] += row.delta;
+    // Sign-first: the SAME predicate the outbound mixes use (delta < 0, not TRANSFER).
+    if (row.delta < 0 && row.logType !== "TRANSFER") entry.outboundUnits += Math.abs(row.delta);
+  }
+
+  const productRows: MovementProductRow[] = Array.from(byProduct.entries()).map(
+    ([productId, entry]) => {
+      finalizeNet(entry.buckets);
+      const identity = identities.get(productId);
+      return {
+        productId,
+        name: identity?.name ?? null,
+        lifecycle: identity?.lifecycle ?? null,
+        outboundUnits: entry.outboundUnits,
+        ...entry.buckets,
+      };
+    },
+  );
+  // Most-moved first; ties by productId so paging is deterministic.
+  productRows.sort((a, b) => b.outboundUnits - a.outboundUnits || a.productId - b.productId);
+
+  return {
+    mode: "by_product",
+    window,
+    filters: {
+      productId: null,
+      productIds: productIds ?? null,
+      locationId: locationId ?? null,
+      mode: "by_product",
+    },
+    rows: productRows,
+    coverage: { unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE, reasonCodeNullRows },
+  };
 }

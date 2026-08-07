@@ -32,6 +32,7 @@ import {
   isPhysicalOutboundRow,
   daysCovered as daysCoveredInWindow,
 } from "@/lib/reports/metrics-contract";
+import { classifyOutboundMix, type OutboundMix } from "@/lib/reports/outbound-mix";
 
 const DAY_MS = 86_400_000;
 
@@ -43,6 +44,14 @@ export interface ProductDemand {
   /** Days from the first qualifying outbound in the window to now, clamped
    *  [1, windowDays]; 0 when there is no qualifying outbound. */
   daysCovered: number;
+  /** The RAW numerator (spec C12): summed |delta| over the qualifying rows, so
+   *  avgDailyDemand = demandUnits / daysCovered is auditable. 0 when there is no
+   *  qualifying outbound (the honest "nothing counted", paired with a null mix). */
+  demandUnits: number;
+  /** The six-bucket composition of exactly the rows `demandUnits` sums (spec C12) —
+   *  so a demand figure can never be relayed as "units sold". null EXACTLY when there
+   *  is no qualifying row; NORMATIVE: bucket sum == demandUnits. */
+  mix: OutboundMix | null;
 }
 
 /** A single inventory-log row, reduced to the fields the predicates read. */
@@ -84,7 +93,13 @@ async function computeDemand(opts: ComputeOpts): Promise<Map<number, ProductDema
   const { productIds, windowDays, predicate, locationId } = opts;
   const result = new Map<number, ProductDemand>();
   for (const id of productIds) {
-    result.set(id, { avgDailyDemand: null, outboundEvents: 0, daysCovered: 0 });
+    result.set(id, {
+      avgDailyDemand: null,
+      outboundEvents: 0,
+      daysCovered: 0,
+      demandUnits: 0,
+      mix: null,
+    });
   }
   if (productIds.length === 0) return result;
 
@@ -102,13 +117,20 @@ async function computeDemand(opts: ComputeOpts): Promise<Map<number, ProductDema
     select: { productId: true, delta: true, changeTime: true, logType: true, reasonCode: true },
   });
 
-  // Accumulate per product: total outbound units, event count, earliest event time.
-  const acc = new Map<number, { total: number; events: number; firstMs: number }>();
+  // Accumulate per product: total outbound units, event count, earliest event time, and
+  // the QUALIFYING rows themselves. The mix (spec C12) is composed from those same rows
+  // in this ONE pass — a separate query against the sliding Date.now() window could never
+  // be guaranteed to partition the same rows (the race both plan-gate voices named).
+  const acc = new Map<
+    number,
+    { total: number; events: number; firstMs: number; mixRows: DemandRow[] }
+  >();
   for (const row of rows) {
     if (!predicate(row)) continue;
-    const cur = acc.get(row.productId) ?? { total: 0, events: 0, firstMs: Infinity };
+    const cur = acc.get(row.productId) ?? { total: 0, events: 0, firstMs: Infinity, mixRows: [] };
     cur.total += Math.abs(row.delta);
     cur.events += 1;
+    cur.mixRows.push({ delta: row.delta, logType: row.logType, reasonCode: row.reasonCode });
     const t = row.changeTime.getTime();
     if (t < cur.firstMs) cur.firstMs = t;
     acc.set(row.productId, cur);
@@ -123,6 +145,9 @@ async function computeDemand(opts: ComputeOpts): Promise<Map<number, ProductDema
       avgDailyDemand: a.total / covered,
       outboundEvents: a.events,
       daysCovered: covered,
+      demandUnits: a.total,
+      // NORMATIVE (spec C12): these buckets sum to demandUnits by construction.
+      mix: classifyOutboundMix(a.mixRows),
     });
   });
 

@@ -16,9 +16,20 @@
  */
 
 import prisma from "@/lib/prisma";
+import { approvedProductIds } from "@/lib/reports/outbound-mix";
 
 /** The fixed bundle-revenue disclosure (spec §3 E2). */
 export const BUNDLE_REVENUE_DISCLOSURE = "excluded — bundle components carry units only";
+
+/**
+ * The always-on get_sales rows disclosure (spec C6). Absence is the ambiguity this
+ * closes: a product missing from the rows could mean "sold nothing" or "we could not
+ * attribute its orders", and the reader cannot tell without being told where to look.
+ */
+export const SALES_ROWS_NOTE =
+  "products with no attributed sales in the window are absent unless includeZeroRows " +
+  "is set; absent or zero means no ATTRIBUTED orders, not necessarily no orders — see " +
+  "unattributedOrders/totalOrders for how much of the order stream is unattributed.";
 
 /**
  * The fixed attribution disclosure (spec C7, review F4). The two order counts are
@@ -41,6 +52,14 @@ export interface CallerScopedSalesCoverage {
   bundleRevenue: string;
   /** Latest sales-fact rebuild run instant (ISO), or null. Not company-sensitive. */
   lastRebuildAt: string | null;
+  /**
+   * The FIRST day-key with an attributed sales fact for this caller (spec C6) —
+   * caller-scoped `_min(dayKey)` over ProductSalesFact, narrowed to the APPROVED
+   * product universe. null = this caller has no attributed sales facts at all.
+   * It is what makes "no attributed sales RECORDED (since <date>)" a legal sentence
+   * where "no sales ever" never was.
+   */
+  salesDataStart: string | null;
 }
 
 /**
@@ -71,10 +90,11 @@ export async function callerScopedSalesCoverage(
       attributionNote: SALES_ATTRIBUTION_NOTE,
       bundleRevenue: BUNDLE_REVENUE_DISCLOSURE,
       lastRebuildAt: null,
+      salesDataStart: null,
     };
   }
 
-  const [unattributedOrders, totalOrders, rebuildState] = await Promise.all([
+  const [unattributedOrders, totalOrders, rebuildState, salesDataStart] = await Promise.all([
     // DISTINCT-order count = orders in the caller's companies that carry >= 1 unmapped
     // line item — the caller-scoped equivalent of COUNT(DISTINCT orderId) over the
     // item×order join with isMapped=false. Never the global rebuild count.
@@ -90,6 +110,7 @@ export async function callerScopedSalesCoverage(
       where: { job: "sales" },
       select: { lastRunAt: true },
     }),
+    scopedSalesDataStart(companyIds),
   ]);
 
   return {
@@ -98,5 +119,27 @@ export async function callerScopedSalesCoverage(
     attributionNote: SALES_ATTRIBUTION_NOTE,
     bundleRevenue: BUNDLE_REVENUE_DISCLOSURE,
     lastRebuildAt: rebuildState?.lastRunAt ? rebuildState.lastRunAt.toISOString() : null,
+    salesDataStart,
   };
+}
+
+/**
+ * `_min(dayKey)` over ProductSalesFact for this caller's companies (spec C6).
+ *
+ * G5 FROM BIRTH (plan G4/G5, gate cluster A): this is a NEW read, so it carries the
+ * APPROVED-id-set filter from the start — an unapproved product's facts must never move
+ * `salesDataStart`, not even in the window between this task and Task 3.1's retrofit of
+ * the pre-existing reads. Archived-but-approved products ARE included: this is a
+ * HISTORICAL fact read, and their past sales really did happen.
+ *
+ * The id set is ALWAYS applied, even when empty: an empty approved universe must read
+ * as "no facts in scope" (`in: []` matches nothing), never as an unfiltered read.
+ */
+async function scopedSalesDataStart(companyIds: string[]): Promise<string | null> {
+  const approvedIds = await approvedProductIds({ includeArchived: true });
+  const row = await prisma.productSalesFact.aggregate({
+    where: { companyId: { in: companyIds }, productId: { in: approvedIds } },
+    _min: { dayKey: true },
+  });
+  return row?._min?.dayKey ?? null;
 }

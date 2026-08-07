@@ -41,6 +41,8 @@ import prisma from "@/lib/prisma";
 import { reorderDemand } from "@/lib/reports/demand";
 import { getGlobalReorderSettings } from "@/lib/reorder-config";
 import { getReorderReport, type ReorderRow } from "@/lib/reports/reorder";
+import type { ProductDemand } from "@/lib/reports/demand";
+import type { OutboundMix } from "@/lib/reports/outbound-mix";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 const mockReorderDemand = reorderDemand as jest.Mock;
@@ -68,7 +70,15 @@ interface SeedProduct {
     minOrderQuantity: number;
     reorderPointOverride: number | null;
   } | null;
-  demand?: { avgDailyDemand: number | null; outboundEvents: number; daysCovered: number };
+  // The C12 additions ride on ProductDemand; older fixtures omit them and get the
+  // no-signal defaults (demandUnits 0 / mix null).
+  demand?: {
+    avgDailyDemand: number | null;
+    outboundEvents: number;
+    daysCovered: number;
+    demandUnits?: number;
+    mix?: OutboundMix | null;
+  };
 }
 
 function seed(products: SeedProduct[]) {
@@ -82,9 +92,10 @@ function seed(products: SeedProduct[]) {
       reorderConfig: p.reorderConfig ?? null,
     })) as never,
   );
-  const map = new Map<number, { avgDailyDemand: number | null; outboundEvents: number; daysCovered: number }>();
+  const map = new Map<number, ProductDemand>();
   for (const p of products) {
-    map.set(p.id, p.demand ?? { avgDailyDemand: null, outboundEvents: 0, daysCovered: 0 });
+    const d = p.demand ?? { avgDailyDemand: null, outboundEvents: 0, daysCovered: 0 };
+    map.set(p.id, { demandUnits: 0, mix: null, ...d });
   }
   mockReorderDemand.mockResolvedValue(map);
 }
@@ -278,5 +289,46 @@ describe("report envelope", () => {
     expect(report.coverage.suggested).toBe(2);
     expect(report.coverage.unavailable).toBe(1);
     expect(report.coverage.costed).toBe(1); // only product 1 has a cost among the suggested
+  });
+});
+
+describe("demand mix on suggested rows (spec C12)", () => {
+  it("surfaces demandUnits + demandMix from ProductDemand; the buckets sum to demandUnits", async () => {
+    seed([
+      {
+        id: 1,
+        name: "Mixed",
+        costPrice: null,
+        stock: 0,
+        demand: {
+          avgDailyDemand: 1,
+          outboundEvents: 10,
+          daysCovered: 30,
+          demandUnits: 30,
+          // The whole point of C12: this product's "demand" is 24 units of legacy
+          // unclassified adjustment and only 6 units of actual SALE.
+          mix: {
+            sale: 6,
+            classifiedLoss: 0,
+            adjustmentUnclassified: 24,
+            correctionUnclassified: 0,
+            countOut: 0,
+            stockInReversal: 0,
+          },
+        },
+      },
+    ]);
+    const report = await getReorderReport({ includeOkay: true });
+    const row = asSuggested(report.rows[0]);
+    expect(row.demandUnits).toBe(30);
+    expect(row.demandMix).toEqual({
+      sale: 6,
+      classifiedLoss: 0,
+      adjustmentUnclassified: 24,
+      correctionUnclassified: 0,
+      countOut: 0,
+      stockInReversal: 0,
+    });
+    expect(Object.values(row.demandMix!).reduce((a, b) => a + b, 0)).toBe(row.demandUnits);
   });
 });

@@ -68,9 +68,11 @@ function setupOps(f: OpsFixtures) {
     // OUTBOUND predicate = delta<0 AND logType != TRANSFER.
     if (w.logType?.not === "TRANSFER" && args._max) return Promise.resolve(f.lastOutbound ?? []);
     if (w.logType?.not === "TRANSFER" && args._sum) {
-      const gte = w.changeTime?.gte?.getTime?.() ?? 0;
-      const sixtyAgo = Date.now() - 60 * DAY;
-      return Promise.resolve(gte > sixtyAgo ? f.outbound30 ?? [] : f.outbound90 ?? []);
+      // quality+reach Task 2.1: the 30-day read is the REGROUPED one — grouped by
+      // (productId, logType, reasonCode) so unitsOut30, the per-product first-outbound,
+      // and outboundMix30 all come off the SAME scan. The 90-day read is unchanged.
+      if ((args.by ?? []).length === 3) return Promise.resolve(f.outbound30 ?? []);
+      return Promise.resolve(f.outbound90 ?? []);
     }
     return Promise.resolve([]);
   });
@@ -106,7 +108,7 @@ describe("getOperationsRows — ONE outbound predicate + per-product null (revie
       products: [product()],
       outboundStart: new Date(Date.now() - 10 * DAY + 60_000),
       outbound30: [
-        { productId: 1, _sum: { delta: -20 }, _min: { changeTime: new Date(Date.now() - 10 * DAY + 60_000) } },
+        { productId: 1, logType: "SALE", reasonCode: null, _sum: { delta: -20 }, _min: { changeTime: new Date(Date.now() - 10 * DAY + 60_000) } },
       ],
       outbound90: [{ productId: 1, _sum: { delta: -20 } }],
     });
@@ -125,7 +127,7 @@ describe("getOperationsRows — ONE outbound predicate + per-product null (revie
       products: [product()], // 50 on hand
       outboundStart: daysAgo(200),
       outbound30: [
-        { productId: 1, _sum: { delta: -19 }, _min: { changeTime: new Date(Date.now() - 5 * DAY + 60_000) } },
+        { productId: 1, logType: "SALE", reasonCode: null, _sum: { delta: -19 }, _min: { changeTime: new Date(Date.now() - 5 * DAY + 60_000) } },
       ],
       outbound90: [{ productId: 1, _sum: { delta: -19 } }],
     });
@@ -140,7 +142,7 @@ describe("getOperationsRows — ONE outbound predicate + per-product null (revie
       products: [product({ id: 1 }), product({ id: 2 })],
       outboundStart: daysAgo(200),
       // only product 1 moved
-      outbound30: [{ productId: 1, _sum: { delta: -30 }, _min: { changeTime: daysAgo(25) } }],
+      outbound30: [{ productId: 1, logType: "SALE", reasonCode: null, _sum: { delta: -30 }, _min: { changeTime: daysAgo(25) } }],
       outbound90: [{ productId: 1, _sum: { delta: -30 } }],
     });
     const { rows } = await getOperationsRows({});
@@ -162,7 +164,7 @@ describe("getOperationsRows — ONE outbound predicate + per-product null (revie
       products: [product({ id: 1 }), product({ id: 2 })],
       outboundStart: daysAgo(365),
       // the lone SALE row, as outbound; first in-window movement clamps to the 30d edge
-      outbound30: [{ productId: 1, _sum: { delta: -5 }, _min: { changeTime: daysAgo(60) } }],
+      outbound30: [{ productId: 1, logType: "SALE", reasonCode: null, _sum: { delta: -5 }, _min: { changeTime: daysAgo(60) } }],
       outbound90: [{ productId: 1, _sum: { delta: -5 } }],
     });
     const { rows } = await getOperationsRows({});
@@ -196,6 +198,79 @@ describe("getOperationsRows — ONE outbound predicate + per-product null (revie
       ([a]: any[]) => a._max && a.where?.logType?.not === "TRANSFER",
     );
     expect(maxCalls.length).toBeGreaterThan(0);
+  });
+});
+
+describe("getOperationsRows — outboundMix30 off the SAME regrouped read (spec C12)", () => {
+  test("the mix decomposes unitsOut30 exactly: bucket sum == unitsOut30", async () => {
+    setupOps({
+      products: [product()],
+      outboundStart: daysAgo(200),
+      outbound30: [
+        { productId: 1, logType: "SALE", reasonCode: null, _sum: { delta: -12 }, _min: { changeTime: daysAgo(20) } },
+        { productId: 1, logType: "ADJUSTMENT", reasonCode: "DAMAGE", _sum: { delta: -3 }, _min: { changeTime: daysAgo(9) } },
+        { productId: 1, logType: "ADJUSTMENT", reasonCode: null, _sum: { delta: -7 }, _min: { changeTime: daysAgo(5) } },
+        { productId: 1, logType: "CORRECTION", reasonCode: null, _sum: { delta: -2 }, _min: { changeTime: daysAgo(4) } },
+        { productId: 1, logType: "COUNT", reasonCode: null, _sum: { delta: -4 }, _min: { changeTime: daysAgo(3) } },
+        // The gate-blocker row: a wrong-signed receipt reversal is legal outbound.
+        { productId: 1, logType: "STOCK_IN", reasonCode: null, _sum: { delta: -6 }, _min: { changeTime: daysAgo(2) } },
+      ],
+      outbound90: [{ productId: 1, _sum: { delta: -34 } }],
+    });
+    const { rows } = await getOperationsRows({});
+    expect(rows[0].unitsOut30).toBe(34);
+    expect(rows[0].outboundMix30).toEqual({
+      sale: 12,
+      classifiedLoss: 3,
+      adjustmentUnclassified: 7,
+      correctionUnclassified: 2,
+      countOut: 4,
+      stockInReversal: 6,
+    });
+    const mix = rows[0].outboundMix30!;
+    expect(Object.values(mix).reduce((a, b) => a + b, 0)).toBe(rows[0].unitsOut30);
+  });
+
+  test("the per-product first-outbound survives the regroup (MIN across the product's groups)", async () => {
+    // The velocity denominator is load-bearing: the earliest group `_min` wins, and it is
+    // NOT the group that carries the largest sum. 20 units over 10 covered days = 2.0/day.
+    setupOps({
+      products: [product()],
+      outboundStart: daysAgo(200),
+      outbound30: [
+        { productId: 1, logType: "ADJUSTMENT", reasonCode: null, _sum: { delta: -4 }, _min: { changeTime: new Date(Date.now() - 10 * DAY + 60_000) } },
+        { productId: 1, logType: "SALE", reasonCode: null, _sum: { delta: -16 }, _min: { changeTime: daysAgo(1) } },
+      ],
+      outbound90: [{ productId: 1, _sum: { delta: -20 } }],
+    });
+    const { rows } = await getOperationsRows({});
+    expect(rows[0].unitsOut30).toBe(20);
+    expect(rows[0].avgDailyOutbound30).toBeCloseTo(2.0, 5); // 20 / 10, not 20 / 1
+  });
+
+  test("outboundMix30 is null EXACTLY when unitsOut30 is null (never a zero-filled mix)", async () => {
+    setupOps({
+      products: [product({ id: 1 }), product({ id: 2 })],
+      outboundStart: daysAgo(200),
+      outbound30: [{ productId: 1, logType: "SALE", reasonCode: null, _sum: { delta: -5 }, _min: { changeTime: daysAgo(3) } }],
+      outbound90: [{ productId: 1, _sum: { delta: -5 } }],
+    });
+    const { rows } = await getOperationsRows({});
+    const byId = Object.fromEntries(rows.map((r) => [r.productId, r]));
+    expect(byId[1].outboundMix30).not.toBeNull();
+    expect(byId[2].unitsOut30).toBeNull();
+    expect(byId[2].outboundMix30).toBeNull();
+  });
+
+  test("the 30-day outbound read is grouped by (productId, logType, reasonCode) — ONE scan", async () => {
+    setupOps({ products: [product()], outboundStart: daysAgo(30) });
+    await getOperationsRows({});
+    const regrouped = m.inventory_logs.groupBy.mock.calls.filter(
+      ([a]: any[]) => a._sum && a.where?.logType?.not === "TRANSFER" && (a.by ?? []).length === 3,
+    );
+    expect(regrouped).toHaveLength(1);
+    expect(regrouped[0][0].by).toEqual(["productId", "logType", "reasonCode"]);
+    expect(regrouped[0][0]._min).toEqual({ changeTime: true });
   });
 });
 

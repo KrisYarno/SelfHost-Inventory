@@ -24,6 +24,7 @@ import {
   PHYSICAL_OUTBOUND_DEFINITION,
   REORDER_DEMAND_DEFINITION,
   OUTBOUND_USAGE_DEFINITION,
+  SHRINKAGE_CLASS_REASONS,
 } from "@/lib/reports/metrics-contract";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
@@ -126,5 +127,30 @@ describe("definition strings are non-empty (spec §2 D3)", () => {
     expect(s).toContain(predicate);
     expect(s.toLowerCase()).toContain("not evidence of verified sales");
     expect(s).not.toMatch(/largest component|genuine losses/); // the review-F2 over-claims
+  });
+
+  // Quality+reach C12 (Task 2.1): the W0 text pointed at get_movement_series's outbound
+  // buckets because the mix fields did not exist yet. Now they do — and they decompose
+  // the SAME rows this definition describes, so the pointer names them instead (a
+  // reader should not have to make a second, differently-defined call to see the split).
+  it("PHYSICAL_OUTBOUND_DEFINITION points at the mix FIELDS, not at another tool's buckets", () => {
+    expect(PHYSICAL_OUTBOUND_DEFINITION).toContain("outboundMix30");
+    for (const bucket of [
+      "sale",
+      "classifiedLoss",
+      "adjustmentUnclassified",
+      "correctionUnclassified",
+      "countOut",
+      "stockInReversal",
+    ]) {
+      expect(PHYSICAL_OUTBOUND_DEFINITION).toContain(bucket);
+    }
+    expect(PHYSICAL_OUTBOUND_DEFINITION).not.toContain("get_movement_series");
+  });
+
+  // The taxonomy moved here in Task 2.1 (G2-5 module cycle); queries.ts keeps a
+  // deprecated re-export. Both spellings must stay the SAME frozen tuple.
+  it("SHRINKAGE_CLASS_REASONS is the canonical four-reason taxonomy", () => {
+    expect(SHRINKAGE_CLASS_REASONS).toEqual(["DAMAGE", "THEFT", "EXPIRY", "COUNT"]);
   });
 });
