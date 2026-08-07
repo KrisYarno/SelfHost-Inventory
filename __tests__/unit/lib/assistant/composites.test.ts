@@ -18,7 +18,10 @@
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {
-    product: { findUnique: jest.fn() },
+    // quality+reach Task 3.1: the snapshot's sales section reads the approved-ACTIVE id
+    // set (its C13 policy row) before summing facts, so `product.findMany` is now part of
+    // this composite's read graph.
+    product: { findUnique: jest.fn(), findMany: jest.fn(async () => []) },
     product_locations: { findMany: jest.fn() },
     location: { findMany: jest.fn() },
     inventory_logs: { aggregate: jest.fn() },

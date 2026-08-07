@@ -1364,6 +1364,176 @@ describe("start() disabled mode", () => {
   });
 });
 
+describe("POST /mcp — quality+reach W3 round-trips (approval + lifecycle over the wire)", () => {
+  // Task 3.3 (spec C13/G5). The trust boundary is only real if it survives the OTHER
+  // runtime: these drive the SIDECAR end-to-end and assert that (a) an unapproved
+  // product never reaches the wire and IS disclosed, and (b) an archived product does,
+  // tagged. `product.findMany` is dispatched BY WHERE-SHAPE rather than by call order,
+  // because one get_sales call now makes three structurally different product reads
+  // (the approved id set, the identity lookup, the contributor census) and a
+  // mockResolvedValueOnce chain would pin the ORDER instead of the meaning.
+  const APPROVED_ACTIVE = { id: 7, name: "TIRZ 10mg", deletedAt: null };
+  const APPROVED_ARCHIVED = { id: 8, name: "Retired 5mg", deletedAt: new Date("2026-03-01T00:00:00.000Z") };
+
+  function seedProductReads(rows: Array<Record<string, unknown>>, censusCount: number) {
+    p.product.findMany.mockImplementation(async (args: any) => {
+      const where = args?.where ?? {};
+      // The G5 CENSUS: starts from Product, reaches facts through a product-side relation.
+      if (where.inventory_logs != null || where.salesFacts != null) {
+        if (where.approvalStatus?.not === "APPROVED") {
+          return Array.from({ length: censusCount }, (_v, i) => ({ id: 900 + i }));
+        }
+        // The archived-contributor census.
+        return rows.filter((r) => r.deletedAt != null).map((r) => ({ id: r.id }));
+      }
+      // The approved id set / the identity lookup: both read the same population here.
+      return rows;
+    });
+  }
+
+  beforeEach(() => {
+    p.userCompany.findMany.mockReset();
+    p.userCompany.findMany.mockResolvedValue([]);
+    p.product.findMany.mockReset();
+    p.product.findMany.mockResolvedValue([]);
+    p.product.findFirst.mockReset();
+    p.product.findFirst.mockResolvedValue(null);
+    p.product.count.mockReset();
+    p.product.count.mockResolvedValue(0);
+    p.productSalesFact.groupBy.mockReset();
+    p.productSalesFact.groupBy.mockResolvedValue([]);
+    p.productSalesFact.aggregate.mockReset();
+    p.productSalesFact.aggregate.mockResolvedValue({ _min: {}, _max: {}, _sum: {}, _count: {} });
+    p.inventory_logs.findMany.mockReset();
+    p.inventory_logs.findMany.mockResolvedValue([]);
+    p.inventory_logs.aggregate.mockReset();
+    p.inventory_logs.aggregate.mockResolvedValue({ _min: {}, _max: {}, _sum: {}, _count: {} });
+    p.inventory_logs.count.mockReset();
+    p.inventory_logs.count.mockResolvedValue(0);
+    p.externalOrder.count.mockReset();
+    p.externalOrder.count.mockResolvedValue(0);
+    p.analyticsRebuildState.findUnique.mockReset();
+    p.analyticsRebuildState.findUnique.mockResolvedValue(null);
+    p.product_locations.findMany.mockReset();
+    p.product_locations.findMany.mockResolvedValue([]);
+    p.systemSetting.findUnique.mockReset();
+    p.systemSetting.findUnique.mockResolvedValue(null);
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function roundTrip(name: string, args: Record<string, unknown>): Promise<any> {
+    const server = createMcpHttpServer();
+    const port = await listen(server);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: MCP_HEADERS,
+        body: toolCall(1, name, args),
+      });
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rpc = (await res.json()) as any;
+      expect(rpc.result).toBeDefined();
+      return JSON.parse(rpc.result.content[0].text as string);
+    } finally {
+      await close(server);
+    }
+  }
+
+  it("get_sales: the fact read is narrowed to the APPROVED id set and the exclusion is disclosed", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    seedProductReads([APPROVED_ACTIVE, APPROVED_ARCHIVED], 2);
+    p.productSalesFact.groupBy.mockResolvedValueOnce([
+      { productId: 7, _sum: { orderedQty: 12, revenue: "24.00", orderCount: 3 } },
+      { productId: 8, _sum: { orderedQty: 5, revenue: "9.00", orderCount: 1 } },
+    ]);
+
+    const toolResult = await roundTrip("get_sales", { groupBy: "product" });
+    expect(toolResult.status).toBe("ok");
+    // The id-set filter reached the DB on the SIDECAR path, not just in-process.
+    const factRead = p.productSalesFact.groupBy.mock.calls[0][0];
+    expect(factRead.where.productId).toEqual({ in: [7, 8] });
+    // ...and the exclusion is DISCLOSED with a real census count, never left implicit.
+    expect(toolResult.data.coverage.excludedUnapprovedProducts).toBe(2);
+    expect(toolResult.data.coverage.archivedProductsIncluded).toBe(1);
+    expect(toolResult.data.coverage.approvalNote).toContain("APPROVED product universe only");
+  });
+
+  it("get_sales: an ARCHIVED product's row reaches the wire TAGGED lifecycle 'deleted'", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    seedProductReads([APPROVED_ACTIVE, APPROVED_ARCHIVED], 0);
+    p.productSalesFact.groupBy.mockResolvedValueOnce([
+      { productId: 8, _sum: { orderedQty: 5, revenue: "9.00", orderCount: 1 } },
+    ]);
+
+    const toolResult = await roundTrip("get_sales", { groupBy: "product" });
+    const row = toolResult.data.rows.find((r: { productId: number }) => r.productId === 8);
+    expect(row.name).toBe("Retired 5mg");
+    expect(row.lifecycle).toBe("deleted");
+    expect(row._sum.orderedQty).toBe(5);
+  });
+
+  it("get_sales(productId): an archived product resolves and the payload carries top-level lifecycle", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    p.product.findFirst.mockResolvedValueOnce(APPROVED_ARCHIVED); // the C13 resolver
+    seedProductReads([APPROVED_ARCHIVED], 0);
+    p.productSalesFact.groupBy.mockResolvedValueOnce([
+      { productId: 8, _sum: { orderedQty: 5, revenue: "9.00", orderCount: 1 } },
+    ]);
+
+    const toolResult = await roundTrip("get_sales", { productId: 8, groupBy: "product" });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.lifecycle).toBe("deleted");
+    expect(toolResult.data.productScope.name).toBe("Retired 5mg");
+    // allowArchived relaxes ONLY deletedAt — approval stays unconditional on the wire path.
+    const resolverCall = p.product.findFirst.mock.calls[0][0];
+    expect(resolverCall.where.approvalStatus).toBe("APPROVED");
+    expect(resolverCall.where).not.toHaveProperty("deletedAt");
+  });
+
+  it("get_movement_series: an archived product's history answers, tagged, over the wire", async () => {
+    const when = new Date(Date.now() - 2 * 86_400_000);
+    p.product.findFirst.mockResolvedValueOnce(APPROVED_ARCHIVED);
+    seedProductReads([APPROVED_ARCHIVED], 1);
+    p.inventory_logs.findMany.mockResolvedValueOnce([
+      { delta: -5, changeTime: when, logType: "SALE", reasonCode: null },
+    ]);
+
+    const toolResult = await roundTrip("get_movement_series", { productId: 8 });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.lifecycle).toBe("deleted");
+    expect(toolResult.data.totals.sale).toBe(-5);
+    expect(toolResult.data.coverage.excludedUnapprovedProducts).toBe(1);
+  });
+
+  it("find_product includeArchived:true: a deleted row is tagged, NULLED, and carries the stateNote", async () => {
+    p.product.count.mockResolvedValue(1);
+    // find_product reads the catalog page, then the shared identity lookup.
+    p.product.findMany.mockImplementation(async (args: any) => {
+      if (args?.where?.id != null) return [APPROVED_ARCHIVED]; // productIdentities
+      return [{ ...APPROVED_ARCHIVED, baseName: "Retired", variant: "5mg", approvalStatus: "APPROVED", lowStockThreshold: null }];
+    });
+
+    const toolResult = await roundTrip("find_product", { query: "Retired", includeArchived: true });
+    expect(toolResult.status).toBe("ok");
+    const row = toolResult.data.products[0];
+    expect(row.lifecycle).toBe("deleted");
+    expect(row.currentStock).toBeNull();
+    expect(row.lowStock).toBeNull();
+    expect(row.stockState).toBeNull();
+    expect(row.stateNote).toBe("deleted product — current stock not reported; history remains queryable");
+  });
+
+  it("find_product WITHOUT the flag keeps the deletedAt predicate on the wire path", async () => {
+    p.product.count.mockResolvedValue(0);
+    await roundTrip("find_product", { query: "Retired" });
+    const catalogRead = p.product.findMany.mock.calls.find(
+      (c: any[]) => c[0]?.where?.approvalStatus === "APPROVED",
+    );
+    expect(catalogRead[0].where.deletedAt).toBeNull();
+  });
+});
+
 describe("MCP mock-layer parity (Task 2.6 consolidation — seam S12/CP-7)", () => {
   // WHY THIS IS STRUCTURAL, not another round-trip: the jest round-trips above run
   // against the INLINE mock, so they physically cannot detect a method missing from

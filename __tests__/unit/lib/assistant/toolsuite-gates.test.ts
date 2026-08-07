@@ -142,7 +142,9 @@ function writeCalls(): Array<{ model: string; method: string }> {
 // ---------------------------------------------------------------------------
 
 const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
-  find_product: [{ query: "abc" }],
+  // Task 3.2 (C13): the archived listing is a distinct read path (relaxed deletedAt
+  // predicate + nulled current-state fields), so it gets its own gate fixture.
+  find_product: [{ query: "abc" }, { query: "abc", includeArchived: true }],
   get_stock: [
     { productId: 1 },
     { productId: 1, from: "2026-01-01", to: "2026-06-01" },
@@ -460,6 +462,13 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d("reorder_report")).toMatch(/unknown_id/);
     expect(d("reorder_report")).toMatch(/never in\s+coverage\.unavailable/i);
     expect(d("reorder_report")).toMatch(/CONFIGURED assumptions only/i);
+    // Task 3.2 (C13): the archived affordance + the coherence rule for a deleted row.
+    // Without the "history stays queryable" sentence a model reads the NULLED
+    // current-state fields as "we have nothing on this product".
+    expect(d("find_product")).toMatch(/includeArchived:true/);
+    expect(d("find_product")).toMatch(/lifecycle/);
+    expect(d("find_product")).toMatch(/DELETED products are ABSENT\s+by default/i);
+    expect(d("find_product")).toMatch(/HISTORY stays queryable/i);
   });
 
   // Quality+reach C12 (Task 2.1): the mix fields are the composition a bare depletion
@@ -617,6 +626,10 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
   // lib/assistant/tools.ts (checked to exist; stock-threshold.ts is present in this repo).
   const READ_PATH_FILES = [
     "lib/assistant/tools.ts",
+    // Found by the import-completeness meta-test below (Task 3.3): tools.ts imports the
+    // Prisma client module itself, and it was never scanned. A write helper added to the
+    // client factory would have been invisible to every layer of this gate.
+    "lib/prisma.ts",
     "lib/assistant/window.ts",
     "lib/assistant/resolve-product.ts",
     "lib/assistant/sales-coverage.ts",
@@ -671,6 +684,81 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
 
   it("the allowlist is EMPTY — the read path carries zero writes (W0-4 closed R2-B1)", () => {
     expect(STATIC_WRITE_ALLOWLIST).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // (2a) META-TEST (Task 3.3 / OC-10): READ_PATH_FILES is HAND-MAINTAINED, so the
+  // static scan above silently shrinks the moment tools.ts imports a new module and
+  // nobody remembers this list. Derive the truth from the source instead: EVERY
+  // `@/lib` module tools.ts imports must be scanned.
+  // -------------------------------------------------------------------------
+  it("every @/lib module imported by tools.ts is registered in READ_PATH_FILES", () => {
+    const repoRoot = path.resolve(__dirname, "../../../..");
+    const src = fs.readFileSync(path.join(repoRoot, "lib/assistant/tools.ts"), "utf8");
+    const imported = new Set(
+      Array.from(src.matchAll(/from\s+"@\/(lib\/[^"]+)"/g)).map((m) => `${m[1]}.ts`),
+    );
+    const registered = new Set(READ_PATH_FILES);
+    const unregistered = Array.from(imported).filter((f) => !registered.has(f)).sort();
+    expect(unregistered).toEqual([]);
+  });
+
+  it("every registered read-path file EXISTS (a stale entry scans nothing)", () => {
+    const repoRoot = path.resolve(__dirname, "../../../..");
+    const missing = READ_PATH_FILES.filter((rel) => !fs.existsSync(path.join(repoRoot, rel)));
+    expect(missing).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (2b) META-TEST (Task 3.3 / OC-19, seam S10): the runner's `gate` suite is the
+// named CONTRACT-GATE subset, and its `patterns` list is hand-maintained too. W0
+// verified the failure mode: a pattern that matches nothing is SILENTLY IGNORED as
+// long as the other patterns match, so a typo'd or deleted path costs a whole gate
+// file with a GREEN run. Two assertions close that:
+//   - bidirectional set equality against the canonical contract-gate file list, so a
+//     new gate file that is never registered fails HERE rather than going unrun;
+//   - fs.existsSync per registered path, so a typo cannot hide behind its neighbours.
+//
+// SCOPE OF THE CANONICAL LIST (adjudicated at Task 3.3): the `gate` suite is the
+// CONTRACT gates — the files that pin cross-task contracts, definitions, prompt rules,
+// presentation, and the approval/lifecycle trust boundary. Per-module behavioral suites
+// (movement, demand, reorder, sales-coverage, compare-periods, movement-breakdown, ...)
+// are NOT gate files: they belong to `all`, which runs them on every wave close. Adding
+// them here would turn the "fast named subset" into a second full run and blur what the
+// gate is FOR. Anything the plan later designates a contract gate is added to BOTH the
+// runner and this list, together.
+// ---------------------------------------------------------------------------
+
+describe("GATE REGISTRATION meta-test (seam S10 — the runner's gate.patterns)", () => {
+  const CONTRACT_GATE_FILES = [
+    "__tests__/unit/lib/assistant/toolsuite-gates.test.ts",
+    "__tests__/unit/lib/reports/metrics-contract.test.ts",
+    "__tests__/unit/lib/assistant/prompt-rules.test.ts",
+    "__tests__/unit/lib/assistant/tool-presentation.test.ts",
+    "__tests__/unit/lib/reports/reorder-coverage-invariant.test.ts",
+    "__tests__/unit/lib/reports/outbound-mix.test.ts",
+    "__tests__/unit/lib/assistant/lifecycle-visibility.test.ts",
+  ];
+
+  /** Read the runner as TEXT — `require`ing it would SPAWN jest (it runs on import). */
+  function registeredPatterns(): string[] {
+    const repoRoot = path.resolve(__dirname, "../../../..");
+    const src = fs.readFileSync(path.join(repoRoot, "scripts/test-runner.js"), "utf8");
+    const block = src.match(/gate:\s*\{[\s\S]*?patterns:\s*\[([\s\S]*?)\]/);
+    expect(block).not.toBeNull();
+    return Array.from(block![1].matchAll(/'([^']+)'/g)).map((m) => m[1]);
+  }
+
+  it("gate.patterns is EXACTLY the contract-gate file list (both directions)", () => {
+    const registered = registeredPatterns();
+    expect([...registered].sort()).toEqual([...CONTRACT_GATE_FILES].sort());
+  });
+
+  it("every registered gate pattern points at a file that EXISTS (S10: a miss is silent)", () => {
+    const repoRoot = path.resolve(__dirname, "../../../..");
+    const missing = registeredPatterns().filter((rel) => !fs.existsSync(path.join(repoRoot, rel)));
+    expect(missing).toEqual([]);
   });
 });
 
@@ -992,11 +1080,15 @@ describe("notFound — the ONE not-found shape (spec §4 W0-PROD)", () => {
   });
 });
 
-describe("resolveAssistantProduct (spec §4 W0-PROD)", () => {
-  it("returns { id, name } for an approved, non-deleted product and filters on that scope", async () => {
+describe("resolveAssistantProduct (spec §4 W0-PROD; opts + lifecycle by C13/T3)", () => {
+  it("returns { id, name, lifecycle } for an approved, non-deleted product and filters on that scope", async () => {
     prismaCtl.__reset();
     prismaCtl.__overrides["product.findFirst"] = { id: 5, name: "TIRZ 10mg" };
-    await expect(resolveAssistantProduct(5)).resolves.toEqual({ id: 5, name: "TIRZ 10mg" });
+    await expect(resolveAssistantProduct(5)).resolves.toEqual({
+      id: 5,
+      name: "TIRZ 10mg",
+      lifecycle: "active",
+    });
     const call = prismaCtl.__calls.find((c) => c.model === "product" && c.method === "findFirst");
     expect(call).toBeDefined();
     expect((call!.args as { where: Record<string, unknown> }).where).toMatchObject({
@@ -1009,6 +1101,28 @@ describe("resolveAssistantProduct (spec §4 W0-PROD)", () => {
   it("returns null for a pending-review / soft-deleted / absent id (proxy findFirst -> null)", async () => {
     prismaCtl.__reset();
     await expect(resolveAssistantProduct(PENDING_REVIEW_FIXTURE_ID)).resolves.toBeNull();
+  });
+
+  // Task 3.2 sibling case: allowArchived relaxes ONLY deletedAt, and the resolved row is
+  // TAGGED — a historical tool must be able to answer for a deleted product without ever
+  // presenting it as a live one.
+  it("allowArchived resolves a soft-deleted approved product, tagged, and drops ONLY the deletedAt predicate", async () => {
+    prismaCtl.__reset();
+    prismaCtl.__overrides["product.findFirst"] = {
+      id: 6,
+      name: "Retired 5mg",
+      deletedAt: new Date("2026-02-01T00:00:00.000Z"),
+    };
+    await expect(resolveAssistantProduct(6, { allowArchived: true })).resolves.toEqual({
+      id: 6,
+      name: "Retired 5mg",
+      lifecycle: "deleted",
+    });
+    const call = prismaCtl.__calls.find((c) => c.model === "product" && c.method === "findFirst");
+    const where = (call!.args as { where: Record<string, unknown> }).where;
+    // approvalStatus stays UNCONDITIONAL — allowArchived is not an approval bypass.
+    expect(where).toMatchObject({ id: 6, approvalStatus: "APPROVED" });
+    expect(where).not.toHaveProperty("deletedAt");
   });
 });
 

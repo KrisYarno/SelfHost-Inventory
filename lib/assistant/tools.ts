@@ -55,7 +55,15 @@ import { resolveWindow, type ResolvedWindow } from "@/lib/assistant/window";
 import { resolveAssistantProduct, resolveAssistantProducts } from "@/lib/assistant/resolve-product";
 import { callerScopedSalesCoverage, SALES_ROWS_NOTE } from "@/lib/assistant/sales-coverage";
 import { classifyWindowCoverage, type WindowCoverage } from "@/lib/reports/metrics-contract";
-import { approvedProductIds, productIdentities } from "@/lib/reports/outbound-mix";
+import {
+  approvedProductIds,
+  productIdentities,
+  approvalDisclosure,
+  archivedCountOf,
+  excludedUnapprovedProductCount,
+  APPROVED_UNIVERSE_NOTE,
+  type CensusScope,
+} from "@/lib/reports/outbound-mix";
 // Wave-1 breadth modules (W1-VAL/MOVE/SUM/POL/FRESH) — each is a self-contained,
 // Next-free data layer; this file is the ONLY place they are wired into a tool.
 import { getValuation } from "@/lib/analytics/valuation";
@@ -599,14 +607,12 @@ export async function pageFromDb<T>(opts: {
 // ---------------------------------------------------------------------------
 // Name resolution (D-T8: groupings carry names, not bare IDs). Guards against a
 // deep-mocked prisma returning undefined in unit tests.
+//
+// Task 3.1: the local `productNames` helper is RETIRED in favor of the shared
+// `productIdentities` (contract pack T2 / OC-7) — one lookup, one `lifecycle` union, no
+// second definition of what a product's identity is. Company/integration names have no
+// lifecycle dimension and keep their local helpers.
 // ---------------------------------------------------------------------------
-
-async function productNames(ids: number[]): Promise<Map<number, string>> {
-  const uniq = Array.from(new Set(ids)).filter((v): v is number => typeof v === "number");
-  if (uniq.length === 0) return new Map();
-  const rows = await prisma.product.findMany({ where: { id: { in: uniq } }, select: { id: true, name: true } });
-  return new Map((rows ?? []).map((r) => [r.id, r.name]));
-}
 
 async function companyNames(ids: string[]): Promise<Map<string, string>> {
   const uniq = Array.from(new Set(ids)).filter((v): v is string => typeof v === "string");
@@ -699,11 +705,26 @@ function bucketBy(rows: RawSalesRow[], keyOf: (r: RawSalesRow) => string): Map<s
   return m;
 }
 
+/** A product-grain sales row (Task 3.1 / OC-3). The rows used to be `unknown[]`, so tsc
+ *  could not catch an object leaking into `name`; typing them here is what makes the
+ *  "name is a STRING" gate assertion a type-level AND value-level guarantee. `lifecycle`
+ *  comes from the shared identity lookup — no caller hardcodes a value. */
+type SalesProductRow = {
+  productId: number | undefined;
+  name: string | null;
+  lifecycle: "active" | "deleted" | null;
+  _sum: RawSum;
+};
+
 /**
  * Shape raw getSales rows for the requested tool grain: resolve names, roll up
  * week/month, regroup company / company_day, and mark orderCount. Returns rows in a
  * DETERMINISTIC order (so offset paging is stable) plus the orderCount note when the
  * grain suppresses it.
+ *
+ * The PRODUCT grain also reports the archived count off its own rows (spec G5's
+ * product-grain mechanic): the identities it already fetched carry `lifecycle`, so the
+ * disclosure needs no second query and cannot disagree with the tags on the rows.
  */
 async function shapeSalesRows(
   raw: RawSalesRow[],
@@ -711,10 +732,18 @@ async function shapeSalesRows(
 ): Promise<{ rows: unknown[]; orderCountNote?: string }> {
   switch (groupBy) {
     case "product": {
-      const names = await productNames(raw.map((r) => r.productId as number));
-      const rows = [...raw]
+      const identities = await productIdentities(raw.map((r) => r.productId as number));
+      const rows: SalesProductRow[] = [...raw]
         .sort((a, b) => (a.productId ?? 0) - (b.productId ?? 0))
-        .map((r) => ({ productId: r.productId, name: names.get(r.productId as number) ?? null, _sum: r._sum }));
+        .map((r) => {
+          const identity = identities.get(r.productId as number);
+          return {
+            productId: r.productId,
+            name: identity?.name ?? null,
+            lifecycle: identity?.lifecycle ?? null,
+            _sum: r._sum,
+          };
+        });
       return { rows };
     }
     case "integration": {
@@ -787,9 +816,10 @@ type ZeroSalesRow = {
 /**
  * Append one row per approved product that has NO attributed sales fact in the window.
  *
- * Population (OC-6): SELF-CONTAINED — the approved ACTIVE catalog. Archived-approved
- * products join it in Task 3.2 (SEAMS: the historical-fact policy row says they belong
- * here, tagged; W2 ships the active-only half so nothing is emitted untagged).
+ * Population (OC-6): SELF-CONTAINED — the approved catalog, ACTIVE + ARCHIVED (Task 3.2
+ * closes the W2 seam). get_sales is a HISTORICAL read, so "which products sold nothing in
+ * this window" has to be answerable about a product that has since been deleted; its row
+ * is tagged lifecycle 'deleted' rather than omitted.
  *
  * Names + lifecycle come from `productIdentities` — the ONE identity lookup — so no
  * caller ever hardcodes a lifecycle value.
@@ -802,8 +832,8 @@ async function withZeroSalesRows(
   const present = new Set(
     rows.map((r) => (r as { productId?: number }).productId).filter((id): id is number => id != null),
   );
-  const activeIds = await approvedProductIds();
-  const missing = activeIds.filter((id) => !present.has(id));
+  const populationIds = await approvedProductIds({ includeArchived: true });
+  const missing = populationIds.filter((id) => !present.has(id));
   if (missing.length === 0) return rows;
   const identities = await productIdentities(missing);
   // A fully-covered window makes silence measurable; anything else leaves it unknown
@@ -998,6 +1028,12 @@ async function compareByProduct(
         unequalLengths: result.unequalLengths,
         unrankedNote: COMPARE_UNRANKED_NOTE,
         evidenceNote: COMPARE_EVIDENCE_NOTE,
+        // G5 disclosure (spec C13): PRODUCT grain, so the archived half is a JS count
+        // over the shaped rows' own `lifecycle` (both arrays — a coverage-artifact row
+        // is still a contributing product), and only the excluded half needs the census.
+        excludedUnapprovedProducts: result.excludedUnapprovedProducts,
+        archivedProductsIncluded: archivedCountOf([...rankedShaped, ...unrankedShaped]),
+        approvalNote: APPROVED_UNIVERSE_NOTE,
       },
     },
     { scope: "mixed" },
@@ -1082,6 +1118,9 @@ async function movementByProduct(
 
 const findProductSchema = z.object({
   query: z.string().min(2).max(64),
+  // C13: list soft-deleted products too, tagged, with their current-state fields nulled.
+  // Plain z.object (MCP reads `.shape`) — no cross-field rule to assert.
+  includeArchived: z.boolean().optional(),
   limit: z.number().int().positive().max(FIND_PRODUCT_MAX).optional(),
   offset: nonNegInt.optional(),
 });
@@ -1247,13 +1286,23 @@ const PAGING_POSTURE =
   "List results are paginated: `returned`/`totalRows`/`nextOffset` describe the page. " +
   "When `nextOffset` is not null, more rows exist — call again with that `offset`.";
 
+/** The find_product row note for a soft-deleted product (spec C13, verbatim). */
+const FIND_PRODUCT_DELETED_NOTE =
+  "deleted product — current stock not reported; history remains queryable";
+
 export const assistantTools: Record<string, AssistantToolDef> = {
   find_product: {
     description:
       `Find products by name (approved products only). Returns id, name, baseName, ` +
-      `variant, current global stock, a low-stock flag, and stockState ` +
+      `variant, current global stock, a low-stock flag, stockState ` +
       `(in_stock | low | out — out means stock 0, low means at/below its alert ` +
-      `threshold). ${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `threshold), and lifecycle ('active' or 'deleted'). DELETED products are ABSENT ` +
+      `by default — pass includeArchived:true to list them, which is the ONLY way to ` +
+      `find a deleted product's id. Their rows come back with currentStock, lowStock ` +
+      `and stockState NULL plus a stateNote, because a deleted product has no current ` +
+      `stock to report; its HISTORY stays queryable (get_sales, get_movement_series, ` +
+      `compare_periods, and get_stock_asof with that productId all answer for it). ` +
+      `${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: findProductSchema,
     run: async (input, ctx) => {
       const args = findProductSchema.parse(input);
@@ -1266,28 +1315,55 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       const dbPage = offset / limit + 1;
       const [{ products, total }, systemDefault] = await Promise.all([
         getProductsWithQuantities(
-          { search: args.query, approvalStatus: "APPROVED", pageSize: limit, page: dbPage },
+          {
+            search: args.query,
+            approvalStatus: "APPROVED",
+            // C13: the ONLY caller that relaxes the deletedAt predicate, and only on
+            // explicit request. Approval scoping is unconditional either way.
+            ...(args.includeArchived ? { includeDeleted: true } : {}),
+            pageSize: limit,
+            page: dbPage,
+          },
           undefined,
           true,
         ),
         getLowStockDefault(),
       ]);
+      // Lifecycle from the SHARED identity lookup (contract pack T2) — the union has one
+      // producer, so a row here can never disagree with the same product's row in a
+      // history tool.
+      const identities = await productIdentities(products.map((p) => p.id));
       const rows = products.map((p) => {
+        // The "active" default is SOUND, not a guess: without includeArchived the DB
+        // predicate can only return non-deleted rows, and the identity read covers exactly
+        // the ids just fetched. It exists so a row never ships a null lifecycle.
+        const lifecycle = identities.get(p.id)?.lifecycle ?? "active";
+        const base = {
+          id: p.id,
+          name: p.name,
+          baseName: p.baseName,
+          variant: p.variant,
+          lifecycle,
+          approvalStatus: p.approvalStatus,
+        };
+        if (lifecycle === "deleted") {
+          // A live currentStock/stockState for a DELETED product is the incoherence
+          // review F10 named: the row would read as a stockable catalog entry. The
+          // current-state fields are NULLED and the note says where the truth still is.
+          return {
+            ...base,
+            currentStock: null,
+            lowStock: null,
+            stockState: null,
+            stateNote: FIND_PRODUCT_DELETED_NOTE,
+          };
+        }
         const effectiveThreshold = effectiveLowStockThreshold(p.lowStockThreshold, systemDefault);
         const low = isLowStock(p.currentQuantity, effectiveThreshold);
         // stockState fixes lowStock:false-when-out-of-stock (W0-FIND): out wins over low.
         const stockState: "in_stock" | "low" | "out" =
           p.currentQuantity <= 0 ? "out" : low ? "low" : "in_stock";
-        return {
-          id: p.id,
-          name: p.name,
-          baseName: p.baseName,
-          variant: p.variant,
-          currentStock: p.currentQuantity,
-          lowStock: low,
-          stockState,
-          approvalStatus: p.approvalStatus,
-        };
+        return { ...base, currentStock: p.currentQuantity, lowStock: low, stockState };
       });
       // Byte-fit the page (the DB already returned <= limit rows in production; the byte
       // cap only bites a pathologically wide row). totalRows stays the HONEST full count.
@@ -1516,11 +1592,16 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // resolver — a pending-review / soft-deleted id returns notFound, never phantom rows.
       // C4 (Task 1.1): the resolved identity becomes the payload's `productScope` echo,
       // so a single-product answer can never be relayed as a catalog-wide one.
+      // C13 (Task 3.2): sales are HISTORY, so an ARCHIVED product resolves here — its
+      // past orders really happened. The answer carries `lifecycle` so it can never be
+      // relayed as a live catalog entry.
       let productScope: ProductScopeEcho | null = null;
+      let productLifecycle: "active" | "deleted" | null = null;
       if (args.productId != null) {
-        const product = await resolveAssistantProduct(args.productId);
+        const product = await resolveAssistantProduct(args.productId, { allowArchived: true });
         if (!product) return notFound("product", args.productId);
         productScope = { productId: product.id, name: product.name, note: PRODUCT_SCOPE_NOTE };
+        productLifecycle = product.lifecycle;
       }
 
       const groupBy = (args.groupBy ?? "product") as SalesToolGroupBy;
@@ -1543,10 +1624,17 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             groupBy,
             window,
             productScope,
+            ...(productLifecycle ? { lifecycle: productLifecycle } : {}),
             coverage: {
               ...coverage,
               windowCoverage: classifyWindowCoverage(coverage.salesDataStart, window.from),
               rowsNote: SALES_ROWS_NOTE,
+              // A caller with NO company access has no sales population at all, so
+              // nothing was excluded and nothing archived contributed. Reported as the
+              // structural 0s they are, without querying (same posture as the rows).
+              excludedUnapprovedProducts: 0,
+              archivedProductsIncluded: 0,
+              approvalNote: APPROVED_UNIVERSE_NOTE,
             },
             note: "You have no company access, so there are no sales to report.",
           },
@@ -1554,12 +1642,16 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         );
       }
 
+      // G5 (Task 3.1): sales are HISTORICAL facts, so the approved universe here is
+      // active+archived — an archived product's past orders really happened.
+      const approvedIds = await approvedProductIds({ includeArchived: true });
       const raw = (await getSales({
         companyIds: ctx.companyIds,
         productId: args.productId,
         from: window.from,
         to: window.to,
         groupBy: SALES_BASE_GRAIN[groupBy],
+        approvedIds,
       })) as unknown as RawSalesRow[];
 
       const shaped = await shapeSalesRows(raw, groupBy);
@@ -1575,6 +1667,25 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       const withZeros = args.includeZeroRows
         ? await withZeroSalesRows(serialized, coverage.salesDataStart, windowCoverage)
         : serialized;
+      // G5 disclosure, PER GRAIN (spec C13). The product grain's rows carry `lifecycle`
+      // already, so its archived count is a JS count over the FULL result set (before
+      // paging — the disclosure describes the answer, not the page). Every other grain
+      // carries no product ids, so both halves come from the window census.
+      const salesCensus: CensusScope = {
+        relation: "salesFacts",
+        some: {
+          companyId: { in: ctx.companyIds },
+          dayKey: { gte: window.from, lte: window.to },
+        },
+        productId: args.productId,
+      };
+      const approval =
+        groupBy === "product"
+          ? {
+              excludedUnapprovedProducts: await excludedUnapprovedProductCount(salesCensus),
+              archivedProductsIncluded: archivedCountOf(withZeros as Array<{ lifecycle?: string | null }>),
+            }
+          : await approvalDisclosure(salesCensus);
       // W3 seam-fix item 1: ctx-aware reserved budget so a tight late-turn read shrinks
       // the page instead of the completed result being discarded whole.
       const page = paginate(withZeros, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
@@ -1585,11 +1696,19 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         groupBy,
         window,
         productScope,
+        // Archived per-product results carry a TOP-LEVEL lifecycle (spec C13).
+        ...(productLifecycle ? { lifecycle: productLifecycle } : {}),
         rows: page.rows,
         returned: page.returned,
         totalRows: page.totalRows,
         nextOffset: page.nextOffset,
-        coverage: { ...coverage, windowCoverage, rowsNote: SALES_ROWS_NOTE },
+        coverage: {
+          ...coverage,
+          windowCoverage,
+          rowsNote: SALES_ROWS_NOTE,
+          ...approval,
+          approvalNote: APPROVED_UNIVERSE_NOTE,
+        },
       };
       if (shaped.orderCountNote) data.orderCountNote = shaped.orderCountNote;
       return ok(data, { scope: "company" });
@@ -1675,7 +1794,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
     inputSchema: getShrinkageSchema,
     run: async (input) => {
       const args = getShrinkageSchema.parse(input);
-      const summary = await getShrinkageSummary({ days: args.days });
+      // G5 (Task 3.1): loss history is HISTORICAL, so archived products are in scope and
+      // unapproved ones are not. The module returns the matching census disclosure inside
+      // its coverage block (it owns the window predicate the census must mirror).
+      const summary = await getShrinkageSummary({
+        days: args.days,
+        approvedIds: await approvedProductIds({ includeArchived: true }),
+      });
       // Effective-scope echo (spec C4): the window these loss figures cover. The tool
       // that produced conv-3's "sold" figures gets the same F1 guard as get_sales.
       return ok(
@@ -1791,13 +1916,19 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         DEFAULT_RELATIVE_DAYS,
       );
       assertWindow(window.from, window.to);
+      // C13 (Task 3.2): movement is HISTORY — an archived product resolves, and every
+      // variant below tags the answer with its lifecycle.
+      let productLifecycle: "active" | "deleted" | null = null;
       if (args.productId != null) {
-        const product = await resolveAssistantProduct(args.productId);
+        const product = await resolveAssistantProduct(args.productId, { allowArchived: true });
         if (!product) return notFound("product", args.productId);
+        productLifecycle = product.lifecycle;
       }
       if (args.breakdownBy === "product") {
         return movementByProduct(args, { window, ctx });
       }
+      // G5 (Task 3.1): the ledger is HISTORICAL — active+archived, unapproved never.
+      const approvedIds = await approvedProductIds({ includeArchived: true });
       // W2-RCPT: receipts:true switches to the STOCK_IN receipts-DETAIL listing —
       // DB-side skip/take paging inside getReceipts (never materialize the full event
       // history). Byte-reserve pattern (W1 seam-fix): the row page is fit into
@@ -1813,11 +1944,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           limit: args.limit,
           offset: args.offset,
           byteBudget: Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
+          approvedIds,
         });
         return ok(
           {
             mode: "receipts",
             window,
+            ...(productLifecycle ? { lifecycle: productLifecycle } : {}),
             // C4 / T4: the SAME filters echo the series envelope carries, with the
             // receipts discriminant — `filters.mode === mode` on every variant.
             filters: {
@@ -1836,6 +1969,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
                 "STOCK_IN receipts only (delta > 0); a wrong-signed STOCK_IN reversal is " +
                 "excluded here (it folds into the partition's stockIn bucket instead). " +
                 "unitCostCents/batchId are frozen at receipt — null when not recorded, never 0.",
+              // G5 disclosure over the WHOLE matching set (the listing is DB-paged, so a
+              // page-derived count would describe one page as if it were the answer).
+              ...(page.disclosure ?? {}),
+              approvalNote: APPROVED_UNIVERSE_NOTE,
             },
           },
           { scope: "global" },
@@ -1848,10 +1985,14 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         locationId: args.locationId,
         window,
         grain,
+        approvedIds,
       });
       // result = { grain, window, points, totals, coverage }; coverage is a named-field
       // block validating CoverageSchema.
-      return ok(result, { scope: "global" });
+      return ok(
+        { ...result, ...(productLifecycle ? { lifecycle: productLifecycle } : {}) },
+        { scope: "global" },
+      );
     },
   },
 
@@ -2117,9 +2258,14 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // resolver BEFORE the module call — a pending-review / soft-deleted / absent id
       // returns notFound, never provisional data (the module itself would just yield an
       // empty page for an out-of-scope id, mirroring valuation.ts).
+      // C13 (Task 3.2): the EXPLICIT-productId path reaches an archived product (its past
+      // balances are real); the CATALOG page below is the spec's named exception and stays
+      // active-only, because `includeArchived` is only honored WITH a productId.
+      let productLifecycle: "active" | "deleted" | null = null;
       if (args.productId != null) {
-        const product = await resolveAssistantProduct(args.productId);
+        const product = await resolveAssistantProduct(args.productId, { allowArchived: true });
         if (!product) return notFound("product", args.productId);
+        productLifecycle = product.lifecycle;
       }
       // getStockAsOf self-validates dayKey and THROWS AppError(VALIDATION,400) on
       // today/future/malformed — that propagates to the adapter, which surfaces the
@@ -2136,15 +2282,27 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         // plus the envelope pushes the COMPLETED result past the threaded budget and the
         // adapter discards the whole thing at the margin (a truncation notice, not a page).
         byteBudget: Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
+        includeArchived: true,
       });
       return ok(
         {
           dayKey: args.dayKey,
+          ...(productLifecycle ? { lifecycle: productLifecycle } : {}),
           rows: page.rows,
           returned: page.returned,
           totalRows: page.totalRows,
           nextOffset: page.nextOffset,
-          coverage: page.coverage,
+          coverage: {
+            ...page.coverage,
+            ...(productLifecycle === "deleted"
+              ? {
+                  archivedNote:
+                    "this product is soft-deleted: its snapshot series may end well before " +
+                    "the catalog frontier, so read seriesEndsAt/possiblyStale before treating " +
+                    "a null day as a real absence of stock.",
+                }
+              : {}),
+          },
         },
         { scope: "global" },
       );
@@ -2194,9 +2352,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       assertWindow(periodA.from, periodA.to);
       assertWindow(periodB.from, periodB.to);
       // W0-PROD: an explicit productId narrows both sources; resolve it first.
+      // C13 (Task 3.2): both periods are HISTORY, so an archived product resolves, tagged.
+      let productLifecycle: "active" | "deleted" | null = null;
       if (args.productId != null) {
-        const product = await resolveAssistantProduct(args.productId);
+        const product = await resolveAssistantProduct(args.productId, { allowArchived: true });
         if (!product) return notFound("product", args.productId);
+        productLifecycle = product.lifecycle;
       }
       const isSales = args.metric === "sales_units" || args.metric === "sales_revenue";
       const metricScopeNote = isSales
@@ -2224,6 +2385,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           // field is additive so a consumer can branch on one key across both modes.
           mode: "totals",
           metric: args.metric,
+          ...(productLifecycle ? { lifecycle: productLifecycle } : {}),
           a: result.a,
           b: result.b,
           delta: result.delta,
@@ -2240,6 +2402,11 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             metricScopes: { sales: "company", ledger: "global" },
             reasonsKeys: "a = periodA, b = periodB, pctChange = percent change",
             unequalLengths: result.unequalLengths,
+            // G5 disclosure (spec C13): totals mode is a non-product grain, so both
+            // counts are the module's contributor census over BOTH periods.
+            excludedUnapprovedProducts: result.excludedUnapprovedProducts,
+            archivedProductsIncluded: result.archivedProductsIncluded,
+            approvalNote: result.approvalNote,
           },
         },
         { scope: "mixed" },

@@ -38,6 +38,7 @@ import { getReorderReport } from "@/lib/reports/reorder";
 import { getFreshness } from "@/lib/assistant/freshness";
 import { getOrderPipeline } from "@/lib/reports/order-pipeline";
 import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
+import { approvedProductIds } from "@/lib/reports/outbound-mix";
 import { resolveWindow } from "@/lib/assistant/window";
 import {
   PHYSICAL_OUTBOUND_WHERE,
@@ -347,15 +348,28 @@ export interface BusinessSnapshot {
   coverage: SnapshotCoverage;
 }
 
-/** Aggregate ProductSalesFact.orderedQty + revenue over a company-scoped window. */
+/**
+ * Aggregate ProductSalesFact.orderedQty + revenue over a company-scoped window.
+ *
+ * G4/G5 (Task 3.1, gate cluster C): narrowed to the approved-ACTIVE id set per
+ * get_business_snapshot's OWN policy row (spec C13) — the snapshot is a CURRENT-STATE
+ * tool, so an archived product is excluded here even though the very same facts are
+ * INCLUDED in get_sales. The caller computes the id set once and passes it, so a two-window
+ * snapshot does not read the catalog twice.
+ */
 async function salesTotals(
   companyIds: string[],
   from: string,
   to: string,
+  approvedActiveIds: number[],
 ): Promise<{ orderedUnits: number; revenue: string | null }> {
   if (companyIds.length === 0) return { orderedUnits: 0, revenue: null };
   const agg = await prisma.productSalesFact.aggregate({
-    where: { companyId: { in: companyIds }, dayKey: { gte: from, lte: to } },
+    where: {
+      companyId: { in: companyIds },
+      productId: { in: approvedActiveIds },
+      dayKey: { gte: from, lte: to },
+    },
     _sum: { orderedQty: true, revenue: true },
   });
   return {
@@ -399,9 +413,13 @@ export async function getBusinessSnapshot(
 
     // sales 7/30d totals (COMPANY-scoped): two separate windows + caller-scoped coverage.
     runSection("company", async () => {
+      // Active-only (spec C13's policy row for this tool) — read ONCE for both windows,
+      // and NOT AT ALL for a caller with no company access (there is no sales population
+      // to scope, and that caller's snapshot has always resolved without querying).
+      const approvedActiveIds = ctx.companyIds.length > 0 ? await approvedProductIds() : [];
       const [last7d, last30d, coverage] = await Promise.all([
-        salesTotals(ctx.companyIds, win7.from, win7.to),
-        salesTotals(ctx.companyIds, win30.from, win30.to),
+        salesTotals(ctx.companyIds, win7.from, win7.to, approvedActiveIds),
+        salesTotals(ctx.companyIds, win30.from, win30.to, approvedActiveIds),
         callerScopedSalesCoverage(ctx.companyIds),
       ]);
       return { last7d: { ...last7d, window: win7 }, last30d: { ...last30d, window: win30 }, coverage };

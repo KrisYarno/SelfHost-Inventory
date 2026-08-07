@@ -10,15 +10,31 @@ import {
   SHRINKAGE_CLASS_REASONS,
   type ShrinkageReason,
 } from "@/lib/reports/metrics-contract";
-import { classifyOutboundMix, type OutboundMix } from "@/lib/reports/outbound-mix";
+import {
+  classifyOutboundMix,
+  approvalDisclosure,
+  APPROVED_UNIVERSE_NOTE,
+  type OutboundMix,
+} from "@/lib/reports/outbound-mix";
 
 export type SalesGroupBy = "product" | "day" | "integration" | "company";
 
-/** Company-scoped sales read. ALWAYS constrains companyId IN companyIds; empty companyIds -> [] (hard isolation). */
-export async function getSales(opts: { companyIds: string[]; productId?: number; from?: string; to?: string; groupBy?: SalesGroupBy }) {
+/** Company-scoped sales read. ALWAYS constrains companyId IN companyIds; empty companyIds -> [] (hard isolation).
+ *
+ *  `approvedIds` is the G5 approved-universe id set (spec C13 / plan G4). It is
+ *  CALLER-SUPPLIED per call rather than derived here, because the tool's policy row
+ *  decides whether archived products belong in it — and because the web analytics routes
+ *  that share this read are explicitly out of this lane's scope, so they keep today's
+ *  unfiltered behavior by simply not passing it. The assistant surface ALWAYS passes it.
+ *  Combined with `productId` via IntFilter `equals` + `in`, so a single-product read is
+ *  narrowed by BOTH rather than one silently overwriting the other. */
+export async function getSales(opts: { companyIds: string[]; productId?: number; from?: string; to?: string; groupBy?: SalesGroupBy; approvedIds?: number[] }) {
   if (opts.companyIds.length === 0) return [];
   const where: any = { companyId: { in: opts.companyIds } };
-  if (opts.productId) where.productId = opts.productId;
+  const productFilter: { equals?: number; in?: number[] } = {};
+  if (opts.productId) productFilter.equals = opts.productId;
+  if (opts.approvedIds) productFilter.in = opts.approvedIds;
+  if (Object.keys(productFilter).length > 0) where.productId = productFilter;
   if (opts.from || opts.to) where.dayKey = { ...(opts.from ? { gte: opts.from } : {}), ...(opts.to ? { lte: opts.to } : {}) };
   const BY: Record<SalesGroupBy, string[]> = {
     product: ["productId"], day: ["dayKey"], integration: ["integrationId"], company: ["companyId", "dayKey"],
@@ -76,14 +92,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const TURNS_COVERAGE_FLOOR = 0.8; // R-L10: turns null below 80% snapshot coverage.
 const AGING_OUTLIER_DAYS = 90; // aligns with DEAD_STOCK_DAYS.
 
-/**
- * DEPRECATED re-export (quality+reach Task 2.1 / G2-5). The shrinkage taxonomy now
- * lives in lib/reports/metrics-contract.ts — the mix classifier needs it, and this
- * module imports the mix classifier, so keeping the definition here would close a
- * module cycle. Existing importers keep working through this re-export; it is
- * removed once the last consumer migrates (SEAMS: after Task 3.1).
- */
-export { SHRINKAGE_CLASS_REASONS, type ShrinkageReason };
+// The shrinkage taxonomy (SHRINKAGE_CLASS_REASONS / ShrinkageReason) lives in
+// lib/reports/metrics-contract.ts (quality+reach Task 2.1 / G2-5: the mix classifier
+// needs it and this module imports the classifier, so a definition here would close a
+// module cycle). The one-wave deprecated re-export is REMOVED in Task 3.1 — every
+// importer now reads it from the metrics contract directly (seam S11 closed).
 
 // The ONE outbound (units-out / velocity) predicate now lives in the metrics
 // contract (spec §2 D1): `PHYSICAL_OUTBOUND_WHERE` = delta<0 AND logType != TRANSFER
@@ -511,7 +524,16 @@ export interface ShrinkageSummary {
   // ~16k units the business SHIPPED as negative ADJUSTMENTs — reported here as a
   // coverage figure, never as loss. `reasonTrackingStartedAt` is the first instant
   // any such row carried a reason code; movement before it is unclassifiable.
-  coverage: { unclassifiedOutboundUnits: number; reasonTrackingStartedAt: string | null };
+  coverage: {
+    unclassifiedOutboundUnits: number;
+    reasonTrackingStartedAt: string | null;
+    // G5 disclosure — present ONLY when the caller scoped the read to an approved id
+    // set (the assistant surface always does; the web analytics route does not, and
+    // must never claim an exclusion that did not happen).
+    excludedUnapprovedProducts?: number;
+    archivedProductsIncluded?: number;
+    approvalNote?: string;
+  };
   dataStart: string | null;
 }
 
@@ -527,13 +549,17 @@ export interface ShrinkageSummary {
  * never units x $0.00.
  */
 export async function getShrinkageSummary(
-  opts: { days: 30 | 90 | 365 }
+  opts: { days: 30 | 90 | 365; approvedIds?: number[] }
 ): Promise<ShrinkageSummary> {
   const now = new Date();
   const start = new Date(now.getTime() - opts.days * DAY_MS);
+  // G5: the approved-id set narrows EVERY read in this function, the all-time dataStart
+  // aggregates included — an unapproved product must not move a disclosed data-start any
+  // more than it may move a total.
   const domain = {
     logType: { in: [inventory_logs_logType.ADJUSTMENT, inventory_logs_logType.CORRECTION] },
     delta: { lt: 0 },
+    ...(opts.approvedIds ? { productId: { in: opts.approvedIds } } : {}),
   };
 
   const [grouped, dataStartAgg, reasonTrackingAgg] = await Promise.all([
@@ -609,15 +635,33 @@ export async function getShrinkageSummary(
     }
   }
 
+  // G5 aggregate disclosure (spec C13: shrinkage is a non-product-grain read, so BOTH
+  // counts come from the window-scoped contributor census). Only when the caller scoped
+  // the read — see the ShrinkageSummary coverage comment.
+  const coverage: ShrinkageSummary["coverage"] = {
+    unclassifiedOutboundUnits,
+    reasonTrackingStartedAt: toIso(reasonTrackingAgg._min?.changeTime),
+  };
+  if (opts.approvedIds) {
+    const disclosure = await approvalDisclosure({
+      relation: "inventory_logs",
+      some: {
+        logType: { in: [inventory_logs_logType.ADJUSTMENT, inventory_logs_logType.CORRECTION] },
+        delta: { lt: 0 },
+        changeTime: { gte: start },
+      },
+    });
+    coverage.excludedUnapprovedProducts = disclosure.excludedUnapprovedProducts;
+    coverage.archivedProductsIncluded = disclosure.archivedProductsIncluded;
+    coverage.approvalNote = APPROVED_UNIVERSE_NOTE;
+  }
+
   return {
     byReason,
     totalUnits,
     totalValueAtCurrentCostCents: totalHasCost ? totalValue : null,
     costCoverage: { costedUnits: totalCostedUnits, totalUnits },
-    coverage: {
-      unclassifiedOutboundUnits,
-      reasonTrackingStartedAt: toIso(reasonTrackingAgg._min?.changeTime),
-    },
+    coverage,
     dataStart: toIso(dataStartAgg._min?.changeTime),
   };
 }

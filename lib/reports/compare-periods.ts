@@ -32,7 +32,12 @@ import {
   classifyWindowCoverage,
   type WindowCoverage,
 } from "@/lib/reports/metrics-contract";
-import { approvedProductIds } from "@/lib/reports/outbound-mix";
+import {
+  approvedProductIds,
+  approvalDisclosure,
+  excludedUnapprovedProductCount,
+  APPROVED_UNIVERSE_NOTE,
+} from "@/lib/reports/outbound-mix";
 
 export type CompareMetric = "sales_units" | "sales_revenue" | "outbound_units" | "inbound_units";
 
@@ -51,6 +56,12 @@ export interface ComparePeriodsResult {
   pctChange: number | null;
   reasons: Record<string, string>;
   unequalLengths: boolean;
+  /** G5 disclosure (spec C13). Totals mode carries no product ids, so BOTH counts come
+   *  from the contributor census, over BOTH periods (a product that contributed to
+   *  either one is a contributor to this comparison). */
+  excludedUnapprovedProducts: number;
+  archivedProductsIncluded: number;
+  approvalNote: string;
 }
 
 /**
@@ -78,9 +89,31 @@ const INBOUND_UNITS_WHERE: Prisma.inventory_logsWhereInput = {
   logType: { not: inventory_logs_logType.TRANSFER },
 };
 
-/** MIN(dayKey) of ProductSalesFact for this caller's scope (company + optional product).
- *  `approvedIds`, when given, narrows to the G5 approved universe — the BY_PRODUCT path
- *  (new code) always passes it; totals mode does not yet (Task 3.1 retrofits it). */
+/**
+ * The productId narrowing, built ONCE for every read in this module (Task 3.1).
+ *
+ * An explicit `productId` (already approval-checked by the caller's resolver) and the G5
+ * approved-id set narrow the SAME column. Spreading them as two `productId` keys made the
+ * second silently OVERWRITE the first — harmless while only the by_product path passed
+ * `approvedIds` (it never passes a productId), but a real hole the moment totals mode
+ * passes both, which it now does. One IntFilter carries both and they AND together.
+ */
+function productFilter(
+  productId: number | undefined,
+  approvedIds: number[] | undefined,
+): { productId?: { equals?: number; in?: number[] } } {
+  if (productId == null && approvedIds == null) return {};
+  return {
+    productId: {
+      ...(productId != null ? { equals: productId } : {}),
+      ...(approvedIds != null ? { in: approvedIds } : {}),
+    },
+  };
+}
+
+/** MIN(dayKey) of ProductSalesFact for this caller's scope (company + optional product),
+ *  narrowed to the G5 approved universe. An unapproved product's older fact must never
+ *  move a disclosed data-start any more than it may move a total. */
 async function salesDataStart(
   companyIds: string[],
   productId: number | undefined,
@@ -90,8 +123,7 @@ async function salesDataStart(
   const row = await prisma.productSalesFact.aggregate({
     where: {
       companyId: { in: companyIds },
-      ...(productId != null ? { productId } : {}),
-      ...(approvedIds != null ? { productId: { in: approvedIds } } : {}),
+      ...productFilter(productId, approvedIds),
     },
     _min: { dayKey: true },
   });
@@ -103,13 +135,14 @@ async function salesUnitsValue(
   companyIds: string[],
   productId: number | undefined,
   window: ResolvedWindow,
+  approvedIds?: number[],
 ): Promise<number | null> {
   if (companyIds.length === 0) return null;
   const row = await prisma.productSalesFact.aggregate({
     where: {
       companyId: { in: companyIds },
       dayKey: { gte: window.from, lte: window.to },
-      ...(productId != null ? { productId } : {}),
+      ...productFilter(productId, approvedIds),
     },
     _sum: { orderedQty: true },
   });
@@ -121,13 +154,14 @@ async function salesRevenueValue(
   companyIds: string[],
   productId: number | undefined,
   window: ResolvedWindow,
+  approvedIds?: number[],
 ): Promise<number | null> {
   if (companyIds.length === 0) return null;
   const row = await prisma.productSalesFact.aggregate({
     where: {
       companyId: { in: companyIds },
       dayKey: { gte: window.from, lte: window.to },
-      ...(productId != null ? { productId } : {}),
+      ...productFilter(productId, approvedIds),
     },
     _sum: { revenue: true },
   });
@@ -135,8 +169,7 @@ async function salesRevenueValue(
 }
 
 /** MIN(changeTime) under a ledger predicate, optional product scoped — GLOBAL (no company
- *  dimension). `approvedIds` narrows to the G5 approved universe (by_product path only —
- *  see salesDataStart). */
+ *  dimension), narrowed to the G5 approved universe. */
 async function ledgerDataStart(
   where: Prisma.inventory_logsWhereInput,
   productId: number | undefined,
@@ -145,8 +178,7 @@ async function ledgerDataStart(
   const row = await prisma.inventory_logs.aggregate({
     where: {
       ...where,
-      ...(productId != null ? { productId } : {}),
-      ...(approvedIds != null ? { productId: { in: approvedIds } } : {}),
+      ...productFilter(productId, approvedIds),
     },
     _min: { changeTime: true },
   });
@@ -158,12 +190,13 @@ async function ledgerValue(
   where: Prisma.inventory_logsWhereInput,
   productId: number | undefined,
   window: ResolvedWindow,
+  approvedIds?: number[],
 ): Promise<number | null> {
   const row = await prisma.inventory_logs.aggregate({
     where: {
       ...where,
       changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
-      ...(productId != null ? { productId } : {}),
+      ...productFilter(productId, approvedIds),
     },
     _sum: { delta: true },
   });
@@ -175,29 +208,71 @@ function metricSource(
   metric: CompareMetric,
   companyIds: string[],
   productId: number | undefined,
+  approvedIds: number[],
 ): { dataStart: () => Promise<string | null>; value: (window: ResolvedWindow) => Promise<number | null> } {
   switch (metric) {
     case "sales_units":
       return {
-        dataStart: () => salesDataStart(companyIds, productId),
-        value: (window) => salesUnitsValue(companyIds, productId, window),
+        dataStart: () => salesDataStart(companyIds, productId, approvedIds),
+        value: (window) => salesUnitsValue(companyIds, productId, window, approvedIds),
       };
     case "sales_revenue":
       return {
-        dataStart: () => salesDataStart(companyIds, productId),
-        value: (window) => salesRevenueValue(companyIds, productId, window),
+        dataStart: () => salesDataStart(companyIds, productId, approvedIds),
+        value: (window) => salesRevenueValue(companyIds, productId, window, approvedIds),
       };
     case "outbound_units":
       return {
-        dataStart: () => ledgerDataStart(PHYSICAL_OUTBOUND_WHERE, productId),
-        value: (window) => ledgerValue(PHYSICAL_OUTBOUND_WHERE, productId, window),
+        dataStart: () => ledgerDataStart(PHYSICAL_OUTBOUND_WHERE, productId, approvedIds),
+        value: (window) => ledgerValue(PHYSICAL_OUTBOUND_WHERE, productId, window, approvedIds),
       };
     case "inbound_units":
       return {
-        dataStart: () => ledgerDataStart(INBOUND_UNITS_WHERE, productId),
-        value: (window) => ledgerValue(INBOUND_UNITS_WHERE, productId, window),
+        dataStart: () => ledgerDataStart(INBOUND_UNITS_WHERE, productId, approvedIds),
+        value: (window) => ledgerValue(INBOUND_UNITS_WHERE, productId, window, approvedIds),
       };
   }
+}
+
+/**
+ * The contributor-census scope for a TWO-PERIOD comparison (spec G5). A product counts as
+ * a contributor when it has a qualifying row in EITHER period — expressed as an OR of the
+ * two window predicates, never as one span covering the gap between them (disjoint periods
+ * are the normal case, and the gap is not part of the question).
+ */
+function comparisonCensusScope(
+  metric: CompareMetric,
+  companyIds: string[],
+  periodA: ResolvedWindow,
+  periodB: ResolvedWindow,
+  productId?: number,
+): Parameters<typeof approvalDisclosure>[0] {
+  const isSales = metric === "sales_units" || metric === "sales_revenue";
+  if (isSales) {
+    return {
+      relation: "salesFacts",
+      some: {
+        companyId: { in: companyIds },
+        OR: [
+          { dayKey: { gte: periodA.from, lte: periodA.to } },
+          { dayKey: { gte: periodB.from, lte: periodB.to } },
+        ],
+      },
+      productId,
+    };
+  }
+  const where = metric === "outbound_units" ? PHYSICAL_OUTBOUND_WHERE : INBOUND_UNITS_WHERE;
+  return {
+    relation: "inventory_logs",
+    some: {
+      ...(where as Record<string, unknown>),
+      OR: [
+        { changeTime: { gte: dayKeyStart(periodA.from), lt: nextDayStart(periodA.to) } },
+        { changeTime: { gte: dayKeyStart(periodB.from), lt: nextDayStart(periodB.to) } },
+      ],
+    },
+    productId,
+  };
 }
 
 /**
@@ -251,12 +326,16 @@ function resolvePeriod(
  */
 export async function comparePeriods(opts: ComparePeriodsOpts): Promise<ComparePeriodsResult> {
   const { metric, periodA, periodB, productId, companyIds } = opts;
-  const source = metricSource(metric, companyIds, productId);
+  // G5 (Task 3.1 retrofit): totals mode reads the SAME approved universe by_product has
+  // read since birth — active+archived, because both periods are HISTORICAL facts.
+  const approvedIds = await approvedProductIds({ includeArchived: true });
+  const source = metricSource(metric, companyIds, productId, approvedIds);
 
-  const [dataStart, rawA, rawB] = await Promise.all([
+  const [dataStart, rawA, rawB, disclosure] = await Promise.all([
     source.dataStart(),
     source.value(periodA),
     source.value(periodB),
+    approvalDisclosure(comparisonCensusScope(metric, companyIds, periodA, periodB, productId)),
   ]);
 
   const reasons: Record<string, string> = {};
@@ -281,6 +360,9 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
     pctChange,
     reasons,
     unequalLengths: periodA.days !== periodB.days,
+    excludedUnapprovedProducts: disclosure.excludedUnapprovedProducts,
+    archivedProductsIncluded: disclosure.archivedProductsIncluded,
+    approvalNote: APPROVED_UNIVERSE_NOTE,
   };
 }
 
@@ -321,6 +403,9 @@ export interface ComparePeriodsByProductResult {
   reasons: Record<string, string>;
   periodCoverage: { a: WindowCoverage; b: WindowCoverage };
   unequalLengths: boolean;
+  /** G5 disclosure, excluded half (spec C13). The ARCHIVED half is product-grain here —
+   *  the tool layer counts it off the rows' own `lifecycle` after attaching identities. */
+  excludedUnapprovedProducts: number;
 }
 
 /** Per-product sums for one window, keyed by productId. */
@@ -388,7 +473,7 @@ export async function comparePeriodsByProduct(opts: {
   const approvedIds = await approvedProductIds({ includeArchived: true });
   const isSales = metric === "sales_units" || metric === "sales_revenue";
 
-  const [dataStart, aByProduct, bByProduct] = await Promise.all([
+  const [dataStart, aByProduct, bByProduct, excludedUnapprovedProducts] = await Promise.all([
     isSales
       ? salesDataStart(companyIds, undefined, approvedIds)
       : ledgerDataStart(
@@ -410,6 +495,7 @@ export async function comparePeriodsByProduct(opts: {
           approvedIds,
           periodB,
         ),
+    excludedUnapprovedProductCount(comparisonCensusScope(metric, companyIds, periodA, periodB)),
   ]);
 
   // Source-level coverage, computed ONCE per period (the erratum's all-or-nothing).
@@ -468,5 +554,6 @@ export async function comparePeriodsByProduct(opts: {
     reasons,
     periodCoverage: { a: coverageA, b: coverageB },
     unequalLengths: periodA.days !== periodB.days,
+    excludedUnapprovedProducts,
   };
 }

@@ -233,7 +233,9 @@ describe("empty window & query shape", () => {
       gte: new Date("2026-07-06T00:00:00.000Z"),
       lt: new Date("2026-07-15T00:00:00.000Z"), // exclusive upper: start of the day AFTER `to`
     });
-    expect(where.productId).toBe(42);
+    // quality+reach Task 3.1: productId and the optional G5 approved-id set narrow the
+    // SAME column, so the read builds ONE IntFilter instead of a bare scalar.
+    expect(where.productId).toEqual({ equals: 42 });
     expect(where.locationId).toBeUndefined();
     // Exhaustive partition ⇒ we must read ALL rows, so no server-side delta/logType narrowing.
     expect(where.delta).toBeUndefined();
@@ -358,7 +360,7 @@ describe("getReceipts -- DB-side paged STOCK_IN receipts detail", () => {
     await getReceipts({ window: win("2026-07-01", "2026-07-31"), productId: 42, byteBudget: 100_000 });
 
     const where = db.inventory_logs.findMany.mock.calls[0][0]!.where as Record<string, unknown>;
-    expect(where.productId).toBe(42);
+    expect(where.productId).toEqual({ equals: 42 });
   });
 
   it("omitting productId leaves it out of the where clause (no accidental narrowing)", async () => {

@@ -155,6 +155,107 @@ export async function approvedProductIds(
   return (rows ?? []).map((r) => r.id);
 }
 
+/**
+ * The two approval/lifecycle disclosures every historical read carries (spec C13).
+ *
+ *  - `excludedUnapprovedProducts` — how many NOT-yet-approved products had activity in
+ *    this window. Their rows AND their contribution to every total are excluded, so the
+ *    reader can see the size of what was left out instead of guessing.
+ *  - `archivedProductsIncluded` — how many of the CONTRIBUTING products are currently
+ *    soft-deleted. Their history is real and IS included (tagged `lifecycle: "deleted"`);
+ *    the count exists so "deleted" never reads as "hidden".
+ */
+export interface ApprovalDisclosure {
+  excludedUnapprovedProducts: number;
+  archivedProductsIncluded: number;
+}
+
+/** The prose that rides beside the two counts, so they are never bare numbers. */
+export const APPROVED_UNIVERSE_NOTE =
+  "figures cover the APPROVED product universe only. excludedUnapprovedProducts counts " +
+  "products with activity in this window that are NOT approved — their rows and their " +
+  "contribution to every total are excluded. archivedProductsIncluded counts contributing " +
+  "products that are currently soft-deleted: their history is real and IS included, " +
+  "tagged lifecycle 'deleted'.";
+
+/**
+ * The window-scoped CONTRIBUTOR CENSUS scope (spec G5). A census starts FROM Product and
+ * reaches the facts through the PRODUCT-SIDE relation field, because the child-side
+ * spellings differ per fact table (`products` on inventory_logs, `product` on
+ * ProductSalesFact) and must never be guessed.
+ *
+ * `productId`/`productIds` MIRROR the read's own product scope: a read narrowed to named
+ * products can only ever have excluded/included those products, so a catalog-wide census
+ * beside it would be catalog NOISE reported as this answer's caveat.
+ */
+export interface CensusScope {
+  /** Product-side relation the window predicate is applied through (schema.prisma:84,92). */
+  relation: "inventory_logs" | "salesFacts";
+  /** The predicate ONE contributing fact row must satisfy (the read's own window). */
+  some: Record<string, unknown>;
+  productId?: number;
+  productIds?: number[];
+}
+
+/** Shared where-builder for both census flavours — identical but for the approval half. */
+function censusWhere(scope: CensusScope, approval: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...approval,
+    ...(scope.productId != null ? { id: scope.productId } : {}),
+    ...(scope.productIds != null ? { id: { in: scope.productIds } } : {}),
+    [scope.relation]: { some: scope.some },
+  };
+}
+
+/**
+ * How many NOT-APPROVED products contributed to this window (spec G5 disclosure half).
+ *
+ * NEVER a global catalog count (that would report products with nothing to do with the
+ * question), NEVER derived from the already-filtered result ids (they are approved by
+ * construction — the excluded set is unreachable from them), and NEVER an extra
+ * full-window ledger groupBy (no serving index on reasonCode; extra scans are real cost).
+ */
+export async function excludedUnapprovedProductCount(scope: CensusScope): Promise<number> {
+  const rows = await prisma.product.findMany({
+    where: censusWhere(scope, { approvalStatus: { not: "APPROVED" } }),
+    select: { id: true },
+  });
+  return (rows ?? []).length;
+}
+
+/**
+ * How many currently-ARCHIVED approved products contributed to this window — the
+ * NON-product-grain half of the archived disclosure (day/week/month/company grains,
+ * movement series totals, shrinkage, compare totals carry no product ids, so there is
+ * nothing to distinct over). Product-grain reads use `archivedCountOf` instead: their
+ * rows already carry the identities, so the count comes free.
+ */
+export async function archivedContributorCount(scope: CensusScope): Promise<number> {
+  const rows = await prisma.product.findMany({
+    where: censusWhere(scope, { approvalStatus: "APPROVED", deletedAt: { not: null } }),
+    select: { id: true },
+  });
+  return (rows ?? []).length;
+}
+
+/** Both census counts for one scope, in parallel (the common non-product-grain case). */
+export async function approvalDisclosure(scope: CensusScope): Promise<ApprovalDisclosure> {
+  const [excludedUnapprovedProducts, archivedProductsIncluded] = await Promise.all([
+    excludedUnapprovedProductCount(scope),
+    archivedContributorCount(scope),
+  ]);
+  return { excludedUnapprovedProducts, archivedProductsIncluded };
+}
+
+/**
+ * PRODUCT-GRAIN archived count (spec G5): distinct over the RESULT's own rows. Every
+ * such row already carries the `lifecycle` its identity lookup produced, so this is a JS
+ * count over rows the caller already has — no second query, no second definition.
+ */
+export function archivedCountOf(rows: Array<{ lifecycle?: string | null }>): number {
+  return rows.filter((r) => r.lifecycle === "deleted").length;
+}
+
 /** A product's identity as every historical surface reports it (contract pack T2). */
 export interface ProductIdentity {
   name: string;

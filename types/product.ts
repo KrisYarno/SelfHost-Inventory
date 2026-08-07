@@ -54,6 +54,11 @@ export interface ProductFilters {
   // find_product tool passes 'APPROVED' so provisional products never surface to
   // the model. Omitted = no approval filter (existing callers unchanged).
   approvalStatus?: ProductApprovalStatus;
+  // quality+reach C13: include soft-deleted products in the result. ABSENT (the default)
+  // keeps today's `deletedAt: null` predicate for every existing caller — only the
+  // assistant's find_product(includeArchived) opts in, and its rows are tagged
+  // `lifecycle` with their current-state fields nulled.
+  includeDeleted?: boolean;
 }
 
 // Create product request

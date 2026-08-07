@@ -12,6 +12,7 @@
  */
 
 import { buildSystemPrompt } from "@/lib/assistant/prompt";
+import { assistantTools } from "@/lib/assistant/tools";
 
 const p = buildSystemPrompt(new Date("2026-08-06T00:00:00Z")).replace(/\s+/g, " ");
 
@@ -42,13 +43,34 @@ describe("C1 ROUTING rules", () => {
 });
 
 describe("W0 seam-fix: the prompt promises NO capability that does not exist yet", () => {
-  // Owning tasks FLIP these pins when they land the capability + its routing bullet:
-  // 2.3 -> compare_periods groupBy:'product' ("started/stopped moving" bullet) — FLIPPED;
+  // Owning tasks FLIPPED these pins as they landed the capability + its routing bullet:
+  // 2.3 -> compare_periods groupBy:'product' ("started/stopped moving" bullet);
   // 2.4 -> movement breakdownBy/productIds (set-question bullet, movement half);
-  // 3.2 -> includeArchived/lifecycle ("Deleted products" bullet).
-  it("does not mention the still-unlanded W3 arguments", () => {
-    expect(p).not.toMatch(/includeArchived/);
-    expect(p).not.toMatch(/lifecycle:'deleted'/);
+  // 3.2 -> includeArchived/lifecycle ("Deleted products" bullet) — the LAST one.
+  // Every W0 negative pin is now a positive assertion below; nothing is outstanding.
+  it("every routing affordance the prompt names is a landed capability", () => {
+    // `.shape` is the same raw-object access the MCP adapter uses (see the gate case in
+    // toolsuite-gates.test.ts) — inputSchema is typed as the ZodType supertype.
+    const shapeOf = (name: string) =>
+      (assistantTools[name].inputSchema as unknown as { shape: Record<string, unknown> }).shape;
+    expect(shapeOf("find_product")).toHaveProperty("includeArchived");
+    expect(shapeOf("get_movement_series")).toHaveProperty("breakdownBy");
+    expect(shapeOf("compare_periods")).toHaveProperty("groupBy");
+  });
+});
+
+describe("C13 routing (Task 3.2): deleted products have a stated, TRUE policy", () => {
+  it("names the history tools that return them automatically, labeled", () => {
+    expect(p).toContain("Deleted products");
+    expect(p).toContain("lifecycle:'deleted'");
+    expect(p).toContain("find_product needs includeArchived:true");
+  });
+
+  it("keeps the as-of CATALOG exception and the current-state exclusion honest", () => {
+    expect(p).toContain("as-of for a SPECIFIC productId");
+    expect(p).toContain("as-of CATALOG page stays active-only");
+    // The failure mode this closes: the model claiming it has no visibility at all.
+    expect(p).toContain("say so rather than 'no visibility'");
   });
 });
 

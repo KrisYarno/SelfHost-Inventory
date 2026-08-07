@@ -41,6 +41,14 @@ import { dayKeyStart, nextDayStart, toDayKey } from "@/lib/analytics/dates";
 import { weekStartKey, monthKey, byStringKey } from "@/lib/analytics/date-grain";
 import type { ResolvedWindow } from "@/lib/assistant/window";
 import { SHRINKAGE_CLASS_REASONS } from "@/lib/reports/metrics-contract";
+import {
+  approvalDisclosure,
+  archivedCountOf,
+  excludedUnapprovedProductCount,
+  productIdentities,
+  APPROVED_UNIVERSE_NOTE,
+  type ApprovalDisclosure,
+} from "@/lib/reports/outbound-mix";
 import { pageFromDb, type DbPage } from "@/lib/assistant/tools";
 
 /** getReceipts default page size when the caller omits `limit` (spec §5 T-RCPT). */
@@ -81,7 +89,16 @@ export interface MovementSeriesResult {
   filters: MovementFilters;
   points: Array<{ key: string } & MovementBuckets>;
   totals: MovementBuckets;
-  coverage: { unclassifiedLegacyNote: string; reasonCodeNullRows: number };
+  coverage: {
+    unclassifiedLegacyNote: string;
+    reasonCodeNullRows: number;
+    // G5 disclosure (spec C13) — present ONLY when the caller scoped the read to an
+    // approved id set. get_product_overview's product-scoped movement30 section does
+    // not (its product is already resolved approved+active), so it never claims one.
+    excludedUnapprovedProducts?: number;
+    archivedProductsIncluded?: number;
+    approvalNote?: string;
+  };
 }
 
 /** Fixed coverage note: legacy negative ADJUSTMENT is this shop's pre-Lane-4
@@ -162,14 +179,27 @@ function classify(logType: string, delta: number, reasonCode: string | null): Bu
  * @param opts.grain   day | week | month bucketing.
  * @param opts.productId  optional single-product scope (pre-validated).
  * @param opts.locationId optional location scope.
+ * @param opts.approvedIds the G5 approved universe (spec C13). Applied at the SQL
+ *   boundary so an unapproved product never moves a bucket, and echoed as the coverage
+ *   disclosure. Omitted by the product-scoped composite caller, whose product is already
+ *   resolved approved — see the coverage comment.
  */
 export async function getMovementSeries(opts: {
   productId?: number;
   locationId?: number;
   window: ResolvedWindow;
   grain: "day" | "week" | "month";
+  approvedIds?: number[];
 }): Promise<MovementSeriesResult> {
-  const { productId, locationId, window, grain } = opts;
+  const { productId, locationId, window, grain, approvedIds } = opts;
+
+  // The window predicate, stated ONCE: the ledger read below and the disclosure census
+  // must agree about what "in this window" means, or the caveat describes a different
+  // question than the answer.
+  const windowPredicate = {
+    changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
+    ...(locationId != null ? { locationId } : {}),
+  };
 
   // Map the inclusive day-key window to a half-open timestamp range
   // [start of `from`, start of the day after `to`). Same select/where shape as
@@ -177,9 +207,18 @@ export async function getMovementSeries(opts: {
   // is exhaustive, so every row in the window must be read.
   const rows = await prisma.inventory_logs.findMany({
     where: {
-      changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
-      ...(productId != null ? { productId } : {}),
-      ...(locationId != null ? { locationId } : {}),
+      ...windowPredicate,
+      // productId (already approval-checked by the caller's resolver) and the approved-id
+      // set narrow the SAME column, so they combine as one IntFilter rather than one
+      // silently overwriting the other.
+      ...(productId != null || approvedIds != null
+        ? {
+            productId: {
+              ...(productId != null ? { equals: productId } : {}),
+              ...(approvedIds != null ? { in: approvedIds } : {}),
+            },
+          }
+        : {}),
     },
     select: { delta: true, changeTime: true, logType: true, reasonCode: true },
   });
@@ -222,6 +261,23 @@ export async function getMovementSeries(opts: {
       return { key, ...b };
     });
 
+  const coverage: MovementSeriesResult["coverage"] = {
+    unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE,
+    reasonCodeNullRows,
+  };
+  if (approvedIds != null) {
+    // Series points/totals carry NO product ids, so the archived half is the same
+    // window-scoped census as the excluded half (spec G5, non-product grain).
+    const disclosure = await approvalDisclosure({
+      relation: "inventory_logs",
+      some: windowPredicate,
+      productId,
+    });
+    coverage.excludedUnapprovedProducts = disclosure.excludedUnapprovedProducts;
+    coverage.archivedProductsIncluded = disclosure.archivedProductsIncluded;
+    coverage.approvalNote = APPROVED_UNIVERSE_NOTE;
+  }
+
   return {
     mode: "series",
     grain,
@@ -236,7 +292,7 @@ export async function getMovementSeries(opts: {
     },
     points,
     totals,
-    coverage: { unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE, reasonCodeNullRows },
+    coverage,
   };
 }
 
@@ -245,6 +301,11 @@ export async function getMovementSeries(opts: {
  *  to 0; `locationId` is nullable too (legacy null-location receipts exist). */
 export interface ReceiptRow {
   productId: number;
+  /** Identity (spec C13, seam S14): receipts used to be productId-only, which made an
+   *  archived product's receipts indistinguishable from a live one's — and unreadable
+   *  without a second call. Both come from the shared `productIdentities` lookup. */
+  name: string | null;
+  lifecycle: "active" | "deleted" | null;
   locationId: number | null;
   quantity: number;
   unitCostCents: number | null;
@@ -276,8 +337,10 @@ export async function getReceipts(opts: {
   limit?: number;
   offset?: number;
   byteBudget: number;
-}): Promise<DbPage<ReceiptRow>> {
-  const { window, productId, locationId, byteBudget } = opts;
+  /** The G5 approved universe (spec C13). Present on the assistant surface always. */
+  approvedIds?: number[];
+}): Promise<DbPage<ReceiptRow> & { disclosure?: ApprovalDisclosure }> {
+  const { window, productId, locationId, byteBudget, approvedIds } = opts;
   const limit = opts.limit ?? RECEIPTS_DEFAULT_LIMIT;
   const offset = opts.offset ?? 0;
 
@@ -289,11 +352,36 @@ export async function getReceipts(opts: {
     logType: "STOCK_IN" as const,
     delta: { gt: 0 },
     changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
-    ...(productId != null ? { productId } : {}),
+    ...(productId != null || approvedIds != null
+      ? {
+          productId: {
+            ...(productId != null ? { equals: productId } : {}),
+            ...(approvedIds != null ? { in: approvedIds } : {}),
+          },
+        }
+      : {}),
     ...(locationId != null ? { locationId } : {}),
   };
 
-  return pageFromDb<ReceiptRow>({
+  // Receipts is a DB-PAGED detail listing: the full matching set is never materialized,
+  // so the archived count cannot come from result ids without describing one page as if
+  // it were the whole answer. Both halves therefore use the window census, whose scope is
+  // exactly this read's `where` (spec G5's contributor-census shape).
+  const disclosure =
+    approvedIds != null
+      ? await approvalDisclosure({
+          relation: "inventory_logs",
+          some: {
+            logType: "STOCK_IN",
+            delta: { gt: 0 },
+            changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
+            ...(locationId != null ? { locationId } : {}),
+          },
+          productId,
+        })
+      : undefined;
+
+  const page = await pageFromDb<ReceiptRow>({
     count: () => prisma.inventory_logs.count({ where }),
     fetch: async (skip, take) => {
       const rows = await prisma.inventory_logs.findMany({
@@ -310,8 +398,13 @@ export async function getReceipts(opts: {
           changeTime: true,
         },
       });
+      // Identities for THIS PAGE's products only — the listing is DB-paged, so a
+      // catalog-wide identity read would fetch names for rows nobody asked for.
+      const identities = await productIdentities((rows ?? []).map((r) => r.productId));
       return (rows ?? []).map((row) => ({
         productId: row.productId,
+        name: identities.get(row.productId)?.name ?? null,
+        lifecycle: identities.get(row.productId)?.lifecycle ?? null,
         locationId: row.locationId,
         quantity: row.delta,
         unitCostCents: row.unitCostCents,
@@ -323,6 +416,7 @@ export async function getReceipts(opts: {
     limit,
     byteBudget,
   });
+  return disclosure ? { ...page, disclosure } : page;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +445,13 @@ export interface MovementByProductResult {
   window: ResolvedWindow;
   filters: MovementFilters;
   rows: MovementProductRow[];
-  coverage: { unclassifiedLegacyNote: string; reasonCodeNullRows: number };
+  coverage: {
+    unclassifiedLegacyNote: string;
+    reasonCodeNullRows: number;
+    excludedUnapprovedProducts: number;
+    archivedProductsIncluded: number;
+    approvalNote: string;
+  };
 }
 
 /**
@@ -378,11 +478,15 @@ export async function getMovementByProduct(opts: {
   // approved universe. Either way the id set is EXPLICIT — never raw caller input.
   const idScope = productIds ?? approvedIds;
 
+  const windowPredicate = {
+    changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
+    ...(locationId != null ? { locationId } : {}),
+  };
+
   const rows = await prisma.inventory_logs.findMany({
     where: {
-      changeTime: { gte: dayKeyStart(window.from), lt: nextDayStart(window.to) },
+      ...windowPredicate,
       productId: { in: idScope },
-      ...(locationId != null ? { locationId } : {}),
     },
     // The breakdown needs productId beside the classifier's inputs (spec C10).
     select: { productId: true, delta: true, logType: true, reasonCode: true },
@@ -433,6 +537,16 @@ export async function getMovementByProduct(opts: {
   // Most-moved first; ties by productId so paging is deterministic.
   productRows.sort((a, b) => b.outboundUnits - a.outboundUnits || a.productId - b.productId);
 
+  // PRODUCT-GRAIN disclosure (spec G5): the archived half is a JS count over the result's
+  // own rows (they already carry the identities' `lifecycle`); only the excluded half —
+  // unreachable from approved result ids by construction — needs the census. The census
+  // MIRRORS the read's scope, so a bounded request never reports catalog-wide noise.
+  const excludedUnapprovedProducts = await excludedUnapprovedProductCount({
+    relation: "inventory_logs",
+    some: windowPredicate,
+    productIds,
+  });
+
   return {
     mode: "by_product",
     window,
@@ -443,6 +557,12 @@ export async function getMovementByProduct(opts: {
       mode: "by_product",
     },
     rows: productRows,
-    coverage: { unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE, reasonCodeNullRows },
+    coverage: {
+      unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE,
+      reasonCodeNullRows,
+      excludedUnapprovedProducts,
+      archivedProductsIncluded: archivedCountOf(productRows),
+      approvalNote: APPROVED_UNIVERSE_NOTE,
+    },
   };
 }

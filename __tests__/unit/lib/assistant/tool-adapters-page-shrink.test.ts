@@ -26,9 +26,15 @@ jest.mock("ai", () => ({ __esModule: true, tool: (def: unknown) => def }));
 // productSalesFact.groupBy is the ONLY direct prisma read the tools under test reach
 // (get_sales fills zero rows' firstSaleDayKey post-pagination); everything else runs
 // through the mocked module functions below.
+// quality+reach Task 3.1: get_sales also runs the G5 contributor CENSUS (a
+// `product.findMany` starting from Product), so the stub gains that delegate. An empty
+// census is the right shape here — the pin is about byte-fitting, not disclosure values.
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
-  default: { productSalesFact: { groupBy: jest.fn(async () => []) } },
+  default: {
+    productSalesFact: { groupBy: jest.fn(async () => []) },
+    product: { findMany: jest.fn(async () => []) },
+  },
 }));
 jest.mock("@/lib/analytics/stock-asof", () => ({ __esModule: true, getStockAsOf: jest.fn() }));
 jest.mock("@/lib/reports/inventory-summary", () => ({ __esModule: true, getInventorySummary: jest.fn() }));

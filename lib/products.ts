@@ -93,12 +93,14 @@ export async function getProductsWithQuantities(
     page = 1,
     pageSize = 50,
     approvalStatus,
+    includeDeleted,
   } = filters;
 
-  // Build where clause - exclude soft deleted products
-  const where: Prisma.ProductWhereInput = {
-    deletedAt: null, // Only get non-deleted products
-  };
+  // Build where clause - exclude soft deleted products.
+  // quality+reach C13: `includeDeleted` is the ONLY thing that relaxes this. Absent (every
+  // pre-existing caller) keeps the exact predicate that shipped before, so the assistant's
+  // archived-history affordance cannot change any other surface's result set.
+  const where: Prisma.ProductWhereInput = includeDeleted ? {} : { deletedAt: null };
 
   // Lane 4 (codex #4): honor an optional approval-status scope (the assistant
   // find_product tool passes 'APPROVED'). Applied to BOTH count and findMany

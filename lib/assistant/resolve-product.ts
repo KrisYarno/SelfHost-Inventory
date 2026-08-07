@@ -8,8 +8,9 @@
  * `notFound("product", id)` error result — never a `currentStock: 0` for an ID that
  * merely isn't APPROVED.
  *
- * Scope: `deletedAt: null AND approvalStatus: APPROVED` — the same visibility rule the
- * find_product / operations / valuation reads already apply.
+ * Scope: `approvalStatus: APPROVED` ALWAYS, plus `deletedAt: null` unless the caller
+ * passes `allowArchived` — the same visibility rule the find_product / operations /
+ * valuation reads apply, with the historical-tool relaxation spec C13 defines.
  *
  * MUST stay Next-free (imported by the assistant-tool layer): no `next/*`, no
  * `@/lib/api-utils`.
@@ -18,17 +19,33 @@
 import prisma from "@/lib/prisma";
 
 /**
- * Resolve an approved, non-deleted product by ID. Returns `{ id, name }` or `null`
- * (pending-review, soft-deleted, or absent). Never throws for a missing ID.
+ * Resolve an APPROVED product by ID. Returns `{ id, name, lifecycle }` or `null`
+ * (pending-review, out-of-scope, or absent). Never throws for a missing ID.
+ *
+ * `allowArchived` relaxes ONLY `deletedAt`; `approvalStatus: "APPROVED"` is
+ * unconditional (contract pack T3). The HISTORICAL tools pass it — an archived
+ * product's past really happened and their answers tag it `lifecycle: "deleted"` — while
+ * the CURRENT-STATE tools leave it false and keep returning `notFound`, because there is
+ * no honest "current stock" for a product that has been deleted (spec C13).
  */
 export async function resolveAssistantProduct(
   productId: number,
-): Promise<{ id: number; name: string } | null> {
+  opts: { allowArchived?: boolean } = {},
+): Promise<ResolvedAssistantProduct | null> {
   const product = await prisma.product.findFirst({
-    where: { id: productId, deletedAt: null, approvalStatus: "APPROVED" },
-    select: { id: true, name: true },
+    where: {
+      id: productId,
+      approvalStatus: "APPROVED",
+      ...(opts.allowArchived ? {} : { deletedAt: null }),
+    },
+    select: { id: true, name: true, deletedAt: true },
   });
-  return product ?? null;
+  if (!product) return null;
+  return {
+    id: product.id,
+    name: product.name,
+    lifecycle: product.deletedAt != null ? "deleted" : "active",
+  };
 }
 
 /** Why a requested id produced no resolved product (contract pack T3).

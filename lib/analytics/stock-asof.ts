@@ -60,6 +60,7 @@
 import prisma from "@/lib/prisma";
 import { toDayKey, lastCompletedDayKey } from "@/lib/analytics/dates";
 import { AppError } from "@/lib/error-handling";
+import { productIdentities } from "@/lib/reports/outbound-mix";
 import { pageFromDb, type DbPage } from "@/lib/assistant/tools";
 
 /** The ONE reason string a null-units row carries (spec §5 T-ASOF — word for word).
@@ -102,6 +103,10 @@ const DEFAULT_LIMIT = 100;
 export interface StockAsOfRow {
   productId: number;
   name: string | null;
+  /** Current lifecycle at QUERY time (spec C13). A row is only ever `"deleted"` on the
+   *  EXPLICIT-productId path — the catalog page stays active-only — so an as-of answer
+   *  can never present a deleted product's history as if it were a live catalog entry. */
+  lifecycle: "active" | "deleted" | null;
   units: number | null;
   reason?: string;
   seriesEndsAt: string | null;
@@ -139,10 +144,21 @@ export interface StockAsOfPage extends DbPage<StockAsOfRow> {
 }
 
 /** Scope predicate — MUST match lib/analytics/valuation.ts (approved, non-deleted). */
-type ProductScope = { deletedAt: null; approvalStatus: "APPROVED"; id?: number };
+type ProductScope = { deletedAt?: null; approvalStatus: "APPROVED"; id?: number };
 
-function productScope(productId?: number): ProductScope {
-  return { deletedAt: null, approvalStatus: "APPROVED", ...(productId ? { id: productId } : {}) };
+/**
+ * quality+reach C13: `includeArchived` relaxes `deletedAt` ONLY on the EXPLICIT-productId
+ * path. The CATALOG page is the spec's named exception and stays active-only — an
+ * as-of listing of the whole catalog is a current-catalog question, and quietly growing
+ * it by every product ever deleted would change what that page means.
+ */
+function productScope(productId?: number, includeArchived?: boolean): ProductScope {
+  const archivedAllowed = productId != null && includeArchived === true;
+  return {
+    approvalStatus: "APPROVED",
+    ...(archivedAllowed ? {} : { deletedAt: null }),
+    ...(productId ? { id: productId } : {}),
+  };
 }
 
 /** String-max of two nullable dayKeys ('YYYY-MM-DD' sorts chronologically). Nulls drop
@@ -191,13 +207,15 @@ export async function getStockAsOf(
     limit?: number;
     offset?: number;
     byteBudget: number;
+    /** spec C13 — honored ONLY together with an explicit productId (see productScope). */
+    includeArchived?: boolean;
   },
   now: Date = new Date(),
 ): Promise<StockAsOfPage> {
   assertCompletedDay(opts.dayKey, now);
 
   const dayKey = opts.dayKey;
-  const scope = productScope(opts.productId);
+  const scope = productScope(opts.productId, opts.includeArchived);
   const limit = opts.limit ?? DEFAULT_LIMIT;
   const offset = opts.offset ?? 0;
 
@@ -240,6 +258,10 @@ export async function getStockAsOf(
       });
       if (products.length === 0) return [];
       const ids = products.map((p) => p.id);
+
+      // Lifecycle comes from the SHARED identity lookup (contract pack T2), never derived
+      // locally — the `"active" | "deleted"` union has exactly one producer.
+      const identities = await productIdentities(ids);
 
       const [daySums, pairInfo] = await Promise.all([
         // Exact-day on-hand per product = SUM(quantity) over that product's day-D rows.
@@ -301,6 +323,7 @@ export async function getStockAsOf(
         const row: StockAsOfRow = {
           productId: p.id,
           name: p.name,
+          lifecycle: identities.get(p.id)?.lifecycle ?? null,
           units,
           seriesEndsAt,
           possiblyStale,

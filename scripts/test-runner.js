@@ -46,6 +46,7 @@ const testSuites = {
       '__tests__/unit/lib/assistant/tool-presentation.test.ts',
       '__tests__/unit/lib/reports/reorder-coverage-invariant.test.ts',
       '__tests__/unit/lib/reports/outbound-mix.test.ts',
+      '__tests__/unit/lib/assistant/lifecycle-visibility.test.ts',
     ],
     description: 'Fast named subset of the contract gates (also covered by "all")',
   },

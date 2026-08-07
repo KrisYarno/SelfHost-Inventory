@@ -284,8 +284,11 @@ describe("productId narrowing", () => {
       companyIds: ["co-1"],
     });
 
+    // quality+reach Task 3.1: productId and the G5 approved-id set narrow the SAME
+    // column, so the read builds ONE IntFilter (`equals` + `in`) rather than two
+    // `productId` keys where the second silently overwrites the first.
     for (const call of db.productSalesFact.aggregate.mock.calls) {
-      expect((call[0] as { where: { productId?: number } }).where.productId).toBe(42);
+      expect((call[0] as { where: { productId?: { equals?: number } } }).where.productId?.equals).toBe(42);
     }
   });
 
@@ -301,7 +304,7 @@ describe("productId narrowing", () => {
     });
 
     for (const call of db.inventory_logs.aggregate.mock.calls) {
-      expect((call[0] as { where: { productId?: number } }).where.productId).toBe(7);
+      expect((call[0] as { where: { productId?: { equals?: number } } }).where.productId?.equals).toBe(7);
     }
   });
 });

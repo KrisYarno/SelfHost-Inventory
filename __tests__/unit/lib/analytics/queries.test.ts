@@ -12,7 +12,10 @@ describe("getSales (multi-company isolation)", () => {
     await getSales({ companyIds: ["c1", "c2"], productId: 42, from: "2026-06-01", to: "2026-06-30" });
     const arg = m.productSalesFact.groupBy.mock.calls[0][0];
     expect(arg.where.companyId).toEqual({ in: ["c1", "c2"] });
-    expect(arg.where.productId).toBe(42);
+    // quality+reach Task 3.1: productId and the optional G5 approved-id set narrow the
+    // SAME column, so the read builds ONE IntFilter instead of a bare scalar (a bare
+    // second `productId` key would silently overwrite the first).
+    expect(arg.where.productId).toEqual({ equals: 42 });
     expect(arg.where.dayKey).toEqual({ gte: "2026-06-01", lte: "2026-06-30" });
     expect(arg.by).toEqual(["productId"]); // default groupBy
   });
