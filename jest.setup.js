@@ -80,9 +80,16 @@ jest.mock("next-auth/react", () => ({
 // `undefined.findUnique` — an unrelated-suite failure that looks like a bug in
 // the suite rather than a missing mock. The gate is fail-closed, so an
 // unstubbed read simply blocks the write, which is the correct default here too.
-jest.mock("@/lib/prisma", () => ({
-  __esModule: true,
-  default: {
+//
+// Multiuser substrate (contract pack T12, owned by task 1.1): the assistant
+// persistence delegates. `lib/assistant/threads.ts` and `requests.ts` run their
+// writes inside `prisma.$transaction`, so the SAME delegate objects back both the
+// top-level client and the `tx` handed to the callback — a suite can assert on
+// either. `$transaction` therefore defaults to driving its callback (array form:
+// Promise.all) instead of returning undefined, and the tx object is exported as
+// `__mockTx` for assertions.
+jest.mock("@/lib/prisma", () => {
+  const delegates = {
     product: {
       findMany: jest.fn(),
       findUnique: jest.fn(),
@@ -140,6 +147,81 @@ jest.mock("@/lib/prisma", () => ({
       upsert: jest.fn(),
       update: jest.fn(),
     },
-    $transaction: jest.fn(),
-  },
-}));
+    assistantThread: {
+      create: jest.fn(),
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+      delete: jest.fn(),
+      deleteMany: jest.fn(),
+      count: jest.fn(),
+    },
+    assistantMessage: {
+      create: jest.fn(),
+      createMany: jest.fn(),
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      updateMany: jest.fn(),
+      deleteMany: jest.fn(),
+      aggregate: jest.fn(),
+      count: jest.fn(),
+      groupBy: jest.fn(),
+    },
+    assistantRequest: {
+      create: jest.fn(),
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+      deleteMany: jest.fn(),
+      aggregate: jest.fn(),
+      count: jest.fn(),
+      groupBy: jest.fn(),
+    },
+    assistantEvalReport: {
+      create: jest.fn(),
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      deleteMany: jest.fn(),
+      count: jest.fn(),
+    },
+    assistantRun: {
+      create: jest.fn(),
+      findMany: jest.fn(),
+      deleteMany: jest.fn(),
+      aggregate: jest.fn(),
+      count: jest.fn(),
+      groupBy: jest.fn(),
+    },
+    user: {
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+      count: jest.fn(),
+    },
+    userCompany: {
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      create: jest.fn(),
+      deleteMany: jest.fn(),
+      count: jest.fn(),
+    },
+  };
+
+  // `tx` IS the client's delegate set (identical object references), minus the
+  // transaction entry point itself.
+  const mockTx = { ...delegates };
+  const client = {
+    ...delegates,
+    $transaction: jest.fn((arg) => (typeof arg === "function" ? arg(mockTx) : Promise.all(arg))),
+  };
+
+  return { __esModule: true, default: client, __mockTx: mockTx };
+});
