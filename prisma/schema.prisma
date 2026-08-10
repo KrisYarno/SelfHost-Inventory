@@ -39,6 +39,7 @@ model User {
   // ApiToken.tokenHash (denylisted).
   apiClientsOwned        ApiToken[]               @relation("ApiTokenOwner")
   apiClientsCreated      ApiToken[]               @relation("ApiTokenCreatedBy")
+  assistantThreads       AssistantThread[]
   locations              Location                 @relation(fields: [defaultLocationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_user_default_location")
 
   @@index([defaultLocationId], map: "fk_user_default_location")
@@ -876,6 +877,7 @@ model AssistantRun {
   id           Int      @id @default(autoincrement())
   userId       Int?
   tokenId      String?  @db.VarChar(30)
+  requestId    Int?     // assistant_requests correlation; NULL on the MCP surface (no request envelope). No FK — see above.
   surface      String   @db.VarChar(12)
   providerKind String?  @db.VarChar(16)
   model        String?  @db.VarChar(64)
@@ -887,5 +889,91 @@ model AssistantRun {
 
   @@index([createdAt], map: "idx_assistant_runs_created")
   @@index([userId, createdAt], map: "idx_assistant_runs_user")
+  @@index([requestId], map: "idx_assistant_runs_request")
   @@map("assistant_runs")
+}
+
+// Per-user assistant conversation threads (multiuser spec C1). Ownership is
+// absolute: every route derives userId from the session; no cross-user reads.
+model AssistantThread {
+  id        String   @id @default(cuid()) @db.VarChar(30)
+  userId    Int
+  title     String?  @db.VarChar(120)      // model-generated (C6); null until set
+  createdAt DateTime @default(now()) @db.DateTime(3)
+  updatedAt DateTime @updatedAt @db.DateTime(3)
+
+  user     User               @relation(fields: [userId], references: [id], onDelete: Cascade, map: "fk_assistant_threads_user")
+  messages AssistantMessage[]
+  requests AssistantRequest[]
+
+  @@index([userId, updatedAt], map: "idx_assistant_threads_user_updated")
+  @@map("assistant_threads")
+}
+
+// One row per persisted UIMessage. COMPOSITE PK (threadId, id): message ids are
+// per-thread, so a client-supplied id can never collide across threads (no
+// enumeration oracle — G1). Assistant ids are server-generated (C3); user ids
+// are client-supplied and validated.
+model AssistantMessage {
+  threadId  String   @db.VarChar(30)
+  id        String   @db.VarChar(40)
+  role      String   @db.VarChar(12)       // "user" | "assistant" | "system"
+  parts     Json                            // ai-sdk UIMessage parts (sanitized per C4)
+  metadata  Json?                           // terminal turn metadata: { finishReason?, aborted?, errorCode? } (C4)
+  sequence  Int                             // server-assigned inside the claim tx (C2)
+  createdAt DateTime @default(now()) @db.DateTime(3)
+
+  thread AssistantThread @relation(fields: [threadId], references: [id], onDelete: Cascade, map: "fk_assistant_messages_thread")
+
+  @@id([threadId, id])
+  @@unique([threadId, sequence], map: "uq_assistant_messages_thread_seq")
+  @@map("assistant_messages")
+}
+
+// One row per model REQUEST (chat turn or title call). The audit/usage record:
+// kept indefinitely; survives thread deletion (SetNull). userId is a bare
+// column (assistant_runs precedent — decoupled; NOTE users are SOFT-deleted in
+// this app, schema.prisma:17, so the User Cascade on threads never fires in
+// practice — a soft-deleted user's threads persist unreachable behind auth).
+model AssistantRequest {
+  id              Int      @id @default(autoincrement())
+  threadId        String?  @db.VarChar(30)
+  userId          Int
+  kind            String   @db.VarChar(8)    // "chat" | "title"
+  providerKind    String   @db.VarChar(16)
+  model           String   @db.VarChar(64)
+  inputTokens     Int?                        // as reported; NULL = not reported (G2)
+  outputTokens    Int?
+  totalTokens     Int?
+  durationMs      Int?
+  status          String   @db.VarChar(16)    // "running" | "ok" | "aborted" | "error"
+  errorCode       String?  @db.VarChar(32)    // masked route vocabulary only
+  membershipScope Json                        // companyIds snapshot at request time (v1.1 audit substrate)
+  dayKey          String   @db.Char(10)       // UTC YYYY-MM-DD computed at insert (C8 rollups; house ProductSalesFact precedent)
+  createdAt       DateTime @default(now()) @db.DateTime(3)
+
+  thread AssistantThread? @relation(fields: [threadId], references: [id], onDelete: SetNull, map: "fk_assistant_requests_thread")
+
+  @@index([userId, dayKey], map: "idx_assistant_requests_user_day")
+  @@index([threadId, status], map: "idx_assistant_requests_thread_status")
+  @@index([createdAt], map: "idx_assistant_requests_created")
+  @@map("assistant_requests")
+}
+
+// Bounded live-eval reports + user reports (C9; Kris decision 3). Small table.
+// Source-discriminated (G2C-9): "eval-run" rows REQUIRE model + corpusRev
+// (validated at the upload route); "user-report" rows leave them NULL (a prod
+// user report has no corpus revision and may span models — fabricating values
+// would be untruthful). environment vocabulary includes "production".
+model AssistantEvalReport {
+  id          Int      @id @default(autoincrement())
+  runAt       DateTime @db.DateTime(3)
+  environment String   @db.VarChar(16)     // "dev" | "staging" | "production"
+  model       String?  @db.VarChar(64)     // eval-run only
+  corpusRev   String?  @db.VarChar(64)     // eval-run only
+  source      String   @db.VarChar(16)     // "eval-run" | "user-report" (C9)
+  report      Json                          // scored report / reported-thread excerpt (C9 schemas)
+  createdAt   DateTime @default(now()) @db.DateTime(3)
+
+  @@map("assistant_eval_reports")
 }

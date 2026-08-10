@@ -69,6 +69,13 @@ export const SAFE_FIELDS: readonly string[] = [
   // not secret material (the secret's digest lives in tokenHash, which is
   // denylisted). Safe to appear in telemetry rows.
   'tokenId',
+  // Multi-user substrate (spec C1/G2): AssistantRequest token COUNTS as reported
+  // by the provider (nullable Ints; NULL = not reported) — usage telemetry the
+  // admin usage page exists to display, never credential material. Redacting
+  // them would erase the usage feature's own data.
+  'inputTokens',
+  'outputTokens',
+  'totalTokens',
 ];
 
 interface SchemaField {
