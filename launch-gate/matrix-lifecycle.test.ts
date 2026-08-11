@@ -724,8 +724,8 @@ describe("REGENERATE — the four cases (spec C4's ONE anchor rule)", () => {
     it("persists NO assistant row — the shape whose retry REV-2's anchor rule 409'd", () => {
       // The meaningful-content predicate runs on the SANITIZED parts, and there were
       // none: a turn that died before content leaves the user row standing alone.
-      // (How the REQUEST row classifies this turn is the FINDING block at the end of
-      // this file — it is not what the anchor rule is about.)
+      // (The REQUEST row classifies this error/PROVIDER_ERROR — the F-5 block at the
+      // end of this file — it is not what the anchor rule is about.)
       expect(messagesAfterFailure.map((row) => row.role)).toEqual(["user"]);
     });
 
@@ -798,7 +798,7 @@ describe("REGENERATE — the four cases (spec C4's ONE anchor rule)", () => {
       expect(streamedText).toBe("Partial before the truncated stream.");
       const persistedText = textOf(afterRetry[1]);
       expect(persistedText).toBe(streamedText);
-      // (What that row's METADATA says about the failure is the FINDING block below.)
+      // (That row's METADATA carries errorCode PROVIDER_ERROR — the F-5 block below.)
       expect(partialAssistantId).toMatch(/^am/);
     });
 
@@ -821,76 +821,53 @@ describe("REGENERATE — the four cases (spec C4's ONE anchor rule)", () => {
 
 // =========================================================================
 /**
- * FINDING (Task 1.8, row 4) — A TRUNCATED PROVIDER STREAM IS RECORDED AS `ok`.
+ * F-5, FIXED (found by Task 1.8; orchestrator fix round) — A TRUNCATED PROVIDER
+ * STREAM IS RECORDED error/PROVIDER_ERROR.
  *
- * These assertions pin OBSERVED behaviour that CONTRADICTS the design, and they are
- * written this way deliberately: a harness that quietly asserted the intended values
- * would just be red, and a harness that asserted nothing would let the divergence
- * ship. Pinned, it is a change detector — the day the route is fixed, this block goes
- * red ON PURPOSE and gets rewritten to the intended shape.
+ * HISTORY: as first landed, a provider NDJSON stream that ended WITHOUT its terminal
+ * frame finalized `ok` with NULL errorCode and a metadata-less partial — a truncated
+ * answer was indistinguishable from a complete one. The fix is evidence-based in the
+ * route: a CONSUMED accumulator stream that never observed its terminal `data: [DONE]`
+ * frame downgrades an otherwise-ok classification to error/PROVIDER_ERROR (spike B(d)'s
+ * held-past-T2 wire is untouched — the latch supplies provider-timeout there first).
  *
- * WHAT WAS EXPECTED (spec C4's status vocabulary + route.ts:9-16's security note +
- * pack T4): a provider failure mid-stream masks to `PROVIDER_ERROR`, reaches the
- * client as an SSE `error` frame, and lands in `assistant_requests.errorCode` (and, on
- * a persisted partial, in `assistant_messages.metadata.errorCode`).
- *
- * WHAT ACTUALLY HAPPENS when the provider's NDJSON stream ends WITHOUT its terminal
- * `done:true` frame (the choreography schema's documented "dead provider"):
- *   1. the client's response is TERMINATED mid-body — `fetch` rejects with
- *      `TypeError: terminated` / `SocketError: other side closed`, and NO `error`
- *      frame is ever delivered (the only events seen are `start`, plus whatever
- *      content preceded the death);
- *   2. `errorLatched` stays null, so `finalizeTurn` classifies the turn `ok` with a
- *      NULL errorCode;
- *   3. a persisted partial therefore carries NO metadata at all — on resume the
- *      truncated answer is indistinguishable from a complete one.
- *
- * WHY NO EXISTING TEST CAUGHT IT: spike B(d) drives the SAME dead-provider wire but
- * holds it past T2, so the two-timer latch supplies `provider-timeout` BEFORE the
- * stream dies and the row is honestly `error`/PROVIDER_TIMEOUT. The vocabulary works
- * whenever the LATCH reaches it; what is missing is the path where the stream fails on
- * its own, in under a second, with no timer involved.
- *
- * BLAST RADIUS for later waves: 2.1's `classifyChatError` will see a transport error
- * rather than a masked code on the live path, and `deriveTurnStatus` has no
- * `errorCode` to read on the resumed turn. ORCHESTRATOR ADJUDICATION REQUIRED.
+ * THE WIRE ITSELF IS UNCHANGED PHYSICS: a dead upstream terminates the client's
+ * response mid-body; no masked `error` frame can reach a connection that no longer
+ * exists. What changed is THE RECORD.
  */
-describe("FINDING — a truncated provider stream: observed shape, pinned", () => {
-  it("delivers NO masked `error` SSE frame; the connection is terminated instead", () => {
+describe("F-5 fixed — a truncated provider stream is recorded error/PROVIDER_ERROR", () => {
+  it("still delivers NO masked `error` SSE frame — the connection is terminated (physics)", () => {
     const before = providerFailure.before as FailedTurn;
     const after = providerFailure.after as FailedTurn;
     expect(before.outcome).toMatch(/^rejected/);
     expect(after.outcome).toMatch(/^rejected/);
     expect(before.events.map((event) => event.type)).toEqual(["start"]);
     expect(after.events.map((event) => event.type)).toEqual(["start", "text-delta"]);
-    // The masking exists (route.ts `maskStreamError`) — it simply never reaches the wire.
     expect(before.events.some((event) => event.type === "error")).toBe(false);
     expect(after.events.some((event) => event.type === "error")).toBe(false);
   });
 
-  it("records the request row `ok` with a NULL errorCode (EXPECTED: error/PROVIDER_ERROR)", () => {
+  it("records BOTH request rows error/PROVIDER_ERROR (the truthful classification)", () => {
     const before = providerFailure.beforeRequest as RequestRow;
     const after = providerFailure.afterRequest as RequestRow;
     expect({ status: before.status, errorCode: before.errorCode }).toEqual({
-      status: "ok",
-      errorCode: null,
+      status: "error",
+      errorCode: "PROVIDER_ERROR",
     });
     expect({ status: after.status, errorCode: after.errorCode }).toEqual({
-      status: "ok",
-      errorCode: null,
+      status: "error",
+      errorCode: "PROVIDER_ERROR",
     });
   });
 
-  it("leaves the persisted partial with NO metadata (EXPECTED: errorCode PROVIDER_ERROR)", () => {
-    // Nothing marks this turn as incomplete: no `aborted`, no `errorCode`, no
-    // finishReason. A reader cannot tell it from a turn that finished.
-    expect(providerFailure.afterMetadata).toBeNull();
+  it("marks the persisted partial: metadata.errorCode = PROVIDER_ERROR", () => {
+    // On resume, a truncated answer is now DISTINGUISHABLE from a complete one —
+    // deriveTurnStatus reads exactly this field (pack T4 precedence).
+    expect(providerFailure.afterMetadata).toEqual({ errorCode: "PROVIDER_ERROR" });
   });
 
-  // NOTE (deliberately NOT a test here): the CONTRAST — the same dead wire held past
-  // T2 IS honestly recorded error/PROVIDER_TIMEOUT — is spike-b.test.ts B(d)'s own
-  // assertion. Reading spike B's rows out of this file would be a cross-file order
-  // dependency, and jest's file order varies (pack REV-8).
+  // The CONTRAST — the same dead wire held past T2 records error/PROVIDER_TIMEOUT —
+  // remains spike-b B(d)'s own assertion (no cross-file order dependency).
 });
 
 // =========================================================================
@@ -1230,72 +1207,53 @@ describe("HISTORY BYTE BOUND — a big SHED-ONLY thread still answers over HTTP"
 
 // =========================================================================
 /**
- * FINDING (Task 1.8, row 4) — THE OMISSION NOTE BRICKS THE THREAD.
+ * F-4, FIXED (found by Task 1.8; orchestrator fix round) — THE OMISSION NOTE RIDES
+ * THE SYSTEM OPTION.
  *
- * `loadBoundedHistory` prepends a `role: "system"` message (the HISTORY_OMISSION_NOTE)
- * whenever whole turns were dropped or the page did not reach the thread start. The
- * route converts that bounded history with `convertToModelMessages` and passes it to
- * `streamText` as `messages` — and ai@7.0.29's `standardizePrompt` REJECTS it:
+ * HISTORY: `loadBoundedHistory` prepends a `role:"system"` note message when whole
+ * turns drop, and ai@7.0.29's standardizePrompt REJECTS system-role messages in
+ * `messages` ("Use the instructions option instead") — as first landed, every turn in
+ * a dropped-turn thread failed PROVIDER_ERROR forever (the brick case spec C7 row 4
+ * forbids). The fix keeps the module contract intact (the note is STILL the bounded
+ * history's first message — the 1.1 unit pins hold) and moves the ROUTE: it strips
+ * the note (known id) before conversion/persistence-mode and appends its text to the
+ * streamText `system` option, exactly where the SDK says instructions belong.
  *
- *   "System messages are not allowed in the prompt or messages fields.
- *    Use the instructions option instead."   (ai/dist/index.js:2446-2450)
- *
- * The throw happens inside the stream, so it is masked to `PROVIDER_ERROR` and the
- * turn fails. It is NOT transient: the note is regenerated on every subsequent load,
- * so EVERY later turn in that thread fails the same way — the thread is permanently
- * bricked, which is the exact failure mode spec C7 row 4's "brick case" exists to
- * forbid. It bites the longest threads, i.e. the ones a real user accumulates.
- *
- * THE CONTROLLED PROOF is the pair of describes above: thread B is the same size
- * class, the same actor, the same tool parts and the same shedding, and it answers
- * normally. The ONE structural difference is the system note.
- *
- * WHY NOTHING CAUGHT IT: the 1.1 unit suite mocks prisma and asserts the note is
- * PRESENT in `loadBoundedHistory`'s output; it never feeds that output to `streamText`.
- * No earlier launch case built a thread large enough to drop a turn.
- *
- * NOT FIXED HERE: the fix is a design decision (fold the note into the route's
- * `system`/`instructions`, or emit it as a non-system message) and product code is
- * outside this milestone's file map. ORCHESTRATOR ADJUDICATION REQUIRED — spec C2
- * step 3 and pack T2 both specify the note as a system message.
- *
- * These assertions PIN the broken behaviour on purpose: the day it is fixed this block
- * goes red and gets rewritten to "the turn completes".
+ * The controlled pair above (thread A drops turns, thread B only sheds) is what
+ * proved the note was the one structural difference; it now proves the fix.
  */
-describe("FINDING — a dropped-turn history brings a system note the SDK rejects", () => {
-  let bricked: TurnResult;
+describe("F-4 fixed — a dropped-turn history answers normally", () => {
+  let turn: TurnResult;
   let requestRow: RequestRow;
   let messagesAfter: MessageRow[];
 
   beforeAll(async () => {
-    bricked = await drive("memberA", "life-simple", "gate-hista-live-user", { threadId: THREAD_A });
-    await settleTurn(THREAD_A, { label: "the bricked over-budget turn" });
+    turn = await drive("memberA", "life-simple", "gate-hista-live-user", { threadId: THREAD_A });
+    await settleTurn(THREAD_A, {
+      requireAssistantRow: true,
+      label: "the dropped-turn over-budget turn",
+    });
     const rows = await requestsOf(THREAD_A);
     requestRow = rows[rows.length - 1];
     messagesAfter = await messagesOf(THREAD_A);
   }, 120_000);
 
-  it("answers 200 and then streams a masked PROVIDER_ERROR with NO content", () => {
-    expect(bricked.status).toBe(200);
-    expect(bricked.text).toBe("");
-    expect(eventsOfType(bricked, "error").map((event) => event.errorText)).toEqual([
-      "PROVIDER_ERROR",
-    ]);
+  it("completes the turn: 200, scripted text, no error frames", () => {
+    expect(turn.status).toBe(200);
+    expect(turn.text).toBe("Life simple turn complete.");
+    expect(eventsOfType(turn, "error")).toHaveLength(0);
   });
 
-  it("finalizes the request row error/PROVIDER_ERROR and persists no assistant row", () => {
+  it("finalizes ok and persists the assistant row", () => {
     expect({ status: requestRow.status, errorCode: requestRow.errorCode }).toEqual({
-      status: "error",
-      errorCode: "PROVIDER_ERROR",
+      status: "ok",
+      errorCode: null,
     });
-    // The user's message is stored; the answer never existed.
-    expect(messagesAfter[messagesAfter.length - 1].id).toBe("gate-hista-live-user");
-    expect(messagesAfter[messagesAfter.length - 1].role).toBe("user");
+    const last = messagesAfter[messagesAfter.length - 1];
+    expect(last.role).toBe("assistant");
   });
 
-  it("CONTROL: the shed-only thread of the same size class answered normally", async () => {
-    // Same actor, same tool parts, same byte class, same shedding — different only in
-    // that nothing was DROPPED, so no system note was prepended.
+  it("CONTROL: the shed-only thread of the same size class also answered normally", async () => {
     const [row] = await oracleQuery<{ status: string; errorCode: string | null }>(
       "SELECT status, errorCode FROM assistant_requests WHERE threadId = ? ORDER BY id DESC LIMIT 1",
       [THREAD_B],
@@ -1306,10 +1264,12 @@ describe("FINDING — a dropped-turn history brings a system note the SDK reject
     });
   });
 
-  it("and it is PERMANENT: the note is rebuilt on every load, so the next turn fails too", async () => {
+  it("the MODULE contract is intact: the note is still the bounded history's first message", async () => {
     const reloaded = await threads.loadBoundedHistory(MEMBER_A.userId, THREAD_A);
     expect(reloaded[0].role).toBe("system");
     expect(reloaded[0].parts).toEqual([{ type: "text", text: threads.HISTORY_OMISSION_NOTE }]);
+    // The route strips it by its KNOWN id — pin that id here so a rename breaks loudly.
+    expect(reloaded[0].id).toBe("system-history-omission");
   });
 });
 

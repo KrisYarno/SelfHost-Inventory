@@ -51,7 +51,7 @@ export const HISTORY_OMISSION_NOTE = "earlier turns omitted (thread continues in
 
 /** Id of that synthetic note. It is never persisted; it exists only in the model
  *  input and in `originalMessages`. */
-const HISTORY_OMISSION_ID = "system-history-omission";
+export const HISTORY_OMISSION_ID = "system-history-omission";
 
 const HISTORY_PAGE_SIZE = 20;
 

@@ -47,6 +47,8 @@ import {
   finalizeTurn,
   loadBoundedHistory,
   serializedBytes,
+  HISTORY_OMISSION_ID,
+  HISTORY_OMISSION_NOTE,
   MESSAGE_BUDGET_BYTES,
   type ClaimTurnResult,
 } from "@/lib/assistant/threads";
@@ -180,6 +182,9 @@ interface StreamAccumulator {
   /** The partial message as of NOW (a copy — later chunks cannot mutate it), or
    *  `null` when nothing has been streamed yet. */
   snapshot(): UIMessage | null;
+  /** TRUE once the stream's terminal `data: [DONE]` frame was observed. A consumed
+   *  stream that ends WITHOUT it was truncated upstream (F-5). */
+  sawTerminal(): boolean;
 }
 
 type AccumulatedPart = Record<string, unknown>;
@@ -368,6 +373,9 @@ function createStreamAccumulator(fallbackId: () => string): StreamAccumulator {
         reader.releaseLock();
       }
     },
+    sawTerminal(): boolean {
+      return done;
+    },
     snapshot(): UIMessage | null {
       if (parts.length === 0) return null;
       const message: UIMessage = {
@@ -502,6 +510,7 @@ export async function POST(request: NextRequest): Promise<Response> {
   let usageSource: UsageSource = null;
   let errorLatched: string | null = null;
   let consumerSettled: Promise<void> = Promise.resolve();
+  let consumeStarted = false;
   let finalizing: Promise<void> | null = null;
 
   const titleJob = (): TitleJob =>
@@ -532,7 +541,13 @@ export async function POST(request: NextRequest): Promise<Response> {
           message,
           cause: latch.cause(),
           eventAborted,
-          errorLatched,
+          // F-5 (launch-gate finding): a CONSUMED stream that never reached its
+          // terminal [DONE] frame was truncated upstream — recording it `ok` would
+          // make a cut-off answer indistinguishable from a complete one. Evidence-
+          // based: no consumption (mocked SDK paths) = no downgrade.
+          errorLatched:
+            errorLatched ??
+            (consumeStarted && !accumulator.sawTerminal() ? "PROVIDER_ERROR" : null),
           usage: await resolveUsage(usageSource),
           durationMs,
         });
@@ -558,7 +573,14 @@ export async function POST(request: NextRequest): Promise<Response> {
   try {
     // C2 step 3: the bounded history is BOTH the model input (converted) and the
     // client's `originalMessages` (persistence mode, C3).
-    const originalMessages = await loadBoundedHistory(userId, claim.threadId);
+    const loadedHistory = await loadBoundedHistory(userId, claim.threadId);
+    // F-4 (launch-gate finding): ai@7.0.29 REJECTS system-role messages in `messages`
+    // ("Use the instructions option instead") — the omission note rides the SYSTEM
+    // option below and is stripped here; it is never converted, never a persistence-
+    // mode original (it was never persisted either).
+    const historyOmitted =
+      loadedHistory.length > 0 && loadedHistory[0].id === HISTORY_OMISSION_ID;
+    const originalMessages = historyOmitted ? loadedHistory.slice(1) : loadedHistory;
     const messages = await convertToModelMessages(originalMessages, {
       ignoreIncompleteToolCalls: true,
     });
@@ -568,7 +590,9 @@ export async function POST(request: NextRequest): Promise<Response> {
       model: resolved.languageModel,
       // Server-controlled context: today's UTC date (D-T6). `new Date()` is trusted
       // server state, never tool or user data — the injection posture is preserved.
-      system: buildSystemPrompt(new Date()),
+      system: historyOmitted
+        ? `${buildSystemPrompt(new Date())}\n\n${HISTORY_OMISSION_NOTE}`
+        : buildSystemPrompt(new Date()),
       messages,
       tools: createAiTools(ctx, budget, wrappedRecordRun),
       stopWhen: stepCountIs(STEP_LIMIT),
@@ -615,12 +639,15 @@ export async function POST(request: NextRequest): Promise<Response> {
         return code;
       },
       onEnd: ({ responseMessage, isAborted }) => {
-        void finalizeOnce(responseMessage ?? accumulator.snapshot(), isAborted === true);
+        void consumerSettled.then(() =>
+          finalizeOnce(responseMessage ?? accumulator.snapshot(), isAborted === true),
+        );
       },
       // Mandatory server-side consumption (C4): the tee'd copy is driven to
       // completion regardless of client disconnect, and the route captures the
       // completion promise ITSELF — the SDK discards the callback's return value.
       consumeSseStream: ({ stream }) => {
+        consumeStarted = true;
         consumerSettled = accumulator.consume(stream);
       },
     });
