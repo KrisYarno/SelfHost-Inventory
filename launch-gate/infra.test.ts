@@ -198,6 +198,21 @@ describe("one trivial scripted turn through the REAL route", () => {
   });
 
   it("persists the thread, both messages and the request row", async () => {
+    // SETTLE BARRIER (1.6 finding, orchestrator seam-fix): the route finalizes
+    // 59-87ms AFTER the response stream closes (usage race + finalize tx). A read
+    // taken the instant postTurn resolves races the assistant row — this exact
+    // race was the lane's one unidentified flake. Bounded poll, no fixed sleeps.
+    const settleDeadline = Date.now() + 5_000;
+    for (;;) {
+      const rows = await oracleQuery<{ status: string }>(
+        "SELECT status FROM assistant_requests WHERE threadId = ? AND kind = 'chat' ORDER BY id DESC LIMIT 1",
+        [threadId],
+      );
+      if (rows.length > 0 && rows[0].status !== "running") break;
+      if (Date.now() > settleDeadline) throw new Error("turn never settled within 5s");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
     const threads = await oracleQuery<{ id: string; userId: number; title: string | null }>(
       "SELECT id, userId, title FROM assistant_threads WHERE id = ?",
       [threadId],

@@ -1,0 +1,10 @@
+{
+  "id": "spike-b-stall",
+  "steps": [
+    {
+      "text": "Spike B stalled partial.",
+      "usage": { "prompt_eval_count": 1433, "eval_count": 8 },
+      "hold": { "ms": 88000, "then": "eof" }
+    }
+  ]
+}

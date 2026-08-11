@@ -1,0 +1,13 @@
+{
+  "id": "spike-a-history",
+  "steps": [
+    {
+      "toolCalls": [{ "name": "get_inventory_summary", "input": {} }],
+      "usage": { "prompt_eval_count": 1511, "eval_count": 21 }
+    },
+    {
+      "text": "Spike A history turn complete.",
+      "usage": { "prompt_eval_count": 1744, "eval_count": 12 }
+    }
+  ]
+}

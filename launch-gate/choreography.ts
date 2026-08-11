@@ -21,13 +21,44 @@ import path from "node:path";
 
 export type UsageScript = { prompt_eval_count: number; eval_count: number };
 
+/** A held connection may not outlive this, whatever a scenario asks for: the cap is
+ *  what keeps a mistyped `ms` from wedging a suite for hours. */
+export const HOLD_MAX_MS = 180_000;
+
+/**
+ * Optional per-step WIRE behaviour (added by 1.6 for Spike B). ABSENT — the default,
+ * and what every pre-1.6 scenario does — means the content frame and the terminal
+ * frame are written back to back and the response ends immediately.
+ *
+ * A `hold` is how a scenario scripts a provider that is slow, dead, or silent:
+ * behaviour the shim cannot express with frames alone and which the bounded-
+ * finalization and client-abort proofs are ENTIRELY about.
+ */
+export type StepHold = {
+  /** How long the shim holds the response open before `then` happens (<= HOLD_MAX_MS). */
+  ms: number;
+  /**
+   * `"complete"` — write the terminal frame after the hold: a SLOW provider, whose
+   * read eventually yields (which is when the SDK observes an abort signal).
+   * `"eof"` — end the body with NO terminal frame: a DEAD provider. The client's
+   * read blocks for the whole hold and then sees a truncated stream. Such a step can
+   * never be followed by another (the turn's stream never completes), so the loader
+   * requires it to be LAST.
+   */
+  then: "complete" | "eof";
+  /** `true` — write NOTHING before the hold: response headers and then silence. The
+   *  step's own content is never emitted (the indefinitely-open SILENT stream). */
+  silent?: boolean;
+};
+
 export type ChoreographyStep =
   | {
       toolCalls: Array<{ name: string; input: Record<string, unknown> }>;
       text?: never;
       usage: UsageScript;
+      hold?: StepHold;
     }
-  | { text: string; toolCalls?: never; usage: UsageScript };
+  | { text: string; toolCalls?: never; usage: UsageScript; hold?: StepHold };
 
 export type Choreography = { id: string; steps: ChoreographyStep[] };
 
@@ -120,13 +151,54 @@ function assertToolCalls(file: string, raw: unknown): Array<{ name: string; inpu
   });
 }
 
+/**
+ * The optional `hold` block. `usage` stays REQUIRED on a held step even when
+ * `then: "eof"` never emits the terminal frame that would carry it — the step's
+ * shape is the same shape, and a scenario that later flips to `"complete"` must not
+ * have to grow a field.
+ */
+function assertHold(file: string, index: number, raw: unknown, isLast: boolean): StepHold {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new ChoreographyError(file, `steps[${index}].hold must be an object`);
+  }
+  const record = raw as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "ms" && key !== "then" && key !== "silent") {
+      throw new ChoreographyError(file, `steps[${index}].hold has unknown key "${key}"`);
+    }
+  }
+  const ms = record.ms;
+  if (typeof ms !== "number" || !Number.isInteger(ms) || ms <= 0 || ms > HOLD_MAX_MS) {
+    throw new ChoreographyError(
+      file,
+      `steps[${index}].hold.ms must be a positive integer of at most ${HOLD_MAX_MS}`,
+    );
+  }
+  const then = record.then;
+  if (then !== "complete" && then !== "eof") {
+    throw new ChoreographyError(file, `steps[${index}].hold.then must be "complete" or "eof"`);
+  }
+  if (then === "eof" && !isLast) {
+    throw new ChoreographyError(
+      file,
+      `steps[${index}].hold ends the stream without a terminal frame, so no step may follow it`,
+    );
+  }
+  if (record.silent !== undefined && record.silent !== true) {
+    throw new ChoreographyError(file, `steps[${index}].hold.silent must be true when present`);
+  }
+  const hold: StepHold = { ms, then };
+  if (record.silent === true) hold.silent = true;
+  return hold;
+}
+
 function parseStep(file: string, raw: unknown, index: number, lastIndex: number): ChoreographyStep {
   if (typeof raw !== "object" || raw === null) {
     throw new ChoreographyError(file, `steps[${index}] must be an object`);
   }
   const record = raw as Record<string, unknown>;
   for (const key of Object.keys(record)) {
-    if (key !== "toolCalls" && key !== "text" && key !== "usage") {
+    if (key !== "toolCalls" && key !== "text" && key !== "usage" && key !== "hold") {
       throw new ChoreographyError(file, `steps[${index}] has unknown key "${key}"`);
     }
   }
@@ -136,6 +208,8 @@ function parseStep(file: string, raw: unknown, index: number, lastIndex: number)
     throw new ChoreographyError(file, `steps[${index}] must carry EXACTLY one of \`toolCalls\` or \`text\``);
   }
   const usage = assertUsage(file, record.usage);
+  const hold =
+    record.hold === undefined ? undefined : assertHold(file, index, record.hold, index === lastIndex);
   if (hasText) {
     if (index !== lastIndex) {
       throw new ChoreographyError(file, `steps[${index}] is a text step but only the LAST step may be text`);
@@ -143,9 +217,10 @@ function parseStep(file: string, raw: unknown, index: number, lastIndex: number)
     if (typeof record.text !== "string" || record.text === "") {
       throw new ChoreographyError(file, `steps[${index}].text must be a non-empty string`);
     }
-    return { text: record.text, usage };
+    return hold === undefined ? { text: record.text, usage } : { text: record.text, usage, hold };
   }
-  return { toolCalls: assertToolCalls(file, record.toolCalls), usage };
+  const toolCalls = assertToolCalls(file, record.toolCalls);
+  return hold === undefined ? { toolCalls, usage } : { toolCalls, usage, hold };
 }
 
 export function parseChoreography(file: string, raw: unknown): Choreography {

@@ -26,6 +26,12 @@
  * G2D-2) and never `role: "tool"` messages (one per result would double-count a
  * parallel-packed step, G2C-6). Any non-GATE prompt is a title call and gets
  * TITLE_SCRIPT. An unknown GATE id is a 500: a mis-seeded harness fails loudly.
+ *
+ * HOLDS (added by 1.6): a step carrying `hold` scripts a provider that is slow
+ * (`then: "complete"`), dead (`then: "eof"`) or silent (`silent: true`) — the wire
+ * behaviour the bounded-finalization and client-abort proofs are about. The hold
+ * timer is cleared when the peer hangs up, and `HOLD_MAX_MS` caps it, so a held
+ * connection can never outlive the run.
  */
 
 import http from "node:http";
@@ -35,6 +41,7 @@ import {
   TITLE_SCRIPT,
   loadChoreographies,
   type Choreography,
+  type StepHold,
   type UsageScript,
 } from "./choreography";
 
@@ -144,7 +151,10 @@ export function scenarioIdOf(messages: OllamaMessage[]): string | null {
   return id === "" ? null : id;
 }
 
-function renderStep(choreography: Choreography, stepIndex: number): string {
+/** One step's wire output, split so a `hold` can sit between the two halves. */
+type RenderedStep = { content: string; terminal: string; hold?: StepHold };
+
+function renderStep(choreography: Choreography, stepIndex: number): RenderedStep {
   const step = choreography.steps[stepIndex];
   if (step === undefined) {
     throw new Error(
@@ -152,16 +162,45 @@ function renderStep(choreography: Choreography, stepIndex: number): string {
         `asked for step ${stepIndex} — the choreography is short a closing text step`,
     );
   }
+  const terminal = doneFrame(step.usage, "stop");
   if (step.toolCalls !== undefined) {
     const toolCalls = step.toolCalls.map((call) => ({
       function: { name: call.name, arguments: call.input },
     }));
-    return (
-      deltaFrame({ role: "assistant", content: "", tool_calls: toolCalls }) +
-      doneFrame(step.usage, "stop")
-    );
+    const content = deltaFrame({ role: "assistant", content: "", tool_calls: toolCalls });
+    return { content, terminal, hold: step.hold };
   }
-  return deltaFrame({ role: "assistant", content: step.text }) + doneFrame(step.usage, "stop");
+  return {
+    content: deltaFrame({ role: "assistant", content: step.text }),
+    terminal,
+    hold: step.hold,
+  };
+}
+
+/**
+ * Serve a held step: flush the headers so the caller's `fetch` resolves and its read
+ * BLOCKS on the body (the silent case writes no bytes at all, so nothing else would
+ * push the head out), optionally write the content frame, then wait.
+ *
+ * `then: "complete"` finishes the turn normally after the wait — the read yields,
+ * which is the only moment the AI SDK looks at its abort signal. `then: "eof"` ends
+ * the body with no terminal frame: the provider raises its "did not receive done"
+ * error, which is how a stalled stream eventually releases the socket instead of
+ * leaking one for the rest of the run.
+ */
+function serveHeld(res: http.ServerResponse, req: http.IncomingMessage, rendered: RenderedStep): void {
+  const hold = rendered.hold as StepHold;
+  res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store" });
+  res.flushHeaders();
+  if (hold.silent !== true) res.write(rendered.content);
+
+  const timer = setTimeout(() => {
+    if (hold.then === "complete") res.end(rendered.terminal);
+    else res.end();
+  }, hold.ms);
+  const cancel = (): void => clearTimeout(timer);
+  req.on("close", cancel);
+  res.on("close", cancel);
 }
 
 function readBody(req: http.IncomingMessage): Promise<unknown> {
@@ -219,22 +258,26 @@ export function createShimServer(choreographies: Map<string, Choreography>): htt
         return;
       }
 
-      let payload: string;
+      let rendered: RenderedStep;
       try {
-        payload = renderStep(choreography, stepIndexOf(messages));
+        rendered = renderStep(choreography, stepIndexOf(messages));
       } catch (err) {
         sendJson(res, 500, { error: err instanceof Error ? err.message : "scenario render failed" });
         return;
       }
 
       if (body.stream === true) {
+        if (rendered.hold !== undefined) {
+          serveHeld(res, req, rendered);
+          return;
+        }
         res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store" });
-        res.end(payload);
+        res.end(rendered.content + rendered.terminal);
         return;
       }
-      // Non-streaming callers get the terminal document only.
-      const lines = payload.trim().split("\n");
-      sendJson(res, 200, JSON.parse(lines[lines.length - 1]));
+      // Non-streaming callers get the terminal document only. A `hold` describes
+      // STREAM timing and does not apply here.
+      sendJson(res, 200, JSON.parse(rendered.terminal));
     })().catch((err: unknown) => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: err instanceof Error ? err.message : "shim failure" });

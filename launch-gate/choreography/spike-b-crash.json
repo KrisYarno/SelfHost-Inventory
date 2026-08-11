@@ -1,0 +1,10 @@
+{
+  "id": "spike-b-crash",
+  "steps": [
+    {
+      "text": "Spike B crash payload.",
+      "usage": { "prompt_eval_count": 1421, "eval_count": 8 },
+      "hold": { "ms": 30000, "then": "eof" }
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": "spike-a-parallel",
+  "steps": [
+    {
+      "toolCalls": [
+        { "name": "get_inventory_summary", "input": { "rankBy": "onHand", "limit": 2 } },
+        { "name": "get_inventory_policy", "input": { "productId": 9101 } }
+      ],
+      "usage": { "prompt_eval_count": 1822, "eval_count": 34 }
+    },
+    {
+      "text": "Spike A parallel turn complete.",
+      "usage": { "prompt_eval_count": 2033, "eval_count": 14 }
+    }
+  ]
+}

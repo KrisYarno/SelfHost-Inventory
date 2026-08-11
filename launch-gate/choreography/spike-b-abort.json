@@ -1,0 +1,10 @@
+{
+  "id": "spike-b-abort",
+  "steps": [
+    {
+      "text": "Spike B abort payload.",
+      "usage": { "prompt_eval_count": 1416, "eval_count": 8 },
+      "hold": { "ms": 4000, "then": "complete" }
+    }
+  ]
+}

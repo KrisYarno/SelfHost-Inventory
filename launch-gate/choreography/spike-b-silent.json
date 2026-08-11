@@ -1,0 +1,10 @@
+{
+  "id": "spike-b-silent",
+  "steps": [
+    {
+      "text": "Spike B silent stream never emits this.",
+      "usage": { "prompt_eval_count": 1447, "eval_count": 8 },
+      "hold": { "ms": 88000, "then": "eof", "silent": true }
+    }
+  ]
+}

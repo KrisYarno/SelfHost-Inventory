@@ -167,9 +167,30 @@ function chargePost(user: Session["user"]): void {
   }
 }
 
+/**
+ * Extras a caller may want mid-flight. Both were added by 1.6 (Spike B): a client
+ * disconnect cannot be scripted without an abort handle, and the moment to pull it
+ * is "when content has actually arrived", which the returned `TurnResult` — a value
+ * that only exists once the stream is over — cannot express.
+ */
+export type PostTurnOptions = {
+  /**
+   * Aborts the client half of the stream. The in-flight `fetch`/read then rejects
+   * with an `AbortError` and `postTurn` PROPAGATES it (standard fetch semantics):
+   * a caller that aborts on purpose catches its own abort, and the events it has
+   * seen reach it through `onEvent`, not through a return value.
+   */
+  signal?: AbortSignal;
+  /** Called with each union event AS IT ARRIVES, before the stream completes. */
+  onEvent?: (event: SseEvent) => void;
+};
+
 /** Read the response body to completion, re-cutting arbitrary network chunks into
  *  complete `\n\n` SSE frames. Returns the raw text AND the union events. */
-async function parseSse(response: Response): Promise<{ raw: string; events: SseEvent[] }> {
+async function parseSse(
+  response: Response,
+  onEvent?: (event: SseEvent) => void,
+): Promise<{ raw: string; events: SseEvent[] }> {
   const events: SseEvent[] = [];
   let raw = "";
   let buffer = "";
@@ -188,7 +209,9 @@ async function parseSse(response: Response): Promise<{ raw: string; events: SseE
       if (typeof chunk !== "object" || chunk === null) continue;
       const typed = chunk as { type?: unknown };
       if (typeof typed.type === "string" && UNION_TYPES.has(typed.type)) {
-        events.push(chunk as SseEvent);
+        const event = chunk as SseEvent;
+        events.push(event);
+        onEvent?.(event);
       }
     }
   };
@@ -239,7 +262,11 @@ function metadataOf(events: SseEvent[]): StreamMetadata {
  * 409/429) returns with `events: []` and the JSON body in `raw` — the caller reads
  * `status` and parses `raw` itself.
  */
-export async function postTurn(session: Session, body: EnvelopeC2): Promise<TurnResult> {
+export async function postTurn(
+  session: Session,
+  body: EnvelopeC2,
+  options: PostTurnOptions = {},
+): Promise<TurnResult> {
   chargePost(session.user);
   const response = await fetch(`${APP_BASE_URL}/api/assistant`, {
     method: "POST",
@@ -250,6 +277,7 @@ export async function postTurn(session: Session, body: EnvelopeC2): Promise<Turn
       "x-csrf-token": session.csrfToken,
     },
     body: JSON.stringify(body),
+    signal: options.signal,
   });
 
   const contentType = response.headers.get("content-type") ?? "";
@@ -258,7 +286,7 @@ export async function postTurn(session: Session, body: EnvelopeC2): Promise<Turn
     return { events: [], text: "", threadId: null, status: response.status, raw };
   }
 
-  const { raw, events } = await parseSse(response);
+  const { raw, events } = await parseSse(response, options.onEvent);
   const text = events
     .filter((event): event is Extract<SseEvent, { type: "text-delta" }> => event.type === "text-delta")
     .map((event) => event.delta)

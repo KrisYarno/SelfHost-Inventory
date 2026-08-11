@@ -1,0 +1,9 @@
+{
+  "id": "spike-b-simple",
+  "steps": [
+    {
+      "text": "Spike B simple turn complete.",
+      "usage": { "prompt_eval_count": 1408, "eval_count": 9 }
+    }
+  ]
+}
