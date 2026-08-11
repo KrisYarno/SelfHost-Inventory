@@ -158,6 +158,7 @@ export function EvalSection() {
                       <th className="px-3 py-2 font-medium">Verdict</th>
                       <th className="px-3 py-2 font-medium">Prompt</th>
                       <th className="px-3 py-2 font-medium">Notes</th>
+                      <th className="px-3 py-2 font-medium">Answer excerpt</th>
                       <th className="px-3 py-2 font-medium">Tools</th>
                     </tr>
                   </thead>
@@ -176,6 +177,13 @@ export function EvalSection() {
                         <td className="px-3 py-2 text-body-sm">{asText(t.verdict)}</td>
                         <td className="px-3 py-2 text-body-sm">{asText(t.prompt)}</td>
                         <td className="px-3 py-2 text-body-sm">{asText(t.notes)}</td>
+                        {/* W3S-2: the bounded answer being scored (<=500 chars at
+                            upload, spec C9) — a TEXT NODE like every corpus string;
+                            without it the admin cannot inspect what the verdict
+                            judged. */}
+                        <td className="px-3 py-2 text-body-sm" data-testid="eval-answer-excerpt">
+                          {asText(t.answerExcerpt)}
+                        </td>
                         <td className="px-3 py-2 text-body-sm">
                           {Array.isArray(t.toolCalls) ? t.toolCalls.join(", ") : ""}
                         </td>

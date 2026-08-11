@@ -276,11 +276,33 @@ const NON_MATRIX_DESCRIBES: Array<{ title: string; why: string }> = [
 // Source scanning
 // ---------------------------------------------------------------------------
 
-const DESCRIBE_ANYWHERE = /describe\(\s*"((?:[^"\\]|\\.)*)"/g;
+const DESCRIBE_ANYWHERE = /(?<![.\w])describe\(\s*"((?:[^"\\]|\\.)*)"/g;
 const DESCRIBE_TOP_LEVEL = /^describe\(\s*"((?:[^"\\]|\\.)*)"/gm;
 
 function unescape(literal: string): string {
   return literal.replace(/\\(.)/g, "$1");
+}
+
+/**
+ * W3S-4: the scan must see only ACTIVE code — a describe commented out wholesale
+ * would otherwise keep satisfying the evidence check while jest no longer runs it.
+ * Line and block comments are stripped BEFORE matching; string literals in these
+ * test files never contain `//` or `/*` sequences that would confuse this (and the
+ * permanent controls below would catch a regression in that assumption via their
+ * active-describe expectations).
+ */
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
+/** The describes really ACTIVE in one source text (comment-stripped; `.skip` and
+ *  other property-call forms excluded by the lookbehind). Exported to the controls. */
+function describesInSource(source: string): string[] {
+  const found: string[] = [];
+  for (const match of Array.from(stripComments(source).matchAll(DESCRIBE_ANYWHERE))) {
+    found.push(unescape(match[1]));
+  }
+  return found;
 }
 
 function testFiles(): string[] {
@@ -293,7 +315,7 @@ function testFiles(): string[] {
 function collectDescribes(pattern: RegExp): string[] {
   const found: string[] = [];
   for (const file of testFiles()) {
-    const source = fs.readFileSync(path.join(LAUNCH_GATE_DIR, file), "utf8");
+    const source = stripComments(fs.readFileSync(path.join(LAUNCH_GATE_DIR, file), "utf8"));
     // `Array.from`, not `for..of` over the iterator: the ROOT tsconfig (which is what
     // `npx tsc --noEmit` checks this directory with) targets below ES2015.
     for (const match of Array.from(source.matchAll(pattern))) found.push(unescape(match[1]));
@@ -493,6 +515,24 @@ describe("COMPLETENESS — every spec C7 matrix row has a describe in this proje
     expect(violations).toHaveLength(2);
     expect(violations[0]).toContain("row 7 names a describe that does not exist");
     expect(violations[1]).toContain("row 8 registers NO evidence at all");
+  });
+
+  // W3S-4: a raw-text scan reads COMMENTS too — a describe commented out wholesale
+  // would keep satisfying the evidence check while jest no longer runs it. The
+  // scanner must strip comments first, and these controls keep it that way.
+  it("CONTROL W3S-4: a commented-out describe is NOT evidence", () => {
+    const source = [
+      '// describe("a block someone disabled", () => {});',
+      '/* describe("a block inside a black comment", () => {}); */',
+      'describe("a block that is really active", () => {});',
+    ].join("\n");
+    const titles = describesInSource(source);
+    expect(titles).toEqual(["a block that is really active"]);
+  });
+
+  it("CONTROL W3S-4: describe.skip is NOT evidence either", () => {
+    const source = 'describe.skip("a block someone parked", () => {});';
+    expect(describesInSource(source)).toEqual([]);
   });
 });
 

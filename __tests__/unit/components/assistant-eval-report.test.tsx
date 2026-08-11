@@ -366,6 +366,16 @@ describe("EvalSection — latest run + history", () => {
     expect(within(latest).getByText("invented a supplier")).toBeInTheDocument();
   });
 
+  // W3S-2: the bounded answer being scored must be INSPECTABLE — the excerpt is the
+  // whole point of the <=500-char upload bound (spec C9), and a verdict without the
+  // judged answer is unreviewable. Rendered as a text node inside the eval mount.
+  test("W3S-2: the answer excerpt renders inside the eval section", () => {
+    render(<EvalSection />);
+    const cells = screen.getAllByTestId("eval-answer-excerpt");
+    expect(cells.length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Three products are below their reorder point").length).toBeGreaterThan(0);
+  });
+
   test("every history row — BOTH sources — carries an export link to its own row", () => {
     render(<EvalSection />);
 

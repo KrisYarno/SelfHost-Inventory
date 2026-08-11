@@ -7,7 +7,8 @@
  * Two DIFFERENT incompletenesses, never merged into one number:
  *   - `running` — the request row never reached a terminal status (still streaming, or
  *     the process died mid-turn). Its outcome is unknown, not zero.
- *   - `nullUsageRequests` — the request DID finish, but no usage was ever reported, so
+ *   - `nullUsageRequests` — no usage was ever reported (W3S-3: this INCLUDES rows
+ *     still `running` — the two figures overlap until a request finalizes), so
  *     its token columns are NULL. Real spend attempts carrying no token truth.
  *
  * Both figures carry their definition inline, which is why they are disclosed here

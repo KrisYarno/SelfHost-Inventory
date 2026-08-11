@@ -517,6 +517,23 @@ describe("report-to-admin — ownership is absolute (404, never 403)", () => {
     expect(db.assistantMessage.findMany).not.toHaveBeenCalled();
   });
 
+  // W3S-1: ownership check, transcript read and create are separate operations — a
+  // concurrent delete between the first two cascades the messages away. An empty
+  // read means the thread VANISHED mid-request (a real thread always holds >= 1 row;
+  // the claim tx inserts the first user message at creation): the honest answer is
+  // the same 404, never a 201 storing `turns: []` as a "whole persisted conversation".
+  test("W3S-1: a thread deleted between ownership check and read => 404, no row", async () => {
+    approvedMock.mockResolvedValue({ user: { id: 7208, isAdmin: false } });
+    threads = [{ id: OWN_THREAD, userId: 7208, title: "Racing a delete" }];
+    db.assistantMessage.findMany.mockResolvedValue([]);
+
+    const { status, body } = await callReport(OWN_THREAD);
+
+    expect(status).toBe(404);
+    expect(body).toEqual({ error: "Thread not found", code: "NOT_FOUND" });
+    expect(db.assistantEvalReport.create).not.toHaveBeenCalled();
+  });
+
   test("an ADMIN reporter gets no bypass — ownership is the WHERE clause", async () => {
     approvedMock.mockResolvedValue({ user: { id: 7202, isAdmin: true } });
     threads = [{ id: FOREIGN_THREAD, userId: OTHER_USER, title: "Someone else's" }];

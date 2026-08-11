@@ -25,7 +25,7 @@ export const USAGE_DEFINITIONS = {
   running:
     "Running — never finalized: still streaming, or the process died mid-turn. Incomplete, not lost.",
   nullUsageRequests:
-    "No usage reported — requests whose token columns are NULL because the call ended before the provider reported any. Counted as attempts, never as 0 tokens.",
+    "No usage reported — requests whose token columns are NULL: the call ended (or is still running) without the provider reporting any. OVERLAPS Running: a still-running request counts in both until it finalizes. Counted as attempts, never as 0 tokens.",
 } as const;
 
 export const TOOL_MIX_DEFINITION =

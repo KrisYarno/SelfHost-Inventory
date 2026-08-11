@@ -113,6 +113,13 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     select: { id: true, role: true, parts: true, metadata: true },
   });
 
+  // W3S-1: a real thread always holds >= 1 row (the claim tx inserts the first user
+  // message at creation) — an empty read means a concurrent delete cascaded the
+  // messages away between the ownership check and this read. The honest answer is
+  // the same non-leaking 404; a 201 storing `turns: []` would be a false record of
+  // a "whole persisted conversation".
+  if (rows.length === 0) throw new AppError("Thread not found", "NOT_FOUND", 404);
+
   const messages: ThreadMessageDto[] = rows.map((row) => ({
     id: row.id,
     role: row.role as ThreadMessageDto["role"],
