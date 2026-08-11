@@ -11,6 +11,7 @@
 
 import * as React from "react";
 import { render, screen, fireEvent, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 jest.mock("react-markdown", () => ({
   __esModule: true,
@@ -37,6 +38,12 @@ const useSessionMock = jest.fn(() => ({ data: { user: { isAdmin: false } } }));
 jest.mock("next-auth/react", () => ({ useSession: () => useSessionMock() }));
 jest.mock("@/hooks/use-csrf", () => ({
   useCSRF: () => ({ token: "csrf-token", isLoading: false, error: null, refreshToken: jest.fn() }),
+  // The C5 thread sidebar sends `x-csrf-token` on DELETE, so the mocked module
+  // must carry the helper too (the real module re-exports it from lib/csrf-client).
+  withCSRFHeaders: (headers: Record<string, string>, token: string | null) => ({
+    ...headers,
+    "x-csrf-token": token ?? "",
+  }),
 }));
 jest.mock("next/link", () => {
   const Mock = ({ children, href }: { children: React.ReactNode; href: string }) => (
@@ -608,22 +615,49 @@ function chatReturn(over: Record<string, unknown> = {}) {
   };
 }
 
+// W2 Task 2.2 ride-along: the page now mounts the C5 thread sidebar, which reads
+// its list through TanStack Query. These D-B7 cases assert nothing about threads,
+// so the harness gives the sidebar the provider it needs and a list route that
+// answers EMPTY — the sidebar renders "No conversations yet" and stays out of the
+// way. `retry: false` keeps a failed list query from re-firing under fake-free
+// timers.
+function renderPage() {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={qc}>
+      <AssistantPage />
+    </QueryClientProvider>,
+  );
+}
+
 describe("AssistantPage states (D-B7)", () => {
   beforeEach(() => {
     useSessionMock.mockReturnValue({ data: { user: { isAdmin: false } } });
     useChatMock.mockReturnValue(chatReturn());
+    window.sessionStorage.clear(); // no last-open thread => no resume fetch
     // Default: the U1 readiness probe fails silently so `configured` stays null
     // and these synchronous state assertions are unaffected (the reactive fork
-    // still drives the unconfigured/rate-limited cases).
-    global.fetch = jest
-      .fn()
-      .mockRejectedValue(new Error("probe disabled")) as unknown as typeof fetch;
+    // still drives the unconfigured/rate-limited cases). The thread list is
+    // answered explicitly so the sidebar is not left in its error state.
+    global.fetch = jest.fn(async (input: unknown) => {
+      const url = typeof input === "string" ? input : String((input as { url?: unknown })?.url);
+      if (url.startsWith("/api/assistant/threads")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [], limit: 20, offset: 0, nextOffset: null }),
+        } as unknown as Response;
+      }
+      throw new Error("probe disabled");
+    }) as unknown as typeof fetch;
   });
 
   test("empty state: capability line + three tap-to-POPULATE prompts (not tap-to-send)", () => {
     const send = jest.fn();
     useChatMock.mockReturnValue(chatReturn({ sendMessage: send }));
-    render(<AssistantPage />);
+    renderPage();
     expect(screen.getByText(/I answer from your live inventory data/)).toBeInTheDocument();
     const prompt = screen.getByRole("button", { name: /What's low on stock right now\?/ });
     fireEvent.click(prompt);
@@ -636,7 +670,7 @@ describe("AssistantPage states (D-B7)", () => {
   test("provider-unconfigured, NON-admin: no admin link", () => {
     useSessionMock.mockReturnValue({ data: { user: { isAdmin: false } } });
     useChatMock.mockReturnValue(chatReturn({ error: new Error(JSON.stringify({ code: "AI_UNCONFIGURED" })) }));
-    render(<AssistantPage />);
+    renderPage();
     expect(
       screen.getByText("The assistant isn’t set up yet. Ask an admin to configure an AI provider."),
     ).toBeInTheDocument();
@@ -646,7 +680,7 @@ describe("AssistantPage states (D-B7)", () => {
   test("provider-unconfigured, ADMIN: same copy PLUS the settings link", () => {
     useSessionMock.mockReturnValue({ data: { user: { isAdmin: true } } });
     useChatMock.mockReturnValue(chatReturn({ error: new Error(JSON.stringify({ code: "AI_UNCONFIGURED" })) }));
-    render(<AssistantPage />);
+    renderPage();
     expect(
       screen.getByText("The assistant isn’t set up yet. Ask an admin to configure an AI provider."),
     ).toBeInTheDocument();
@@ -660,7 +694,7 @@ describe("AssistantPage states (D-B7)", () => {
     useChatMock.mockReturnValue(
       chatReturn({ error: new Error(JSON.stringify({ code: "RATE_LIMITED", retryAt: "2026-07-13T10:00:00Z" })) }),
     );
-    render(<AssistantPage />);
+    renderPage();
     expect(screen.getByText(/Assistant is temporarily rate-limited\. Try again at/)).toBeInTheDocument();
     expect(screen.getByLabelText("Message the assistant")).toBeDisabled();
   });
@@ -670,11 +704,16 @@ describe("AssistantPage states (D-B7)", () => {
   test("page-fork: probe reporting configured:false forks the unconfigured panel proactively", async () => {
     useSessionMock.mockReturnValue({ data: { user: { isAdmin: false } } });
     useChatMock.mockReturnValue(chatReturn()); // no error
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ configured: false }),
+    // Route-aware: a blanket stub would answer the sidebar's list request with
+    // the probe body too, and the list contract is not the probe contract.
+    global.fetch = jest.fn(async (input: unknown) => {
+      const url = typeof input === "string" ? input : String((input as { url?: unknown })?.url);
+      const body = url.startsWith("/api/assistant/threads")
+        ? { items: [], limit: 20, offset: 0, nextOffset: null }
+        : { configured: false };
+      return { ok: true, status: 200, json: async () => body } as unknown as Response;
     }) as unknown as typeof fetch;
-    render(<AssistantPage />);
+    renderPage();
     expect(
       await screen.findByText("The assistant isn’t set up yet. Ask an admin to configure an AI provider."),
     ).toBeInTheDocument();
@@ -684,7 +723,7 @@ describe("AssistantPage states (D-B7)", () => {
   // the 375px viewport (the behavioral 375px overflow check is the W3 drive).
   test("no page container has a fixed min-width wider than the 375px viewport", () => {
     useChatMock.mockReturnValue(chatReturn());
-    const { container } = render(<AssistantPage />);
+    const { container } = renderPage();
     const VIEWPORT = 375;
     const offenders: string[] = [];
     container.querySelectorAll<HTMLElement>("*").forEach((el) => {
