@@ -35,6 +35,11 @@ export const EVAL_EMPTY_REASON =
 
 export const EVAL_NOT_APPLICABLE_LABEL = "not applicable";
 
+/** A user report's empty model/corpus cells are INHERENT to the row type, and the
+ *  cell says so itself (micro round 2026-08-11 — the generic label read as
+ *  breakage to the first real reporter). */
+export const EVAL_USER_REPORT_LABEL = "n/a for user reports";
+
 export const EVAL_LATEST_HEADING = "Latest scored run";
 
 export const EVAL_HISTORY_HEADING = "Run history";
@@ -67,12 +72,15 @@ function formatWhen(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toISOString().replace("T", " ").slice(0, 16) + "Z";
 }
 
-/** NULL is a fact here (a user report has no corpus revision) — it gets words. */
-function orNotApplicable(value: string | null) {
-  return value === null ? (
-    <span className="text-muted-foreground">{EVAL_NOT_APPLICABLE_LABEL}</span>
-  ) : (
-    <span>{value}</span>
+/** An absent value is a FACT here and gets words — which words depends on the row:
+ *  a user report's absence is inherent to its type; an eval-run's is simply not
+ *  recorded. (G1-2: one helper, one absence semantics.) */
+function orAbsent(value: string | null, source: string) {
+  if (value) return <span>{value}</span>;
+  return (
+    <span className="text-muted-foreground">
+      {source === "user-report" ? EVAL_USER_REPORT_LABEL : EVAL_NOT_APPLICABLE_LABEL}
+    </span>
   );
 }
 
@@ -82,8 +90,8 @@ function HistoryRow({ item }: { item: AssistantEvalSummary }) {
       <td className="px-3 py-2 text-body-sm">{formatWhen(item.runAt)}</td>
       <td className="px-3 py-2 text-body-sm">{item.source}</td>
       <td className="px-3 py-2 text-body-sm">{item.environment}</td>
-      <td className="px-3 py-2 text-body-sm">{orNotApplicable(item.model)}</td>
-      <td className="px-3 py-2 text-body-sm">{orNotApplicable(item.corpusRev)}</td>
+      <td className="px-3 py-2 text-body-sm">{orAbsent(item.model, item.source)}</td>
+      <td className="px-3 py-2 text-body-sm">{orAbsent(item.corpusRev, item.source)}</td>
       <td className="px-3 py-2 text-body-sm">
         <a
           href={evalExportHref(item.id)}
@@ -141,11 +149,11 @@ export function EvalSection() {
                 </div>
                 <div className="flex gap-2">
                   <dt className="text-muted-foreground">Model</dt>
-                  <dd>{orNotApplicable(data.latest.model)}</dd>
+                  <dd>{orAbsent(data.latest.model, "eval-run")}</dd>
                 </div>
                 <div className="flex gap-2">
                   <dt className="text-muted-foreground">Corpus</dt>
-                  <dd>{orNotApplicable(data.latest.corpusRev)}</dd>
+                  <dd>{orAbsent(data.latest.corpusRev, "eval-run")}</dd>
                 </div>
               </dl>
 

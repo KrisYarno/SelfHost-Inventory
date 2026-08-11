@@ -153,16 +153,25 @@ export function toEvalExportDto(row: EvalReportRow): EvalExportDto {
  * assembles its DTO differently still ships byte-identical files.
  */
 export function serializeEvalExport(dto: EvalExportDto): string {
-  return JSON.stringify({
-    id: dto.id,
-    runAt: dto.runAt,
-    environment: dto.environment,
-    model: dto.model,
-    corpusRev: dto.corpusRev,
-    source: dto.source,
-    report: dto.report,
-    createdAt: dto.createdAt,
-  });
+  // INDENTED canonical form (micro round 2026-08-11): the first real prod export
+  // was one 40K-char line and put the reader's editor into read-only mode. Corpus
+  // files exist to be READ. Two-space indent, fixed key order — still deterministic,
+  // and G2-12 holds by construction because every fidelity comparator calls THIS
+  // function.
+  return JSON.stringify(
+    {
+      id: dto.id,
+      runAt: dto.runAt,
+      environment: dto.environment,
+      model: dto.model,
+      corpusRev: dto.corpusRev,
+      source: dto.source,
+      report: dto.report,
+      createdAt: dto.createdAt,
+    },
+    null,
+    2,
+  );
 }
 
 /** The same rule `lib/assistant/threads.ts` sheds history by: a resolved tool part

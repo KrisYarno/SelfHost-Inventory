@@ -60,6 +60,7 @@ import {
   EVAL_SECTION_HEADING,
   EVAL_EMPTY_REASON,
   EVAL_NOT_APPLICABLE_LABEL,
+  EVAL_USER_REPORT_LABEL,
   EVAL_REPORT_PRIVACY_NOTE,
 } from "@/components/admin/usage/eval-section";
 import { evalExportHref, type AssistantEvalResponse } from "@/hooks/use-assistant-eval";
@@ -391,7 +392,11 @@ describe("EvalSection — latest run + history", () => {
 
     const row = screen.getByTestId("eval-history-10");
     expect(within(row).getByText("user-report")).toBeInTheDocument();
-    expect(within(row).getAllByText(EVAL_NOT_APPLICABLE_LABEL).length).toBeGreaterThanOrEqual(1);
+    // Micro round 2026-08-11: the generic label under-explained — Kris (the first
+    // real reporter) read it as breakage. A user report's absence is INHERENT to
+    // the row type, and the cell now says so without needing the Source column.
+    expect(within(row).getAllByText(EVAL_USER_REPORT_LABEL).length).toBeGreaterThanOrEqual(1);
+    expect(within(row).queryByText(EVAL_NOT_APPLICABLE_LABEL)).toBeNull();
     expect(within(row).queryByText("claude-opus-5")).toBeNull();
   });
 

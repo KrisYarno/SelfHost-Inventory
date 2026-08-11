@@ -756,6 +756,12 @@ describe("export — admin-gated JSON download, BYTE-identical to the stored row
     expect(status).toBe(200);
     // The comparand is built from the FRESHLY RE-READ row, not from the request.
     expect(text).toBe(serializeEvalExport(toEvalExportDto(stored)));
+    // Micro round 2026-08-11 (Kris's first prod export): the canonical serialization
+    // is INDENTED — a 40K-char single line put his editor into read-only mode, and
+    // corpus files exist to be read. Two-space indent, fixed key order, still
+    // deterministic; this pin is the format's teeth against a silent regression.
+    expect(text).toContain("\n");
+    expect(text).toBe(JSON.stringify(JSON.parse(text), null, 2));
     expect(JSON.parse(text)).toEqual({
       id: 1,
       runAt: stored.runAt.toISOString(),
