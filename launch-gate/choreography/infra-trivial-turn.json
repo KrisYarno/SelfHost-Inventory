@@ -1,0 +1,13 @@
+{
+  "id": "infra-trivial-turn",
+  "steps": [
+    {
+      "toolCalls": [{ "name": "get_inventory_summary", "input": {} }],
+      "usage": { "prompt_eval_count": 1201, "eval_count": 17 }
+    },
+    {
+      "text": "Gate infra turn complete.",
+      "usage": { "prompt_eval_count": 1447, "eval_count": 11 }
+    }
+  ]
+}

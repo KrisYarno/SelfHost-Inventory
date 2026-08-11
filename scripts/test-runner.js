@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 
 const { spawn } = require('child_process');
+// `fs`/`os` back the launch gate's per-run state file (below). Disabled per line so
+// this CJS script's existing lint profile is unchanged by the addition.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const fs = require('fs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const os = require('os');
 const path = require('path');
 
 // Color codes for output
@@ -49,6 +55,15 @@ const testSuites = {
       '__tests__/unit/lib/assistant/lifecycle-visibility.test.ts',
     ],
     description: 'Fast named subset of the contract gates (also covered by "all")',
+  },
+  launch: {
+    name: 'Launch Gate',
+    // The DB-backed structured-layer harness (multiuser spec C7): its own jest
+    // project, its own globalSetup/globalTeardown, NO positional pattern — that
+    // config's testMatch decides what runs. Fails closed with an actionable message
+    // when Docker or the 3100-3102 ports are unavailable.
+    config: 'launch-gate/jest.config.mjs',
+    description: 'DB-backed launch gate (throwaway container + app/mcp/shim over HTTP)',
   },
   all: {
     name: 'All Tests',
@@ -119,15 +134,45 @@ if (watch) console.log(`${colors.yellow}👀 Watch mode enabled${colors.reset}`)
 if (coverage) console.log(`${colors.yellow}📊 Coverage report enabled${colors.reset}`);
 console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
 
+// The launch gate's cross-process state file (multiuser contract pack CP-7): jest's
+// globalSetup state never reaches a test suite's module registry, so the harness and
+// its suites share a mode-0600 JSON document instead. The path must exist BEFORE jest
+// starts and must be unique per run — two concurrent runs sharing one path would
+// corrupt each other's pids and session cookies.
+const launchGateFiles = [];
+function createLaunchGateStateFile() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'launch-gate-'));
+  const file = path.join(dir, 'state.json');
+  fs.writeFileSync(file, '', { mode: 0o600 });
+  launchGateFiles.push(dir);
+  return file;
+}
+
+function cleanupLaunchGateFiles() {
+  for (const target of launchGateFiles) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true });
+    } catch {
+      /* best effort — the harness's own teardown owns the real resources */
+    }
+  }
+}
+
+const jestEnv = { ...process.env, NODE_ENV: 'test' };
+if (suite === 'launch') {
+  jestEnv.LAUNCH_GATE_STATE_FILE = createLaunchGateStateFile();
+}
+
 // Run jest
 const jest = spawn('npx', jestArgs, {
   stdio: 'inherit',
   shell: true,
-  env: { ...process.env, NODE_ENV: 'test' }
+  env: jestEnv
 });
 
 // Handle exit
 jest.on('close', (code) => {
+  cleanupLaunchGateFiles();
   if (code === 0) {
     console.log(`\n${colors.green}✅ Tests completed successfully!${colors.reset}`);
   } else {
@@ -145,6 +190,7 @@ jest.on('close', (code) => {
 
 // Handle errors
 jest.on('error', (error) => {
+  cleanupLaunchGateFiles();
   console.error(`${colors.red}Failed to start test runner:${colors.reset}`, error);
   process.exit(1);
 });
