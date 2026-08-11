@@ -124,7 +124,11 @@ import { requireApproved } from "@/lib/api-utils";
 import { validateCSRFToken } from "@/lib/csrf";
 import { enforceRateLimit } from "@/lib/rateLimit";
 import { FINALIZE_DEADLINE_MS } from "@/lib/assistant/timing";
-import { MESSAGE_BUDGET_BYTES } from "@/lib/assistant/threads";
+import {
+  HISTORY_OMISSION_ID,
+  HISTORY_OMISSION_NOTE,
+  MESSAGE_BUDGET_BYTES,
+} from "@/lib/assistant/threads";
 
 const resolveMock = resolveSurfaceModel as jest.Mock;
 const approvedMock = requireApproved as jest.Mock;
@@ -455,6 +459,55 @@ describe("claim transaction + bounded history", () => {
       __opts: { ignoreIncompleteToolCalls: true },
     });
     expect(capturedStreamOptions().originalMessages).toBe(HISTORY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W1S-1 — the omission sentinel is id AND role
+// ---------------------------------------------------------------------------
+
+describe("history omission sentinel (W1S-1)", () => {
+  /** streamText's captured `messages` is the convertToModelMessages mock's envelope,
+   *  so `__converted` IS the array the route chose to convert. */
+  function convertedFrom(): { messages: { __converted: unknown }; system: string } {
+    return streamTextSpy.mock.calls[0][0] as { messages: { __converted: unknown }; system: string };
+  }
+
+  test("a USER message that happens to carry the sentinel id is NEVER stripped", async () => {
+    // Ids are client-chosen: nothing stops a client from naming its own user message
+    // "system-history-omission". Stripping it would silently delete the user's turn AND
+    // graft a false "earlier turns omitted" note onto a complete history.
+    const history = [
+      { id: HISTORY_OMISSION_ID, role: "user", parts: [{ type: "text", text: "cheeky id" }] },
+      { id: "m2", role: "assistant", parts: [{ type: "text", text: "sure" }] },
+    ];
+    mockThreadOps.loadBoundedHistory.mockResolvedValue(history);
+
+    await POST(req(validBody));
+
+    const opts = convertedFrom();
+    // Reference identity: the route converted the loaded array ITSELF, unsliced.
+    expect(opts.messages.__converted).toBe(history);
+    expect(opts.system).not.toContain(HISTORY_OMISSION_NOTE);
+    expect(capturedStreamOptions().originalMessages).toBe(history);
+  });
+
+  test("CONTROL: the SYSTEM-role note IS stripped and rides the system option instead", async () => {
+    const note = {
+      id: HISTORY_OMISSION_ID,
+      role: "system",
+      parts: [{ type: "text", text: HISTORY_OMISSION_NOTE }],
+    };
+    const kept = { id: "m2", role: "user", parts: [{ type: "text", text: "hi" }] };
+    mockThreadOps.loadBoundedHistory.mockResolvedValue([note, kept]);
+
+    await POST(req(validBody));
+
+    const opts = convertedFrom();
+    // ai@7 REJECTS system-role messages in `messages` — the note must not be converted.
+    expect(opts.messages.__converted).toEqual([kept]);
+    expect(opts.system).toContain(HISTORY_OMISSION_NOTE);
+    expect(capturedStreamOptions().originalMessages).toEqual([kept]);
   });
 });
 

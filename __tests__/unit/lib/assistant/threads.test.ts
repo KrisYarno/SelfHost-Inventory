@@ -26,6 +26,7 @@ import {
   loadBoundedHistory,
   serializedBytes,
   HISTORY_BUDGET_BYTES,
+  HISTORY_OMISSION_ID,
   HISTORY_OMISSION_NOTE,
   MESSAGE_BUDGET_BYTES,
   SHED_KEEP_TURNS,
@@ -417,7 +418,7 @@ describe("claimTurn (T2 / spec C2 step 2)", () => {
     expect(db.assistantMessage.create).not.toHaveBeenCalled();
   });
 
-  describe("the four regenerate anchor cases (spec C4)", () => {
+  describe("the regenerate anchor cases (spec C4 + the W1S-2 role guard)", () => {
     const regen = () =>
       claimTurn({
         userId: USER_ID,
@@ -430,7 +431,7 @@ describe("claimTurn (T2 / spec C2 step 2)", () => {
       });
 
     it("1. already persisted -> IDEMPOTENT (no insert, no 409)", async () => {
-      db.assistantMessage.findUnique.mockResolvedValue({ sequence: 7 });
+      db.assistantMessage.findUnique.mockResolvedValue({ sequence: 7, role: "user" });
 
       const result = await regen();
 
@@ -456,7 +457,7 @@ describe("claimTurn (T2 / spec C2 step 2)", () => {
     });
 
     it("3. trailing assistant/system rows are SUPERSEDED and reported", async () => {
-      db.assistantMessage.findUnique.mockResolvedValue({ sequence: 7 });
+      db.assistantMessage.findUnique.mockResolvedValue({ sequence: 7, role: "user" });
       db.assistantMessage.findMany.mockResolvedValue([{ id: "am-old-1" }, { id: "am-old-2" }]);
       db.assistantMessage.deleteMany.mockResolvedValue({ count: 2 });
 
@@ -473,12 +474,38 @@ describe("claimTurn (T2 / spec C2 step 2)", () => {
     });
 
     it("4. a NEWER user row -> 409 CONFLICT and NOTHING is deleted", async () => {
-      db.assistantMessage.findUnique.mockResolvedValue({ sequence: 7 });
+      db.assistantMessage.findUnique.mockResolvedValue({ sequence: 7, role: "user" });
       db.assistantMessage.findFirst.mockResolvedValue({ id: "msg-user-2" });
 
-      await expect(regen()).rejects.toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      const err = await regen().catch((e) => e);
 
+      expect(err).toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      // Both regenerate conflicts are CONFLICT/409, so the MESSAGE is what keeps
+      // "another tab advanced the thread" distinguishable from case 5's duplicate id.
+      expect(err.message).toBe("Thread advanced — reload");
       expect(db.assistantMessage.deleteMany).not.toHaveBeenCalled();
+      expect(db.assistantRequest.create).not.toHaveBeenCalled();
+    });
+
+    it("5. (W1S-2) an ASSISTANT-role row under that id -> 409 CONFLICT, nothing touched", async () => {
+      // The id RESOLVES, but to a row that is not a user message — an id copied off an
+      // assistant row must never let a regenerate proceed with no user anchor. It gets
+      // the same duplicate-id CONFLICT a submit would.
+      db.assistantMessage.findUnique.mockResolvedValue({ sequence: 7, role: "assistant" });
+
+      const err = await regen().catch((e) => e);
+
+      expect(err).toBeInstanceOf(AppError);
+      expect(err).toMatchObject({ code: "CONFLICT", statusCode: 409 });
+      expect(err.message).toBe("Message id already used in this thread");
+      // The guard can only exist if the anchor lookup actually SELECTS the role.
+      expect(db.assistantMessage.findUnique.mock.calls[0][0].select).toEqual({
+        sequence: true,
+        role: true,
+      });
+      // No delete, and no user row invented under the assistant row's id.
+      expect(db.assistantMessage.deleteMany).not.toHaveBeenCalled();
+      expect(db.assistantMessage.create).not.toHaveBeenCalled();
       expect(db.assistantRequest.create).not.toHaveBeenCalled();
     });
   });
@@ -612,6 +639,109 @@ describe("loadBoundedHistory (T2 / spec C2 step 3)", () => {
 
     expect(messages.map((m) => m.id)).toEqual(["system-history-omission", "u3", "a3"]);
     expect(serializedBytes(messages)).toBeGreaterThan(HISTORY_BUDGET_BYTES);
+  });
+
+  it("(W1S-3) drops the ORPHAN assistant tail whose user anchor sits on an unread page", async () => {
+    // A FULL descending page whose OLDEST row is an assistant message: its user anchor
+    // lives on a page that is never read. Big tool OUTPUTS make the RAW load blow the
+    // budget (so paging stops with reachedStart false) while the SHED result fits it
+    // comfortably — the byte loop therefore drops nothing, and the orphan can only
+    // leave via the W1S-3 guard.
+    const payload = "p".repeat(12_000);
+    const toolRow = (seq: number) =>
+      row({
+        id: `a${seq}`,
+        role: "assistant",
+        sequence: seq,
+        parts: [
+          {
+            type: "tool-inventory_overview",
+            toolCallId: `call-${seq}`,
+            state: "output-available",
+            input: {},
+            output: { rows: [payload] },
+          },
+        ],
+      });
+
+    // seq 1 is the orphan assistant; 2..20 alternate user/assistant turns.
+    const ascending = [toolRow(1)];
+    for (let seq = 2; seq <= 20; seq++) {
+      ascending.push(
+        seq % 2 === 0
+          ? row({ id: `u${seq}`, role: "user", sequence: seq, parts: [{ type: "text", text: "q" }] })
+          : toolRow(seq),
+      );
+    }
+    expect(ascending).toHaveLength(20); // exactly HISTORY_PAGE_SIZE — paging continues
+    expect(serializedBytes(ascending)).toBeGreaterThan(HISTORY_BUDGET_BYTES);
+
+    db.assistantMessage.findMany.mockResolvedValue([...ascending].reverse());
+    db.assistantMessage.findFirst.mockResolvedValue({ sequence: 0 }); // earlier rows exist
+
+    const messages = await loadBoundedHistory(USER_ID, THREAD_ID);
+
+    expect(messages[0].role).toBe("system");
+    expect(JSON.stringify(messages[0].parts)).toContain(HISTORY_OMISSION_NOTE);
+    // The model never sees an assistant message with no user turn in front of it.
+    expect(messages[1].role).toBe("user");
+    expect(messages.map((m) => m.id)).not.toContain("a1");
+    // Nothing else was dropped: the guard is surgical, not a budget side effect.
+    expect(messages[1].id).toBe("u2");
+  });
+
+  it("(W1S-4) reserves the omission note's OWN bytes — the RETURNED array fits the budget", async () => {
+    const noteBytes = serializedBytes([
+      {
+        id: HISTORY_OMISSION_ID,
+        role: "system",
+        parts: [{ type: "text", text: HISTORY_OMISSION_NOTE }],
+      },
+    ]);
+    expect(noteBytes).toBeGreaterThan(0);
+
+    /** The module's own row -> UIMessage projection, so the fixture can be sized to
+     *  the byte. */
+    const asMessages = (rows: Record<string, unknown>[]) =>
+      rows.map((r) => {
+        const m: Record<string, unknown> = { id: r.id, role: r.role, parts: r.parts };
+        if (r.metadata !== null && r.metadata !== undefined) m.metadata = r.metadata;
+        return m;
+      });
+
+    const textRow = (id: string, role: string, seq: number, text: string) =>
+      row({ id, role, sequence: seq, parts: [{ type: "text", text }] });
+
+    // The two NEWEST turns, sized so they land EXACTLY on the budget: an unreserved
+    // loop stops there (not > budget) and the note then pushes the RESULT over it.
+    const tail = (pad: number) => [
+      textRow("u2", "user", 17, "z".repeat(pad)),
+      textRow("a2", "assistant", 18, "answer 2"),
+      textRow("u3", "user", 19, "next"),
+      textRow("a3", "assistant", 20, "answer 3"),
+    ];
+    // Each pad character is one plain byte in JSON, so this converges in one step.
+    let pad = 90_000;
+    pad += HISTORY_BUDGET_BYTES - serializedBytes(asMessages(tail(pad)));
+    expect(serializedBytes(asMessages(tail(pad)))).toBe(HISTORY_BUDGET_BYTES);
+
+    // One older turn in front, so a drop still leaves TWO turns to measure (the
+    // current turn is never dropped, which is what makes the band reachable).
+    const head = [textRow("u1", "user", 1, "oldest")];
+    for (let seq = 2; seq <= 16; seq++) {
+      head.push(textRow(`a1-${seq}`, "assistant", seq, "old answer"));
+    }
+    const ascending = [...head, ...tail(pad)];
+    expect(ascending).toHaveLength(20);
+
+    db.assistantMessage.findMany.mockResolvedValue([...ascending].reverse());
+    db.assistantMessage.findFirst.mockResolvedValue({ sequence: 0 }); // reachedStart false
+
+    const messages = await loadBoundedHistory(USER_ID, THREAD_ID);
+
+    // The documented bound is on what the caller RECEIVES, note included.
+    expect(serializedBytes(messages)).toBeLessThanOrEqual(HISTORY_BUDGET_BYTES);
+    expect(messages.map((m) => m.id)).toEqual([HISTORY_OMISSION_ID, "u3", "a3"]);
   });
 
   it("prepends the omission note when the tail page did not reach the thread start", async () => {

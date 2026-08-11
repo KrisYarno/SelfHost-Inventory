@@ -326,8 +326,15 @@ async function anchorRegenerate(
 ): Promise<string[]> {
   const anchor = await tx.assistantMessage.findUnique({
     where: { threadId_id: { threadId, id: message.id } },
-    select: { sequence: true },
+    select: { sequence: true, role: true },
   });
+
+  // W1S-2: only a USER row is a legal idempotent anchor. An id copied from an
+  // assistant/system row must not let a regenerate run without a user anchor —
+  // it gets the same duplicate-id CONFLICT a submit would.
+  if (anchor && anchor.role !== "user") {
+    throw new AppError("Message id already used in this thread", "CONFLICT", 409);
+  }
 
   if (!anchor) {
     await tx.assistantMessage.create({
@@ -419,23 +426,41 @@ export async function loadBoundedHistory(userId: number, threadId: string): Prom
 
   rows.reverse();
 
-  const turns = groupIntoTurns(rows);
+  let turns = groupIntoTurns(rows);
+  let droppedTurns = 0;
+
+  // W1S-3: a page boundary can split a turn — the oldest loaded rows may be the
+  // TAIL of a turn whose user anchor sits on an unread page. A leading turn that
+  // does not start with a user row is that orphan tail; keeping it would hand the
+  // model an assistant message with no user anchor. Drop it (it counts as an
+  // omission — the note fires via !reachedStart or droppedTurns below).
+  if (!reachedStart && turns.length > 1 && turns[0][0]?.role !== "user") {
+    turns = turns.slice(1);
+    droppedTurns += 1;
+  }
+
   const shedBefore = Math.max(0, turns.length - SHED_KEEP_TURNS);
   let kept = turns.map((turn, index) => (index < shedBefore ? turn.map(shedToolOutputs) : turn));
 
-  let droppedTurns = 0;
-  while (kept.length > 1 && serializedBytes(toMessages(kept)) > HISTORY_BUDGET_BYTES) {
+  // W1S-4: the omission note's own bytes count against the budget — reserve them
+  // whenever a note is already certain (!reachedStart) and re-check after any drop
+  // makes one certain, so the RETURNED array never exceeds the documented bound.
+  const noteMessage: UIMessage = {
+    id: HISTORY_OMISSION_ID,
+    role: "system",
+    parts: [{ type: "text", text: HISTORY_OMISSION_NOTE }],
+  };
+  const noteBytes = serializedBytes([noteMessage]);
+  const budgetFor = (): number =>
+    droppedTurns > 0 || !reachedStart ? HISTORY_BUDGET_BYTES - noteBytes : HISTORY_BUDGET_BYTES;
+  while (kept.length > 1 && serializedBytes(toMessages(kept)) > budgetFor()) {
     kept = kept.slice(1);
     droppedTurns += 1;
   }
 
   const messages = toMessages(kept);
   if (droppedTurns > 0 || !reachedStart) {
-    messages.unshift({
-      id: HISTORY_OMISSION_ID,
-      role: "system",
-      parts: [{ type: "text", text: HISTORY_OMISSION_NOTE }],
-    });
+    messages.unshift(noteMessage);
   }
   return messages;
 }

@@ -578,8 +578,14 @@ export async function POST(request: NextRequest): Promise<Response> {
     // ("Use the instructions option instead") — the omission note rides the SYSTEM
     // option below and is stripped here; it is never converted, never a persistence-
     // mode original (it was never persisted either).
+    // W1S-1: the sentinel is id AND role — a client may legally choose the literal
+    // id for its own USER message, which must never be stripped or trigger a false
+    // omission note (persisted rows are only ever user/assistant; the synthetic
+    // note is the sole system-role message in a loaded history).
     const historyOmitted =
-      loadedHistory.length > 0 && loadedHistory[0].id === HISTORY_OMISSION_ID;
+      loadedHistory.length > 0 &&
+      loadedHistory[0].id === HISTORY_OMISSION_ID &&
+      loadedHistory[0].role === "system";
     const originalMessages = historyOmitted ? loadedHistory.slice(1) : loadedHistory;
     const messages = await convertToModelMessages(originalMessages, {
       ignoreIncompleteToolCalls: true,
