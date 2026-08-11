@@ -31,8 +31,11 @@
 import { describe, expect, it, beforeAll } from "@jest/globals";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+// Extracted to launch-gate/assertions.ts by Task 1.7 (contract pack REV-8). Same
+// helpers, same behaviour — one definition.
+import { asJson, canonicalJson, eventsOfType, settleTurn } from "./assertions";
 import { gatePrompt, loadChoreographies, TITLE_SCRIPT } from "./choreography";
-import { loginOnce, postTurn, type SseEvent, type TurnResult } from "./driver";
+import { loginOnce, postTurn, type TurnResult } from "./driver";
 import { oracleQuery } from "./oracle";
 import { REPO_ROOT, SHIM_PORT } from "./spawn";
 import { GATE_MODEL } from "./seed";
@@ -43,76 +46,6 @@ const PARALLEL_SCENARIO = "spike-a-parallel";
 const TITLE_PROBE = path.join(__dirname, "spike-a-title.mjs");
 
 type MessageRow = { id: string; role: string; parts: string; sequence: number };
-
-function eventsOfType<T extends SseEvent["type"]>(
-  turn: TurnResult,
-  type: T,
-): Array<Extract<SseEvent, { type: T }>> {
-  return turn.events.filter((event): event is Extract<SseEvent, { type: T }> => event.type === type);
-}
-
-/** mysql2 hands back MySQL JSON columns already parsed; normalise either shape. */
-function asJson(value: unknown): unknown {
-  return typeof value === "string" ? JSON.parse(value) : value;
-}
-
-/** Key-order-canonical serialization: MySQL's native JSON type re-emits object keys
- *  in its own normalised order, so this is the strongest byte-level claim available
- *  on a stream -> column -> read-back round trip (infra.test.ts states the full
- *  rationale; the helper is deliberately local to each launch-gate suite until a
- *  shared helper module is worth its own owner). */
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const keys = Object.keys(record).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * THE SETTLE BARRIER (reality finding, 1.6): a turn is over for the CLIENT when the
- * stream closes and over for the DATABASE when the finalizer commits — and those are
- * NOT the same instant. The route finalizes AFTER the response ends (the usage race,
- * then the finalize transaction), so a DB read taken the moment `postTurn` resolves
- * can legitimately see the user row and not yet the assistant row, and a follow-up
- * POST to the same thread can legitimately 409 THREAD_BUSY on a turn the client
- * considers finished.
- *
- * Every persistence assertion and every same-thread follow-up therefore waits for the
- * thread to carry no `running` request. BOUNDED, and never a fixed sleep.
- */
-async function settleTurn(threadId: string, label: string, deadlineMs = 20_000): Promise<void> {
-  const startedAt = Date.now();
-  const until = startedAt + deadlineMs;
-  for (;;) {
-    const rows = await oracleQuery<{ running: number; assistants: number }>(
-      "SELECT (SELECT COUNT(*) FROM assistant_requests WHERE threadId = ? AND status = 'running') AS running, " +
-        "(SELECT COUNT(*) FROM assistant_messages WHERE threadId = ? AND role = 'assistant') AS assistants",
-      [threadId, threadId],
-    );
-    if (Number(rows[0].running) === 0 && Number(rows[0].assistants) > 0) {
-      // Standing record for 1.7/1.8 (and for infra.test.ts's owner): how far the
-      // finalizer trails the closed stream on this machine, this run.
-      console.log(
-        `[launch-gate] settle lag after ${label}: ${Date.now() - startedAt}ms from stream close to persisted turn`,
-      );
-      return;
-    }
-    if (Date.now() > until) {
-      throw new Error(
-        `thread ${threadId} did not settle within ${deadlineMs}ms after ${label} ` +
-          `(running=${rows[0].running} assistantRows=${rows[0].assistants})`,
-      );
-    }
-    await sleep(50);
-  }
-}
 
 function toolPartsOf(parts: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(parts)) return [];
@@ -151,7 +84,7 @@ describe("SPIKE A — shim wire fidelity through ai-sdk-ollama", () => {
       threadId = historyTurn.threadId;
       // The historical turn must be COMPLETE — persisted and no longer holding the
       // claim — before the next one is posted; otherwise "history" is not history.
-      await settleTurn(threadId, "the historical turn");
+      await settleTurn(threadId, { label: "the historical turn", requireAssistantRow: true, deadlineMs: 20_000 });
 
       // SAME thread: the server-canonical history now carries a COMPLETED assistant
       // tool_calls message, which is the thing that must not advance the step index.
@@ -170,7 +103,7 @@ describe("SPIKE A — shim wire fidelity through ai-sdk-ollama", () => {
         );
       }
 
-      await settleTurn(threadId, "the parallel turn");
+      await settleTurn(threadId, { label: "the parallel turn", requireAssistantRow: true, deadlineMs: 20_000 });
       rows = await oracleQuery<MessageRow>(
         "SELECT id, role, parts, sequence FROM assistant_messages WHERE threadId = ? ORDER BY sequence",
         [threadId],

@@ -1,0 +1,31 @@
+{
+  "id": "contract-reorder-sweep",
+  "steps": [
+    {
+      "toolCalls": [
+        {
+          "name": "get_sales",
+          "input": { "groupBy": "product", "relativeDays": 5, "includeZeroRows": true }
+        },
+        { "name": "reorder_report", "input": { "includeOkay": false } },
+        { "name": "reorder_report", "input": { "includeHealthy": true } },
+        { "name": "reorder_report", "input": { "includeOkay": false, "includeHealthy": true } },
+        { "name": "reorder_report", "input": { "productIds": [9104, 9102, 424242] } }
+      ],
+      "usage": { "prompt_eval_count": 1618, "eval_count": 71 }
+    },
+    {
+      "toolCalls": [
+        { "name": "get_valuation", "input": { "productId": 9102 } },
+        { "name": "get_operations", "input": { "productId": 9102 } },
+        { "name": "get_inventory_policy", "input": { "productId": 9102 } },
+        { "name": "get_product_overview", "input": { "productId": 9102 } }
+      ],
+      "usage": { "prompt_eval_count": 1977, "eval_count": 48 }
+    },
+    {
+      "text": "Reorder coverage swept and the archived product refused by every current-state tool.",
+      "usage": { "prompt_eval_count": 2331, "eval_count": 18 }
+    }
+  ]
+}

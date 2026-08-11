@@ -1,0 +1,62 @@
+{
+  "id": "contract-modes-and-misuse",
+  "steps": [
+    {
+      "toolCalls": [
+        {
+          "name": "compare_periods",
+          "input": {
+            "metric": "sales_units",
+            "periodA": { "relativeDays": 30 },
+            "periodB": { "relativeDays": 5 }
+          }
+        },
+        {
+          "name": "compare_periods",
+          "input": {
+            "metric": "sales_units",
+            "periodA": { "relativeDays": 30 },
+            "periodB": { "relativeDays": 5 },
+            "groupBy": "product"
+          }
+        },
+        {
+          "name": "get_movement_series",
+          "input": {
+            "breakdownBy": "product",
+            "productIds": [9101, 9102, 9103, 424242],
+            "relativeDays": 60
+          }
+        },
+        { "name": "get_movement_series", "input": { "receipts": true, "relativeDays": 60 } },
+        { "name": "get_movement_series", "input": { "relativeDays": 60, "groupBy": "week" } }
+      ],
+      "usage": { "prompt_eval_count": 1571, "eval_count": 88 }
+    },
+    {
+      "toolCalls": [
+        {
+          "name": "get_sales",
+          "input": { "groupBy": "day", "relativeDays": 30, "includeZeroRows": true }
+        },
+        { "name": "get_movement_series", "input": { "productIds": [9101], "relativeDays": 30 } },
+        {
+          "name": "compare_periods",
+          "input": {
+            "metric": "sales_units",
+            "periodA": { "relativeDays": 30 },
+            "periodB": { "relativeDays": 5 },
+            "groupBy": "product",
+            "productId": 9101
+          }
+        },
+        { "name": "reorder_report", "input": { "productIds": [] } }
+      ],
+      "usage": { "prompt_eval_count": 2011, "eval_count": 59 }
+    },
+    {
+      "text": "Modes exercised and four illegal combinations rejected.",
+      "usage": { "prompt_eval_count": 2402, "eval_count": 16 }
+    }
+  ]
+}

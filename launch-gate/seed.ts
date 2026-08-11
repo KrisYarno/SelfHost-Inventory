@@ -53,6 +53,28 @@ export type GateSeedManifest = {
     correctionLogId: number;
     reorderConfigIds: readonly number[];
     staggeredCompanyIds: readonly string[];
+    // --- ADDITIVE (Task 1.7, declared) — matrix row 2 needs data the 1.5 seed did
+    //     not carry. Nothing above changed value or meaning. ---
+    /** The approved-ACTIVE population `reorder_report` counts as `coverage.total`
+     *  (spec C5). Seeded to span the urgency buckets: REORDER_NOW / CRITICAL /
+     *  APPROACHING / healthy / two no_demand_signal. */
+    reorderCohortProductIds: readonly number[];
+    /** Low-stock alert whose `lowStockThreshold` column is NULL -> thresholdSource
+     *  `system_default` (spec C8). */
+    lowStockInheritProductId: number;
+    /** Low-stock alert whose column is an EXPLICIT value EQUAL to the system default
+     *  -> thresholdSource `product_override`: the exact case C8's deleted
+     *  equality-inference used to get wrong. */
+    lowStockExplicitProductId: number;
+    /** The system default low-stock threshold, seeded as a real setting row so the
+     *  oracle reads it rather than assuming the code's fallback. */
+    lowStockDefaultThreshold: number;
+    /** Ledger row id carrying the NOT-APPROVED product's movement (row 2k). */
+    unapprovedLedgerLogId: number;
+    /** Magnitudes only the NOT-APPROVED product contributes. They must never appear
+     *  in ANY payload and must never move a total or a data-start (row 2k). */
+    unapprovedLedgerUnits: number;
+    unapprovedSalesQty: number;
   };
   sentinels: { companyA: readonly string[]; companyB: readonly string[] };
 };
@@ -111,6 +133,17 @@ export const GATE_SEED: GateSeedManifest = {
     correctionLogId: 9202,
     reorderConfigIds: [9301, 9302, 9303],
     staggeredCompanyIds: [COMPANY_A, COMPANY_B],
+    reorderCohortProductIds: [9101, 9104, 9105, 9106, 9108, 9109],
+    lowStockInheritProductId: 9108,
+    lowStockExplicitProductId: 9109,
+    lowStockDefaultThreshold: 10,
+    unapprovedLedgerLogId: 9230,
+    // SEVEN digits, disjoint from BOTH sentinel bands (A 1_000-99_999, B
+    // 9_100_000-9_199_999). A short numeric literal is not scannable over a
+    // transcript that also carries hex ids — "4747" really did collide with a
+    // UUID toolCallId in a trial run.
+    unapprovedLedgerUnits: 8_414_141,
+    unapprovedSalesQty: 8_474_747,
   },
   sentinels: {
     // A: product_sales_facts.orderedQty · external_order_items.quantity ·
@@ -297,6 +330,30 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           costPrice: "1.25",
           approvalStatus: "APPROVED",
         },
+        // ADDITIVE (Task 1.7): the two low-stock alert rows that make spec C8's
+        // thresholdSource observable. 9108 INHERITS (column NULL); 9109 carries an
+        // EXPLICIT override that happens to EQUAL the system default — the case the
+        // deleted equality inference reported as `system_default`.
+        {
+          id: 9108,
+          name: "Gate Threshold Inherit 5 mg",
+          baseName: "Gate Threshold Inherit",
+          variant: "5 mg",
+          quantity: 3,
+          location: 1,
+          approvalStatus: "APPROVED",
+        },
+        {
+          id: 9109,
+          name: "Gate Threshold Explicit 5 mg",
+          baseName: "Gate Threshold Explicit",
+          variant: "5 mg",
+          quantity: 3,
+          location: 1,
+          lowStockThreshold: 10,
+          costPrice: "7.00",
+          approvalStatus: "APPROVED",
+        },
       ],
     });
     await prisma.product_locations.createMany({
@@ -306,6 +363,9 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
         { productId: 9104, locationId: 1, quantity: 2, minQuantity: 25 },
         { productId: 9105, locationId: 1, quantity: 40, minQuantity: 25 },
         { productId: 9106, locationId: 1, quantity: 500, minQuantity: 25 },
+        // ADDITIVE (Task 1.7) — the two C8 threshold products.
+        { productId: 9108, locationId: 1, quantity: 3, minQuantity: 0 },
+        { productId: 9109, locationId: 1, quantity: 3, minQuantity: 0 },
       ],
     });
 
@@ -340,6 +400,62 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           delta: -30,
           logType: "SALE",
           changeTime: daysAgo(6),
+          locationId: 1,
+          actorKind: "USER",
+        },
+      ],
+    });
+
+    // --- ADDITIVE (Task 1.7, declared) — DEMAND EVIDENCE ---------------------
+    //
+    // WHY: `minEvidenceEvents` is 3 (the migrated global default), and the 1.5 seed
+    // gave every product at most ONE qualifying outbound row. Every product therefore
+    // fell out of reorder_report as `insufficient_history`, so the C5 coverage sweep
+    // (spec C7 row 2b) had nothing but zeros to assert and no `suggested` row existed
+    // to carry a `demandMix` (row 2g). These rows give the four configured products
+    // >= 3 qualifying events each, landing them on DIFFERENT urgency buckets.
+    //
+    // NOTHING SEEDED ABOVE CHANGES. Every row here is a new id on an existing product,
+    // and every value the matrices assert is RECOMPUTED from these rows by the oracle
+    // rather than hard-coded — the arithmetic below is the intent, not the assertion.
+    //
+    //   9101  94 units / 3 events over 13 covered days -> REORDER_NOW (stock 120)
+    //         and its demandMix is stockInReversal 14 + adjustmentUnclassified 80,
+    //         while its outboundMix30 additionally holds the CORRECTION row's 9 —
+    //         the C12 partition difference, on real rows.
+    //   9104  60 units / 4 events over 31 covered days -> CRITICAL (stock 2)
+    //   9105  42 units / 3 events over 21 covered days -> APPROACHING (stock 40)
+    //   9106  15 units / 3 events over 26 covered days -> healthy (reorderPoint
+    //         override 0), i.e. urgency null unless includeHealthy asks for it
+    //   9108/9109 get NO rows -> no_demand_signal, the `unavailable` bucket
+    await prisma.inventory_logs.createMany({
+      data: [
+        // 9101 — unclassified adjustments (this shop's real shipping record).
+        { id: 9210, productId: 9101, userId: GATE_SEED.actors.admin.userId, delta: -40, logType: "ADJUSTMENT", changeTime: daysAgo(8), locationId: 1, actorKind: "USER" },
+        { id: 9211, productId: 9101, userId: GATE_SEED.actors.admin.userId, delta: -40, logType: "ADJUSTMENT", changeTime: daysAgo(4), locationId: 1, actorKind: "USER" },
+        // 9104 — plain sales.
+        { id: 9212, productId: 9104, userId: GATE_SEED.actors.admin.userId, delta: -10, logType: "SALE", changeTime: daysAgo(30), locationId: 1, actorKind: "USER" },
+        { id: 9213, productId: 9104, userId: GATE_SEED.actors.admin.userId, delta: -10, logType: "SALE", changeTime: daysAgo(20), locationId: 1, actorKind: "USER" },
+        { id: 9214, productId: 9104, userId: GATE_SEED.actors.admin.userId, delta: -10, logType: "SALE", changeTime: daysAgo(10), locationId: 1, actorKind: "USER" },
+        // 9105 — plain sales.
+        { id: 9215, productId: 9105, userId: GATE_SEED.actors.admin.userId, delta: -14, logType: "SALE", changeTime: daysAgo(20), locationId: 1, actorKind: "USER" },
+        { id: 9216, productId: 9105, userId: GATE_SEED.actors.admin.userId, delta: -14, logType: "SALE", changeTime: daysAgo(12), locationId: 1, actorKind: "USER" },
+        { id: 9217, productId: 9105, userId: GATE_SEED.actors.admin.userId, delta: -14, logType: "SALE", changeTime: daysAgo(4), locationId: 1, actorKind: "USER" },
+        // 9106 — plain sales, small enough to stay healthy against a 500 stock.
+        { id: 9218, productId: 9106, userId: GATE_SEED.actors.admin.userId, delta: -5, logType: "SALE", changeTime: daysAgo(25), locationId: 1, actorKind: "USER" },
+        { id: 9219, productId: 9106, userId: GATE_SEED.actors.admin.userId, delta: -5, logType: "SALE", changeTime: daysAgo(15), locationId: 1, actorKind: "USER" },
+        { id: 9220, productId: 9106, userId: GATE_SEED.actors.admin.userId, delta: -5, logType: "SALE", changeTime: daysAgo(5), locationId: 1, actorKind: "USER" },
+        // The NOT-APPROVED product's movement (row 2k). Every assistant read narrows
+        // by the approved-id set, so this row must move NO total anywhere — and it
+        // must be COUNTED by the `excludedUnapprovedProducts` census. Its magnitude is
+        // deliberately distinctive so the matrices can also grep for its absence.
+        {
+          id: GATE_SEED.fixtures.unapprovedLedgerLogId,
+          productId: GATE_SEED.fixtures.pendingReviewProductId,
+          userId: GATE_SEED.actors.admin.userId,
+          delta: -GATE_SEED.fixtures.unapprovedLedgerUnits,
+          logType: "ADJUSTMENT",
+          changeTime: daysAgo(7),
           locationId: 1,
           actorKind: "USER",
         },
@@ -388,6 +504,28 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           internalStatus: "pending",
           externalCreatedAt: daysAgo(5),
         },
+        // ADDITIVE (Task 1.7, declared): an OLD company-A order carrying an UNMAPPED
+        // line item. Two contracts need it and neither was observable without it:
+        //  · C7's `totalOrders` denominator is ALL-TIME while the sales figures beside
+        //    it are WINDOWED — with every seeded order inside every seeded window, the
+        //    two were indistinguishable and `attributionNote` asserted nothing.
+        //  · `unattributedOrders` was structurally 0 (every item was isMapped), so the
+        //    numerator could not be told from a broken read.
+        {
+          id: "gateorder-companya-old",
+          companyId: COMPANY_A,
+          integrationId: integrationOf(COMPANY_A),
+          externalId: "gate-a-0",
+          orderNumber: "gate-a-old-1",
+          nativeStatus: "completed",
+          financialStatus: "paid",
+          fulfillmentStatus: "fulfilled",
+          total: "10.00",
+          currency: "USD",
+          rawPayload: {},
+          internalStatus: "pending",
+          externalCreatedAt: daysAgo(200),
+        },
         {
           id: "gateorder-companyb",
           companyId: COMPANY_B,
@@ -417,6 +555,18 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           price: "19.00",
           productLinkId: `gatelink-${COMPANY_A.slice(-6)}`,
           isMapped: true,
+        },
+        // ADDITIVE (Task 1.7): the UNMAPPED line item that makes the old order
+        // "unattributed". No productLinkId — that is what unmapped means.
+        {
+          id: "gateitem-companya-old",
+          orderId: "gateorder-companya-old",
+          externalItemId: "gate-a-old-item-1",
+          externalProductId: "gate-ext-unmapped",
+          name: "Gate Unmapped Line",
+          quantity: 1,
+          price: "10.00",
+          isMapped: false,
         },
         {
           id: "gateitem-companyb",
@@ -466,6 +616,22 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           revenue: "620.00",
           orderCount: 1,
         },
+        // ADDITIVE (Task 1.7, declared): the NOT-APPROVED product's sales fact, in
+        // company A and EARLIER than A's first approved fact. Every assistant sales
+        // read narrows by the approved-id set, so this row must (a) contribute to no
+        // total, (b) NOT move `coverage.salesDataStart` back to this day, and (c) be
+        // counted by `excludedUnapprovedProducts`. Without it the unapproved column of
+        // the C13 policy table is asserted against an empty set.
+        {
+          productId: GATE_SEED.fixtures.pendingReviewProductId,
+          companyId: COMPANY_A,
+          integrationId: integrationOf(COMPANY_A),
+          dayKey: dayKey(50),
+          orderedQty: GATE_SEED.fixtures.unapprovedSalesQty,
+          fulfilledQty: 0,
+          revenue: "99.00",
+          orderCount: 1,
+        },
       ],
     });
 
@@ -509,6 +675,16 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
     });
     await prisma.systemSetting.create({
       data: { key: "aiSurfaceConfig", value: AI_SURFACE_CONFIG_VALUE },
+    });
+    // ADDITIVE (Task 1.7): the system default low-stock threshold as a REAL setting
+    // row. Its value is identical to `LOW_STOCK_DEFAULT_FALLBACK`, so no behaviour
+    // changes — but the "override EQUALS the default" C8 case now rests on a value the
+    // oracle can READ instead of on a constant the harness would have to assume.
+    await prisma.systemSetting.create({
+      data: {
+        key: "lowStockDefaultThreshold",
+        value: String(GATE_SEED.fixtures.lowStockDefaultThreshold),
+      },
     });
   } finally {
     await prisma.$disconnect();

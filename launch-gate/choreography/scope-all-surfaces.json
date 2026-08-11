@@ -1,0 +1,35 @@
+{
+  "id": "scope-all-surfaces",
+  "steps": [
+    {
+      "toolCalls": [
+        { "name": "get_stock", "input": { "productId": 9101 } },
+        { "name": "get_valuation", "input": { "groupBy": "total" } },
+        { "name": "get_inventory_summary", "input": {} }
+      ],
+      "usage": { "prompt_eval_count": 1502, "eval_count": 41 }
+    },
+    {
+      "toolCalls": [
+        { "name": "get_sales", "input": { "groupBy": "company", "relativeDays": 60 } },
+        { "name": "get_sales", "input": { "groupBy": "day", "relativeDays": 60 } },
+        { "name": "get_order_pipeline", "input": { "relativeDays": 60, "groupBy": "status" } },
+        { "name": "get_data_freshness", "input": {} },
+        {
+          "name": "compare_periods",
+          "input": {
+            "metric": "sales_units",
+            "periodA": { "relativeDays": 30 },
+            "periodB": { "relativeDays": 5 }
+          }
+        },
+        { "name": "get_business_snapshot", "input": {} }
+      ],
+      "usage": { "prompt_eval_count": 1861, "eval_count": 77 }
+    },
+    {
+      "text": "Scope surfaces read.",
+      "usage": { "prompt_eval_count": 2140, "eval_count": 12 }
+    }
+  ]
+}

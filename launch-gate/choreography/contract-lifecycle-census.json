@@ -1,0 +1,52 @@
+{
+  "id": "contract-lifecycle-census",
+  "steps": [
+    {
+      "toolCalls": [
+        {
+          "name": "compare_periods",
+          "input": {
+            "metric": "sales_units",
+            "periodA": { "relativeDays": 30 },
+            "periodB": { "relativeDays": 5 }
+          }
+        },
+        {
+          "name": "compare_periods",
+          "input": {
+            "metric": "sales_units",
+            "periodA": { "relativeDays": 30 },
+            "periodB": { "relativeDays": 5 },
+            "groupBy": "product"
+          }
+        },
+        {
+          "name": "compare_periods",
+          "input": {
+            "metric": "sales_units",
+            "periodA": { "relativeDays": 30 },
+            "periodB": { "relativeDays": 5 },
+            "groupBy": "product",
+            "direction": "increase"
+          }
+        },
+        { "name": "get_sales", "input": { "groupBy": "product", "relativeDays": 60 } },
+        { "name": "get_stock_asof", "input": { "dayKey": "2026-01-15", "productId": 9102 } }
+      ],
+      "usage": { "prompt_eval_count": 1644, "eval_count": 83 }
+    },
+    {
+      "toolCalls": [
+        { "name": "get_stock", "input": { "productId": 9102 } },
+        { "name": "get_stock", "input": { "productId": 9103 } },
+        { "name": "get_inventory_summary", "input": {} },
+        { "name": "get_business_snapshot", "input": {} }
+      ],
+      "usage": { "prompt_eval_count": 2044, "eval_count": 46 }
+    },
+    {
+      "text": "Coverage shift, per-product split and the lifecycle policy table read.",
+      "usage": { "prompt_eval_count": 2419, "eval_count": 17 }
+    }
+  ]
+}

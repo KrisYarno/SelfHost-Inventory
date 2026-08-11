@@ -18,8 +18,11 @@
 import { describe, expect, it, beforeAll } from "@jest/globals";
 import fs from "node:fs";
 import path from "node:path";
+// The five helpers this file used to define locally now live in ONE place (contract
+// pack REV-8's 1.7 first-creator task). Behaviour is unchanged.
+import { asJson, canonicalJson, eventsOfType, settleTurn } from "./assertions";
 import { gatePrompt, loadChoreographies, parseChoreography } from "./choreography";
-import { apiGet, loginOnce, postTurn, type SseEvent, type TurnResult } from "./driver";
+import { apiGet, loginOnce, postTurn, type TurnResult } from "./driver";
 import { oracleQuery, tableDigest } from "./oracle";
 import { GATE_MODEL, GATE_SEED } from "./seed";
 import { GATE_CONTAINER_PREFIX, GATE_PORTS, findOrphans } from "./spawn";
@@ -29,38 +32,6 @@ const CHOREOGRAPHY_DIR = path.join(__dirname, "choreography");
 const SCENARIO = "infra-trivial-turn";
 
 type MessageRow = { id: string; role: string; parts: string; metadata: string | null; sequence: number };
-
-function eventsOfType<T extends SseEvent["type"]>(
-  turn: TurnResult,
-  type: T,
-): Array<Extract<SseEvent, { type: T }>> {
-  return turn.events.filter((event): event is Extract<SseEvent, { type: T }> => event.type === type);
-}
-
-/** MySQL JSON columns come back from mysql2 already parsed; normalise either shape. */
-function asJson(value: unknown): unknown {
-  return typeof value === "string" ? JSON.parse(value) : value;
-}
-
-/**
- * Key-order-canonical serialization.
- *
- * MySQL's native JSON type stores objects in a normalised binary form and re-emits
- * keys sorted by (length, lexicographic) — so a structured tool output that goes
- * `stream -> assistant_messages.parts -> read back` is byte-IDENTICAL in its values
- * and its ARRAY order, but NOT in its object key order. Comparing canonical forms is
- * the strongest byte-level claim available on that round trip; strings (the assistant
- * text) are compared raw, where byte-identity really does hold.
- */
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const keys = Object.keys(record).sort();
-    return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
 
 describe("choreography loader (seam S8)", () => {
   it("validates every committed scenario JSON", () => {
@@ -198,20 +169,11 @@ describe("one trivial scripted turn through the REAL route", () => {
   });
 
   it("persists the thread, both messages and the request row", async () => {
-    // SETTLE BARRIER (1.6 finding, orchestrator seam-fix): the route finalizes
-    // 59-87ms AFTER the response stream closes (usage race + finalize tx). A read
-    // taken the instant postTurn resolves races the assistant row — this exact
-    // race was the lane's one unidentified flake. Bounded poll, no fixed sleeps.
-    const settleDeadline = Date.now() + 5_000;
-    for (;;) {
-      const rows = await oracleQuery<{ status: string }>(
-        "SELECT status FROM assistant_requests WHERE threadId = ? AND kind = 'chat' ORDER BY id DESC LIMIT 1",
-        [threadId],
-      );
-      if (rows.length > 0 && rows[0].status !== "running") break;
-      if (Date.now() > settleDeadline) throw new Error("turn never settled within 5s");
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    // SETTLE BARRIER (1.6 finding, orchestrator seam-fix; now the shared helper): the
+    // route finalizes 59-87ms AFTER the response stream closes (usage race + finalize
+    // tx). A read taken the instant postTurn resolves races the assistant row — this
+    // exact race was the lane's one unidentified flake. Bounded poll, no fixed sleeps.
+    await settleTurn(threadId, { requireAssistantRow: true });
 
     const threads = await oracleQuery<{ id: string; userId: number; title: string | null }>(
       "SELECT id, userId, title FROM assistant_threads WHERE id = ?",

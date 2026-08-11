@@ -1,0 +1,31 @@
+{
+  "id": "contract-echoes-and-mix",
+  "steps": [
+    {
+      "toolCalls": [
+        { "name": "get_sales", "input": { "productId": 9101, "relativeDays": 60 } },
+        {
+          "name": "get_sales",
+          "input": { "groupBy": "product", "relativeDays": 30, "includeZeroRows": true }
+        },
+        { "name": "get_sales", "input": { "productId": 9102, "relativeDays": 60 } },
+        { "name": "get_operations", "input": { "productId": 9101, "windowDays": 30 } },
+        { "name": "get_shrinkage", "input": { "days": 30 } }
+      ],
+      "usage": { "prompt_eval_count": 1533, "eval_count": 66 }
+    },
+    {
+      "toolCalls": [
+        { "name": "low_stock_report", "input": {} },
+        { "name": "reorder_report", "input": {} },
+        { "name": "find_product", "input": { "query": "Gate", "includeArchived": true } },
+        { "name": "get_movement_series", "input": { "relativeDays": 60 } }
+      ],
+      "usage": { "prompt_eval_count": 1904, "eval_count": 52 }
+    },
+    {
+      "text": "Echoes, coverage, mixes and definitions read.",
+      "usage": { "prompt_eval_count": 2288, "eval_count": 14 }
+    }
+  ]
+}

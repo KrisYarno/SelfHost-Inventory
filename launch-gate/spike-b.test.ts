@@ -46,6 +46,9 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "@jest/globals";
+// Extracted to launch-gate/assertions.ts by Task 1.7 (contract pack REV-8). Same
+// helpers, same behaviour — one definition.
+import { asJson, settleTurn, sleep } from "./assertions";
 import { gatePrompt } from "./choreography";
 import { apiGet, loginOnce, postTurn, type SseEvent } from "./driver";
 import { oracleQuery } from "./oracle";
@@ -76,14 +79,6 @@ type MessageRow = { id: string; role: string; parts: string; metadata: string | 
 const REQUEST_COLUMNS =
   "id, threadId, status, errorCode, durationMs, createdAt, " +
   "TIMESTAMPDIFF(MICROSECOND, createdAt, NOW(3)) DIV 1000 AS ageMs";
-
-function asJson(value: unknown): unknown {
-  return typeof value === "string" ? JSON.parse(value) : value;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 async function requestRow(id: number): Promise<RequestRow> {
   const rows = await oracleQuery<RequestRow>(
@@ -156,29 +151,6 @@ async function maxRequestId(): Promise<number> {
     "SELECT COALESCE(MAX(id), 0) AS maxId FROM assistant_requests",
   );
   return Number(rows[0].maxId);
-}
-
-/**
- * THE SETTLE BARRIER (reality finding, 1.6): a turn is over for the CLIENT when the
- * stream closes and over for the DATABASE when the finalizer commits — the route
- * finalizes AFTER the response ends (usage race, then the finalize transaction). A
- * follow-up POST to the same thread taken the instant `postTurn` resolves can
- * therefore legitimately 409 THREAD_BUSY on a turn the client considers finished.
- * BOUNDED, never a fixed sleep.
- */
-async function settleTurn(threadId: string, deadlineMs = 20_000): Promise<void> {
-  const until = Date.now() + deadlineMs;
-  for (;;) {
-    const rows = await oracleQuery<{ n: number }>(
-      "SELECT COUNT(*) AS n FROM assistant_requests WHERE threadId = ? AND status = 'running'",
-      [threadId],
-    );
-    if (Number(rows[0].n) === 0) return;
-    if (Date.now() > until) {
-      throw new Error(`thread ${threadId} still carried a running request after ${deadlineMs}ms`);
-    }
-    await sleep(100);
-  }
 }
 
 /** Manufacture staleness the ONLY sanctioned way (plan D7): move `createdAt` back
@@ -482,7 +454,7 @@ describe("SPIKE B(c) — the crash path: SIGKILL, restart, lease, fence", () => 
     threadId = setup.threadId;
     // The setup turn's claim must be RELEASED before the next POST, or the crash turn
     // 409s on a turn whose stream the client already saw end.
-    await settleTurn(threadId);
+    await settleTurn(threadId, { deadlineMs: 20_000 });
 
     // 2. A turn that holds its stream open, killed while genuinely in flight.
     const before = await maxRequestId();
