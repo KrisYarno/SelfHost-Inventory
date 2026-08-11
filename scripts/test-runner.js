@@ -75,12 +75,18 @@ if (!testSuites[suite]) {
 }
 
 // Build jest command. A suite declares EITHER one `pattern` or a `patterns` list;
-// every pattern is spliced in where the single positional pattern used to go.
-const patterns = testSuites[suite].patterns ?? [testSuites[suite].pattern];
+// every pattern is spliced in where the single positional pattern used to go. A suite
+// MAY also name its own `config` (the launch gate is a separate jest project) — and a
+// config-bearing suite may declare NO pattern at all, in which case jest receives no
+// positional filter and that config's own testMatch decides what runs. The splice is
+// guarded: an absent pattern must never reach argv as the string "undefined".
+const suiteDef = testSuites[suite];
+const patterns = suiteDef.patterns ?? (suiteDef.pattern ? [suiteDef.pattern] : []);
+const configPath = suiteDef.config ?? 'jest.config.js';
 const jestArgs = [
   'jest',
   ...patterns,
-  '--config', 'jest.config.js',
+  '--config', configPath,
 ];
 
 if (watch) {
@@ -108,7 +114,7 @@ jestArgs.push(...additionalArgs);
 // Print test run information
 console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
 console.log(`${colors.cyan}🧪 Running ${testSuites[suite].name}${colors.reset}`);
-console.log(`${colors.yellow}📁 Pattern: ${patterns.join(', ')}${colors.reset}`);
+console.log(`${colors.yellow}📁 Pattern: ${patterns.length > 0 ? patterns.join(', ') : `(none — ${configPath} testMatch)`}${colors.reset}`);
 if (watch) console.log(`${colors.yellow}👀 Watch mode enabled${colors.reset}`);
 if (coverage) console.log(`${colors.yellow}📊 Coverage report enabled${colors.reset}`);
 console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);

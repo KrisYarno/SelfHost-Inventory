@@ -107,6 +107,9 @@ import { TOOL_PRESENTATION } from "@/lib/assistant/tool-presentation";
 import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
 import { STATIC_WRITE_ALLOWLIST } from "./static-write-allowlist";
 import { ORDER_PIPELINE_SELECT, ORDER_ITEM_UNITS_SELECT } from "@/lib/reports/order-pipeline";
+// Task 1.4: the C2 envelope pins read the SHARED schema (contract pack T0) — never a
+// local re-declaration, which would pin a copy instead of the contract.
+import { requestSchema } from "@/lib/assistant/thread-contracts";
 
 const prismaCtl = jest.requireMock("@/lib/prisma") as {
   __calls: Array<{ model: string; method: string; args: unknown }>;
@@ -1309,5 +1312,261 @@ describe("universal productId not-found fixture (spec §4 W0-PROD)", () => {
       CTX,
     );
     expect(result).toEqual(NOT_FOUND);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (4) G4 gate — TRANSITIVE-IMPORT WRITE-FREEDOM (spec REV-9 G4; plan D1; Task 1.4).
+//
+// The READ_PATH_FILES completeness meta-test above only sees tools.ts's DIRECT
+// imports — it is not a closure, so a persistence module pulled in two hops down
+// still escapes it. This gate closes that hole: a static BFS over the `@/lib` import
+// graph rooted at BOTH read-path entry points (tools.ts = the tool bodies,
+// tool-adapters.ts = the ai/MCP wrappers — design D1 names both) asserting the
+// thread-persistence modules stay UNREACHABLE. Nothing is executed: every visited
+// file is read from disk and its import statements are parsed.
+//
+// TYPE-ONLY IMPORTS ARE NOT EDGES. `import type ...` / `export type ... from ...` is
+// erased at compile time and can issue no write, so following one would fail this
+// gate on a compile-time-only reference (threads.ts's own
+// `import type { UIMessage } from "ai"` is the shape that made the rule explicit —
+// contract pack REV-5). An inline `{ type Foo }` specifier inside a VALUE import is
+// still a real edge and is followed.
+// ---------------------------------------------------------------------------
+
+const G4_REPO_ROOT = path.resolve(__dirname, "../../../..");
+
+/** Design D1: the tool read path has two entry points, and the denial holds for both. */
+const G4_ROOTS = ["lib/assistant/tools.ts", "lib/assistant/tool-adapters.ts"];
+
+/** The persistence boundary the read path may never reach (spec G4 / plan D1). */
+const PERSISTENCE_MODULES = [
+  "lib/assistant/threads.ts",
+  "lib/assistant/requests.ts",
+  "lib/assistant/titles.ts",
+];
+
+/** Spec G4 states the denial as a glob (`lib/assistant/threads*`), so a future
+ *  sibling (threads-foo.ts) is denied too — not only the three files above. */
+const PERSISTENCE_PATTERN = /^lib\/assistant\/(threads|requests|titles)[^/]*\.tsx?$/;
+
+type ImportEdge = { spec: string; typeOnly: boolean };
+
+/**
+ * Every module specifier in a source file, with its type-only flag. Handles the
+ * statement forms that can create a RUNTIME edge — `import ... from "x"`,
+ * `export ... from "x"`, side-effect `import "x"`, dynamic `import("x")` and
+ * `require("x")` — and marks `import type` / `export type` statements type-only.
+ * The clause between the keyword and `from` may contain neither `;` nor another
+ * `import`/`export`, so one match can never straddle two statements and mis-read
+ * the following statement's `type` modifier.
+ */
+function extractImportEdges(source: string): ImportEdge[] {
+  const edges: ImportEdge[] = [];
+  const fromRe =
+    /(?:^|[\n;])[ \t]*(?:import|export)\s+((?:type\s+)?)(?:(?!\bimport\b|\bexport\b|;)[\s\S])*?\bfrom\s*["']([^"']+)["']/g;
+  let m: RegExpExecArray | null;
+  while ((m = fromRe.exec(source)) !== null) {
+    edges.push({ spec: m[2], typeOnly: m[1].trim() === "type" });
+  }
+  const callRe = /(?:^|[^\w$.])(?:require|import)\s*\(\s*["']([^"']+)["']\s*\)/g;
+  while ((m = callRe.exec(source)) !== null) edges.push({ spec: m[1], typeOnly: false });
+  const sideEffectRe = /(?:^|[\n;])[ \t]*import\s*["']([^"']+)["']/g;
+  while ((m = sideEffectRe.exec(source)) !== null) edges.push({ spec: m[1], typeOnly: false });
+  return edges;
+}
+
+/** Resolve a LOCAL specifier (`@/…` alias or relative) to a repo-relative .ts(x)
+ *  path INSIDE `lib/`. null = bare module, unresolvable, or outside lib/ — the G4
+ *  graph is the `@/lib` graph, and a relative edge that lands in lib/ is one of its
+ *  edges just as much as an aliased one. */
+function resolveLibModule(spec: string, fromRel: string): string | null {
+  let base: string;
+  if (spec.startsWith("@/")) {
+    base = path.join(G4_REPO_ROOT, spec.slice(2));
+  } else if (spec.startsWith("./") || spec.startsWith("../")) {
+    base = path.resolve(path.dirname(path.join(G4_REPO_ROOT, fromRel)), spec);
+  } else {
+    return null; // bare module (node_modules / builtin)
+  }
+  const candidates = [
+    `${base}.ts`,
+    `${base}.tsx`,
+    path.join(base, "index.ts"),
+    path.join(base, "index.tsx"),
+  ];
+  for (const cand of candidates) {
+    if (!fs.existsSync(cand)) continue;
+    const rel = path.relative(G4_REPO_ROOT, cand).split(path.sep).join("/");
+    return rel.startsWith("lib/") ? rel : null;
+  }
+  return null;
+}
+
+type LibWalk = { visited: Set<string>; parents: Map<string, string> };
+
+/** Breadth-first walk of the runtime `@/lib` import graph from the given roots. */
+function walkLibGraph(roots: string[]): LibWalk {
+  const visited = new Set<string>();
+  const parents = new Map<string, string>();
+  const queue = [...roots];
+
+  while (queue.length > 0) {
+    const rel = queue.shift() as string;
+    if (visited.has(rel)) continue;
+    visited.add(rel);
+
+    const abs = path.join(G4_REPO_ROOT, rel);
+    if (!fs.existsSync(abs)) continue;
+    for (const edge of extractImportEdges(fs.readFileSync(abs, "utf8"))) {
+      if (edge.typeOnly) continue; // erased at compile time — never a runtime edge
+      const target = resolveLibModule(edge.spec, rel);
+      if (target === null || visited.has(target)) continue;
+      if (!parents.has(target)) parents.set(target, rel);
+      queue.push(target);
+    }
+  }
+
+  return { visited, parents };
+}
+
+/** root -> … -> target, so a failure names the offending import chain. */
+function importChain(walk: LibWalk, target: string): string {
+  const chain = [target];
+  let cur = target;
+  while (walk.parents.has(cur) && chain.length < 40) {
+    cur = walk.parents.get(cur) as string;
+    chain.unshift(cur);
+  }
+  return chain.join(" -> ");
+}
+
+describe("G4 gate — the read path never transitively reaches thread persistence", () => {
+  const walk = walkLibGraph(G4_ROOTS);
+
+  it("walks a connected, plausible @/lib graph from BOTH roots (self-check — no vacuous pass)", () => {
+    for (const root of G4_ROOTS) expect(walk.visited.has(root)).toBe(true);
+    // Real transitive reach, several hops deep past the roots.
+    expect(walk.visited.has("lib/reports/low-stock.ts")).toBe(true);
+    expect(walk.visited.has("lib/products.ts")).toBe(true);
+    expect(walk.visited.has("lib/analytics/queries.ts")).toBe(true);
+    expect(walk.visited.has("lib/prisma.ts")).toBe(true);
+    expect(walk.visited.size).toBeGreaterThan(20);
+  });
+
+  it("the extractor follows value imports and IGNORES type-only ones (walker contract)", () => {
+    const source = [
+      'import type { UIMessage } from "ai";',
+      "import type {",
+      "  AssistantMessageMetadata,",
+      '} from "@/lib/assistant/thread-contracts";',
+      'export type { TitleJob } from "@/lib/assistant/titles";',
+      'import { claimTurn } from "@/lib/assistant/threads";',
+      'import { tool, type ToolSet } from "ai";',
+      'export { utcDayKey } from "@/lib/assistant/requests";',
+      'import "@/lib/side-effect";',
+      'const m = require("@/lib/required");',
+      'const d = await import("@/lib/dynamic");',
+    ].join("\n");
+    const edges = extractImportEdges(source);
+    const specs = (typeOnly: boolean) =>
+      edges
+        .filter((e) => e.typeOnly === typeOnly)
+        .map((e) => e.spec)
+        .sort();
+    // `import type` / `export type` statements only — the erased ones.
+    expect(specs(true)).toEqual([
+      "@/lib/assistant/thread-contracts",
+      "@/lib/assistant/titles",
+      "ai",
+    ]);
+    // Everything that survives to runtime, incl. the inline-`type`-specifier import
+    // and the VALUE re-export (`export { x } from` is an edge; `export type` is not).
+    expect(specs(false)).toEqual([
+      "@/lib/assistant/requests",
+      "@/lib/assistant/threads",
+      "@/lib/dynamic",
+      "@/lib/required",
+      "@/lib/side-effect",
+      "ai",
+    ]);
+  });
+
+  it("the walker DOES report threads.ts from app/api/assistant/route.ts (negative control)", () => {
+    // The route GENUINELY imports the persistence modules (design D1: orchestration
+    // calls persistence), so walking from it proves the machinery detects an edge and
+    // the empty assertion below cannot pass vacuously — without touching product code.
+    const control = walkLibGraph(["app/api/assistant/route.ts"]);
+    expect(control.visited.has("lib/assistant/threads.ts")).toBe(true);
+    expect(control.visited.has("lib/assistant/titles.ts")).toBe(true);
+    // ...and requests.ts is reached TRANSITIVELY (route -> threads -> requests): the
+    // multi-hop closure a direct-import check like READ_PATH_FILES cannot see.
+    expect(control.visited.has("lib/assistant/requests.ts")).toBe(true);
+    expect(control.parents.get("lib/assistant/requests.ts")).toBe("lib/assistant/threads.ts");
+  });
+
+  it("neither tools.ts nor tool-adapters.ts reaches threads/requests/titles (spec G4)", () => {
+    const reached = Array.from(walk.visited)
+      .filter((rel) => PERSISTENCE_MODULES.includes(rel) || PERSISTENCE_PATTERN.test(rel))
+      .sort()
+      .map((rel) => importChain(walk, rel));
+    expect(reached).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (5) C2 ENVELOPE fast pins (spec C2; contract pack T0 — Task 1.4). The route's own
+// cutover pins live in the integration suite; these are the FAST ones the gate suite
+// carries, straight against the shared schema: the pre-lane envelope is dead, the C2
+// envelope parses, and the 4-part / 24_576-character bounds are enforced at the zod
+// layer (the serialized BYTE cap stays a post-parse assert at the route — C2).
+// ---------------------------------------------------------------------------
+
+describe("C2 envelope pins (contract pack T0 — requestSchema)", () => {
+  const textPart = (text: string) => ({ type: "text", text });
+  const validMessage = { id: "am-fixture-1", role: "user", parts: [textPart("hi")] };
+
+  it("REJECTS the pre-lane envelope { conversationId, messages }", () => {
+    const parsed = requestSchema.safeParse({
+      conversationId: "abc",
+      messages: [{ id: "m1", role: "user", parts: [textPart("hi")] }],
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    const paths = parsed.error.issues.map((i) => i.path.join("."));
+    expect(paths).toContain("threadId");
+    expect(paths).toContain("message");
+  });
+
+  it("ACCEPTS { threadId: null, message, trigger: 'submit-message' }", () => {
+    const parsed = requestSchema.safeParse({
+      threadId: null,
+      message: validMessage,
+      trigger: "submit-message",
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.threadId).toBeNull();
+    expect(parsed.data.trigger).toBe("submit-message");
+    expect(parsed.data.message.parts).toEqual([textPart("hi")]);
+  });
+
+  it("caps the message at FOUR parts", () => {
+    const parts = (n: number) => Array.from({ length: n }, (_, i) => textPart(`p${i}`));
+    expect(
+      requestSchema.safeParse({ threadId: null, message: { ...validMessage, parts: parts(4) } })
+        .success,
+    ).toBe(true);
+    expect(
+      requestSchema.safeParse({ threadId: null, message: { ...validMessage, parts: parts(5) } })
+        .success,
+    ).toBe(false);
+  });
+
+  it("caps each text part at 24_576 characters", () => {
+    const atCap = { ...validMessage, parts: [textPart("x".repeat(24_576))] };
+    const overCap = { ...validMessage, parts: [textPart("x".repeat(24_577))] };
+    expect(requestSchema.safeParse({ threadId: null, message: atCap }).success).toBe(true);
+    expect(requestSchema.safeParse({ threadId: null, message: overCap }).success).toBe(false);
   });
 });
