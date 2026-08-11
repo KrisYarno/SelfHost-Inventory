@@ -256,6 +256,25 @@ const PERMANENT_EXEMPT: Exemption[] = [
       "rows survive via SetNull). Thread-mutation audit events are deliberately out " +
       "of scope for v1 — registered with the v1.1 write tools.",
   },
+  {
+    // Multiuser substrate D9 (task 3.2; spec C9): the eval upload.
+    path: "app/api/admin/assistant-eval/route.ts",
+    reason:
+      "assistant feature state: an admin-uploaded scored run of the curated prompt " +
+      "corpus (assistant_eval_reports). It is an evaluation artefact about the " +
+      "assistant, not business state, and will never migrate to recordChange. Zero " +
+      "business writes unchanged. The GET half is read-only and takes no entry.",
+  },
+  {
+    // Multiuser substrate D9 (task 3.2; spec C9): the consent-only user report.
+    path: "app/api/assistant/threads/[id]/report/route.ts",
+    reason:
+      "assistant feature state: the OWNER copies their own conversation to the admin " +
+      "(assistant_eval_reports, source user-report) — an evaluation artefact derived " +
+      "from chat persistence, not business state, and never a recordChange candidate. " +
+      "The per-row export GET writes NO DATA_EXPORT row either: a DELIBERATE, " +
+      "recorded divergence from the four business-data export GETs (plan §7).",
+  },
 ];
 
 /**

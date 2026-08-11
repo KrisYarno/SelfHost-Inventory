@@ -50,6 +50,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { useIsMobile } from "@/hooks/use-is-mobile";
+import { ReportThreadAction } from "@/components/assistant/report-dialog";
 import type { ThreadListResponse } from "@/lib/assistant/thread-contracts";
 
 /** The one cache key for the thread list. Exported for EXACTLY ONE outside
@@ -242,7 +243,9 @@ function ThreadRow({
         data-testid={`thread-item-${item.id}`}
         aria-current={isActive ? "true" : undefined}
         className={cn(
-          "flex min-h-[44px] w-full flex-col items-start gap-0.5 rounded-lg px-3 py-2 pr-10 text-left transition-colors",
+          // pr-[4.5rem]: room for BOTH row actions (report + delete), which sit
+          // absolutely positioned over the right edge.
+          "flex min-h-[44px] w-full flex-col items-start gap-0.5 rounded-lg px-3 py-2 pr-[4.5rem] text-left transition-colors",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
           isActive ? "bg-surface-hover font-medium" : "hover:bg-surface-hover",
         )}
@@ -250,6 +253,9 @@ function ThreadRow({
         <span className="w-full truncate text-body-sm">{item.title ?? "Untitled"}</span>
         <span className="text-caption text-muted-foreground">{relativeTime(item.updatedAt)}</span>
       </button>
+      {/* Task 3.2 (spec C9): the consent-only "Report to admin" action. It owns its
+          own dialog and its own POST — this row only gives it a place to live. */}
+      <ReportThreadAction threadId={item.id} title={item.title} />
       <DeleteThreadButton
         item={item}
         disabled={isStreaming}

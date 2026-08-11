@@ -22,6 +22,7 @@ import { TokenRollupTable } from "@/components/admin/usage/token-rollup-table";
 import { ToolMixPanel } from "@/components/admin/usage/tool-mix-panel";
 import { IncompleteRequestsDisclosure } from "@/components/admin/usage/incomplete-requests-disclosure";
 import { UsageRangePicker } from "@/components/admin/usage/usage-range-picker";
+import { EvalSection } from "@/components/admin/usage/eval-section";
 import {
   TOKENS_ONLY_NOTE,
   PRIVACY_NOTE,
@@ -88,10 +89,13 @@ export default function AdminUsagePage() {
         </>
       )}
 
-      {/* MOUNT POINT — task 3.2 renders the spec-C9 bounded live-eval + user-report
-          section HERE. Deliberately empty in 3.1: no C9 UI exists yet, and an empty
-          anchor is honest where a placeholder heading would not be. */}
-      <div id={EVAL_SECTION_MOUNT_ID} data-testid="assistant-eval-mount" />
+      {/* MOUNT POINT — the spec-C9 bounded live-eval + user-report section (task
+          3.2). It is the page's ONE labelled exception to the privacy note above:
+          admin-curated corpus prompts/excerpts, and rows for user-INITIATED reports
+          whose transcripts leave only by the deliberate per-row export. */}
+      <div id={EVAL_SECTION_MOUNT_ID} data-testid="assistant-eval-mount">
+        <EvalSection />
+      </div>
     </div>
   );
 }

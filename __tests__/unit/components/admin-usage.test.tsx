@@ -41,6 +41,23 @@ jest.mock("@/hooks/use-assistant-usage", () => {
 });
 const mockUsageCalls: any[] = [];
 
+// Task 3.2 (shared-file rule): the page now mounts the C9 eval section, whose own
+// query is exercised in assistant-eval-report.test.tsx. Stubbed to its EMPTY state
+// here so these C8 assertions keep testing the usage page, not the eval fetch.
+jest.mock("@/hooks/use-assistant-eval", () => {
+  const actual = jest.requireActual("@/hooks/use-assistant-eval");
+  return {
+    __esModule: true,
+    ...actual,
+    useAssistantEvalReports: () => ({
+      data: { latest: null, history: [], historyNote: "the 50 most recent reports" },
+      isLoading: false,
+      isError: false,
+      refetch: jest.fn(),
+    }),
+  };
+});
+
 import {
   USAGE_DEFINITIONS,
   TOOL_MIX_DEFINITION,
@@ -55,6 +72,7 @@ import { TokenRollupTable } from "@/components/admin/usage/token-rollup-table";
 import { ToolMixPanel } from "@/components/admin/usage/tool-mix-panel";
 import { IncompleteRequestsDisclosure } from "@/components/admin/usage/incomplete-requests-disclosure";
 import { UsageRangePicker } from "@/components/admin/usage/usage-range-picker";
+import { EVAL_SECTION_HEADING } from "@/components/admin/usage/eval-section";
 import AdminUsagePage from "@/app/(app)/admin/usage/page";
 import {
   DEFAULT_RANGE_DAYS,
@@ -97,6 +115,19 @@ function usageData(overrides: Partial<AssistantUsageResponse> = {}): AssistantUs
 /** The whole page's visible prose — the surface both prohibitions are asserted over. */
 function pageText(): string {
   return document.body.textContent ?? "";
+}
+
+/**
+ * The page's prose MINUS the C9 eval section (task 3.2). Spec C8 is precise about
+ * this: no PRIVATE thread content appears on this page, and the eval section —
+ * admin-curated corpus prompts and USER-INITIATED reports — is the one explicit,
+ * labelled exception. So the thread-content prohibition is asserted over everything
+ * OUTSIDE the anchor; the section itself is governed by its own tests.
+ */
+function textOutsideEvalSection(): string {
+  const clone = document.body.cloneNode(true) as HTMLElement;
+  clone.querySelector(`#${EVAL_SECTION_MOUNT_ID}`)?.remove();
+  return clone.textContent ?? "";
 }
 
 beforeEach(() => {
@@ -345,14 +376,19 @@ describe("AdminUsagePage", () => {
     expect(refetch).toHaveBeenCalled();
   });
 
-  it("leaves the C9 eval MOUNT POINT and builds no eval UI (Task 3.2 owns it)", () => {
+  // Task 3.2 (shared-file rule): the anchor 3.1 left empty is now FILLED. The pin
+  // flips from "no eval UI exists" to "the C9 section mounts HERE and nowhere else"
+  // — the mount point is still the contract, only its occupancy changed.
+  it("mounts the C9 eval section INSIDE the anchor (Task 3.2 owns the section)", () => {
     const { container } = render(<AdminUsagePage />);
 
-    expect(container.querySelector(`#${EVAL_SECTION_MOUNT_ID}`)).toBeInTheDocument();
-    expect(container.querySelector(`#${EVAL_SECTION_MOUNT_ID}`)?.children.length).toBe(0);
-    // "not reported" is legitimate page prose, so the eval markers are the C9-specific
-    // vocabulary the 3.2 section will introduce — none of it may exist yet.
-    expect(pageText()).not.toMatch(/verdict|corpus|run history|scored|evaluation/i);
+    const anchor = container.querySelector(`#${EVAL_SECTION_MOUNT_ID}`);
+    expect(anchor).toBeInTheDocument();
+    expect(anchor?.children.length).toBeGreaterThan(0);
+    expect(within(anchor as HTMLElement).getByText(EVAL_SECTION_HEADING)).toBeInTheDocument();
+    // The C9 vocabulary exists ONLY inside the anchor — the tokens-only rollup half
+    // of the page never grew eval prose.
+    expect(anchor?.textContent ?? "").toMatch(/evaluation/i);
   });
 
   it("states the tokens-only and no-thread-content postures", () => {
@@ -380,6 +416,6 @@ describe("AdminUsagePage", () => {
   it("shows NO private thread content — ids, counts and tokens only", () => {
     render(<AdminUsagePage />);
 
-    expect(pageText()).not.toMatch(/thread|conversation|message|prompt|transcript/i);
+    expect(textOutsideEvalSection()).not.toMatch(/thread|conversation|message|prompt|transcript/i);
   });
 });
