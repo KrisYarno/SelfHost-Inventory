@@ -231,6 +231,19 @@ const PERMANENT_EXEMPT: Exemption[] = [
       "trigger-only: delegates to lib/external-orders/sync, which records effective " +
       "order transitions via recordIngestion (Phase B, R-D4)",
   },
+  {
+    // Multiuser substrate D9 (moved out of PHASE_PENDING 2026-08-10): the route now
+    // writes assistant_threads / assistant_messages / assistant_requests, so the
+    // honest reading is no longer "writes nothing" — it is that this is assistant
+    // FEATURE state, not business state, and it is never migrating to recordChange.
+    path: "app/api/assistant/route.ts",
+    reason:
+      "assistant feature state: threads/messages/requests are user-owned chat " +
+      "persistence, not business state; zero business writes unchanged (the curated " +
+      "tool layer stays read-only + assistant_runs telemetry). v1.1 mutation tools " +
+      "will recordChange same-tx when they land — that is a TOOL-layer change, not " +
+      "this route's.",
+  },
 ];
 
 /**
@@ -251,13 +264,6 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
   // --- Task 12: orders group — MIGRATED (fulfill/unfulfill now recordChange) ---
   // --- Phase B: coverage closure (not in any A2 task group) ---
   // --- Lane 4 (orchestrator, plan Global Constraints) ---
-  {
-    path: "app/api/assistant/route.ts",
-    reason:
-      "assistant chat POST — reads via the curated tool layer + assistant_runs " +
-      "telemetry only; mutates no business state (spec D5: reads are not audit " +
-      "events). v1.1 mutation tools will recordChange same-tx when they land.",
-  },
   {
     path: "app/api/admin/ai-providers/[kind]/test/route.ts",
     reason:

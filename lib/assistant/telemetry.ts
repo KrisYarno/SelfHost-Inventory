@@ -31,6 +31,10 @@ export async function recordAssistantRun(row: {
   outcome: "ok" | "error" | "truncated";
   durationMs: number;
   resultBytes: number;
+  /** The chat turn that spent this tool call (contract pack T5). The assistant
+   *  route threads its claim's request id through; the MCP surface passes nothing,
+   *  so its rows are NULL by construction. */
+  requestId?: number;
 }): Promise<void> {
   try {
     const created = await prisma.assistantRun.create({
@@ -44,6 +48,7 @@ export async function recordAssistantRun(row: {
         outcome: row.outcome,
         durationMs: row.durationMs,
         resultBytes: row.resultBytes,
+        requestId: row.requestId ?? null,
       },
       select: { id: true },
     });
