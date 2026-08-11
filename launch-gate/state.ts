@@ -22,7 +22,11 @@ import fs from "node:fs";
 import path from "node:path";
 
 export type Session = {
-  user: "memberA" | "zeroUser" | "admin";
+  // Widened by Task 1.8 (declared): the seed gained a FOURTH actor (pack REV-9 F-3),
+  // and `driver.loginOnce` indexes `GATE_SEED.actors` by exactly this union — so the
+  // union and the seed manifest's actor keys are one contract in two files. state.ts
+  // stays the dependency LEAF (no import of seed.ts, not even type-only).
+  user: "memberA" | "zeroUser" | "admin" | "noFactsUser";
   cookieHeader: string;
   csrfToken: string;
 };
@@ -34,6 +38,16 @@ export type HarnessState = {
   containerName: string;
   sessions: Record<Session["user"], Session>;
   postCounts: Record<string, Record<Session["user"], number>>;
+  /**
+   * Epoch-ms of recent `POST /api/assistant` calls, ACROSS ALL CALLERS (Task 1.8,
+   * declared). The route's own 30/hr per-USER limiter is what `postCounts` models;
+   * `middleware.ts:43` additionally runs `enforceRateLimit(request,
+   * "middleware:/api/assistant")` with lib/rateLimit's DEFAULTS — 30 requests per 60
+   * SECONDS, keyed by IP, so every seeded caller shares ONE bucket. That is the
+   * binding constraint for a matrix this size, and it is a wall-clock window rather
+   * than a count, so it needs its own bookkeeping.
+   */
+  postTimestamps: number[];
   warmupIds: { threadIds: string[]; requestIds: number[]; runIds: number[] };
 };
 
@@ -47,7 +61,12 @@ export const GATE_DB_PASSWORD = "proof";
 
 /** Actor keys in a fixed order — the POST-budget bookkeeping and the session map
  *  both key off these. */
-export const GATE_USERS: ReadonlyArray<Session["user"]> = ["memberA", "zeroUser", "admin"];
+export const GATE_USERS: ReadonlyArray<Session["user"]> = [
+  "memberA",
+  "zeroUser",
+  "admin",
+  "noFactsUser",
+];
 
 const STATE_ENV = "LAUNCH_GATE_STATE_FILE";
 
@@ -92,6 +111,7 @@ export function initialState(containerName: string): HarnessState {
     containerName,
     sessions: {} as Record<Session["user"], Session>,
     postCounts: {},
+    postTimestamps: [],
     warmupIds: { threadIds: [], requestIds: [], runIds: [] },
   };
 }

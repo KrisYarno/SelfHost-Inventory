@@ -1,0 +1,18 @@
+{
+  "id": "life-nofacts-sales",
+  "steps": [
+    {
+      "toolCalls": [
+        {
+          "name": "get_sales",
+          "input": { "groupBy": "product", "relativeDays": 30, "includeZeroRows": true }
+        }
+      ],
+      "usage": { "prompt_eval_count": 1316, "eval_count": 14 }
+    },
+    {
+      "text": "No attributed sales data for this caller.",
+      "usage": { "prompt_eval_count": 1544, "eval_count": 11 }
+    }
+  ]
+}

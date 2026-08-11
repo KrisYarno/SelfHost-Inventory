@@ -1,0 +1,9 @@
+{
+  "id": "life-simple",
+  "steps": [
+    {
+      "text": "Life simple turn complete.",
+      "usage": { "prompt_eval_count": 1204, "eval_count": 9 }
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "id": "tel-scope-echo",
+  "steps": [
+    {
+      "text": "Membership scope echoed.",
+      "usage": { "prompt_eval_count": 409, "eval_count": 13 }
+    }
+  ]
+}

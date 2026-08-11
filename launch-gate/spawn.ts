@@ -524,6 +524,11 @@ export async function restartApp(): Promise<void> {
       (typeof GATE_USERS)[number],
       number
     >;
+    // BOTH limiters are in-process Maps in the app that just died (lib/rateLimit:18),
+    // so the middleware's 30-per-60s /api/assistant bucket is empty again too (Task
+    // 1.8, declared). Keeping stale timestamps would make the driver wait out a window
+    // that no longer exists.
+    state.postTimestamps = [];
   });
 }
 

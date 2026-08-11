@@ -1,0 +1,10 @@
+{
+  "id": "life-fail-after",
+  "steps": [
+    {
+      "text": "Partial before the truncated stream.",
+      "usage": { "prompt_eval_count": 1223, "eval_count": 8 },
+      "hold": { "ms": 1200, "then": "eof" }
+    }
+  ]
+}

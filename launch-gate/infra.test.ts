@@ -24,7 +24,7 @@ import { asJson, canonicalJson, eventsOfType, settleTurn } from "./assertions";
 import { gatePrompt, loadChoreographies, parseChoreography } from "./choreography";
 import { apiGet, loginOnce, postTurn, type TurnResult } from "./driver";
 import { oracleQuery, tableDigest } from "./oracle";
-import { GATE_MODEL, GATE_SEED } from "./seed";
+import { GATE_ACTOR_KEYS, GATE_MODEL, GATE_SEED } from "./seed";
 import { GATE_CONTAINER_PREFIX, GATE_PORTS, findOrphans } from "./spawn";
 import { readState } from "./state";
 
@@ -105,7 +105,11 @@ describe("harness infrastructure", () => {
 
   it("migrated and seeded the throwaway database", async () => {
     const users = await oracleQuery<{ n: number }>("SELECT COUNT(*) AS n FROM users");
-    expect(Number(users[0].n)).toBe(3);
+    // Pinned against the MANIFEST, not a literal (Task 1.8, declared — the F-3 fourth
+    // actor moved this from 3 to 4 and a hand-kept literal would move again). The
+    // assertion still bites: it is the DB row count versus the manifest's actor list,
+    // so a seed that silently skipped an actor fails here.
+    expect(Number(users[0].n)).toBe(GATE_ACTOR_KEYS.length);
     const setting = await oracleQuery<{ value: string }>(
       "SELECT value FROM system_settings WHERE `key` = ?",
       ["aiSurfaceConfig"],

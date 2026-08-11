@@ -1,0 +1,10 @@
+{
+  "id": "life-fail-before",
+  "steps": [
+    {
+      "text": "This text is never written to the wire.",
+      "usage": { "prompt_eval_count": 1218, "eval_count": 8 },
+      "hold": { "ms": 1200, "then": "eof", "silent": true }
+    }
+  ]
+}

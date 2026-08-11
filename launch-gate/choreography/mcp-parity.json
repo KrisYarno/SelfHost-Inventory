@@ -1,0 +1,13 @@
+{
+  "id": "mcp-parity",
+  "steps": [
+    {
+      "toolCalls": [{ "name": "get_inventory_summary", "input": {} }],
+      "usage": { "prompt_eval_count": 1233, "eval_count": 10 }
+    },
+    {
+      "text": "Chat-surface parity call complete.",
+      "usage": { "prompt_eval_count": 1461, "eval_count": 9 }
+    }
+  ]
+}

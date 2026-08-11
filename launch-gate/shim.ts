@@ -222,6 +222,11 @@ function readBody(req: http.IncomingMessage): Promise<unknown> {
 
 function sendJson(res: http.ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
+  // ADDITIVE (Task 1.8, declared): "a mis-seeded harness fails loudly" (spec C7 item 3)
+  // was only half true — the 500 went back to the provider, where the route masks it to
+  // PROVIDER_ERROR and the reason is lost. The shim's own log is the only place that
+  // reason can survive, and it costs nothing on the happy path.
+  if (status >= 500) console.error(`[gate-shim] ${status} ${body}`);
   res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
   res.end(body);
 }

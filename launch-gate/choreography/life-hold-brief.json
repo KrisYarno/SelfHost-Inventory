@@ -1,0 +1,10 @@
+{
+  "id": "life-hold-brief",
+  "steps": [
+    {
+      "text": "Held turn complete.",
+      "usage": { "prompt_eval_count": 1211, "eval_count": 7 },
+      "hold": { "ms": 6000, "then": "complete" }
+    }
+  ]
+}

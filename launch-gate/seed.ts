@@ -41,8 +41,14 @@ export type GateActor = {
   companyIds: readonly string[];
 };
 
+/** Every seeded actor key, in a fixed order. The seed writer iterates THIS list, so
+ *  adding an actor to the manifest is the only edit an actor needs. */
+export const GATE_ACTOR_KEYS = ["memberA", "zeroUser", "admin", "noFactsUser"] as const;
+
+export type GateActorKey = (typeof GATE_ACTOR_KEYS)[number];
+
 export type GateSeedManifest = {
-  actors: Record<"memberA" | "zeroUser" | "admin", GateActor>;
+  actors: Record<GateActorKey, GateActor>;
   companies: { A: string; B: string; noSales: string };
   apiTokens: Record<"memberA" | "admin" | "revoked", { id: string; plaintext: string }>;
   fixtures: {
@@ -117,6 +123,20 @@ export const GATE_SEED: GateSeedManifest = {
       email: "gate-admin@advancedresearchpep.com",
       password: "GateAdmin-2026",
       companyIds: [COMPANY_A, COMPANY_B],
+    },
+    // --- ADDITIVE (Task 1.8, declared — pack REV-9 F-3) ---
+    // The FOURTH actor, and the only one that closes 2j's fourth branch: a caller
+    // with a REAL company membership whose company has ZERO sales facts. zeroUser
+    // cannot produce it (no memberships at all -> the empty-membership
+    // short-circuit returns before any zero row is synthesized) and memberA cannot
+    // either (it holds company A, which HAS facts, so its salesDataStart is never
+    // null). Only "companies, but nothing recorded in any of them" reaches
+    // `salesDataStart == null` with a non-empty scope.
+    noFactsUser: {
+      userId: 9004,
+      email: "gate-no-facts@advancedresearchpep.com",
+      password: "GateNoFacts-2026",
+      companyIds: [COMPANY_NO_SALES],
     },
   },
   companies: { A: COMPANY_A, B: COMPANY_B, noSales: COMPANY_NO_SALES },
@@ -213,12 +233,10 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
 
     // --- Actors -------------------------------------------------------------
     const hashes = await Promise.all(
-      (["memberA", "zeroUser", "admin"] as const).map((key) =>
-        hashPassword(GATE_SEED.actors[key].password),
-      ),
+      GATE_ACTOR_KEYS.map((key) => hashPassword(GATE_SEED.actors[key].password)),
     );
     await prisma.user.createMany({
-      data: (["memberA", "zeroUser", "admin"] as const).map((key, index) => ({
+      data: GATE_ACTOR_KEYS.map((key, index) => ({
         id: GATE_SEED.actors[key].userId,
         username: key.toLowerCase(),
         email: GATE_SEED.actors[key].email,
@@ -238,7 +256,7 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
       ],
     });
     await prisma.userCompany.createMany({
-      data: (["memberA", "zeroUser", "admin"] as const).flatMap((key) =>
+      data: GATE_ACTOR_KEYS.flatMap((key) =>
         GATE_SEED.actors[key].companyIds.map((companyId) => ({
           userId: GATE_SEED.actors[key].userId,
           companyId,

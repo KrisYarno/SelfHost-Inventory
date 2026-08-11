@@ -1,0 +1,17 @@
+{
+  "id": "tel-usage-sums",
+  "steps": [
+    {
+      "toolCalls": [{ "name": "get_inventory_summary", "input": {} }],
+      "usage": { "prompt_eval_count": 101, "eval_count": 11 }
+    },
+    {
+      "toolCalls": [{ "name": "get_stock", "input": { "productId": 9101 } }],
+      "usage": { "prompt_eval_count": 211, "eval_count": 22 }
+    },
+    {
+      "text": "Usage sums recorded.",
+      "usage": { "prompt_eval_count": 307, "eval_count": 33 }
+    }
+  ]
+}

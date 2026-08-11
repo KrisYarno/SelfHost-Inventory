@@ -148,6 +148,69 @@ export async function loginOnce(user: Session["user"]): Promise<Session> {
   return session;
 }
 
+/**
+ * THE MIDDLEWARE WINDOW (Task 1.8, declared — a second limiter the POST budget did
+ * not model).
+ *
+ * `middleware.ts:43` runs `enforceRateLimit(request, "middleware:/api/assistant")`
+ * with lib/rateLimit's DEFAULTS: 30 requests per 60 SECONDS, keyed by IP. Every
+ * seeded caller shares one loopback IP, so this is a SUITE-WIDE budget measured in
+ * wall clock — a completely different shape from the route's own 30/hr per-user
+ * limiter (`POST_BUDGET_PER_GENERATION`), and the binding one once the matrix drives
+ * ~40 turns. It is also invisible from any single test file: three fast files in a
+ * row can exhaust it for a fourth that has spent almost nothing.
+ *
+ * The harness RESPECTS it rather than working around it (no test-only override, no
+ * new product seam): a POST that would breach the window WAITS for the oldest entry
+ * to age out. Timestamps live in the state file because each jest test file gets a
+ * fresh module registry and the window spans files.
+ */
+const MIDDLEWARE_WINDOW_MS = 60_000;
+const MIDDLEWARE_LIMIT = 30;
+/** Two spare requests, the same headroom `POST_BUDGET_PER_GENERATION` keeps against
+ *  the route limiter: the harness fails or waits BEFORE the product refuses. */
+const MIDDLEWARE_EFFECTIVE_LIMIT = MIDDLEWARE_LIMIT - 2;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Reserve a slot in the trailing-60s window, waiting (bounded by the window itself)
+ *  when it is full. Returns the milliseconds spent waiting. */
+async function reserveMiddlewareSlot(): Promise<number> {
+  const startedAt = Date.now();
+  let waitedAtAll = false;
+  for (;;) {
+    const { result } = updateState((state) => {
+      const now = Date.now();
+      const recent = (state.postTimestamps ?? []).filter(
+        (stamp) => now - stamp < MIDDLEWARE_WINDOW_MS,
+      );
+      if (recent.length >= MIDDLEWARE_EFFECTIVE_LIMIT) {
+        state.postTimestamps = recent;
+        return MIDDLEWARE_WINDOW_MS - (now - recent[0]) + 250;
+      }
+      recent.push(now);
+      state.postTimestamps = recent;
+      return 0;
+    });
+    if (result <= 0) {
+      const waited = Date.now() - startedAt;
+      // Only when the window was ACTUALLY full — otherwise this logs the microsecond
+      // the state-file lock took and reads like a throttle that is always engaging.
+      if (waitedAtAll) {
+        console.log(
+          `[launch-gate] middleware window: waited ${waited}ms for the 30-per-60s ` +
+            "/api/assistant bucket to roll over",
+        );
+      }
+      return waited;
+    }
+    waitedAtAll = true;
+    await sleep(result);
+  }
+}
+
 /** Charge one chat POST against the caller's budget for the CURRENT generation. */
 function chargePost(user: Session["user"]): void {
   const { result } = updateState((state) => {
@@ -268,6 +331,7 @@ export async function postTurn(
   options: PostTurnOptions = {},
 ): Promise<TurnResult> {
   chargePost(session.user);
+  await reserveMiddlewareSlot();
   const response = await fetch(`${APP_BASE_URL}/api/assistant`, {
     method: "POST",
     redirect: "manual",
