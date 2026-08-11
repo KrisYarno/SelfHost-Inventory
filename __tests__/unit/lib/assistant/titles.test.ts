@@ -506,6 +506,41 @@ describe("generateThreadTitle: NEVER throws into its caller (detached dispatch)"
     expect(logged).not.toContain("connection lost");
   });
 
+  // W2S-1: the request row must reach a TERMINAL state even when the TITLE WRITE
+  // fails — a row stranded `running` is untruthful telemetry, and the thread can
+  // never be backfilled (later-fallback defers to a successful first chat request).
+  it("W2S-1: a generated-title WRITE failure still finalizes the row ok w/ usage (the spend happened)", async () => {
+    db.assistantThread.updateMany.mockRejectedValue(new TypeError("connection lost"));
+
+    await expect(generateThreadTitle(CREATING_JOB)).resolves.toBeUndefined();
+    expect(mockFinalizeTitleRequest).toHaveBeenCalledTimes(1);
+    expect(mockFinalizeTitleRequest.mock.calls[0][1]).toMatchObject({
+      ok: true,
+      usage: { inputTokens: 31, outputTokens: 6, totalTokens: 37 },
+    });
+  });
+
+  it("W2S-1: a FALLBACK-write failure on the failed-call path still finalizes error/PROVIDER_ERROR", async () => {
+    mockGenerateText.mockRejectedValue(new Error("provider down"));
+    db.assistantThread.updateMany.mockRejectedValue(new TypeError("connection lost"));
+
+    await expect(generateThreadTitle(CREATING_JOB)).resolves.toBeUndefined();
+    expect(mockFinalizeTitleRequest).toHaveBeenCalledTimes(1);
+    expect(mockFinalizeTitleRequest.mock.calls[0][1]).toMatchObject({
+      ok: false,
+      errorCode: "PROVIDER_ERROR",
+    });
+  });
+
+  // W2S-3 companion: the named sentinels must appear BY NAME in the name-only log —
+  // an anonymous Error logging as "Error" is exactly how F-7 stayed invisible.
+  it("logs EmptyTitleResult by NAME when the model answers blank", async () => {
+    mockGenerateText.mockResolvedValue(generated("   "));
+
+    await generateThreadTitle(CREATING_JOB);
+    expect(JSON.stringify(errorSpy.mock.calls)).toContain("EmptyTitleResult");
+  });
+
   it("swallows a database failure on the backfill path", async () => {
     db.assistantThread.findFirst.mockRejectedValue(new Error("connection lost"));
 

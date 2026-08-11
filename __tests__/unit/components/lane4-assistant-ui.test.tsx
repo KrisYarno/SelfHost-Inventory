@@ -10,7 +10,7 @@
 // (plain React text) — neither needs the real renderer.
 
 import * as React from "react";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 jest.mock("react-markdown", () => ({
@@ -717,6 +717,46 @@ describe("AssistantPage states (D-B7)", () => {
     expect(
       await screen.findByText("The assistant isn’t set up yet. Ask an admin to configure an AI provider."),
     ).toBeInTheDocument();
+  });
+
+  // W2S-2: the sidebar's list cache is 5-minutes stale with focus refetch off, so
+  // the PAGE must refresh it on activity: every settle (streaming -> idle)
+  // invalidates the threads list at once (updatedAt reorder) and once more after a
+  // delay (the DETACHED C6 title lands a few seconds post-turn).
+  test("W2S-2: a stream SETTLE invalidates the threads list now and again after the title window", () => {
+    jest.useFakeTimers();
+    try {
+      useChatMock.mockReturnValue(chatReturn({ status: "streaming" }));
+      const qc = new QueryClient({
+        defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+      });
+      const invalidate = jest.spyOn(qc, "invalidateQueries");
+      const view = render(
+        <QueryClientProvider client={qc}>
+          <AssistantPage />
+        </QueryClientProvider>,
+      );
+      expect(invalidate).not.toHaveBeenCalled();
+
+      useChatMock.mockReturnValue(chatReturn({ status: "ready" }));
+      view.rerender(
+        <QueryClientProvider client={qc}>
+          <AssistantPage />
+        </QueryClientProvider>,
+      );
+      const listCalls = () =>
+        invalidate.mock.calls.filter(
+          (call) => JSON.stringify(call[0]?.queryKey) === JSON.stringify(["assistant-threads"]),
+        ).length;
+      expect(listCalls()).toBe(1);
+
+      act(() => {
+        jest.advanceTimersByTime(8_000);
+      });
+      expect(listCalls()).toBe(2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   // U2: class-invariant — no page container declares a fixed min-width wider than

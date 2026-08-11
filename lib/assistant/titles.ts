@@ -128,23 +128,35 @@ async function runModelTitle(job: Extract<TitleJob, { mode: "creating-model" }>)
     generated = { requestId, title, usage: toUsageTriple(result.usage) };
   } catch (err) {
     console.error("[assistant] title call failed", err instanceof Error ? err.name : "unknown");
-    await writeTitleIfUntitled(job.threadId, sanitize(job.firstUserText, FALLBACK_MAX_CHARS));
-    if (requestId !== null) {
-      await finalizeTitleRequest(requestId, {
-        ok: false,
-        errorCode: "PROVIDER_ERROR",
-        durationMs: Date.now() - startedAt,
-      });
+    // W2S-1: the row must reach a TERMINAL state even when the fallback WRITE
+    // fails — finalize rides a finally so a stranded `running` row is impossible;
+    // the write error still propagates to the outer detached catch for logging.
+    try {
+      await writeTitleIfUntitled(job.threadId, sanitize(job.firstUserText, FALLBACK_MAX_CHARS));
+    } finally {
+      if (requestId !== null) {
+        await finalizeTitleRequest(requestId, {
+          ok: false,
+          errorCode: "PROVIDER_ERROR",
+          durationMs: Date.now() - startedAt,
+        });
+      }
     }
     return;
   }
 
-  await writeTitleIfUntitled(job.threadId, generated.title);
-  await finalizeTitleRequest(generated.requestId, {
-    ok: true,
-    usage: generated.usage,
-    durationMs: Date.now() - startedAt,
-  });
+  // W2S-1: same finally discipline on the success path. The finalize records the
+  // SPEND truthfully (the model call succeeded) even if the title write fails —
+  // the thread then stays NULL-titled, which is visible and at least honest.
+  try {
+    await writeTitleIfUntitled(job.threadId, generated.title);
+  } finally {
+    await finalizeTitleRequest(generated.requestId, {
+      ok: true,
+      usage: generated.usage,
+      durationMs: Date.now() - startedAt,
+    });
+  }
 }
 
 /**

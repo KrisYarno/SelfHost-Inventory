@@ -34,7 +34,8 @@ import type { UIMessage } from "ai";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Composer } from "@/components/assistant/composer";
 import { Transcript } from "@/components/assistant/transcript";
-import { ThreadSidebar } from "@/components/assistant/thread-sidebar";
+import { ThreadSidebar, THREADS_QUERY_KEY } from "@/components/assistant/thread-sidebar";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useAssistantChat,
   classifyChatError,
@@ -198,9 +199,14 @@ function RateLimitedPanel({ retryAt }: { retryAt?: string }) {
   );
 }
 
+/** W2S-2: the DETACHED C6 title lands a few seconds after a turn settles — one
+ *  delayed list refresh inside the documented 0-10s window catches it. */
+const TITLE_REFRESH_DELAY_MS = 8_000;
+
 export default function AssistantPage() {
   const { data: session } = useSession();
   const isAdmin = !!session?.user?.isAdmin;
+  const queryClient = useQueryClient();
 
   const {
     messages,
@@ -277,6 +283,9 @@ export default function AssistantPage() {
           const detail = await fetchThreadDetail(id);
           if (cancelled || detail.activeRequest) return;
           setBusyThreadId(null);
+          // W2S-2: the other session's turn just finished — its title/reorder is
+          // exactly what the cached list is now missing.
+          void queryClient.invalidateQueries({ queryKey: THREADS_QUERY_KEY });
           openThreadRef.current(id, toUIMessages(detail.messages));
         } catch {
           // A transient failure keeps the banner up: the honest statement is
@@ -288,7 +297,8 @@ export default function AssistantPage() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [busyThreadId]);
+    // queryClient is provider-stable — listing it cannot restart the 2s clock.
+  }, [busyThreadId, queryClient]);
 
   const handleNewThread = React.useCallback(() => {
     loadSeqRef.current += 1; // abandon any in-flight load
@@ -316,6 +326,24 @@ export default function AssistantPage() {
   const errorInfo = classifyChatError(error);
   const rateLimited = errorInfo?.kind === "rate-limited";
   const streaming = status === "streaming" || status === "submitted";
+
+  // W2S-2: the sidebar's list cache is 5-minutes stale with focus refetch off —
+  // without this, new titles and updatedAt-DESC reordering sit stale far beyond
+  // the documented window. Every SETTLE (streaming -> idle) invalidates the list
+  // immediately (the reorder) and ONCE more after the title window (the detached
+  // C6 title). The cleanup clears the pending timer if a next turn starts early —
+  // that turn's own settle re-arms it.
+  const wasStreamingRef = React.useRef(false);
+  React.useEffect(() => {
+    const settled = wasStreamingRef.current && !streaming;
+    wasStreamingRef.current = streaming;
+    if (!settled) return;
+    void queryClient.invalidateQueries({ queryKey: THREADS_QUERY_KEY });
+    const timer = setTimeout(() => {
+      void queryClient.invalidateQueries({ queryKey: THREADS_QUERY_KEY });
+    }, TITLE_REFRESH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [streaming, queryClient]);
   // The readiness probe (configured === false) forks the panel BEFORE the first
   // submit; the reactive 409 (errorInfo unconfigured) stays as the fallback.
   const unconfigured = configured === false || errorInfo?.kind === "unconfigured";

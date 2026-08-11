@@ -52,10 +52,11 @@ import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import type { ThreadListResponse } from "@/lib/assistant/thread-contracts";
 
-/** The one cache key for the thread list. Module-private on purpose: nothing
- *  outside this file may reach into the list cache (the page talks to the
- *  sidebar through props, never through the query client). */
-const THREADS_QUERY_KEY = ["assistant-threads"] as const;
+/** The one cache key for the thread list. Exported for EXACTLY ONE outside
+ *  consumer (W2S-2): the page's freshness effect, which invalidates the list on
+ *  stream settle + busy-clear because the 5-minute staleTime would otherwise show
+ *  stale titles and ordering. Everything else still talks through props. */
+export const THREADS_QUERY_KEY = ["assistant-threads"] as const;
 
 /** The C5 page size (the route clamps anything above 50 and echoes what it used). */
 const PAGE_LIMIT = 20;
