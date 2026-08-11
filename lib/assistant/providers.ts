@@ -42,8 +42,15 @@ function unconfigured(): never {
  * `aiSurfaceConfig` setting, picks the surface override or the default, verifies the
  * provider row is enabled with its credential and lists the model, then builds the
  * languageModel via a per-request registry. Any gap -> AppError('AI_UNCONFIGURED').
+ *
+ * Surface fallback is a CHAIN (spec C6): `"title"` falls back THROUGH the assistant
+ * override before reaching the default, so routing the assistant to a provider
+ * routes its titles there too — one decision, not two. `"assistant"` is unaffected
+ * (its first two links are the same lookup).
  */
-export async function resolveSurfaceModel(surface: "assistant"): Promise<ResolvedModel> {
+export async function resolveSurfaceModel(
+  surface: "assistant" | "title",
+): Promise<ResolvedModel> {
   const setting = await prisma.systemSetting.findUnique({
     where: { key: AI_SURFACE_CONFIG_KEY },
     select: { value: true },
@@ -57,7 +64,7 @@ export async function resolveSurfaceModel(surface: "assistant"): Promise<Resolve
     return unconfigured();
   }
 
-  const ref = config.surfaces?.[surface] ?? config.default;
+  const ref = config.surfaces?.[surface] ?? config.surfaces?.assistant ?? config.default;
 
   const provider = await prisma.aiProvider.findUnique({ where: { kind: ref.providerKind } });
   if (!provider || !provider.isEnabled) return unconfigured();

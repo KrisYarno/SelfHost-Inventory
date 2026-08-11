@@ -138,3 +138,73 @@ describe("resolveSurfaceModel: happy path + per-request registry", () => {
     expect(PROVIDER_TIMEOUT_MS).toBe(60_000);
   });
 });
+
+// Task 2.3 (spec C6): the surface union widens to "assistant" | "title", and title
+// resolution is a CHAIN — its own override, else the assistant override, else the
+// default. Routing the assistant somewhere routes its titles there too unless the
+// title surface is explicitly set (API-only in v1).
+describe("resolveSurfaceModel: the title surface (C6)", () => {
+  it("prefers an explicit title override", async () => {
+    db.systemSetting.findUnique.mockResolvedValue(
+      configRow({
+        default: { providerKind: "ANTHROPIC", model: "claude-sonnet-4-5" },
+        surfaces: {
+          assistant: { providerKind: "OPENAI", model: "gpt-x" },
+          title: { providerKind: "OLLAMA", model: "llama3.2" },
+        },
+      }),
+    );
+    db.aiProvider.findUnique.mockResolvedValue(
+      providerRow({
+        kind: "OLLAMA",
+        encryptedApiKey: null,
+        baseUrl: "http://ollama:11434",
+        enabledModels: ["llama3.2"],
+      }),
+    );
+
+    const r = await resolveSurfaceModel("title");
+    expect({ kind: r.kind, model: r.model }).toEqual({ kind: "OLLAMA", model: "llama3.2" });
+    expect(mockLanguageModel).toHaveBeenCalledWith("ollama:llama3.2");
+  });
+
+  it("falls back THROUGH the assistant override when no title override exists", async () => {
+    db.systemSetting.findUnique.mockResolvedValue(
+      configRow({
+        default: { providerKind: "ANTHROPIC", model: "claude-sonnet-4-5" },
+        surfaces: { assistant: { providerKind: "OPENAI", model: "gpt-x" } },
+      }),
+    );
+    db.aiProvider.findUnique.mockResolvedValue(
+      providerRow({ kind: "OPENAI", encryptedApiKey: "enc", enabledModels: ["gpt-x"] }),
+    );
+
+    const r = await resolveSurfaceModel("title");
+    expect({ kind: r.kind, model: r.model }).toEqual({ kind: "OPENAI", model: "gpt-x" });
+  });
+
+  it("falls back to the default when there are no surface overrides at all", async () => {
+    db.systemSetting.findUnique.mockResolvedValue(configRow(VALID_CONFIG));
+    db.aiProvider.findUnique.mockResolvedValue(providerRow());
+
+    const r = await resolveSurfaceModel("title");
+    expect({ kind: r.kind, model: r.model }).toEqual({
+      kind: "ANTHROPIC",
+      model: "claude-sonnet-4-5",
+    });
+  });
+
+  it("degrades to AI_UNCONFIGURED when the title-routed provider is disabled", async () => {
+    db.systemSetting.findUnique.mockResolvedValue(
+      configRow({
+        default: { providerKind: "ANTHROPIC", model: "claude-sonnet-4-5" },
+        surfaces: { title: { providerKind: "OLLAMA", model: "llama3.2" } },
+      }),
+    );
+    db.aiProvider.findUnique.mockResolvedValue(
+      providerRow({ kind: "OLLAMA", isEnabled: false, enabledModels: ["llama3.2"] }),
+    );
+
+    await expect(resolveSurfaceModel("title")).rejects.toMatchObject({ code: "AI_UNCONFIGURED" });
+  });
+});

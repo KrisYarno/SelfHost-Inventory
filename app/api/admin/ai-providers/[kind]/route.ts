@@ -39,7 +39,9 @@ function toModels(value: unknown): string[] {
 }
 
 /** The set of provider kinds the current routing config references (default +
- *  optional assistant override). Empty when routing is unset/unparseable. */
+ *  optional assistant override + optional C6 title override). Empty when routing is
+ *  unset/unparseable. A title-routed provider is protected exactly like an
+ *  assistant-routed one: disabling it (or removing its key) would break titles. */
 function routedKinds(rawSetting: string | null | undefined): Set<ProviderKind> {
   if (!rawSetting) return new Set();
   try {
@@ -47,6 +49,7 @@ function routedKinds(rawSetting: string | null | undefined): Set<ProviderKind> {
     const kinds = new Set<ProviderKind>();
     kinds.add(config.default.providerKind);
     if (config.surfaces?.assistant) kinds.add(config.surfaces.assistant.providerKind);
+    if (config.surfaces?.title) kinds.add(config.surfaces.title.providerKind);
     return kinds;
   } catch {
     return new Set();

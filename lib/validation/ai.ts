@@ -19,14 +19,22 @@ const providerRefSchema = z.object({
   model: z.string().min(1).max(64),
 });
 
+/** `surfaces.title` is the C6 cheaper-title route: OPTIONAL, API-settable only (the
+ *  admin panel does not expose it in v1), and resolved through the assistant
+ *  override before the default (lib/assistant/providers.ts). */
 export type AiSurfaceConfig = {
   default: { providerKind: ProviderKind; model: string };
-  surfaces?: { assistant?: { providerKind: ProviderKind; model: string } };
+  surfaces?: {
+    assistant?: { providerKind: ProviderKind; model: string };
+    title?: { providerKind: ProviderKind; model: string };
+  };
 };
 
 export const AiSurfaceConfigSchema: z.ZodType<AiSurfaceConfig> = z.object({
   default: providerRefSchema,
-  surfaces: z.object({ assistant: providerRefSchema.optional() }).optional(),
+  surfaces: z
+    .object({ assistant: providerRefSchema.optional(), title: providerRefSchema.optional() })
+    .optional(),
 });
 
 /**
@@ -39,7 +47,12 @@ export async function validateSurfaceConfig(
   tx: Prisma.TransactionClient,
   next: AiSurfaceConfig,
 ): Promise<void> {
-  const refs = [next.default, ...(next.surfaces?.assistant ? [next.surfaces.assistant] : [])];
+  const refs = [
+    next.default,
+    ...(next.surfaces?.assistant ? [next.surfaces.assistant] : []),
+    // C6: a title route is spend like any other — same invariants, no exemption.
+    ...(next.surfaces?.title ? [next.surfaces.title] : []),
+  ];
   for (const ref of refs) {
     const provider = await tx.aiProvider.findUnique({ where: { kind: ref.providerKind } });
     if (!provider) {

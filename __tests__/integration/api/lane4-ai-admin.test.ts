@@ -236,6 +236,46 @@ describe("PUT /api/admin/ai-providers/[kind] — key semantics", () => {
     expect(tx.aiProvider.upsert).not.toHaveBeenCalled();
   });
 
+  // Task 2.3 (spec C6): the title surface is API-settable routing, so the
+  // disable/remove-key guard must count it. `routedKinds` stays module-private —
+  // the observable contract is the route's 400, which is what these assert.
+  it("disabling a provider routed ONLY by the TITLE surface is blocked (C6)", async () => {
+    tx.aiProvider.findUnique.mockResolvedValue(existing());
+    tx.systemSetting.findUnique.mockResolvedValue({
+      value: JSON.stringify({
+        default: { providerKind: "OPENAI", model: "gpt-x" },
+        surfaces: { title: { providerKind: "ANTHROPIC", model: "m1" } },
+      }),
+    });
+
+    const resp = await providerPUT(
+      mkReq("http://t/api/admin/ai-providers/ANTHROPIC", "PUT", { isEnabled: false }),
+      { params: { kind: "ANTHROPIC" } } as any,
+    );
+
+    expect(resp.status).toBe(400);
+    expect((await resp.json()).error).toContain("Choose another model in Routing defaults");
+    expect(tx.aiProvider.upsert).not.toHaveBeenCalled();
+  });
+
+  it("removeKey on a TITLE-routed provider is rejected too (same routed set)", async () => {
+    tx.aiProvider.findUnique.mockResolvedValue(existing());
+    tx.systemSetting.findUnique.mockResolvedValue({
+      value: JSON.stringify({
+        default: { providerKind: "OPENAI", model: "gpt-x" },
+        surfaces: { title: { providerKind: "ANTHROPIC", model: "m1" } },
+      }),
+    });
+
+    const resp = await providerPUT(
+      mkReq("http://t/api/admin/ai-providers/ANTHROPIC", "PUT", { removeKey: true }),
+      { params: { kind: "ANTHROPIC" } } as any,
+    );
+
+    expect(resp.status).toBe(400);
+    expect(tx.aiProvider.upsert).not.toHaveBeenCalled();
+  });
+
   it("enabling with zero models is rejected", async () => {
     tx.aiProvider.findUnique.mockResolvedValue(existing({ enabledModels: [], isEnabled: false }));
 
