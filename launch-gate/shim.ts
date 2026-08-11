@@ -20,12 +20,30 @@
  *   - `done_reason` maps to the finish reason, but a turn that emitted tool calls is
  *     reported as `tool-calls` regardless.
  *
- * SCENARIO DISPATCH: the `GATE:<id>` prefix on the LAST user message. The step index
- * is the number of assistant messages carrying `tool_calls` AFTER that last user
- * message — the CURRENT turn only (earlier turns' tool messages must not advance it,
- * G2D-2) and never `role: "tool"` messages (one per result would double-count a
- * parallel-packed step, G2C-6). Any non-GATE prompt is a title call and gets
- * TITLE_SCRIPT. An unknown GATE id is a 500: a mis-seeded harness fails loudly.
+ * DISPATCH, in order:
+ *
+ *  1. THE TITLE PATH, keyed on the C6 SYSTEM PROMPT (pack REV-13 S6-A, fixed by Task
+ *     2.4a). Spec C7 item 3 originally keyed it on the ABSENCE of a `GATE:` prefix —
+ *     which is wrong for every gate drive: a C6 title call's user content is the
+ *     thread's FIRST USER TEXT, and in this harness that text IS the `GATE:<id>`
+ *     prompt, verbatim. Under the old rule every title call landed on the scenario
+ *     path, was answered with a terminal frame whose content is deliberately empty,
+ *     and failed — so no thread could ever get a model title and the FAILING-title
+ *     case was indistinguishable from the succeeding one. The system prompt is the
+ *     honest discriminant: `lib/assistant/titles.ts` sends it on every title call and
+ *     nothing else in the product sends anything like it.
+ *     Within the title path, the scenario id on the user message still selects
+ *     behaviour: `TITLE_FAILING_SCENARIO` gets a 500 (a provider that refuses to name
+ *     the thread), everything else gets TITLE_SCRIPT.
+ *  2. SCENARIO DISPATCH: the `GATE:<id>` prefix on the LAST user message. The step
+ *     index is the number of assistant messages carrying `tool_calls` AFTER that last
+ *     user message — the CURRENT turn only (earlier turns' tool messages must not
+ *     advance it, G2D-2) and never `role: "tool"` messages (one per result would
+ *     double-count a parallel-packed step, G2C-6). An unknown GATE id is a 500: a
+ *     mis-seeded harness fails loudly.
+ *  3. RESIDUAL: a prompt with neither the title system prompt nor a `GATE:` prefix
+ *     still gets TITLE_SCRIPT (spec C7 item 3's rule, kept — it is what the Spike A
+ *     title probe, which sends no system prompt at all, drives).
  *
  * HOLDS (added by 1.6): a step carrying `hold` scripts a provider that is slow
  * (`then: "complete"`), dead (`then: "eof"`) or silent (`silent: true`) — the wire
@@ -46,6 +64,13 @@ import {
 } from "./choreography";
 
 const MODEL_ID = "gate-scripted";
+
+/**
+ * The ONE scenario whose TITLE call is scripted to FAIL (pack REV-10's owed
+ * affordance). Exported so the matrix drives it by this name rather than by a literal
+ * that could drift away from the shim's own dispatch.
+ */
+export const TITLE_FAILING_SCENARIO = "title-failing";
 
 type OllamaMessage = {
   role?: unknown;
@@ -139,7 +164,34 @@ export function stepIndexOf(messages: OllamaMessage[]): number {
   return index;
 }
 
-/** The scenario id on the last user message, or null when this is a title call. */
+/**
+ * The opening words of the C6 title system prompt (`lib/assistant/titles.ts`,
+ * verbatim from spec C6). A PREFIX rather than the whole string: the sentence that
+ * follows it is injection-posture wording that may be reworded without the wire
+ * meaning changing, but "Generate a concise 3-8 word title for this conversation" is
+ * the sentence that MAKES it a title call.
+ */
+export const TITLE_SYSTEM_PREFIX = "Generate a concise 3-8 word title for this conversation";
+
+/**
+ * Is this a C6 TITLE call? Answered from the SYSTEM message, never from the user
+ * content (pack REV-13 S6-A — the title prompt's user content is the GATE-prefixed
+ * first user text of the thread being titled).
+ *
+ * The chat route's own system prompt (`buildSystemPrompt`) never begins this way, and
+ * the check reads EVERY system message rather than only the first, so it survives an
+ * SDK that reorders or splits instructions.
+ */
+export function isTitleCall(messages: OllamaMessage[]): boolean {
+  return messages.some(
+    (message) =>
+      message?.role === "system" &&
+      typeof message.content === "string" &&
+      message.content.trimStart().startsWith(TITLE_SYSTEM_PREFIX),
+  );
+}
+
+/** The scenario id on the last user message, or null when there is no GATE prefix. */
 export function scenarioIdOf(messages: OllamaMessage[]): string | null {
   const index = lastUserIndex(messages);
   if (index === -1) return null;
@@ -249,9 +301,27 @@ export function createShimServer(choreographies: Map<string, Choreography>): htt
       const messages = messagesOf(body);
       const scenarioId = scenarioIdOf(messages);
 
-      // Title path: any prompt without the GATE prefix. Answered as ONE complete
-      // document regardless of `stream` — a single terminal frame is also a valid
-      // one-line NDJSON stream, so both provider paths accept it.
+      // THE TITLE PATH FIRST (pack REV-13 S6-A): a C6 title call carries the title
+      // SYSTEM prompt, and its user content is the GATE-prefixed first user text of the
+      // thread it is naming — so this test must precede scenario dispatch or every
+      // title call is answered as a chat turn.
+      if (isTitleCall(messages)) {
+        if (scenarioId === TITLE_FAILING_SCENARIO) {
+          // The owed failing-title affordance (pack REV-10): a provider that answers
+          // the CHAT turn normally and refuses to name the thread. The route never sees
+          // this — `generateThreadTitle` is detached — so the only trace is the failed
+          // title request row and the truncation fallback.
+          sendJson(res, 500, { error: `scripted title failure for scenario "${scenarioId}"` });
+          return;
+        }
+        sendJson(res, 200, titleResponse());
+        return;
+      }
+
+      // Residual title path (spec C7 item 3): no GATE prefix and no title system
+      // prompt. Answered as ONE complete document regardless of `stream` — a single
+      // terminal frame is also a valid one-line NDJSON stream, so both provider paths
+      // accept it.
       if (scenarioId === null) {
         sendJson(res, 200, titleResponse());
         return;

@@ -204,7 +204,9 @@ describe("one trivial scripted turn through the REAL route", () => {
       membershipScope: unknown;
       dayKey: string;
     }>(
-      "SELECT status, kind, model, providerKind, inputTokens, outputTokens, totalTokens, membershipScope, dayKey FROM assistant_requests WHERE threadId = ?",
+      // Scoped to kind = 'chat' since 2.4a made titles real: the detached C6 title
+      // call adds a kind:"title" row to this same thread (precedent: matrix-mcp:278).
+      "SELECT status, kind, model, providerKind, inputTokens, outputTokens, totalTokens, membershipScope, dayKey FROM assistant_requests WHERE threadId = ? AND kind = 'chat'",
       [threadId],
     );
     expect(requests).toHaveLength(1);

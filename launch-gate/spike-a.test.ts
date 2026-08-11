@@ -202,7 +202,10 @@ describe("SPIKE A — shim wire fidelity through ai-sdk-ollama", () => {
         inputTokens: number | null;
         outputTokens: number | null;
       }>(
-        "SELECT status, model, inputTokens, outputTokens FROM assistant_requests WHERE threadId = ? ORDER BY id",
+        // Scoped to kind = 'chat' since 2.4a made titles real: the detached C6 title
+        // call interleaves a kind:"title" row between the two chat turns' rows
+        // (precedent: matrix-mcp:278).
+        "SELECT status, model, inputTokens, outputTokens FROM assistant_requests WHERE threadId = ? AND kind = 'chat' ORDER BY id",
         [threadId],
       );
       expect(requests).toHaveLength(2);

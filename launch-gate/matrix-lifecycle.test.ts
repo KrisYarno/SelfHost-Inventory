@@ -47,7 +47,7 @@ import {
   toolCalls,
   type FloatDrift,
 } from "./assertions";
-import { gatePrompt } from "./choreography";
+import { TITLE_SCRIPT, gatePrompt } from "./choreography";
 import {
   apiDelete,
   apiGet,
@@ -60,6 +60,9 @@ import { oracleQuery } from "./oracle";
 import { GATE_SEED } from "./seed";
 import { restartApp } from "./spawn";
 import { assertGateDatabaseUrl, gateDatabaseUrl, readState } from "./state";
+// Type-only, relative like the driver's: the CLIENT WIRE case builds envelopes the
+// way the shipped hook does and hands them to `postTurn` unchanged.
+import type { EnvelopeC2 } from "../lib/assistant/thread-contracts";
 
 type ThreadsModule = typeof import("../lib/assistant/threads");
 
@@ -86,6 +89,7 @@ type MessageRow = {
 type RequestRow = {
   id: number;
   threadId: string | null;
+  kind: string;
   status: string;
   errorCode: string | null;
 };
@@ -106,9 +110,40 @@ async function messagesOf(threadId: string): Promise<MessageRow[]> {
 
 async function requestsOf(threadId: string): Promise<RequestRow[]> {
   return oracleQuery<RequestRow>(
-    "SELECT id, threadId, status, errorCode FROM assistant_requests WHERE threadId = ? ORDER BY id",
+    "SELECT id, threadId, kind, status, errorCode FROM assistant_requests WHERE threadId = ? ORDER BY id",
     [threadId],
   );
+}
+
+/**
+ * TITLE ROWS ARE REAL NOW (Task 2.3; pack REV-13) — and they are DETACHED.
+ *
+ * Every thread-creating turn that finalizes `ok` fires `generateThreadTitle` AFTER the
+ * finalize transaction commits, so a `kind:"title"` row lands SHORTLY AFTER the REV-8
+ * settle barrier reports the turn over. This row counts request rows per thread in
+ * several places, all of which were written while `titles.ts` was the W1 stub and
+ * `assistant_requests` therefore held chat rows only. Each of those counts is now
+ * SCOPED TO `kind = "chat"`, and the title row it used to miscount is asserted
+ * explicitly instead — a stated fact rather than an accommodated one.
+ */
+function chatRows(rows: RequestRow[]): RequestRow[] {
+  return rows.filter((row) => row.kind === "chat");
+}
+
+/** Bounded wait for the ONE detached title row of a thread-creating turn. */
+async function waitForTitleRow(threadId: string, label: string): Promise<RequestRow> {
+  const until = Date.now() + 20_000;
+  for (;;) {
+    const rows = (await requestsOf(threadId)).filter((row) => row.kind === "title");
+    if (rows.length > 1) {
+      throw new Error(`${label}: ${rows.length} title rows — the C6 bound is at most one`);
+    }
+    if (rows.length === 1 && rows[0].status !== "running") return rows[0];
+    if (Date.now() > until) {
+      throw new Error(`${label}: no settled title row within 20000ms (rows=${rows.length})`);
+    }
+    await sleep(200);
+  }
 }
 
 /** The text an assistant ROW carries, joined from its persisted text parts. */
@@ -308,6 +343,9 @@ describe("RESUME — the persisted transcript is canonical-equal to what streame
     threadId = turn.threadId as string;
     await settleTurn(threadId, { requireAssistantRow: true, label: "the resume turn" });
     persisted = await messagesOf(threadId);
+    // The C6 title is DETACHED — waited for here so the detail below is read in a
+    // settled state rather than in whichever half of the race the run landed in.
+    await waitForTitleRow(threadId, "the resume turn");
     const response = await apiGet(await loginOnce("memberA"), `/api/assistant/threads/${threadId}`);
     expect(response.status).toBe(200);
     detail = JSON.parse(response.raw) as DetailBody;
@@ -389,9 +427,11 @@ describe("RESUME — the persisted transcript is canonical-equal to what streame
     expect(detail.id).toBe(threadId);
     // Settled: nothing is streaming into this thread any more.
     expect(detail.activeRequest).toBeNull();
-    // W1 stubs titles (pack T6) — the title charter in matrix-telemetry covers the
-    // W2 behaviour; here the honest observation is that nothing wrote one.
-    expect(detail.title).toBeNull();
+    // RECONCILED (Task 2.3 / pack REV-13): this assertion read `toBeNull()` while
+    // titles.ts was the W1 stub. The creating turn now spends a model title, and the
+    // resume path SERVES it — which is how the sidebar labels a reopened thread.
+    // (Row 5 owns the title row's own shape; here it is the resume payload's field.)
+    expect(detail.title).toBe(TITLE_SCRIPT.text);
   });
 
   // The ownership matrix rides on this thread: it is a real thread with real content,
@@ -484,6 +524,9 @@ describe("THREAD_BUSY — one writer per thread, and the DELETE that respects it
     });
     await settleTurn(threadId, { requireAssistantRow: true });
 
+    // The creating turn's detached title row is part of what the delete must preserve,
+    // so it is waited for BEFORE the snapshot rather than raced.
+    await waitForTitleRow(threadId, "the held turn");
     requestsBeforeDelete = await requestsOf(threadId);
     deleteResponse = await apiDelete(session, `/api/assistant/threads/${threadId}`);
   }, 120_000);
@@ -507,9 +550,21 @@ describe("THREAD_BUSY — one writer per thread, and the DELETE that respects it
     expect(busyDelete.raw).not.toBe(CLAIM_BUSY_BODY);
   });
 
-  it("the rejected send left NO trace: two request rows, not three", () => {
-    expect(requestsBeforeDelete).toHaveLength(2);
-    expect(requestsBeforeDelete.map((row) => row.status)).toEqual(["ok", "ok"]);
+  it("the rejected send left NO trace: two CHAT request rows, not three", () => {
+    // RECONCILED (Task 2.3): scoped to chat rows. The busy-rejected send is what this
+    // case is about — the thread ALSO carries the creating turn's title row, asserted
+    // separately below so the scoping cannot hide a stray chat claim.
+    expect(chatRows(requestsBeforeDelete)).toHaveLength(2);
+    expect(chatRows(requestsBeforeDelete).map((row) => row.status)).toEqual(["ok", "ok"]);
+  });
+
+  it("the thread carries exactly ONE title row — and the second turn did not spend another", () => {
+    const titles = requestsBeforeDelete.filter((row) => row.kind === "title");
+    expect(titles).toHaveLength(1);
+    expect(titles[0].status).toBe("ok");
+    // Two ok turns, one model title: the creating turn's. The later turn dispatched
+    // mode "later-fallback", which never calls a provider (spec C6).
+    expect(requestsBeforeDelete).toHaveLength(3);
   });
 
   it("after the turn finalizes the SAME thread accepts the next send", () => {
@@ -531,7 +586,7 @@ describe("THREAD_BUSY — one writer per thread, and the DELETE that respects it
 
   it("the REQUEST rows survive the delete with threadId NULL (usage attribution is kept)", async () => {
     const survivors = await oracleQuery<RequestRow>(
-      `SELECT id, threadId, status, errorCode FROM assistant_requests WHERE id IN (${requestsBeforeDelete
+      `SELECT id, threadId, kind, status, errorCode FROM assistant_requests WHERE id IN (${requestsBeforeDelete
         .map(() => "?")
         .join(", ")}) ORDER BY id`,
       requestsBeforeDelete.map((row) => row.id),
@@ -541,6 +596,10 @@ describe("THREAD_BUSY — one writer per thread, and the DELETE that respects it
       expect(row.threadId).toBeNull();
       expect(row.status).toBe("ok");
     }
+    // RECONCILED (Task 2.3): TITLE spend survives a deleted thread exactly like chat
+    // spend does — stated, because "usage attribution is kept" is the claim and title
+    // rows are now part of the usage.
+    expect(survivors.map((row) => row.kind).sort()).toEqual(["chat", "chat", "title"]);
     // Nothing can still be addressed by the dead thread id.
     expect(await requestsOf(threadId)).toHaveLength(0);
   });
@@ -585,12 +644,17 @@ describe("TWO TABS on DIFFERENT threads stream concurrently", () => {
 
   it("both finalized ok — neither turn fenced or busied the other", async () => {
     for (const turn of [first, second]) {
+      // RECONCILED (Task 2.3): ONE CHAT row per thread. Both turns created their
+      // thread, so both also spend one detached title — waited for, then asserted, so
+      // the scoping states the extra row instead of ignoring it.
       const rows = await requestsOf(turn.threadId as string);
-      expect(rows).toHaveLength(1);
-      expect({ status: rows[0].status, errorCode: rows[0].errorCode }).toEqual({
+      expect(chatRows(rows)).toHaveLength(1);
+      expect({ status: chatRows(rows)[0].status, errorCode: chatRows(rows)[0].errorCode }).toEqual({
         status: "ok",
         errorCode: null,
       });
+      const title = await waitForTitleRow(turn.threadId as string, "a two-tab turn");
+      expect(title.status).toBe("ok");
     }
   });
 
@@ -620,6 +684,9 @@ describe("REGENERATE — the four cases (spec C4's ONE anchor rule)", () => {
       const setup = await drive("admin", "life-simple", "gate-life-regen-user");
       threadId = setup.threadId as string;
       await settleTurn(threadId, { requireAssistantRow: true });
+      // The creating turn's detached title lands here, before the regenerate, so the
+      // request-row assertions below read a settled thread.
+      await waitForTitleRow(threadId, "the regenerate setup turn");
       const before = await messagesOf(threadId);
       firstAssistantId = before[1].id;
 
@@ -662,8 +729,15 @@ describe("REGENERATE — the four cases (spec C4's ONE anchor rule)", () => {
     });
 
     it("the PRIOR request row survives (regenerate deletes messages, not the audit)", () => {
-      expect(requestsAfter).toHaveLength(2);
-      expect(requestsAfter.map((row) => row.status)).toEqual(["ok", "ok"]);
+      // RECONCILED (Task 2.3): scoped to chat rows.
+      expect(chatRows(requestsAfter)).toHaveLength(2);
+      expect(chatRows(requestsAfter).map((row) => row.status)).toEqual(["ok", "ok"]);
+    });
+
+    it("a REGENERATE spends no second model title (the C6 bound, from row 4's side)", () => {
+      // A regenerate is not a thread-creating turn, so it dispatches "later-fallback":
+      // no provider call, and the thread is already titled, so not even a write.
+      expect(requestsAfter.filter((row) => row.kind === "title")).toHaveLength(1);
     });
 
     it("(4) a regenerate under a NEWER user row is 409 CONFLICT, byte-exact", () => {
@@ -929,6 +1003,311 @@ describe("F-3 — a caller WITH companies and ZERO facts: the null-salesDataStar
       _sum: { orderedQty: number | null };
     }>;
     expect(rows.filter((row) => row._sum.orderedQty === 0)).toHaveLength(0);
+  });
+});
+
+// =========================================================================
+/**
+ * THE CLIENT WIRE (Task 2.4a; pack REV-11, seam S7) — the body the SHIPPED hook
+ * actually emits, driven through the REAL route.
+ *
+ * Every other case in this file writes an envelope BY HAND. That proves the route's
+ * contract and says nothing about whether the client speaks it, which is the seam 2.1
+ * opened: `prepareSendMessagesRequest` maps the SDK's `{ messages, trigger, messageId }`
+ * to `{ threadId, message, trigger, messageId }` — and `message` is the SDK's LAST
+ * UIMessage passed through VERBATIM, not a freshly built object.
+ *
+ * WHY REPLICATED, DECLARED: `hooks/use-assistant-chat.ts` cannot be imported here. It
+ * pulls React and the `ai` ESM chain, which is the entire reason this gate drives HTTP
+ * instead of loading modules (spec C7). So the mapping is reproduced below — three
+ * lines in the hook, three lines here — together with the SDK-state shapes it maps
+ * over, each pinned against `node_modules/ai/dist/index.js` (`AbstractChat.sendMessage`
+ * / `AbstractChat.regenerate` / `HttpChatTransport.sendMessages`).
+ *
+ * THE REGENERATE SLICE is the load-bearing detail: `regenerate()` with no messageId
+ * takes the LAST message, sees it is an assistant message, and slices it off — so the
+ * array handed to the transport ENDS WITH THE USER MESSAGE, which the hook then sends
+ * verbatim. That is why the route's anchor rule ever works from a real browser.
+ */
+
+/** A UIMessage exactly as `AbstractChat.sendMessage({ text })` pushes it into chat
+ *  state: `{ ...uiMessage, id, role, metadata }` — parts first, `metadata` undefined
+ *  (the hook's `sendPrompt` sets none). The key ORDER is part of the shape: this
+ *  object is what `JSON.stringify` serializes. */
+function sdkUserMessage(id: string, text: string): Record<string, unknown> {
+  return { parts: [{ type: "text", text }], id, role: "user", metadata: undefined };
+}
+
+/** The assistant message the SDK holds once a turn completes. Only its presence
+ *  matters: `regenerate()` slices it off before the transport is ever called. */
+function sdkAssistantMessage(id: string, text: string): Record<string, unknown> {
+  return {
+    id,
+    role: "assistant",
+    parts: [{ type: "text", text }],
+    metadata: { finishReason: "stop" },
+  };
+}
+
+/** `prepareSendMessagesRequest` (hooks/use-assistant-chat.ts), replicated. */
+function clientBody(
+  threadId: string | null,
+  messages: Array<Record<string, unknown>>,
+  trigger: "submit-message" | "regenerate-message",
+  messageId: string | undefined,
+): Record<string, unknown> {
+  const last = messages[messages.length - 1];
+  return { threadId, message: last, trigger, messageId };
+}
+
+/** The BYTES the transport puts on the wire — `JSON.stringify` drops undefined keys,
+ *  which is why a `messageId: undefined` never reaches the server at all. */
+function wireOf(body: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+}
+
+describe("THE CLIENT WIRE — the exact body prepareSendMessagesRequest emits", () => {
+  const SCENARIO = "life-simple";
+  const USER_ID = "gate-life-wire-user";
+  const EXTRA_USER_ID = "gate-life-wire-extra-user";
+
+  let submitBody: Record<string, unknown>;
+  let regenerateBody: Record<string, unknown>;
+  let extraKeyBody: Record<string, unknown>;
+  let submitTurn: TurnResult;
+  let regenerateTurn: TurnResult;
+  let extraKeyTurn: TurnResult;
+  let threadId: string;
+  let afterSubmit: MessageRow[];
+  let afterRegenerate: MessageRow[];
+  let afterExtraKey: MessageRow[];
+  let requestsAfter: RequestRow[];
+
+  beforeAll(async () => {
+    const session = await loginOnce("noFactsUser");
+
+    // (1) sendMessage({ text }): one user message in state, trigger "submit-message",
+    //     messageId undefined, threadId still null (no stream has named one yet).
+    const afterSend = [sdkUserMessage(USER_ID, gatePrompt(SCENARIO))];
+    submitBody = clientBody(null, afterSend, "submit-message", undefined);
+    submitTurn = await postTurn(session, submitBody as unknown as EnvelopeC2);
+    if (submitTurn.status !== 200 || submitTurn.threadId === null) {
+      throw new Error(`the client-wire submit failed (${submitTurn.status}): ${submitTurn.raw.slice(0, 2_000)}`);
+    }
+    threadId = submitTurn.threadId;
+    await settleTurn(threadId, { requireAssistantRow: true, label: "the client-wire submit" });
+    afterSubmit = await messagesOf(threadId);
+
+    // (2) retry() -> chat.regenerate(): the SDK slices the trailing assistant message
+    //     off its state, and the hook sends what is now the last message — the USER
+    //     one — with the thread id its ref has been carrying since the first "start".
+    const afterStream = [...afterSend, sdkAssistantMessage(afterSubmit[1].id, submitTurn.text)];
+    const afterRegenerateSlice = afterStream.slice(0, afterStream.length - 1);
+    regenerateBody = clientBody(threadId, afterRegenerateSlice, "regenerate-message", undefined);
+    regenerateTurn = await postTurn(session, regenerateBody as unknown as EnvelopeC2);
+    await settleTurn(threadId, { requireAssistantRow: true, label: "the client-wire regenerate" });
+    afterRegenerate = await messagesOf(threadId);
+
+    // (3) THE PASSTHROUGH'S OTHER HALF (pack REV-11: "extra keys server-stripped").
+    //     The hook hands the SDK's message object over UNTOUCHED, so any key the SDK
+    //     (or a future SDK) carries rides along. Sent deliberately here — today's
+    //     client emits none — because the contract is about the SERVER's tolerance,
+    //     and a strip is only observable on a row the claim actually INSERTS.
+    const extraKeyMessage = {
+      parts: [
+        { type: "text", text: gatePrompt(SCENARIO), providerMetadata: { gate: "extra part key" } },
+      ],
+      id: EXTRA_USER_ID,
+      role: "user",
+      metadata: { threadId, gateExtra: "extra message key" },
+    };
+    extraKeyBody = clientBody(threadId, [extraKeyMessage], "submit-message", undefined);
+    extraKeyTurn = await postTurn(session, extraKeyBody as unknown as EnvelopeC2);
+    await settleTurn(threadId, { requireAssistantRow: true, label: "the client-wire extra-key submit" });
+    afterExtraKey = await messagesOf(threadId);
+    await waitForTitleRow(threadId, "the client-wire submit");
+    requestsAfter = await requestsOf(threadId);
+  }, 180_000);
+
+  it("puts EXACTLY { threadId, message, trigger } on the wire — no messageId, no id, no messages[]", () => {
+    const wire = wireOf(submitBody);
+    // `messageId: undefined` never reaches the server, and the SDK's own default body
+    // (`{ id, messages, trigger, messageId }`, HttpChatTransport.sendMessages) is
+    // REPLACED, not extended — the client never uploads history.
+    expect(Object.keys(wire).sort()).toEqual(["message", "threadId", "trigger"]);
+    expect(wire.threadId).toBeNull();
+    expect(wire.trigger).toBe("submit-message");
+    // The message is the SDK's object VERBATIM: composer parts, then id, then role.
+    expect(Object.keys(wire.message as Record<string, unknown>)).toEqual(["parts", "id", "role"]);
+    expect(wire.message).toEqual({
+      parts: [{ type: "text", text: gatePrompt(SCENARIO) }],
+      id: USER_ID,
+      role: "user",
+    });
+  });
+
+  it("that body creates the thread and persists the user row the client sent", () => {
+    expect(submitTurn.text).toBe("Life simple turn complete.");
+    expect(afterSubmit.map((row) => row.role)).toEqual(["user", "assistant"]);
+    expect(afterSubmit[0].id).toBe(USER_ID);
+    expect(asJson(afterSubmit[0].parts)).toEqual([{ type: "text", text: gatePrompt(SCENARIO) }]);
+  });
+
+  it("REGENERATE: the sliced state ends with the USER message, and THAT is what ships", () => {
+    const wire = wireOf(regenerateBody);
+    expect(Object.keys(wire).sort()).toEqual(["message", "threadId", "trigger"]);
+    expect(wire.trigger).toBe("regenerate-message");
+    // The thread ref is populated by now — a regenerate that shipped `threadId: null`
+    // would fork a second thread instead of re-asking this one.
+    expect(wire.threadId).toBe(threadId);
+    const message = wire.message as Record<string, unknown>;
+    expect(message.role).toBe("user");
+    expect(message.id).toBe(USER_ID);
+    // NOT the assistant message the user asked to regenerate — the SDK sliced it off,
+    // which is what makes the route's "anchor = the incoming message row" rule work.
+    expect(message.id).not.toBe(afterSubmit[1].id);
+  });
+
+  it("REGENERATE over the real wire supersedes the assistant row and reuses the anchor", () => {
+    expect(regenerateTurn.status).toBe(200);
+    expect(regenerateTurn.text).toBe("Life simple turn complete.");
+    expect(afterRegenerate.map((row) => row.role)).toEqual(["user", "assistant"]);
+    expect(afterRegenerate[0].id).toBe(USER_ID);
+    expect(afterRegenerate[0].sequence).toBe(1);
+    expect(afterRegenerate[1].id).not.toBe(afterSubmit[1].id);
+  });
+
+  it("EXTRA KEYS are accepted and STRIPPED — nothing unvalidated reaches storage", () => {
+    expect(extraKeyTurn.status).toBe(200);
+    const inserted = afterExtraKey.find((row) => row.id === EXTRA_USER_ID);
+    expect(inserted).toBeDefined();
+    // The part kept its type and text and lost `providerMetadata`; the message-level
+    // `metadata` was never persisted at all (the claim writes no metadata on a user
+    // row, and there is nowhere else for it to go).
+    expect(asJson(inserted?.parts)).toEqual([{ type: "text", text: gatePrompt(SCENARIO) }]);
+    // Canonicalized, not `String(row.parts)`: mysql2 hands JSON columns back already
+    // parsed, and stringifying an object would make this read "[object Object]" and
+    // pass no matter what was stored.
+    expect(canonicalJson(asJson(inserted?.parts))).not.toContain("providerMetadata");
+    expect(inserted?.metadata).toBeNull();
+    expect(inserted?.role).toBe("user");
+  });
+
+  it("three client-shaped POSTs, three CHAT rows, one title row, all ok", () => {
+    expect(chatRows(requestsAfter)).toHaveLength(3);
+    expect(chatRows(requestsAfter).map((row) => row.status)).toEqual(["ok", "ok", "ok"]);
+    // One model title for the thread, spent by the FIRST of the three (spec C6).
+    expect(requestsAfter.filter((row) => row.kind === "title")).toHaveLength(1);
+    expect(afterExtraKey.map((row) => row.role)).toEqual(["user", "assistant", "user", "assistant"]);
+  });
+});
+
+// =========================================================================
+/**
+ * RESUME COMPOSITION (Task 2.4a; pack REV-12, seam S7) — what the client MOUNTS is
+ * not what the wire carried.
+ *
+ * `ThreadDetailResponse.messages` is the whole persisted transcript. What
+ * `openThread` receives is the 2.2 MAPPING of it, and that mapping FILTERS system rows
+ * (a stated decision matching `Transcript.buildTurns`' real behaviour) and turns
+ * `metadata: null` into `undefined`. Pack REV-12 binds this case to the FILTERED
+ * length — a resumed thread's UIMessage[] is shorter than the response that produced
+ * it whenever a system row exists.
+ *
+ * WHY REPLICATED, DECLARED: same reason as the wire case above —
+ * `app/(app)/assistant/page.tsx` cannot be imported into this project.
+ *
+ * WHY A HAND-INSERTED SYSTEM ROW, DECLARED: the product never persists one. The
+ * history omission note carries a known id and is never written (pack REV-3), so the
+ * filter has nothing to bite on unless a row is put there — the same raw-SQL fixture
+ * affordance the history byte-bound threads below use.
+ */
+
+type MountedMessage = { id: string; role: string; parts: unknown[]; metadata: unknown };
+
+/** `toUIMessages` (app/(app)/assistant/page.tsx), replicated. */
+function toUIMessages(rows: DetailBody["messages"]): MountedMessage[] {
+  return rows
+    .filter((row) => row.role === "user" || row.role === "assistant")
+    .map((row) => ({
+      id: row.id,
+      role: row.role,
+      parts: row.parts,
+      metadata: row.metadata ?? undefined,
+    }));
+}
+
+describe("RESUME COMPOSITION — the client mounts the FILTERED mapping, not the response", () => {
+  const SYSTEM_ROW_ID = "gate-life-resumecomp-system";
+  let threadId: string;
+  let detail: DetailBody;
+  let mounted: MountedMessage[];
+
+  beforeAll(async () => {
+    // A REAL failed-after-content turn: the accumulator persisted the partial the user
+    // actually saw and the finalizer stamped it errorCode PROVIDER_ERROR. That is the
+    // metadata `deriveTurnStatus` reads on a RESUMED turn (pack T4's precedence), and
+    // without it every reloaded failure would render "completed".
+    const failed = await driveFailing("zeroUser", "life-fail-after", "gate-life-resumecomp-user");
+    threadId = failed.threadId;
+    await settleTurn(threadId, {
+      requireAssistantRow: true,
+      label: "the resume-composition turn",
+    });
+
+    const persisted = await messagesOf(threadId);
+    await oracleQuery(
+      "INSERT INTO assistant_messages (threadId, id, role, parts, metadata, sequence) VALUES (?, ?, 'system', ?, NULL, ?)",
+      [
+        threadId,
+        SYSTEM_ROW_ID,
+        JSON.stringify([{ type: "text", text: "gate resume-composition system row" }]),
+        persisted.length + 1,
+      ],
+    );
+
+    const response = await apiGet(await loginOnce("zeroUser"), `/api/assistant/threads/${threadId}`);
+    expect(response.status).toBe(200);
+    detail = JSON.parse(response.raw) as DetailBody;
+    mounted = toUIMessages(detail.messages);
+  }, 120_000);
+
+  it("the RESPONSE carries every persisted row, system included (the route does not filter)", () => {
+    expect(detail.messages.map((message) => message.role)).toEqual(["user", "assistant", "system"]);
+    expect(detail.messages[2].id).toBe(SYSTEM_ROW_ID);
+  });
+
+  it("the CLIENT mounts FEWER messages than the response carried (pack REV-12)", () => {
+    expect(mounted).toHaveLength(detail.messages.length - 1);
+    expect(mounted.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(mounted.map((message) => message.id)).not.toContain(SYSTEM_ROW_ID);
+  });
+
+  it("the resumed FAILED turn carries the metadata + content deriveTurnStatus reads", () => {
+    const assistant = mounted[1];
+    // T4 precedence: `aborted` first, then `errorCode`, then the finish-reason caps.
+    // errorCode WITH content is the failed-after-content branch — the branch that only
+    // exists because this field survives the round trip.
+    expect(assistant.metadata).toEqual({ errorCode: "PROVIDER_ERROR" });
+    const text = (assistant.parts as Array<{ type: string; text?: string }>)
+      .filter((part) => part.type === "text")
+      .map((part) => String(part.text))
+      .join("");
+    expect(text).toBe("Partial before the truncated stream.");
+    expect(text.trim().length).toBeGreaterThan(0);
+  });
+
+  it("a row with NO metadata mounts as undefined — the null/undefined distinction", () => {
+    expect(detail.messages[0].metadata).toBeNull();
+    expect(mounted[0].metadata).toBeUndefined();
+  });
+
+  it("the thread is settled, and UNTITLED — the state later-fallback exists to repair", () => {
+    expect(detail.activeRequest).toBeNull();
+    // The creating turn failed, so no title was ever dispatched (C6: only a FENCED ok
+    // finalize fires one). NULL is the repairable state — a blank string would satisfy
+    // the `title IS NULL` fence forever.
+    expect(detail.title).toBeNull();
   });
 });
 
