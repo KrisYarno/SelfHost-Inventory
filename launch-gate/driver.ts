@@ -359,7 +359,18 @@ export async function postTurn(
   return { events, text, threadId: metadata.threadId ?? null, status: response.status, raw };
 }
 
-export type ApiResponse = { status: number; raw: string };
+/** `headers` is lower-cased by `fetch` (Task 3.3, additive): the 429 contract is
+ *  partly IN the headers (`Retry-After`, `X-RateLimit-*`), and a body-only reader
+ *  cannot see it. Existing callers read `status`/`raw` and are unaffected. */
+export type ApiResponse = { status: number; raw: string; headers: Record<string, string> };
+
+function headersOf(response: Response): Record<string, string> {
+  const collected: Record<string, string> = {};
+  response.headers.forEach((value, key) => {
+    collected[key] = value;
+  });
+  return collected;
+}
 
 /** Authenticated GET against the app (thread list/detail). Not budgeted — the chat
  *  limiter only counts POSTs to /api/assistant. */
@@ -368,7 +379,7 @@ export async function apiGet(session: Session, path: string): Promise<ApiRespons
     redirect: "manual",
     headers: { cookie: session.cookieHeader },
   });
-  return { status: response.status, raw: await response.text() };
+  return { status: response.status, raw: await response.text(), headers: headersOf(response) };
 }
 
 /** Authenticated DELETE against the app (thread delete; CSRF-guarded). */
@@ -378,7 +389,45 @@ export async function apiDelete(session: Session, path: string): Promise<ApiResp
     redirect: "manual",
     headers: { cookie: session.cookieHeader, "x-csrf-token": session.csrfToken },
   });
-  return { status: response.status, raw: await response.text() };
+  return { status: response.status, raw: await response.text(), headers: headersOf(response) };
+}
+
+export type ApiPostOptions = {
+  /** Send NO `x-csrf-token` header — the CSRF-rejection case (403 CSRF_INVALID). */
+  omitCsrf?: boolean;
+};
+
+/**
+ * Authenticated JSON POST against a NON-CHAT route (Task 3.3: the report POST and the
+ * eval upload).
+ *
+ * DELIBERATELY UNBUDGETED, and the arithmetic is stated rather than assumed:
+ * `POST_BUDGET_PER_GENERATION` models the CHAT route's own 30/hr per-user limiter
+ * (`/api/assistant`), and `reserveMiddlewareSlot` models the middleware's 30-per-60s
+ * bucket for THAT pathname — `middleware.ts:43` keys its bucket
+ * `middleware:${pathname}`, so every distinct route path (and every distinct thread id
+ * inside one) carries its OWN bucket. A report POST therefore cannot exhaust the chat
+ * window and is not exhausted by it. The limiter that really binds these calls is the
+ * ROUTE's own (`assistant:report`, 5/hr per USER), which Task 3.3 drives on purpose.
+ */
+export async function apiPost(
+  session: Session,
+  path: string,
+  body?: unknown,
+  options: ApiPostOptions = {},
+): Promise<ApiResponse> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    cookie: session.cookieHeader,
+  };
+  if (options.omitCsrf !== true) headers["x-csrf-token"] = session.csrfToken;
+  const response = await fetch(`${APP_BASE_URL}${path}`, {
+    method: "POST",
+    redirect: "manual",
+    headers,
+    body: JSON.stringify(body ?? {}),
+  });
+  return { status: response.status, raw: await response.text(), headers: headersOf(response) };
 }
 
 export type McpResponse = { status: number; raw: string; json: unknown };

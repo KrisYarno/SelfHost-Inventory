@@ -122,7 +122,13 @@ describe("harness infrastructure", () => {
   it("recorded warm-up ids so the matrices can exclude them", () => {
     const { warmupIds } = readState();
     expect(warmupIds.threadIds).toHaveLength(1);
-    expect(warmupIds.requestIds.length).toBeGreaterThan(0);
+    // EXACTLY TWO (Task 3.3, closing pack REV-14's registered race — shared-file rule):
+    // the warm-up turn creates a thread, so it spends a CHAT request and a detached
+    // TITLE request. `spawn.warmUp` now waits for both to settle before collecting, and
+    // a `> 0` pin passed happily while the title row raced the read (and, worse, raced
+    // the warm-up's own DELETE, where the title insert's FK has nothing to point at).
+    expect(warmupIds.requestIds).toHaveLength(2);
+    expect(warmupIds.runIds.length).toBeGreaterThan(0);
   });
 
   it("leaves no residue from an earlier run (the twice-back-to-back proof)", async () => {

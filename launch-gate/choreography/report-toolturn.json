@@ -1,0 +1,16 @@
+{
+  "id": "report-toolturn",
+  "steps": [
+    {
+      "toolCalls": [
+        { "name": "get_inventory_summary", "input": {} },
+        { "name": "get_stock", "input": { "productId": 9101 } }
+      ],
+      "usage": { "prompt_eval_count": 1503, "eval_count": 21 }
+    },
+    {
+      "text": "Report fixture turn complete — two tool outputs are on the record.",
+      "usage": { "prompt_eval_count": 1677, "eval_count": 14 }
+    }
+  ]
+}

@@ -71,6 +71,44 @@ export const GATE_USERS: ReadonlyArray<Session["user"]> = [
 const STATE_ENV = "LAUNCH_GATE_STATE_FILE";
 
 /**
+ * THE RUN PROFILE (plan Task 3.3; spec C7 topology item 2's "W3 close additionally
+ * runs the FULL matrix once against `next build && next start`").
+ *
+ * `dev` — `next dev` under NODE_ENV=development, the path W1/W2 built.
+ * `start` — ONE `next build` and then `next start`, under NODE_ENV=production: the
+ * production artifact, which is what a deploy actually ships (standalone tracing,
+ * prod bundling, per-route compilation differences).
+ *
+ * It lives HERE, in the dependency leaf, because both the harness (which spawns the
+ * app) and the SUITES (whose expectations differ by profile — `NODE_ENV` is what the
+ * report route derives its stored `environment` from) must read the same value
+ * without importing spawn.ts's process-management graph.
+ */
+export type GateProfile = "dev" | "start";
+
+export const GATE_PROFILE_ENV = "LAUNCH_GATE_PROFILE";
+
+export function gateProfile(): GateProfile {
+  const configured = process.env[GATE_PROFILE_ENV] ?? "dev";
+  if (configured !== "dev" && configured !== "start") {
+    throw new Error(
+      `${GATE_PROFILE_ENV}="${configured}" is not a launch-gate profile. Use "dev" ` +
+        '(next dev) or "start" (next build + next start), or leave it unset for "dev".',
+    );
+  }
+  return configured;
+}
+
+/**
+ * The `NODE_ENV` the app under test runs with, per profile. `next` PRESERVES an
+ * inherited NODE_ENV (spec C7 item 2), so the harness pins it explicitly on both
+ * paths and the suites read the SAME function rather than re-deriving the mapping.
+ */
+export function appNodeEnv(profile: GateProfile = gateProfile()): "development" | "production" {
+  return profile === "start" ? "production" : "development";
+}
+
+/**
  * The state-file path the runner minted. Absent => the suite was started by hand
  * with a bare `jest`; say so instead of silently inventing a path (two runs sharing
  * an invented path would corrupt each other).

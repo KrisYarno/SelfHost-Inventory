@@ -25,10 +25,12 @@ import {
   GATE_DB_PASSWORD,
   GATE_DB_USER,
   GATE_USERS,
+  appNodeEnv,
   buildDatabaseUrl,
   containerIp,
   ensureWorkDir,
   gateDatabaseUrl,
+  gateProfile,
   initialState,
   primeDatabaseUrl,
   readState,
@@ -331,26 +333,76 @@ async function waitForHttp(
   }
 }
 
+/**
+ * The app-under-test environment, shared by `next build` and BOTH run profiles.
+ *
+ * EXPLICIT `NODE_ENV` (spec C7 item 2): `next` PRESERVES an inherited value and the
+ * runner exports NODE_ENV=test — unpinned, the app would run under test env. Under
+ * the `start` profile it is `production`, which is the point of that profile and is
+ * ALSO observable in the product: the report route derives its stored `environment`
+ * from NODE_ENV (task 3.2), so the two profiles legitimately store different values
+ * and the suites read `appNodeEnv()` instead of hard-coding one.
+ *
+ * Everything else is pinned so no `.env*` file on the machine can steer the app under
+ * test at a real database or a real identity. `@next/env` layers the repo's `.env`
+ * UNDER these (it never overwrites a key already present in the environment).
+ */
+function appEnv(databaseUrl: string): NodeJS.ProcessEnv {
+  return {
+    ...baseEnv(),
+    NODE_ENV: appNodeEnv(),
+    DATABASE_URL: databaseUrl,
+    NEXTAUTH_URL: `http://localhost:${APP_PORT}`,
+    NEXTAUTH_SECRET,
+    ENCRYPTION_KEY,
+    // "unset" in effect: an empty value is falsy at lib/auth.ts:10 (so the DEFAULT
+    // allowed domain applies, which is where the seed emails live) AND it stops
+    // @next/env from layering the repo's own .env value on top.
+    ALLOWED_EMAIL_DOMAINS: "",
+  };
+}
+
+/**
+ * The `start` profile's ONE build (plan Task 3.3). It writes the repo's `.next`, the
+ * same directory `next dev` uses — the two profiles run SEQUENTIALLY (the runner
+ * aggregates them as separate jest processes), so they never share it at once.
+ *
+ * Build output goes to the run's work directory and the tail is quoted on failure: a
+ * bare "next build exited 1" is not actionable, and this is the one phase whose
+ * failure is a REAL product finding (the production artifact is what a deploy ships).
+ */
+function buildNextApp(databaseUrl: string): void {
+  const logPath = workFile("build.log");
+  const stream = fs.openSync(logPath, "a");
+  try {
+    execFileSync("npx", ["--no-install", "next", "build"], {
+      cwd: REPO_ROOT,
+      env: appEnv(databaseUrl),
+      stdio: ["ignore", stream, stream],
+    });
+  } catch (err) {
+    const tailLines = (() => {
+      try {
+        return fs.readFileSync(logPath, "utf8").split("\n").slice(-60).join("\n");
+      } catch {
+        return "(no build log captured)";
+      }
+    })();
+    throw new Error(
+      `\`next build\` failed under the launch gate's start profile ` +
+        `(${err instanceof Error ? err.message : "unknown"}).\n--- build log ---\n${tailLines}`,
+    );
+  } finally {
+    fs.closeSync(stream);
+  }
+}
+
 function spawnApp(databaseUrl: string): void {
-  spawnLogged("app", "npx", ["--no-install", "next", "dev", "-p", String(APP_PORT), "-H", "127.0.0.1"], {
-    cwd: REPO_ROOT,
-    env: {
-      ...baseEnv(),
-      // EXPLICIT (spec C7 item 2): `next` PRESERVES an inherited NODE_ENV, and the
-      // runner exports NODE_ENV=test — unpinned, the dev server would run under test
-      // env. Everything else is pinned so no `.env*` file on the machine can steer
-      // the app under test at a real database or a real identity.
-      NODE_ENV: "development",
-      DATABASE_URL: databaseUrl,
-      NEXTAUTH_URL: `http://localhost:${APP_PORT}`,
-      NEXTAUTH_SECRET,
-      ENCRYPTION_KEY,
-      // "unset" in effect: an empty value is falsy at lib/auth.ts:10 (so the DEFAULT
-      // allowed domain applies, which is where the seed emails live) AND it stops
-      // @next/env from layering the repo's own .env value on top.
-      ALLOWED_EMAIL_DOMAINS: "",
-    },
-  });
+  const args =
+    gateProfile() === "start"
+      ? ["--no-install", "next", "start", "-p", String(APP_PORT), "-H", "127.0.0.1"]
+      : ["--no-install", "next", "dev", "-p", String(APP_PORT), "-H", "127.0.0.1"];
+  spawnLogged("app", "npx", args, { cwd: REPO_ROOT, env: appEnv(databaseUrl) });
 }
 
 function spawnMcp(entry: string, databaseUrl: string): void {
@@ -384,8 +436,13 @@ function spawnShim(entry: string): void {
 /** Build + spawn shim, MCP and app, then poll each to readiness. */
 export async function startProcesses(): Promise<void> {
   const databaseUrl = gateDatabaseUrl();
+  const profile = gateProfile();
+  log(`profile: ${profile} (${profile === "start" ? "next build + next start" : "next dev"})`);
   const shimEntry = await phase("shim bundle", () => buildShimBundle());
   const mcpEntry = await phase("mcp bundle", () => buildMcpBundle());
+  if (profile === "start") {
+    await phase("next build", () => buildNextApp(databaseUrl));
+  }
 
   spawnShim(shimEntry);
   spawnMcp(mcpEntry, databaseUrl);
@@ -397,14 +454,61 @@ export async function startProcesses(): Promise<void> {
     waitForHttp("shim", `http://127.0.0.1:${SHIM_PORT}/api/chat`, 15_000, (status) => status === 404),
   );
   await phase("mcp ready", () => waitForHttp("mcp", `http://127.0.0.1:${MCP_PORT}/healthz`, 30_000));
-  // `next dev` compiles the first route on demand; this poll IS that compile.
-  log("waiting for next dev to compile its first route (this is the slow one)");
+  // `next dev` compiles the first route on demand; this poll IS that compile. Under
+  // `start` the routes are already compiled, so the same poll just waits for a listen.
+  log(
+    profile === "start"
+      ? "waiting for next start to accept connections"
+      : "waiting for next dev to compile its first route (this is the slow one)",
+  );
   await phase("app ready", () => waitForHttp("app", `http://127.0.0.1:${APP_PORT}/api/csrf`, 240_000));
 }
 
 // --------------------------------------------------------------------------
 // Warm-up (OC-16)
 // --------------------------------------------------------------------------
+
+/**
+ * THE WARM-UP TURN'S SETTLE BARRIER (contract pack REV-14's registered 3.3 item).
+ *
+ * The warm-up turn creates a thread, so the route dispatches a DETACHED
+ * "creating-model" title job after finalizing. Collecting request ids the instant the
+ * stream closed raced that job two ways: the title row could land AFTER the read (an
+ * unrecorded warm-up row, which is the id-collection defect as registered) and, worse,
+ * AFTER the warm-up's own DELETE — where `insertTitleRequest`'s FK to a thread that no
+ * longer exists fails inside a detached promise, in the app under test, for no reason
+ * a reader of the logs could ever attribute.
+ *
+ * So the warm-up waits for BOTH request rows to settle before it reads or deletes
+ * anything: bounded, 100ms steps, never a fixed sleep (the pack REV-8 barrier rule).
+ * The wait THROWS on timeout rather than collecting a partial set — the warm-up is a
+ * scripted turn on a scripted provider, and a title that never arrives here is a real
+ * finding that every downstream title assertion would report anyway.
+ */
+const WARMUP_SETTLE_DEADLINE_MS = 30_000;
+
+async function settleWarmUpTurn(threadId: string): Promise<void> {
+  const until = Date.now() + WARMUP_SETTLE_DEADLINE_MS;
+  for (;;) {
+    const [row] = await oracleQuery<{ running: number; titles: number }>(
+      "SELECT SUM(status = 'running') AS running, SUM(kind = 'title') AS titles " +
+        "FROM assistant_requests WHERE threadId = ?",
+      [threadId],
+    );
+    const running = Number(row?.running ?? 0);
+    const titles = Number(row?.titles ?? 0);
+    if (running === 0 && titles > 0) return;
+    if (Date.now() > until) {
+      throw new Error(
+        `the warm-up turn did not settle within ${WARMUP_SETTLE_DEADLINE_MS}ms ` +
+          `(running=${running} titleRows=${titles}). The chat turn streamed, so this is the ` +
+          "finalizer or the detached C6 title job — check the app log.\n" +
+          `--- app log ---\n${tail("app")}`,
+      );
+    }
+    await sleep(100);
+  }
+}
 
 /**
  * One throwaway pass over every route the matrices assert against, BEFORE any
@@ -439,6 +543,7 @@ export async function warmUp(): Promise<void> {
   }
 
   const threadId = turn.threadId;
+  await phase("warm-up settle (chat + detached title)", () => settleWarmUpTurn(threadId));
   const requestRows = await oracleQuery<{ id: number }>(
     "SELECT id FROM assistant_requests WHERE threadId = ?",
     [threadId],

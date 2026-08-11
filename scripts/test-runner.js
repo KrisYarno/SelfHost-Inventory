@@ -56,14 +56,35 @@ const testSuites = {
     ],
     description: 'Fast named subset of the contract gates (also covered by "all")',
   },
-  launch: {
-    name: 'Launch Gate',
-    // The DB-backed structured-layer harness (multiuser spec C7): its own jest
-    // project, its own globalSetup/globalTeardown, NO positional pattern — that
-    // config's testMatch decides what runs. Fails closed with an actionable message
-    // when Docker or the 3100-3102 ports are unavailable.
+  // The DB-backed structured-layer harness (multiuser spec C7): its own jest project,
+  // its own globalSetup/globalTeardown, NO positional pattern — that config's testMatch
+  // decides what runs. Fails closed with an actionable message when Docker or the
+  // 3100-3102 ports are unavailable.
+  //
+  // TWO PROFILES from W3 (plan Task 3.3): the same matrix against `next dev` and
+  // against the PRODUCTION artifact (`next build` once, then `next start`). Each leg is
+  // its own jest process with its own state file and its own throwaway container, so
+  // they share nothing but the repo.
+  'launch:dev': {
+    name: 'Launch Gate (dev profile)',
     config: 'launch-gate/jest.config.mjs',
-    description: 'DB-backed launch gate (throwaway container + app/mcp/shim over HTTP)',
+    profile: 'dev',
+    description: 'launch gate against `next dev` (the W1/W2 path)',
+  },
+  'launch:start': {
+    name: 'Launch Gate (start profile)',
+    config: 'launch-gate/jest.config.mjs',
+    profile: 'start',
+    description: 'launch gate against the built artifact (`next build` + `next start`)',
+  },
+  launch: {
+    name: 'Launch Gate (both profiles)',
+    // AGGREGATE (plan Task 3.3): `launch` is the gate-blocking name the wave-close
+    // ritual runs, and from W3 it means BOTH profiles, in order, with both counts
+    // reported. Legs run even after a failure — a wave close wants to know whether the
+    // production artifact fails the same way `next dev` did, not just that something did.
+    aggregates: ['launch:dev', 'launch:start'],
+    description: 'DB-backed launch gate — dev profile then start profile (both must pass)',
   },
   all: {
     name: 'All Tests',
@@ -89,56 +110,17 @@ if (!testSuites[suite]) {
   process.exit(1);
 }
 
-// Build jest command. A suite declares EITHER one `pattern` or a `patterns` list;
-// every pattern is spliced in where the single positional pattern used to go. A suite
-// MAY also name its own `config` (the launch gate is a separate jest project) — and a
-// config-bearing suite may declare NO pattern at all, in which case jest receives no
-// positional filter and that config's own testMatch decides what runs. The splice is
-// guarded: an absent pattern must never reach argv as the string "undefined".
-const suiteDef = testSuites[suite];
-const patterns = suiteDef.patterns ?? (suiteDef.pattern ? [suiteDef.pattern] : []);
-const configPath = suiteDef.config ?? 'jest.config.js';
-const jestArgs = [
-  'jest',
-  ...patterns,
-  '--config', configPath,
-];
-
-if (watch) {
-  jestArgs.push('--watch');
-}
-
-if (coverage) {
-  jestArgs.push('--coverage');
-  jestArgs.push('--coverageReporters=text');
-  jestArgs.push('--coverageReporters=lcov');
-  jestArgs.push('--coverageReporters=html');
-}
-
-if (verbose) {
-  jestArgs.push('--verbose');
-}
-
 // Add any additional arguments passed to the script
-const additionalArgs = args.filter(arg => 
-  arg !== suite && 
+const additionalArgs = args.filter(arg =>
+  arg !== suite &&
   !['--watch', '-w', '--coverage', '-c', '--verbose', '-v'].includes(arg)
 );
-jestArgs.push(...additionalArgs);
-
-// Print test run information
-console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
-console.log(`${colors.cyan}🧪 Running ${testSuites[suite].name}${colors.reset}`);
-console.log(`${colors.yellow}📁 Pattern: ${patterns.length > 0 ? patterns.join(', ') : `(none — ${configPath} testMatch)`}${colors.reset}`);
-if (watch) console.log(`${colors.yellow}👀 Watch mode enabled${colors.reset}`);
-if (coverage) console.log(`${colors.yellow}📊 Coverage report enabled${colors.reset}`);
-console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
 
 // The launch gate's cross-process state file (multiuser contract pack CP-7): jest's
 // globalSetup state never reaches a test suite's module registry, so the harness and
 // its suites share a mode-0600 JSON document instead. The path must exist BEFORE jest
-// starts and must be unique per run — two concurrent runs sharing one path would
-// corrupt each other's pids and session cookies.
+// starts and must be unique per run — two concurrent runs (or two aggregated profile
+// legs) sharing one path would corrupt each other's pids and session cookies.
 const launchGateFiles = [];
 function createLaunchGateStateFile() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'launch-gate-'));
@@ -158,39 +140,101 @@ function cleanupLaunchGateFiles() {
   }
 }
 
-const jestEnv = { ...process.env, NODE_ENV: 'test' };
-if (suite === 'launch') {
-  jestEnv.LAUNCH_GATE_STATE_FILE = createLaunchGateStateFile();
+// Build + run ONE leg. A suite declares EITHER one `pattern` or a `patterns` list;
+// every pattern is spliced in where the single positional pattern used to go. A suite
+// MAY also name its own `config` (the launch gate is a separate jest project) — and a
+// config-bearing suite may declare NO pattern at all, in which case jest receives no
+// positional filter and that config's own testMatch decides what runs. The splice is
+// guarded: an absent pattern must never reach argv as the string "undefined".
+function runLeg(key) {
+  const def = testSuites[key];
+  const patterns = def.patterns ?? (def.pattern ? [def.pattern] : []);
+  const configPath = def.config ?? 'jest.config.js';
+  const jestArgs = [
+    'jest',
+    ...patterns,
+    '--config', configPath,
+  ];
+
+  if (watch) {
+    jestArgs.push('--watch');
+  }
+
+  if (coverage) {
+    jestArgs.push('--coverage');
+    jestArgs.push('--coverageReporters=text');
+    jestArgs.push('--coverageReporters=lcov');
+    jestArgs.push('--coverageReporters=html');
+  }
+
+  if (verbose) {
+    jestArgs.push('--verbose');
+  }
+
+  jestArgs.push(...additionalArgs);
+
+  // Print test run information
+  console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
+  console.log(`${colors.cyan}🧪 Running ${def.name}${colors.reset}`);
+  console.log(`${colors.yellow}📁 Pattern: ${patterns.length > 0 ? patterns.join(', ') : `(none — ${configPath} testMatch)`}${colors.reset}`);
+  if (def.profile) console.log(`${colors.yellow}🏗  Launch profile: ${def.profile}${colors.reset}`);
+  if (watch) console.log(`${colors.yellow}👀 Watch mode enabled${colors.reset}`);
+  if (coverage) console.log(`${colors.yellow}📊 Coverage report enabled${colors.reset}`);
+  console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
+
+  const jestEnv = { ...process.env, NODE_ENV: 'test' };
+  if (def.profile) {
+    jestEnv.LAUNCH_GATE_STATE_FILE = createLaunchGateStateFile();
+    jestEnv.LAUNCH_GATE_PROFILE = def.profile;
+  }
+
+  return new Promise((resolve) => {
+    const jest = spawn('npx', jestArgs, {
+      stdio: 'inherit',
+      shell: true,
+      env: jestEnv
+    });
+    jest.on('close', (code) => resolve(code === null ? 1 : code));
+    jest.on('error', (error) => {
+      console.error(`${colors.red}Failed to start test runner:${colors.reset}`, error);
+      resolve(1);
+    });
+  });
 }
 
-// Run jest
-const jest = spawn('npx', jestArgs, {
-  stdio: 'inherit',
-  shell: true,
-  env: jestEnv
-});
+// A suite either IS a leg or aggregates several. Every leg runs, even after a failing
+// one: when the launch gate is red, "does the production artifact fail the same way?"
+// is the next question, and paying for a second run to answer it is worse.
+const legs = testSuites[suite].aggregates ?? [suite];
 
-// Handle exit
-jest.on('close', (code) => {
+(async () => {
+  const results = [];
+  for (const key of legs) {
+    results.push({ key, code: await runLeg(key) });
+  }
   cleanupLaunchGateFiles();
-  if (code === 0) {
+
+  const failed = results.filter((result) => result.code !== 0);
+  if (results.length > 1) {
+    console.log(`\n${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
+    for (const result of results) {
+      const mark = result.code === 0 ? `${colors.green}PASS${colors.reset}` : `${colors.red}FAIL (${result.code})${colors.reset}`;
+      console.log(`  ${mark}  ${testSuites[result.key].name}`);
+    }
+    console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}`);
+  }
+
+  if (failed.length === 0) {
     console.log(`\n${colors.green}✅ Tests completed successfully!${colors.reset}`);
   } else {
-    console.log(`\n${colors.red}❌ Tests failed with exit code ${code}${colors.reset}`);
+    console.log(`\n${colors.red}❌ Tests failed with exit code ${failed[0].code}${colors.reset}`);
   }
-  
+
   if (coverage) {
     console.log(`\n${colors.cyan}📊 Coverage report generated:${colors.reset}`);
     console.log(`   HTML: ${path.join(process.cwd(), 'coverage/lcov-report/index.html')}`);
     console.log(`   LCOV: ${path.join(process.cwd(), 'coverage/lcov.info')}`);
   }
-  
-  process.exit(code);
-});
 
-// Handle errors
-jest.on('error', (error) => {
-  cleanupLaunchGateFiles();
-  console.error(`${colors.red}Failed to start test runner:${colors.reset}`, error);
-  process.exit(1);
-});
+  process.exit(failed.length === 0 ? 0 : failed[0].code);
+})();

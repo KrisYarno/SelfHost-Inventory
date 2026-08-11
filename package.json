@@ -31,10 +31,12 @@
     "test:e2e": "node scripts/test-runner.js e2e",
     "test:gate": "node scripts/test-runner.js gate",
     "test:launch": "node scripts/test-runner.js launch",
+    "test:launch:dev": "node scripts/test-runner.js launch:dev",
+    "test:launch:start": "node scripts/test-runner.js launch:start",
     "test:watch": "node scripts/test-runner.js all --watch",
     "test:coverage": "node scripts/test-runner.js all --coverage",
     "test:mcp": "jest -c mcp/jest.config.mjs",
-    "test:ci": "node scripts/test-runner.js all --coverage --ci && npm run test:mcp"
+    "test:ci": "node scripts/test-runner.js all --coverage --ci && npm run test:mcp && npm run test:launch"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.15",
