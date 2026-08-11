@@ -244,6 +244,18 @@ const PERMANENT_EXEMPT: Exemption[] = [
       "will recordChange same-tx when they land — that is a TOOL-layer change, not " +
       "this route's.",
   },
+  {
+    // Multiuser substrate D9 (task 1.3): same rationale CLASS as the route above.
+    // DELETE removes the caller's OWN thread (messages Cascade, requests SetNull so
+    // usage attribution survives) — user-owned chat persistence, never business
+    // state, and deliberately not audited in v1 (spec G4, registered).
+    path: "app/api/assistant/threads/[id]/route.ts",
+    reason:
+      "assistant feature state: a user deleting their own thread removes chat " +
+      "persistence, not business state; zero business writes unchanged (telemetry " +
+      "rows survive via SetNull). Thread-mutation audit events are deliberately out " +
+      "of scope for v1 — registered with the v1.1 write tools.",
+  },
 ];
 
 /**
