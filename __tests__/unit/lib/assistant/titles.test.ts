@@ -121,7 +121,7 @@ describe('generateThreadTitle "creating-model" (C6): the detached model call', (
     ]);
   });
 
-  it("calls generateText ONCE with the C6 prompt, maxOutputTokens 24 and an abort signal", async () => {
+  it("calls generateText ONCE with the C6 prompt, maxOutputTokens 256, thinking disabled and an abort signal", async () => {
     await generateThreadTitle(CREATING_JOB);
 
     expect(mockGenerateText).toHaveBeenCalledTimes(1);
@@ -129,7 +129,12 @@ describe('generateThreadTitle "creating-model" (C6): the detached model call', (
     expect(args.model).toBe(RESOLVED.languageModel);
     expect(args.system).toBe(TITLE_SYSTEM);
     expect(args.prompt).toBe(CREATING_JOB.firstUserText);
-    expect(args.maxOutputTokens).toBe(24);
+    // F-7 (2.C live re-baseline): reasoning-default models (Claude 5 family) burn a
+    // small output cap on thinking before any text — every live title fell back.
+    // Thinking is DISABLED for the anthropic path (a title needs no reasoning) and
+    // the cap is a cost bound tolerant of providers that ignore that namespace.
+    expect(args.maxOutputTokens).toBe(256);
+    expect(args.providerOptions).toEqual({ anthropic: { thinking: { type: "disabled" } } });
     expect(args.abortSignal).toBeInstanceOf(AbortSignal);
     expect(args.abortSignal.aborted).toBe(false);
   });

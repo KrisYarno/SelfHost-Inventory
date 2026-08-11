@@ -60,8 +60,12 @@ const FALLBACK_MAX_CHARS = 60;
 /** The model only ever sees the head of the first user message. */
 const PROMPT_MAX_CHARS = 500;
 
-/** A title is a handful of words; 24 is the cost bound, not a target length. */
-const TITLE_MAX_OUTPUT_TOKENS = 24;
+/** A title is a handful of words; the cap is a COST bound, not a target length.
+ *  F-7 (2.C live re-baseline): 24 was too tight for reasoning-default models — the
+ *  Claude 5 family burns the whole cap on adaptive thinking before any text, so
+ *  every live title fell back. Thinking is disabled for the anthropic path below;
+ *  256 additionally tolerates providers that ignore that namespace. */
+const TITLE_MAX_OUTPUT_TOKENS = 256;
 
 /** Spec C6, verbatim. The message is DATA — this prompt is the injection posture. */
 const TITLE_SYSTEM_PROMPT =
@@ -117,7 +121,9 @@ async function runModelTitle(job: Extract<TitleJob, { mode: "creating-model" }>)
     const title = sanitize(result.text ?? "", TITLE_MAX_CHARS);
     // An empty answer is a FAILED answer: a blank title would satisfy the
     // `title IS NULL` fence forever and no later backfill could repair it.
-    if (title.length === 0) throw new Error("EmptyTitleResult");
+    // Named error: the catch logs err.NAME only (a message can echo user text), so
+    // an anonymous Error would log as just "Error" — undiagnosable (how F-7 hid).
+    if (title.length === 0) throw Object.assign(new Error("EmptyTitleResult"), { name: "EmptyTitleResult" });
 
     generated = { requestId, title, usage: toUsageTriple(result.usage) };
   } catch (err) {
@@ -191,6 +197,9 @@ async function callWithTimeout(
     system: TITLE_SYSTEM_PROMPT,
     prompt: firstUserText.slice(0, PROMPT_MAX_CHARS),
     maxOutputTokens: TITLE_MAX_OUTPUT_TOKENS,
+    // F-7: a title needs no reasoning. Other providers ignore this namespace —
+    // their reasoning-default models lean on the raised output cap instead.
+    providerOptions: { anthropic: { thinking: { type: "disabled" } } },
     abortSignal: controller.signal,
   });
   // Handled here, read nowhere: without this, a hung call that eventually rejects
@@ -200,7 +209,7 @@ async function callWithTimeout(
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       controller.abort();
-      reject(new Error("TitleTimeout"));
+      reject(Object.assign(new Error("TitleTimeout"), { name: "TitleTimeout" }));
     }, TITLE_TIMEOUT_MS);
   });
 
