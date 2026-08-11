@@ -18,6 +18,7 @@ import {
   Mail,
   BarChart3,
   Sparkles,
+  Gauge,
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -148,6 +149,19 @@ export default function AdminSettingsPage() {
             <p className="font-medium">AI providers &amp; assistant</p>
             <p className="text-sm text-muted-foreground">
               Configure AI providers, routing defaults, and read-only API tokens.
+            </p>
+          </div>
+        </Link>
+        <Link
+          href="/admin/usage"
+          className="flex items-center gap-3 p-4 hover:bg-surface-hover"
+        >
+          <Gauge className="h-5 w-5 shrink-0 text-muted-foreground" />
+          <div className="min-w-0">
+            <p className="font-medium">Assistant usage</p>
+            <p className="text-sm text-muted-foreground">
+              Token usage per user and day, the tool mix, and incomplete requests.
+              Tokens only — no cost estimates.
             </p>
           </div>
         </Link>
