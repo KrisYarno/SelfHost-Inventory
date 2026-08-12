@@ -23,7 +23,9 @@
 //   --census-since=2026-07-14    D4 logType census lower bound.
 //   --class-b-floor=evidence|spec  Which class (b) observability floor BINDS.
 //                                Both readings are always emitted; see D1's
-//                                notes and the SEAMS report.
+//                                notes and the SEAMS report. EXACTLY one of the
+//                                two tokens — anything else is a validation
+//                                error, never coerced to a reading.
 //
 const fs = require("fs");
 const path = require("path");
@@ -38,6 +40,9 @@ const MODULES = [
   require("./d3-snapshot-walk"),
   require("./d4-checks"),
 ];
+
+/** The only two accepted --class-b-floor readings. Exact tokens, never coerced. */
+const CLASS_B_FLOOR_MODES = ["evidence", "spec"];
 
 const DEFAULTS = {
   checks: ["d1", "d2", "d3", "d4"],
@@ -89,7 +94,10 @@ function parseArgs(argv) {
         opts.censusSince = value;
         break;
       case "class-b-floor":
-        opts.classBFloorMode = value === "spec" ? "spec" : "evidence";
+        // Kept VERBATIM: validate() rejects anything that is not one of the two
+        // readings. Coercing here would let a typo silently bind a different
+        // floor and the artifact would say nothing about it.
+        opts.classBFloorMode = value;
         break;
       case "help":
         opts.help = true;
@@ -115,6 +123,12 @@ function validate(opts) {
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.censusSince)) {
     errors.push("--census-since must be YYYY-MM-DD");
+  }
+  if (!CLASS_B_FLOOR_MODES.includes(opts.classBFloorMode)) {
+    errors.push(
+      `--class-b-floor must be exactly one of ${CLASS_B_FLOOR_MODES.join("|")} ` +
+        `(got '${opts.classBFloorMode}') — an unrecognised value is NEVER coerced to a reading`
+    );
   }
   const known = new Set(MODULES.map((m) => m.check.slice(0, 2)));
   for (const c of opts.checks) {
@@ -239,4 +253,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, validate, DEFAULTS, MODULES };
+module.exports = { parseArgs, validate, DEFAULTS, MODULES, CLASS_B_FLOOR_MODES };

@@ -16,7 +16,10 @@ const {
   EVIDENCE_CLASS,
   ORDER_STATUS,
   STOCKED_OUT_MIGRATION_AT,
+  WOO_COMPLETED_STATUS,
+  DEFINITIONS,
   deriveFloors,
+  earliestApplicableFloor,
   observableClassesAt,
   classifyUnits,
   classifyOrder,
@@ -26,6 +29,17 @@ const {
 const {
   walkSnapshotSeries,
 } = require("../../../../scripts/diagnostics/inventory-accuracy/lib/snapshot-walk");
+
+const {
+  buildClassBAttribution,
+  selectClassCBatches,
+} = require("../../../../scripts/diagnostics/inventory-accuracy/lib/attribute");
+
+const {
+  rollupLineGrain,
+  splitUnitsByLogType,
+  summarizeUnattributedPool,
+} = require("../../../../scripts/diagnostics/inventory-accuracy/lib/rollups");
 
 const {
   weekStartKey,
@@ -143,6 +157,26 @@ describe("deriveFloors — per-evidence-class start dates", () => {
     expect(f.c.floor).toEqual(D("2026-09-01T00:00:00.000Z"));
   });
 
+  // P0S-3 — the unattributed-outbound pool is scoped to the window in which a
+  // gap-counted order can live: the EARLIEST applicable class floor.
+  test("earliestApplicableFloor is the earliest applicable class's floor", () => {
+    const f = deriveFloors({
+      ...FLOOR_INPUT_FULL,
+      earliestPersistedOrderReferenceAt: D("2026-09-01T00:00:00.000Z"),
+    });
+    expect(earliestApplicableFloor(f)).toEqual(D("2026-07-14T10:00:00.000Z"));
+  });
+
+  test("earliestApplicableFloor is null when NO class is applicable (structurally empty, never 0)", () => {
+    const f = deriveFloors({
+      earliestStockedOutAt: null,
+      earliestLedgerBatchAt: null,
+      earliestFulfillmentAuditAt: null,
+      earliestPersistedOrderReferenceAt: null,
+    });
+    expect(earliestApplicableFloor(f)).toBeNull();
+  });
+
   test("observableClassesAt returns only classes whose floor has been reached", () => {
     const f = deriveFloors({
       ...FLOOR_INPUT_FULL,
@@ -199,6 +233,7 @@ function order(overrides) {
     companyId: "co_1",
     integrationId: "int_1",
     orderNumber: "1001",
+    internalStatus: "fulfilled",
     anchorAt: POST_FLOOR,
     completedAt: POST_FLOOR,
     observations: [],
@@ -209,7 +244,16 @@ function order(overrides) {
   };
 }
 
-const obs = (productId, units, tombstonedAt = null) => ({ productId, units, tombstonedAt });
+// An observation row carries the Woo order status it was written under:
+// `unitsOnCompletedOrder` is 0 unless that status is `completed`, so the status
+// is what separates a real over-deduction from a deduction on an order Woo
+// never reported as completed (P0S-1).
+const obs = (productId, units, tombstonedAt = null, orderStatus = WOO_COMPLETED_STATUS) => ({
+  productId,
+  units,
+  tombstonedAt,
+  orderStatus,
+});
 const led = (productId, delta, locationId = 1, evidenceClass = EVIDENCE_CLASS.B) => ({
   productId,
   locationId,
@@ -255,6 +299,11 @@ describe("classifyOrder", () => {
     expect(r.status).toBe(ORDER_STATUS.OVER);
     expect(r.observedUnits).toBe(0);
     expect(r.deductedUnits).toBe(2);
+    // P0S-1: nothing observed the order as COMPLETED, so this is not evidence of
+    // over-deduction — it is a deduction we cannot confirm against Woo.
+    expect(r.observedOrderStatus).toBeNull();
+    expect(r.statusReason).toBe("deducted_order_not_completed");
+    expect(r.countsTowardGapTotals).toBe(false);
   });
 
   test("mixed products roll up WORST-CASE, and unit differences do not cancel", () => {
@@ -310,6 +359,130 @@ describe("classifyOrder", () => {
     expect(r.status).toBe(ORDER_STATUS.UNOBSERVABLE);
     expect(r.statusReason).toBe("historically_unobservable");
     expect(r.countsTowardGapTotals).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // P0S-1 — the OVER cohort is SPLIT by whether Woo ever reported the order as
+  // completed. The app's completed-push is expected-blocked in production, so a
+  // deducted-but-not-completed order is a PERSISTENT state, not an in-flight one.
+  // -------------------------------------------------------------------------
+  describe("over cohort split (P0S-1)", () => {
+    test("OVER on a Woo-COMPLETED order stays in the gap totals", () => {
+      const r = classifyOrder(
+        order({ observations: [obs(7, 3)], ledger: [led(7, -8)] }),
+        FLOORS
+      );
+      expect(r.status).toBe(ORDER_STATUS.OVER);
+      expect(r.observedOrderStatus).toBe("completed");
+      expect(r.observedAsCompleted).toBe(true);
+      expect(r.statusReason).toBeNull();
+      expect(r.countsTowardGapTotals).toBe(true);
+      expect(r.unitsOverDeducted).toBe(5);
+    });
+
+    test("deducted while Woo says the order is NOT completed => excluded from gap totals with a named reason", () => {
+      const r = classifyOrder(
+        order({
+          internalStatus: "fulfilled",
+          observations: [obs(7, 0, null, "processing")],
+          ledger: [led(7, -6)],
+        }),
+        FLOORS
+      );
+      expect(r.status).toBe(ORDER_STATUS.OVER);
+      expect(r.observedOrderStatus).toBe("processing");
+      expect(r.observedAsCompleted).toBe(false);
+      expect(r.statusReason).toBe("deducted_order_not_completed");
+      expect(r.countsTowardGapTotals).toBe(false);
+      // The units are still CARRIED (the cohort is disclosed with its own unit
+      // count) — they are simply not folded into unitsOverDeducted.
+      expect(r.deductedUnitsUnscoped).toBe(6);
+      expect(r.observedUnitsUnscoped).toBe(0);
+    });
+
+    test("the observed Woo status and the app's internalStatus are BOTH carried onto the result", () => {
+      const r = classifyOrder(
+        order({
+          internalStatus: "cancelled",
+          observations: [obs(7, 10, null, "refunded")],
+          ledger: [led(7, -10)],
+        }),
+        FLOORS
+      );
+      expect(r.internalStatus).toBe("cancelled");
+      expect(r.observedOrderStatus).toBe("refunded");
+    });
+
+    test("a mixed observed status counts as completed when ANY live row says completed", () => {
+      const r = classifyOrder(
+        order({
+          observations: [obs(7, 10, null, "completed"), obs(8, 0, null, "processing")],
+          ledger: [led(7, -12)],
+        }),
+        FLOORS
+      );
+      expect(r.observedOrderStatus).toBe("completed,processing");
+      expect(r.observedAsCompleted).toBe(true);
+      expect(r.countsTowardGapTotals).toBe(true);
+    });
+
+    test("a NON-over order is never excluded by the completed test", () => {
+      const r = classifyOrder(
+        order({ observations: [obs(7, 10, null, "completed")], ledger: [led(7, -4)] }),
+        FLOORS
+      );
+      expect(r.status).toBe(ORDER_STATUS.PARTIAL);
+      expect(r.countsTowardGapTotals).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // P0S-6 — every excluded cohort needs a UNIT count beside its order count, so
+  // the classifier carries UNSCOPED unit totals for orders it does not score.
+  // -------------------------------------------------------------------------
+  describe("unscoped unit totals for excluded cohorts (P0S-6)", () => {
+    test("a pre-floor order carries its observed/deducted units unscoped, while the scored figures stay 0", () => {
+      const r = classifyOrder(
+        order({
+          anchorAt: D("2026-05-01T00:00:00.000Z"),
+          completedAt: D("2026-05-02T00:00:00.000Z"),
+          observations: [obs(7, 10)],
+          ledger: [led(7, -4)],
+        }),
+        FLOORS
+      );
+      expect(r.statusReason).toBe("historically_unobservable");
+      expect(r.observedUnits).toBe(0);
+      expect(r.deductedUnits).toBe(0);
+      expect(r.observedUnitsUnscoped).toBe(10);
+      expect(r.deductedUnitsUnscoped).toBe(4);
+    });
+
+    test("a no_completed_observation order is 0 units BY CONSTRUCTION, not by omission", () => {
+      const r = classifyOrder(order({ completedAt: null, observations: [] }), FLOORS);
+      expect(r.statusReason).toBe("no_completed_observation");
+      expect(r.observedUnitsUnscoped).toBe(0);
+      expect(r.deductedUnitsUnscoped).toBe(0);
+    });
+
+    test("an unmapped_only order carries its unmapped units", () => {
+      const r = classifyOrder(
+        order({ observations: [obs(null, 6)], unmappedItems: { itemCount: 1, itemUnits: 6 } }),
+        FLOORS
+      );
+      expect(r.statusReason).toBe("unmapped_only");
+      expect(r.observedUnitsUnscoped).toBe(0);
+      expect(r.unmapped).toMatchObject({ observationUnits: 6, itemUnits: 6 });
+    });
+
+    test("a scored order's unscoped totals equal its scored totals", () => {
+      const r = classifyOrder(
+        order({ observations: [obs(7, 10)], ledger: [led(7, -4)] }),
+        FLOORS
+      );
+      expect(r.observedUnitsUnscoped).toBe(r.observedUnits);
+      expect(r.deductedUnitsUnscoped).toBe(r.deductedUnits);
+    });
   });
 
   test("no completed observation and no ledger evidence => unobservable, not a gap", () => {
@@ -399,6 +572,10 @@ const ORDERS_FOR_MATCH = [
   { orderId: "o_c", integrationId: "int_1", orderNumber: "2002", anchorAt: D("2026-09-01T00:00:00.000Z") },
   { orderId: "o_d", integrationId: "int_1", orderNumber: "3003", anchorAt: D("2026-01-01T00:00:00.000Z") },
   { orderId: "o_e", integrationId: "int_1", orderNumber: "AR-9", anchorAt: D("2026-09-01T00:00:00.000Z") },
+  // Two orders in the SAME integration carrying the same number, both inside the
+  // window: the other ambiguity branch (P0S-7a).
+  { orderId: "o_f", integrationId: "int_1", orderNumber: "4004", anchorAt: D("2026-09-01T00:00:00.000Z") },
+  { orderId: "o_g", integrationId: "int_1", orderNumber: "4004", anchorAt: D("2026-09-03T00:00:00.000Z") },
 ];
 
 const ref = (id, raw, createdAt = D("2026-09-02T00:00:00.000Z")) => ({
@@ -427,6 +604,32 @@ describe("matchHeuristicReferences — exact normalized equality, ±7d, one inte
       integrationCount: 2,
       reason: "multi_integration",
     });
+  });
+
+  test("AMBIGUOUS: two orders in the SAME integration match inside the window (P0S-7a)", () => {
+    const out = matchHeuristicReferences([ref(20, "4004")], ORDERS_FOR_MATCH);
+    expect(out.matches).toHaveLength(0);
+    expect(out.ambiguous).toHaveLength(1);
+    expect(out.ambiguous[0]).toMatchObject({
+      auditId: 20,
+      normalizedReference: "4004",
+      candidateCount: 2,
+      integrationCount: 1,
+      reason: "multi_order_in_window",
+    });
+    expect(out.ambiguous[0].candidateOrderIds.sort()).toEqual(["o_f", "o_g"]);
+    expect(out.disclosures.ambiguousMultiOrder).toBe(1);
+  });
+
+  test("same-integration duplicates are NOT ambiguous when only ONE falls inside the window", () => {
+    const out = matchHeuristicReferences(
+      // 8 days from o_f (out of window), 6 days from o_g (inside it).
+      [ref(21, "4004", D("2026-09-09T00:00:00.000Z"))],
+      ORDERS_FOR_MATCH
+    );
+    expect(out.ambiguous).toHaveLength(0);
+    expect(out.matches).toHaveLength(1);
+    expect(out.matches[0]).toMatchObject({ orderId: "o_g" });
   });
 
   test("OUT OF WINDOW: candidate exists but is more than 7 days from the audit row", () => {
@@ -464,6 +667,208 @@ describe("matchHeuristicReferences — exact normalized equality, ±7d, one inte
     const out = matchHeuristicReferences([ref(8, "order 2002 rush")], ORDERS_FOR_MATCH);
     expect(out.matches).toHaveLength(0);
     expect(out.unmatched[0].reason).toBe("no_candidate");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D1 attribution munging (P0S-4 / P0S-7b) — extracted from d1-reconciliation.js
+// so every decision-shaped branch is pinned here instead of running only
+// against a restore.
+// ---------------------------------------------------------------------------
+const ev = (auditId, batchId, orderId) => ({ auditId, batchId, orderId });
+const KNOWN_ORDERS = new Set(["o_1", "o_2", "o_3"]);
+const isKnown = (id) => KNOWN_ORDERS.has(id);
+
+describe("buildClassBAttribution — batchId -> order, and what happens on conflict", () => {
+  test("a batchId claimed by ONE order is attributed to it", () => {
+    const out = buildClassBAttribution([ev(1, "b_1", "o_1")], isKnown);
+    expect(out.batchToOrder.get("b_1")).toBe("o_1");
+    expect(out.conflicts).toHaveLength(0);
+  });
+
+  test("several events from the SAME order on one batch are not a conflict", () => {
+    const out = buildClassBAttribution(
+      [ev(1, "b_1", "o_1"), ev(2, "b_1", "o_1"), ev(3, "b_1", "o_1")],
+      isKnown
+    );
+    expect(out.batchToOrder.get("b_1")).toBe("o_1");
+    expect(out.conflicts).toHaveLength(0);
+  });
+
+  test("P0S-4: a batchId claimed by TWO orders is dropped from BOTH — never first-wins", () => {
+    const out = buildClassBAttribution([ev(1, "b_1", "o_1"), ev(2, "b_1", "o_2")], isKnown);
+    expect(out.batchToOrder.has("b_1")).toBe(false);
+    expect(out.conflicts).toEqual([{ batchId: "b_1", orderIds: ["o_1", "o_2"] }]);
+    expect(out.conflictedBatchIds.has("b_1")).toBe(true);
+  });
+
+  test("a later event cannot RESURRECT a conflicted batchId", () => {
+    const out = buildClassBAttribution(
+      [ev(1, "b_1", "o_1"), ev(2, "b_1", "o_2"), ev(3, "b_1", "o_1"), ev(4, "b_1", "o_3")],
+      isKnown
+    );
+    expect(out.batchToOrder.has("b_1")).toBe(false);
+    expect(out.conflicts[0].orderIds).toEqual(["o_1", "o_2", "o_3"]);
+  });
+
+  test("a conflict on one batch never disturbs a clean one", () => {
+    const out = buildClassBAttribution(
+      [ev(1, "b_1", "o_1"), ev(2, "b_1", "o_2"), ev(3, "b_2", "o_3")],
+      isKnown
+    );
+    expect(out.batchToOrder.get("b_2")).toBe("o_3");
+    expect(out.batchToOrder.size).toBe(1);
+  });
+
+  test("events with NO batchId and events on unknown orders are counted, never attributed", () => {
+    const out = buildClassBAttribution(
+      [ev(1, null, "o_1"), ev(2, "", "o_1"), ev(3, "b_9", "o_gone"), ev(4, "b_1", "o_1")],
+      isKnown
+    );
+    expect(out.eventsWithoutBatch).toBe(2);
+    expect(out.eventsWithUnknownOrder).toBe(1);
+    expect(Array.from(out.batchToOrder.keys())).toEqual(["b_1"]);
+  });
+});
+
+describe("selectClassCBatches — class (c) never overrides the stronger class (b)", () => {
+  const m = (batchId, orderId) => ({ batchId, orderId });
+
+  test("a matched reference whose batch is already class (b) is skipped, never double-counted", () => {
+    const out = selectClassCBatches([m("b_1", "o_2")], new Set(["b_1"]));
+    expect(out.batchToOrder.size).toBe(0);
+    expect(out.skippedAsClassB).toBe(1);
+  });
+
+  test("a free batch is attributed", () => {
+    const out = selectClassCBatches([m("b_5", "o_2")], new Set(["b_1"]));
+    expect(out.batchToOrder.get("b_5")).toBe("o_2");
+  });
+
+  test("two references claiming ONE batch for different orders drop both (same rule as class b)", () => {
+    const out = selectClassCBatches([m("b_5", "o_1"), m("b_5", "o_2")], new Set());
+    expect(out.batchToOrder.has("b_5")).toBe(false);
+    expect(out.conflicts).toEqual([{ batchId: "b_5", orderIds: ["o_1", "o_2"] }]);
+  });
+
+  test("matches carrying no batchId are counted, never attributed", () => {
+    const out = selectClassCBatches([m(null, "o_1")], new Set());
+    expect(out.matchesWithoutBatch).toBe(1);
+    expect(out.batchToOrder.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rollups (P0S-2 / P0S-3 / P0S-5)
+// ---------------------------------------------------------------------------
+describe("rollupLineGrain — observed vs app-recorded fulfilledQty, monthly (P0S-2)", () => {
+  const pair = (o) => ({
+    orderId: "ord_1",
+    month: "2026-05",
+    productId: 7,
+    lineCount: 1,
+    orderedUnits: 0,
+    appFulfilledUnits: 0,
+    observedUnits: 0,
+    ...o,
+  });
+
+  test("drift does NOT cancel across pairs (house rule)", () => {
+    const out = rollupLineGrain([
+      pair({ orderId: "a", orderedUnits: 10, appFulfilledUnits: 0, observedUnits: 10 }),
+      pair({ orderId: "b", productId: 8, orderedUnits: 4, appFulfilledUnits: 4, observedUnits: 0 }),
+    ]);
+    expect(out.totals.unitsObservedNotAppFulfilled).toBe(10);
+    expect(out.totals.unitsAppFulfilledNotObserved).toBe(4);
+    expect(out.totals.pairs).toBe(2);
+    expect(out.totals.orders).toBe(2);
+    expect(out.totals.pairsWithDrift).toBe(2);
+  });
+
+  test("a pair where the two agree contributes no drift", () => {
+    const out = rollupLineGrain([pair({ orderedUnits: 5, appFulfilledUnits: 5, observedUnits: 5 })]);
+    expect(out.totals.unitsObservedNotAppFulfilled).toBe(0);
+    expect(out.totals.unitsAppFulfilledNotObserved).toBe(0);
+    expect(out.totals.pairsWithDrift).toBe(0);
+  });
+
+  test("months are bucketed and sorted, and orders are counted DISTINCT per month", () => {
+    const out = rollupLineGrain([
+      pair({ orderId: "a", month: "2026-06", observedUnits: 3 }),
+      pair({ orderId: "a", month: "2026-06", productId: 8, observedUnits: 2 }),
+      pair({ orderId: "b", month: "2026-05", observedUnits: 1 }),
+    ]);
+    expect(out.byMonth.map((r) => r.month)).toEqual(["2026-05", "2026-06"]);
+    expect(out.byMonth[1]).toMatchObject({
+      month: "2026-06",
+      pairs: 2,
+      orders: 1,
+      observedUnits: 5,
+      unitsObservedNotAppFulfilled: 5,
+    });
+    expect(out.totals.orders).toBe(2);
+  });
+
+  test("an empty panel is empty, not zero-filled", () => {
+    const out = rollupLineGrain([]);
+    expect(out.byMonth).toEqual([]);
+    expect(out.totals.pairs).toBe(0);
+  });
+});
+
+describe("splitUnitsByLogType — D2 scope figures stop being pool-level (P0S-5)", () => {
+  test("rows are carried per logType and the totals are their sum", () => {
+    const out = splitUnitsByLogType([
+      { logType: "TRANSFER", rowCount: 4, positiveUnits: 50, negativeUnits: 50 },
+      { logType: "ADJUSTMENT", rowCount: 2, positiveUnits: 30, negativeUnits: 5 },
+    ]);
+    expect(out.rows.map((r) => r.logType)).toEqual(["ADJUSTMENT", "TRANSFER"]);
+    expect(out.totals).toMatchObject({ rowCount: 6, positiveUnits: 80, negativeUnits: 55 });
+  });
+
+  test("TRANSFER legs are visible as their own row (the whole point of the split)", () => {
+    const out = splitUnitsByLogType([
+      { logType: "TRANSFER", rowCount: 4, positiveUnits: 50, negativeUnits: 50 },
+    ]);
+    expect(out.byLogType.TRANSFER).toMatchObject({ positiveUnits: 50, negativeUnits: 50 });
+  });
+
+  test("no rows => empty split and zero totals", () => {
+    const out = splitUnitsByLogType([]);
+    expect(out.rows).toEqual([]);
+    expect(out.totals).toMatchObject({ rowCount: 0, positiveUnits: 0, negativeUnits: 0 });
+  });
+});
+
+describe("summarizeUnattributedPool — outbound units no evidence class reached (P0S-3)", () => {
+  test("unattributed = total - attributed, per logType", () => {
+    const out = summarizeUnattributedPool(
+      [
+        { logType: "SALE", rowCount: 10, units: 100, rowsWithoutBatch: 2, unitsWithoutBatch: 20 },
+        { logType: "ADJUSTMENT", rowCount: 5, units: 50, rowsWithoutBatch: 0, unitsWithoutBatch: 0 },
+      ],
+      [{ logType: "SALE", rowCount: 6, units: 70 }]
+    );
+    expect(out.byLogType.SALE).toMatchObject({
+      units: 100,
+      attributedUnits: 70,
+      unattributedUnits: 30,
+      unattributedRowCount: 4,
+      unitsWithoutBatch: 20,
+    });
+    expect(out.byLogType.ADJUSTMENT).toMatchObject({ attributedUnits: 0, unattributedUnits: 50 });
+    expect(out.totals).toMatchObject({ units: 150, attributedUnits: 70, unattributedUnits: 80 });
+  });
+
+  test("a logType with NO negative rows is absent, not zero-filled", () => {
+    const out = summarizeUnattributedPool([{ logType: "SALE", rowCount: 1, units: 1 }], []);
+    expect(out.byLogType.TRANSFER).toBeUndefined();
+    expect(out.rows.map((r) => r.logType)).toEqual(["SALE"]);
+  });
+
+  test("nothing attributed => the whole pool is unattributed", () => {
+    const out = summarizeUnattributedPool([{ logType: "SALE", rowCount: 3, units: 12 }], []);
+    expect(out.byLogType.SALE.unattributedUnits).toBe(12);
   });
 });
 
@@ -569,6 +974,13 @@ const {
   MODULES,
 } = require("../../../../scripts/diagnostics/inventory-accuracy/run");
 
+describe("definition strings (P0S-6)", () => {
+  test("the observed/deducted unit definitions NAME their scope: orders counted toward gap totals", () => {
+    expect(DEFINITIONS.observedUnits).toMatch(/counted toward gap totals/i);
+    expect(DEFINITIONS.deductedUnits).toMatch(/counted toward gap totals/i);
+  });
+});
+
 describe("artifact house rules", () => {
   test("a figure without a definition string is refused", () => {
     expect(() => figure(5, "")).toThrow(/definition/);
@@ -634,9 +1046,24 @@ describe("runner argv", () => {
     );
   });
 
-  test("--class-b-floor only accepts the two readings", () => {
+  // P0S-8: the old behavior SILENTLY COERCED an unrecognised value to the
+  // evidence floor — a typo'd flag bound a different reading and the artifact
+  // said nothing about it. It is now a validation error.
+  test("--class-b-floor accepts exactly the two readings and REJECTS anything else", () => {
     expect(parseArgs(["--out=/tmp/x", "--class-b-floor=spec"]).classBFloorMode).toBe("spec");
-    expect(parseArgs(["--out=/tmp/x", "--class-b-floor=nonsense"]).classBFloorMode).toBe("evidence");
+    expect(validate(parseArgs(["--out=/tmp/x", "--class-b-floor=spec"]))).toEqual([]);
+    expect(validate(parseArgs(["--out=/tmp/x", "--class-b-floor=evidence"]))).toEqual([]);
+    expect(parseArgs(["--out=/tmp/x", "--class-b-floor=nonsense"]).classBFloorMode).toBe("nonsense");
+    expect(validate(parseArgs(["--out=/tmp/x", "--class-b-floor=nonsense"]))).toEqual(
+      expect.arrayContaining([expect.stringContaining("--class-b-floor")])
+    );
+    // Case matters: the two readings are exact tokens, not a fuzzy match.
+    expect(validate(parseArgs(["--out=/tmp/x", "--class-b-floor=Evidence"]))).toEqual(
+      expect.arrayContaining([expect.stringContaining("--class-b-floor")])
+    );
+    expect(validate(parseArgs(["--out=/tmp/x", "--class-b-floor="]))).toEqual(
+      expect.arrayContaining([expect.stringContaining("--class-b-floor")])
+    );
   });
 
   test("an unknown option is a hard error, never silently ignored", () => {

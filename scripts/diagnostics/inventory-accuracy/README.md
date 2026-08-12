@@ -32,13 +32,15 @@ Artifacts written: `d1-reconciliation.{json,txt}`, `d2-inbound.{json,txt}`,
 options, per-check status and durations).
 
 `--class-b-floor` chooses which observability floor **binds** for evidence class (b); both
-readings are always emitted side by side. See "Declared deviations" below.
+readings are always emitted side by side. See "Declared deviations" below. It accepts
+exactly `evidence` or `spec` — anything else is a **validation error**, never coerced (a
+typo'd flag must not quietly bind a different reading).
 
 ## What each check answers
 
 | Check | Question |
 | --- | --- |
-| `d1-reconciliation` | Per (order, product): units Woo observed on a completed order vs NET units the ledger removed for that order. Statuses `full/partial/none/over/unobservable` with unit differences. |
+| `d1-reconciliation` | Per (order, product): units Woo observed on a completed order vs NET units the ledger removed for that order. Statuses `full/partial/none/over/unobservable` with unit differences. Plus three supplemental panels: the **over-cohort split**, the **line-grain observed-vs-fulfilledQty** panel (full history), and the **unattributed outbound pool**. |
 | `d2-inbound` | Largest positive-adjustment batches in a trailing window (actor, location, batch id) + identification of mass-update operations as overwrite/count-event dates. Includes negative-correction mass batches. |
 | `d3-snapshot-walk` | Per (product, location, day): snapshot delta vs ledger delta. Coverage gaps disclosed, never interpolated. |
 | `d4-checks` | Legacy `products.quantity` mirror gap; logType census by ISO week; `stockedOut` set-rate over time. |
@@ -58,6 +60,33 @@ readings are always emitted side by side. See "Declared deviations" below.
   matches are properties of the figure they qualify, not footnotes.
 - **Unavailable is never a gap.** Orders anchored before every applicable evidence class's
   start are `historically_unobservable`: excluded from gap totals, disclosed with a reason.
+  Every excluded cohort carries a **unit count beside its order count**, so an exclusion is
+  never an order count with no magnitude.
+- **Evidence that contradicts itself is dropped, not resolved.** A `batchId` claimed by two
+  orders is dropped from **both** attributions (never first-wins), in either evidence
+  class. Its ledger units land in the unattributed outbound pool instead.
+
+## D1's three supplemental panels
+
+- **Over-cohort split.** `unitsOnCompletedOrder` is 0 for every Woo status but `completed`,
+  and the app's completed-push is expected-blocked in production — so an order the app
+  fulfilled and deducted can sit non-completed at Woo *permanently* and read as
+  over-deduction by construction. `over` is therefore split into **over on a completed
+  order** (the only evidence-backed reading, the whole of `unitsOverDeducted`) and
+  **deducted, order not completed** (excluded from gap totals, with its own order count,
+  unit count, named reason and detail table).
+- **Line-grain observed-vs-fulfilledQty.** Per (order, product): `external_order_items`
+  `quantity`/`fulfilledQty` against observation units, with **no ledger join and no
+  observability floor** — the only panel covering the full history, so it is the only one
+  that can date pre-July drift. Rolled up by the order's anchor month (UTC). **Caveat,
+  binding:** `fulfilledQty` is written only by the app's own fulfill path, so a zero means
+  "not fulfilled *through this app*", never "not shipped". Bundle and unmapped lines are
+  excluded and counted (a bundle line's quantity is line grain; its observations are
+  component grain).
+- **Unattributed outbound pool.** Negative-delta `SALE` units (and, separately, negative
+  `ADJUSTMENT` units) in the post-floor window that no evidence class reached. It
+  upper-bounds how much of the under-deduction gap could be *unlinked* rather than
+  *missing*, and the confound rides on `gapTotals.unitsUnderDeducted` itself.
 
 ## Declared deviations from the frozen spec (details in the Phase 0a SEAMS report)
 
@@ -82,9 +111,10 @@ readings are always emitted side by side. See "Declared deviations" below.
 ## Tests
 
 `__tests__/unit/scripts/diagnostics/inventory-accuracy-classify.test.js` pins the pure
-logic (floors, evidence-class assignment, normalization, ambiguity, statuses, the snapshot
-walk, the artifact house rules and the runner's argv). The SQL runs only against the real
-restore — it is not exercised by the unit suite.
+logic (floors, evidence-class assignment, normalization, ambiguity, statuses, the over
+split, the attribution munging in `lib/attribute.js`, the rollups in `lib/rollups.js`, the
+snapshot walk, the artifact house rules and the runner's argv). The SQL runs only against
+the real restore — it is not exercised by the unit suite.
 
 ```bash
 node scripts/test-runner.js __tests__/unit/scripts/diagnostics/inventory-accuracy-classify.test.js

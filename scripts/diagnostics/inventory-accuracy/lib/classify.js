@@ -39,16 +39,49 @@ const STOCKED_OUT_MIGRATION_AT = new Date("2026-04-11T00:00:00.000Z");
 /** Class (c) window. Applies to THIS CLASS ONLY (spec §D1). */
 const CLASS_C_WINDOW_DAYS = 7;
 
+/**
+ * The Woo status under which `unitsOnCompletedOrder` is non-zero. Every other
+ * status resolves the observation to 0 units, so it is this value — and only
+ * this value — that separates a real over-deduction from a deduction on an
+ * order Woo never reported as completed (P0S-1).
+ */
+const WOO_COMPLETED_STATUS = "completed";
+
 const DEFINITIONS = {
   observedUnits:
     "Sum of fulfillment_observations.unitsOnCompletedOrder for MAPPED products " +
     "(productId NOT NULL), tombstoned rows excluded. Woo shipped-truth is 'units " +
     "on a COMPLETED order' — never per-item fulfilled quantity. Bundle lines are " +
-    "already expanded to one row per frozen component at write time.",
+    "already expanded to one row per frozen component at write time. SCOPED to " +
+    "orders counted toward gap totals: every excluded cohort " +
+    "(historically_unobservable, no_completed_observation, unmapped_only, " +
+    "deducted_order_not_completed) is out of this sum and carries its own order " +
+    "count AND unit count in the disclosures.",
   deductedUnits:
     "NET units removed from the ledger by rows linked to this order = -SUM(" +
     "inventory_logs.delta) over linked rows. Unfulfillment restores are POSITIVE " +
-    "deltas and therefore SUBTRACT from the deduction (net semantics).",
+    "deltas and therefore SUBTRACT from the deduction (net semantics). SCOPED to " +
+    "orders counted toward gap totals — the excluded cohorts carry their units in " +
+    "the disclosures, never in this sum.",
+  observedOrderStatus:
+    "The Woo order status(es) carried by this order's LIVE fulfillment_observations " +
+    "rows, comma-joined when they disagree; null when the order has no live " +
+    "observation row at all (unknown, NOT 'not completed').",
+  internalStatus:
+    "external_orders.internalStatus — the APP's own order state, written by the " +
+    "app's own pipeline. Independent of the Woo status above: the app's " +
+    "completed-push is expected-blocked in production, so an order can be " +
+    "`fulfilled` here and still not `completed` at Woo, permanently.",
+  overNotCompleted:
+    "OVER-deduction on an order that NO live observation reports as Woo-completed. " +
+    "unitsOnCompletedOrder is 0 for every non-completed status, so the comparison " +
+    "reads as over-deduction by construction rather than by evidence. Its own " +
+    "cohort: EXCLUDED from unitsOverDeducted, disclosed with its own order count " +
+    "and unit count.",
+  unitsUnscoped:
+    "The same unit arithmetic computed for EVERY order, including the cohorts " +
+    "excluded from gap totals — the unit count that rides beside each excluded " +
+    "cohort's order count.",
   unitsDifference:
     "observedUnits - deductedUnits at order grain (positive = under-deducted).",
   unitsUnderDeducted:
@@ -223,6 +256,22 @@ function deriveFloors(facts, opts = {}) {
 }
 
 /**
+ * The earliest date at which ANY evidence class can produce evidence — i.e. the
+ * lower bound of the window a gap-counted order can live in. Null when no class
+ * is applicable at all (structurally empty, never 0).
+ * @param {ReturnType<typeof deriveFloors>} floors
+ * @returns {Date|null}
+ */
+function earliestApplicableFloor(floors) {
+  const applicable = ["a", "b", "c"]
+    .map((k) => floors[k])
+    .filter((f) => f && f.applicable && f.floor instanceof Date)
+    .map((f) => f.floor);
+  if (applicable.length === 0) return null;
+  return applicable.reduce((a, b) => (a.getTime() <= b.getTime() ? a : b));
+}
+
+/**
  * Which evidence classes are in force for an order anchored at `anchorAt`.
  * Empty => historically_unobservable.
  * @param {Date} anchorAt
@@ -282,8 +331,10 @@ function rollupStatus(statuses) {
  * Classify ONE order at (order, product) grain, then roll up.
  *
  * @param {{orderId: string, companyId: string, integrationId: string,
- *          orderNumber: string|null, anchorAt: Date, completedAt: Date|null,
- *          observations: Array<{productId: number|null, units: number, tombstonedAt: Date|null}>,
+ *          orderNumber: string|null, internalStatus: string|null, anchorAt: Date,
+ *          completedAt: Date|null,
+ *          observations: Array<{productId: number|null, units: number, tombstonedAt: Date|null,
+ *                               orderStatus: string|null}>,
  *          ledger: Array<{productId: number, locationId: number|null, delta: number, evidenceClass: string}>,
  *          unmappedItems: {itemCount: number, itemUnits: number}}} order
  * @param {ReturnType<typeof deriveFloors>} floors
@@ -321,16 +372,39 @@ function classifyOrder(order, floors) {
   ).sort((x, y) => x - y);
   const evidenceClassesUsed = Array.from(new Set(ledger.map((l) => l.evidenceClass))).sort();
 
+  // P0S-1: the Woo status the observations were written under. `completed` is
+  // the ONLY status under which unitsOnCompletedOrder is non-zero, so an order
+  // no live observation reports as completed cannot be compared against Woo at
+  // all — it reads as over-deduction by construction. Null (no live observation
+  // row) is UNKNOWN, and unknown is not evidence either.
+  const observedStatuses = Array.from(
+    new Set(liveObs.map((o) => o.orderStatus).filter((s) => typeof s === "string" && s.length > 0))
+  ).sort();
+  const observedOrderStatus = observedStatuses.length > 0 ? observedStatuses.join(",") : null;
+  const observedAsCompleted = observedStatuses.includes(WOO_COMPLETED_STATUS);
+
+  // P0S-6: the unit arithmetic for EVERY order, scored or not — the unit count
+  // that rides beside each excluded cohort's order count.
+  const observedUnitsUnscoped = liveObs
+    .filter((o) => o.productId !== null && o.productId !== undefined)
+    .reduce((s, o) => s + (Number(o.units) || 0), 0);
+  const deductedUnitsUnscoped = ledger.reduce((s, l) => s - (Number(l.delta) || 0), 0);
+
   const base = {
     orderId: order.orderId,
     companyId: order.companyId,
     integrationId: order.integrationId,
+    internalStatus: typeof order.internalStatus === "string" ? order.internalStatus : null,
+    observedOrderStatus,
+    observedAsCompleted,
     observableClasses,
     evidenceClassesUsed,
     floorAnchorAt,
     floorAnchorSource,
     observedUnits: 0,
     deductedUnits: 0,
+    observedUnitsUnscoped,
+    deductedUnitsUnscoped,
     unitsDifference: 0,
     unitsUnderDeducted: 0,
     unitsOverDeducted: 0,
@@ -411,10 +485,19 @@ function classifyOrder(order, floors) {
   }
 
   const status = rollupStatus(perProduct.map((p) => p.status));
+
+  // P0S-1 — SPLIT the over cohort. An `over` order that no live observation
+  // reports as Woo-completed is not evidence of over-deduction: every one of its
+  // observation rows resolves to 0 units BECAUSE of the status, so the ledger
+  // necessarily exceeds it. The app's completed-push is expected-blocked in
+  // production, so this is a persistent state, not an in-flight one. Excluded
+  // from gap totals, kept visible as its own named cohort with its own units.
+  const notCompletedOverCohort = status === ORDER_STATUS.OVER && !observedAsCompleted;
+
   return {
     ...base,
     status,
-    statusReason: null,
+    statusReason: notCompletedOverCohort ? "deducted_order_not_completed" : null,
     observedUnits,
     deductedUnits,
     unitsDifference: observedUnits - deductedUnits,
@@ -422,7 +505,7 @@ function classifyOrder(order, floors) {
     unitsOverDeducted: over,
     perProduct,
     productStatusCounts: counts,
-    countsTowardGapTotals: true,
+    countsTowardGapTotals: !notCompletedOverCohort,
   };
 }
 
@@ -553,8 +636,10 @@ module.exports = {
   ORDER_STATUS,
   STOCKED_OUT_MIGRATION_AT,
   CLASS_C_WINDOW_DAYS,
+  WOO_COMPLETED_STATUS,
   DEFINITIONS,
   deriveFloors,
+  earliestApplicableFloor,
   observableClassesAt,
   classifyUnits,
   rollupStatus,

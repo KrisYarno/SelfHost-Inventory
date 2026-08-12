@@ -13,6 +13,7 @@
 //
 const { query, queryChunkedIn, int, date, bool } = require("./lib/db");
 const { figure, disclosure, table } = require("./lib/artifact");
+const { splitUnitsByLogType } = require("./lib/rollups");
 
 const check = "d2-inbound";
 const title = "Inbound review + overwrite/count-event dates";
@@ -201,14 +202,40 @@ async function run(ctx) {
     lastChangeTime: date(noBatchRows[0]?.lastChangeTime),
   };
 
-  const windowTotals = await query(
+  // P0S-5: the window scope figures are split BY LOGTYPE (the D4 census shape,
+  // reused). A TRANSFER writes a negative leg and a positive leg for the same
+  // physical units, so a pool-level positive/negative total counts every
+  // transfer as both an inbound and an outbound event.
+  const windowByLogType = await query(
     prisma,
-    `SELECT COUNT(*) AS rowCount,
+    `SELECT il.logType, COUNT(*) AS rowCount,
             COALESCE(SUM(CASE WHEN il.delta > 0 THEN il.delta ELSE 0 END), 0) AS positiveUnits,
             COALESCE(SUM(CASE WHEN il.delta < 0 THEN -il.delta ELSE 0 END), 0) AS negativeUnits
        FROM inventory_logs il
-      WHERE il.changeTime >= ?`,
+      WHERE il.changeTime >= ?
+      GROUP BY il.logType`,
     [sinceIso]
+  );
+  const windowSplit = splitUnitsByLogType(
+    windowByLogType.map((r) => ({
+      logType: r.logType,
+      rowCount: int(r.rowCount),
+      positiveUnits: int(r.positiveUnits),
+      negativeUnits: int(r.negativeUnits),
+    }))
+  );
+  const transferUnits = windowSplit.byLogType.TRANSFER ?? null;
+  const TRANSFER_CONFOUND = disclosure(
+    "transfer_legs_in_this_total",
+    transferUnits ? transferUnits.positiveUnits : null,
+    transferUnits
+      ? "TRANSFER units inside the pool-level total. A transfer writes a negative leg " +
+        `and a positive leg for the SAME physical units (${transferUnits.negativeUnits} ` +
+        `out, ${transferUnits.positiveUnits} in), so it inflates both directions ` +
+        "without any stock entering or leaving the business. Use the byLogType split " +
+        "below, not this total, to reason about real inbound/outbound."
+      : "No TRANSFER rows in the window, so this total carries no transfer legs. null " +
+        "= the logType is absent from the window (unknown/not applicable, not 0 units)."
   );
 
   const coverageDisclosures = [
@@ -251,17 +278,34 @@ async function run(ctx) {
         coverageDisclosures
       ),
       ledgerRowsInWindow: figure(
-        int(windowTotals[0]?.rowCount),
+        windowSplit.totals.rowCount,
         "All inventory_logs rows in the window, batched or not."
       ),
       positiveUnitsInWindow: figure(
-        int(windowTotals[0]?.positiveUnits),
-        "SUM(delta) over positive-delta rows in the window — every unit that entered " +
-          "stock by any path."
+        windowSplit.totals.positiveUnits,
+        "SUM(delta) over positive-delta rows in the window — every unit that entered a " +
+          "stock POOL by any path. NOT 'units received': transfer legs and correction " +
+          "restores are in here too. See unitsByLogType.",
+        [TRANSFER_CONFOUND]
       ),
       negativeUnitsInWindow: figure(
-        int(windowTotals[0]?.negativeUnits),
-        "SUM(-delta) over negative-delta rows in the window — every unit that left stock."
+        windowSplit.totals.negativeUnits,
+        "SUM(-delta) over negative-delta rows in the window — every unit that left a " +
+          "stock POOL by any path, transfer legs included. See unitsByLogType.",
+        [TRANSFER_CONFOUND]
+      ),
+      unitsByLogType: table(
+        windowSplit.rows,
+        "The window's units SPLIT BY LOGTYPE (same shape as D4's census). This is the " +
+          "reading to reason from: a TRANSFER's two legs are one physical movement " +
+          "inside the business, an ADJUSTMENT is generic receiving-or-anything, and a " +
+          "SALE is the order-linked path. The pool-level totals above sum this table.",
+        {
+          rowCount: "inventory_logs rows of that logType in the window.",
+          positiveUnits: "SUM(delta) over that logType's positive rows.",
+          negativeUnits: "SUM(-delta) over that logType's negative rows.",
+        },
+        [TRANSFER_CONFOUND]
       ),
     },
 
