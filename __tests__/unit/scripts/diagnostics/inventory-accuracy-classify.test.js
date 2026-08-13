@@ -46,6 +46,11 @@ const {
   monthKey,
 } = require("../../../../scripts/diagnostics/inventory-accuracy/lib/date-buckets");
 
+const {
+  MASS_UPDATE_LABEL,
+  classifyMassUpdateBatch,
+} = require("../../../../scripts/diagnostics/inventory-accuracy/lib/mass-update");
+
 // ---------------------------------------------------------------------------
 // Fixture clock. Real structural dates from the repo's migration history:
 //   2026-04-11 stockedOut columns   (20260411_add_stocked_out)
@@ -837,6 +842,121 @@ describe("splitUnitsByLogType — D2 scope figures stop being pool-level (P0S-5)
     const out = splitUnitsByLogType([]);
     expect(out.rows).toEqual([]);
     expect(out.totals).toMatchObject({ rowCount: 0, positiveUnits: 0, negativeUnits: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D2 mass-update discriminator (extracted from d2-inbound.js so it can be
+// pinned). Phase 0b-1 adds the FORWARD-COMPAT branch: post-deploy the route
+// stamps logType COUNT, which identifies the operation directly.
+// ---------------------------------------------------------------------------
+describe("classifyMassUpdateBatch — historical audit shape + the 0b-1 COUNT branch", () => {
+  const bulk = ["INVENTORY_BULK_UPDATE"];
+
+  describe("the FROZEN historical discriminator (pre-0b-1 batches)", () => {
+    test("INVENTORY_BULK_UPDATE + details.rows + no SALE row => mass update", () => {
+      const out = classifyMassUpdateBatch({
+        auditActionTypes: bulk,
+        logTypes: ["ADJUSTMENT"],
+        hasRowsShape: true,
+      });
+      expect(out.isMassUpdate).toBe(true);
+      expect(out.isMassUpdateRowsOmitted).toBe(false);
+      expect(out.evidence).toContain("audit-rows-shape");
+    });
+
+    test("a SALE row disqualifies it — deduct-simple writes the SAME actionType", () => {
+      const out = classifyMassUpdateBatch({
+        auditActionTypes: bulk,
+        logTypes: ["SALE"],
+        hasRowsShape: true,
+      });
+      expect(out.isMassUpdate).toBe(false);
+      expect(out.evidence).toEqual([]);
+    });
+
+    test(">500 rows: details.rows is replaced by rowsOmitted, identified as its own case", () => {
+      const out = classifyMassUpdateBatch({
+        auditActionTypes: bulk,
+        logTypes: ["ADJUSTMENT"],
+        hasRowsShape: false,
+        hasRowsOmitted: true,
+      });
+      expect(out.isMassUpdate).toBe(false);
+      expect(out.isMassUpdateRowsOmitted).toBe(true);
+      expect(out.evidence).toContain("audit-rows-omitted");
+    });
+
+    test("no audit event at all => not identified (the shape is the only pre-0b-1 evidence)", () => {
+      const out = classifyMassUpdateBatch({
+        auditActionTypes: [],
+        logTypes: ["ADJUSTMENT"],
+        hasRowsShape: true,
+      });
+      expect(out.isMassUpdate).toBe(false);
+      expect(out.isMassUpdateRowsOmitted).toBe(false);
+      expect(out.evidence).toEqual([]);
+    });
+  });
+
+  describe("the 0b-1 FORWARD-COMPAT branch (post-deploy batches)", () => {
+    test("COUNT ledger rows are mass-update evidence on their own", () => {
+      const out = classifyMassUpdateBatch({
+        auditActionTypes: [],
+        logTypes: ["COUNT"],
+        hasRowsShape: false,
+      });
+      expect(out.isMassUpdate).toBe(true);
+      expect(out.evidence).toEqual(["count-logtype"]);
+    });
+
+    test("a post-0b-1 batch carries BOTH evidences, and both are disclosed", () => {
+      const out = classifyMassUpdateBatch({
+        auditActionTypes: bulk,
+        logTypes: ["COUNT"],
+        hasRowsShape: true,
+      });
+      expect(out.isMassUpdate).toBe(true);
+      expect(out.evidence).toEqual(["audit-rows-shape", "count-logtype"]);
+    });
+
+    test("a >500-row post-0b-1 operation is a FULL identification, not the degraded case", () => {
+      // Pre-0b-1 this batch could only be identified by the rowsOmitted fallback
+      // and had to be labelled as such. The COUNT rows now identify it outright.
+      const out = classifyMassUpdateBatch({
+        auditActionTypes: bulk,
+        logTypes: ["COUNT"],
+        hasRowsShape: false,
+        hasRowsOmitted: true,
+      });
+      expect(out.isMassUpdate).toBe(true);
+      // Both branches matched, and both are named. The DEGRADED flag (the
+      // "[rows omitted]" label suffix) is off: the ledger identifies it outright,
+      // so it no longer needs the caveat that only the fallback saw it.
+      expect(out.evidence).toEqual(["audit-rows-omitted", "count-logtype"]);
+      expect(out.isMassUpdateRowsOmitted).toBe(false);
+    });
+
+    test("COUNT survives a MISSING summary event — the audit write is best-effort (P-B1)", () => {
+      // mass-update records its summary via recordIngestion AFTER the stock
+      // batches commit, and a failed summary must not 500 the operation. Such a
+      // batch has ledger rows and no audit row: invisible to the frozen rule,
+      // identified by the ledger from 0b-1 on.
+      const out = classifyMassUpdateBatch({ logTypes: ["COUNT"] });
+      expect(out.isMassUpdate).toBe(true);
+      expect(out.evidence).toEqual(["count-logtype"]);
+    });
+
+    test("ADJUSTMENT-only batches are NOT swept in — the branch keys on COUNT alone", () => {
+      const out = classifyMassUpdateBatch({ auditActionTypes: [], logTypes: ["ADJUSTMENT"] });
+      expect(out.isMassUpdate).toBe(false);
+      expect(out.evidence).toEqual([]);
+    });
+  });
+
+  test("the frozen label is never softened to 'baseline' (G2-7)", () => {
+    expect(MASS_UPDATE_LABEL).toMatch(/overwrite\/count-event dates/);
+    expect(MASS_UPDATE_LABEL).not.toMatch(/baseline/i);
   });
 });
 

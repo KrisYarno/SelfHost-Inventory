@@ -101,6 +101,13 @@ typo'd flag must not quietly bind a different reading).
    shape, but `app/api/admin/inventory/mass-update/route.ts` replaces `rows` with
    `rowCount` + `rowsOmitted` above 500 rows. Those operations are identified separately by
    the `rowsOmitted` shape and labelled as such, so the frozen rule stays visible.
+   **Phase 0b-1 adds a second branch** (`lib/mass-update.js`, both branches named per batch
+   in the `identifiedBy` column): the route now stamps `logType: COUNT`, which no other
+   writer emits, so operations from that deploy on are identified by the LEDGER — including
+   `>500`-row ones (a full identification, not the degraded case) and ones whose
+   best-effort audit summary never landed (`recordIngestion`, P-B1), which the audit-shape
+   rule cannot see at all. Batches written BEFORE the deploy carry no `COUNT` rows and are
+   still identified by the frozen rule alone.
 3. **D3 framing.** `product_stock_snapshots` levels are RECONSTRUCTED from the ledger
    (`lib/analytics/rebuild-snapshots.ts`), so a divergence is evidence about the rebuild —
    not proof of an out-of-band stock write. The check runs exactly as specified; the
@@ -113,8 +120,9 @@ typo'd flag must not quietly bind a different reading).
 `__tests__/unit/scripts/diagnostics/inventory-accuracy-classify.test.js` pins the pure
 logic (floors, evidence-class assignment, normalization, ambiguity, statuses, the over
 split, the attribution munging in `lib/attribute.js`, the rollups in `lib/rollups.js`, the
-snapshot walk, the artifact house rules and the runner's argv). The SQL runs only against
-the real restore — it is not exercised by the unit suite.
+mass-update discriminator in `lib/mass-update.js`, the snapshot walk, the artifact house
+rules and the runner's argv). The SQL runs only against the real restore — it is not
+exercised by the unit suite.
 
 ```bash
 node scripts/test-runner.js __tests__/unit/scripts/diagnostics/inventory-accuracy-classify.test.js

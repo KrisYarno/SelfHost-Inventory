@@ -135,6 +135,11 @@ export function CompleteOrderDialog({
             productId: item.product.id,
             quantity: item.quantity,
           })),
+          // Phase 0b-2: send the external order this cart is being packed
+          // against so the deduction can later be attributed to it. The dialog
+          // already holds it; the server re-resolves it and checks membership
+          // before recording. No UX change — omitted for a non-WC order.
+          ...(selectedExternalOrder ? { selectedExternalOrderId: selectedExternalOrder.id } : {}),
         };
 
         const deductResponse = await fetch("/api/inventory/deduct-simple", {

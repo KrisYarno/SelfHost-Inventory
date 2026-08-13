@@ -457,6 +457,21 @@ describe("getShrinkageSummary — classified loss only + unclassified coverage (
     expect(s.coverage.reasonTrackingStartedAt).toBeNull();
   });
 
+  // Phase 0b-1 consequence guard. mass-update now writes logType COUNT, and the
+  // shrinkage read NARROWS to ADJUSTMENT/CORRECTION before any reason is
+  // classified — so mass-count rows are outside this read entirely: they land in
+  // neither byReason.COUNT nor coverage.unclassifiedOutboundUnits. This pin is
+  // GREEN both sides of 0b-1 (the domain itself did not change); it exists so the
+  // domain fact that MAKES that consequence true cannot drift unnoticed.
+  test("the domain is logType IN (ADJUSTMENT, CORRECTION) — a COUNT-logType row is never read", async () => {
+    setupShrink([], [], null);
+    await getShrinkageSummary({ days: 90 });
+    const where = m.inventory_logs.groupBy.mock.calls[0][0].where;
+    expect(where.logType.in).toEqual(["ADJUSTMENT", "CORRECTION"]);
+    expect(where.logType.in).not.toContain("COUNT");
+    expect(where.delta).toEqual({ lt: 0 });
+  });
+
   test("classified reasons (incl COUNT) bucket as loss; CORRECTION + null go to coverage", async () => {
     const reasonStart = daysAgo(20);
     setupShrink(

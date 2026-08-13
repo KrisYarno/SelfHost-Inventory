@@ -334,7 +334,15 @@ export const POST = apiHandler(async (request: NextRequest) => {
                   locationId,
                   delta: serverDelta,
                   changeTime: new Date(),
-                  logType: "ADJUSTMENT",
+                  // Phase 0b-1 (spec REV-2 / OC-9): a mass update IS a physical
+                  // count event — somebody set these rows to an observed value on
+                  // a day. It used to write an anonymous ADJUSTMENT with a NULL
+                  // reason, indistinguishable from receiving. Self-labelling makes
+                  // the drift between counts measurable. Downstream consequence is
+                  // deliberate and pinned by
+                  // __tests__/integration/api/mass-update-count-stamp.test.ts.
+                  logType: "COUNT",
+                  reasonCode: "COUNT",
                   // Phase C (P-C1): join each ledger row to the summary event.
                   batchId,
                 },
