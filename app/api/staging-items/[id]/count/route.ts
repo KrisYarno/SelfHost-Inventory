@@ -7,6 +7,8 @@ import { CountStagingSchema } from '@/lib/validation/staging';
 import { recordChange } from '@/lib/change-tracking';
 import { claimShipmentForCount } from '@/lib/shipments/lifecycle';
 import { lineDiscrepancy } from '@/lib/shipments/rollup';
+import { recvDiscrepancyKey } from '@/lib/exceptions/kinds';
+import { resolveException, upsertException } from '@/lib/exceptions/write';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
 
 export const dynamic = 'force-dynamic';
@@ -38,6 +40,11 @@ interface RouteParams {
  *
  * A countedQuantity of 0 is accepted here on purpose; the "zero is a Discard,
  * not a stock-in" 422 is graduation's rule, not this endpoint's.
+ *
+ * W1-2c: this is also where a discrepancy becomes a ROW. A count is the moment
+ * the mismatch becomes KNOWN, so the `recv-discrepancy` register entry is raised
+ * (or auto-resolved) in the SAME transaction as the count — a rolled-back count
+ * can never strand an exception, and an exception can never outlive its cause.
  */
 export const POST = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   const { user } = await requireApproved();
@@ -68,6 +75,9 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
         shipmentId: true,
         expectedQuantity: true,
         countedQuantity: true,
+        // W1-2c: the exception subject names the product when the line has one
+        // resolved, so the reconciliation surface can group by product.
+        resolvedProductId: true,
       },
     });
     if (!existing) {
@@ -108,6 +118,47 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
 
     const recount = previousCountedQuantity !== null;
 
+    // The T4 arithmetic, computed ONCE: the same result feeds the exception
+    // register and the response, so the row and the UI can never disagree about
+    // whether this line missed (and an unexpected arrival — NULL expected —
+    // counts in FULL rather than reading as "no discrepancy").
+    const discrepancy = lineDiscrepancy({
+      expectedQuantity: existing.expectedQuantity,
+      countedQuantity: body.countedQuantity,
+    });
+
+    // W1-2c EXCEPTIONS (pack REV-3 T1). The zero branch calls resolve on EVERY
+    // matching count, not only on a recount that zeroed a known discrepancy:
+    // resolve is a no-op for an absent key, and the broader rule also closes the
+    // row when the miss was settled by EDITING expectedQuantity rather than by
+    // recounting (legal while RECEIVED on an OPEN shipment).
+    // `delta` is `number | null` only because a line can be UNCOUNTED; the
+    // schema makes countedQuantity a required integer, so here it is a number.
+    const exceptionKey = recvDiscrepancyKey(id);
+    if (discrepancy.delta !== 0) {
+      await upsertException(tx, {
+        kind: 'recv-discrepancy',
+        key: exceptionKey,
+        subject: {
+          stagingItemId: id,
+          shipmentId: existing.shipmentId,
+          productId: existing.resolvedProductId,
+          // The VALUES, per T1 — a tolerance chosen at the checkpoint applies
+          // retroactively. expectedQty stays NULL when nothing was expected.
+          expectedQty: existing.expectedQuantity,
+          countedQty: body.countedQuantity,
+        },
+        now: countedAt,
+      });
+    } else {
+      // resolvedBy stays NULL: nobody adjudicated this, the recount did.
+      await resolveException(tx, {
+        key: exceptionKey,
+        note: 'auto: recount matched',
+        now: countedAt,
+      });
+    }
+
     // ALWAYS recorded, including a confirming recount that lands on the same
     // number — a deliberate divergence from the ER-B9 "from === to drops" diff
     // idiom, because the event's subject is the COUNT ACT, not the field delta.
@@ -142,10 +193,7 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
       shipmentId: existing.shipmentId,
       // The same per-line flags the receiving detail renders (W1-4b, seam S10):
       // NULL expected counts in FULL, and the sign lives in `direction`.
-      discrepancy: lineDiscrepancy({
-        expectedQuantity: existing.expectedQuantity,
-        countedQuantity: body.countedQuantity,
-      }),
+      discrepancy,
     };
   });
 

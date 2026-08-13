@@ -39,6 +39,14 @@ jest.mock('@/lib/prisma', () => {
       findUnique: jest.fn(),
       updateMany: jest.fn(),
     },
+    // W1-2c wired the exceptions register into this route's transaction. The
+    // delegate is stubbed here so the route LOADS and runs; what it writes is
+    // owned by staging-count-exceptions.test.ts, not by this file.
+    inventoryException: {
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
   };
   return {
     __esModule: true,
@@ -108,6 +116,7 @@ beforeEach(() => {
   mockValidateCSRF.mockResolvedValue(true);
   (db.$transaction as jest.Mock) = jest.fn(async (fn: any) => fn(db));
   db.stagingItem.updateMany.mockResolvedValue({ count: 1 });
+  db.inventoryException.findUnique.mockResolvedValue(null);
 });
 
 describe('POST /api/staging-items/[id]/count — the first count', () => {

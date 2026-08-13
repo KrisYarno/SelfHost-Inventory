@@ -1,0 +1,194 @@
+/**
+ * THE inventory-exception writer (contract pack REV-3 T1, EXCEPTIONS block).
+ *
+ * `inventory_exceptions` is a LIVING REGISTER, not a log. One row per stable
+ * key, seen over and over, resolved and sometimes seen again — so the table has
+ * a lifecycle, and this module is the only place that lifecycle exists:
+ *
+ *   upsertException   first sighting inserts; every later sighting advances
+ *                     lastSeenAt and refreshes `subject`. `firstSeenAt` is never
+ *                     rewritten — it is the AGE the reconciliation surface sorts
+ *                     by, and a discrepancy that has been open for three weeks
+ *                     must not read as new because somebody recounted it today.
+ *                     A RESOLVED key that recurs REOPENS: resolvedAt/resolvedBy
+ *                     cleared, the prior note KEPT, an audit-visible line added.
+ *   resolveException  idempotent. Resolving twice is not two resolutions, and
+ *                     resolving a key nobody ever raised is a silent no-op —
+ *                     which is what lets the auto-resolve caller fire on EVERY
+ *                     matching count without checking first.
+ *
+ * PURE + TX-SCOPED. No `prisma` import of its own, no route logic, no HTTP
+ * vocabulary: every write joins the CALLER's transaction, which is what makes
+ * "the discrepancy row and the count commit together, or neither does" true.
+ *
+ * WRITE BOUNDARY (binding, zero-business-writes adjacent): only explicitly-
+ * mutating routes may import this module. No GET, no assistant tool, ever —
+ * enforced by __tests__/integration/exceptions-write-boundary.test.ts, which
+ * also pins that this file is the ONLY one touching the Prisma delegate.
+ */
+
+import { Prisma } from '@prisma/client';
+import type { InventoryException } from '@prisma/client';
+import type { ExceptionKind } from '@/lib/exceptions/kinds';
+
+/** `inventory_exceptions.key` is VarChar(191) and UNIQUE. */
+export const EXCEPTION_KEY_MAX_LENGTH = 191;
+
+/**
+ * A subject payload. Flat by convention (every declared kind is a scalar map),
+ * but typed against Prisma's JSON input so a future kind is not boxed in.
+ */
+export type ExceptionSubject = Record<string, Prisma.InputJsonValue | null>;
+
+export type UpsertExceptionArgs = {
+  kind: ExceptionKind;
+  /** MUST be the canonical `<kind>:<subject id>` encoding — see lib/exceptions/kinds.ts. */
+  key: string;
+  subject: ExceptionSubject;
+  /** Appended as a note LINE; a line identical to the current last one is not repeated. */
+  note?: string;
+  /**
+   * The caller's transaction instant. Passing the same `Date` the business write
+   * used keeps lastSeenAt exactly equal to the event that raised it, instead of
+   * a few milliseconds adrift.
+   */
+  now?: Date;
+};
+
+export type ResolveExceptionArgs = {
+  key: string;
+  /** NULL (the default) means the SYSTEM resolved it — an auto-resolve, not a person. */
+  resolvedBy?: number | null;
+  note?: string;
+  now?: Date;
+};
+
+/**
+ * The key must encode its own kind. Two writers disagreeing about which kind a
+ * key belongs to would silently split one subject's history across two rows (or
+ * merge two subjects into one), and neither is recoverable from the data.
+ */
+function assertKeyMatchesKind(kind: ExceptionKind, key: string): void {
+  if (!key.startsWith(`${kind}:`)) {
+    throw new Error(
+      `Exception key "${key}" does not encode its kind "${kind}" — expected "${kind}:<subject id>"`,
+    );
+  }
+  if (key.length > EXCEPTION_KEY_MAX_LENGTH) {
+    // MySQL outside strict mode would TRUNCATE, and truncated keys collide —
+    // two different subjects would share one register row.
+    throw new Error(
+      `Exception key "${key}" is ${key.length} characters; the column holds ${EXCEPTION_KEY_MAX_LENGTH}`,
+    );
+  }
+}
+
+/**
+ * Notes are an append-only line log: whoever wrote the last note explained why
+ * this row was closed, and no later event gets to erase that. Consecutive
+ * duplicates are dropped so a repeated automatic line cannot grow the column
+ * without adding information.
+ */
+function appendNoteLine(note: string | null, line: string): string {
+  if (!note) return line;
+  const lines = note.split('\n');
+  if (lines[lines.length - 1] === line) return note;
+  return `${note}\n${line}`;
+}
+
+function reopenNoteLine(now: Date): string {
+  return `[${now.toISOString()}] auto: reopened — the condition recurred after resolution`;
+}
+
+/**
+ * Raise (or re-raise) an exception. Returns the row as it now stands.
+ *
+ * RACE NOTE: the prior row is READ before the write, because the reopen decision
+ * and the note history cannot be expressed as a single blind upsert. Two
+ * concurrent first-sightings of the same key therefore contend on the UNIQUE
+ * index — one commits, the other's transaction fails and its caller's business
+ * write rolls back with it. That is the correct outcome here (retry re-reads and
+ * takes the update path); it is not a silent data hazard.
+ */
+export async function upsertException(
+  tx: Prisma.TransactionClient,
+  args: UpsertExceptionArgs,
+): Promise<InventoryException> {
+  const { kind, key, subject, note } = args;
+  assertKeyMatchesKind(kind, key);
+  const now = args.now ?? new Date();
+
+  const existing = await tx.inventoryException.findUnique({ where: { key } });
+
+  if (!existing) {
+    return tx.inventoryException.create({
+      data: {
+        key,
+        kind,
+        subject: subject as Prisma.InputJsonObject,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        note: note ?? null,
+      },
+    });
+  }
+
+  // `kind` is fixed by the key (asserted above), so it is never rewritten.
+  const data: Prisma.InventoryExceptionUpdateInput = {
+    subject: subject as Prisma.InputJsonObject,
+    lastSeenAt: now,
+  };
+
+  const reopening = existing.resolvedAt !== null;
+  let nextNote = existing.note;
+  if (reopening) {
+    data.resolvedAt = null;
+    data.resolvedBy = null;
+    nextNote = appendNoteLine(nextNote, reopenNoteLine(now));
+  }
+  if (note) {
+    nextNote = appendNoteLine(nextNote, note);
+  }
+  if (nextNote !== existing.note) {
+    data.note = nextNote;
+  }
+
+  return tx.inventoryException.update({ where: { key }, data });
+}
+
+/**
+ * Resolve an exception. Returns the row, or `null` when the key was never
+ * raised.
+ *
+ * `lastSeenAt` is deliberately NOT advanced: resolving is not another sighting,
+ * and letting it move would make "how long has this been open" unanswerable.
+ *
+ * IDEMPOTENT: an already-resolved key is returned untouched — the FIRST
+ * resolution's instant, actor and note are the truth, and a second call (a
+ * confirming recount, a repeated recompute) must not overwrite them. A note
+ * passed to a call that does not resolve is therefore not written; re-raise
+ * through `upsertException` if the condition actually came back.
+ */
+export async function resolveException(
+  tx: Prisma.TransactionClient,
+  args: ResolveExceptionArgs,
+): Promise<InventoryException | null> {
+  const { key, note } = args;
+  const now = args.now ?? new Date();
+
+  const existing = await tx.inventoryException.findUnique({ where: { key } });
+  if (!existing) return null;
+  if (existing.resolvedAt !== null) return existing;
+
+  const data: Prisma.InventoryExceptionUpdateInput = {
+    resolvedAt: now,
+    resolvedBy: args.resolvedBy ?? null,
+  };
+
+  const nextNote = note ? appendNoteLine(existing.note, note) : existing.note;
+  if (nextNote !== existing.note) {
+    data.note = nextNote;
+  }
+
+  return tx.inventoryException.update({ where: { key }, data });
+}
