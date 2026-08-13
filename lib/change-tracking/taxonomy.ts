@@ -57,6 +57,8 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   RESTORE: 'positive',
   SIGNUP: 'positive',
   STOCK_IN: 'positive',
+  // Inventory-accuracy lane (T4): closing a shipment is a completed receipt.
+  CLOSE: 'positive',
   // negative
   DELETE: 'negative',
   DELETION: 'negative',
@@ -65,6 +67,7 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   REJECTION: 'negative',
   DISCARD: 'negative',
   REVOKE: 'negative', // Lane 4: API_TOKEN_REVOKE
+  CANCEL: 'negative', // Inventory-accuracy lane (T4): SHIPMENT_CANCEL
   // warning
   ADJUSTMENT: 'warning',
   BULK_UPDATE: 'warning',
@@ -78,6 +81,10 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   FULFILLMENT: 'info',
   IMPORT: 'info',
   EXPORT: 'info',
+  // Inventory-accuracy lane (T4): a line joining/leaving a receiving header is
+  // routine bookkeeping, not a judgement about the stock.
+  LINK: 'info',
+  UNLINK: 'info',
   SYNC: 'info',
   AUTO_ADD: 'info',
   SENT: 'info',
@@ -97,6 +104,9 @@ const KNOWN_VERBS: readonly string[] = [
   'STOCK_IN',
   'BULK_UPDATE',
   'AUTO_ADD',
+  // Inventory-accuracy lane (T4). UNLINK precedes LINK per the longest-first
+  // rule, even though '_LINK' cannot match a '..._UNLINK' member today.
+  'UNLINK',
   'UNFULFILLMENT',
   'FULFILLMENT',
   'ADJUSTMENT',
@@ -119,10 +129,13 @@ const KNOWN_VERBS: readonly string[] = [
   'EXPORT',
   'REJECT',
   'REVOKE',
+  'CANCEL',
   'CHANGE',
   'CREATE',
   'DELETE',
   'UPDATE',
+  'CLOSE',
+  'LINK',
   'SYNC',
   'SENT',
 ];
@@ -140,6 +153,10 @@ const PREFIX_GROUP: Readonly<Record<string, ActionGroup>> = {
   INVENTORY: 'INVENTORY',
   STAGING: 'STAGING',
   SCRATCHPAD: 'SCRATCHPAD',
+  // Inventory-accuracy lane (T4): a receiving header IS the staging domain's
+  // header, so SHIPMENT_* folds into the existing STAGING group rather than
+  // minting a group (established fold idiom: BUNDLE -> MAPPING, AI -> SETTINGS).
+  SHIPMENT: 'STAGING',
   COMPANY: 'COMPANY',
   INTEGRATION: 'INTEGRATION',
   MAPPING: 'MAPPING',
@@ -179,6 +196,12 @@ const LABEL_OVERRIDES: Readonly<Record<string, string>> = {
   API_TOKEN_CREATE: 'API token created',
   API_TOKEN_REVOKE: 'API token revoked',
   PLATFORM_WRITE_ATTEMPT: 'Platform write attempt',
+  SHIPMENT_CREATE: 'Shipment opened',
+  SHIPMENT_UPDATE: 'Shipment updated',
+  SHIPMENT_CLOSE: 'Shipment closed',
+  SHIPMENT_CANCEL: 'Shipment cancelled',
+  SHIPMENT_LINK: 'Item linked to shipment',
+  SHIPMENT_UNLINK: 'Item unlinked from shipment',
 };
 
 function titleCase(actionType: string): string {
@@ -260,6 +283,12 @@ export const ALL_ACTION_TYPES: readonly AuditActionType[] = [
   'STAGING_GRADUATE',
   'STAGING_DISCARD',
   'STAGING_UPDATE',
+  'SHIPMENT_CREATE',
+  'SHIPMENT_UPDATE',
+  'SHIPMENT_CLOSE',
+  'SHIPMENT_CANCEL',
+  'SHIPMENT_LINK',
+  'SHIPMENT_UNLINK',
   'SCRATCHPAD_CREATE',
   'SCRATCHPAD_UPDATE',
   'SCRATCHPAD_DELETE',

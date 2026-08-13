@@ -6,6 +6,7 @@ import type { Prisma } from '@prisma/client';
 import { PatchStagingSchema } from '@/lib/validation/staging';
 import { getStagingItem } from '@/lib/staging/queries';
 import { recordChange, type ChangeDiff } from '@/lib/change-tracking';
+import { applyShipmentLink } from '@/lib/shipments/lifecycle';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
 
 export const dynamic = 'force-dynamic';
@@ -88,12 +89,46 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     data.resolvedProduct = { connect: { id: body.resolvedProductId } };
     after.resolvedProductId = body.resolvedProductId;
   }
+  // shipmentId is deliberately NOT part of the generic field path: it is a state
+  // transition with its own guards and its own audit verbs (T4), handled below.
 
   // Update + record atomically (D4); the before-image is read inside the tx.
   const item = await prisma.$transaction(async (tx) => {
     const existing = await tx.stagingItem.findUnique({ where: { id } });
     if (!existing) {
       throw new AppError('Staging item not found', 'NOT_FOUND', 404);
+    }
+
+    // Inventory-accuracy lane (pack REV-2 T4): join / leave a receiving header.
+    // Legal only while the item is RECEIVED and every shipment involved is OPEN;
+    // applyShipmentLink throws 404/409 (its claims are the guards) and the throw
+    // aborts this whole transaction, field edits included.
+    if (body.shipmentId !== undefined) {
+      const link = await applyShipmentLink(tx, {
+        item: existing,
+        targetShipmentId: body.shipmentId,
+      });
+
+      if (link.action === 'UNLINK' || link.action === 'RELINK') {
+        await recordChange(tx, {
+          actor: { userId: user.id },
+          actionType: 'SHIPMENT_UNLINK',
+          entityType: 'SHIPMENT',
+          entityId: link.previousShipmentId,
+          action: `Unlinked staging item ${id} from inbound shipment ${link.previousShipmentId}`,
+          details: { stagingItemId: id },
+        });
+      }
+      if (link.action === 'LINK' || link.action === 'RELINK') {
+        await recordChange(tx, {
+          actor: { userId: user.id },
+          actionType: 'SHIPMENT_LINK',
+          entityType: 'SHIPMENT',
+          entityId: body.shipmentId,
+          action: `Linked staging item ${id} to inbound shipment ${body.shipmentId}`,
+          details: { stagingItemId: id, previousShipmentId: link.previousShipmentId },
+        });
+      }
     }
 
     const updated = await tx.stagingItem.update({

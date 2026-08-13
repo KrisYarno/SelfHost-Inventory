@@ -200,6 +200,13 @@ const KNOWN_VERBS: readonly string[] = [
   // Lane 6 (D-E5): PLATFORM_WRITE_ATTEMPT -- every outbound platform write,
   // sent / blocked / dry-run.
   'ATTEMPT',
+  // Inventory-accuracy lane (pack REV-2 T4): the receiving header's lifecycle
+  // (SHIPMENT_CLOSE / SHIPMENT_CANCEL) and its line membership
+  // (SHIPMENT_LINK / SHIPMENT_UNLINK).
+  'CLOSE',
+  'CANCEL',
+  'LINK',
+  'UNLINK',
 ];
 
 /**

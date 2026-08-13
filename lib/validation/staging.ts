@@ -29,6 +29,12 @@ export const CreateStagingSchema = z.object({
 export const PatchStagingSchema = CreateStagingSchema.partial().extend({
   // tentative; >= 1 enforced only at graduate
   countedQuantity: z.number().int().min(0).max(1_000_000).optional(),
+  // Inventory-accuracy lane (pack REV-2 T4): link this line to a receiving
+  // header, or `null` to unlink it. PATCH-only — a box is logged first and
+  // attributed to a shipment afterwards. Absent = untouched; `null` = clear.
+  // The state matrix (item RECEIVED, both shipments OPEN) is enforced at the
+  // route, not here.
+  shipmentId: z.string().min(1).max(30).nullable().optional(),
 });
 
 export const GraduateSchema = z.discriminatedUnion('mode', [

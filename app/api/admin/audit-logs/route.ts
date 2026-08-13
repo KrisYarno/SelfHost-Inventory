@@ -22,6 +22,7 @@ const ENTITY_TYPES: readonly EntityType[] = [
   "SETTINGS",
   "SYSTEM",
   "STAGING",
+  "SHIPMENT",
   "SCRATCHPAD",
   "COMPANY",
   "INTEGRATION",

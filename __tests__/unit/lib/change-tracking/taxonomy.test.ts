@@ -40,10 +40,14 @@ const unionMembers = parseAuditActionTypeMembers(fs.readFileSync(CHANGE_TRACKING
 
 describe('taxonomy completeness (writer-exhaustive)', () => {
   it('parses a plausible union (self-check) incl. the Lane 3 addition', () => {
-    expect(unionMembers.length).toBe(52); // Lane 6 added PLATFORM_WRITE_ATTEMPT
+    // Lane 6 added PLATFORM_WRITE_ATTEMPT (52); the inventory-accuracy lane's
+    // W1-2a added the six SHIPMENT_* verbs (58).
+    expect(unionMembers.length).toBe(58);
     expect(unionMembers).toContain('ANALYTICS_REBUILD_TRIGGER');
     expect(unionMembers).toContain('USER_APPROVAL_REMINDER_SENT');
     expect(unionMembers).toContain('PLATFORM_WRITE_ATTEMPT');
+    expect(unionMembers).toContain('SHIPMENT_CANCEL');
+    expect(unionMembers).toContain('SHIPMENT_UNLINK');
     expect(new Set(unionMembers).size).toBe(unionMembers.length);
   });
 
@@ -106,6 +110,7 @@ describe('verb -> tone table (spec §11 D-L5 verbatim)', () => {
     ['PRODUCT_APPROVE', 'positive'],
     ['USER_APPROVAL', 'positive'],
     ['STAGING_GRADUATE', 'positive'],
+    ['SHIPMENT_CLOSE', 'positive'],
     ['PRODUCT_RESTORE', 'positive'],
     ['SIGNUP', 'positive'],
     // negative
@@ -114,6 +119,7 @@ describe('verb -> tone table (spec §11 D-L5 verbatim)', () => {
     ['PRODUCT_DECLINE', 'negative'],
     ['USER_REJECTION', 'negative'],
     ['STAGING_DISCARD', 'negative'],
+    ['SHIPMENT_CANCEL', 'negative'],
     // warning
     ['INVENTORY_ADJUSTMENT', 'warning'],
     ['INVENTORY_BULK_UPDATE', 'warning'],
@@ -124,6 +130,8 @@ describe('verb -> tone table (spec §11 D-L5 verbatim)', () => {
     ['INVENTORY_TRANSFER_AUTO_ADD', 'info'],
     ['DATA_EXPORT', 'info'],
     ['ANALYTICS_REBUILD_TRIGGER', 'info'],
+    ['SHIPMENT_LINK', 'info'],
+    ['SHIPMENT_UNLINK', 'info'],
     // neutral
     ['PRODUCT_UPDATE', 'neutral'],
     ['USER_ROLE_CHANGE', 'neutral'],

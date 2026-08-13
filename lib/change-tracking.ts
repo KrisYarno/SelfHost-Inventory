@@ -93,6 +93,19 @@ export type AuditActionType =
   // hard record is the platform_write_attempts row and this event is its
   // human-facing surface.
   | 'PLATFORM_WRITE_ATTEMPT'
+  // --- Inventory-accuracy lane (contract pack REV-2 T4): the receiving header's
+  // lifecycle. SHIPMENT_UPDATE is the notes/supplierRef field edit, following the
+  // STAGING_UPDATE precedent (diff-based, an empty diff records nothing).
+  // LINK/UNLINK are emitted by PATCH /api/staging-items/[id] when a line joins or
+  // leaves a shipment, and are addressed to the SHIPMENT (entityId = the shipment
+  // id, the line id in details). cancelledBy rides the SHIPMENT_CANCEL line
+  // because T1 deliberately gives the table no cancelledBy column.
+  | 'SHIPMENT_CREATE'
+  | 'SHIPMENT_UPDATE'
+  | 'SHIPMENT_CLOSE'
+  | 'SHIPMENT_CANCEL'
+  | 'SHIPMENT_LINK'
+  | 'SHIPMENT_UNLINK'
   // --- Lane 4 additions (spec D2/D7): AI-provider config + API-token lifecycle.
   // Key values diff as [REDACTED] via the deep scan; token/hash never enter
   // payloads (details = name/tier only). Emitted by the T4 admin routes.
@@ -110,6 +123,10 @@ export type EntityType =
   | 'SYSTEM'
   | 'STAGING'
   | 'SCRATCHPAD'
+  // Inventory-accuracy lane (T4): the receiving header. NOT company-scoped —
+  // a shipment belongs to the warehouse, not to a sales channel, so it stays
+  // out of COMPANY_SCOPED_ENTITY_TYPES below.
+  | 'SHIPMENT'
   // --- spec D5 additions ---
   | 'COMPANY'
   | 'INTEGRATION'
