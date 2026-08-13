@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { useWorkbench } from "@/hooks/use-workbench";
@@ -18,9 +18,54 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { AlertCircle, AlertTriangle, CheckCircle2, Package } from "lucide-react";
+import { AlertCircle, AlertTriangle, Check, CheckCircle2, Package } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
 import { getUserFriendlyMessage } from "@/lib/error-handling";
+import type { UnmappedExternalItem } from "@/types/workbench";
+
+// ---------------------------------------------------------------------------
+// W0.5-a (contract pack T6): the skipped-line checklist.
+//
+// `unmappedExternalItems` mixes THREE cases, all produced by
+// hooks/use-workbench.ts `selectExternalOrder` (lines 205-259):
+//
+//   bundle       the line IS mapped, but a bundle can't sit in the workbench
+//                cart (cart entries are 1:1 with one internal product) — the
+//                operator fulfills it from the Order Details sheet;
+//   unavailable  the line IS mapped, but its internal product was not in the
+//                loaded products array, so it could not be added to the cart;
+//   unmapped     the line was never mapped at all.
+//
+// Class detection: `isBundle` is set only by the bundle push. The
+// mapped-but-not-loaded push is the ONLY one that omits the external product
+// reference (every ExternalOrderItem carries a non-null `externalProductId` —
+// prisma schema VarChar(255) NOT NULL — and the unmapped push forwards it), so
+// a missing reference is what separates the two non-bundle classes.
+// ---------------------------------------------------------------------------
+
+type SkippedLineClass = "unmapped" | "unavailable" | "bundle";
+
+// The per-line truth. Bundles are the only class that still ships correctly.
+const SKIPPED_LINE_COPY: Record<SkippedLineClass, string> = {
+  unmapped: "ships unmapped — not deducted",
+  unavailable: "mapped but unavailable — not deducted",
+  bundle: "bundle — fulfill via Order Details",
+};
+
+const SKIPPED_LINE_LABEL: Record<SkippedLineClass, string> = {
+  unmapped: "Unmapped",
+  unavailable: "Mapped but unavailable",
+  bundle: "Bundles",
+};
+
+// Render order: the lines that need a tap first, the informational ones last.
+const SKIPPED_LINE_CLASSES: SkippedLineClass[] = ["unmapped", "unavailable", "bundle"];
+
+function classifySkippedLine(item: UnmappedExternalItem): SkippedLineClass {
+  if (item.isBundle) return "bundle";
+  if (!item.externalProductId && !item.externalVariantId) return "unavailable";
+  return "unmapped";
+}
 
 export interface DeductionDetail {
   productId: number;
@@ -68,6 +113,44 @@ export function CompleteOrderDialog({
     const manual = orderItems.filter((item) => !item.fulfillmentItemId);
     return { wcItems: wc, manualItems: manual };
   }, [orderItems]);
+
+  // W0.5-a (T6): the skipped lines, classified, plus the per-line
+  // acknowledgements. Acknowledgement is LOCAL state only — nothing is
+  // persisted, and no request carries it.
+  const [acknowledgedLines, setAcknowledgedLines] = useState<string[]>([]);
+
+  const skippedLines = useMemo(
+    () =>
+      unmappedExternalItems.map((item, idx) => ({
+        // externalItemId is stamped on every push; the index is the fallback.
+        key: item.externalItemId ?? `line-${idx}`,
+        item,
+        lineClass: classifySkippedLine(item),
+      })),
+    [unmappedExternalItems]
+  );
+
+  // Bundles are informational — they are excluded from the tap count.
+  const tapRequiredKeys = useMemo(
+    () => skippedLines.filter((line) => line.lineClass !== "bundle").map((line) => line.key),
+    [skippedLines]
+  );
+  const acknowledgedCount = tapRequiredKeys.filter((key) =>
+    acknowledgedLines.includes(key)
+  ).length;
+  const allAcknowledged = acknowledgedCount === tapRequiredKeys.length;
+
+  // Reopening the dialog RESETS the taps. Intended friction: an operator who
+  // backs out and comes back re-reads what is about to ship undeducted.
+  useEffect(() => {
+    setAcknowledgedLines([]);
+  }, [open]);
+
+  const toggleAcknowledged = (key: string) => {
+    setAcknowledgedLines((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  };
 
   const handleComplete = async () => {
     if (!csrfToken) {
@@ -398,41 +481,94 @@ export function CompleteOrderDialog({
                 </div>
               )}
 
-              {/* Skipped-items warning. Bundles are surfaced separately
-                  because they ARE mapped — operators just need to fulfill them
-                  via the Order Details sheet, not the workbench cart. The
-                  noun chosen is "items" when both bundle + unmapped exist,
-                  "bundle items" when only bundles, "unmapped items" otherwise. */}
-              {isWCOrder && unmappedExternalItems.length > 0 && (() => {
-                const allBundles = unmappedExternalItems.every((i) => i.isBundle);
-                const someBundles = unmappedExternalItems.some((i) => i.isBundle);
-                const someUnmapped = unmappedExternalItems.some((i) => !i.isBundle);
-                const noun = allBundles
-                  ? "bundle item"
-                  : someBundles && someUnmapped
-                  ? "item"
-                  : "unmapped item";
-                const plural = unmappedExternalItems.length !== 1 ? "s" : "";
-                return (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/30 p-3 space-y-1">
-                    <div className="flex items-center gap-1.5">
-                      <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
-                      <span className="text-sm font-medium text-amber-700 dark:text-amber-300">
-                        {unmappedExternalItems.length} {noun}{plural} will be skipped
-                      </span>
-                    </div>
-                    <ul className="text-xs text-amber-600 dark:text-amber-400 space-y-0.5 ml-5">
-                      {unmappedExternalItems.map((item, idx) => (
-                        <li key={idx}>
-                          {item.name} x{item.quantity}
-                          {item.sku && <span className="ml-1 opacity-70">({item.sku})</span>}
-                          {item.isBundle && <span className="ml-1 italic opacity-70">(bundle — fulfill via Order Details)</span>}
-                        </li>
-                      ))}
-                    </ul>
+              {/* Skipped-line checklist (T6). Grouped by class, because the
+                  three classes are three different truths: a bundle still
+                  ships (from Order Details), the other two do not ship
+                  deducted at all. Every non-bundle line has to be tapped
+                  before Complete unlocks — the checklist never blocks the
+                  completion itself, it only makes the operator see each line. */}
+              {isWCOrder && skippedLines.length > 0 && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/30 p-3 space-y-2">
+                  <div className="flex items-center gap-1.5">
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+                    <span className="text-sm font-medium text-amber-700 dark:text-amber-300">
+                      {skippedLines.length} line{skippedLines.length !== 1 ? "s" : ""} will not be deducted
+                    </span>
                   </div>
-                );
-              })()}
+
+                  {tapRequiredKeys.length > 0 && (
+                    <p className="ml-5 text-xs text-amber-700 dark:text-amber-300">
+                      Tap each flagged line to acknowledge ({acknowledgedCount} of{" "}
+                      {tapRequiredKeys.length}).
+                    </p>
+                  )}
+
+                  {SKIPPED_LINE_CLASSES.map((lineClass) => {
+                    const lines = skippedLines.filter((line) => line.lineClass === lineClass);
+                    if (lines.length === 0) return null;
+                    return (
+                      <div key={lineClass} className="ml-5 space-y-1">
+                        <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
+                          {SKIPPED_LINE_LABEL[lineClass]} ({lines.length})
+                        </p>
+                        <ul className="space-y-1">
+                          {lines.map(({ key, item }) => {
+                            const detail = (
+                              <span className="text-left">
+                                {item.name} x{item.quantity}
+                                {item.sku && <span className="ml-1 opacity-70">({item.sku})</span>}
+                                <span className="ml-1 italic opacity-80">
+                                  {SKIPPED_LINE_COPY[lineClass]}
+                                </span>
+                              </span>
+                            );
+
+                            // Bundles are informational: no tap, nothing to unlock.
+                            if (lineClass === "bundle") {
+                              return (
+                                <li
+                                  key={key}
+                                  className="text-xs text-amber-600 dark:text-amber-400"
+                                >
+                                  {detail}
+                                </li>
+                              );
+                            }
+
+                            const isAcknowledged = acknowledgedLines.includes(key);
+                            return (
+                              <li key={key}>
+                                <button
+                                  type="button"
+                                  role="checkbox"
+                                  aria-checked={isAcknowledged}
+                                  onClick={() => toggleAcknowledged(key)}
+                                  disabled={isProcessing}
+                                  // py-2 keeps the row a comfortable tap target
+                                  // on the mobile workbench.
+                                  className={`flex w-full items-start gap-2 rounded-md border px-2 py-2 text-xs transition-colors disabled:opacity-60 ${
+                                    isAcknowledged
+                                      ? "border-amber-400 bg-amber-100/70 text-amber-800 dark:border-amber-700 dark:bg-amber-900/40 dark:text-amber-200"
+                                      : "border-amber-300/70 text-amber-700 hover:bg-amber-100/50 dark:border-amber-800 dark:text-amber-300 dark:hover:bg-amber-900/30"
+                                  }`}
+                                >
+                                  <span
+                                    aria-hidden="true"
+                                    className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border border-amber-500 dark:border-amber-600"
+                                  >
+                                    {isAcknowledged && <Check className="h-3 w-3" />}
+                                  </span>
+                                  {detail}
+                                </button>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
 
               {/* Summary text */}
               {isWCOrder ? (
@@ -453,7 +589,9 @@ export function CompleteOrderDialog({
           <AlertDialogCancel disabled={isProcessing}>Cancel</AlertDialogCancel>
           <AlertDialogAction
             onClick={handleComplete}
-            disabled={isProcessing || csrfLoading || !csrfToken}
+            // T6: the only new gate is the acknowledgement one, and it lifts
+            // for good once every tap-required line has been tapped.
+            disabled={isProcessing || csrfLoading || !csrfToken || !allAcknowledged}
           >
             {isProcessing
               ? "Processing..."
