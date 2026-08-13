@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin, apiHandler, requireCSRF } from '@/lib/api-utils';
 import { declineProduct } from '@/lib/products/decline';
+import { pendingWithStockKey } from '@/lib/exceptions/kinds';
+import { resolveException } from '@/lib/exceptions/write';
 import { recordChange, newBatchId } from '@/lib/change-tracking';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
 
@@ -48,6 +50,18 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
         action: `Declined product ${id}`,
         details: { reversed: ctx.reversed, alreadyDeclined: ctx.alreadyDeclined },
         batchId,
+      });
+
+      // W1-3b (pack REV-3 T1 LIFECYCLE): the OTHER act that settles
+      // `pending-with-stock`. A decline reverses the stock, so there are no
+      // units left to adjudicate — and this rides the SAME tx as that reversal
+      // (the callback's whole purpose), so the register cannot outlive it.
+      // Fired on the already-declined path too: resolveException is idempotent,
+      // and a row stranded by an earlier partial failure deserves to close.
+      await resolveException(tx, {
+        key: pendingWithStockKey(id),
+        resolvedBy: user.id,
+        note: 'resolved: product declined',
       });
     },
   });

@@ -65,6 +65,28 @@ const ALLOWED_WRITER_CALLERS: WriterCaller[] = [
       'W1-2c: the count endpoint is where a receiving discrepancy becomes known, so it ' +
       'raises / auto-resolves recv-discrepancy in the same transaction as the count write',
   },
+  {
+    path: 'app/api/staging-items/[id]/graduate/route.ts',
+    reason:
+      'W1-3b: graduation is where both W1 register rows are BORN — cost-differs (a ' +
+      'non-admin received goods at a cost that disagrees with the product, and may not ' +
+      'edit the price) and pending-with-stock (a non-admin minted a product, so real ' +
+      'units now sit against an unapproved catalog entry). Both are written through the ' +
+      "graduation's own transaction via its onRecord hook, so a rolled-back graduation " +
+      'can never strand one',
+  },
+  {
+    path: 'app/api/admin/products/[id]/approve/route.ts',
+    reason:
+      'W1-3b: approving the product is one of the two acts that make pending-with-stock ' +
+      'false, so the resolution is written inside the approval transaction (T1 LIFECYCLE)',
+  },
+  {
+    path: 'app/api/admin/products/[id]/decline/route.ts',
+    reason:
+      'W1-3b: declining reverses the stock, so pending-with-stock is resolved inside ' +
+      "declineProduct's transaction — the register never outlives the units it names",
+  },
 ];
 
 const MUTATING_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'] as const;

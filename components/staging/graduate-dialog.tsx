@@ -6,7 +6,12 @@ import { Search, Loader2, AlertCircle, Package } from "lucide-react";
 import { toast } from "sonner";
 import { useCSRF } from "@/hooks/use-csrf";
 import { useDebounce } from "@/hooks/use-debounce";
-import { useCountStagingItem, useGraduateStagingItem } from "@/hooks/use-staging";
+import {
+  useCountStagingItem,
+  useGraduateStagingItem,
+  type GraduateCostPrompt,
+} from "@/hooks/use-staging";
+import { useUpdateProduct } from "@/hooks/use-products";
 import {
   Dialog,
   DialogContent,
@@ -49,6 +54,12 @@ export interface GraduateStagingItem {
    * renders it read-only and never seeds it from `expectedQuantity`.
    */
   countedQuantity: number | null;
+  /**
+   * The cost typed on the RECEIPT LINE, in cents (W1-3b / pack REV-3 T3). In
+   * "new product" mode it pre-fills the ProductForm cost field — one value, no
+   * conflict, entered once.
+   */
+  unitCostCents?: number | null;
   locationId: number;
 }
 
@@ -62,6 +73,16 @@ interface GraduateDialogProps {
 
 type Mode = "existing" | "new";
 
+/**
+ * INT cents -> a displayable price. `null` renders as "Not set", never as
+ * $0.00: a product with no recorded cost is unknown, and printing a zero would
+ * be a number nobody can stand behind (truthful-data).
+ */
+function formatCents(cents: number | null): string {
+  if (cents === null) return "Not set";
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
 export function GraduateDialog({
   open,
   onOpenChange,
@@ -72,7 +93,15 @@ export function GraduateDialog({
   const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
   const graduateMutation = useGraduateStagingItem();
   const countMutation = useCountStagingItem();
+  const updateProductMutation = useUpdateProduct();
   const isSubmitting = graduateMutation.isPending;
+
+  // D-COST (pack REV-3 T3, seam S11). The graduation SUCCEEDED; this is the
+  // server reporting that the receipt priced these units differently from the
+  // product's standing cost, and that it wrote nothing. Admins only — a
+  // non-admin's response carries null here and the server has already put the
+  // disagreement on the exception register instead.
+  const [costPrompt, setCostPrompt] = useState<GraduateCostPrompt | null>(null);
 
   const [mode, setMode] = useState<Mode>("existing");
   // The AUTHORITATIVE count. Seeded from the row and thereafter only ever
@@ -114,6 +143,9 @@ export function GraduateDialog({
       setDebouncedSearch("");
       setSelectedProduct(null);
       setNewBaseName("");
+      // A prompt belongs to the graduation that produced it; opening the dialog
+      // for another box must never inherit it.
+      setCostPrompt(null);
     }
   }, [open, item]);
 
@@ -239,7 +271,7 @@ export function GraduateDialog({
   const handleGraduateExisting = async () => {
     if (!item || !existingValid || !selectedProduct || !locationId) return;
     try {
-      await graduateMutation.mutateAsync({
+      const result = await graduateMutation.mutateAsync({
         id: item.id,
         body: {
           mode: "existing",
@@ -249,6 +281,7 @@ export function GraduateDialog({
         },
       });
       toast.success(`Added ${bookedQuantity} to ${selectedProduct.name}`);
+      setCostPrompt(result.costPrompt ?? null);
       onOpenChange(false);
       onSuccess?.();
     } catch (error) {
@@ -271,7 +304,7 @@ export function GraduateDialog({
   }) => {
     if (!item || !baseGatePassed || !locationId) return;
     try {
-      await graduateMutation.mutateAsync({
+      const result = await graduateMutation.mutateAsync({
         id: item.id,
         body: {
           mode: "new",
@@ -290,6 +323,7 @@ export function GraduateDialog({
         },
       });
       toast.success(`Created product and added ${bookedQuantity} units`);
+      setCostPrompt(result.costPrompt ?? null);
       onOpenChange(false);
       onSuccess?.();
     } catch (error) {
@@ -299,6 +333,77 @@ export function GraduateDialog({
       );
     }
   };
+
+  // --- The cost prompt (pack REV-3 T3) -------------------------------------
+  // Update goes through the REAL product PUT: same authorization, same
+  // PRODUCT_UPDATE audit line as any other price edit. Nothing about receiving
+  // gets its own back door into pricing.
+  const handleCostUpdate = async () => {
+    if (!costPrompt) return;
+    try {
+      await updateProductMutation.mutateAsync({
+        id: costPrompt.productId,
+        data: { costPrice: costPrompt.receiptCents / 100 },
+      });
+      toast.success("Product cost updated from the receipt");
+      setCostPrompt(null);
+    } catch (error) {
+      console.error("Error updating product cost:", error);
+      toast.error(
+        error instanceof Error ? error.message : "Failed to update the cost"
+      );
+    }
+  };
+
+  const costPromptDialog = (
+    <Dialog
+      open={costPrompt !== null}
+      onOpenChange={(next) => {
+        // Dismissing IS "Keep": the stock is already booked, and the standing
+        // cost is what it always was.
+        if (!next) setCostPrompt(null);
+      }}
+    >
+      <DialogContent className="sm:max-w-[440px]" data-testid="cost-prompt">
+        <DialogHeader>
+          <DialogTitle>This receipt was priced differently</DialogTitle>
+          <DialogDescription>
+            The stock is already booked at the receipt&apos;s cost. Nothing has
+            been changed on the product.
+          </DialogDescription>
+        </DialogHeader>
+
+        <dl className="grid grid-cols-2 gap-2 rounded-md border bg-muted/40 p-3 text-sm">
+          <dt className="text-muted-foreground">Product cost</dt>
+          <dd className="text-right font-medium">
+            {formatCents(costPrompt?.currentCents ?? null)}
+          </dd>
+          <dt className="text-muted-foreground">This receipt</dt>
+          <dd className="text-right font-medium">
+            {formatCents(costPrompt?.receiptCents ?? null)}
+          </dd>
+        </dl>
+
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => setCostPrompt(null)}
+            disabled={updateProductMutation.isPending}
+          >
+            Keep current cost
+          </Button>
+          <Button
+            onClick={handleCostUpdate}
+            disabled={updateProductMutation.isPending || !csrfToken}
+          >
+            {updateProductMutation.isPending
+              ? "Updating…"
+              : "Update to the receipt cost"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 
   const sharedTop = (
     <div className="space-y-4">
@@ -448,151 +553,160 @@ export function GraduateDialog({
   );
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Graduate Item</DialogTitle>
-          <DialogDescription>
-            {item
-              ? `Resolve "${item.description}" into real inventory.`
-              : "Resolve this box into real inventory."}
-          </DialogDescription>
-        </DialogHeader>
+    <>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Graduate Item</DialogTitle>
+            <DialogDescription>
+              {item
+                ? `Resolve "${item.description}" into real inventory.`
+                : "Resolve this box into real inventory."}
+            </DialogDescription>
+          </DialogHeader>
 
-        {/* Existing / New toggle */}
-        <div className="inline-flex rounded-md border p-1 self-start">
-          <button
-            type="button"
-            onClick={() => setMode("existing")}
-            className={cn(
-              "rounded-sm px-3 py-1.5 text-sm font-medium transition-colors",
-              mode === "existing"
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-            aria-pressed={mode === "existing"}
-          >
-            Existing product
-          </button>
-          <button
-            type="button"
-            onClick={() => setMode("new")}
-            className={cn(
-              "rounded-sm px-3 py-1.5 text-sm font-medium transition-colors",
-              mode === "new"
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-            aria-pressed={mode === "new"}
-          >
-            New product
-          </button>
-        </div>
-
-        {sharedTop}
-
-        {mode === "existing" ? (
-          <div className="space-y-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="graduate-search">Find a product</Label>
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  id="graduate-search"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search products…"
-                  className="pl-9"
-                />
-                {searching && (
-                  <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
-                )}
-              </div>
-            </div>
-
-            {selectedProduct && (
-              <div className="flex items-center gap-2 rounded-md border bg-muted/50 p-2 text-sm">
-                <Package className="h-4 w-4 text-muted-foreground" />
-                <span className="font-medium">{selectedProduct.name}</span>
-                <span className="text-xs text-muted-foreground">selected</span>
-              </div>
-            )}
-
-            <div className="max-h-48 overflow-y-auto space-y-1">
-              {results.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => setSelectedProduct(p)}
-                  className={cn(
-                    "w-full text-left rounded-md border border-border/60 px-3 py-2 hover:bg-muted/50 text-sm",
-                    selectedProduct?.id === p.id && "ring-1 ring-primary"
-                  )}
-                >
-                  {p.name}
-                </button>
-              ))}
-              {debouncedSearch.length > 0 &&
-                !searching &&
-                results.length === 0 && (
-                  <p className="py-2 text-xs text-muted-foreground">
-                    No products match “{debouncedSearch}”.
-                  </p>
-                )}
-            </div>
-
-            <DialogFooter>
-              <Button
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-                disabled={isSubmitting}
-              >
-                Cancel
-              </Button>
-              <Button
-                onClick={handleGraduateExisting}
-                disabled={!existingValid || isSubmitting || csrfLoading}
-              >
-                {isSubmitting ? "Graduating…" : "Confirm"}
-              </Button>
-            </DialogFooter>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {duplicateName && (
-              <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
-                <AlertCircle className="h-4 w-4 shrink-0" />
-                <span>
-                  A product named “{duplicateName}” already exists. You can still
-                  create a new one if this is different.
-                </span>
-              </div>
-            )}
-            {/* ProductForm owns field validation + the submit button; it only
-                fires onSubmit when its required fields are valid. We gate that
-                button on counted qty via disableSubmit so Confirm stays disabled
-                until counted qty >= 1 AND the new product fields are filled.
-                The wrapping div captures the bubbled change of the baseName
-                input to drive the best-effort duplicate-name warning without
-                modifying ProductForm. */}
-            <div
-              onChange={(e) => {
-                const target = e.target as HTMLInputElement;
-                if (target?.id === "baseName") {
-                  setNewBaseName(target.value);
-                }
-              }}
+          {/* Existing / New toggle */}
+          <div className="inline-flex rounded-md border p-1 self-start">
+            <button
+              type="button"
+              onClick={() => setMode("existing")}
+              className={cn(
+                "rounded-sm px-3 py-1.5 text-sm font-medium transition-colors",
+                mode === "existing"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              aria-pressed={mode === "existing"}
             >
-              <ProductForm
-                onSubmit={handleGraduateNew}
-                onCancel={() => onOpenChange(false)}
-                isSubmitting={isSubmitting}
-                disableSubmit={!baseGatePassed || csrfLoading}
-              />
-            </div>
+              Existing product
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("new")}
+              className={cn(
+                "rounded-sm px-3 py-1.5 text-sm font-medium transition-colors",
+                mode === "new"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              aria-pressed={mode === "new"}
+            >
+              New product
+            </button>
           </div>
-        )}
-      </DialogContent>
-    </Dialog>
+
+          {sharedTop}
+
+          {mode === "existing" ? (
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="graduate-search">Find a product</Label>
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    id="graduate-search"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search products…"
+                    className="pl-9"
+                  />
+                  {searching && (
+                    <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+                  )}
+                </div>
+              </div>
+
+              {selectedProduct && (
+                <div className="flex items-center gap-2 rounded-md border bg-muted/50 p-2 text-sm">
+                  <Package className="h-4 w-4 text-muted-foreground" />
+                  <span className="font-medium">{selectedProduct.name}</span>
+                  <span className="text-xs text-muted-foreground">selected</span>
+                </div>
+              )}
+
+              <div className="max-h-48 overflow-y-auto space-y-1">
+                {results.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setSelectedProduct(p)}
+                    className={cn(
+                      "w-full text-left rounded-md border border-border/60 px-3 py-2 hover:bg-muted/50 text-sm",
+                      selectedProduct?.id === p.id && "ring-1 ring-primary"
+                    )}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+                {debouncedSearch.length > 0 &&
+                  !searching &&
+                  results.length === 0 && (
+                    <p className="py-2 text-xs text-muted-foreground">
+                      No products match “{debouncedSearch}”.
+                    </p>
+                  )}
+              </div>
+
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => onOpenChange(false)}
+                  disabled={isSubmitting}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleGraduateExisting}
+                  disabled={!existingValid || isSubmitting || csrfLoading}
+                >
+                  {isSubmitting ? "Graduating…" : "Confirm"}
+                </Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {duplicateName && (
+                <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  <span>
+                    A product named “{duplicateName}” already exists. You can still
+                    create a new one if this is different.
+                  </span>
+                </div>
+              )}
+              {/* ProductForm owns field validation + the submit button; it only
+                  fires onSubmit when its required fields are valid. We gate that
+                  button on counted qty via disableSubmit so Confirm stays disabled
+                  until counted qty >= 1 AND the new product fields are filled.
+                  The wrapping div captures the bubbled change of the baseName
+                  input to drive the best-effort duplicate-name warning without
+                  modifying ProductForm. */}
+              <div
+                onChange={(e) => {
+                  const target = e.target as HTMLInputElement;
+                  if (target?.id === "baseName") {
+                    setNewBaseName(target.value);
+                  }
+                }}
+              >
+                <ProductForm
+                  onSubmit={handleGraduateNew}
+                  onCancel={() => onOpenChange(false)}
+                  isSubmitting={isSubmitting}
+                  disableSubmit={!baseGatePassed || csrfLoading}
+                  // T3: the RECEIPT LINE's cost seeds the field. One value, typed
+                  // once — the operator confirms what the box was priced at
+                  // instead of entering it a second time and disagreeing.
+                  defaultCostPrice={
+                    item?.unitCostCents == null ? null : item.unitCostCents / 100
+                  }
+                />
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+      {costPromptDialog}
+    </>
   );
 }

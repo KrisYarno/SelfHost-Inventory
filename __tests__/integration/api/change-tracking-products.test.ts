@@ -44,6 +44,14 @@ jest.mock('@/lib/prisma', () => {
     productLink: { findUnique: jest.fn() },
     location: { findUnique: jest.fn() },
     auditLog: { create: jest.fn(async () => ({ id: 1 })) },
+    // W1-3b: approve/decline resolve `pending-with-stock` on the same tx as the
+    // product write. Stubbed so the routes RUN; the resolution itself is owned
+    // by __tests__/integration/api/product-approval-exceptions.test.ts.
+    inventoryException: {
+      findUnique: jest.fn(async () => null),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
   };
   return {
     __esModule: true,

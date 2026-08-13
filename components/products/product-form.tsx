@@ -52,6 +52,14 @@ interface ProductFormProps {
   locations?: Array<{ id: number; name: string }>;
   externalError?: string | null;
   defaultLocationId?: number;
+  /**
+   * CREATE-mode seed for the cost field (W1-3b / pack REV-3 T3). Graduation's
+   * "new product" branch pre-fills it with the cost typed on the RECEIPT LINE,
+   * so the operator confirms one number instead of entering it twice and
+   * disagreeing with themselves. Ignored in edit mode (`product` wins) and
+   * `null`/omitted leaves the field blank — unknown stays unknown.
+   */
+  defaultCostPrice?: number | null;
   externalFieldErrors?: Partial<{
     baseName: string;
     numericValue: string;
@@ -70,6 +78,7 @@ export function ProductForm({
   locations = [],
   externalError,
   defaultLocationId,
+  defaultCostPrice,
   externalFieldErrors,
 }: ProductFormProps) {
   const [error, setError] = useState<string | null>(null);
@@ -117,7 +126,9 @@ export function ProductForm({
       costPrice:
         product && product.costPrice !== null && product.costPrice !== undefined
           ? Number(product.costPrice)
-          : null,
+          : // Create mode: the caller may seed it (graduation passes the receipt
+            // line's cost). Still null when nobody knows a cost.
+            (defaultCostPrice ?? null),
       // Unknown retail -> blank (null), so editing a product without a retail price
       // does not re-save a phantom 0. An existing explicit price (incl. 0 = free) shows as-is.
       retailPrice:

@@ -183,7 +183,17 @@ describe('staging POST /api/staging-items/[id]/discard', () => {
 
 describe('graduate POST /api/staging-items/[id]/graduate — flagship fan-out', () => {
   it('new-product path: STAGING_GRADUATE + PRODUCT_CREATE share ONE batchId on ONE tx', async () => {
-    const GRAD_TX: any = { __gradTx: true };
+    // W1-3b: a non-admin's new product also raises `pending-with-stock` on this
+    // very tx, so the sentinel needs the delegate the register writes through.
+    // What that row CONTAINS is owned by staging-graduate-exceptions.test.ts.
+    const GRAD_TX: any = {
+      __gradTx: true,
+      inventoryException: {
+        findUnique: jest.fn(async () => null),
+        create: jest.fn(async ({ data }: any) => ({ id: 1, ...data })),
+        update: jest.fn(async ({ data }: any) => ({ id: 1, ...data })),
+      },
+    };
     mockGraduate.mockImplementation(async (_id: number, _body: any, _actor: any, opts: any) => {
       if (opts?.onRecord) {
         await opts.onRecord(GRAD_TX, {
@@ -400,6 +410,11 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
     const tx = mockDeep<Prisma.TransactionClient>();
     tx.stagingItem.updateMany.mockResolvedValue({ count: 1 } as any);
     tx.stagingItem.update.mockResolvedValue({} as any);
+    // W1-3b (pack REV-3 T3): the real helper now runs D-COST inside this same
+    // transaction. Default = the fill claim matches nothing (the product already
+    // has a cost), so these tests keep testing the fan-out, not the cost rule.
+    tx.product.updateMany.mockResolvedValue({ count: 0 } as any);
+    tx.product.findUnique.mockResolvedValue(null as any);
     // W1-3a (pack REV-3 T2): the booked quantity is READ from the claimed row,
     // never taken from the request — so every drive has to supply one.
     tx.stagingItem.findUnique.mockResolvedValue({

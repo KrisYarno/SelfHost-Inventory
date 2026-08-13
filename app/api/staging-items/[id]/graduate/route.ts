@@ -6,6 +6,8 @@ import {
   assertGraduateOverridePair,
 } from '@/lib/validation/staging';
 import { graduateStagingItem } from '@/lib/staging/graduate';
+import { costDiffersKey, pendingWithStockKey } from '@/lib/exceptions/kinds';
+import { upsertException } from '@/lib/exceptions/write';
 import { recordChange, newBatchId } from '@/lib/change-tracking';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
 
@@ -119,6 +121,45 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
               overrideReason: ctx.override.reason,
             },
             batchId,
+          });
+        }
+
+        // W1-3b EXCEPTIONS (pack REV-3 T1/T3). Both rows are written on THIS
+        // transaction — the graduation's own — so a graduation that rolls back
+        // can never leave a register row describing units that were never
+        // booked.
+        //
+        // cost-differs: the receiving user could not be prompted (no admin
+        // rights to edit a price), so the disagreement becomes a row instead of
+        // a dialog. The subject is decided in the helper, where the actor's
+        // rights are known; the route only writes what it was handed.
+        if (ctx.costDiffers) {
+          await upsertException(tx, {
+            kind: 'cost-differs',
+            key: costDiffersKey(id),
+            subject: {
+              productId: ctx.costDiffers.productId,
+              stagingItemId: ctx.costDiffers.stagingItemId,
+              currentCents: ctx.costDiffers.currentCents,
+              receiptCents: ctx.costDiffers.receiptCents,
+            },
+          });
+        }
+
+        // pending-with-stock: a non-admin minted a product, so real units are
+        // now on hand against something nobody has approved. Keyed by PRODUCT
+        // (the grain approve/decline settles), not by the line that raised it.
+        if (ctx.created && ctx.approvalStatus === 'PENDING_REVIEW') {
+          await upsertException(tx, {
+            kind: 'pending-with-stock',
+            key: pendingWithStockKey(ctx.productId),
+            subject: {
+              productId: ctx.productId,
+              stagingItemId: id,
+              // What the LEDGER booked — the units actually sitting on the
+              // shelf, which is what makes this worth adjudicating.
+              units: ctx.bookedQuantity,
+            },
           });
         }
       },

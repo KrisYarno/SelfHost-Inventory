@@ -17,6 +17,14 @@ jest.mock('@/lib/prisma', () => {
     product: {
       update: jest.fn(),
     },
+    // W1-3b: approve/decline resolve `pending-with-stock` on this same tx. The
+    // delegate is stubbed so the routes RUN; what they resolve is owned by
+    // __tests__/integration/api/product-approval-exceptions.test.ts.
+    inventoryException: {
+      findUnique: jest.fn(async () => null),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
   };
   return {
     __esModule: true,
@@ -170,8 +178,14 @@ describe('POST /api/admin/products/[id]/decline', () => {
     // declineProduct is mocked, so the callback has not fired yet.
     expect(mockRecordChange).not.toHaveBeenCalled();
     // Driving the callback (as declineProduct's tx would) records PRODUCT_DECLINE
-    // with the DeclineResult ctx + the shared batchId.
-    await opts.record({}, { reversed: true, alreadyDeclined: false });
+    // with the DeclineResult ctx + the shared batchId. W1-3b: the same callback
+    // also resolves `pending-with-stock`, so the stand-in tx carries that
+    // delegate — the resolution itself is pinned in
+    // __tests__/integration/api/product-approval-exceptions.test.ts.
+    const declineTx = {
+      inventoryException: { findUnique: jest.fn(async () => null), update: jest.fn() },
+    };
+    await opts.record(declineTx, { reversed: true, alreadyDeclined: false });
     expect(mockRecordChange).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({

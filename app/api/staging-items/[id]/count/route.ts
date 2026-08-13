@@ -32,11 +32,13 @@ interface RouteParams {
  *   - the item must exist                             (404)
  *   - the item must still be RECEIVED                 (409) — graduated stock is
  *     a settled movement; re-counting it would rewrite history
+ *   - the write is an atomic claim on (id, RECEIVED)  (409 when lost)
  *   - a linked shipment must be OPEN                  (409) — counting is
  *     receiving work, and closing a shipment ends it (CLOSED and CANCELLED
  *     alike; graduation, by contrast, stays legal on CLOSED — the amended T4
  *     matrix, enforced in claimShipmentForCount vs claimShipmentForGraduation)
- *   - the write is an atomic claim on (id, RECEIVED)  (409 when lost)
+ *
+ * The last two are in THAT order deliberately — see the lock-order note below.
  *
  * A countedQuantity of 0 is accepted here on purpose; the "zero is a Discard,
  * not a stock-in" 422 is graduation's rule, not this endpoint's.
@@ -92,14 +94,19 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
       );
     }
 
-    // The shipment guard is a CLAIM (404/409 thrown from the helper), so a
-    // concurrent close serializes against it and the loser writes nothing.
-    if (existing.shipmentId !== null) {
-      await claimShipmentForCount(tx, existing.shipmentId);
-    }
-
     const previousCountedQuantity = existing.countedQuantity;
 
+    // LOCK ORDER — THE ITEM FIRST, THEN ITS SHIPMENT (W1-3b ride-along A).
+    // Counting and graduating touch the same two rows, and graduation takes them
+    // item -> shipment. This endpoint used to take them the other way round, so
+    // two people counting and graduating the same box at the same instant could
+    // each hold the lock the other needed — a real deadlock, on the exact pair of
+    // acts the receiving workflow puts back-to-back. Every writer now takes the
+    // item first.
+    //
+    // The 409/404 shipment guard below therefore runs with this claim already
+    // issued, which is safe for the reason every other guard in this file is
+    // safe: the throw unwinds the transaction and the claim rolls back with it.
     const claim = await tx.stagingItem.updateMany({
       where: { id, status: StagingItemStatus.RECEIVED },
       data: {
@@ -114,6 +121,12 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
         'CONFLICT',
         409,
       );
+    }
+
+    // The shipment guard is a CLAIM (404/409 thrown from the helper), so a
+    // concurrent close serializes against it and the loser writes nothing.
+    if (existing.shipmentId !== null) {
+      await claimShipmentForCount(tx, existing.shipmentId);
     }
 
     const recount = previousCountedQuantity !== null;

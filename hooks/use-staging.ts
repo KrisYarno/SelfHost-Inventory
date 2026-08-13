@@ -161,6 +161,20 @@ export type GraduateBody =
       productFields: GraduateNewProductFields;
     } & Partial<GraduateOverrideFields>);
 
+/**
+ * W1-3b (pack REV-3 T3, seam S11): the receipt priced these units differently
+ * from the product's standing cost, and the server wrote NOTHING. Sent only to
+ * an ADMIN — they are the ones who can settle it, through the real product PUT.
+ * Everyone else gets `null` here, and the server has already written a
+ * `cost-differs` row to the exception register instead.
+ */
+export interface GraduateCostPrompt {
+  productId: number;
+  /** NULL when the product's stored cost carries no representable value. */
+  currentCents: number | null;
+  receiptCents: number;
+}
+
 export interface GraduateResponse {
   productId: number;
   approvalStatus: "APPROVED" | "PENDING_REVIEW";
@@ -170,6 +184,7 @@ export interface GraduateResponse {
   /** What the ledger booked (differs only on an audited override). */
   bookedQuantity: number;
   receiptCost: { unitCostCents: number | null; source: "line" | "product" };
+  costPrompt: GraduateCostPrompt | null;
 }
 
 /** Graduation creates products + stock, so it invalidates the staging queue

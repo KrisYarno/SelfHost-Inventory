@@ -16,6 +16,14 @@
  *
  * A countedQuantity of 0 is LEGAL here — "the box was empty" is a fact. The
  * 422 for a zero count is W1-3a's GRADUATION rule, not this endpoint's.
+ *
+ * W1-3b RIDE-ALONG A (lock order): the item claim now runs BEFORE the shipment
+ * claim, matching graduation's item -> shipment order (the ABBA deadlock found
+ * at W1-3a). The shipment-guard 409s therefore reach the DB with the item claim
+ * already issued — and are still absolutely safe, because the guard's throw
+ * unwinds the transaction and rolls that claim back. Those tests now assert the
+ * ROLLBACK (the tx callback rejected) instead of "the claim was never issued",
+ * which is what the transaction actually guarantees.
  */
 
 import { NextRequest } from 'next/server';
@@ -111,10 +119,25 @@ function itemRow(overrides: Record<string, unknown> = {}) {
 
 const actionTypes = () => mockRecordChange.mock.calls.map((c) => c[1].actionType);
 
+/**
+ * True when the transaction callback threw — i.e. the whole transaction unwound
+ * and every write inside it (the count claim included) rolled back. With a
+ * mocked client that is the only honest way to say "nothing persisted".
+ */
+let txRolledBack: boolean;
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockValidateCSRF.mockResolvedValue(true);
-  (db.$transaction as jest.Mock) = jest.fn(async (fn: any) => fn(db));
+  txRolledBack = false;
+  (db.$transaction as jest.Mock) = jest.fn(async (fn: any) => {
+    try {
+      return await fn(db);
+    } catch (err) {
+      txRolledBack = true;
+      throw err;
+    }
+  });
   db.stagingItem.updateMany.mockResolvedValue({ count: 1 });
   db.inventoryException.findUnique.mockResolvedValue(null);
 });
@@ -278,12 +301,13 @@ describe('POST /api/staging-items/[id]/count — the 409 matrix', () => {
     const resp = await POST(mkReq({ countedQuantity: 12 }), { params: { id: '5' } });
 
     expect(resp.status).toBe(409);
-    // The shipment guard runs BEFORE the item write.
     expect(db.inboundShipment.updateMany.mock.calls[0][0].where).toEqual({
       id: SHIPMENT,
       status: 'OPEN',
     });
-    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    // W1-3b: the item claim is issued first now, and the guard's throw unwinds
+    // the transaction — so it never persists.
+    expect(txRolledBack).toBe(true);
     expect(mockRecordChange).not.toHaveBeenCalled();
   });
 
@@ -296,7 +320,8 @@ describe('POST /api/staging-items/[id]/count — the 409 matrix', () => {
     const resp = await POST(mkReq({ countedQuantity: 12 }), { params: { id: '5' } });
 
     expect(resp.status).toBe(409);
-    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(txRolledBack).toBe(true);
+    expect(mockRecordChange).not.toHaveBeenCalled();
   });
 
   it('counts a line on an OPEN shipment (the claim is the guard)', async () => {
@@ -322,7 +347,8 @@ describe('POST /api/staging-items/[id]/count — the 409 matrix', () => {
     const resp = await POST(mkReq({ countedQuantity: 12 }), { params: { id: '5' } });
 
     expect(resp.status).toBe(404);
-    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(txRolledBack).toBe(true);
+    expect(mockRecordChange).not.toHaveBeenCalled();
   });
 
   it('RACE: a lost item claim (it graduated mid-flight) is a 409 and records nothing', async () => {
@@ -403,5 +429,66 @@ describe('POST /api/staging-items/[id]/count — request validation + guards', (
 
     expect(resp.status).toBe(403);
     expect(db.stagingItem.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W1-3b RIDE-ALONG A — THE LOCK ORDER (the ABBA found at W1-3a).
+// ---------------------------------------------------------------------------
+
+/**
+ * Counting and graduating touch the SAME two rows: the staging item and its
+ * inbound shipment. W1-3a took them in the order item -> shipment; this endpoint
+ * took them shipment -> item. Two people working the same box at the same
+ * instant could therefore each hold the lock the other needed — a real InnoDB
+ * deadlock, on the exact pair of actions the receiving workflow tells people to
+ * do back-to-back.
+ *
+ * The fix is not a retry, it is an ORDER: every writer takes the item first.
+ * A call-sequence pin is the only thing that can hold that, because nothing in
+ * the type system or the response shape changes when someone reorders two
+ * awaits.
+ */
+describe('POST /api/staging-items/[id]/count — lock order (ABBA fix)', () => {
+  it('claims the ITEM before the SHIPMENT, matching graduation', async () => {
+    setApprovedUser();
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ shipmentId: SHIPMENT }));
+
+    const order: string[] = [];
+    db.stagingItem.updateMany.mockImplementation(async () => {
+      order.push('item-claim');
+      return { count: 1 };
+    });
+    db.inboundShipment.updateMany.mockImplementation(async () => {
+      order.push('shipment-claim');
+      return { count: 1 };
+    });
+
+    const resp = await POST(mkReq({ countedQuantity: 12 }), { params: { id: '5' } });
+
+    expect(resp.status).toBe(200);
+    expect(order).toEqual(['item-claim', 'shipment-claim']);
+  });
+
+  it('an UNLINKED item takes exactly one lock (no shipment work at all)', async () => {
+    setApprovedUser();
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ shipmentId: null }));
+
+    const resp = await POST(mkReq({ countedQuantity: 12 }), { params: { id: '5' } });
+
+    expect(resp.status).toBe(200);
+    expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a LOST item claim never reaches the shipment (the 409 settles it first)', async () => {
+    setApprovedUser();
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ shipmentId: SHIPMENT }));
+    db.stagingItem.updateMany.mockResolvedValue({ count: 0 });
+
+    const resp = await POST(mkReq({ countedQuantity: 12 }), { params: { id: '5' } });
+
+    expect(resp.status).toBe(409);
+    expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
+    expect(mockRecordChange).not.toHaveBeenCalled();
   });
 });

@@ -4,6 +4,8 @@ import { inventory_logs_logType, Prisma } from '@prisma/client';
 import { AppError } from '@/lib/error-handling';
 import { formatProductName } from '@/lib/products';
 import { claimShipmentForGraduation } from '@/lib/shipments/lifecycle';
+import { applyReceiptCost } from '@/lib/products/cost';
+import type { CostDiffersSubject } from '@/lib/exceptions/kinds';
 import type { GraduateInput } from '@/lib/validation/staging';
 
 /**
@@ -16,6 +18,19 @@ export type GraduateReceiptCost = {
   source: 'line' | 'product';
 };
 
+/**
+ * D-COST (pack REV-3 T3, seam S11): the receipt priced these units differently
+ * from the product's standing cost, and NOTHING was written. Present only for an
+ * ADMIN actor — they are the ones who can settle it, through the real product
+ * PUT. A non-admin gets `null` here and a `cost-differs` register row instead.
+ */
+export type GraduateCostPrompt = {
+  productId: number;
+  /** NULL when the product's stored cost carries no representable value (a 0). */
+  currentCents: number | null;
+  receiptCents: number;
+};
+
 export type GraduateResult = {
   productId: number;
   approvalStatus: 'APPROVED' | 'PENDING_REVIEW';
@@ -25,6 +40,7 @@ export type GraduateResult = {
   /** What the ledger booked: the count, or an audited override of it. */
   bookedQuantity: number;
   receiptCost: GraduateReceiptCost;
+  costPrompt: GraduateCostPrompt | null;
 };
 
 /** An audited request to book a number the dock did not produce (pack T2). */
@@ -48,6 +64,17 @@ export type GraduateRecordContext = {
   override: GraduateOverride | null;
   created: boolean;
   receiptCost: GraduateReceiptCost;
+  /** The same prompt the response carries (admin + disagreement, else null). */
+  costPrompt: GraduateCostPrompt | null;
+  /**
+   * D-COST, the OTHER half (pack REV-3 T1/T3). Non-null ONLY when a NON-ADMIN's
+   * receipt cost disagreed with the product's: they may not edit the price, so
+   * the disagreement becomes a `cost-differs` register row instead of a prompt.
+   * The subject is assembled HERE (this is where the actor's rights are known)
+   * and WRITTEN by the caller, because the exceptions write boundary allows only
+   * routes to reach the writer.
+   */
+  costDiffers: CostDiffersSubject | null;
 };
 
 /**
@@ -80,11 +107,15 @@ export type GraduateRecordContext = {
  *        approvalStatus (APPROVED for admins, PENDING_REVIEW otherwise) and createdBy.
  *   5. Stock-in via the shared `applyStockDelta(tx, …)` core (+bookedQuantity),
  *      stamped with the receipt's inboundShipmentId and unit cost (T3).
- *   6. Finalize the staging item: resolvedProductId. The count is NOT rewritten —
+ *   6. D-COST (T3): the receipt's cost meets the catalog's. A product with NO
+ *      cost gets one, audited; a product whose cost DISAGREES is never rewritten
+ *      here — the disagreement leaves as a prompt (admin) or as a register-row
+ *      subject for the caller (everyone else).
+ *   7. Finalize the staging item: resolvedProductId. The count is NOT rewritten —
  *      an override changes what the LEDGER books, never what the dock reported.
  *
  * Returns { productId, approvalStatus, locationId, countedQuantity,
- * bookedQuantity, receiptCost }.
+ * bookedQuantity, receiptCost, costPrompt }.
  *
  * LOCK-ORDER NOTE: this path takes the staging row's lock and then the
  * shipment's; the count endpoint takes them the other way round. Two people
@@ -285,7 +316,41 @@ export async function graduateStagingItem(
         batchId,
       });
 
-      // 6. Finalize the staging item. countedQuantity is NOT written here: the
+      // 6. D-COST (pack REV-3 T3). Deliberately AFTER the ledger write: the
+      //    STOCK_IN row is frozen at the receipt's cost no matter what happens
+      //    next, so what the ledger booked never depends on how the catalog
+      //    disagreement is settled. The mutation is the ONLY thing allowed to
+      //    write a cost from here, and it writes only into a NULL.
+      const costOutcome = await applyReceiptCost(tx, {
+        productId,
+        receiptCents: receiptCost.unitCostCents,
+        actor,
+        batchId,
+      });
+
+      // A disagreement goes to whoever can act on it, and nowhere else. An admin
+      // is prompted (they can call the real product PUT); anybody else raises a
+      // register row — never silent, never blocking the receipt.
+      const differs = costOutcome.outcome === 'differs';
+      const costPrompt: GraduateCostPrompt | null =
+        differs && actor.isAdmin
+          ? {
+              productId,
+              currentCents: costOutcome.currentCents,
+              receiptCents: costOutcome.receiptCents as number,
+            }
+          : null;
+      const costDiffers: CostDiffersSubject | null =
+        differs && !actor.isAdmin
+          ? {
+              productId,
+              stagingItemId,
+              currentCents: costOutcome.currentCents,
+              receiptCents: costOutcome.receiptCents as number,
+            }
+          : null;
+
+      // 7. Finalize the staging item. countedQuantity is NOT written here: the
       //    count belongs to the count endpoint, and an override changes what the
       //    LEDGER books, never what the dock reported.
       await tx.stagingItem.update({
@@ -295,10 +360,12 @@ export async function graduateStagingItem(
         },
       });
 
-      // 7. Change-tracking (Task 10): emit the caller's correlated events from
+      // 8. Change-tracking (Task 10): emit the caller's correlated events from
       //    INSIDE this same transaction, so the graduation, the product-create,
       //    and any stock event share one batchId and commit/roll back together.
       //    A throw here (unrecordable change) aborts the entire graduation.
+      //    W1-3b: the caller's exception-register writes ride this same hook —
+      //    same transaction, same guarantee.
       if (onRecord) {
         await onRecord(tx, {
           productId,
@@ -309,6 +376,8 @@ export async function graduateStagingItem(
           override,
           created,
           receiptCost,
+          costPrompt,
+          costDiffers,
         });
       }
 
@@ -319,6 +388,7 @@ export async function graduateStagingItem(
         countedQuantity,
         bookedQuantity,
         receiptCost,
+        costPrompt,
       };
     })
   );

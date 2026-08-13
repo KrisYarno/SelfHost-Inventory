@@ -370,3 +370,135 @@ describe("GraduateDialog — unchanged behaviour", () => {
     void rerender;
   });
 });
+
+// ---------------------------------------------------------------------------
+// W1-3b — D-COST in the dialog (contract pack REV-3 T3, seam S11).
+// ---------------------------------------------------------------------------
+
+/**
+ * The server never overwrites a cost that already exists — it reports the
+ * disagreement and lets a human settle it. For an ADMIN that report arrives as
+ * `costPrompt` on the graduate response, and the settlement goes through the
+ * REAL product PUT (same authorization, same audit line as any price edit).
+ * A non-admin never sees this: their response carries `costPrompt: null` and the
+ * server has already written a cost-differs register row instead.
+ */
+function mockFetchWithPrompt(costPrompt: unknown) {
+  const fn = jest.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    const u = String(url);
+    if (u.includes("/graduate")) {
+      return {
+        ok: true,
+        json: async () => ({
+          productId: 7,
+          approvalStatus: "APPROVED",
+          locationId: 1,
+          countedQuantity: 46,
+          bookedQuantity: 46,
+          receiptCost: { unitCostCents: 1234, source: "line" },
+          costPrompt,
+        }),
+      } as unknown as Response;
+    }
+    if (u.includes("/api/products/7") && init?.method === "PUT") {
+      return { ok: true, json: async () => ({ id: 7 }) } as unknown as Response;
+    }
+    return {
+      ok: true,
+      json: async () => ({ products: u.includes("search=") ? [PRODUCT] : [] }),
+    } as unknown as Response;
+  });
+  global.fetch = fn as unknown as typeof fetch;
+  return fn;
+}
+
+const PROMPT = { productId: 7, currentCents: 100, receiptCents: 1234 };
+
+async function graduateWithPrompt(costPrompt: unknown) {
+  const user = userEvent.setup();
+  mockFetchWithPrompt(costPrompt);
+  renderDialog({ item: { ...ITEM, countedQuantity: 46 } });
+  await selectProduct(user);
+  await user.click(screen.getByRole("button", { name: /confirm/i }));
+  return user;
+}
+
+describe("GraduateDialog — the cost prompt", () => {
+  afterEach(() => jest.clearAllMocks());
+
+  it("shows both numbers when the receipt disagrees with the product's cost", async () => {
+    await graduateWithPrompt(PROMPT);
+
+    const dialog = await screen.findByTestId("cost-prompt");
+    // $1.00 on the product, $12.34 on this receipt — stated, never guessed.
+    expect(within(dialog).getByText(/\$1\.00/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/\$12\.34/)).toBeInTheDocument();
+  });
+
+  it("Update sends the receipt cost through the REAL product PUT", async () => {
+    const user = await graduateWithPrompt(PROMPT);
+
+    const dialog = await screen.findByTestId("cost-prompt");
+    await user.click(within(dialog).getByRole("button", { name: /update/i }));
+
+    await waitFor(() =>
+      expect(urls().some((u) => u.includes("/api/products/7"))).toBe(true),
+    );
+    const put = calls().find(
+      (c) => String(c[0]).includes("/api/products/7") && (c[1] as RequestInit)?.method === "PUT",
+    );
+    expect(put).toBeDefined();
+    expect(JSON.parse(String((put![1] as RequestInit).body))).toEqual({ costPrice: 12.34 });
+  });
+
+  it("Keep writes nothing at all", async () => {
+    const user = await graduateWithPrompt(PROMPT);
+
+    const dialog = await screen.findByTestId("cost-prompt");
+    await user.click(within(dialog).getByRole("button", { name: /keep/i }));
+
+    await waitFor(() => expect(screen.queryByTestId("cost-prompt")).not.toBeInTheDocument());
+    expect(urls().some((u) => u.includes("/api/products/7"))).toBe(false);
+  });
+
+  it("no prompt when the server sent none (agreement, or a non-admin actor)", async () => {
+    await graduateWithPrompt(null);
+
+    await waitFor(() =>
+      expect(urls().some((u) => u.includes("/graduate"))).toBe(true),
+    );
+    expect(screen.queryByTestId("cost-prompt")).not.toBeInTheDocument();
+  });
+
+  it("a product with NO standing cost is described as unknown, not as $0.00", async () => {
+    await graduateWithPrompt({ productId: 7, currentCents: null, receiptCents: 1234 });
+
+    const dialog = await screen.findByTestId("cost-prompt");
+    expect(within(dialog).getByText(/not set|unknown/i)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/\$0\.00/)).not.toBeInTheDocument();
+  });
+});
+
+describe("GraduateDialog — mode:new pre-fills the cost from the receipt line", () => {
+  afterEach(() => jest.clearAllMocks());
+
+  it("the typed line cost lands in the ProductForm cost field (one value, no conflict)", async () => {
+    const user = userEvent.setup();
+    mockFetch([PRODUCT]);
+    renderDialog({ item: { ...ITEM, countedQuantity: 46, unitCostCents: 1234 } });
+
+    await user.click(screen.getByRole("button", { name: /new product/i }));
+
+    expect(screen.getByLabelText(/cost price/i)).toHaveValue(12.34);
+  });
+
+  it("a line with no cost leaves the field blank (unknown stays unknown)", async () => {
+    const user = userEvent.setup();
+    mockFetch([PRODUCT]);
+    renderDialog({ item: { ...ITEM, countedQuantity: 46, unitCostCents: null } });
+
+    await user.click(screen.getByRole("button", { name: /new product/i }));
+
+    expect(screen.getByLabelText(/cost price/i)).toHaveValue(null);
+  });
+});

@@ -44,6 +44,15 @@ jest.mock('@/lib/inventory', () => ({
   centsFromCostPrice: jest.requireActual('@/lib/inventory').centsFromCostPrice,
 }));
 
+// W1-3b (pack REV-3 T3): graduation now calls the D-COST mutation inside its own
+// transaction. It is mocked HERE so this file keeps testing the graduation seam —
+// what applyReceiptCost itself writes is pinned in __tests__/unit/lib/products/cost.test.ts.
+const mockApplyReceiptCost = jest.fn();
+jest.mock('@/lib/products/cost', () => ({
+  __esModule: true,
+  applyReceiptCost: (...args: any[]) => mockApplyReceiptCost(...args),
+}));
+
 import prisma from '@/lib/prisma';
 import { graduateStagingItem } from '@/lib/staging/graduate';
 import { AppError } from '@/lib/error-handling';
@@ -85,9 +94,21 @@ const newFields = {
 
 const EXISTING = { mode: 'existing', productId: 7, locationId: 1 } as any;
 
+/** Default D-COST answer: the receipt said nothing, so nothing happens. */
+function receiptCostOutcome(overrides: Record<string, unknown> = {}) {
+  return {
+    outcome: 'no-receipt-cost',
+    currentCents: null,
+    receiptCents: null,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   mockReset(getMockPrisma());
   mockApplyStockDelta.mockReset();
+  mockApplyReceiptCost.mockReset();
+  mockApplyReceiptCost.mockResolvedValue(receiptCostOutcome());
   setupTransaction();
 });
 
@@ -185,6 +206,9 @@ describe('graduateStagingItem — the row is the truth (count-46-book-50)', () =
       countedQuantity: 12,
       bookedQuantity: 12,
       receiptCost: { unitCostCents: null, source: 'product' },
+      // W1-3b (pack REV-3 T3, seam S11): present on EVERY graduation, null
+      // unless an admin's receipt disagreed with the product's standing cost.
+      costPrompt: null,
     });
   });
 
@@ -644,5 +668,165 @@ describe('graduateStagingItem — new product (provisional)', () => {
 
     const data = (mockTx.product.create.mock.calls[0][0] as any).data;
     expect(data.retailPrice).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W1-3b — D-COST (contract pack REV-3 T3).
+// ---------------------------------------------------------------------------
+
+describe('graduateStagingItem — D-COST wiring (T3)', () => {
+  function existingProduct(costPrice: number | null) {
+    mockTx.product.findFirst.mockResolvedValue({
+      id: 7,
+      approvalStatus: 'APPROVED',
+      deletedAt: null,
+      costPrice,
+    } as any);
+  }
+
+  /** A receipt that carries a real line cost of $12.34. */
+  function withLineCost(cents = 1234) {
+    mockTx.stagingItem.findUnique.mockResolvedValue(
+      stagingRow({ countedQuantity: 5, unitCostCents: cents }) as any
+    );
+  }
+
+  it('calls applyReceiptCost on the SAME tx, with the receipt cost and the actor', async () => {
+    existingProduct(null);
+    withLineCost();
+
+    await graduateStagingItem(55, EXISTING, { id: 42, isAdmin: false }, { batchId: 'B9' });
+
+    expect(mockApplyReceiptCost).toHaveBeenCalledTimes(1);
+    const [tx, args] = mockApplyReceiptCost.mock.calls[0];
+    expect(tx).toBe(mockTx);
+    expect(args).toEqual({
+      productId: 7,
+      receiptCents: 1234,
+      actor: { id: 42, isAdmin: false },
+      batchId: 'B9',
+    });
+  });
+
+  it('runs AFTER the ledger write (the receipt is booked before the catalog is touched)', async () => {
+    const order: string[] = [];
+    mockApplyStockDelta.mockImplementation(async () => {
+      order.push('ledger');
+      return { log: { id: 1 }, newVersion: 1 };
+    });
+    mockApplyReceiptCost.mockImplementation(async () => {
+      order.push('cost');
+      return receiptCostOutcome();
+    });
+    existingProduct(null);
+    withLineCost();
+
+    await graduateStagingItem(55, EXISTING, { id: 42, isAdmin: false });
+
+    expect(order).toEqual(['ledger', 'cost']);
+  });
+
+  it('the LEDGER receipt cost is independent of the prompt outcome (differ books the same cents)', async () => {
+    existingProduct(1.0);
+    withLineCost();
+    mockApplyReceiptCost.mockResolvedValue(
+      receiptCostOutcome({ outcome: 'differs', currentCents: 100, receiptCents: 1234 })
+    );
+
+    const result = await graduateStagingItem(55, EXISTING, { id: 42, isAdmin: true });
+
+    expect(mockApplyStockDelta.mock.calls[0][1].unitCostCents).toBe(1234);
+    expect(result.receiptCost).toEqual({ unitCostCents: 1234, source: 'line' });
+  });
+
+  it('ADMIN + differ -> costPrompt on the response, and NO cost-differs row for the caller to write', async () => {
+    existingProduct(1.0);
+    withLineCost();
+    mockApplyReceiptCost.mockResolvedValue(
+      receiptCostOutcome({ outcome: 'differs', currentCents: 100, receiptCents: 1234 })
+    );
+
+    const ctxs: any[] = [];
+    const result = await graduateStagingItem(55, EXISTING, { id: 42, isAdmin: true }, {
+      onRecord: async (_tx, ctx) => {
+        ctxs.push(ctx);
+      },
+    });
+
+    expect(result.costPrompt).toEqual({ productId: 7, currentCents: 100, receiptCents: 1234 });
+    expect(ctxs[0].costDiffers).toBeNull();
+    expect(ctxs[0].costPrompt).toEqual({ productId: 7, currentCents: 100, receiptCents: 1234 });
+  });
+
+  it('NON-ADMIN + differ -> NO prompt, and a cost-differs subject for the caller to register', async () => {
+    existingProduct(1.0);
+    withLineCost();
+    mockApplyReceiptCost.mockResolvedValue(
+      receiptCostOutcome({ outcome: 'differs', currentCents: 100, receiptCents: 1234 })
+    );
+
+    const ctxs: any[] = [];
+    const result = await graduateStagingItem(55, EXISTING, { id: 42, isAdmin: false }, {
+      onRecord: async (_tx, ctx) => {
+        ctxs.push(ctx);
+      },
+    });
+
+    expect(result.costPrompt).toBeNull();
+    expect(ctxs[0].costDiffers).toEqual({
+      productId: 7,
+      stagingItemId: 55,
+      currentCents: 100,
+      receiptCents: 1234,
+    });
+  });
+
+  it('FILLED -> no prompt and no exception subject (nothing disagreed)', async () => {
+    existingProduct(null);
+    withLineCost();
+    mockApplyReceiptCost.mockResolvedValue(
+      receiptCostOutcome({ outcome: 'filled', currentCents: null, receiptCents: 1234 })
+    );
+
+    const ctxs: any[] = [];
+    const result = await graduateStagingItem(55, EXISTING, { id: 42, isAdmin: false }, {
+      onRecord: async (_tx, ctx) => {
+        ctxs.push(ctx);
+      },
+    });
+
+    expect(result.costPrompt).toBeNull();
+    expect(ctxs[0].costDiffers).toBeNull();
+  });
+
+  it('EQUAL -> nothing at all (no prompt, no subject)', async () => {
+    existingProduct(12.34);
+    withLineCost();
+    mockApplyReceiptCost.mockResolvedValue(
+      receiptCostOutcome({ outcome: 'equal', currentCents: 1234, receiptCents: 1234 })
+    );
+
+    const ctxs: any[] = [];
+    const result = await graduateStagingItem(55, EXISTING, { id: 42, isAdmin: true }, {
+      onRecord: async (_tx, ctx) => {
+        ctxs.push(ctx);
+      },
+    });
+
+    expect(result.costPrompt).toBeNull();
+    expect(ctxs[0].costDiffers).toBeNull();
+  });
+
+  it('a receipt with no representable cost still calls the mutation (it decides, not the caller)', async () => {
+    existingProduct(null);
+    mockTx.stagingItem.findUnique.mockResolvedValue(
+      stagingRow({ countedQuantity: 5, unitCostCents: null }) as any
+    );
+
+    const result = await graduateStagingItem(55, EXISTING, { id: 42, isAdmin: false });
+
+    expect(mockApplyReceiptCost.mock.calls[0][1].receiptCents).toBeNull();
+    expect(result.costPrompt).toBeNull();
   });
 });

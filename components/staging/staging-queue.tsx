@@ -20,6 +20,8 @@ export interface StagingItem {
   status: StagingStatus;
   expectedQuantity: number | null;
   countedQuantity: number | null;
+  /** The receipt line's unit cost in INT cents (W1-3b / pack REV-3 T3). */
+  unitCostCents?: number | null;
   vendor: string | null;
   reference: string | null;
   locationId: number;

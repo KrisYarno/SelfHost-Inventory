@@ -8,12 +8,20 @@ import type { StagingItemStatus } from '@prisma/client';
  * detail/edit views render off one shape:
  *   - location:        the bin/location the box was received into
  *   - resolvedProduct: the product a GRADUATED item was turned into (null until then)
- *   - receivedByUser:  who logged the box
+ *   - receivedByUser:  who logged the box — ID AND USERNAME ONLY
+ *
+ * SECURITY (W1-3b ride-along B): `receivedByUser` was `true`, i.e. every column
+ * of the User row — passwordHash included — and both helpers below return their
+ * rows VERBATIM to the client. The queue only ever rendered a username. Same
+ * rule as `createInventoryLog`'s include: name the fields, never hand back a
+ * whole User. Pinned by
+ * __tests__/integration/api/staging-items-password-hash.test.ts (a deep scan of
+ * the response, not a shape check).
  */
 const stagingInclude = {
   location: true,
   resolvedProduct: true,
-  receivedByUser: true,
+  receivedByUser: { select: { id: true, username: true } },
 } as const;
 
 /**

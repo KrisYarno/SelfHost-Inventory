@@ -75,6 +75,8 @@ export default function PreStagingPage() {
       // W1-3a: the dialog books THIS, read-only. It used to derive its quantity
       // from expectedQuantity, which is how a counted 46 became a booked 50.
       countedQuantity: item.countedQuantity,
+      // W1-3b: the receipt line's cost pre-fills the New-product cost field.
+      unitCostCents: item.unitCostCents ?? null,
       locationId: item.locationId,
     });
     setGraduateOpen(true);
