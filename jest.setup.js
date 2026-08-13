@@ -198,6 +198,34 @@ jest.mock("@/lib/prisma", () => {
       count: jest.fn(),
       groupBy: jest.fn(),
     },
+    // Inventory-accuracy lane (pack T1, owned by W1-1): the receiving header and
+    // the exception register. Present from the schema wave onward so the W1
+    // tasks that follow — the shipment routes, the count/graduate chain, the
+    // exception writers — see defined delegates instead of `undefined.upsert`.
+    // Both are written inside `prisma.$transaction`, so they ride the shared
+    // delegate objects that back the client AND `__mockTx`.
+    inboundShipment: {
+      create: jest.fn(),
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+      deleteMany: jest.fn(),
+      count: jest.fn(),
+    },
+    inventoryException: {
+      create: jest.fn(),
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      upsert: jest.fn(),
+      update: jest.fn(),
+      updateMany: jest.fn(),
+      deleteMany: jest.fn(),
+      count: jest.fn(),
+      groupBy: jest.fn(),
+    },
     user: {
       findUnique: jest.fn(),
       findFirst: jest.fn(),

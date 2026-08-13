@@ -29,6 +29,8 @@ model User {
   fulfilledOrders        ExternalOrder[]
   stagingReceived        StagingItem[]            @relation("StagingReceivedBy")
   stagingGraduated       StagingItem[]            @relation("StagingGraduatedBy")
+  stagingCounted         StagingItem[]            @relation("StagingCountedBy")
+  shipmentsCreated       InboundShipment[]        @relation("shipmentCreator")
   createdProducts        Product[]                @relation("ProductCreatedBy")
   reviewedProducts       Product[]                @relation("ProductReviewedBy")
   scratchpadCreated      ProductScratchpadPrice[] @relation("ScratchpadCreatedBy")
@@ -182,15 +184,25 @@ model StagingItem {
   graduatedAt       DateTime?         @db.DateTime(0)
   createdAt         DateTime          @default(now()) @db.DateTime(0)
   updatedAt         DateTime          @updatedAt @db.DateTime(0)
+  // Inventory-accuracy lane (pack REV-2 T1). shipmentId is a SOFT ref to
+  // inbound_shipments.id — cross-aggregate, so no relation and no FK. countedBy
+  // is an ACTOR column, so it takes the house relation (receivedBy precedent);
+  // the soft-ref rule is scoped to cross-aggregate references only.
+  shipmentId        String?           @db.VarChar(30)
+  unitCostCents     Int?
+  countedBy         Int?
+  countedAt         DateTime?
 
   receivedByUser  User     @relation("StagingReceivedBy", fields: [receivedBy], references: [id])
   graduatedByUser User?    @relation("StagingGraduatedBy", fields: [graduatedBy], references: [id])
+  countedByUser   User?    @relation("StagingCountedBy", fields: [countedBy], references: [id])
   resolvedProduct Product? @relation("StagingResolvedProduct", fields: [resolvedProductId], references: [id])
   location        Location @relation(fields: [locationId], references: [id])
 
   @@index([status, locationId, receivedAt], map: "idx_staging_status_loc_time")
   @@index([receivedBy], map: "idx_staging_received_by")
   @@index([resolvedProductId], map: "idx_staging_resolved_product")
+  @@index([shipmentId])
   @@map("staging_items")
 }
 
@@ -220,6 +232,13 @@ model inventory_logs {
   reasonCode    String?                @db.VarChar(20)
   unitCostCents Int?
   batchId       String?                @db.VarChar(36)
+  // Inventory-accuracy lane (pack REV-2 T1). BOTH are SOFT refs — no relation,
+  // no FK (the cross-aggregate rule). orderRecordId -> external_orders.id (cuid,
+  // VarChar(191)); inboundShipmentId -> inbound_shipments.id. orderRecordId is
+  // the FINAL name: the prod-only `externalOrderId` column on this table is an
+  // INT with an FK to a legacy-preserve table and can never be adopted.
+  orderRecordId     String?            @db.VarChar(191)
+  inboundShipmentId String?            @db.VarChar(30)
   locations     Location?              @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_log_location")
   users         User?                  @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_1")
   products      Product                @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_2")
@@ -234,6 +253,8 @@ model inventory_logs {
   @@index([productId, changeTime, delta], map: "idx_logs_product_time_delta")
   @@index([batchId], map: "idx_inventory_logs_batch")
   @@index([changeTime, productId, userId], map: "idx_inventory_logs_recent_changes")
+  @@index([orderRecordId])
+  @@index([inboundShipmentId])
 }
 
 model product_locations {
@@ -976,4 +997,56 @@ model AssistantEvalReport {
   createdAt   DateTime @default(now()) @db.DateTime(3)
 
   @@map("assistant_eval_reports")
+}
+
+// ---------------------------------------------------------------------------
+// Inventory-accuracy lane (contract pack REV-2 T1) — the whole lane's schema
+// rides ONE additive migration. The staging_items / inventory_logs additions
+// live with their models above; the two new tables are here.
+// ---------------------------------------------------------------------------
+
+// Thin receiving header. Lines live on staging_items (soft-linked via
+// shipmentId), so a shipment carries no quantities of its own and the
+// discrepancy rollup is COMPUTED ON READ from the linked rows (T4 — deliberately
+// no stored column). cancelledBy is carried by the audit line, not a column.
+model InboundShipment {
+  id          String                @id @default(cuid()) @db.VarChar(30)
+  supplierRef String?               @db.VarChar(255)
+  status      InboundShipmentStatus @default(OPEN)
+  createdBy   Int
+  closedBy    Int?
+  notes       String?               @db.Text
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+  closedAt    DateTime?
+  creator     User                  @relation("shipmentCreator", fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@map("inbound_shipments")
+}
+
+enum InboundShipmentStatus {
+  OPEN
+  CLOSED
+  CANCELLED
+}
+
+// One row per accuracy exception, upserted on `key`. `kind` is a CLOSED
+// vocabulary (W1 writes recv-discrepancy / pending-with-stock / cost-differs;
+// W3 adds unattributed-outstock / unmapped-lines / gap-order) and severity is
+// DERIVED from kind at read time — deliberately no column. `subject` carries the
+// named payload INCLUDING the values, so a tolerance chosen at the checkpoint
+// applies retroactively. WRITE BOUNDARY: rows are written ONLY by explicitly-
+// mutating routes; no GET and no assistant tool ever writes one.
+model InventoryException {
+  id          Int       @id @default(autoincrement())
+  key         String    @unique @db.VarChar(191)
+  kind        String    @db.VarChar(32)
+  subject     Json
+  firstSeenAt DateTime  @default(now())
+  lastSeenAt  DateTime
+  resolvedAt  DateTime?
+  resolvedBy  Int?
+  note        String?   @db.Text
+
+  @@map("inventory_exceptions")
 }

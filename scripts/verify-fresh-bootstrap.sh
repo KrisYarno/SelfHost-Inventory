@@ -33,4 +33,21 @@ q "SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.STATISTICS WHERE TA
 q "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='webhook_deliveries';" | tail -1 | grep -q '^1$'
 q "SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='external_orders' AND INDEX_NAME='external_orders_updatedAt_idx';" | tail -1 | grep -q '^1$'
 
+# W1-1 (inventory-accuracy lane, pack T1): both new tables must exist post-chain.
+q "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME IN ('inbound_shipments','inventory_exceptions');" | tail -1 | grep -q '^2$'
+
+# W1-1: the four staging_items additions (shipment link, line cost, count actor+time).
+q "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME IN ('shipmentId','unitCostCents','countedBy','countedAt');" | tail -1 | grep -q '^4$'
+
+# W1-1: the two inventory_logs soft-ref columns. orderRecordId is the FINAL name —
+# it is deliberately NOT the prod-only legacy `externalOrderId` (INT + FK to a
+# legacy-preserve table), which this chain never creates and never touches.
+q "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inventory_logs' AND COLUMN_NAME IN ('orderRecordId','inboundShipmentId');" | tail -1 | grep -q '^2$'
+
+# W1-1: the three indexes on the new soft-ref columns must exist post-chain.
+q "SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND INDEX_NAME IN ('staging_items_shipmentId_idx','inventory_logs_orderRecordId_idx','inventory_logs_inboundShipmentId_idx');" | tail -1 | grep -q '^3$'
+
+# W1-1: the exception key must be UNIQUE — the whole upsert-on-key lifecycle rests on it.
+q "SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inventory_exceptions' AND CONSTRAINT_NAME='inventory_exceptions_key_key' AND CONSTRAINT_TYPE='UNIQUE';" | tail -1 | grep -q '^1$'
+
 echo "FRESH BOOTSTRAP: PASS"
