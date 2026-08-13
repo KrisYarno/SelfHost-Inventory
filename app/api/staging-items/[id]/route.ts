@@ -37,16 +37,26 @@ export const GET = apiHandler(async (request: NextRequest, { params }: RoutePara
 /**
  * The state-bearing fields (pack REV-3 T2, W1-2b). Every one of them describes
  * WHAT MOVED — the receipt figures, the product it became, where it landed, and
- * which receipt it belongs to. Once the line graduated, all four are the
+ * which receipt it belongs to. Once the line graduated, all of them are the
  * history of a real stock movement, and a PATCH would rewrite that story after
- * the fact: 409. (`countedQuantity` is the fifth frozen field; it never reaches
+ * the fact: 409. (`countedQuantity` is another frozen field; it never reaches
  * this list because it left the PATCH surface entirely — the count endpoint's
  * own RECEIVED guard freezes it.)
+ *
+ * W1-4b added `unitCostCents` to the list: graduation books the ledger's
+ * receipt cost FROM it, so after graduation it is the price real stock was
+ * valued at — a receipt figure by the same definition as expectedQuantity.
  *
  * Free-text annotation (description / vendor / reference / notes) is
  * deliberately NOT frozen: it labels the box, it does not restate the movement.
  */
-const STATE_FIELDS = ['expectedQuantity', 'resolvedProductId', 'locationId', 'shipmentId'] as const;
+const STATE_FIELDS = [
+  'expectedQuantity',
+  'resolvedProductId',
+  'locationId',
+  'shipmentId',
+  'unitCostCents',
+] as const;
 
 // PATCH /api/staging-items/[id] - Edit / label a staging item
 export const PATCH = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
@@ -103,6 +113,13 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     data.resolvedProduct = { connect: { id: body.resolvedProductId } };
     after.resolvedProductId = body.resolvedProductId;
   }
+  // W1-4b (T3): the receipt line's cost. `null` is a legal WRITE here (it means
+  // "un-price this line"), so the `!== undefined` test is the only one that can
+  // distinguish it from an untouched field.
+  if (body.unitCostCents !== undefined) {
+    data.unitCostCents = body.unitCostCents;
+    after.unitCostCents = body.unitCostCents;
+  }
   // shipmentId is deliberately NOT part of the generic field path: it is a state
   // transition with its own guards and its own audit verbs (T4), handled below.
 
@@ -126,12 +143,45 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
       );
     }
 
+    // --- LOCK ORDER: THE ITEM FIRST, THEN ITS SHIPMENT (W1-4b ride-along) ---
+    // The count endpoint and graduation both take these two rows item ->
+    // shipment. This route took them the other way round — every shipment claim
+    // below fired while the item row was still only READ, its lock arriving at
+    // the closing `update`. That is a genuine ABBA between two acts the
+    // receiving workflow puts back-to-back (price a line, count the same box).
+    //
+    // So: one claim on the ITEM, before any shipment work. It is a NO-OP write
+    // (it re-states the status it matched) whose value is the row lock, and its
+    // WHERE is the precondition — a line that changed status or moved between
+    // the read above and this write loses with `count === 0`.
+    //
+    // Only the paths that ACTUALLY touch a shipment take it. A label edit, an
+    // unlinked line, and a link that is already where it was asked to be do no
+    // shipment work at all, so there is no lock pair to order and no reason to
+    // write.
+    const relinking = body.shipmentId !== undefined && body.shipmentId !== existing.shipmentId;
+    const reclaimingQuantity = body.expectedQuantity !== undefined && existing.shipmentId !== null;
+    if (relinking || reclaimingQuantity) {
+      const lock = await tx.stagingItem.updateMany({
+        where: { id, status: existing.status, shipmentId: existing.shipmentId },
+        data: { status: existing.status },
+      });
+      if (lock.count === 0) {
+        throw new AppError(
+          `Staging item ${id} changed state while it was being updated; reload and retry`,
+          'CONFLICT',
+          409,
+        );
+      }
+    }
+
     // expectedQuantity is the count's counterpart in the discrepancy
     // arithmetic, so it freezes when receiving ends: its shipment must be OPEN.
-    // resolvedProductId / locationId deliberately do NOT take this claim —
-    // under the stranded-line amendment a CLOSED shipment's lines can still
-    // graduate, and those two fields are exactly what a graduation consumes.
-    if (body.expectedQuantity !== undefined && existing.shipmentId !== null) {
+    // resolvedProductId / locationId / unitCostCents deliberately do NOT take
+    // this claim — under the stranded-line amendment a CLOSED shipment's lines
+    // can still graduate, and those three fields are exactly what a graduation
+    // consumes.
+    if (reclaimingQuantity && existing.shipmentId !== null) {
       await claimShipmentForCount(tx, existing.shipmentId);
     }
 

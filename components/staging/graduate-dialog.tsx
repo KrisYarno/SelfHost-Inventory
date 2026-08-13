@@ -10,6 +10,7 @@ import {
   useCountStagingItem,
   useGraduateStagingItem,
   type GraduateCostPrompt,
+  type GraduateResponse,
 } from "@/hooks/use-staging";
 import { useUpdateProduct } from "@/hooks/use-products";
 import {
@@ -68,7 +69,16 @@ interface GraduateDialogProps {
   onOpenChange: (open: boolean) => void;
   item: GraduateStagingItem | null;
   locations: Location[];
-  onSuccess?: () => void;
+  /**
+   * Fired after a graduation commits, with the server's own response.
+   *
+   * W1-4b threads the RESULT through (it was a bare `()` callback) because the
+   * approval verdict only exists here: a non-admin's new product comes back
+   * PENDING_REVIEW with its stock already booked, and the receiving detail is
+   * where that has to be said out loud. Callers that ignore the argument are
+   * unaffected.
+   */
+  onSuccess?: (result: GraduateResponse) => void;
 }
 
 type Mode = "existing" | "new";
@@ -283,7 +293,7 @@ export function GraduateDialog({
       toast.success(`Added ${bookedQuantity} to ${selectedProduct.name}`);
       setCostPrompt(result.costPrompt ?? null);
       onOpenChange(false);
-      onSuccess?.();
+      onSuccess?.(result);
     } catch (error) {
       console.error("Error graduating staging item:", error);
       toast.error(
@@ -325,7 +335,7 @@ export function GraduateDialog({
       toast.success(`Created product and added ${bookedQuantity} units`);
       setCostPrompt(result.costPrompt ?? null);
       onOpenChange(false);
-      onSuccess?.();
+      onSuccess?.(result);
     } catch (error) {
       console.error("Error graduating staging item:", error);
       toast.error(

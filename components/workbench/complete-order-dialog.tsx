@@ -21,51 +21,21 @@ import { toast } from "sonner";
 import { AlertCircle, AlertTriangle, Check, CheckCircle2, Package } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
 import { getUserFriendlyMessage } from "@/lib/error-handling";
-import type { UnmappedExternalItem } from "@/types/workbench";
+import {
+  SKIPPED_LINE_CLASSES,
+  SKIPPED_LINE_COPY,
+  SKIPPED_LINE_LABEL,
+  classifySkippedLine,
+} from "@/lib/workbench/skipped-lines";
 
 // ---------------------------------------------------------------------------
 // W0.5-a (contract pack T6): the skipped-line checklist.
 //
-// `unmappedExternalItems` mixes THREE cases, all produced by
-// hooks/use-workbench.ts `selectExternalOrder` (lines 205-259):
-//
-//   bundle       the line IS mapped, but a bundle can't sit in the workbench
-//                cart (cart entries are 1:1 with one internal product) — the
-//                operator fulfills it from the Order Details sheet;
-//   unavailable  the line IS mapped, but its internal product was not in the
-//                loaded products array, so it could not be added to the cart;
-//   unmapped     the line was never mapped at all.
-//
-// Class detection: `isBundle` is set only by the bundle push. The
-// mapped-but-not-loaded push is the ONLY one that omits the external product
-// reference (every ExternalOrderItem carries a non-null `externalProductId` —
-// prisma schema VarChar(255) NOT NULL — and the unmapped push forwards it), so
-// a missing reference is what separates the two non-bundle classes.
+// The three classes `unmappedExternalItems` mixes, the copy each one gets, and
+// the detection rule all live in lib/workbench/skipped-lines.ts — extracted at
+// W1-4b so this dialog and the page-level UnmappedItemsAlert cannot tell the
+// same array's story two different ways (the registered W0.5-a divergence).
 // ---------------------------------------------------------------------------
-
-type SkippedLineClass = "unmapped" | "unavailable" | "bundle";
-
-// The per-line truth. Bundles are the only class that still ships correctly.
-const SKIPPED_LINE_COPY: Record<SkippedLineClass, string> = {
-  unmapped: "ships unmapped — not deducted",
-  unavailable: "mapped but unavailable — not deducted",
-  bundle: "bundle — fulfill via Order Details",
-};
-
-const SKIPPED_LINE_LABEL: Record<SkippedLineClass, string> = {
-  unmapped: "Unmapped",
-  unavailable: "Mapped but unavailable",
-  bundle: "Bundles",
-};
-
-// Render order: the lines that need a tap first, the informational ones last.
-const SKIPPED_LINE_CLASSES: SkippedLineClass[] = ["unmapped", "unavailable", "bundle"];
-
-function classifySkippedLine(item: UnmappedExternalItem): SkippedLineClass {
-  if (item.isBundle) return "bundle";
-  if (!item.externalProductId && !item.externalVariantId) return "unavailable";
-  return "unmapped";
-}
 
 export interface DeductionDetail {
   productId: number;

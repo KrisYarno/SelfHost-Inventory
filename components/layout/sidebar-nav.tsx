@@ -7,8 +7,8 @@
  *
  * Consuming the shared config ungates Orders (now a Fulfill child, present for
  * all users) and reorders the list to the workflow IA:
- *   Workbench, Orders, Inventory, Stocker, Pre-Staging, Journal, Products,
- *   Price Board, Analytics, [Admin], Assistant.
+ *   Workbench, Orders, Inventory, Stocker, Receiving, Pre-Staging, Journal,
+ *   Products, Price Board, Analytics, [Admin], Assistant.
  *
  * The desktop-only {@link desktopOnlyNav} leaves (Assistant) are appended here
  * and NOWHERE else (Lane 4 spec §10 R-A3): the mobile dock stays exactly the 6

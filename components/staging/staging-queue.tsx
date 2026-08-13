@@ -22,6 +22,12 @@ export interface StagingItem {
   countedQuantity: number | null;
   /** The receipt line's unit cost in INT cents (W1-3b / pack REV-3 T3). */
   unitCostCents?: number | null;
+  /**
+   * The receiving header this box belongs to, or `null` while it is unattributed
+   * (W1-4b). Soft ref — the API returns the column verbatim; the receiving
+   * detail's link picker is the one surface that reads it.
+   */
+  shipmentId?: string | null;
   vendor: string | null;
   reference: string | null;
   locationId: number;

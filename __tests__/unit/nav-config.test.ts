@@ -112,18 +112,42 @@ describe("group membership", () => {
     ]);
   });
 
-  it("Stock Ops = { Stocker, Pre-Staging, Journal }", () => {
+  it("Stock Ops = { Stocker, Receiving, Pre-Staging, Journal }", () => {
     const stockOps = groupByKey("stock-ops");
     expect(stockOps.children.map((c) => c.name)).toEqual([
       "Stocker",
+      "Receiving",
       "Pre-Staging",
       "Journal",
     ]);
     expect(stockOps.children.map((c) => c.href)).toEqual([
       "/stocker",
+      "/receiving",
       "/pre-staging",
       "/journal",
     ]);
+  });
+
+  // W1-4b: /receiving is the SHIPMENT-grain surface and /pre-staging stays the
+  // ITEM-grain queue (plan REV-2) — the two are adjacent so the group reads as
+  // one receiving workflow, and neither replaces the other.
+  it("Receiving sits adjacent to Pre-Staging inside Stock Ops (both kept)", () => {
+    const names = groupByKey("stock-ops").children.map((c) => c.name);
+    const receiving = names.indexOf("Receiving");
+    const preStaging = names.indexOf("Pre-Staging");
+    expect(receiving).toBeGreaterThanOrEqual(0);
+    expect(preStaging).toBeGreaterThanOrEqual(0);
+    expect(Math.abs(receiving - preStaging)).toBe(1);
+  });
+
+  it("Receiving is visible to a non-admin (NOT adminOnly)", () => {
+    const receiving = groupByKey("stock-ops").children.find(
+      (c) => c.name === "Receiving"
+    );
+    expect(receiving?.adminOnly).toBeFalsy();
+    expect(flattenNav(navConfig, false).map((l) => l.name)).toContain(
+      "Receiving"
+    );
   });
 
   it("Catalog = { Products, Price Board } with full 'Price Board' label", () => {
@@ -165,6 +189,7 @@ describe("flattenNav", () => {
       "Orders",
       "Inventory",
       "Stocker",
+      "Receiving",
       "Pre-Staging",
       "Journal",
       "Products",

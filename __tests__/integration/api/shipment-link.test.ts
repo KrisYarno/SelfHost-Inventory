@@ -9,6 +9,19 @@
  * W1-2b owns the count endpoint and the post-graduation field freeze; this file
  * deliberately asserts only that a body WITHOUT `shipmentId` behaves exactly as
  * it did before (countedQuantity semantics untouched).
+ *
+ * W1-4b RIDE-ALONG (lock order): the route now issues a NO-OP item claim BEFORE
+ * any shipment work, so every writer takes the staging row before its shipment
+ * (the residual ABBA registered at W1-3b close). Two consequences for the pins
+ * below, both matching what W1-3b did to the count endpoint's suite:
+ *   - `stagingItem.updateMany` fires TWICE on a real link — the lock claim, then
+ *     applyShipmentLink's own claim. The pins therefore identify the LINK claim
+ *     by its `data.shipmentId` rather than by call index.
+ *   - the shipment-guard 409/404s are reached with the lock claim already
+ *     issued. That is safe for the reason every guard in this route is safe: the
+ *     throw unwinds the transaction and the claim rolls back with it. Those
+ *     tests assert "the LINK never happened", which is what the transaction
+ *     actually guarantees.
  */
 
 import { NextRequest } from 'next/server';
@@ -100,6 +113,17 @@ function itemRow(overrides: Record<string, unknown> = {}) {
 
 const actionTypes = () => mockRecordChange.mock.calls.map((c) => c[1].actionType);
 
+/**
+ * The item claims that actually MOVE the line between shipments, i.e. every
+ * `stagingItem.updateMany` whose data names `shipmentId`. The route's leading
+ * lock claim writes only `status`, so it is excluded by construction — which is
+ * exactly the distinction the refusal pins care about.
+ */
+const linkClaims = () =>
+  db.stagingItem.updateMany.mock.calls
+    .map((c: any[]) => c[0])
+    .filter((args: any) => args?.data && 'shipmentId' in args.data);
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockValidateCSRF.mockResolvedValue(true);
@@ -124,7 +148,7 @@ describe('PATCH /api/staging-items/[id] — link', () => {
       status: 'OPEN',
     });
     // (2) the item itself is claimed on (RECEIVED, current link) — never read-then-write.
-    const claim = db.stagingItem.updateMany.mock.calls[0][0];
+    const claim = linkClaims()[0];
     expect(claim.where).toEqual({ id: 5, status: 'RECEIVED', shipmentId: null });
     expect(claim.data).toEqual({ shipmentId: SHIPMENT_A });
   });
@@ -176,7 +200,9 @@ describe('PATCH /api/staging-items/[id] — link', () => {
     const resp = await PATCH(mkReq({ shipmentId: SHIPMENT_A }), { params: { id: '5' } });
 
     expect(resp.status).toBe(409);
-    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    // The lock claim was issued and rolled back with the transaction; the LINK
+    // itself never happened.
+    expect(linkClaims()).toHaveLength(0);
     expect(mockRecordChange).not.toHaveBeenCalled();
   });
 
@@ -200,7 +226,7 @@ describe('PATCH /api/staging-items/[id] — link', () => {
     const resp = await PATCH(mkReq({ shipmentId: SHIPMENT_A }), { params: { id: '5' } });
 
     expect(resp.status).toBe(404);
-    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(linkClaims()).toHaveLength(0);
   });
 
   it('RACE: a lost item claim (count 0 — it graduated mid-flight) is a 409, no audit', async () => {
@@ -238,7 +264,7 @@ describe('PATCH /api/staging-items/[id] — unlink', () => {
     const resp = await PATCH(mkReq({ shipmentId: null }), { params: { id: '5' } });
 
     expect(resp.status).toBe(200);
-    const claim = db.stagingItem.updateMany.mock.calls[0][0];
+    const claim = linkClaims()[0];
     expect(claim.where).toEqual({ id: 5, status: 'RECEIVED', shipmentId: SHIPMENT_A });
     expect(claim.data).toEqual({ shipmentId: null });
     expect(actionTypes()).toEqual(['SHIPMENT_UNLINK']);
@@ -259,7 +285,7 @@ describe('PATCH /api/staging-items/[id] — unlink', () => {
     const resp = await PATCH(mkReq({ shipmentId: null }), { params: { id: '5' } });
 
     expect(resp.status).toBe(409);
-    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(linkClaims()).toHaveLength(0);
   });
 
   it('is a no-op when the item carries no link', async () => {
@@ -307,7 +333,7 @@ describe('PATCH /api/staging-items/[id] — relink', () => {
 
     expect(resp.status).toBe(409);
     expect(db.inboundShipment.updateMany).toHaveBeenCalledTimes(1);
-    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(linkClaims()).toHaveLength(0);
   });
 });
 

@@ -41,6 +41,17 @@ export const PatchStagingSchema = CreateStagingSchema.partial().extend({
   // The state matrix (item RECEIVED, both shipments OPEN) is enforced at the
   // route, not here.
   shipmentId: z.string().min(1).max(30).nullable().optional(),
+  // W1-4b (pack REV-3 T3): the RECEIPT LINE's per-unit cost, in INT cents —
+  // what the receiving detail's cost column and the freight calculator write.
+  // PATCH-only for the same reason as the link: a box is logged on the dock and
+  // priced from the invoice afterwards.
+  //
+  // 0 and null are DIFFERENT answers and both are accepted: 0 means "this
+  // arrived free" (a fact), null means "nobody has priced it yet" (unknown).
+  // Collapsing them would be exactly the $0.00-that-means-unknown the
+  // truthful-data north star forbids — graduation reads this field and books
+  // its ledger receipt cost from it. Absent = untouched.
+  unitCostCents: z.number().int().min(0).max(100_000_000).nullable().optional(),
 });
 
 /**

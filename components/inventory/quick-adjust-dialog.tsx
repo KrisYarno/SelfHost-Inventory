@@ -29,6 +29,7 @@ import {
 import { ValueChip } from "@/components/ui/value-chip";
 import { ContextTag } from "@/components/ui/context-tag";
 import { InlineHighlight } from "@/components/ui/inline-highlight";
+import { ReceivingRedirectPrompt } from "@/components/inventory/receiving-redirect-prompt";
 import type { DialogProduct } from "@/types/inventory";
 
 interface QuickAdjustDialogProps {
@@ -258,6 +259,11 @@ export function QuickAdjustDialog({
               ) : null}
             </p>
           </div>
+
+          {/* T5 (pack REV-3): a POSITIVE delta here is stock arriving with no
+              receipt behind it. The prompt offers /receiving once per session
+              and never blocks — declining submits the identical adjustment. */}
+          <ReceivingRedirectPrompt active={adjustmentType === "add" && quantityNum > 0} />
 
           {/* Reason */}
           <div className="space-y-2">

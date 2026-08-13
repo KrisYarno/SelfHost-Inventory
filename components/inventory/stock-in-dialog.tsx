@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { ReceivingRedirectPrompt } from "@/components/inventory/receiving-redirect-prompt";
 import type { DialogProduct } from "@/types/inventory";
 
 interface StockInDialogProps {
@@ -162,6 +163,11 @@ export function StockInDialog({
               autoFocus
             />
           </div>
+
+          {/* T5 (pack REV-3): every stock-in is a positive delta, so the prompt
+              turns on as soon as a quantity is entered. Once per session, and
+              declining leaves this stock-in exactly as it was. */}
+          <ReceivingRedirectPrompt active={quantityNum > 0} />
 
           {/* Order Number */}
           <div className="space-y-2">

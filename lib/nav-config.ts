@@ -15,6 +15,7 @@ import {
   Boxes,
   ClipboardList,
   Home,
+  Inbox,
   NotebookPen,
   Package,
   PackageCheck,
@@ -95,6 +96,11 @@ export const navConfig: readonly NavItem[] = [
     icon: Boxes,
     children: [
       { kind: "link", name: "Stocker", href: "/stocker", icon: Truck, label: "Stocker" },
+      // W1-4b: the SHIPMENT-grain receiving surface, adjacent to Pre-Staging —
+      // the ITEM-grain queue it deliberately does NOT replace (plan REV-2). A
+      // box is logged in Pre-Staging and attributed to a receipt here; both
+      // stay reachable, and both are ungated (receiving is dock work).
+      { kind: "link", name: "Receiving", href: "/receiving", icon: Inbox, label: "Receiving" },
       { kind: "link", name: "Pre-Staging", href: "/pre-staging", icon: PackageOpen, label: "Pre-Staging" },
       { kind: "link", name: "Journal", href: "/journal", icon: ClipboardList, label: "Journal" },
     ],
