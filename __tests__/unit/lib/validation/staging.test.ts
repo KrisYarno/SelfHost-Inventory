@@ -12,6 +12,8 @@ import {
   GraduateSchema,
   CountStagingSchema,
   assertStagingPatchOmitsCount,
+  assertGraduateOmitsCount,
+  assertGraduateOverridePair,
 } from '@/lib/validation/staging';
 
 const validProductFields = {
@@ -126,46 +128,31 @@ describe('CountStagingSchema', () => {
   });
 });
 
-describe('GraduateSchema', () => {
-  it('rejects graduate with countedQuantity < 1', () => {
-    expect(
-      GraduateSchema.safeParse({
-        mode: 'existing',
-        productId: 1,
-        countedQuantity: 0,
-        locationId: 1,
-      }).success
-    ).toBe(false);
+describe('GraduateSchema (W1-3a — the request no longer carries a quantity)', () => {
+  it('DROPS countedQuantity: the parsed body has no such key even when one is sent', () => {
+    // The defect this kills: the dialog pre-filled counted from EXPECTED and the
+    // server booked whatever the request said (count 46, confirm, book 50). Zod
+    // strips the unknown key, so the parsed value cannot carry a quantity at all.
+    const parsed = GraduateSchema.parse({
+      mode: 'existing',
+      productId: 7,
+      countedQuantity: 50,
+      locationId: 1,
+    });
+    expect(parsed).not.toHaveProperty('countedQuantity');
   });
 
   it('requires productId for mode=existing', () => {
-    expect(
-      GraduateSchema.safeParse({
-        mode: 'existing',
-        countedQuantity: 5,
-        locationId: 1,
-      }).success
-    ).toBe(false);
+    expect(GraduateSchema.safeParse({ mode: 'existing', locationId: 1 }).success).toBe(false);
   });
 
   it('requires productFields for mode=new', () => {
-    expect(
-      GraduateSchema.safeParse({
-        mode: 'new',
-        countedQuantity: 5,
-        locationId: 1,
-      }).success
-    ).toBe(false);
+    expect(GraduateSchema.safeParse({ mode: 'new', locationId: 1 }).success).toBe(false);
   });
 
-  it('accepts a valid mode=existing graduate', () => {
+  it('accepts a valid mode=existing graduate (mode + productId + locationId)', () => {
     expect(
-      GraduateSchema.safeParse({
-        mode: 'existing',
-        productId: 7,
-        countedQuantity: 5,
-        locationId: 1,
-      }).success
+      GraduateSchema.safeParse({ mode: 'existing', productId: 7, locationId: 1 }).success
     ).toBe(true);
   });
 
@@ -174,20 +161,13 @@ describe('GraduateSchema', () => {
       GraduateSchema.safeParse({
         mode: 'new',
         productFields: validProductFields,
-        countedQuantity: 5,
         locationId: 1,
       }).success
     ).toBe(true);
   });
 
   it('rejects an unknown mode', () => {
-    expect(
-      GraduateSchema.safeParse({
-        mode: 'bogus',
-        countedQuantity: 5,
-        locationId: 1,
-      }).success
-    ).toBe(false);
+    expect(GraduateSchema.safeParse({ mode: 'bogus', locationId: 1 }).success).toBe(false);
   });
 
   it('rejects mode=new when productFields are invalid (empty baseName)', () => {
@@ -195,9 +175,115 @@ describe('GraduateSchema', () => {
       GraduateSchema.safeParse({
         mode: 'new',
         productFields: { ...validProductFields, baseName: '' },
-        countedQuantity: 5,
         locationId: 1,
       }).success
     ).toBe(false);
+  });
+});
+
+describe('GraduateSchema — the override pair', () => {
+  const base = { mode: 'existing' as const, productId: 7, locationId: 1 };
+
+  it('accepts the pair', () => {
+    expect(
+      GraduateSchema.safeParse({
+        ...base,
+        overrideQuantity: 3,
+        overrideReason: 'two vials broken in transit',
+      }).success
+    ).toBe(true);
+  });
+
+  it('rejects overrideQuantity < 1 and a non-integer', () => {
+    expect(GraduateSchema.safeParse({ ...base, overrideQuantity: 0 }).success).toBe(false);
+    expect(GraduateSchema.safeParse({ ...base, overrideQuantity: 1.5 }).success).toBe(false);
+  });
+
+  it('rejects an empty reason and one over 500 chars', () => {
+    expect(GraduateSchema.safeParse({ ...base, overrideReason: '' }).success).toBe(false);
+    expect(
+      GraduateSchema.safeParse({ ...base, overrideReason: 'x'.repeat(501) }).success
+    ).toBe(false);
+    expect(
+      GraduateSchema.safeParse({ ...base, overrideReason: 'x'.repeat(500) }).success
+    ).toBe(true);
+  });
+
+  it('the pair survives the mode=new branch too', () => {
+    const parsed = GraduateSchema.parse({
+      mode: 'new',
+      productFields: validProductFields,
+      locationId: 1,
+      overrideQuantity: 9,
+      overrideReason: 'supplier shorted the box',
+    });
+    expect(parsed).toMatchObject({ overrideQuantity: 9, overrideReason: 'supplier shorted the box' });
+  });
+});
+
+describe('assertGraduateOmitsCount (the count-46-book-50 regression guard)', () => {
+  it('throws a ZodError (-> 400) when the RAW body still carries countedQuantity', () => {
+    expect(() =>
+      assertGraduateOmitsCount({ mode: 'existing', productId: 7, locationId: 1, countedQuantity: 50 })
+    ).toThrow(z.ZodError);
+  });
+
+  it('names the field and points at the count endpoint', () => {
+    try {
+      assertGraduateOmitsCount({ countedQuantity: 50 });
+      throw new Error('expected a ZodError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(z.ZodError);
+      const issue = (err as z.ZodError).errors[0];
+      expect(issue.path).toEqual(['countedQuantity']);
+      expect(issue.message).toMatch(/count/i);
+    }
+  });
+
+  it('refuses even a countedQuantity of null / undefined (the KEY is the tell)', () => {
+    expect(() => assertGraduateOmitsCount({ countedQuantity: null })).toThrow(z.ZodError);
+    expect(() => assertGraduateOmitsCount({ countedQuantity: undefined })).toThrow(z.ZodError);
+  });
+
+  it('passes a clean body, a null body and a non-object body', () => {
+    expect(() => assertGraduateOmitsCount({ mode: 'existing', productId: 7, locationId: 1 })).not.toThrow();
+    expect(() => assertGraduateOmitsCount(null)).not.toThrow();
+    expect(() => assertGraduateOmitsCount('nope')).not.toThrow();
+  });
+});
+
+describe('assertGraduateOverridePair (both-or-neither)', () => {
+  const base = { mode: 'existing' as const, productId: 7, locationId: 1 };
+
+  it('accepts neither', () => {
+    expect(() => assertGraduateOverridePair(base as never)).not.toThrow();
+  });
+
+  it('accepts both', () => {
+    expect(() =>
+      assertGraduateOverridePair({ ...base, overrideQuantity: 3, overrideReason: 'damaged' } as never)
+    ).not.toThrow();
+  });
+
+  it('rejects a quantity without a reason', () => {
+    expect(() =>
+      assertGraduateOverridePair({ ...base, overrideQuantity: 3 } as never)
+    ).toThrow(z.ZodError);
+  });
+
+  it('rejects a reason without a quantity', () => {
+    expect(() =>
+      assertGraduateOverridePair({ ...base, overrideReason: 'damaged' } as never)
+    ).toThrow(z.ZodError);
+  });
+
+  it('names overrideReason as the missing half when only the quantity was sent', () => {
+    try {
+      assertGraduateOverridePair({ ...base, overrideQuantity: 3 } as never);
+      throw new Error('expected a ZodError');
+    } catch (err) {
+      expect(err).toBeInstanceOf(z.ZodError);
+      expect((err as z.ZodError).errors[0].path).toEqual(['overrideReason']);
+    }
   });
 });

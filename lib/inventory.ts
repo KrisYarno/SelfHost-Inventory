@@ -28,6 +28,10 @@ export async function createInventoryLog(
     reasonCode?: string | null;
     unitCostCents?: number | null;
     batchId?: string | null;
+    // Inventory-accuracy lane (pack REV-3 T1/T3, seam S4): the SOFT ref naming
+    // the receiving header this movement came in on. Pure passthrough, same as
+    // the three above — the writer decides, this function only stores.
+    inboundShipmentId?: string | null;
   },
   tx?: Prisma.TransactionClient
 ) {
@@ -46,6 +50,7 @@ export async function createInventoryLog(
       reasonCode: data.reasonCode ?? null,
       unitCostCents: data.unitCostCents ?? null,
       batchId: data.batchId ?? null,
+      inboundShipmentId: data.inboundShipmentId ?? null,
     },
     // SECURITY: never `users: true` here — these rows are returned verbatim by
     // adjust/stock-in/transfer/batch-adjust responses, so a full User include
@@ -204,6 +209,8 @@ export async function applyStockDelta(
     reasonCode?: string | null;
     unitCostCents?: number | null;
     batchId?: string | null;
+    // Inventory-accuracy lane (seam S4): passthrough to createInventoryLog.
+    inboundShipmentId?: string | null;
   }
 ): Promise<{
   log: Awaited<ReturnType<typeof createInventoryLog>>;
@@ -218,6 +225,7 @@ export async function applyStockDelta(
     reasonCode,
     unitCostCents,
     batchId,
+    inboundShipmentId,
   } = args;
 
   // Create the log entry
@@ -231,6 +239,7 @@ export async function applyStockDelta(
       reasonCode,
       unitCostCents,
       batchId,
+      inboundShipmentId,
     },
     tx
   );

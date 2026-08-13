@@ -191,17 +191,24 @@ describe('graduate POST /api/staging-items/[id]/graduate — flagship fan-out', 
           approvalStatus: 'PENDING_REVIEW',
           locationId: 1,
           countedQuantity: 5,
+          bookedQuantity: 5,
+          override: null,
           created: true,
         });
       }
-      return { productId: 100, approvalStatus: 'PENDING_REVIEW', locationId: 1, countedQuantity: 5 };
+      return {
+        productId: 100,
+        approvalStatus: 'PENDING_REVIEW',
+        locationId: 1,
+        countedQuantity: 5,
+        bookedQuantity: 5,
+      };
     });
 
     const res = await graduatePOST(
       mkReq('http://t/api/staging-items/5/graduate', 'POST', {
         mode: 'new',
         productFields: { baseName: 'X', variant: '1', locationId: 1 },
-        countedQuantity: 5,
         locationId: 1,
       }),
       { params: { id: '5' } },
@@ -241,17 +248,24 @@ describe('graduate POST /api/staging-items/[id]/graduate — flagship fan-out', 
           approvalStatus: 'APPROVED',
           locationId: 1,
           countedQuantity: 5,
+          bookedQuantity: 5,
+          override: null,
           created: false,
         });
       }
-      return { productId: 77, approvalStatus: 'APPROVED', locationId: 1, countedQuantity: 5 };
+      return {
+        productId: 77,
+        approvalStatus: 'APPROVED',
+        locationId: 1,
+        countedQuantity: 5,
+        bookedQuantity: 5,
+      };
     });
 
     const res = await graduatePOST(
       mkReq('http://t/api/staging-items/5/graduate', 'POST', {
         mode: 'existing',
         productId: 77,
-        countedQuantity: 5,
         locationId: 1,
       }),
       { params: { id: '5' } },
@@ -382,10 +396,17 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
     locationId: 1,
   };
 
-  function driveWithTx(): DeepMockProxy<Prisma.TransactionClient> {
+  function driveWithTx(counted = 8): DeepMockProxy<Prisma.TransactionClient> {
     const tx = mockDeep<Prisma.TransactionClient>();
     tx.stagingItem.updateMany.mockResolvedValue({ count: 1 } as any);
     tx.stagingItem.update.mockResolvedValue({} as any);
+    // W1-3a (pack REV-3 T2): the booked quantity is READ from the claimed row,
+    // never taken from the request — so every drive has to supply one.
+    tx.stagingItem.findUnique.mockResolvedValue({
+      countedQuantity: counted,
+      shipmentId: null,
+      unitCostCents: null,
+    } as any);
     mockApplyStockDelta.mockResolvedValue({ log: { id: 1 }, newVersion: 1 });
     mockPrisma.$transaction.mockImplementation(async (fn: any) => fn(tx));
     return tx;
@@ -398,7 +419,7 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
 
     await realGraduate(
       55,
-      { mode: 'new', productFields: newFields as any, countedQuantity: 8, locationId: 1 },
+      { mode: 'new', productFields: newFields as any, locationId: 1 },
       { id: 42, isAdmin: false },
       { onRecord, batchId: 'GRAD-BATCH' },
     );
@@ -433,7 +454,7 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
 
     await realGraduate(
       55,
-      { mode: 'new', productFields: newFields as any, countedQuantity: 8, locationId: 1 },
+      { mode: 'new', productFields: newFields as any, locationId: 1 },
       { id: 42, isAdmin: false },
       { onRecord: jest.fn(), batchId: 'GRAD-BATCH' },
     );
@@ -453,7 +474,7 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
 
     await realGraduate(
       55,
-      { mode: 'new', productFields: newFields as any, countedQuantity: 8, locationId: 1 },
+      { mode: 'new', productFields: newFields as any, locationId: 1 },
       { id: 42, isAdmin: false },
       { onRecord: jest.fn(), batchId: 'GRAD-BATCH' },
     );
@@ -463,7 +484,7 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
   });
 
   it('existing-restock path: freezes unitCostCents from the LOADED product row', async () => {
-    const tx = driveWithTx();
+    const tx = driveWithTx(3);
     tx.product.findFirst.mockResolvedValue({
       id: 7,
       approvalStatus: 'APPROVED',
@@ -473,7 +494,7 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
 
     await realGraduate(
       55,
-      { mode: 'existing', productId: 7, countedQuantity: 3, locationId: 2 },
+      { mode: 'existing', productId: 7, locationId: 2 },
       { id: 42, isAdmin: false },
       { onRecord: jest.fn(), batchId: 'GRAD-BATCH' },
     );
@@ -498,7 +519,7 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
 
     await realGraduate(
       55,
-      { mode: 'new', productFields: newFields as any, countedQuantity: 8, locationId: 1 },
+      { mode: 'new', productFields: newFields as any, locationId: 1 },
       { id: 42, isAdmin: false },
       { onRecord: jest.fn(), batchId: 'GRAD-BATCH' },
     );
@@ -510,13 +531,13 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
   });
 
   it('existing-restock path: created=false (no product minted)', async () => {
-    const tx = driveWithTx();
+    const tx = driveWithTx(12);
     tx.product.findFirst.mockResolvedValue({ id: 7, approvalStatus: 'APPROVED', deletedAt: null } as any);
     const onRecord = jest.fn();
 
     await realGraduate(
       55,
-      { mode: 'existing', productId: 7, countedQuantity: 12, locationId: 3 },
+      { mode: 'existing', productId: 7, locationId: 3 },
       { id: 42, isAdmin: false },
       { onRecord, batchId: 'GRAD-BATCH' },
     );
@@ -536,7 +557,7 @@ describe('graduateStagingItem (real helper) — onRecord co-transacts with the m
     await expect(
       realGraduate(
         55,
-        { mode: 'existing', productId: 7, countedQuantity: 5, locationId: 1 },
+        { mode: 'existing', productId: 7, locationId: 1 },
         { id: 42, isAdmin: false },
         { onRecord, batchId: 'GRAD-BATCH' },
       ),

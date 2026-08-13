@@ -210,6 +210,9 @@ const KNOWN_VERBS: readonly string[] = [
   // W1-2b: STAGING_RECOUNT -- the count endpoint's audit verb (first count and
   // every recount alike).
   'RECOUNT',
+  // W1-3a: GRADUATE_OVERRIDE -- a graduation that booked a quantity other than
+  // the row's count.
+  'OVERRIDE',
 ];
 
 /**

@@ -242,13 +242,13 @@ describe('POST /api/staging-items/[id]/graduate', () => {
       approvalStatus: 'PENDING_REVIEW',
       locationId: 1,
       countedQuantity: 5,
+      bookedQuantity: 5,
     });
 
     const resp = await graduatePOST(
       mkReq('http://t/api/staging-items/5/graduate', 'POST', {
         mode: 'existing',
         productId: 100,
-        countedQuantity: 5,
         locationId: 1,
       }),
       { params: { id: '5' } }
@@ -274,7 +274,6 @@ describe('POST /api/staging-items/[id]/graduate', () => {
       mkReq('http://t/api/staging-items/5/graduate', 'POST', {
         mode: 'existing',
         productId: 100,
-        countedQuantity: 5,
         locationId: 1,
       }),
       { params: { id: '5' } }
@@ -285,14 +284,17 @@ describe('POST /api/staging-items/[id]/graduate', () => {
     expect(body.error).toMatch(/already graduated/i);
   });
 
-  it('returns 400 (Zod) when countedQuantity < 1, without calling the lib', async () => {
+  // W1-3a (pack REV-3 T2): countedQuantity left this request entirely. The old
+  // "< 1 -> 400" Zod pin is superseded by the regression pin — ANY countedQuantity
+  // is refused, and the zero-count rule now lives on the ROW (422 from the lib).
+  it('returns 400 when the body still carries countedQuantity, without calling the lib', async () => {
     setApprovedUser();
 
     const resp = await graduatePOST(
       mkReq('http://t/api/staging-items/5/graduate', 'POST', {
         mode: 'existing',
         productId: 100,
-        countedQuantity: 0,
+        countedQuantity: 50,
         locationId: 1,
       }),
       { params: { id: '5' } }
@@ -310,7 +312,6 @@ describe('POST /api/staging-items/[id]/graduate', () => {
       mkReq('http://t/api/staging-items/5/graduate', 'POST', {
         mode: 'existing',
         productId: 100,
-        countedQuantity: 5,
         locationId: 1,
       }),
       { params: { id: '5' } }

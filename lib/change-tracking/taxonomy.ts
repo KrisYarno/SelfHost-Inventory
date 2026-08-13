@@ -88,6 +88,9 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   // W1-2b: a count is evidence-gathering. It reports what is on the dock; the
   // judgement about a discrepancy belongs to the exception row, not the verb.
   RECOUNT: 'info',
+  // W1-3a: the ledger was deliberately made to disagree with the count. Legal,
+  // reasoned, and exactly the class of event the feed must never bury.
+  OVERRIDE: 'warning',
   SYNC: 'info',
   AUTO_ADD: 'info',
   SENT: 'info',
@@ -128,6 +131,9 @@ const KNOWN_VERBS: readonly string[] = [
   // W1-2b: STAGING_RECOUNT. No shorter 'COUNT' verb exists, so there is no
   // longest-first ambiguity to resolve here.
   'RECOUNT',
+  // W1-3a: GRADUATE_OVERRIDE. Longer than the existing 'GRADUATE' verb and not a
+  // suffix of it, so ordering against it is immaterial.
+  'OVERRIDE',
   'TRANSFER',
   'TRIGGER',
   'SIGNUP',
@@ -163,6 +169,10 @@ const PREFIX_GROUP: Readonly<Record<string, ActionGroup>> = {
   // header, so SHIPMENT_* folds into the existing STAGING group rather than
   // minting a group (established fold idiom: BUNDLE -> MAPPING, AI -> SETTINGS).
   SHIPMENT: 'STAGING',
+  // W1-3a: GRADUATE_OVERRIDE's leading token is the act, not a domain — the pack
+  // fixed the member's NAME, so the fold table absorbs it the same way SHIPMENT
+  // and BUNDLE are absorbed. Graduation is pre-staging work, hence STAGING.
+  GRADUATE: 'STAGING',
   COMPANY: 'COMPANY',
   INTEGRATION: 'INTEGRATION',
   MAPPING: 'MAPPING',
@@ -211,6 +221,9 @@ const LABEL_OVERRIDES: Readonly<Record<string, string>> = {
   // One verb covers the first count and every recount, so the label states the
   // act rather than claiming a re-count that may not have happened.
   STAGING_RECOUNT: 'Item counted',
+  // Names the divergence outright — "override" alone would read as a permission
+  // grant rather than "the ledger was booked away from the count".
+  GRADUATE_OVERRIDE: 'Graduated with a quantity override',
 };
 
 function titleCase(actionType: string): string {
@@ -293,6 +306,7 @@ export const ALL_ACTION_TYPES: readonly AuditActionType[] = [
   'STAGING_DISCARD',
   'STAGING_UPDATE',
   'STAGING_RECOUNT',
+  'GRADUATE_OVERRIDE',
   'SHIPMENT_CREATE',
   'SHIPMENT_UPDATE',
   'SHIPMENT_CLOSE',

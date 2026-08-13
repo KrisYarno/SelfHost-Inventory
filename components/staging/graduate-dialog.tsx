@@ -6,7 +6,7 @@ import { Search, Loader2, AlertCircle, Package } from "lucide-react";
 import { toast } from "sonner";
 import { useCSRF } from "@/hooks/use-csrf";
 import { useDebounce } from "@/hooks/use-debounce";
-import { useGraduateStagingItem } from "@/hooks/use-staging";
+import { useCountStagingItem, useGraduateStagingItem } from "@/hooks/use-staging";
 import {
   Dialog,
   DialogContent,
@@ -43,6 +43,12 @@ export interface GraduateStagingItem {
   id: number;
   description: string;
   expectedQuantity: number | null;
+  /**
+   * The row's count — `null` while the box is still uncounted. W1-3a (pack
+   * REV-3 T2) made this the ONLY source of what graduation books, so the dialog
+   * renders it read-only and never seeds it from `expectedQuantity`.
+   */
+  countedQuantity: number | null;
   locationId: number;
 }
 
@@ -65,10 +71,20 @@ export function GraduateDialog({
 }: GraduateDialogProps) {
   const { token: csrfToken, isLoading: csrfLoading } = useCSRF();
   const graduateMutation = useGraduateStagingItem();
+  const countMutation = useCountStagingItem();
   const isSubmitting = graduateMutation.isPending;
 
   const [mode, setMode] = useState<Mode>("existing");
-  const [countedQuantity, setCountedQuantity] = useState("");
+  // The AUTHORITATIVE count. Seeded from the row and thereafter only ever
+  // replaced by a count-endpoint RESPONSE — never by anything typed here, which
+  // is the whole point: the field the operator types into (below) posts a count,
+  // and graduation reads the row.
+  const [countedQuantity, setCountedQuantity] = useState<number | null>(null);
+  const [countDraft, setCountDraft] = useState("");
+  // The override affordance stays collapsed: the default path books the count.
+  const [overrideOpen, setOverrideOpen] = useState(false);
+  const [overrideQuantity, setOverrideQuantity] = useState("");
+  const [overrideReason, setOverrideReason] = useState("");
   const [locationId, setLocationId] = useState<number | undefined>(undefined);
 
   // Existing-branch product search
@@ -85,9 +101,14 @@ export function GraduateDialog({
   useEffect(() => {
     if (open && item) {
       setMode("existing");
-      setCountedQuantity(
-        item.expectedQuantity != null ? String(item.expectedQuantity) : ""
-      );
+      // W1-3a: the count comes from the ROW. The deleted line here used to seed
+      // it from `expectedQuantity`, which is precisely how a counted 46 became a
+      // booked 50 — the operator saw a plausible number and pressed Confirm.
+      setCountedQuantity(item.countedQuantity);
+      setCountDraft("");
+      setOverrideOpen(false);
+      setOverrideQuantity("");
+      setOverrideReason("");
       setLocationId(item.locationId);
       setSearch("");
       setDebouncedSearch("");
@@ -154,12 +175,66 @@ export function GraduateDialog({
     return match ? match.name : null;
   }, [dupEnabled, dupData, debouncedNewName]);
 
-  const countedNum = parseInt(countedQuantity, 10);
-  const countedValid = Number.isInteger(countedNum) && countedNum >= 1;
-  const baseGatePassed = countedValid && !!locationId && !!csrfToken;
+  // --- The count gate (pack REV-3 T2) -------------------------------------
+  // Mirrors the server's two 422s so the operator learns the rule from the
+  // dialog instead of from a failed request.
+  const countMissing = countedQuantity === null;
+  const countIsZero = countedQuantity === 0;
 
-  // Existing-branch Confirm gate: qty >= 1 AND a product is selected.
+  // --- The override pair, mirrored client-side ------------------------------
+  const overrideNum = parseInt(overrideQuantity, 10);
+  const overrideQuantityValid = Number.isInteger(overrideNum) && overrideNum >= 1;
+  const trimmedReason = overrideReason.trim();
+  const overrideReasonValid =
+    trimmedReason.length >= 1 && trimmedReason.length <= 500;
+  const overrideComplete = overrideQuantityValid && overrideReasonValid;
+  const overrideTouched =
+    overrideQuantity.trim().length > 0 || trimmedReason.length > 0;
+  // Half a pair is a 400 at the server; hold Confirm rather than send it.
+  const overrideHalfFilled = overrideOpen && overrideTouched && !overrideComplete;
+  // Only a COMPLETE pair on an OPEN affordance rides the body — collapsing the
+  // panel is a withdrawal, not a hidden instruction.
+  const overrideActive = overrideOpen && overrideComplete;
+
+  const overrideFields = overrideActive
+    ? { overrideQuantity: overrideNum, overrideReason: trimmedReason }
+    : {};
+  const bookedQuantity = overrideActive ? overrideNum : countedQuantity;
+
+  const baseGatePassed =
+    !countMissing &&
+    !countIsZero &&
+    !overrideHalfFilled &&
+    !!locationId &&
+    !!csrfToken;
+
+  // Existing-branch Confirm gate: a usable count AND a product is selected.
   const existingValid = baseGatePassed && !!selectedProduct;
+
+  // --- The count control ----------------------------------------------------
+  // A SEPARATE act with a SEPARATE button: it posts to the count endpoint and
+  // adopts the server's echo. Graduation never carries a count, so there is no
+  // path here that writes one "through" a Confirm.
+  const countDraftNum = parseInt(countDraft, 10);
+  const countDraftValid = Number.isInteger(countDraftNum) && countDraftNum >= 0;
+
+  const handleRecordCount = async () => {
+    if (!item || !countDraftValid) return;
+    try {
+      const result = await countMutation.mutateAsync({
+        id: item.id,
+        countedQuantity: countDraftNum,
+      });
+      setCountedQuantity(result.countedQuantity);
+      setCountDraft("");
+      toast.success(`Counted ${result.countedQuantity}`);
+    } catch (error) {
+      console.error("Error counting staging item:", error);
+      toast.error(
+        error instanceof Error ? error.message : "Failed to record the count"
+      );
+    }
+  };
 
   const handleGraduateExisting = async () => {
     if (!item || !existingValid || !selectedProduct || !locationId) return;
@@ -169,11 +244,11 @@ export function GraduateDialog({
         body: {
           mode: "existing",
           productId: selectedProduct.id,
-          countedQuantity: countedNum,
           locationId,
+          ...overrideFields,
         },
       });
-      toast.success(`Added ${countedNum} to ${selectedProduct.name}`);
+      toast.success(`Added ${bookedQuantity} to ${selectedProduct.name}`);
       onOpenChange(false);
       onSuccess?.();
     } catch (error) {
@@ -194,13 +269,12 @@ export function GraduateDialog({
     costPrice?: number;
     retailPrice?: number | null;
   }) => {
-    if (!item || !countedValid || !locationId) return;
+    if (!item || !baseGatePassed || !locationId) return;
     try {
       await graduateMutation.mutateAsync({
         id: item.id,
         body: {
           mode: "new",
-          countedQuantity: countedNum,
           locationId,
           productFields: {
             baseName: productData.baseName,
@@ -212,9 +286,10 @@ export function GraduateDialog({
             retailPrice: productData.retailPrice,
             locationId,
           },
+          ...overrideFields,
         },
       });
-      toast.success(`Created product and added ${countedNum} units`);
+      toast.success(`Created product and added ${bookedQuantity} units`);
       onOpenChange(false);
       onSuccess?.();
     } catch (error) {
@@ -225,21 +300,42 @@ export function GraduateDialog({
     }
   };
 
-  const sharedTop = useMemo(
-    () => (
+  const sharedTop = (
+    <div className="space-y-4">
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
-          <Label htmlFor="graduate-counted">
-            Counted Quantity <span className="text-destructive">*</span>
-          </Label>
+          <Label htmlFor="graduate-counted">Counted (from the row)</Label>
+          {/* READ-ONLY, deliberately. This is what graduation books; the way to
+              change it is to count the box again, in the control below. */}
           <Input
             id="graduate-counted"
-            type="number"
-            min="1"
-            value={countedQuantity}
-            onChange={(e) => setCountedQuantity(e.target.value)}
-            placeholder="Enter counted quantity"
+            type="text"
+            inputMode="numeric"
+            readOnly
+            aria-readonly="true"
+            tabIndex={-1}
+            value={countedQuantity === null ? "" : String(countedQuantity)}
+            placeholder="Not counted yet"
+            className="bg-muted/50"
           />
+          {countMissing && (
+            <p className="text-xs text-destructive">
+              Count this item first — graduation books the counted quantity.
+            </p>
+          )}
+          {countIsZero && (
+            <p className="text-xs text-destructive">
+              A zero count is a Discard, not a stock-in.
+            </p>
+          )}
+          {item?.expectedQuantity != null && (
+            <p className="text-xs text-muted-foreground">
+              Expected {item.expectedQuantity}
+              {countedQuantity !== null &&
+                countedQuantity !== item.expectedQuantity &&
+                ` — counted ${countedQuantity}`}
+            </p>
+          )}
         </div>
         <div className="space-y-2">
           <Label htmlFor="graduate-location">
@@ -263,8 +359,92 @@ export function GraduateDialog({
           </Select>
         </div>
       </div>
-    ),
-    [countedQuantity, locationId, locations]
+
+      {/* The count control — its OWN act, its OWN button, its OWN request. It
+          posts to the count endpoint and adopts the SERVER's number; Confirm
+          below never carries a count. */}
+      <div
+        data-testid="graduate-count-control"
+        className="rounded-md border border-border/60 p-3 space-y-2"
+      >
+        <Label htmlFor="graduate-count-entry">
+          {countMissing ? "Record the count" : "Recount"}
+        </Label>
+        <div className="flex gap-2">
+          <Input
+            id="graduate-count-entry"
+            type="number"
+            min="0"
+            value={countDraft}
+            onChange={(e) => setCountDraft(e.target.value)}
+            placeholder="Units on the dock"
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={handleRecordCount}
+            disabled={!countDraftValid || countMutation.isPending || !csrfToken}
+          >
+            {countMutation.isPending ? "Saving…" : "Save count"}
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Counting is recorded separately, stamped with who counted and when. A
+          count of 0 is a valid answer — an empty box is a fact.
+        </p>
+      </div>
+
+      {/* The override affordance: collapsed by default, because the default is
+          to book what was counted. */}
+      <div className="space-y-2">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="px-0 text-xs text-muted-foreground hover:text-foreground"
+          aria-expanded={overrideOpen}
+          onClick={() => setOverrideOpen((v) => !v)}
+        >
+          Book a different quantity
+        </Button>
+        {overrideOpen && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 space-y-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="graduate-override-qty">Quantity to book</Label>
+              <Input
+                id="graduate-override-qty"
+                type="number"
+                min="1"
+                value={overrideQuantity}
+                onChange={(e) => setOverrideQuantity(e.target.value)}
+                placeholder="Units to add to stock"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="graduate-override-reason">
+                Reason for the difference
+              </Label>
+              <Input
+                id="graduate-override-reason"
+                value={overrideReason}
+                onChange={(e) => setOverrideReason(e.target.value)}
+                maxLength={500}
+                placeholder="e.g. six vials broken in transit"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              The count stays on the record; only the stock movement changes.
+              Both numbers and this reason are written to the activity log.
+            </p>
+            {overrideHalfFilled && (
+              <p className="text-xs text-destructive">
+                A quantity and a reason are both required.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
 
   return (
@@ -407,7 +587,7 @@ export function GraduateDialog({
                 onSubmit={handleGraduateNew}
                 onCancel={() => onOpenChange(false)}
                 isSubmitting={isSubmitting}
-                disableSubmit={!countedValid || csrfLoading || !csrfToken}
+                disableSubmit={!baseGatePassed || csrfLoading}
               />
             </div>
           </div>

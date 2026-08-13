@@ -111,6 +111,11 @@ export type AuditActionType =
   // first), and the event is written even when a confirming recount lands on
   // the same number, because the act is the record.
   | 'STAGING_RECOUNT'
+  // W1-3a: a graduation that booked a quantity OTHER than the row's count. Its
+  // own actionType, not a flag on STAGING_GRADUATE, so the one act that can make
+  // the ledger disagree with the dock is separately filterable. The line names
+  // BOTH quantities and carries the mandatory reason.
+  | 'GRADUATE_OVERRIDE'
   // --- Lane 4 additions (spec D2/D7): AI-provider config + API-token lifecycle.
   // Key values diff as [REDACTED] via the deep scan; token/hash never enter
   // payloads (details = name/tier only). Emitted by the T4 admin routes.

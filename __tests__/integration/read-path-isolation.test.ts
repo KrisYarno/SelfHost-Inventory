@@ -328,7 +328,6 @@ describe('CONCURRENCY: POST /api/staging-items/[id]/graduate (same item, two cal
       body: JSON.stringify({
         mode: 'existing',
         productId: 100,
-        countedQuantity: 5,
         locationId: 1,
       }),
     });
@@ -352,6 +351,7 @@ describe('CONCURRENCY: POST /api/staging-items/[id]/graduate (same item, two cal
         approvalStatus: 'PENDING_REVIEW',
         locationId: 1,
         countedQuantity: 5,
+        bookedQuantity: 5,
       };
     });
 

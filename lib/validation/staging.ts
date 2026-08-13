@@ -18,7 +18,10 @@ import { ProductCreateUISchema } from '@/lib/validation/product';
  *       - "existing": restock an existing product (requires `productId`).
  *       - "new":      create a provisional product (requires `productFields`,
  *                     reusing the same ProductCreateUISchema as the Add Product form).
- *     `countedQuantity` must be >= 1 at graduation.
+ *     W1-3a (pack REV-3 T2) DROPPED `countedQuantity` from this request: the
+ *     quantity is read from the staging ROW inside the graduation transaction.
+ *     The request may only ask to book a DIFFERENT number, and only by naming
+ *     it and explaining it — the `overrideQuantity`/`overrideReason` pair.
  */
 
 export const CreateStagingSchema = z.object({
@@ -40,18 +43,36 @@ export const PatchStagingSchema = CreateStagingSchema.partial().extend({
   shipmentId: z.string().min(1).max(30).nullable().optional(),
 });
 
+/**
+ * The audited override (pack REV-3 T2), shared by both `mode` branches.
+ *
+ * BOTH-OR-NEITHER, enforced post-parse by `assertGraduateOverridePair` rather
+ * than by `.refine`: the house rule keeps every request schema a plain
+ * ZodObject (the MCP adapter reads `.shape`), and a discriminated union cannot
+ * carry a cross-field refinement on its members anyway.
+ *
+ * A quantity without a reason is exactly the silent-divergence this lane
+ * exists to end, so the reason is not optional COPY — it is the price of
+ * booking a number the dock did not produce. The 1,000,000 ceiling mirrors the
+ * house bound the count endpoint uses.
+ */
+const GRADUATE_OVERRIDE_FIELDS = {
+  overrideQuantity: z.number().int().min(1).max(1_000_000).optional(),
+  overrideReason: z.string().min(1).max(500).optional(),
+};
+
 export const GraduateSchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('existing'),
     productId: z.number().int().positive(),
-    countedQuantity: z.number().int().min(1).max(1_000_000),
     locationId: z.number().int().positive(),
+    ...GRADUATE_OVERRIDE_FIELDS,
   }),
   z.object({
     mode: z.literal('new'),
     productFields: ProductCreateUISchema,
-    countedQuantity: z.number().int().min(1).max(1_000_000),
     locationId: z.number().int().positive(),
+    ...GRADUATE_OVERRIDE_FIELDS,
   }),
 ]);
 
@@ -91,4 +112,52 @@ export function assertStagingPatchOmitsCount(raw: unknown): void {
       },
     ]);
   }
+}
+
+/**
+ * Refuse a GRADUATE body that still carries `countedQuantity` (pack REV-3 T2).
+ *
+ * THE COUNT-46-BOOK-50 GUARD. The old contract let the request name the booked
+ * quantity, and the dialog filled that field from the EXPECTED quantity — so an
+ * operator who counted 46 and pressed Confirm booked 50, with an audit line that
+ * agreed with the request. Zod alone would strip the key silently; a caller that
+ * believes it just booked its own number deserves an error, not a surprise.
+ *
+ * Runs on the RAW body, BEFORE GraduateSchema.parse. Same shape as
+ * `assertStagingPatchOmitsCount` — the KEY is the tell, so a `countedQuantity`
+ * of null or undefined is refused too.
+ */
+export function assertGraduateOmitsCount(raw: unknown): void {
+  if (raw !== null && typeof raw === 'object' && 'countedQuantity' in raw) {
+    throw new z.ZodError([
+      {
+        code: z.ZodIssueCode.custom,
+        path: ['countedQuantity'],
+        message:
+          'countedQuantity is not accepted here — graduation books the count on the staging row; count the item via POST /api/staging-items/[id]/count',
+      },
+    ]);
+  }
+}
+
+/**
+ * Enforce the override pair's both-or-neither rule (pack REV-3 T2).
+ *
+ * Runs POST-parse (it reads validated values). The issue is addressed to the
+ * MISSING half, so the client can highlight the field it actually forgot.
+ */
+export function assertGraduateOverridePair(input: GraduateInput): void {
+  const hasQuantity = input.overrideQuantity !== undefined;
+  const hasReason = input.overrideReason !== undefined;
+  if (hasQuantity === hasReason) return;
+
+  throw new z.ZodError([
+    {
+      code: z.ZodIssueCode.custom,
+      path: [hasQuantity ? 'overrideReason' : 'overrideQuantity'],
+      message: hasQuantity
+        ? 'overrideReason is required when overrideQuantity is set — booking a quantity the dock did not produce has to be explained'
+        : 'overrideQuantity is required when overrideReason is set',
+    },
+  ]);
 }

@@ -72,6 +72,9 @@ export default function PreStagingPage() {
       id: item.id,
       description: item.description,
       expectedQuantity: item.expectedQuantity,
+      // W1-3a: the dialog books THIS, read-only. It used to derive its quantity
+      // from expectedQuantity, which is how a counted 46 became a booked 50.
+      countedQuantity: item.countedQuantity,
       locationId: item.locationId,
     });
     setGraduateOpen(true);

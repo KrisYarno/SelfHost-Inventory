@@ -55,9 +55,11 @@ describe('taxonomy completeness (writer-exhaustive)', () => {
   it('parses a plausible union (self-check) incl. the Lane 3 addition', () => {
     // Lane 6 added PLATFORM_WRITE_ATTEMPT (52); the inventory-accuracy lane's
     // W1-2a added the six SHIPMENT_* verbs (58) and W1-2b added STAGING_RECOUNT
-    // (59). The last four are the Lane 4 members the pre-fix parser truncated
-    // away — they were in the union all along (63).
-    expect(unionMembers.length).toBe(63);
+    // (59). The next four are the Lane 4 members the pre-fix parser truncated
+    // away — they were in the union all along (63). W1-3a added
+    // GRADUATE_OVERRIDE (64).
+    expect(unionMembers.length).toBe(64);
+    expect(unionMembers).toContain('GRADUATE_OVERRIDE');
     expect(unionMembers).toContain('ANALYTICS_REBUILD_TRIGGER');
     expect(unionMembers).toContain('USER_APPROVAL_REMINDER_SENT');
     expect(unionMembers).toContain('PLATFORM_WRITE_ATTEMPT');

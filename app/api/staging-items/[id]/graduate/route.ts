@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, apiHandler, requireCSRF } from '@/lib/api-utils';
-import { GraduateSchema } from '@/lib/validation/staging';
+import {
+  GraduateSchema,
+  assertGraduateOmitsCount,
+  assertGraduateOverridePair,
+} from '@/lib/validation/staging';
 import { graduateStagingItem } from '@/lib/staging/graduate';
 import { recordChange, newBatchId } from '@/lib/change-tracking';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
@@ -14,8 +18,14 @@ interface RouteParams {
 }
 
 // POST /api/staging-items/[id]/graduate - Resolve a box into real inventory.
-// The 409 (already graduated/discarded) and 400 (bad target) AppErrors thrown
-// by graduateStagingItem propagate through apiHandler's mapping.
+// The 409 (already graduated/discarded, cancelled shipment), 422 (uncounted or
+// zero-counted) and 400 (bad target) AppErrors thrown by graduateStagingItem
+// propagate through apiHandler's mapping.
+//
+// W1-3a (pack REV-3 T2): the request names NO quantity. What gets booked is the
+// staging row's count, read inside the graduation transaction; the only thing a
+// caller may ask for is an explicitly-named, explicitly-reasoned override, which
+// gets its own audit line.
 export const POST = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   const { user } = await requireApproved();
 
@@ -30,7 +40,13 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     return NextResponse.json({ error: 'Invalid staging item ID' }, { status: 400 });
   }
 
-  const body = GraduateSchema.parse(await request.json());
+  // The count-46-book-50 guard runs on the RAW body: Zod would strip a stray
+  // countedQuantity silently, and a caller that believes it just booked its own
+  // number deserves a 400, not a surprise.
+  const raw = await request.json();
+  assertGraduateOmitsCount(raw);
+  const body = GraduateSchema.parse(raw);
+  assertGraduateOverridePair(body);
 
   // Graduation is the flagship multi-event flow: one user action fans out into a
   // STAGING_GRADUATE event, a PRODUCT_CREATE event (only when a new product is
@@ -76,10 +92,35 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
             productId: ctx.productId,
             approvalStatus: ctx.approvalStatus,
             locationId: ctx.locationId,
+            // BOTH numbers ride every graduation line, so a reader never has to
+            // assume the ledger booked what the dock counted.
             countedQuantity: ctx.countedQuantity,
+            bookedQuantity: ctx.bookedQuantity,
           },
           batchId,
         });
+
+        // The override gets its OWN line (pack REV-3 T2/T4). A graduation that
+        // books a different number than the dock reported is a distinct,
+        // separately-filterable act — folding it into the details of the normal
+        // line would hide it in exactly the feed built to surface it.
+        if (ctx.override) {
+          await recordChange(tx, {
+            actor: { userId: user.id },
+            actionType: 'GRADUATE_OVERRIDE',
+            entityType: 'STAGING',
+            entityId: id,
+            action: `Graduated staging item ${id} booking ${ctx.bookedQuantity} against a counted ${ctx.countedQuantity}`,
+            details: {
+              productId: ctx.productId,
+              locationId: ctx.locationId,
+              countedQuantity: ctx.countedQuantity,
+              bookedQuantity: ctx.bookedQuantity,
+              overrideReason: ctx.override.reason,
+            },
+            batchId,
+          });
+        }
       },
     }
   );

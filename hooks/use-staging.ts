@@ -136,19 +136,41 @@ export interface GraduateNewProductFields {
   locationId: number;
 }
 
+/**
+ * W1-3a (pack REV-3 T2): the graduate request carries NO quantity. The server
+ * books the staging ROW's count, read inside the graduation transaction — a
+ * body that still carries `countedQuantity` is refused at 400.
+ *
+ * The ONLY way to book a different number is the override PAIR, and it is
+ * both-or-neither: a quantity without a reason is refused too.
+ */
+export interface GraduateOverrideFields {
+  overrideQuantity: number;
+  overrideReason: string;
+}
+
 export type GraduateBody =
-  | {
+  | ({
       mode: "existing";
       productId: number;
-      countedQuantity: number;
       locationId: number;
-    }
-  | {
+    } & Partial<GraduateOverrideFields>)
+  | ({
       mode: "new";
-      countedQuantity: number;
       locationId: number;
       productFields: GraduateNewProductFields;
-    };
+    } & Partial<GraduateOverrideFields>);
+
+export interface GraduateResponse {
+  productId: number;
+  approvalStatus: "APPROVED" | "PENDING_REVIEW";
+  locationId: number;
+  /** What the dock reported. */
+  countedQuantity: number;
+  /** What the ledger booked (differs only on an audited override). */
+  bookedQuantity: number;
+  receiptCost: { unitCostCents: number | null; source: "line" | "product" };
+}
 
 /** Graduation creates products + stock, so it invalidates the staging queue
  *  AND the full inventory/product cache set (products, inventory-variants,
@@ -156,7 +178,7 @@ export type GraduateBody =
 export function useGraduateStagingItem() {
   const queryClient = useQueryClient();
   const { token: csrfToken } = useCSRF();
-  return useMutation({
+  return useMutation<GraduateResponse, Error, { id: number; body: GraduateBody }>({
     mutationFn: async ({ id, body }: { id: number; body: GraduateBody }) => {
       const res = await fetch(`/api/staging-items/${id}/graduate`, {
         method: "POST",
@@ -177,5 +199,66 @@ export function useGraduateStagingItem() {
       // productId omitted -> invalidate ALL product-location-quantity entries.
       await invalidateInventoryCaches(queryClient);
     },
+  });
+}
+
+/**
+ * The count endpoint's response (W1-2b, `POST /api/staging-items/[id]/count`).
+ * `countedQuantity` here is the SERVER's number — every count surface renders
+ * this rather than the value it typed, so what the UI shows is always what the
+ * row holds.
+ */
+export interface CountStagingResponse {
+  id: number;
+  status: "RECEIVED";
+  countedQuantity: number;
+  previousCountedQuantity: number | null;
+  recount: boolean;
+  countedBy: number;
+  countedAt: string;
+  expectedQuantity: number | null;
+  shipmentId: string | null;
+  discrepancy: {
+    counted: boolean;
+    expectedMissing: boolean;
+    delta: number | null;
+    direction: "OVER" | "UNDER" | "MATCH" | null;
+  };
+}
+
+/**
+ * Record a physical count (pack REV-3 T2 count-entry UX).
+ *
+ * Counting is its OWN request, never a field that rides a graduation: the count
+ * stamps who counted and when and is always audited, and graduation books
+ * whatever the row holds afterwards. A `countedQuantity` of 0 is legal here —
+ * "the box was empty" is a fact about the dock; the "a zero count is a Discard"
+ * rule belongs to graduation.
+ */
+export function useCountStagingItem() {
+  const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
+  return useMutation<
+    CountStagingResponse,
+    Error,
+    { id: number; countedQuantity: number }
+  >({
+    mutationFn: async ({ id, countedQuantity }) => {
+      const res = await fetch(`/api/staging-items/${id}/count`, {
+        method: "POST",
+        headers: withCSRFHeaders(
+          { "Content-Type": "application/json" },
+          csrfToken
+        ),
+        body: JSON.stringify({ countedQuantity }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || "Failed to record the count");
+      }
+      return res.json();
+    },
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["staging-items"] }),
   });
 }
