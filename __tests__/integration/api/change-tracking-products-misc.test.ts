@@ -374,6 +374,7 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
     tx.stagingItem.findUnique.mockResolvedValue({
       id: 5,
       description: "Old",
+      status: "RECEIVED",
       vendor: null,
       countedQuantity: null,
       expectedQuantity: null,
@@ -381,11 +382,14 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
       notes: null,
       locationId: 1,
       resolvedProductId: null,
+      shipmentId: null,
     });
-    tx.stagingItem.update.mockResolvedValue({ id: 5, countedQuantity: 12 });
+    tx.stagingItem.update.mockResolvedValue({ id: 5, expectedQuantity: 12 });
 
+    // W1-2b: countedQuantity left the PATCH surface (pack REV-3 T2); the
+    // provided-fields-only diff is pinned on expectedQuantity instead.
     const resp = await stagingPATCH(
-      mkReq("http://t/api/staging-items/5", "PATCH", { countedQuantity: 12, vendor: "Acme" }),
+      mkReq("http://t/api/staging-items/5", "PATCH", { expectedQuantity: 12, vendor: "Acme" }),
       { params: { id: "5" } } as any
     );
 
@@ -400,7 +404,7 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
     expect(row.entityId).toBe("5");
     // ONLY the two provided fields appear — nothing else diffed.
     expect(row.details.changes).toEqual({
-      countedQuantity: { from: null, to: 12 },
+      expectedQuantity: { from: null, to: 12 },
       vendor: { from: null, to: "Acme" },
     });
   });
@@ -408,8 +412,10 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
   it("records SCALAR after-values for relation fields, but writes connect objects", async () => {
     tx.stagingItem.findUnique.mockResolvedValue({
       id: 5,
+      status: "RECEIVED",
       locationId: 1,
       resolvedProductId: null,
+      shipmentId: null,
     });
     tx.stagingItem.update.mockResolvedValue({ id: 5 });
 
@@ -431,11 +437,16 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
   });
 
   it("ER-B9: providing the same value => NO event (update still applied)", async () => {
-    tx.stagingItem.findUnique.mockResolvedValue({ id: 5, countedQuantity: 12 });
-    tx.stagingItem.update.mockResolvedValue({ id: 5, countedQuantity: 12 });
+    tx.stagingItem.findUnique.mockResolvedValue({
+      id: 5,
+      status: "RECEIVED",
+      expectedQuantity: 12,
+      shipmentId: null,
+    });
+    tx.stagingItem.update.mockResolvedValue({ id: 5, expectedQuantity: 12 });
 
     const resp = await stagingPATCH(
-      mkReq("http://t/api/staging-items/5", "PATCH", { countedQuantity: 12 }),
+      mkReq("http://t/api/staging-items/5", "PATCH", { expectedQuantity: 12 }),
       { params: { id: "5" } } as any
     );
 
@@ -448,7 +459,7 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
     tx.stagingItem.findUnique.mockResolvedValue(null);
 
     const resp = await stagingPATCH(
-      mkReq("http://t/api/staging-items/999", "PATCH", { countedQuantity: 1 }),
+      mkReq("http://t/api/staging-items/999", "PATCH", { expectedQuantity: 1 }),
       { params: { id: "999" } } as any
     );
 

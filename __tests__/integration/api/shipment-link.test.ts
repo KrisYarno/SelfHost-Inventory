@@ -315,12 +315,15 @@ describe('PATCH /api/staging-items/[id] — the pre-existing field path is untou
   it('a body without shipmentId never touches the shipment tables', async () => {
     setApprovedUser();
     db.stagingItem.findUnique.mockResolvedValue(itemRow());
-    db.stagingItem.update.mockResolvedValue(itemRow({ countedQuantity: 12 }));
+    db.stagingItem.update.mockResolvedValue(itemRow({ notes: 'pallet 3' }));
 
-    const resp = await PATCH(mkReq({ countedQuantity: 12 }), { params: { id: '5' } });
+    // W1-2b landed after this file: countedQuantity left the PATCH surface, and
+    // expectedQuantity (the other quantity field) now claims the linked
+    // shipment. `notes` is the field that still touches nothing but the row.
+    const resp = await PATCH(mkReq({ notes: 'pallet 3' }), { params: { id: '5' } });
 
     expect(resp.status).toBe(200);
-    expect(db.stagingItem.update.mock.calls[0][0].data).toEqual({ countedQuantity: 12 });
+    expect(db.stagingItem.update.mock.calls[0][0].data).toEqual({ notes: 'pallet 3' });
     expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
     expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
     expect(actionTypes()).toEqual(['STAGING_UPDATE']);

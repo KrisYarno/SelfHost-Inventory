@@ -26,13 +26,26 @@ import {
 
 const CHANGE_TRACKING_PATH = path.join(process.cwd(), 'lib', 'change-tracking.ts');
 
+/**
+ * W1-2b PARSER FIX (see the identical note in change-tracking-guards.test.ts):
+ * the old regex stopped at the first `;` ANYWHERE after the `=`, and the Lane 4
+ * member comment contains one. Four members past that point were invisible to
+ * this gate, so a taxonomy that did not list them still passed. Strip comments
+ * first, then cut at the declaration's real terminator.
+ */
 function parseAuditActionTypeMembers(moduleSource: string): string[] {
-  const block = moduleSource.match(/export type AuditActionType\s*=([\s\S]*?);/);
-  if (!block) throw new Error('could not locate the AuditActionType declaration');
+  const start = moduleSource.search(/export type AuditActionType\s*=/);
+  if (start < 0) throw new Error('could not locate the AuditActionType declaration');
+  const decommented = moduleSource
+    .slice(start)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  const end = decommented.indexOf(';');
+  if (end < 0) throw new Error('the AuditActionType declaration has no terminating `;`');
   const memberRe = /['"]([A-Z0-9_]+)['"]/g;
   const members: string[] = [];
   let m: RegExpExecArray | null;
-  while ((m = memberRe.exec(block[1])) !== null) members.push(m[1]);
+  while ((m = memberRe.exec(decommented.slice(0, end))) !== null) members.push(m[1]);
   return members;
 }
 
@@ -41,14 +54,33 @@ const unionMembers = parseAuditActionTypeMembers(fs.readFileSync(CHANGE_TRACKING
 describe('taxonomy completeness (writer-exhaustive)', () => {
   it('parses a plausible union (self-check) incl. the Lane 3 addition', () => {
     // Lane 6 added PLATFORM_WRITE_ATTEMPT (52); the inventory-accuracy lane's
-    // W1-2a added the six SHIPMENT_* verbs (58).
-    expect(unionMembers.length).toBe(58);
+    // W1-2a added the six SHIPMENT_* verbs (58) and W1-2b added STAGING_RECOUNT
+    // (59). The last four are the Lane 4 members the pre-fix parser truncated
+    // away — they were in the union all along (63).
+    expect(unionMembers.length).toBe(63);
     expect(unionMembers).toContain('ANALYTICS_REBUILD_TRIGGER');
     expect(unionMembers).toContain('USER_APPROVAL_REMINDER_SENT');
     expect(unionMembers).toContain('PLATFORM_WRITE_ATTEMPT');
     expect(unionMembers).toContain('SHIPMENT_CANCEL');
     expect(unionMembers).toContain('SHIPMENT_UNLINK');
+    expect(unionMembers).toContain('STAGING_RECOUNT');
     expect(new Set(unionMembers).size).toBe(unionMembers.length);
+  });
+
+  it('PARSER REGRESSION: a semicolon inside a member comment no longer truncates', () => {
+    // The Lane 4 comment ("...via the deep scan; token/hash never enter
+    // payloads") sits between PLATFORM_WRITE_ATTEMPT and the last four members.
+    // The pre-fix regex stopped there, so these four were invisible to every
+    // gate that reads the union — and to the admin filter built from it.
+    for (const hidden of [
+      'AI_PROVIDER_CREATE',
+      'AI_PROVIDER_UPDATE',
+      'API_TOKEN_CREATE',
+      'API_TOKEN_REVOKE',
+    ]) {
+      expect(unionMembers).toContain(hidden);
+      expect(ALL_ACTION_TYPES).toContain(hidden);
+    }
   });
 
   it('every union member -> non-UNKNOWN group, verb, label, tone', () => {
@@ -90,6 +122,14 @@ describe('actionMeta group / verb derivation', () => {
     expect(actionMeta('SIGNUP').group).toBe('ACCOUNT');
     expect(actionMeta('BUNDLE_CHANGE').group).toBe('MAPPING');
     expect(actionMeta('ACCOUNT_PASSWORD_CHANGE').group).toBe('ACCOUNT');
+    // Lane 4 folds (AI / API -> SETTINGS): correct all along, but only reachable
+    // through the filter now that the four members are in ALL_ACTION_TYPES.
+    expect(actionMeta('AI_PROVIDER_CREATE').group).toBe('SETTINGS');
+    expect(actionMeta('API_TOKEN_REVOKE').group).toBe('SETTINGS');
+    // W1-2b: the count endpoint's verb lands in the pre-staging group.
+    expect(actionMeta('STAGING_RECOUNT').group).toBe('STAGING');
+    expect(actionMeta('STAGING_RECOUNT').verb).toBe('RECOUNT');
+    expect(actionMeta('STAGING_RECOUNT').label).toBe('Item counted');
   });
 
   it('parses the MOST SPECIFIC trailing verb (BULK_UPDATE over UPDATE, AUTO_ADD)', () => {
@@ -132,10 +172,16 @@ describe('verb -> tone table (spec §11 D-L5 verbatim)', () => {
     ['ANALYTICS_REBUILD_TRIGGER', 'info'],
     ['SHIPMENT_LINK', 'info'],
     ['SHIPMENT_UNLINK', 'info'],
+    // W1-2b: a count is evidence-gathering, not a judgement about the stock.
+    ['STAGING_RECOUNT', 'info'],
     // neutral
     ['PRODUCT_UPDATE', 'neutral'],
     ['USER_ROLE_CHANGE', 'neutral'],
     ['BUNDLE_CHANGE', 'neutral'],
+    // Lane 4 members, reachable through the union again after the parser fix.
+    ['AI_PROVIDER_CREATE', 'positive'],
+    ['API_TOKEN_REVOKE', 'negative'],
+    ['AI_PROVIDER_UPDATE', 'neutral'],
   ];
   it.each(cases)('%s -> %s', (actionType, tone) => {
     expect(actionMeta(actionType).tone).toBe(tone);
@@ -168,6 +214,19 @@ describe('expandActionGroup', () => {
     expect(members).toContain('PRODUCT_CREATE');
     expect(members).toContain('PRODUCT_UPDATE');
     expect(members!.every((m) => actionMeta(m).group === 'PRODUCT')).toBe(true);
+  });
+
+  it('SETTINGS now expands to the Lane 4 members the truncated union hid', () => {
+    const members = expandActionGroup('SETTINGS');
+    expect(members).toContain('SETTINGS_UPDATE');
+    expect(members).toContain('AI_PROVIDER_CREATE');
+    expect(members).toContain('AI_PROVIDER_UPDATE');
+    expect(members).toContain('API_TOKEN_CREATE');
+    expect(members).toContain('API_TOKEN_REVOKE');
+  });
+
+  it('STAGING expands to the count verb alongside the rest of the queue', () => {
+    expect(expandActionGroup('STAGING')).toContain('STAGING_RECOUNT');
   });
 
   it('returns null for an unknown group (caller answers 400)', () => {

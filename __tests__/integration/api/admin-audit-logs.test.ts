@@ -170,4 +170,24 @@ describe('GET /api/admin/audit-logs (read path via lib/change-tracking)', () => 
     expect('entityId' in where).toBe(false);
     expect(where.actionType).toBe('PRODUCT_UPDATE');
   });
+
+  // W1-2b ride-along: ALL_ACTION_TYPES is this route's actionType allowlist, and
+  // it was built from a union the source parser truncated — so filtering the
+  // feed by a REAL, emitted Lane 4 action answered 400 "Unknown actionType".
+  it.each(['AI_PROVIDER_CREATE', 'AI_PROVIDER_UPDATE', 'API_TOKEN_CREATE', 'API_TOKEN_REVOKE'])(
+    'accepts ?actionType=%s (was a 400 while the union parse truncated)',
+    async (actionType) => {
+      const resp = await auditLogsGET(mkGet(`?actionType=${actionType}`), undefined as any);
+
+      expect((resp as Response).status).toBe(200);
+      expect(db.auditLog.findMany.mock.calls[0][0].where.actionType).toBe(actionType);
+    },
+  );
+
+  it('accepts ?actionType=STAGING_RECOUNT (the W1-2b count verb)', async () => {
+    const resp = await auditLogsGET(mkGet('?actionType=STAGING_RECOUNT'), undefined as any);
+
+    expect((resp as Response).status).toBe(200);
+    expect(db.auditLog.findMany.mock.calls[0][0].where.actionType).toBe('STAGING_RECOUNT');
+  });
 });

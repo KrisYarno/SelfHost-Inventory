@@ -85,6 +85,9 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   // routine bookkeeping, not a judgement about the stock.
   LINK: 'info',
   UNLINK: 'info',
+  // W1-2b: a count is evidence-gathering. It reports what is on the dock; the
+  // judgement about a discrepancy belongs to the exception row, not the verb.
+  RECOUNT: 'info',
   SYNC: 'info',
   AUTO_ADD: 'info',
   SENT: 'info',
@@ -122,6 +125,9 @@ const KNOWN_VERBS: readonly string[] = [
   'GRADUATE',
   'RESTORE',
   'DISCARD',
+  // W1-2b: STAGING_RECOUNT. No shorter 'COUNT' verb exists, so there is no
+  // longest-first ambiguity to resolve here.
+  'RECOUNT',
   'TRANSFER',
   'TRIGGER',
   'SIGNUP',
@@ -202,6 +208,9 @@ const LABEL_OVERRIDES: Readonly<Record<string, string>> = {
   SHIPMENT_CANCEL: 'Shipment cancelled',
   SHIPMENT_LINK: 'Item linked to shipment',
   SHIPMENT_UNLINK: 'Item unlinked from shipment',
+  // One verb covers the first count and every recount, so the label states the
+  // act rather than claiming a re-count that may not have happened.
+  STAGING_RECOUNT: 'Item counted',
 };
 
 function titleCase(actionType: string): string {
@@ -283,6 +292,7 @@ export const ALL_ACTION_TYPES: readonly AuditActionType[] = [
   'STAGING_GRADUATE',
   'STAGING_DISCARD',
   'STAGING_UPDATE',
+  'STAGING_RECOUNT',
   'SHIPMENT_CREATE',
   'SHIPMENT_UPDATE',
   'SHIPMENT_CLOSE',
@@ -319,6 +329,17 @@ export const ALL_ACTION_TYPES: readonly AuditActionType[] = [
   'BACKUP_CREATED',
   'ANALYTICS_REBUILD_TRIGGER',
   'PLATFORM_WRITE_ATTEMPT',
+  // Lane 4 (W1-2b ride-along). These were in the union and had labels, a group
+  // fold and verbs all along, but were MISSING here: the completeness gate
+  // parsed the union source with a regex that stopped at the first `;`, and the
+  // Lane 4 member comment contains one -- so the gate compared the taxonomy
+  // against a union four members short and passed. The visible consequence was
+  // an admin audit-log filter that answered 400 for real, emitted actions
+  // (ALL_ACTION_TYPES is that route's allowlist).
+  'AI_PROVIDER_CREATE',
+  'AI_PROVIDER_UPDATE',
+  'API_TOKEN_CREATE',
+  'API_TOKEN_REVOKE',
 ];
 
 // Display order + labels for the non-UNKNOWN groups.

@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, apiHandler, requireCSRF } from '@/lib/api-utils';
 import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
-import type { Prisma } from '@prisma/client';
-import { PatchStagingSchema } from '@/lib/validation/staging';
+import { Prisma, StagingItemStatus } from '@prisma/client';
+import { PatchStagingSchema, assertStagingPatchOmitsCount } from '@/lib/validation/staging';
 import { getStagingItem } from '@/lib/staging/queries';
 import { recordChange, type ChangeDiff } from '@/lib/change-tracking';
-import { applyShipmentLink } from '@/lib/shipments/lifecycle';
+import { applyShipmentLink, claimShipmentForCount } from '@/lib/shipments/lifecycle';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
 
 export const dynamic = 'force-dynamic';
@@ -34,7 +34,21 @@ export const GET = apiHandler(async (request: NextRequest, { params }: RoutePara
   return NextResponse.json(item);
 });
 
-// PATCH /api/staging-items/[id] - Edit / label / count a staging item
+/**
+ * The state-bearing fields (pack REV-3 T2, W1-2b). Every one of them describes
+ * WHAT MOVED — the receipt figures, the product it became, where it landed, and
+ * which receipt it belongs to. Once the line graduated, all four are the
+ * history of a real stock movement, and a PATCH would rewrite that story after
+ * the fact: 409. (`countedQuantity` is the fifth frozen field; it never reaches
+ * this list because it left the PATCH surface entirely — the count endpoint's
+ * own RECEIVED guard freezes it.)
+ *
+ * Free-text annotation (description / vendor / reference / notes) is
+ * deliberately NOT frozen: it labels the box, it does not restate the movement.
+ */
+const STATE_FIELDS = ['expectedQuantity', 'resolvedProductId', 'locationId', 'shipmentId'] as const;
+
+// PATCH /api/staging-items/[id] - Edit / label a staging item
 export const PATCH = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   const { user } = await requireApproved();
 
@@ -49,7 +63,11 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     return NextResponse.json({ error: 'Invalid staging item ID' }, { status: 400 });
   }
 
-  const body = PatchStagingSchema.parse(await request.json());
+  // Counting left this surface (pack REV-3 T2): refuse the field outright
+  // rather than let Zod strip it, so a caller can never believe it counted.
+  const raw = await request.json();
+  assertStagingPatchOmitsCount(raw);
+  const body = PatchStagingSchema.parse(raw);
 
   // Build a true partial update: only keys explicitly present in the body are
   // written, so PATCH never clobbers untouched columns. In parallel, collect the
@@ -64,10 +82,6 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
   if (body.expectedQuantity !== undefined) {
     data.expectedQuantity = body.expectedQuantity;
     after.expectedQuantity = body.expectedQuantity;
-  }
-  if (body.countedQuantity !== undefined) {
-    data.countedQuantity = body.countedQuantity;
-    after.countedQuantity = body.countedQuantity;
   }
   if (body.vendor !== undefined) {
     data.vendor = body.vendor;
@@ -97,6 +111,28 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     const existing = await tx.stagingItem.findUnique({ where: { id } });
     if (!existing) {
       throw new AppError('Staging item not found', 'NOT_FOUND', 404);
+    }
+
+    // --- the post-graduation FREEZE (pack REV-3 T2) -----------------------
+    // Checked before ANY write, and over the whole body at once, so a request
+    // that mixes a frozen field with a legal one is refused entirely rather
+    // than applied in part.
+    const frozen = STATE_FIELDS.filter((field) => body[field] !== undefined);
+    if (frozen.length > 0 && existing.status !== StagingItemStatus.RECEIVED) {
+      throw new AppError(
+        `Staging item ${id} is ${existing.status.toLowerCase()}; ${frozen.join(', ')} can no longer be changed`,
+        'CONFLICT',
+        409,
+      );
+    }
+
+    // expectedQuantity is the count's counterpart in the discrepancy
+    // arithmetic, so it freezes when receiving ends: its shipment must be OPEN.
+    // resolvedProductId / locationId deliberately do NOT take this claim —
+    // under the stranded-line amendment a CLOSED shipment's lines can still
+    // graduate, and those two fields are exactly what a graduation consumes.
+    if (body.expectedQuantity !== undefined && existing.shipmentId !== null) {
+      await claimShipmentForCount(tx, existing.shipmentId);
     }
 
     // Inventory-accuracy lane (pack REV-2 T4): join / leave a receiving header.

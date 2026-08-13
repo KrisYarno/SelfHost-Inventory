@@ -186,20 +186,23 @@ describe('GET /api/staging-items (list)', () => {
 });
 
 describe('PATCH /api/staging-items/[id]', () => {
+  // W1-2b (pack REV-3 T2): countedQuantity left this surface, so the
+  // partial-update pin now rides expectedQuantity — same property (only the
+  // provided keys are written), a field that is still PATCHable while RECEIVED.
   it('updates only the provided fields (200)', async () => {
     setApprovedUser();
-    db.stagingItem.findUnique.mockResolvedValue({ id: 5, status: 'RECEIVED' });
-    db.stagingItem.update.mockResolvedValue({ id: 5, countedQuantity: 12 });
+    db.stagingItem.findUnique.mockResolvedValue({ id: 5, status: 'RECEIVED', shipmentId: null });
+    db.stagingItem.update.mockResolvedValue({ id: 5, expectedQuantity: 12 });
 
     const resp = await PATCH(
-      mkReq('http://t/api/staging-items/5', 'PATCH', { countedQuantity: 12 }),
+      mkReq('http://t/api/staging-items/5', 'PATCH', { expectedQuantity: 12 }),
       { params: { id: '5' } }
     );
 
     expect(resp.status).toBe(200);
     const updateArgs = db.stagingItem.update.mock.calls[0][0];
     expect(updateArgs.where).toEqual({ id: 5 });
-    expect(updateArgs.data).toEqual({ countedQuantity: 12 });
+    expect(updateArgs.data).toEqual({ expectedQuantity: 12 });
     // description was not in the body -> must not be written
     expect(updateArgs.data.description).toBeUndefined();
   });
@@ -209,7 +212,7 @@ describe('PATCH /api/staging-items/[id]', () => {
     db.stagingItem.findUnique.mockResolvedValue(null);
 
     const resp = await PATCH(
-      mkReq('http://t/api/staging-items/999', 'PATCH', { countedQuantity: 1 }),
+      mkReq('http://t/api/staging-items/999', 'PATCH', { expectedQuantity: 1 }),
       { params: { id: '999' } }
     );
 
@@ -222,7 +225,7 @@ describe('PATCH /api/staging-items/[id]', () => {
     mockValidateCSRF.mockResolvedValue(false);
 
     const resp = await PATCH(
-      mkReq('http://t/api/staging-items/5', 'PATCH', { countedQuantity: 12 }),
+      mkReq('http://t/api/staging-items/5', 'PATCH', { expectedQuantity: 12 }),
       { params: { id: '5' } }
     );
 

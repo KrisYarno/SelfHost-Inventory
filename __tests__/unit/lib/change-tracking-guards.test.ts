@@ -207,6 +207,9 @@ const KNOWN_VERBS: readonly string[] = [
   'CANCEL',
   'LINK',
   'UNLINK',
+  // W1-2b: STAGING_RECOUNT -- the count endpoint's audit verb (first count and
+  // every recount alike).
+  'RECOUNT',
 ];
 
 /**
@@ -214,18 +217,35 @@ const KNOWN_VERBS: readonly string[] = [
  * source. Anchored on the type DECLARATION and stopped at its terminating
  * `;`, so concurrent additions elsewhere in the module (e.g. Task 5's read
  * functions) cannot leak into the parse.
+ *
+ * W1-2b PARSER FIX: the old one-shot regex (`=([\s\S]*?);`) stopped at the
+ * first semicolon of any kind — including one inside a MEMBER COMMENT. The
+ * Lane 4 block ("...via the deep scan; token/hash never enter payloads")
+ * carries exactly that, so the union silently truncated four members short and
+ * this gate, the taxonomy completeness gate, and the admin filter all agreed on
+ * a union that was missing AI_PROVIDER_CREATE / AI_PROVIDER_UPDATE /
+ * API_TOKEN_CREATE / API_TOKEN_REVOKE. Comments are stripped BEFORE the
+ * terminator is located, so the parse ends at the union's real end.
  */
 function parseAuditActionTypeMembers(moduleSource: string): string[] {
-  const block = moduleSource.match(/export type AuditActionType\s*=([\s\S]*?);/);
-  if (!block) {
+  const start = moduleSource.search(/export type AuditActionType\s*=/);
+  if (start < 0) {
     throw new Error(
       '[guards] could not locate the `export type AuditActionType =` declaration in lib/change-tracking.ts',
     );
   }
+  const decommented = moduleSource
+    .slice(start)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  const end = decommented.indexOf(';');
+  if (end < 0) {
+    throw new Error('[guards] the AuditActionType declaration has no terminating `;`');
+  }
   const memberRe = /['"]([A-Z0-9_]+)['"]/g;
   const members: string[] = [];
   let match: RegExpExecArray | null;
-  while ((match = memberRe.exec(block[1])) !== null) {
+  while ((match = memberRe.exec(decommented.slice(0, end))) !== null) {
     members.push(match[1]);
   }
   return members;
@@ -236,7 +256,11 @@ function parseAuditActionTypeMembers(moduleSource: string): string[] {
 const SENTINEL_MEMBERS: readonly AuditActionType[] = [
   'PRODUCT_UPDATE', // carried-over section
   'USER_ROLE_CHANGE', // spec D5 additions section
-  'BACKUP_CREATED', // last member — proves the parse reached the end
+  'BACKUP_CREATED', // mid-union anchor
+  // W1-2b: the two members that sit AFTER the semicolon-bearing Lane 4 comment.
+  // They are the truncation regression pin — the pre-fix parser saw neither.
+  'AI_PROVIDER_CREATE',
+  'API_TOKEN_REVOKE', // last member — proves the parse reached the real end
 ];
 
 describe('R-D15 guard: every AuditActionType member ends in a known verb', () => {

@@ -106,6 +106,11 @@ export type AuditActionType =
   | 'SHIPMENT_CANCEL'
   | 'SHIPMENT_LINK'
   | 'SHIPMENT_UNLINK'
+  // W1-2b: the count endpoint's verb. ONE actionType covers the first count and
+  // every recount -- the changes diff carries old -> new (from: null on the
+  // first), and the event is written even when a confirming recount lands on
+  // the same number, because the act is the record.
+  | 'STAGING_RECOUNT'
   // --- Lane 4 additions (spec D2/D7): AI-provider config + API-token lifecycle.
   // Key values diff as [REDACTED] via the deep scan; token/hash never enter
   // payloads (details = name/tier only). Emitted by the T4 admin routes.

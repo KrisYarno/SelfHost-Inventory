@@ -5,10 +5,13 @@
  * Pure schema validation — no Prisma, no mocks.
  */
 
+import { z } from 'zod';
 import {
   CreateStagingSchema,
   PatchStagingSchema,
   GraduateSchema,
+  CountStagingSchema,
+  assertStagingPatchOmitsCount,
 } from '@/lib/validation/staging';
 
 const validProductFields = {
@@ -78,12 +81,48 @@ describe('PatchStagingSchema', () => {
     expect(PatchStagingSchema.safeParse({}).success).toBe(true);
   });
 
-  it('accepts a tentative countedQuantity of 0 (>= 1 enforced only at graduate)', () => {
-    expect(PatchStagingSchema.safeParse({ countedQuantity: 0 }).success).toBe(true);
+  // W1-2b (pack REV-3 T2): countedQuantity LEFT this schema. Counting is a
+  // physical act with an actor and a timestamp, so it lives at
+  // POST /api/staging-items/[id]/count and nowhere else.
+  it('no longer declares countedQuantity', () => {
+    expect(Object.keys(PatchStagingSchema.shape)).not.toContain('countedQuantity');
   });
 
-  it('rejects a negative countedQuantity', () => {
-    expect(PatchStagingSchema.safeParse({ countedQuantity: -1 }).success).toBe(false);
+  it('assertStagingPatchOmitsCount throws on a body that still carries it', () => {
+    expect(() => assertStagingPatchOmitsCount({ countedQuantity: 12 })).toThrow(z.ZodError);
+    // ...including an explicit null: clearing a count is still counting.
+    expect(() => assertStagingPatchOmitsCount({ countedQuantity: null })).toThrow(z.ZodError);
+    // The message names the endpoint that CAN do it.
+    try {
+      assertStagingPatchOmitsCount({ countedQuantity: 12 });
+    } catch (err) {
+      expect((err as z.ZodError).errors[0].message).toMatch(/\/count/);
+      expect((err as z.ZodError).errors[0].path).toEqual(['countedQuantity']);
+    }
+  });
+
+  it('assertStagingPatchOmitsCount passes anything else through (incl. junk bodies)', () => {
+    expect(() => assertStagingPatchOmitsCount({ notes: 'pallet 3' })).not.toThrow();
+    expect(() => assertStagingPatchOmitsCount({})).not.toThrow();
+    expect(() => assertStagingPatchOmitsCount(null)).not.toThrow();
+    expect(() => assertStagingPatchOmitsCount('nonsense')).not.toThrow();
+  });
+});
+
+describe('CountStagingSchema', () => {
+  it('accepts a count of 0 (an empty box is a fact; the 422 is graduation-side)', () => {
+    expect(CountStagingSchema.safeParse({ countedQuantity: 0 }).success).toBe(true);
+  });
+
+  it('rejects a negative, fractional, or missing count', () => {
+    expect(CountStagingSchema.safeParse({ countedQuantity: -1 }).success).toBe(false);
+    expect(CountStagingSchema.safeParse({ countedQuantity: 1.5 }).success).toBe(false);
+    expect(CountStagingSchema.safeParse({}).success).toBe(false);
+  });
+
+  it('caps at the house 1,000,000 ceiling', () => {
+    expect(CountStagingSchema.safeParse({ countedQuantity: 1_000_000 }).success).toBe(true);
+    expect(CountStagingSchema.safeParse({ countedQuantity: 1_000_001 }).success).toBe(false);
   });
 });
 
