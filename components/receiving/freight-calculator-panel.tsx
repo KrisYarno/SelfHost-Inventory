@@ -54,8 +54,9 @@ import {
  * FD2-2 (fix round 3) — THE DRIFT CHECK IS THE SERVER'S. Everything compared
  * here is a render old, so every line carries `ifUnitCostCents` — the value it
  * expects the row to still hold — and the server makes that its WHERE. A refusal
- * arrives as the API error's `code: "COST_DRIFT"` and invalidates the whole bill
- * through the same surface a locally-detected change uses.
+ * arrives as the API error's `code` (FD4-1 named it `BASIS_DRIFT`) and
+ * invalidates the whole bill through the same surface a locally-detected change
+ * uses.
  *
  * FD3-1 (fix round 4) — THE PARTIAL WRITE IS GONE, AND SO IS EVERY STATE THAT
  * DESCRIBED ONE. Accept used to fan out into one request per line, and three
@@ -70,6 +71,17 @@ import {
  * DELETED — there is no partial state left for them to describe. A failure keeps
  * the bill exactly as it is and Accept-again re-sends it whole, which is safe
  * precisely because nothing landed.
+ *
+ * FD4-1 (fix round 6) — ACCEPT HANDS BACK THE WHOLE FROZEN BASIS. The payload
+ * used to be the writes alone, and QA-12 shrank it further by dropping the
+ * no-ops. But the split was computed from every line's cost AND quantity, so the
+ * lines left out were exactly the ones nothing was checking: a line whose base
+ * went 0 -> 100 after the last render could sit outside the request while the
+ * all-onto-B split it invalidated committed anyway. Every session line now
+ * travels with the cost and quantity it was frozen at — the writable ones
+ * carrying a cost to write, the rest carrying none — and the server claims all
+ * of them. What the panel refuses to WRITE is unchanged; what it refuses to
+ * mention is nothing.
  *
  * Accept hands back the per-line unit costs; writing them ATOMICALLY is the
  * caller's job. A caller whose write fails must REJECT (W1S-5).
@@ -86,12 +98,23 @@ export interface CalculatorLine {
   baseCents: number | null;
 }
 
-/** One line's write: the cost to set, and the cost it must still hold (FD2-2). */
-export interface AllocationWrite {
+/**
+ * One line of the bill: the basis it was computed from, and — when this line is
+ * being written — the cost to set (FD2-2, widened by FD4-1).
+ *
+ * A line WITHOUT `unitCostCents` is VERIFY-ONLY: it is part of the split's
+ * premise and must be checked, but nothing about it is being changed.
+ */
+export interface AllocationLine {
   id: number;
-  unitCostCents: number;
-  /** The precondition. NULL is legal and means "still unpriced". */
+  /** Which quantity the share was divided by — the server's WHERE depends on it. */
+  qtySource: CalculatorLine["qtySource"];
+  /** That quantity, frozen. */
+  qty: number;
+  /** The cost precondition. NULL is legal and means "still unpriced". */
   ifUnitCostCents: number | null;
+  /** Present = write this cost. Absent = verify only. */
+  unitCostCents?: number;
 }
 
 /** The frozen inputs of one bill: what the split was computed from. */
@@ -102,7 +125,7 @@ interface BillSession {
 
 interface FreightCalculatorPanelProps {
   lines: CalculatorLine[];
-  onAccept: (updates: AllocationWrite[]) => void | Promise<void>;
+  onAccept: (bill: AllocationLine[]) => void | Promise<void>;
   disabled?: boolean;
   busy?: boolean;
 }
@@ -128,12 +151,12 @@ function parseDollarsToCents(raw: string): number | null {
 }
 
 /**
- * Did the SERVER refuse a cost precondition (FD2-2)? Read off the API error's
- * house `code`, defensively — the panel takes no dependency on the caller's
- * error class, only on the field the server itself sent.
+ * Did the SERVER refuse a basis precondition (FD2-2; FD4-1 renamed it)? Read off
+ * the API error's house `code`, defensively — the panel takes no dependency on
+ * the caller's error class, only on the field the server itself sent.
  */
-function isCostDrift(error: unknown): boolean {
-  return (error as { code?: unknown } | null)?.code === "COST_DRIFT";
+function isBasisDrift(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === "BASIS_DRIFT";
 }
 
 const QTY_SOURCE_LABEL: Record<CalculatorLine["qtySource"], string> = {
@@ -341,34 +364,45 @@ export function FreightCalculatorPanel({
   );
 
   /**
-   * What a press of Accept SENDS: the WHOLE bill (FD3-1) — every writable line
-   * at its frozen allocation, each guarded on the base the split was computed
-   * from (FD2-2). Withheld lines stay out (W1S-3: an inexact split is not
-   * consented to), and there is no "already written" category to subtract,
-   * because the caller writes all of these or none of them.
+   * The lines this bill actually WRITES, by id, at their frozen allocation.
    *
-   * QA-12b — A NO-OP IS NOT A WRITE. A line with no quantity (an uncounted box
-   * with nothing expected) has no value, so it takes 0 of the freight and its
-   * "suggested" unit cost is the base cost it already holds. Sending it bought
-   * nothing and cost something real: a row lock inside the bill's transaction,
-   * an `updatedAt` bump on a line nobody touched, and one more precondition for
-   * a concurrent edit to fail the WHOLE bill on. So a line is in this payload
-   * only if writing it would change the number stored on the row.
+   * Withheld lines stay out (W1S-3: an inexact split is not consented to), and
+   * so do the no-ops — QA-12b — because a line with no quantity takes 0 of the
+   * freight and its "suggested" cost is the one already stored. Writing it
+   * bought nothing and cost something real: an `updatedAt` bump on a line nobody
+   * touched. A line is written only if writing it changes the stored number.
    */
-  const payload: AllocationWrite[] = !session
-    ? []
-    : writable
-        .filter((s) => {
-          const allocated = allocatedById.get(s.id) ?? 0;
-          return !(
-            allocated === 0 && s.suggestedUnitCostCents === (frozenBaseById.get(s.id) ?? null)
-          );
-        })
-        .map((s) => ({
-          id: s.id as number,
-          unitCostCents: s.suggestedUnitCostCents,
-          ifUnitCostCents: frozenBaseById.get(s.id) ?? null,
-        }));
+  const writes = new Map<number, number>(
+    writable
+      .filter((s) => {
+        const allocated = allocatedById.get(s.id) ?? 0;
+        return !(
+          allocated === 0 && s.suggestedUnitCostCents === (frozenBaseById.get(s.id) ?? null)
+        );
+      })
+      .map((s) => [s.id as number, s.suggestedUnitCostCents]),
+  );
+
+  /**
+   * What a press of Accept SENDS: the WHOLE frozen session (FD3-1 + FD4-1).
+   *
+   * Every line travels, carrying the cost and the quantity the split was
+   * computed against; the ones above also carry the cost to write. The rest are
+   * VERIFY-ONLY, and leaving them out was the FD4-1 defect: the split rests on
+   * their numbers just as much, so a line nobody sends is a line nobody checks —
+   * and an all-onto-B allocation could commit long after the truth had become
+   * 50/50 because A's base moved and A was not in the request.
+   */
+  const payload: AllocationLine[] = (session?.lines ?? []).map((line) => {
+    const unitCostCents = writes.get(line.id);
+    return {
+      id: line.id,
+      qtySource: line.qtySource,
+      qty: line.qty,
+      ifUnitCostCents: line.baseCents,
+      ...(unitCostCents === undefined ? {} : { unitCostCents }),
+    };
+  });
 
   const canAllocate =
     !disabled && !busy && !accepting &&
@@ -382,8 +416,9 @@ export function FreightCalculatorPanel({
     ok !== null &&
     (validation === null || validation.status === "ok") &&
     // QA-12b: writable lines that would write what is already there leave
-    // nothing to send, and an empty bill is not a bill.
-    payload.length > 0;
+    // nothing to send, and a payload of pure basis is not a bill (FD4-1 — the
+    // server refuses that request too).
+    writes.size > 0;
 
   const handleAllocate = () => {
     if (!canAllocate || freightCents === null) return;
@@ -405,16 +440,18 @@ export function FreightCalculatorPanel({
       // W1S-5 / FD3-1: the bill did not land — NONE of it — so nothing here may
       // look like it did. The bill, the edits and the per-line choices all stay
       // exactly as they were, and Accept-again re-sends the same request.
-      if (isCostDrift(error)) {
+      if (isBasisDrift(error)) {
         // FD2-2: the server refused a precondition, so the shipment is not the
         // one this split describes — and no amount of retrying makes it so. The
         // WHOLE bill goes, by name, through the same surface a locally-detected
         // change uses. Safe advice now that it is also TRUE advice: nothing was
         // written, so re-entering the full freight cannot double-apply it.
+        // FD4-1: "cost or quantity", because both are now preconditions and the
+        // line it refused on may be one this bill was not even writing.
         setDriftInvalidation(
           error instanceof Error
-            ? `A line's cost changed while this bill was open (${error.message}).`
-            : "A line's cost changed while this bill was open.",
+            ? `A line's cost or quantity changed while this bill was open (${error.message}).`
+            : "A line's cost or quantity changed while this bill was open.",
         );
         setWriteFailed(null);
       } else {
@@ -737,7 +774,7 @@ export function FreightCalculatorPanel({
           // With every line held back, Accept is disabled and that sentence sent
           // an operator to press a button that does nothing.
           <span data-testid="allocation-withheld" className="text-xs text-amber-700 dark:text-amber-400">
-            {payload.length > 0
+            {writes.size > 0
               ? `${withheld.length} line(s) cannot be expressed as a whole unit cost and are held back. Accept writes the rest.`
               : `All ${withheld.length} line(s) are held back: none of them can be expressed as a whole unit cost, so there is nothing for Accept to write. Edit the split until it divides, or take the floored drop per line.`}
           </span>

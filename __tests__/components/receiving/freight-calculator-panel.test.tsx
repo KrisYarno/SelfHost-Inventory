@@ -16,18 +16,45 @@
  *
  * Accept writes each line's `unitCostCents`; lines with no suggestible cost are
  * left alone rather than stamped with a number nobody chose.
+ *
+ * FD4-1 (fix round 6) — ACCEPT SENDS THE WHOLE FROZEN BASIS. A split is computed
+ * from every line's cost AND quantity, including the lines it does not write, so
+ * a payload of writes alone leaves most of its own premise unchecked. Every
+ * session line now travels: the ones being written carry `unitCostCents`, the
+ * rest (no-ops, withheld inexact splits, unpriced lines) carry the same frozen
+ * basis with no cost, and the server claims them all.
  */
 
 import * as React from "react";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import { FreightCalculatorPanel } from "@/components/receiving/freight-calculator-panel";
+import {
+  FreightCalculatorPanel,
+  type CalculatorLine,
+} from "@/components/receiving/freight-calculator-panel";
 
 const LINES = [
   { id: 1, description: "Vials 10ml", qty: 10, qtySource: "counted" as const, baseCents: 500 },
   { id: 2, description: "Caps", qty: 5, qtySource: "counted" as const, baseCents: 200 },
 ];
+
+/**
+ * The VERIFY-ONLY form of a fixture line (FD4-1): its frozen basis — the cost
+ * and the quantity the split was computed from — and no cost to write.
+ */
+const basisOf = (line: CalculatorLine) => ({
+  id: line.id,
+  qtySource: line.qtySource,
+  qty: line.qty,
+  ifUnitCostCents: line.baseCents,
+});
+
+/** ...and the WRITE form: the same basis, plus the cost this bill lands on it. */
+const writeOf = (line: CalculatorLine, unitCostCents: number) => ({
+  ...basisOf(line),
+  unitCostCents,
+});
 
 function renderPanel(
   overrides: Partial<React.ComponentProps<typeof FreightCalculatorPanel>> = {},
@@ -226,25 +253,27 @@ describe("edited allocations", () => {
     // Line 1: 500 + 4000/10 = 900. Line 2: 200 + 2000/5 = 600. Each carries the
     // FROZEN base as its server-side precondition (FD2-2).
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 900, ifUnitCostCents: 500 },
-      { id: 2, unitCostCents: 600, ifUnitCostCents: 200 },
+      writeOf(LINES[0], 900),
+      writeOf(LINES[1], 600),
     ]);
   });
 
   it("Accept writes only the lines that HAVE a suggestible cost", async () => {
     const user = userEvent.setup();
-    const { onAccept } = renderPanel({
-      lines: [
-        { id: 1, description: "Priced", qty: 10, qtySource: "counted", baseCents: 500 },
-        { id: 2, description: "Unpriced", qty: 4, qtySource: "counted", baseCents: null },
-      ],
-    });
+    const PRICED_AND_NOT: CalculatorLine[] = [
+      { id: 1, description: "Priced", qty: 10, qtySource: "counted", baseCents: 500 },
+      { id: 2, description: "Unpriced", qty: 4, qtySource: "counted", baseCents: null },
+    ];
+    const { onAccept } = renderPanel({ lines: PRICED_AND_NOT });
 
     await enterBill(user, "60.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
+    // FD4-1: the unpriced line is still BASIS — the whole split rests on it
+    // having no cost — so it travels verify-only rather than not at all.
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 1100, ifUnitCostCents: 500 },
+      writeOf(PRICED_AND_NOT[0], 1100),
+      basisOf(PRICED_AND_NOT[1]),
     ]);
   });
 
@@ -282,9 +311,9 @@ describe("inexact unit splits are withheld until somebody chooses (W1S-3)", () =
    * Line 1 (qty 1) takes 2c and expresses it exactly. Line 2 (qty 3) takes 8c,
    * which is 2c per unit with 2c no unit cost can carry.
    */
-  const MIXED = [
-    { id: 1, description: "Exact", qty: 1, qtySource: "counted" as const, baseCents: 100 },
-    { id: 2, description: "Inexact", qty: 3, qtySource: "counted" as const, baseCents: 100 },
+  const MIXED: CalculatorLine[] = [
+    { id: 1, description: "Exact", qty: 1, qtySource: "counted", baseCents: 100 },
+    { id: 2, description: "Inexact", qty: 3, qtySource: "counted", baseCents: 100 },
   ];
 
   it("marks the inexact line as needing an exact split", async () => {
@@ -306,9 +335,10 @@ describe("inexact unit splits are withheld until somebody chooses (W1S-3)", () =
     await enterBill(user, "0.10");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
-    expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 102, ifUnitCostCents: 100 },
-    ]);
+    // FD4-1: the withheld line is not written — and is not silently dropped
+    // either. Its frozen basis travels, because the exact line's share was
+    // computed against it.
+    expect(onAccept).toHaveBeenCalledWith([writeOf(MIXED[0], 102), basisOf(MIXED[1])]);
   });
 
   it("holds Accept entirely when NO line can be written exactly", async () => {
@@ -337,8 +367,8 @@ describe("inexact unit splits are withheld until somebody chooses (W1S-3)", () =
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 102, ifUnitCostCents: 100 },
-      { id: 2, unitCostCents: 102, ifUnitCostCents: 100 },
+      writeOf(MIXED[0], 102),
+      writeOf(MIXED[1], 102),
     ]);
   });
 
@@ -356,8 +386,8 @@ describe("inexact unit splits are withheld until somebody chooses (W1S-3)", () =
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 101, ifUnitCostCents: 100 },
-      { id: 2, unitCostCents: 103, ifUnitCostCents: 100 },
+      writeOf(MIXED[0], 101),
+      writeOf(MIXED[1], 103),
     ]);
   });
 
@@ -390,31 +420,39 @@ describe("inexact unit splits are withheld until somebody chooses (W1S-3)", () =
 });
 
 // ---------------------------------------------------------------------------
-// QA-12b — a write that changes nothing is not a write
+// QA-12b — a write that changes nothing is not a write.
+// FD4-1 — but it IS part of the basis, and the server has to see it.
 // ---------------------------------------------------------------------------
 //
 // A qty-0 line takes a 0 allocation (it has no value to allocate against), so
-// its "suggested" unit cost is its own base cost. Sending it meant a row lock,
+// its "suggested" unit cost is its own base cost. WRITING it meant a row lock,
 // an updatedAt bump and a precondition to lose the race on, all to store the
-// number already there.
+// number already there — so it is not written.
+//
+// Dropping it from the request altogether was the mistake QA-12 shipped: that
+// line's base cost is one of the numbers the split was computed from, and a
+// line nobody sends is a line nobody checks. The all-onto-B split then commits
+// while the truth on the rows has become 50/50. It travels VERIFY-ONLY.
 
-describe("no-op lines never reach the payload (QA-12b)", () => {
-  const WITH_ZERO_QTY = [
-    { id: 1, description: "Vials", qty: 10, qtySource: "counted" as const, baseCents: 500 },
+describe("no-op lines are verify-only, never written (QA-12b + FD4-1)", () => {
+  const WITH_ZERO_QTY: CalculatorLine[] = [
+    { id: 1, description: "Vials", qty: 10, qtySource: "counted", baseCents: 500 },
     // Logged but never counted and nothing expected: qty 0, priced 200c.
-    { id: 2, description: "Mystery box", qty: 0, qtySource: "none" as const, baseCents: 200 },
+    { id: 2, description: "Mystery box", qty: 0, qtySource: "none", baseCents: 200 },
   ];
 
-  it("leaves a qty-0 line out of the bill entirely", async () => {
+  it("sends a qty-0 line as BASIS with no cost to write", async () => {
     const user = userEvent.setup();
     const { onAccept } = renderPanel({ lines: WITH_ZERO_QTY });
 
     await enterBill(user, "60.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
-    expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 1100, ifUnitCostCents: 500 },
-    ]);
+    const [sent] = onAccept.mock.calls[0];
+    expect(sent).toEqual([writeOf(WITH_ZERO_QTY[0], 1100), basisOf(WITH_ZERO_QTY[1])]);
+    // The distinction is the PRESENCE of the key, and it is what the server
+    // reads to decide write-vs-verify.
+    expect(sent[1]).not.toHaveProperty("unitCostCents");
   });
 
   it("still writes a 0-allocation line whose cost the operator EDITED upward", async () => {
@@ -433,7 +471,8 @@ describe("no-op lines never reach the payload (QA-12b)", () => {
     expect(within(lineRow(2)).getByTestId("needs-exact-split")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /accept/i }));
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 1099, ifUnitCostCents: 500 },
+      writeOf(WITH_ZERO_QTY[0], 1099),
+      basisOf(WITH_ZERO_QTY[1]),
     ]);
   });
 
@@ -444,6 +483,83 @@ describe("no-op lines never reach the payload (QA-12b)", () => {
     await enterBill(user, "0");
 
     // Every line is allocated 0 and would be restated at its own base cost.
+    // A payload of pure basis is not a bill, however many lines are in it.
+    expect(screen.getByRole("button", { name: /accept/i })).toBeDisabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD4-1 — the payload IS the frozen session, whole.
+// ---------------------------------------------------------------------------
+
+describe("the payload carries the WHOLE frozen basis (FD4-1)", () => {
+  /**
+   * One of each kind the panel refuses to write: a no-op (qty 0), an inexact
+   * split (qty 3 over 10c), and an unpriced line. None of them may be dropped.
+   */
+  const EVERY_KIND: CalculatorLine[] = [
+    { id: 1, description: "Writable", qty: 2, qtySource: "counted", baseCents: 100 },
+    { id: 2, description: "Inexact", qty: 3, qtySource: "expected", baseCents: 100 },
+    { id: 3, description: "Unpriced", qty: 4, qtySource: "counted", baseCents: null },
+    { id: 4, description: "No quantity", qty: 0, qtySource: "none", baseCents: 900 },
+  ];
+
+  it("sends every session line — no-op, withheld and unpriced ones as basis", async () => {
+    const user = userEvent.setup();
+    const { onAccept } = renderPanel({ lines: EVERY_KIND });
+
+    await enterBill(user, "0.10");
+    // 2c over 2 units divides exactly (line 1 writes); 8c over 3 units does not
+    // (line 2 is withheld, W1S-3). Line 3 has no base and line 4 no quantity.
+    await user.clear(allocationInput(1));
+    await user.type(allocationInput(1), "2");
+    await user.clear(allocationInput(2));
+    await user.type(allocationInput(2), "8");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    // ONE write, THREE verifications — and every one of the four carries the
+    // frozen basis its share was computed against.
+    expect(onAccept).toHaveBeenCalledWith([
+      writeOf(EVERY_KIND[0], 101),
+      basisOf(EVERY_KIND[1]),
+      basisOf(EVERY_KIND[2]),
+      basisOf(EVERY_KIND[3]),
+    ]);
+  });
+
+  it("carries the FROZEN quantity AND its source on every line (the split rests on both)", async () => {
+    const user = userEvent.setup();
+    const MIXED_SOURCES: CalculatorLine[] = [
+      { id: 1, description: "Counted", qty: 2, qtySource: "counted", baseCents: 100 },
+      { id: 2, description: "Expected", qty: 2, qtySource: "expected", baseCents: 100 },
+      { id: 3, description: "No quantity", qty: 0, qtySource: "none", baseCents: 400 },
+    ];
+    const { onAccept } = renderPanel({ lines: MIXED_SOURCES });
+
+    // Values 200 / 200 / 0: 8c splits 4 / 4 / 0, and each divides exactly.
+    await enterBill(user, "0.08");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(onAccept).toHaveBeenCalledWith([
+      writeOf(MIXED_SOURCES[0], 102),
+      writeOf(MIXED_SOURCES[1], 102),
+      basisOf(MIXED_SOURCES[2]),
+    ]);
+  });
+
+  it("Accept stays disabled when the basis is all there is to send", async () => {
+    const user = userEvent.setup();
+    renderPanel({
+      lines: [
+        { id: 1, description: "Inexact", qty: 3, qtySource: "counted", baseCents: 100 },
+        { id: 2, description: "Unpriced", qty: 4, qtySource: "counted", baseCents: null },
+      ],
+    });
+
+    await enterBill(user, "0.10");
+
+    // Two lines would travel, neither would be written: that is a verification
+    // request, not a bill, and the server refuses it too.
     expect(screen.getByRole("button", { name: /accept/i })).toBeDisabled();
   });
 });
@@ -511,9 +627,9 @@ describe("a failing write keeps the bill (W1S-5)", () => {
 
 describe("the bill session (FD-1)", () => {
   /** Two 100c lines of one unit each: 200c of freight lands 100c on each. */
-  const PAIR = [
-    { id: 1, description: "A", qty: 1, qtySource: "counted" as const, baseCents: 100 },
-    { id: 2, description: "B", qty: 1, qtySource: "counted" as const, baseCents: 100 },
+  const PAIR: CalculatorLine[] = [
+    { id: 1, description: "A", qty: 1, qtySource: "counted", baseCents: 100 },
+    { id: 2, description: "B", qty: 1, qtySource: "counted", baseCents: 100 },
   ];
 
   it("PIN 6: Accept-again after a failure re-sends the IDENTICAL full bill", async () => {
@@ -531,10 +647,7 @@ describe("the bill session (FD-1)", () => {
 
     // Nothing landed, so the retry is the SAME request — a legal full retry, not
     // a "retry of the rest" that has to be reasoned about.
-    const bill = [
-      { id: 1, unitCostCents: 200, ifUnitCostCents: 100 },
-      { id: 2, unitCostCents: 200, ifUnitCostCents: 100 },
-    ];
+    const bill = [writeOf(PAIR[0], 200), writeOf(PAIR[1], 200)];
     expect(onAccept).toHaveBeenNthCalledWith(1, bill);
     expect(onAccept).toHaveBeenNthCalledWith(2, bill);
     // 333 is the number the compounding panel would have re-sent for line 1.
@@ -568,8 +681,8 @@ describe("the bill session (FD-1)", () => {
     // ...and the retry is still the WHOLE bill, line 1 included.
     await user.click(screen.getByRole("button", { name: /accept/i }));
     expect(onAccept).toHaveBeenLastCalledWith([
-      { id: 1, unitCostCents: 200, ifUnitCostCents: 100 },
-      { id: 2, unitCostCents: 200, ifUnitCostCents: 100 },
+      writeOf(PAIR[0], 200),
+      writeOf(PAIR[1], 200),
     ]);
   });
 
@@ -667,9 +780,9 @@ describe("the bill session (FD-1)", () => {
 
 describe("floored consent is keyed to the amounts (FD-4)", () => {
   /** qty 4 makes line 2's remainder move with the allocation: 10c -> 2, 11c -> 3. */
-  const CONSENT_LINES = [
-    { id: 1, description: "Exact", qty: 1, qtySource: "counted" as const, baseCents: 100 },
-    { id: 2, description: "Inexact", qty: 4, qtySource: "counted" as const, baseCents: 100 },
+  const CONSENT_LINES: CalculatorLine[] = [
+    { id: 1, description: "Exact", qty: 1, qtySource: "counted", baseCents: 100 },
+    { id: 2, description: "Inexact", qty: 4, qtySource: "counted", baseCents: 100 },
   ];
 
   it("consent given at drops-2c does NOT authorize drops-3c after an edit", async () => {
@@ -697,7 +810,8 @@ describe("floored consent is keyed to the amounts (FD-4)", () => {
 
     await user.click(screen.getByRole("button", { name: /accept/i }));
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 102, ifUnitCostCents: 100 },
+      writeOf(CONSENT_LINES[0], 102),
+      basisOf(CONSENT_LINES[1]),
     ]);
   });
 
@@ -718,8 +832,8 @@ describe("floored consent is keyed to the amounts (FD-4)", () => {
 
     // 100 + floor(11/4) = 102, the 3c named above deliberately dropped.
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 102, ifUnitCostCents: 100 },
-      { id: 2, unitCostCents: 102, ifUnitCostCents: 100 },
+      writeOf(CONSENT_LINES[0], 102),
+      writeOf(CONSENT_LINES[1], 102),
     ]);
   });
 });
@@ -730,18 +844,23 @@ describe("floored consent is keyed to the amounts (FD-4)", () => {
 // Everything the panel compares is a render old, so any foreign change to a line
 // between the freeze and the write would simply be overwritten. Every line of
 // the bill therefore carries the value it EXPECTS the row to hold, the server
-// makes that the WHERE, and a refusal (409 COST_DRIFT on the house envelope)
-// invalidates the whole bill.
+// makes that the WHERE, and a refusal (409 on the house envelope) invalidates
+// the whole bill.
 //
 // FD3-1 (fix round 4): the refusal now arrives as the API error's `code` — the
 // same field the server sent — rather than through a bespoke seam field on a
 // partial-write error class. That class is gone with the fan-out it described.
+//
+// FD4-1 (fix round 6): the code is BASIS_DRIFT. The precondition covers the
+// quantity as well as the cost now, and on every line of the session rather than
+// only the written ones, so "the cost drifted" would be too small a sentence for
+// what the server actually refused.
 // ---------------------------------------------------------------------------
 
 describe("the write carries its own precondition (FD2-2)", () => {
-  const PAIR = [
-    { id: 1, description: "A", qty: 1, qtySource: "counted" as const, baseCents: 100 },
-    { id: 2, description: "B", qty: 1, qtySource: "counted" as const, baseCents: 100 },
+  const PAIR: CalculatorLine[] = [
+    { id: 1, description: "A", qty: 1, qtySource: "counted", baseCents: 100 },
+    { id: 2, description: "B", qty: 1, qtySource: "counted", baseCents: 100 },
   ];
 
   it("sends the FROZEN base as the precondition, not the live row", async () => {
@@ -757,19 +876,18 @@ describe("the write carries its own precondition (FD2-2)", () => {
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 200, ifUnitCostCents: 100 },
-      { id: 2, unitCostCents: 200, ifUnitCostCents: 100 },
+      writeOf(PAIR[0], 200),
+      writeOf(PAIR[1], 200),
     ]);
   });
 
   it("an unpriced line's precondition is NULL, not 0 (unknown is not free)", async () => {
     const user = userEvent.setup();
-    const { onAccept } = renderPanel({
-      lines: [
-        { id: 1, description: "Priced", qty: 1, qtySource: "counted", baseCents: 100 },
-        { id: 2, description: "Unpriced", qty: 1, qtySource: "counted", baseCents: null },
-      ],
-    });
+    const UNPRICED: CalculatorLine[] = [
+      { id: 1, description: "Priced", qty: 1, qtySource: "counted", baseCents: 100 },
+      { id: 2, description: "Unpriced", qty: 1, qtySource: "counted", baseCents: null },
+    ];
+    const { onAccept } = renderPanel({ lines: UNPRICED });
 
     await enterBill(user, "1.00");
     await user.clear(allocationInput(1));
@@ -778,18 +896,20 @@ describe("the write carries its own precondition (FD2-2)", () => {
     await user.type(allocationInput(2), "50");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
-    // Line 2 has no base, so it is not writable at all — the only precondition
-    // sent is line 1's frozen 100c.
+    // Line 2 has no base, so it is not writable at all — but its precondition
+    // still travels, and it is NULL: "this line must still be unpriced".
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 150, ifUnitCostCents: 100 },
+      writeOf(UNPRICED[0], 150),
+      basisOf(UNPRICED[1]),
     ]);
+    expect(onAccept.mock.calls[0][0][1].ifUnitCostCents).toBeNull();
   });
 
-  it("PIN 1: a COST_DRIFT refusal invalidates the WHOLE bill by name, with no partial report", async () => {
+  it("PIN 1: a BASIS_DRIFT refusal invalidates the WHOLE bill by name, with no partial report", async () => {
     const user = userEvent.setup();
     const drift = Object.assign(
-      new Error("Staging item 2: the cost changed while the bill was open"),
-      { code: "COST_DRIFT" },
+      new Error("Staging item 2: its cost or quantity changed while the bill was open"),
+      { code: "BASIS_DRIFT" },
     );
     const onAccept = jest.fn().mockRejectedValue(drift);
     render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
@@ -815,9 +935,10 @@ describe("the write carries its own precondition (FD2-2)", () => {
 
   it("clearing a drift-invalidated bill starts from nothing", async () => {
     const user = userEvent.setup();
-    const drift = Object.assign(new Error("the cost changed while the bill was open"), {
-      code: "COST_DRIFT",
-    });
+    const drift = Object.assign(
+      new Error("its cost or quantity changed while the bill was open"),
+      { code: "BASIS_DRIFT" },
+    );
     const onAccept = jest.fn().mockRejectedValue(drift);
     render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
 
@@ -864,9 +985,9 @@ describe("the write carries its own precondition (FD2-2)", () => {
 // ---------------------------------------------------------------------------
 
 describe("the session cannot be orphaned (FD2-3)", () => {
-  const PAIR = [
-    { id: 1, description: "A", qty: 1, qtySource: "counted" as const, baseCents: 100 },
-    { id: 2, description: "B", qty: 1, qtySource: "counted" as const, baseCents: 100 },
+  const PAIR: CalculatorLine[] = [
+    { id: 1, description: "A", qty: 1, qtySource: "counted", baseCents: 100 },
+    { id: 2, description: "B", qty: 1, qtySource: "counted", baseCents: 100 },
   ];
 
   /** A bill that did not write. Nothing landed, so nothing is left behind. */

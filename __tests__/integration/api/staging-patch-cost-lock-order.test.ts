@@ -464,7 +464,7 @@ describe('PATCH /api/staging-items/[id] — no cost precondition (FD3-1)', () =>
     expect(stateWrites()[0].data).not.toHaveProperty('ifUnitCostCents');
   });
 
-  it('a lost write is the plain state-change 409 — COST_DRIFT is gone from here', async () => {
+  it('a lost write is the plain state-change 409 — basis drift is gone from here', async () => {
     db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
     db.stagingItem.updateMany.mockResolvedValue({ count: 0 });
 
@@ -473,7 +473,7 @@ describe('PATCH /api/staging-items/[id] — no cost precondition (FD3-1)', () =>
     expect(resp.status).toBe(409);
     const json = await resp.json();
     expect(json.code).toBe('CONFLICT');
-    expect(json.code).not.toBe('COST_DRIFT');
+    expect(json.code).not.toBe('BASIS_DRIFT');
     expect(mockRecordChange).not.toHaveBeenCalled();
   });
 

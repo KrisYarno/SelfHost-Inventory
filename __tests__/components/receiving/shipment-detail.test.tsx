@@ -32,10 +32,11 @@ jest.mock("next/navigation", () => ({
   useRouter: () => ({ push: jest.fn(), refresh: jest.fn() }),
 }));
 const toastError = jest.fn();
+const toastSuccess = jest.fn();
 jest.mock("sonner", () => ({
   toast: {
     error: (...args: unknown[]) => toastError(...args),
-    success: jest.fn(),
+    success: (...args: unknown[]) => toastSuccess(...args),
     warning: jest.fn(),
   },
 }));
@@ -578,11 +579,24 @@ describe("the freight calculator", () => {
     const [, init] = writesTo(fetchFn, "/costs")[0];
     expect((init as RequestInit).method).toBe("POST");
     // 6000c of freight over values 5000 and 1000: 5000c and 1000c, i.e. +500 and
-    // +200 per unit. Every line carries the frozen base as its precondition.
+    // +200 per unit. Every line carries the frozen BASIS — the base cost and the
+    // quantity it was divided by, with the source of that quantity named (FD4-1).
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({
       lines: [
-        { id: 11, unitCostCents: 1000, ifUnitCostCents: 500 },
-        { id: 12, unitCostCents: 400, ifUnitCostCents: 200 },
+        {
+          id: 11,
+          qtySource: "counted",
+          qty: 10,
+          ifUnitCostCents: 500,
+          unitCostCents: 1000,
+        },
+        {
+          id: 12,
+          qtySource: "counted",
+          qty: 5,
+          ifUnitCostCents: 200,
+          unitCostCents: 400,
+        },
       ],
     });
     // FD3-1: the per-line fan-out is GONE. Not one staging PATCH was sent.
@@ -624,7 +638,7 @@ describe("the freight calculator", () => {
   // safe again.
   // -------------------------------------------------------------------------
 
-  it("PIN 1: a drifted line takes the WHOLE bill down — no line's cost changes", async () => {
+  it("PIN 1: a drifted basis takes the WHOLE bill down — no line's cost changes", async () => {
     const user = userEvent.setup();
     // Two lines at 100c; whatever happens, neither may come back repriced.
     const items = [
@@ -640,8 +654,8 @@ describe("the freight calculator", () => {
           status: 409,
           json: async () => ({
             error:
-              "Staging item 12: the cost changed while the bill was open; reload the shipment and re-enter the freight against the costs on screen",
-            code: "COST_DRIFT",
+              "Staging item 12: its cost or quantity changed while the bill was open; reload the shipment and re-enter the freight against the values on screen",
+            code: "BASIS_DRIFT",
           }),
         };
       }
@@ -682,12 +696,38 @@ describe("the freight calculator", () => {
     await waitFor(() => expect(writesTo(fetchFn, "/costs").length).toBe(1));
     expect(JSON.parse(String((writesTo(fetchFn, "/costs")[0][1] as RequestInit).body))).toEqual({
       lines: [
-        { id: 11, unitCostCents: 200, ifUnitCostCents: 100 },
-        { id: 12, unitCostCents: 200, ifUnitCostCents: 100 },
+        { id: 11, qtySource: "counted", qty: 10, ifUnitCostCents: 100, unitCostCents: 200 },
+        { id: 12, qtySource: "counted", qty: 10, ifUnitCostCents: 100, unitCostCents: 200 },
       ],
     });
     expect(await screen.findByTestId("allocation-applied")).toBeInTheDocument();
     expect(screen.queryByTestId("cost-write-partial")).not.toBeInTheDocument();
+  });
+
+  it("FD4-1: the success toast counts the lines it WROTE, not the basis it verified", async () => {
+    const user = userEvent.setup();
+    renderDetail(
+      detail({}, [
+        line({ id: 11, countedQuantity: 10, unitCostCents: 100 }),
+        // No count and nothing expected: qty 0, so it takes none of the freight
+        // and travels verify-only. A toast that counted it would be claiming a
+        // write that never happened.
+        line({
+          id: 12,
+          description: "Mystery box",
+          expectedQuantity: null,
+          countedQuantity: null,
+          unitCostCents: 100,
+        }),
+      ]),
+    );
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await enterBill(user, "20.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    expect(String(toastSuccess.mock.calls[0][0])).toMatch(/\b1 line/);
   });
 
   it("QA-8: a line that GRADUATES mid-bill leaves the calculator and kills the session", async () => {

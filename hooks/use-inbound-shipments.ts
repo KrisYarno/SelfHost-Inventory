@@ -255,12 +255,23 @@ export function useUpdateStagingLine() {
   });
 }
 
-/** One line of a freight bill: the cost to write, and the cost it must still hold. */
+/**
+ * One line of a freight bill: the frozen basis it was computed from, and — on
+ * the lines this bill writes — the cost to set (FD4-1).
+ *
+ * A line without `unitCostCents` is VERIFY-ONLY: the split rests on its cost and
+ * quantity, so the server claims and checks it, but nothing about it changes.
+ */
 export interface AllocateShipmentCostLine {
   id: number;
-  unitCostCents: number;
-  /** The precondition. NULL is legal and means "still unpriced". */
+  /** Which quantity the share was divided by — the server's WHERE depends on it. */
+  qtySource: "counted" | "expected" | "none";
+  /** That quantity, frozen. */
+  qty: number;
+  /** The cost precondition. NULL is legal and means "still unpriced". */
   ifUnitCostCents: number | null;
+  /** Present = write this cost. Absent = verify only. */
+  unitCostCents?: number;
 }
 
 /**
@@ -272,6 +283,10 @@ export interface AllocateShipmentCostLine {
  * double-applied it onto the ones that had landed. `POST
  * /api/inbound-shipments/[id]/costs` writes every line in one transaction, so
  * there are exactly two outcomes and the failing one wrote nothing.
+ *
+ * FD4-1: the request carries the panel's WHOLE frozen session — the lines being
+ * written and the lines the split merely rests on — so the server can check the
+ * entire basis rather than the part of it that happens to be changing.
  *
  * Invalidation is on SETTLE, not on success: a refusal is the moment the panel's
  * frozen bill is most likely to be describing rows that have moved, and after it

@@ -157,6 +157,47 @@ function heldMembers(
   return receiving;
 }
 
+/** The header fields a diff on this route can name, plus the status the claim re-matches. */
+type CurrentHeader = {
+  status: InboundShipmentStatus;
+  notes: string | null;
+  supplierRef: string | null;
+};
+
+/**
+ * THE AUDIT'S BEFORE-IMAGE, LOCKED (FD4-2).
+ *
+ * `existing` — the `findUnique` whose real job is the 404 — answers from the
+ * snapshot this transaction took before it held anything. A field-only PATCH
+ * that commits A -> B in between is invisible to it, and the diff then lies in
+ * one of two directions: it records A -> C when the truth is B -> C, or (worse)
+ * it records NOTHING at all when this request restates A over that B, because
+ * from === to against a value that is no longer there. An overwrite IS a change,
+ * and the change feed is the only surface that can say whose note survived.
+ *
+ * So the before-image comes from HERE: one `SELECT ... FOR UPDATE` of exactly
+ * the fields a diff can name. It is taken with the lines already locked and
+ * immediately BEFORE the status claim — which is where that claim takes the
+ * header lock anyway, so this adds no lock and changes no order (item -> header,
+ * unchanged). The claim still re-matches on `{ id, status: OPEN }`, so a header
+ * that settled since the snapshot is still refused by its own `count === 0`
+ * rather than by anything read here.
+ *
+ * Raw SQL because Prisma has no `FOR UPDATE` (house precedent: `currentLines`
+ * above, lib/products/decline.ts). The id is a BOUND parameter.
+ */
+async function lockedHeader(
+  tx: Prisma.TransactionClient,
+  id: string,
+): Promise<Record<string, unknown>> {
+  const rows = await tx.$queryRaw<CurrentHeader[]>(
+    Prisma.sql`SELECT status, notes, supplierRef FROM inbound_shipments WHERE id = ${id} FOR UPDATE`,
+  );
+  // A row that vanished between the 404 pre-check and this read leaves nothing
+  // to diff against — and the claim below is about to refuse anyway.
+  return rows[0] ?? {};
+}
+
 /**
  * The diff for the fields this PATCH explicitly provided (ER-B9: a `from === to`
  * entry drops, and an empty diff attaches nothing).
@@ -229,6 +270,11 @@ export const GET = apiHandler(async (request: NextRequest, { params }: RoutePara
  * the unlink set — comes from ONE locking read taken after the header claim
  * (`currentLines`), because a plain re-read in this transaction still answers
  * from a snapshot older than the locks.
+ *
+ * The HEADER has the same problem and the same answer (FD4-2): `lockedHeader`
+ * is read where the header lock is taken — after the lines, before the claim —
+ * and every field diff on every path is measured against THAT row. The one
+ * thing `existing` still answers is the 404.
  */
 export const PATCH = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   const { user } = await requireApproved();
@@ -286,6 +332,10 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
             if (!(await lockLine(tx, id, line.id))) missedFirstPass = true;
           }
 
+          // The header lock, and with it the CURRENT values any field diff below
+          // is measured against (FD4-2).
+          const before = await lockedHeader(tx, id);
+
           const claim = await tx.inboundShipment.updateMany({
             where: { id, status: InboundShipmentStatus.OPEN },
             data: {
@@ -327,9 +377,8 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
             entityId: id,
             action: `Closed inbound shipment ${id}`,
             // QA-14: fields edited on the way out ride this record's diff.
-            ...changesFragment(
-              fieldChanges(existing as unknown as Record<string, unknown>, after),
-            ),
+            // FD4-2: measured against the LOCKED row, not the snapshot.
+            ...changesFragment(fieldChanges(before, after)),
             details: {
               itemCount: rollup.itemCount,
               countedItemCount: rollup.countedItemCount,
@@ -361,6 +410,10 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
 
           // Now the header: the serialization point against a concurrent
           // cancel/close, and against the graduation guard's own shipment claim.
+          // The locking read is that lock's first statement, and carries the
+          // CURRENT values any field diff below is measured against (FD4-2).
+          const before = await lockedHeader(tx, id);
+
           const claim = await tx.inboundShipment.updateMany({
             where: { id, status: InboundShipmentStatus.OPEN },
             data: { ...fields, status: InboundShipmentStatus.CANCELLED },
@@ -405,9 +458,8 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
             entityId: id,
             action: `Cancelled inbound shipment ${id}`,
             // QA-14: fields edited on the way out ride this record's diff.
-            ...changesFragment(
-              fieldChanges(existing as unknown as Record<string, unknown>, after),
-            ),
+            // FD4-2: measured against the LOCKED row, not the snapshot.
+            ...changesFragment(fieldChanges(before, after)),
             // cancelledBy rides this audit line — T1 deliberately gives the table
             // no cancelledBy column. The ids are the CURRENT membership (FD2-1),
             // not the snapshot: the record names the boxes that actually left.
@@ -418,6 +470,13 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
         }
 
         // --- field edit while OPEN --------------------------------------------
+        // This path locks nothing but the header, and its claim is where that
+        // lock is taken — so the locking read goes immediately before it, and
+        // the staleness FD4-2 found on the settle paths is closed here on the
+        // same terms. Two field edits racing is the ORDINARY case for this
+        // route, not the exotic one.
+        const before = await lockedHeader(tx, id);
+
         const claim = await tx.inboundShipment.updateMany({
           where: { id, status: InboundShipmentStatus.OPEN },
           data: fields,
@@ -427,10 +486,7 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
         // Diff over EXACTLY the provided fields (ER-B9: from===to entries drop; an
         // empty diff writes no event). On THIS path the diff is the whole event,
         // so an empty one records nothing at all rather than an empty record.
-        const changes = fieldChanges(
-          existing as unknown as Record<string, unknown>,
-          after,
-        );
+        const changes = fieldChanges(before, after);
 
         if (Object.keys(changes).length > 0) {
           await recordChange(tx, {

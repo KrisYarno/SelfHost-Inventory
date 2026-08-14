@@ -38,7 +38,7 @@ import {
 } from "@/components/staging/graduate-dialog";
 import {
   FreightCalculatorPanel,
-  type AllocationWrite,
+  type AllocationLine,
   type CalculatorLine,
 } from "@/components/receiving/freight-calculator-panel";
 
@@ -322,13 +322,18 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
    * `POST /api/inbound-shipments/[id]/costs` writes every line or none, so there
    * is nothing to record about "where it stopped": it did not stop anywhere. The
    * rejection is RETHROWN unchanged (W1S-5) — it already carries the server's
-   * `code`, which is how the panel tells a COST_DRIFT (the bill is dead) from a
+   * `code`, which is how the panel tells a BASIS_DRIFT (the bill is dead) from a
    * plain failure (Accept again, unchanged).
+   *
+   * FD4-1: the bill carries the whole frozen basis, so most of what is in
+   * `bill` may be verify-only. The toast counts what was WRITTEN — a line the
+   * server merely checked is not a line an operator saw a cost land on.
    */
-  const handleAcceptAllocation = async (updates: AllocationWrite[]) => {
+  const handleAcceptAllocation = async (bill: AllocationLine[]) => {
+    const written = bill.filter((line) => line.unitCostCents !== undefined).length;
     try {
-      await allocateCosts.mutateAsync({ id: shipmentId, lines: updates });
-      toast.success(`Landed cost written on ${updates.length} line(s)`);
+      await allocateCosts.mutateAsync({ id: shipmentId, lines: bill });
+      toast.success(`Landed cost written on ${written} line(s)`);
     } catch (err) {
       console.error("Error writing allocated costs:", err);
       toast.error(err instanceof Error ? err.message : "Failed to write the costs");

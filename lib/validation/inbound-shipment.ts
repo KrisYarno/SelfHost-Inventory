@@ -31,7 +31,7 @@ export const PatchInboundShipmentSchema = z.object({
 });
 
 /**
- * ONE FREIGHT BILL (FD3-1, fix round 4).
+ * ONE FREIGHT BILL (FD3-1, fix round 4; basis widened by FD4-1, fix round 6).
  *
  * The freight calculator used to fan its Accept out into one staging PATCH per
  * line. Three review rounds of partial-commit hazards later, the fan-out itself
@@ -40,26 +40,44 @@ export const PatchInboundShipmentSchema = z.object({
  * DOUBLE-APPLIES it onto the bases that already absorbed a share. So a bill is
  * one request and one transaction, and this is its shape.
  *
- * Every line carries BOTH halves, and both are required:
- *   `unitCostCents`    the landed cost to write. Never null — un-pricing a line
- *                      is the manual per-line save's job, not a bill's;
- *   `ifUnitCostCents`  the cost the row must STILL hold for that write to land.
- *                      `null` is legal and means "only if it is still unpriced"
- *                      — the same unknown-is-not-zero distinction the column
- *                      itself keeps.
+ * A BILL IS ITS WHOLE BASIS (FD4-1). The split is computed from every line's
+ * cost AND quantity — including the lines it decides not to write — so a request
+ * carrying only the writes hands the server most of its premise unchecked. Two
+ * live holes came from that: an excluded line (a no-op, a withheld inexact
+ * split, an unpriced line) could be repriced after the last render with nothing
+ * to notice, and no line carried a quantity precondition at all, so a recount
+ * landing mid-Accept let per-unit costs computed over the old units be written
+ * over the new ones. Every line of the frozen session therefore travels, and
+ * what a line MEANS is read off its shape:
+ *
+ *   `id`               the staging line;
+ *   `qtySource`+`qty`  the quantity the share was divided by, and where that
+ *                      number came from — the server builds a different WHERE
+ *                      for each source, because "still 10 counted" and "still
+ *                      uncounted, still expecting 10" are different questions;
+ *   `ifUnitCostCents`  the cost the row must STILL hold. `null` is legal and
+ *                      means "only if it is still unpriced" — the same
+ *                      unknown-is-not-zero distinction the column itself keeps;
+ *   `unitCostCents`    PRESENT: write this landed cost. Never null — un-pricing
+ *                      a line is the manual per-line save's job, not a bill's.
+ *                      ABSENT: the line is VERIFY-ONLY — claimed and checked as
+ *                      part of the basis, never written.
  *
  * The array is non-empty because a write request that writes nothing is a client
- * bug, not a 200. Uniqueness of the ids is a CROSS-LINE rule, so it lives in the
- * post-parse `assert*` helper below (house rule: request schemas stay plain
- * ZodObjects — the MCP adapter reads `.shape` — and never carry `.refine`).
+ * bug, not a 200. Uniqueness of the ids and "at least one write line" are
+ * CROSS-LINE rules, so they live in the post-parse `assert*` helpers below
+ * (house rule: request schemas stay plain ZodObjects — the MCP adapter reads
+ * `.shape` — and never carry `.refine`).
  */
 export const AllocateShipmentCostsSchema = z.object({
   lines: z
     .array(
       z.object({
         id: z.number().int().positive(),
-        unitCostCents: z.number().int().min(0).max(100_000_000),
+        qtySource: z.enum(['counted', 'expected', 'none']),
+        qty: z.number().int().min(0),
         ifUnitCostCents: z.number().int().min(0).max(100_000_000).nullable(),
+        unitCostCents: z.number().int().min(0).max(100_000_000).optional(),
       }),
     )
     .min(1),
@@ -99,9 +117,10 @@ export function assertShipmentPatchNotEmpty(body: PatchInboundShipmentInput): vo
 /**
  * One line, one answer (FD3-1).
  *
- * The batch writes ascending by id and each line's write is a claim on the cost
+ * The batch claims ascending by id and each line's claim is guarded on the basis
  * the row must still hold, so a repeated id would be two claims whose order
  * decides the outcome — the second guarded on a value the first just replaced.
+ * (A write line repeated as a verify-only one is the same trap wearing a hat.)
  * There is no reading of that request worth guessing at: refuse it.
  *
  * Post-parse `assert*` helper (house rule), naming the repeated line so the
@@ -121,6 +140,31 @@ export function assertAllocationLineIdsUnique(body: AllocateShipmentCostsInput):
     }
     seen.add(line.id);
   }
+}
+
+/**
+ * A BILL WRITES SOMETHING (FD4-1).
+ *
+ * Every line of the frozen session travels now, so "the request has lines" no
+ * longer means "the request writes". A payload of pure basis is a verification
+ * request, and this route does not offer one: it would spend a transaction
+ * taking a row lock per line to check numbers nobody is about to use, and it
+ * would silently 200 a bill the panel thought it had written.
+ *
+ * The panel keeps the same promise on its own side (QA-12 disables Accept when
+ * every writable line would restate what is already stored); this is the
+ * server's version of it, which is the one that holds against a stale client.
+ */
+export function assertAllocationHasWriteLine(body: AllocateShipmentCostsInput): void {
+  if (body.lines.some((line) => line.unitCostCents !== undefined)) return;
+  throw new z.ZodError([
+    {
+      code: z.ZodIssueCode.custom,
+      path: ['lines'],
+      message:
+        'this bill writes nothing — at least one line must carry a unitCostCents to write',
+    },
+  ]);
 }
 
 /**

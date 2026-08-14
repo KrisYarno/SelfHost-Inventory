@@ -24,6 +24,23 @@
  *     the entire point: after a refusal there is nothing to recover from, so
  *     re-entering the full freight is safe again;
  *   - the per-line audit rides the SAME transaction (house D4).
+ *
+ * FD4-1 (fix round 6) — THE PRECONDITION IS THE WHOLE FROZEN BASIS.
+ *
+ * Round 4 checked only what it wrote, and a freight split is not computed only
+ * from what it writes. Two live gaps came out of that:
+ *
+ *   (a) QA-12 stopped sending no-op lines, so a line the panel EXCLUDED could be
+ *       repriced after the last render and nothing on the server would notice —
+ *       an all-onto-B split committing while the truth had become 50/50;
+ *   (b) no line carried a QUANTITY precondition, so a count committing mid-Accept
+ *       let per-unit costs computed over the OLD units land on the new ones.
+ *
+ * Now EVERY line of the frozen session travels — write lines carry
+ * `unitCostCents`, verify-only lines do not — and every one of them is claimed
+ * on its frozen cost AND its frozen quantity. A miss on any of them refuses the
+ * whole bill as BASIS_DRIFT (the round-4 name, COST_DRIFT, would now be a lie:
+ * the precondition covers quantity too).
  */
 
 import { NextRequest } from 'next/server';
@@ -115,6 +132,22 @@ function mkReq(body: unknown, id: string = SHIPMENT_ID) {
 const post = (body: unknown, id: string = SHIPMENT_ID) =>
   POST(mkReq(body, id), { params: { id } });
 
+/** A WRITE line: the frozen basis, plus the cost to write against it. */
+const write = (over: Record<string, unknown> = {}) => ({
+  id: 11,
+  qtySource: 'counted',
+  qty: 10,
+  ifUnitCostCents: 500,
+  unitCostCents: 600,
+  ...over,
+});
+
+/** A VERIFY-ONLY line (FD4-1): the frozen basis, claimed and checked, never written. */
+const verify = (over: Record<string, unknown> = {}) => {
+  const { unitCostCents: _unwritten, ...basis } = write(over);
+  return basis;
+};
+
 function shipmentRow(overrides: Record<string, unknown> = {}) {
   return {
     id: SHIPMENT_ID,
@@ -139,16 +172,24 @@ function primeDetailRead(items: any[] = []) {
 
 /** Every in-transaction claim, in call order, as {where, data}. */
 const claims = () => tx.stagingItem.updateMany.mock.calls.map((c: any[]) => c[0]);
-/** The claims that actually WRITE a cost (the no-op re-claims restate status). */
+/**
+ * The BASIS claims — one per line of the bill, write and verify-only alike.
+ * They are the ones whose WHERE carries the frozen cost (FD4-1); the
+ * disambiguating re-claim below deliberately does not.
+ */
+const basisClaims = () => claims().filter((args: any) => 'unitCostCents' in (args?.where ?? {}));
+/** The claims that actually WRITE a cost (verify-only claims restate status). */
 const costWrites = () =>
   claims().filter((args: any) => args?.data && 'unitCostCents' in args.data);
+/** The disambiguating no-op re-claims: id / shipment / status, nothing else. */
+const reclaims = () => claims().filter((args: any) => !('unitCostCents' in (args?.where ?? {})));
 
 /**
- * Drive the per-line claims. `drifted` names lines whose cost precondition
- * misses while the line is otherwise untouched (somebody repriced it);
- * `departed` names lines that are no longer this shipment's RECEIVED lines at
- * all (graduated, unlinked, cancelled out) — for those even the no-op re-claim
- * misses.
+ * Drive the per-line claims. `drifted` names lines whose BASIS precondition
+ * misses while the line is otherwise untouched (somebody repriced or recounted
+ * it); `departed` names lines that are no longer this shipment's RECEIVED lines
+ * at all (graduated, unlinked, cancelled out) — for those even the no-op
+ * re-claim misses.
  */
 function lineClaims({
   drifted = [],
@@ -157,7 +198,7 @@ function lineClaims({
   tx.stagingItem.updateMany.mockImplementation(async (args: any) => {
     const id = args?.where?.id;
     if (departed.includes(id)) return { count: 0 };
-    if (drifted.includes(id) && args?.data && 'unitCostCents' in args.data) {
+    if (drifted.includes(id) && 'unitCostCents' in (args?.where ?? {})) {
       return { count: 0 };
     }
     return { count: 1 };
@@ -192,10 +233,7 @@ describe('POST /api/inbound-shipments/[id]/costs (the whole bill)', () => {
     lineClaims();
 
     const resp = await post({
-      lines: [
-        { id: 11, unitCostCents: 600, ifUnitCostCents: 500 },
-        { id: 12, unitCostCents: 240, ifUnitCostCents: 200 },
-      ],
+      lines: [write({ id: 11 }), write({ id: 12, unitCostCents: 240, ifUnitCostCents: 200 })],
     });
 
     expect(resp.status).toBe(200);
@@ -211,50 +249,46 @@ describe('POST /api/inbound-shipments/[id]/costs (the whole bill)', () => {
 
     await post({
       lines: [
-        { id: 31, unitCostCents: 600, ifUnitCostCents: 500 },
-        { id: 11, unitCostCents: 240, ifUnitCostCents: 200 },
-        { id: 22, unitCostCents: 100, ifUnitCostCents: null },
+        write({ id: 31 }),
+        write({ id: 11, unitCostCents: 240, ifUnitCostCents: 200 }),
+        write({ id: 22, unitCostCents: 100, ifUnitCostCents: null }),
       ],
     });
 
     expect(costWrites().map((args: any) => args.where.id)).toEqual([11, 22, 31]);
   });
 
-  it('pins the WHERE on the line, ITS SHIPMENT, RECEIVED, and the expected cost', async () => {
+  it('pins the WHERE on the line, ITS SHIPMENT, RECEIVED, the expected cost and the frozen qty', async () => {
     lineClaims();
 
-    await post({ lines: [{ id: 11, unitCostCents: 600, ifUnitCostCents: 500 }] });
+    await post({ lines: [write({ id: 11, qtySource: 'counted', qty: 10 })] });
 
-    const write = costWrites()[0];
-    expect(write.where).toEqual({
+    const claim = costWrites()[0];
+    expect(claim.where).toEqual({
       id: 11,
       shipmentId: SHIPMENT_ID,
       status: 'RECEIVED',
       unitCostCents: 500,
+      countedQuantity: 10,
     });
     // The precondition is a GUARD, never a written column.
-    expect(write.data).toEqual({ unitCostCents: 600 });
+    expect(claim.data).toEqual({ unitCostCents: 600 });
   });
 
   it('an explicit NULL precondition means "only if it is still unpriced"', async () => {
     lineClaims();
 
-    const resp = await post({
-      lines: [{ id: 11, unitCostCents: 600, ifUnitCostCents: null }],
-    });
+    const resp = await post({ lines: [write({ ifUnitCostCents: null })] });
 
     expect(resp.status).toBe(200);
     expect(costWrites()[0].where).toMatchObject({ id: 11, unitCostCents: null });
   });
 
-  it('audits EVERY line inside the same transaction, in the per-line cost shape', async () => {
+  it('audits EVERY written line inside the same transaction, in the per-line cost shape', async () => {
     lineClaims();
 
     await post({
-      lines: [
-        { id: 11, unitCostCents: 600, ifUnitCostCents: 500 },
-        { id: 12, unitCostCents: 240, ifUnitCostCents: null },
-      ],
+      lines: [write({ id: 11 }), write({ id: 12, unitCostCents: 240, ifUnitCostCents: null })],
     });
 
     expect(mockRecordChange).toHaveBeenCalledTimes(2);
@@ -279,13 +313,13 @@ describe('POST /api/inbound-shipments/[id]/costs (the whole bill)', () => {
   it('writes but does NOT audit a line whose cost is unchanged (ER-B9)', async () => {
     lineClaims();
 
-    // Freight of 0 (or a zero-value line) suggests the base back: the guarded
+    // A hand-edited split can land a line back on its own base: the guarded
     // write still runs — it is what proves the row is untouched — but a
     // from===to diff is not a change, and the house rule writes no event for it.
     await post({
       lines: [
-        { id: 11, unitCostCents: 500, ifUnitCostCents: 500 },
-        { id: 12, unitCostCents: 240, ifUnitCostCents: 200 },
+        write({ id: 11, unitCostCents: 500, ifUnitCostCents: 500 }),
+        write({ id: 12, unitCostCents: 240, ifUnitCostCents: 200 }),
       ],
     });
 
@@ -318,9 +352,7 @@ describe('POST /api/inbound-shipments/[id]/costs (the whole bill)', () => {
       },
     ]);
 
-    const resp = await post({
-      lines: [{ id: 11, unitCostCents: 600, ifUnitCostCents: 500 }],
-    });
+    const resp = await post({ lines: [write({ id: 11 })] });
 
     const body = await resp.json();
     expect(body.id).toBe(SHIPMENT_ID);
@@ -331,7 +363,150 @@ describe('POST /api/inbound-shipments/[id]/costs (the whole bill)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. FD3-1 — a refusal on ANY line rolls back EVERY line
+// 2. FD4-1 — THE WHOLE FROZEN BASIS IS THE PRECONDITION
+// ---------------------------------------------------------------------------
+
+describe('POST /api/inbound-shipments/[id]/costs — the frozen basis (FD4-1)', () => {
+  it('PIN 5a: a COUNTED line is guarded on its counted quantity', async () => {
+    lineClaims();
+
+    await post({ lines: [write({ qtySource: 'counted', qty: 10 })] });
+
+    expect(basisClaims()[0].where).toMatchObject({ countedQuantity: 10 });
+    expect(basisClaims()[0].where).not.toHaveProperty('expectedQuantity');
+  });
+
+  it('PIN 5b: an EXPECTED line is guarded on "still uncounted, still expecting N"', async () => {
+    lineClaims();
+
+    await post({ lines: [write({ qtySource: 'expected', qty: 8 })] });
+
+    // A count landing mid-bill makes countedQuantity non-null, so this misses —
+    // which is the point: the split rested on the expectation.
+    expect(basisClaims()[0].where).toMatchObject({
+      countedQuantity: null,
+      expectedQuantity: 8,
+    });
+  });
+
+  it('PIN 5c: a NO-QUANTITY line is guarded on both quantities still being absent', async () => {
+    lineClaims();
+
+    await post({ lines: [write({ qtySource: 'none', qty: 0 })] });
+
+    expect(basisClaims()[0].where).toMatchObject({
+      countedQuantity: null,
+      expectedQuantity: null,
+    });
+  });
+
+  it('PIN 3: verify-only lines are claimed ASCENDING, interleaved with the writes (one order)', async () => {
+    lineClaims();
+
+    await post({
+      lines: [
+        write({ id: 30 }),
+        verify({ id: 20, ifUnitCostCents: 100 }),
+        write({ id: 10, unitCostCents: 300, ifUnitCostCents: 200 }),
+        verify({ id: 40, ifUnitCostCents: null }),
+      ],
+    });
+
+    // ONE pass over the whole basis in the house lock order — not "the writes,
+    // then the checks", which would be two lock orders in one transaction.
+    expect(basisClaims().map((args: any) => args.where.id)).toEqual([10, 20, 30, 40]);
+  });
+
+  it('a verify-only line is CLAIMED on its full basis and writes NOTHING', async () => {
+    lineClaims();
+
+    await post({
+      lines: [write({ id: 11 }), verify({ id: 12, qty: 4, ifUnitCostCents: 200 })],
+    });
+
+    const check = basisClaims().find((args: any) => args.where.id === 12);
+    expect(check.where).toEqual({
+      id: 12,
+      shipmentId: SHIPMENT_ID,
+      status: 'RECEIVED',
+      unitCostCents: 200,
+      countedQuantity: 4,
+    });
+    // The house no-op claim idiom: the claim IS the verification and the lock.
+    expect(check.data).toEqual({ status: 'RECEIVED' });
+    expect(costWrites().map((args: any) => args.where.id)).toEqual([11]);
+  });
+
+  it('never audits a verify-only line — nothing about it changed', async () => {
+    lineClaims();
+
+    await post({
+      lines: [verify({ id: 10, ifUnitCostCents: 100 }), write({ id: 11 })],
+    });
+
+    expect(mockRecordChange).toHaveBeenCalledTimes(1);
+    expect(mockRecordChange.mock.calls[0][1]).toMatchObject({ entityId: 11 });
+  });
+
+  it('PIN 2 — THE FD4-1 SCENARIO: the EXCLUDED line moved, so the bill refuses', async () => {
+    // A carried all the freight because B's base was 0 at freeze time. B was
+    // priced to 100c since, so the true split is now 50/50 — and B is the line
+    // the panel had no write for. Verify-only or not, it is basis.
+    lineClaims({ drifted: [12] });
+
+    const resp = await post({
+      lines: [write({ id: 11, unitCostCents: 700, ifUnitCostCents: 500 }), verify({ id: 12 })],
+    });
+
+    expect(resp.status).toBe(409);
+    expect((await resp.json()).code).toBe('BASIS_DRIFT');
+    // Line 11's write really ran; the throw is what unwinds it.
+    expect(txRejected).toBe(true);
+    expect(costWrites().map((args: any) => args.where.id)).toEqual([11]);
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('PIN 1: a RECOUNT under a write line refuses — old per-unit costs never land on new units', async () => {
+    // The quantity precondition is the only thing standing between a bill
+    // computed over 10 units and a row that now holds 40.
+    lineClaims({ drifted: [11] });
+
+    const resp = await post({ lines: [write({ id: 11, qtySource: 'counted', qty: 10 })] });
+
+    expect(resp.status).toBe(409);
+    const json = await resp.json();
+    expect(json.code).toBe('BASIS_DRIFT');
+    expect(json.error).toMatch(/quantity/i);
+    expect(txRejected).toBe(true);
+    expect(mockRecordChange).not.toHaveBeenCalled();
+  });
+
+  it('PIN 4: a WITHHELD line travels as basis, and its drift refuses too', async () => {
+    // W1S-3 holds an inexact split back, and W1S-3's "Accept writes the rest"
+    // rests on the withheld line's own base and quantity. Stale there is stale.
+    lineClaims({ drifted: [12] });
+
+    const resp = await post({
+      lines: [write({ id: 11 }), verify({ id: 12, qty: 3, ifUnitCostCents: 100 })],
+    });
+
+    expect(resp.status).toBe(409);
+    expect((await resp.json()).code).toBe('BASIS_DRIFT');
+    expect(txRejected).toBe(true);
+  });
+
+  it('a verify-only line that LEFT the shipment is a state CONFLICT, not basis drift', async () => {
+    lineClaims({ departed: [12] });
+
+    const resp = await post({ lines: [write({ id: 11 }), verify({ id: 12 })] });
+
+    expect(resp.status).toBe(409);
+    expect((await resp.json()).code).toBe('CONFLICT');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. FD3-1 — a refusal on ANY line rolls back EVERY line
 // ---------------------------------------------------------------------------
 
 describe('POST /api/inbound-shipments/[id]/costs — all or nothing (FD3-1)', () => {
@@ -340,38 +515,35 @@ describe('POST /api/inbound-shipments/[id]/costs — all or nothing (FD3-1)', ()
     lineClaims({ drifted: [12] });
 
     const resp = await post({
-      lines: [
-        { id: 11, unitCostCents: 600, ifUnitCostCents: 500 },
-        { id: 12, unitCostCents: 240, ifUnitCostCents: 200 },
-      ],
+      lines: [write({ id: 11 }), write({ id: 12, unitCostCents: 240, ifUnitCostCents: 200 })],
     });
 
     expect(resp.status).toBe(409);
     const json = await resp.json();
-    expect(json.code).toBe('COST_DRIFT');
+    expect(json.code).toBe('BASIS_DRIFT');
     // THE ROLLBACK: the refusal is a THROW out of the transaction callback, so
     // line 11's write — which really did run — never commits. A returned refusal
     // would have COMMITTED it, which is the whole of FD3-1.
     expect(txRejected).toBe(true);
     expect(db.$transaction).toHaveBeenCalledTimes(1);
-    // Line 11's write happened INSIDE that transaction and nowhere else.
+    // Line 11's write happened INSIDE that transaction and nowhere else; line
+    // 12's was attempted and matched nothing, which is the refusal.
     expect(costWrites().map((args: any) => args.where.id)).toEqual([11, 12]);
+    expect(basisClaims().map((args: any) => args.where.id)).toEqual([11, 12]);
     expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
   });
 
-  it('names the line whose cost drifted', async () => {
+  it('names the line whose basis drifted, and what can have moved', async () => {
     lineClaims({ drifted: [12] });
 
     const resp = await post({
-      lines: [
-        { id: 11, unitCostCents: 600, ifUnitCostCents: 500 },
-        { id: 12, unitCostCents: 240, ifUnitCostCents: 200 },
-      ],
+      lines: [write({ id: 11 }), write({ id: 12, unitCostCents: 240, ifUnitCostCents: 200 })],
     });
 
     const json = await resp.json();
     expect(json.error).toMatch(/12/);
-    expect(json.error).toMatch(/cost changed/i);
+    expect(json.error).toMatch(/cost/i);
+    expect(json.error).toMatch(/quantity/i);
   });
 
   it('a line that LEFT the shipment mid-bill refuses as a state CONFLICT', async () => {
@@ -380,10 +552,7 @@ describe('POST /api/inbound-shipments/[id]/costs — all or nothing (FD3-1)', ()
     lineClaims({ departed: [12] });
 
     const resp = await post({
-      lines: [
-        { id: 11, unitCostCents: 600, ifUnitCostCents: 500 },
-        { id: 12, unitCostCents: 240, ifUnitCostCents: 200 },
-      ],
+      lines: [write({ id: 11 }), write({ id: 12, unitCostCents: 240, ifUnitCostCents: 200 })],
     });
 
     expect(resp.status).toBe(409);
@@ -393,12 +562,10 @@ describe('POST /api/inbound-shipments/[id]/costs — all or nothing (FD3-1)', ()
     expect(txRejected).toBe(true);
   });
 
-  it('a GRADUATED line is a state CONFLICT, never COST_DRIFT', async () => {
+  it('a GRADUATED line is a state CONFLICT, never BASIS_DRIFT', async () => {
     lineClaims({ departed: [11] });
 
-    const resp = await post({
-      lines: [{ id: 11, unitCostCents: 600, ifUnitCostCents: 500 }],
-    });
+    const resp = await post({ lines: [write({ id: 11 })] });
 
     expect(resp.status).toBe(409);
     expect((await resp.json()).code).toBe('CONFLICT');
@@ -407,9 +574,9 @@ describe('POST /api/inbound-shipments/[id]/costs — all or nothing (FD3-1)', ()
   it('the disambiguating re-claim writes NOTHING new and pins the shipment', async () => {
     lineClaims({ drifted: [11] });
 
-    await post({ lines: [{ id: 11, unitCostCents: 600, ifUnitCostCents: 500 }] });
+    await post({ lines: [write({ id: 11 })] });
 
-    const reclaim = claims().find((args: any) => !('unitCostCents' in (args.data ?? {})));
+    const reclaim = reclaims()[0];
     expect(reclaim.where).toEqual({ id: 11, shipmentId: SHIPMENT_ID, status: 'RECEIVED' });
     expect(reclaim.data).toEqual({ status: 'RECEIVED' });
   });
@@ -418,27 +585,24 @@ describe('POST /api/inbound-shipments/[id]/costs — all or nothing (FD3-1)', ()
     lineClaims({ drifted: [11] });
 
     await post({
-      lines: [
-        { id: 11, unitCostCents: 600, ifUnitCostCents: 500 },
-        { id: 12, unitCostCents: 240, ifUnitCostCents: 200 },
-      ],
+      lines: [write({ id: 11 }), write({ id: 12, unitCostCents: 240, ifUnitCostCents: 200 })],
     });
 
-    expect(costWrites().map((args: any) => args.where.id)).toEqual([11]);
+    expect(basisClaims().map((args: any) => args.where.id)).toEqual([11]);
     expect(mockRecordChange).not.toHaveBeenCalled();
   });
 
   it('a bill aimed at ANOTHER shipment writes nothing (the WHERE pins the route id)', async () => {
     lineClaims();
 
-    await post({ lines: [{ id: 11, unitCostCents: 600, ifUnitCostCents: 500 }] }, OTHER_SHIPMENT);
+    await post({ lines: [write({ id: 11 })] }, OTHER_SHIPMENT);
 
     expect(costWrites()[0].where.shipmentId).toBe(OTHER_SHIPMENT);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 3. The request contract
+// 4. The request contract
 // ---------------------------------------------------------------------------
 
 describe('POST /api/inbound-shipments/[id]/costs — the request', () => {
@@ -449,41 +613,56 @@ describe('POST /api/inbound-shipments/[id]/costs — the request', () => {
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 
+  it('PIN 6: 400s a bill of VERIFY-ONLY lines — a bill that writes nothing is not a bill', async () => {
+    // The panel's own gate (QA-12) already refuses to send this; the server
+    // keeps the promise on its own terms rather than spending a transaction's
+    // row locks verifying a basis nobody is going to use.
+    const resp = await post({ lines: [verify({ id: 11 }), verify({ id: 12 })] });
+
+    expect(resp.status).toBe(400);
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
   it('400s a DUPLICATE line id — the same line twice has no single answer', async () => {
     const resp = await post({
-      lines: [
-        { id: 11, unitCostCents: 600, ifUnitCostCents: 500 },
-        { id: 11, unitCostCents: 700, ifUnitCostCents: 600 },
-      ],
+      lines: [write({ id: 11 }), write({ id: 11, unitCostCents: 700, ifUnitCostCents: 600 })],
     });
 
     expect(resp.status).toBe(400);
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 
-  it('400s a line missing its precondition (every field is required per line)', async () => {
-    const resp = await post({ lines: [{ id: 11, unitCostCents: 600 }] });
+  it('400s a line missing its precondition or its frozen quantity', async () => {
+    const noPrecondition = { ...write() } as Record<string, unknown>;
+    delete noPrecondition.ifUnitCostCents;
+    expect((await post({ lines: [noPrecondition] })).status).toBe(400);
+
+    const noQty = { ...write() } as Record<string, unknown>;
+    delete noQty.qty;
+    expect((await post({ lines: [noQty] })).status).toBe(400);
+
+    const noSource = { ...write() } as Record<string, unknown>;
+    delete noSource.qtySource;
+    expect((await post({ lines: [noSource] })).status).toBe(400);
+
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('400s an unknown qtySource — the WHERE is built from that word', async () => {
+    const resp = await post({ lines: [write({ qtySource: 'guessed' })] });
 
     expect(resp.status).toBe(400);
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it('400s a fractional or negative cost (cents are whole, and never negative)', async () => {
-    expect(
-      (await post({ lines: [{ id: 11, unitCostCents: 6.5, ifUnitCostCents: 500 }] })).status,
-    ).toBe(400);
-    expect(
-      (await post({ lines: [{ id: 11, unitCostCents: -1, ifUnitCostCents: 500 }] })).status,
-    ).toBe(400);
-    expect(
-      (await post({ lines: [{ id: 11, unitCostCents: 600, ifUnitCostCents: 1.5 }] })).status,
-    ).toBe(400);
+    expect((await post({ lines: [write({ unitCostCents: 6.5 })] })).status).toBe(400);
+    expect((await post({ lines: [write({ unitCostCents: -1 })] })).status).toBe(400);
+    expect((await post({ lines: [write({ ifUnitCostCents: 1.5 })] })).status).toBe(400);
   });
 
   it('400s a NULL cost — un-pricing a line is the manual save\'s job, not a bill\'s', async () => {
-    const resp = await post({
-      lines: [{ id: 11, unitCostCents: null, ifUnitCostCents: 500 }],
-    });
+    const resp = await post({ lines: [write({ unitCostCents: null })] });
 
     expect(resp.status).toBe(400);
     expect(db.$transaction).not.toHaveBeenCalled();
@@ -491,14 +670,14 @@ describe('POST /api/inbound-shipments/[id]/costs — the request', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. The guards every mutating receiving route carries
+// 5. The guards every mutating receiving route carries
 // ---------------------------------------------------------------------------
 
 describe('POST /api/inbound-shipments/[id]/costs — guards', () => {
   it('403s an invalid CSRF token (no write, no audit)', async () => {
     mockValidateCSRF.mockResolvedValue(false);
 
-    const resp = await post({ lines: [{ id: 11, unitCostCents: 600, ifUnitCostCents: 500 }] });
+    const resp = await post({ lines: [write({ id: 11 })] });
 
     expect(resp.status).toBe(403);
     expect(db.$transaction).not.toHaveBeenCalled();
@@ -511,7 +690,7 @@ describe('POST /api/inbound-shipments/[id]/costs — guards', () => {
       new AppError('Account pending approval', 'FORBIDDEN', 403),
     );
 
-    const resp = await post({ lines: [{ id: 11, unitCostCents: 600, ifUnitCostCents: 500 }] });
+    const resp = await post({ lines: [write({ id: 11 })] });
 
     expect(resp.status).toBe(403);
     expect(db.$transaction).not.toHaveBeenCalled();
@@ -520,7 +699,7 @@ describe('POST /api/inbound-shipments/[id]/costs — guards', () => {
   it('rate-limits per user, under its own key', async () => {
     lineClaims();
 
-    await post({ lines: [{ id: 11, unitCostCents: 600, ifUnitCostCents: 500 }] });
+    await post({ lines: [write({ id: 11 })] });
 
     expect(mockEnforceRateLimit).toHaveBeenCalledWith(expect.anything(), 'inbound-shipment-costs:POST', {
       identifier: APPROVED_USER.id,
@@ -529,7 +708,7 @@ describe('POST /api/inbound-shipments/[id]/costs — guards', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. D9 — a new mutating route joins the change-tracking gate, unexempted
+// 6. D9 — a new mutating route joins the change-tracking gate, unexempted
 // ---------------------------------------------------------------------------
 
 describe('D9 coverage', () => {
