@@ -253,6 +253,150 @@ describe("edited allocations", () => {
 });
 
 // ---------------------------------------------------------------------------
+// W1S-3 (W1-C fix round) — a floored unit cost is never written by accident.
+//
+// `suggestedUnitCostCents` is base + FLOOR(allocated / qty). When the division
+// is not exact the line's landed total is `qty * unit + remainder`, and writing
+// the unit cost alone silently drops that remainder — real money, gone from the
+// valuation with nobody told. The panel shows the remainder, but Accept used to
+// write the line anyway. Now: exact lines write, inexact lines are WITHHELD, and
+// the operator releases one either by editing the split until it is exact or by
+// accepting the floored value explicitly, per line, with the drop named.
+// ---------------------------------------------------------------------------
+
+describe("inexact unit splits are withheld until somebody chooses (W1S-3)", () => {
+  /**
+   * Line 1 (qty 1) takes 2c and expresses it exactly. Line 2 (qty 3) takes 8c,
+   * which is 2c per unit with 2c no unit cost can carry.
+   */
+  const MIXED = [
+    { id: 1, description: "Exact", qty: 1, qtySource: "counted" as const, baseCents: 100 },
+    { id: 2, description: "Inexact", qty: 3, qtySource: "counted" as const, baseCents: 100 },
+  ];
+
+  it("marks the inexact line as needing an exact split", async () => {
+    const user = userEvent.setup();
+    renderPanel({ lines: MIXED });
+
+    await user.type(freightInput(), "0.10");
+
+    expect(within(lineRow(2)).getByTestId("needs-exact-split")).toHaveTextContent(
+      /exact split/i,
+    );
+    expect(within(lineRow(1)).queryByTestId("needs-exact-split")).not.toBeInTheDocument();
+  });
+
+  it("Accept writes ONLY the exact line, leaving the inexact one alone", async () => {
+    const user = userEvent.setup();
+    const { onAccept } = renderPanel({ lines: MIXED });
+
+    await user.type(freightInput(), "0.10");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(onAccept).toHaveBeenCalledWith([{ id: 1, unitCostCents: 102 }]);
+  });
+
+  it("holds Accept entirely when NO line can be written exactly", async () => {
+    const user = userEvent.setup();
+    renderPanel({
+      lines: [{ id: 1, description: "A", qty: 3, qtySource: "counted", baseCents: 100 }],
+    });
+
+    await user.type(freightInput(), "0.10");
+
+    expect(within(lineRow(1)).getByTestId("needs-exact-split")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /accept/i })).toBeDisabled();
+  });
+
+  it("an explicit per-line accept releases the floored cost AND names what it drops", async () => {
+    const user = userEvent.setup();
+    const { onAccept } = renderPanel({ lines: MIXED });
+
+    await user.type(freightInput(), "0.10");
+    const release = within(lineRow(2)).getByRole("button", { name: /write floored/i });
+    // The drop is named on the control itself, before it is pressed.
+    expect(release).toHaveTextContent("2");
+    await user.click(release);
+
+    expect(within(lineRow(2)).getByTestId("floored-accepted")).toHaveTextContent("2");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(onAccept).toHaveBeenCalledWith([
+      { id: 1, unitCostCents: 102 },
+      { id: 2, unitCostCents: 102 },
+    ]);
+  });
+
+  it("EDITING the split to something exact releases the line with no confirm at all", async () => {
+    const user = userEvent.setup();
+    const { onAccept } = renderPanel({ lines: MIXED });
+
+    await user.type(freightInput(), "0.10");
+    await user.clear(allocationInput(1));
+    await user.type(allocationInput(1), "1");
+    await user.clear(allocationInput(2));
+    await user.type(allocationInput(2), "9");
+
+    expect(screen.queryByTestId("needs-exact-split")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(onAccept).toHaveBeenCalledWith([
+      { id: 1, unitCostCents: 101 },
+      { id: 2, unitCostCents: 103 },
+    ]);
+  });
+
+  it("says how many lines it is holding back", async () => {
+    const user = userEvent.setup();
+    renderPanel({ lines: MIXED });
+
+    await user.type(freightInput(), "0.10");
+
+    expect(screen.getByTestId("allocation-withheld")).toHaveTextContent(/1 line/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W1S-5 (W1-C fix round) — a failed write must not look like a clean one.
+// ---------------------------------------------------------------------------
+
+describe("a failing write keeps the bill (W1S-5)", () => {
+  it("retains the freight total and the rows, and says the write failed", async () => {
+    const user = userEvent.setup();
+    const onAccept = jest.fn().mockRejectedValue(new Error("Failed to update the line"));
+    render(<FreightCalculatorPanel lines={LINES} onAccept={onAccept} />);
+
+    await user.type(freightInput(), "60.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(await screen.findByTestId("allocation-write-failed")).toHaveTextContent(
+      /not written/i,
+    );
+    // The compounding guard must NOT fire: nothing was compounded.
+    expect(freightInput()).toHaveValue("60.00");
+    expect(screen.getByTestId("allocation-row-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("allocation-applied")).not.toBeInTheDocument();
+  });
+
+  it("clears the failure notice once a retry succeeds", async () => {
+    const user = userEvent.setup();
+    const onAccept = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce(undefined);
+    render(<FreightCalculatorPanel lines={LINES} onAccept={onAccept} />);
+
+    await user.type(freightInput(), "60.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    await screen.findByTestId("allocation-write-failed");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(await screen.findByTestId("allocation-applied")).toBeInTheDocument();
+    expect(screen.queryByTestId("allocation-write-failed")).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Nothing to work with
 // ---------------------------------------------------------------------------
 

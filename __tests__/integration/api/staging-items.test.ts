@@ -192,7 +192,9 @@ describe('PATCH /api/staging-items/[id]', () => {
   it('updates only the provided fields (200)', async () => {
     setApprovedUser();
     db.stagingItem.findUnique.mockResolvedValue({ id: 5, status: 'RECEIVED', shipmentId: null });
-    db.stagingItem.update.mockResolvedValue({ id: 5, expectedQuantity: 12 });
+    // W1S-1: a state-bearing field is written by a CONDITIONAL claim, so the
+    // partial-update property is asserted on that claim rather than on `update`.
+    db.stagingItem.updateMany.mockResolvedValue({ count: 1 });
 
     const resp = await PATCH(
       mkReq('http://t/api/staging-items/5', 'PATCH', { expectedQuantity: 12 }),
@@ -200,11 +202,11 @@ describe('PATCH /api/staging-items/[id]', () => {
     );
 
     expect(resp.status).toBe(200);
-    const updateArgs = db.stagingItem.update.mock.calls[0][0];
-    expect(updateArgs.where).toEqual({ id: 5 });
-    expect(updateArgs.data).toEqual({ expectedQuantity: 12 });
+    const writeArgs = db.stagingItem.updateMany.mock.calls[0][0];
+    expect(writeArgs.where).toEqual({ id: 5, status: 'RECEIVED' });
+    expect(writeArgs.data).toEqual({ expectedQuantity: 12 });
     // description was not in the body -> must not be written
-    expect(updateArgs.data.description).toBeUndefined();
+    expect(writeArgs.data.description).toBeUndefined();
   });
 
   it('returns 404 when the item does not exist', async () => {
@@ -218,6 +220,7 @@ describe('PATCH /api/staging-items/[id]', () => {
 
     expect(resp.status).toBe(404);
     expect(db.stagingItem.update).not.toHaveBeenCalled();
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
   });
 
   it('returns 403 when CSRF token is invalid', async () => {

@@ -111,11 +111,20 @@ export type GraduateRecordContext = {
  *      cost gets one, audited; a product whose cost DISAGREES is never rewritten
  *      here — the disagreement leaves as a prompt (admin) or as a register-row
  *      subject for the caller (everyone else).
- *   7. Finalize the staging item: resolvedProductId. The count is NOT rewritten —
- *      an override changes what the LEDGER books, never what the dock reported.
+ *   7. Finalize the staging item: resolvedProductId AND locationId. The count is
+ *      NOT rewritten — an override changes what the LEDGER books, never what the
+ *      dock reported.
  *
  * Returns { productId, approvalStatus, locationId, countedQuantity,
  * bookedQuantity, receiptCost, costPrompt }.
+ *
+ * AN OVERRIDE MUST BE AUDITABLE (W1S-6, W1-C fix round). Booking a number the
+ * dock did not produce is only defensible because it lands in the audit feed
+ * with its reason attached, and that line is written by the CALLER's onRecord
+ * hook under the caller's batchId. So an override that arrives without both is
+ * refused BEFORE the claim: a programmer error, not a user state, and the one
+ * failure mode where "write the stock, lose the explanation" is worse than not
+ * writing at all.
  *
  * LOCK-ORDER NOTE: this path takes the staging row's lock and then the
  * shipment's; the count endpoint takes them the other way round. Two people
@@ -138,6 +147,21 @@ export async function graduateStagingItem(
   }
 ): Promise<GraduateResult> {
   const { onRecord, batchId } = opts ?? {};
+
+  // W1S-6: the override's audit trail is part of the override, not an optional
+  // extra. Checked HERE — outside the transaction, before the claim — so an
+  // unauditable override never reaches a write at all. `assertGraduateOverridePair`
+  // at the route settles the half-pair case; this settles the wiring case.
+  const overrideRequested =
+    body.overrideQuantity !== undefined && body.overrideReason !== undefined;
+  if (overrideRequested && (!onRecord || !batchId)) {
+    throw new AppError(
+      'A graduation override must be audited: graduateStagingItem requires both opts.onRecord and opts.batchId when a quantity override is supplied',
+      'OVERRIDE_NOT_AUDITABLE',
+      500
+    );
+  }
+
   return withDeadlockRetry(() =>
     prisma.$transaction(async (tx) => {
       // 1. Atomic claim — the double-stock guard.
@@ -353,10 +377,18 @@ export async function graduateStagingItem(
       // 7. Finalize the staging item. countedQuantity is NOT written here: the
       //    count belongs to the count endpoint, and an override changes what the
       //    LEDGER books, never what the dock reported.
+      //
+      //    locationId IS written (W1S-6's sibling, W1S-4): graduation books the
+      //    stock into `body.locationId`, which the dialog lets an operator change
+      //    away from wherever the box was logged. Leaving the row on its old
+      //    location made the FROZEN RECEIPT disagree with the movement it
+      //    produced — and the row is what every receiving surface reads back, so
+      //    the receipt would have said one thing and the ledger another forever.
       await tx.stagingItem.update({
         where: { id: stagingItemId },
         data: {
           resolvedProductId: productId,
+          locationId: body.locationId,
         },
       });
 

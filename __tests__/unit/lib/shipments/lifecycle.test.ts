@@ -18,6 +18,7 @@
  */
 
 import {
+  applyShipmentLink,
   claimShipmentForCount,
   claimShipmentForGraduation,
 } from '@/lib/shipments/lifecycle';
@@ -30,6 +31,9 @@ function mkTx() {
     inboundShipment: {
       updateMany: jest.fn(),
       findUnique: jest.fn(),
+    },
+    stagingItem: {
+      updateMany: jest.fn(),
     },
   } as any;
 }
@@ -143,6 +147,75 @@ describe('claimShipmentForGraduation (OPEN or CLOSED — the stranded-line amend
     tx.inboundShipment.findUnique.mockResolvedValue({ id: SHIPMENT, status: 'CANCELLED' });
 
     await expectAppError(claimShipmentForGraduation(tx, SHIPMENT), 409);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W1S-2/W1S-7 (W1-C fix round) — the RELINK takes both headers in a canonical
+// order. A relink is the one act that holds TWO shipment row locks at once, and
+// two operators moving lines in opposite directions (A -> B and B -> A) took
+// them in opposite orders: a textbook deadlock between two legal requests.
+// Sorting by id makes the order a property of the PAIR, not of the direction.
+// ---------------------------------------------------------------------------
+
+describe('applyShipmentLink — deterministic multi-shipment lock order', () => {
+  const A = 'ckshipment00000000000000a';
+  const B = 'ckshipment00000000000000b';
+
+  function linkTx() {
+    const tx = mkTx();
+    tx.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+    tx.stagingItem.updateMany.mockResolvedValue({ count: 1 });
+    return tx;
+  }
+
+  const claimedIds = (tx: any) =>
+    tx.inboundShipment.updateMany.mock.calls.map((c: any[]) => c[0].where.id);
+
+  it('claims A then B when moving A -> B', async () => {
+    const tx = linkTx();
+
+    await applyShipmentLink(tx, {
+      item: { id: 5, status: 'RECEIVED' as any, shipmentId: A },
+      targetShipmentId: B,
+    });
+
+    expect(claimedIds(tx)).toEqual([A, B]);
+  });
+
+  it('claims A then B when moving B -> A (the IDENTICAL order, not the request order)', async () => {
+    const tx = linkTx();
+
+    await applyShipmentLink(tx, {
+      item: { id: 5, status: 'RECEIVED' as any, shipmentId: B },
+      targetShipmentId: A,
+    });
+
+    // Source-then-target would have claimed B first here and deadlocked against
+    // the A -> B relink above.
+    expect(claimedIds(tx)).toEqual([A, B]);
+  });
+
+  it('a plain LINK claims only the target', async () => {
+    const tx = linkTx();
+
+    await applyShipmentLink(tx, {
+      item: { id: 5, status: 'RECEIVED' as any, shipmentId: null },
+      targetShipmentId: B,
+    });
+
+    expect(claimedIds(tx)).toEqual([B]);
+  });
+
+  it('a plain UNLINK claims only the shipment being left', async () => {
+    const tx = linkTx();
+
+    await applyShipmentLink(tx, {
+      item: { id: 5, status: 'RECEIVED' as any, shipmentId: A },
+      targetShipmentId: null,
+    });
+
+    expect(claimedIds(tx)).toEqual([A]);
   });
 });
 

@@ -254,15 +254,50 @@ describe('graduateStagingItem — the row is the truth (count-46-book-50)', () =
     expect(mockApplyStockDelta).not.toHaveBeenCalled();
   });
 
-  it('finalize writes resolvedProductId ONLY — the staging row keeps its true count', async () => {
+  it('finalize writes resolvedProductId + locationId — the staging row keeps its true count', async () => {
     mockTx.stagingItem.findUnique.mockResolvedValue(stagingRow({ countedQuantity: 46 }) as any);
 
     await graduateStagingItem(55, EXISTING, { id: 42, isAdmin: false });
 
     const finalArg = mockTx.stagingItem.update.mock.calls[0][0] as any;
     expect(finalArg.where).toEqual({ id: 55 });
-    expect(finalArg.data).toEqual({ resolvedProductId: 7 });
+    expect(finalArg.data).toEqual({ resolvedProductId: 7, locationId: 1 });
     expect(finalArg.data).not.toHaveProperty('countedQuantity');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W1S-4 (W1-C fix round): the frozen receipt names WHERE the stock landed.
+// ---------------------------------------------------------------------------
+
+describe('graduateStagingItem — the receipt records the booked location', () => {
+  beforeEach(() => {
+    mockTx.product.findFirst.mockResolvedValue({
+      id: 7,
+      approvalStatus: 'APPROVED',
+      deletedAt: null,
+      costPrice: null,
+    } as any);
+    mockTx.stagingItem.findUnique.mockResolvedValue(stagingRow({ countedQuantity: 12 }) as any);
+  });
+
+  it('writes the LEDGER location onto the staging row when they differ', async () => {
+    // The box was logged into location 1 and stocked into location 3. Leaving
+    // the row at 1 makes the frozen receipt disagree with the movement it
+    // produced — and the row is what the receiving surfaces read back.
+    await graduateStagingItem(55, { ...EXISTING, locationId: 3 }, { id: 42, isAdmin: false });
+
+    const ledgerLocation = mockApplyStockDelta.mock.calls[0][1].locationId;
+    const rowLocation = (mockTx.stagingItem.update.mock.calls[0][0] as any).data.locationId;
+
+    expect(ledgerLocation).toBe(3);
+    expect(rowLocation).toBe(ledgerLocation);
+  });
+
+  it('still writes it when the location did not change (one code path, no branch)', async () => {
+    await graduateStagingItem(55, { ...EXISTING, locationId: 1 }, { id: 42, isAdmin: false });
+
+    expect((mockTx.stagingItem.update.mock.calls[0][0] as any).data.locationId).toBe(1);
   });
 });
 
@@ -281,17 +316,24 @@ describe('graduateStagingItem — the audited override', () => {
     mockTx.stagingItem.findUnique.mockResolvedValue(stagingRow({ countedQuantity: 46 }) as any);
   });
 
+  /** The audit wiring every override REQUIRES (W1S-6). */
+  const AUDITED = { onRecord: jest.fn(), batchId: 'B1' };
+
   it('books the override, reports BOTH quantities, and leaves the row count alone', async () => {
     const result = await graduateStagingItem(
       55,
       { ...EXISTING, overrideQuantity: 40, overrideReason: 'six vials broken in transit' },
-      { id: 42, isAdmin: false }
+      { id: 42, isAdmin: false },
+      { ...AUDITED, onRecord: jest.fn() }
     );
 
     expect(mockApplyStockDelta.mock.calls[0][1].delta).toBe(40);
     expect(result.countedQuantity).toBe(46);
     expect(result.bookedQuantity).toBe(40);
-    expect((mockTx.stagingItem.update.mock.calls[0][0] as any).data).toEqual({ resolvedProductId: 7 });
+    expect((mockTx.stagingItem.update.mock.calls[0][0] as any).data).toEqual({
+      resolvedProductId: 7,
+      locationId: 1,
+    });
   });
 
   it('hands onRecord the override so the caller can write GRADUATE_OVERRIDE', async () => {
@@ -300,7 +342,7 @@ describe('graduateStagingItem — the audited override', () => {
       55,
       { ...EXISTING, overrideQuantity: 40, overrideReason: 'six vials broken in transit' },
       { id: 42, isAdmin: false },
-      { onRecord }
+      { onRecord, batchId: 'B1' }
     );
 
     const [, ctx] = onRecord.mock.calls[0];
@@ -309,6 +351,54 @@ describe('graduateStagingItem — the audited override', () => {
       bookedQuantity: 40,
       override: { quantity: 40, reason: 'six vials broken in transit' },
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // W1S-6 (W1-C fix round): an override is only legal if it can be AUDITED.
+  // -------------------------------------------------------------------------
+
+  it('REFUSES an override with no onRecord hook — an unauditable override is a bug', async () => {
+    const err = await graduateStagingItem(
+      55,
+      { ...EXISTING, overrideQuantity: 40, overrideReason: 'six vials broken in transit' },
+      { id: 42, isAdmin: false },
+      { batchId: 'B1' }
+    ).catch((e) => e);
+
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.message).toMatch(/override/i);
+    // Refused BEFORE the claim: nothing is written, so no half-audited
+    // graduation can exist even for the length of a transaction.
+    expect(mockTx.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(mockApplyStockDelta).not.toHaveBeenCalled();
+  });
+
+  it('REFUSES an override with no batchId — the override line must join its fan-out', async () => {
+    const err = await graduateStagingItem(
+      55,
+      { ...EXISTING, overrideQuantity: 40, overrideReason: 'six vials broken in transit' },
+      { id: 42, isAdmin: false },
+      { onRecord: jest.fn() }
+    ).catch((e) => e);
+
+    expect(err).toBeInstanceOf(AppError);
+    expect(mockTx.stagingItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('REFUSES an override with no options at all', async () => {
+    await expect(
+      graduateStagingItem(
+        55,
+        { ...EXISTING, overrideQuantity: 40, overrideReason: 'six vials broken in transit' },
+        { id: 42, isAdmin: false }
+      )
+    ).rejects.toBeInstanceOf(AppError);
+  });
+
+  it('a graduation WITHOUT an override needs neither (the rule is override-scoped)', async () => {
+    await expect(
+      graduateStagingItem(55, EXISTING, { id: 42, isAdmin: false })
+    ).resolves.toMatchObject({ bookedQuantity: 46 });
   });
 
   it('no override -> ctx.override is null and booked === counted', async () => {
@@ -335,7 +425,8 @@ describe('graduateStagingItem — the audited override', () => {
       graduateStagingItem(
         55,
         { ...EXISTING, overrideQuantity: 40, overrideReason: 'the box was empty but I want stock' },
-        { id: 42, isAdmin: false }
+        { id: 42, isAdmin: false },
+        { onRecord: jest.fn(), batchId: 'B1' }
       )
     ).rejects.toMatchObject({ statusCode: 422 });
   });

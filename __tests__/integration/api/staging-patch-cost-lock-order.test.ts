@@ -117,6 +117,16 @@ function itemRow(overrides: Record<string, unknown> = {}) {
 
 /** Every `stagingItem.updateMany` call, in order, as {where, data}. */
 const itemClaims = () => db.stagingItem.updateMany.mock.calls.map((c: any[]) => c[0]);
+/**
+ * The claims that WRITE a state-bearing field. W1S-1 turned the closing state
+ * write into a conditional `updateMany` too, so the leading no-op lock claim
+ * (data names only `status`) is separated by its data, never by call index.
+ */
+const stateWrites = () =>
+  itemClaims().filter((args: any) => args?.data && Object.keys(args.data).some((k) => k !== 'status'));
+/** The leading NO-OP lock claims — the ones this file is actually about. */
+const lockClaims = () =>
+  itemClaims().filter((args: any) => args?.data && Object.keys(args.data).every((k) => k === 'status'));
 /** The interleaving of item-table and shipment-table claims, in call order. */
 function claimOrder(): string[] {
   const order: string[] = [];
@@ -229,7 +239,10 @@ describe('PATCH /api/staging-items/[id] — lock order (residual ABBA)', () => {
     const resp = await patch({ expectedQuantity: 25 });
 
     expect(resp.status).toBe(200);
-    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    // No shipment work -> no ABBA to order -> no lock claim. (The state write
+    // itself is still a conditional claim; that is W1S-1, not this rule.)
+    expect(lockClaims()).toHaveLength(0);
+    expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
   });
 
   it('takes NO lock for a link that is already where it was asked to be', async () => {
@@ -256,7 +269,7 @@ describe('PATCH /api/staging-items/[id] — unitCostCents', () => {
     const resp = await patch({ unitCostCents: 1250 });
 
     expect(resp.status).toBe(200);
-    expect(db.stagingItem.update.mock.calls[0][0].data).toEqual({ unitCostCents: 1250 });
+    expect(stateWrites()[0].data).toEqual({ unitCostCents: 1250 });
     expect(mockRecordChange.mock.calls[0][1]).toMatchObject({
       actionType: 'STAGING_UPDATE',
       entityType: 'STAGING',
@@ -271,7 +284,7 @@ describe('PATCH /api/staging-items/[id] — unitCostCents', () => {
     const resp = await patch({ unitCostCents: 0 });
 
     expect(resp.status).toBe(200);
-    expect(db.stagingItem.update.mock.calls[0][0].data).toEqual({ unitCostCents: 0 });
+    expect(stateWrites()[0].data).toEqual({ unitCostCents: 0 });
   });
 
   it('accepts null — clearing a cost restores "unknown", never 0', async () => {
@@ -281,7 +294,7 @@ describe('PATCH /api/staging-items/[id] — unitCostCents', () => {
     const resp = await patch({ unitCostCents: null });
 
     expect(resp.status).toBe(200);
-    expect(db.stagingItem.update.mock.calls[0][0].data).toEqual({ unitCostCents: null });
+    expect(stateWrites()[0].data).toEqual({ unitCostCents: null });
     expect(mockRecordChange.mock.calls[0][1].changes).toEqual({
       unitCostCents: { from: 500, to: null },
     });
@@ -293,7 +306,7 @@ describe('PATCH /api/staging-items/[id] — unitCostCents', () => {
     const resp = await patch({ unitCostCents: 12.5 });
 
     expect(resp.status).toBe(400);
-    expect(db.stagingItem.update).not.toHaveBeenCalled();
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
   });
 
   it('400s a negative cost', async () => {
@@ -312,6 +325,7 @@ describe('PATCH /api/staging-items/[id] — unitCostCents', () => {
     expect(resp.status).toBe(409);
     const json = await resp.json();
     expect(json.error).toMatch(/unitCostCents/);
+    expect(stateWrites()).toHaveLength(0);
     expect(db.stagingItem.update).not.toHaveBeenCalled();
     expect(mockRecordChange).not.toHaveBeenCalled();
   });

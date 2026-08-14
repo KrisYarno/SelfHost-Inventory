@@ -54,9 +54,10 @@ import {
  *
  * The state matrix is rendered rather than merely enforced: a CLOSED shipment
  * stops offering counts, links and the close button, but KEEPS offering
- * graduation (the stranded-line amendment — closing ends receiving, not
- * stocking). A CANCELLED shipment offers nothing. The server's 409s remain the
- * real guard; this is just the part that stops an operator walking into one.
+ * graduation AND per-line pricing (the stranded-line amendment — closing ends
+ * receiving, not stocking, and the graduation of a stranded line reads that
+ * cost). A CANCELLED shipment offers nothing. The server's 409s remain the real
+ * guard; this is just the part that stops an operator walking into one.
  */
 
 /** INT cents -> money. NULL is "not priced", never $0.00 (truthful-data). */
@@ -136,6 +137,15 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
   // The close guard's 409, kept on screen: it NAMES the lines that blocked it,
   // and a toast that scrolls away would throw that away.
   const [closeBlocked, setCloseBlocked] = useState<number[] | null>(null);
+
+  // W1S-5: where a sequential cost write stopped. The calculator's Accept fans
+  // out into one PATCH per line, and those PATCHes are NOT one transaction — so
+  // a failure halfway leaves some lines priced and some not, and the operator
+  // has to be told which is which before retrying anything.
+  const [costWriteReport, setCostWriteReport] = useState<{
+    written: number[];
+    pending: number[];
+  } | null>(null);
 
   const [graduateItem, setGraduateItem] = useState<GraduateStagingItem | null>(null);
   const [graduateOpen, setGraduateOpen] = useState(false);
@@ -297,6 +307,8 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
   const handleAcceptAllocation = async (
     updates: Array<{ id: number; unitCostCents: number }>,
   ) => {
+    const written: number[] = [];
+    setCostWriteReport(null);
     try {
       // Sequential on purpose: each PATCH is its own audited change, and a
       // half-applied burst is easier to read in the log than a racing one.
@@ -305,11 +317,22 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
           id: update.id,
           body: { unitCostCents: update.unitCostCents },
         });
+        written.push(update.id);
       }
       toast.success(`Landed cost written to ${updates.length} line(s)`);
     } catch (err) {
+      // W1S-5: RETHROW. These PATCHes are not one transaction, so swallowing the
+      // failure told the operator "done" while some lines carried the new landed
+      // cost and some still carried the old one — and the panel, believing it had
+      // written, cleared the bill they would need to finish the job. Record where
+      // it stopped, say so, and let the panel keep everything.
       console.error("Error writing allocated costs:", err);
+      setCostWriteReport({
+        written,
+        pending: updates.map((u) => u.id).filter((id) => !written.includes(id)),
+      });
       toast.error(err instanceof Error ? err.message : "Failed to write the costs");
+      throw err;
     }
   };
 
@@ -433,6 +456,23 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
           </div>
         )}
 
+        {costWriteReport && (
+          <div
+            data-testid="cost-write-partial"
+            className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs"
+          >
+            <p className="font-medium">
+              The landed costs were only partly written.
+            </p>
+            <p className="text-muted-foreground">
+              {costWriteReport.written.length > 0
+                ? `Written: line(s) ${costWriteReport.written.join(", ")}.`
+                : "No line was written."}
+              {` Not written: line(s) ${costWriteReport.pending.join(", ")}. The bill is still in the calculator — fix the problem and Accept again, but re-enter costs only for the lines above.`}
+            </p>
+          </div>
+        )}
+
         {pendingApproval.length > 0 && (
           <div
             data-testid="pending-approval-notice"
@@ -459,6 +499,14 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
               const lineBusy = busyLineId === item.id;
               const countable = receivingActive && item.status === "RECEIVED";
               const gradable = stockingActive && item.status === "RECEIVED";
+              // W1S-8: pricing follows STOCKING, not receiving. A closed
+              // shipment's RECEIVED line can still graduate, and graduation
+              // reads this cost — gating the input on `countable` meant the one
+              // number the stranded line still needs became unreachable the
+              // moment the shipment closed, on the very surface that offers the
+              // graduation. The calculator was already gated this way; the
+              // per-line input disagreed with it.
+              const priceable = gradable;
               const countDraft = countDrafts[item.id] ?? "";
               const countValid = /^\d+$/.test(countDraft.trim());
               const costDraft = costDrafts[item.id] ?? "";
@@ -521,66 +569,70 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
                     </div>
                   </div>
 
-                  {countable && (
+                  {(countable || priceable) && (
                     <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="space-y-1.5">
-                        <Label htmlFor={`count-${item.id}`} className="text-xs">
-                          Count
-                        </Label>
-                        <div className="flex gap-2">
-                          <Input
-                            id={`count-${item.id}`}
-                            type="number"
-                            min="0"
-                            className="h-9"
-                            value={countDraft}
-                            onChange={(e) =>
-                              setCountDrafts((prev) => ({
-                                ...prev,
-                                [item.id]: e.target.value,
-                              }))
-                            }
-                            placeholder="Units on the dock"
-                          />
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => handleCount(item)}
-                            disabled={!countValid || lineBusy || !csrfToken}
-                          >
-                            Save count
-                          </Button>
+                      {countable && (
+                        <div className="space-y-1.5">
+                          <Label htmlFor={`count-${item.id}`} className="text-xs">
+                            Count
+                          </Label>
+                          <div className="flex gap-2">
+                            <Input
+                              id={`count-${item.id}`}
+                              type="number"
+                              min="0"
+                              className="h-9"
+                              value={countDraft}
+                              onChange={(e) =>
+                                setCountDrafts((prev) => ({
+                                  ...prev,
+                                  [item.id]: e.target.value,
+                                }))
+                              }
+                              placeholder="Units on the dock"
+                            />
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => handleCount(item)}
+                              disabled={!countValid || lineBusy || !csrfToken}
+                            >
+                              Save count
+                            </Button>
+                          </div>
                         </div>
-                      </div>
+                      )}
 
-                      <div className="space-y-1.5">
-                        <Label htmlFor={`cost-${item.id}`} className="text-xs">
-                          Unit cost
-                        </Label>
-                        <div className="flex gap-2">
-                          <Input
-                            id={`cost-${item.id}`}
-                            inputMode="decimal"
-                            className="h-9"
-                            value={costDraft}
-                            onChange={(e) =>
-                              setCostDrafts((prev) => ({
-                                ...prev,
-                                [item.id]: e.target.value,
-                              }))
-                            }
-                            placeholder="0.00"
-                          />
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => handleCost(item)}
-                            disabled={!costValid || lineBusy || !csrfToken}
-                          >
-                            Save cost
-                          </Button>
+                      {priceable && (
+                        <div className="space-y-1.5">
+                          <Label htmlFor={`cost-${item.id}`} className="text-xs">
+                            Unit cost
+                          </Label>
+                          <div className="flex gap-2">
+                            <Input
+                              id={`cost-${item.id}`}
+                              inputMode="decimal"
+                              className="h-9"
+                              value={costDraft}
+                              onChange={(e) =>
+                                setCostDrafts((prev) => ({
+                                  ...prev,
+                                  [item.id]: e.target.value,
+                                }))
+                              }
+                              placeholder="0.00"
+                            />
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => handleCost(item)}
+                              disabled={!costValid || lineBusy || !csrfToken}
+                            >
+                              Save cost
+                            </Button>
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
                   )}
                 </li>

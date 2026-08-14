@@ -80,6 +80,8 @@ jest.mock("@/lib/prisma", () => {
     stagingItem: {
       findUnique: jest.fn(),
       update: jest.fn(),
+      // W1S-1: a state-bearing PATCH writes through a conditional claim.
+      updateMany: jest.fn(async () => ({ count: 1 })),
     },
     auditLog: { create: jest.fn(async () => ({ id: 1 })) },
   };
@@ -384,7 +386,7 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
       resolvedProductId: null,
       shipmentId: null,
     });
-    tx.stagingItem.update.mockResolvedValue({ id: 5, expectedQuantity: 12 });
+    tx.stagingItem.updateMany.mockResolvedValue({ count: 1 });
 
     // W1-2b: countedQuantity left the PATCH surface (pack REV-3 T2); the
     // provided-fields-only diff is pinned on expectedQuantity instead.
@@ -395,7 +397,9 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
 
     expect(resp.status).toBe(200);
     expect(db.$transaction).toHaveBeenCalledTimes(1);
-    expect(tx.stagingItem.update).toHaveBeenCalledTimes(1);
+    // W1S-1: expectedQuantity is state-bearing, so the write is the conditional
+    // claim rather than an unconditional `update`.
+    expect(tx.stagingItem.updateMany).toHaveBeenCalledTimes(1);
     expect(tx.auditLog.create).toHaveBeenCalledTimes(1);
 
     const [row] = auditRows();
@@ -409,7 +413,7 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
     });
   });
 
-  it("records SCALAR after-values for relation fields, but writes connect objects", async () => {
+  it("records SCALAR after-values for relation fields, and writes scalar FKs", async () => {
     tx.stagingItem.findUnique.mockResolvedValue({
       id: 5,
       status: "RECEIVED",
@@ -417,7 +421,7 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
       resolvedProductId: null,
       shipmentId: null,
     });
-    tx.stagingItem.update.mockResolvedValue({ id: 5 });
+    tx.stagingItem.updateMany.mockResolvedValue({ count: 1 });
 
     const resp = await stagingPATCH(
       mkReq("http://t/api/staging-items/5", "PATCH", { locationId: 2, resolvedProductId: 88 }),
@@ -430,10 +434,13 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
       locationId: { from: 1, to: 2 },
       resolvedProductId: { from: null, to: 88 },
     });
-    // The write still uses Prisma relation-connect objects.
-    const data = tx.stagingItem.update.mock.calls[0][0].data;
-    expect(data.location).toEqual({ connect: { id: 2 } });
-    expect(data.resolvedProduct).toEqual({ connect: { id: 88 } });
+    // W1S-1: both are state-bearing, so the write carries `status: RECEIVED` in
+    // its WHERE — which means scalar FK columns, not relation connects
+    // (`updateMany` takes no nested writes). The DIFF is unchanged: it always
+    // reported scalars.
+    const claim = tx.stagingItem.updateMany.mock.calls[0][0];
+    expect(claim.where).toEqual({ id: 5, status: "RECEIVED" });
+    expect(claim.data).toEqual({ locationId: 2, resolvedProductId: 88 });
   });
 
   it("ER-B9: providing the same value => NO event (update still applied)", async () => {
@@ -443,7 +450,7 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
       expectedQuantity: 12,
       shipmentId: null,
     });
-    tx.stagingItem.update.mockResolvedValue({ id: 5, expectedQuantity: 12 });
+    tx.stagingItem.updateMany.mockResolvedValue({ count: 1 });
 
     const resp = await stagingPATCH(
       mkReq("http://t/api/staging-items/5", "PATCH", { expectedQuantity: 12 }),
@@ -451,7 +458,7 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
     );
 
     expect(resp.status).toBe(200);
-    expect(tx.stagingItem.update).toHaveBeenCalledTimes(1);
+    expect(tx.stagingItem.updateMany).toHaveBeenCalledTimes(1);
     expect(tx.auditLog.create).not.toHaveBeenCalled();
   });
 
@@ -465,6 +472,7 @@ describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
 
     expect(resp.status).toBe(404);
     expect(tx.stagingItem.update).not.toHaveBeenCalled();
+    expect(tx.stagingItem.updateMany).not.toHaveBeenCalled();
     expect(tx.auditLog.create).not.toHaveBeenCalled();
   });
 });

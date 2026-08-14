@@ -27,6 +27,40 @@
  * that reached a write through a THIRD module would be invisible to (4).
  * Assertion (2) is what actually closes that: no third module may import the
  * writer at all without appearing here.
+ *
+ * ---------------------------------------------------------------------------
+ * W1S-9 (W1-C fix round) — REGISTERED ESCAPE CLASSES, no code change.
+ *
+ * A source scan matches TEXT. These are the ways a write could get past it
+ * today; they are recorded rather than closed, because closing them properly
+ * means an AST / import-graph gate, which is a W3 item (see the plan register).
+ * Until then the four assertions above are a strong deterrent, not a proof.
+ *
+ *   E1  DYNAMIC DELEGATE ACCESS. `DELEGATE_WRITE` matches the literal
+ *       `inventoryException.<verb>`. `tx['inventory' + 'Exception'].create(…)`,
+ *       a destructured `const { inventoryException } = tx`, or a delegate passed
+ *       as a parameter all write without ever spelling the pattern.
+ *   E2  RAW SQL. `$executeRaw`/`$queryRaw` against `inventory_exceptions` never
+ *       touches the delegate at all. Nothing here looks at raw statements.
+ *   E3  ALTERNATE SPECIFIERS. Assertion (2) keys on the `@/lib/exceptions/write`
+ *       string. A relative import (`../../lib/exceptions/write`), a re-export
+ *       barrel, or a `await import()` with a computed path imports the writer
+ *       under a name this scan does not recognise — and would then also be
+ *       missing from the allow-list comparison rather than failing it.
+ *   E4  NON-ROUTE ENTRY POINTS. The sweep covers app/lib/components/hooks and
+ *       treats `/route.ts` as the unit of HTTP. Server actions, middleware, and
+ *       instrumentation hooks are read as ordinary modules, so "no GET writes"
+ *       says nothing about them.
+ *   E5  SEGMENT SLICING (the pre-existing limit above, restated as a class):
+ *       `handlerSegments` splits on `export const|async function <METHOD>`. A
+ *       handler assigned differently (`export { handler as GET }`, a wrapper
+ *       applied after definition) lands in the WRONG segment, so a GET's writes
+ *       can be attributed to the POST above it.
+ *   E6  COMMENTS AND STRINGS. The scan cannot tell code from prose: a mention of
+ *       `inventoryException.create` inside a comment fails the gate, and there
+ *       is no way to suppress it except by rewording. Cheap to live with, worth
+ *       naming so a future editor does not think the gate has gone mad.
+ * ---------------------------------------------------------------------------
  */
 
 import fs from 'node:fs';

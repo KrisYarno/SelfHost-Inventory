@@ -145,6 +145,14 @@ export type ShipmentLinkResult = {
  * item that graduated (or was relinked) between the caller's read and this
  * write loses with `count === 0` -> 409 instead of overwriting the winner.
  *
+ * W1S-7 (W1-C fix round): the shipment claims are taken in CANONICAL id order,
+ * sorted and deduped — never source-then-target. A relink is the only act that
+ * holds two header locks at once, and taking them in request order meant two
+ * operators moving lines in opposite directions (A -> B and B -> A) grabbed them
+ * in opposite orders and deadlocked each other. Sorting makes the order a
+ * property of the PAIR rather than of the direction, so the two requests queue
+ * instead of colliding.
+ *
  * The audit verbs are emitted by the CALLER from the returned action (house
  * pattern: recordChange lives in the route, inside this same transaction).
  */
@@ -171,11 +179,14 @@ export async function applyShipmentLink(
     );
   }
 
-  if (previousShipmentId !== null) {
-    await claimShipmentForLink(tx, previousShipmentId);
-  }
-  if (targetShipmentId !== null) {
-    await claimShipmentForLink(tx, targetShipmentId);
+  // Both headers involved, sorted + deduped: the deadlock-free order (see the
+  // header note). Dedupe is belt-and-braces — the NOOP short-circuit above
+  // already removed the only way the two ids can be equal.
+  const headers = Array.from(
+    new Set([previousShipmentId, targetShipmentId].filter((s): s is string => s !== null)),
+  ).sort();
+  for (const shipmentId of headers) {
+    await claimShipmentForLink(tx, shipmentId);
   }
 
   const claim = await tx.stagingItem.updateMany({

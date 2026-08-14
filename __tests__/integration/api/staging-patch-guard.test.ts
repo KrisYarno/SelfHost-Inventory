@@ -113,6 +113,33 @@ function itemRow(overrides: Record<string, unknown> = {}) {
 
 const patch = (body: unknown) => PATCH(mkReq(body), { params: { id: '5' } });
 
+/** Every `stagingItem.updateMany` call, in order, as {where, data}. */
+const itemClaims = () => db.stagingItem.updateMany.mock.calls.map((c: any[]) => c[0]);
+/**
+ * The claims that actually WRITE a state-bearing field — i.e. everything except
+ * the route's leading no-op lock claim, whose data names only `status`.
+ */
+const stateWrites = () =>
+  itemClaims().filter((args: any) => args?.data && Object.keys(args.data).some((k) => k !== 'status'));
+
+/**
+ * A REAL two-step race: the row is RECEIVED when the route reads it, and a
+ * concurrent graduation commits before the route writes. The mocked `updateMany`
+ * evaluates its own WHERE against the row's CURRENT status, exactly as MySQL
+ * would, so a claim conditioned on RECEIVED matches 0 rows.
+ */
+function graduateBetweenReadAndWrite(overrides: Record<string, unknown> = {}) {
+  let status = 'RECEIVED';
+  db.stagingItem.findUnique.mockImplementation(async () => {
+    const row = itemRow({ status, ...overrides });
+    status = 'GRADUATED'; // <- the concurrent graduation commits here
+    return row;
+  });
+  db.stagingItem.updateMany.mockImplementation(async (args: any) => ({
+    count: args?.where?.status === undefined || args.where.status === status ? 1 : 0,
+  }));
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   (requireApproved as jest.Mock).mockResolvedValue({ user: APPROVED_USER });
@@ -241,6 +268,75 @@ describe('post-graduation freeze — every frozen field, one at a time', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// W1S-1 (W1-C fix round) — the freeze is ATOMIC, not advisory.
+//
+// The verdict above is computed from a READ. Between that read and the closing
+// write, a concurrent graduation can commit — and the write that followed was
+// unconditional, so the loser of the race silently rewrote the receipt figures
+// of a line that had already become real stock. The fix makes the write itself
+// the guard: every state-bearing update is an `updateMany` whose WHERE carries
+// `status: RECEIVED`, so the race is settled by MySQL and the loser gets a 409.
+// ---------------------------------------------------------------------------
+
+describe('the post-graduation freeze is ATOMIC (W1S-1)', () => {
+  const stateBodies: Array<[string, unknown]> = [
+    ['unitCostCents', { unitCostCents: 1250 }],
+    ['expectedQuantity', { expectedQuantity: 25 }],
+    ['resolvedProductId', { resolvedProductId: 77 }],
+    ['locationId', { locationId: 3 }],
+    ['a mixed body', { locationId: 3, notes: 'pallet 3' }],
+  ];
+
+  it.each(stateBodies)(
+    'RACE: %s graduating between the read and the write is a 409 with ZERO writes',
+    async (_label, body) => {
+      graduateBetweenReadAndWrite();
+
+      const resp = await patch(body);
+
+      expect(resp.status).toBe(409);
+      expect((await resp.json()).code).toBe('CONFLICT');
+      // The claim was attempted and matched nothing; nothing else ran.
+      expect(stateWrites()).toHaveLength(1);
+      expect(db.stagingItem.update).not.toHaveBeenCalled();
+      expect(mockRecordChange).not.toHaveBeenCalled();
+    },
+  );
+
+  it('conditions the state write on status RECEIVED', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow());
+
+    await patch({ unitCostCents: 1250 });
+
+    expect(stateWrites()[0].where).toEqual({ id: 5, status: 'RECEIVED' });
+    expect(stateWrites()[0].data).toEqual({ unitCostCents: 1250 });
+    // The state path never uses the unconditional `update` any more.
+    expect(db.stagingItem.update).not.toHaveBeenCalled();
+  });
+
+  it('carries the label fields along in the SAME conditional write (no partial apply)', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow());
+
+    const resp = await patch({ locationId: 3, notes: 'pallet 3' });
+
+    expect(resp.status).toBe(200);
+    expect(stateWrites()).toHaveLength(1);
+    expect(stateWrites()[0].data).toEqual({ locationId: 3, notes: 'pallet 3' });
+  });
+
+  it('a LABEL-only edit stays unconditional — annotation is legal after graduation', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ status: 'GRADUATED' }));
+    db.stagingItem.update.mockResolvedValue(itemRow({ status: 'GRADUATED', notes: 'RMA 44' }));
+
+    const resp = await patch({ notes: 'RMA 44' });
+
+    expect(resp.status).toBe(200);
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(db.stagingItem.update.mock.calls[0][0].data).toEqual({ notes: 'RMA 44' });
+  });
+});
+
 describe('RECEIVED-only rules — the legal paths still work', () => {
   it('PATCHes expectedQuantity on an unlinked RECEIVED item (no shipment claim)', async () => {
     db.stagingItem.findUnique.mockResolvedValue(itemRow());
@@ -250,7 +346,7 @@ describe('RECEIVED-only rules — the legal paths still work', () => {
 
     expect(resp.status).toBe(200);
     expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
-    expect(db.stagingItem.update.mock.calls[0][0].data).toEqual({ expectedQuantity: 25 });
+    expect(stateWrites()[0].data).toEqual({ expectedQuantity: 25 });
     expect(mockRecordChange.mock.calls[0][1]).toMatchObject({
       actionType: 'STAGING_UPDATE',
       changes: { expectedQuantity: { from: 10, to: 25 } },
@@ -279,6 +375,7 @@ describe('RECEIVED-only rules — the legal paths still work', () => {
     const resp = await patch({ expectedQuantity: 25 });
 
     expect(resp.status).toBe(409);
+    expect(stateWrites()).toHaveLength(0);
     expect(db.stagingItem.update).not.toHaveBeenCalled();
     expect(mockRecordChange).not.toHaveBeenCalled();
   });
@@ -294,10 +391,9 @@ describe('RECEIVED-only rules — the legal paths still work', () => {
     expect(resp.status).toBe(200);
     // No shipment claim is taken at all for these fields.
     expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
-    expect(db.stagingItem.update.mock.calls[0][0].data).toEqual({
-      resolvedProduct: { connect: { id: 77 } },
-      location: { connect: { id: 3 } },
-    });
+    // Scalar FKs, not Prisma relation connects: the write is an `updateMany`
+    // now, because it has to carry the RECEIVED precondition (W1S-1).
+    expect(stateWrites()[0].data).toEqual({ resolvedProductId: 77, locationId: 3 });
   });
 
   it('404s an unknown item before any freeze verdict', async () => {

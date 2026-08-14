@@ -49,6 +49,13 @@ export const GET = apiHandler(async (request: NextRequest, { params }: RoutePara
  *
  * Free-text annotation (description / vendor / reference / notes) is
  * deliberately NOT frozen: it labels the box, it does not restate the movement.
+ *
+ * W1S-1 (W1-C fix round) made the freeze ATOMIC. The list below still produces
+ * the READ-based 409 (it is what names the offending fields in the message), but
+ * it is no longer what enforces the rule: every write of a field on this list
+ * carries `status: RECEIVED` in its own WHERE, so a graduation that commits
+ * between the read and the write takes the row and the PATCH gets a 409 instead
+ * of quietly rewriting a settled receipt.
  */
 const STATE_FIELDS = [
   'expectedQuantity',
@@ -80,48 +87,58 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
   const body = PatchStagingSchema.parse(raw);
 
   // Build a true partial update: only keys explicitly present in the body are
-  // written, so PATCH never clobbers untouched columns. In parallel, collect the
-  // SCALAR after-values for the change diff — locationId/resolvedProductId as ids,
-  // NOT the Prisma relation-connect objects the write uses.
-  const data: Prisma.StagingItemUpdateInput = {};
+  // written, so PATCH never clobbers untouched columns.
+  //
+  // The body splits in TWO (W1S-1), because the two halves are governed
+  // differently: `labelData` may be written at any time, while `stateData` may
+  // only be written to a line that is STILL RECEIVED — and that precondition
+  // rides in the write's own WHERE, which means scalar FK columns rather than
+  // Prisma relation connects (`updateMany` takes no nested writes).
+  //
+  // `after` collects the SCALAR after-values for the change diff, unchanged.
+  const stateData: Prisma.StagingItemUncheckedUpdateManyInput = {};
+  const labelData: Prisma.StagingItemUncheckedUpdateManyInput = {};
   const after: Record<string, unknown> = {};
   if (body.description !== undefined) {
-    data.description = body.description;
+    labelData.description = body.description;
     after.description = body.description;
   }
   if (body.expectedQuantity !== undefined) {
-    data.expectedQuantity = body.expectedQuantity;
+    stateData.expectedQuantity = body.expectedQuantity;
     after.expectedQuantity = body.expectedQuantity;
   }
   if (body.vendor !== undefined) {
-    data.vendor = body.vendor;
+    labelData.vendor = body.vendor;
     after.vendor = body.vendor;
   }
   if (body.reference !== undefined) {
-    data.reference = body.reference;
+    labelData.reference = body.reference;
     after.reference = body.reference;
   }
   if (body.notes !== undefined) {
-    data.notes = body.notes;
+    labelData.notes = body.notes;
     after.notes = body.notes;
   }
   if (body.locationId !== undefined) {
-    data.location = { connect: { id: body.locationId } };
+    stateData.locationId = body.locationId;
     after.locationId = body.locationId;
   }
   if (body.resolvedProductId !== undefined) {
-    data.resolvedProduct = { connect: { id: body.resolvedProductId } };
+    stateData.resolvedProductId = body.resolvedProductId;
     after.resolvedProductId = body.resolvedProductId;
   }
   // W1-4b (T3): the receipt line's cost. `null` is a legal WRITE here (it means
   // "un-price this line"), so the `!== undefined` test is the only one that can
   // distinguish it from an untouched field.
   if (body.unitCostCents !== undefined) {
-    data.unitCostCents = body.unitCostCents;
+    stateData.unitCostCents = body.unitCostCents;
     after.unitCostCents = body.unitCostCents;
   }
   // shipmentId is deliberately NOT part of the generic field path: it is a state
   // transition with its own guards and its own audit verbs (T4), handled below.
+  // Its write is already conditional — `applyShipmentLink`'s claim pins
+  // (id, RECEIVED, current link) — so W1S-1 leaves it alone.
+  const writesState = Object.keys(stateData).length > 0;
 
   // Update + record atomically (D4); the before-image is read inside the tx.
   const item = await prisma.$transaction(async (tx) => {
@@ -217,10 +234,39 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
       }
     }
 
-    const updated = await tx.stagingItem.update({
-      where: { id },
-      data,
-    });
+    // --- the write, and the OTHER half of the freeze (W1S-1) ---------------
+    // A state-bearing write carries its own precondition. The read-based verdict
+    // above is a snapshot: a graduation committing between it and this line
+    // would leave the old, unconditional `update` rewriting the receipt figures
+    // of stock that is already on the shelf. Conditioning the write on
+    // `status: RECEIVED` hands the decision to MySQL, and the loser writes
+    // nothing at all — label fields included, since they ride the same statement.
+    let updated;
+    if (writesState) {
+      const write = await tx.stagingItem.updateMany({
+        where: { id, status: StagingItemStatus.RECEIVED },
+        data: { ...stateData, ...labelData },
+      });
+      if (write.count === 0) {
+        throw new AppError(
+          `Staging item ${id} changed state while it was being updated; reload and retry`,
+          'CONFLICT',
+          409,
+        );
+      }
+      const row = await tx.stagingItem.findUnique({ where: { id } });
+      if (!row) {
+        // Unreachable: the claim above matched exactly this row in this tx.
+        throw new AppError('Staging item not found', 'NOT_FOUND', 404);
+      }
+      updated = row;
+    } else {
+      // Annotation only — legal at any status, so deliberately unconditional.
+      updated = await tx.stagingItem.update({
+        where: { id },
+        data: labelData,
+      });
+    }
 
     // Diff over EXACTLY the provided fields (ER-B9: from===to entries drop; an
     // empty diff writes no event).

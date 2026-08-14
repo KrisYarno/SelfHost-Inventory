@@ -172,6 +172,7 @@ function renderDetail(body: unknown = detail(), extra?: Responder) {
 }
 
 const lineRow = (id: number) => screen.getByTestId(`receiving-line-${id}`);
+const fetchSpy = () => global.fetch as unknown as jest.Mock;
 const writesTo = (fn: jest.Mock, fragment: string) =>
   fn.mock.calls.filter(
     (c) => String(c[0]).includes(fragment) && (c[1] as RequestInit)?.method !== undefined,
@@ -502,6 +503,115 @@ describe("the freight calculator", () => {
 
     await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
     expect(screen.queryByLabelText(/freight/i)).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // W1S-5 — the sequential PATCHes are not all-or-nothing, so a failure has to
+  // say WHERE it stopped. Swallowing it left the operator with a cleared bill,
+  // a success-shaped screen, and some lines priced and some not.
+  // -------------------------------------------------------------------------
+
+  it("a mid-sequence failure names the lines that DID write and keeps the bill", async () => {
+    const user = userEvent.setup();
+    let costPatches = 0;
+    renderDetail(
+      detail({}, [
+        line({ id: 11, countedQuantity: 10, unitCostCents: 500 }),
+        line({ id: 12, description: "Caps", countedQuantity: 5, unitCostCents: 200 }),
+      ]),
+      (url, init) => {
+        if (url.includes("/api/staging-items/") && init?.method === "PATCH") {
+          costPatches += 1;
+          // the first line writes, the second one 500s
+          if (costPatches === 1) return { ok: true, json: async () => ({ id: 11 }) };
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({ error: "Database is unavailable" }),
+          };
+        }
+        return undefined;
+      },
+    );
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await user.type(screen.getByLabelText(/freight/i), "60.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    const report = await screen.findByTestId("cost-write-partial");
+    // WHICH lines wrote — the whole point of not swallowing the throw.
+    expect(report).toHaveTextContent("11");
+    expect(report).toHaveTextContent(/not written/i);
+    expect(report).toHaveTextContent("12");
+    // The panel kept the bill, so the operator can retry the rest.
+    expect(screen.getByLabelText(/freight/i)).toHaveValue("60.00");
+    expect(await screen.findByTestId("allocation-write-failed")).toBeInTheDocument();
+  });
+
+  it("a fully successful Accept reports nothing partial (the success path is unchanged)", async () => {
+    const user = userEvent.setup();
+    renderDetail(detail({}, [line({ countedQuantity: 10, unitCostCents: 500 })]));
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await user.type(screen.getByLabelText(/freight/i), "10.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    await waitFor(() => expect(writesTo(fetchSpy(), "/api/staging-items/11").length).toBe(1));
+    expect(screen.queryByTestId("cost-write-partial")).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W1S-8 — pricing outlives the close, exactly as graduation does.
+// ---------------------------------------------------------------------------
+
+describe("the per-line cost control follows STOCKING, not receiving (W1S-8)", () => {
+  it("a CLOSED shipment still offers the cost input for its RECEIVED lines", async () => {
+    renderDetail(
+      detail({ status: "CLOSED", closedAt: new Date().toISOString(), closedBy: 7 }, [
+        line({ countedQuantity: 10 }),
+      ]),
+    );
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    // A stranded line's graduation reads this cost, so pricing must still be
+    // possible — while COUNTING (receiving work) is correctly gone.
+    expect(within(lineRow(11)).getByLabelText(/unit cost/i)).toBeInTheDocument();
+    expect(
+      within(lineRow(11)).queryByLabelText(/^count$/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a CANCELLED shipment offers no cost input", async () => {
+    renderDetail(detail({ status: "CANCELLED" }, [line({ countedQuantity: 10 })]));
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    expect(within(lineRow(11)).queryByLabelText(/unit cost/i)).not.toBeInTheDocument();
+  });
+
+  it("a GRADUATED line offers no cost input even while the shipment is OPEN", async () => {
+    renderDetail(detail({}, [line({ status: "GRADUATED", countedQuantity: 10 })]));
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    expect(within(lineRow(11)).queryByLabelText(/unit cost/i)).not.toBeInTheDocument();
+  });
+
+  it("writes the cost from a CLOSED shipment's line through the staging PATCH", async () => {
+    const user = userEvent.setup();
+    const { fetchFn } = renderDetail(
+      detail({ status: "CLOSED", closedAt: new Date().toISOString(), closedBy: 7 }, [
+        line({ countedQuantity: 10 }),
+      ]),
+    );
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await user.type(within(lineRow(11)).getByLabelText(/unit cost/i), "12.50");
+    await user.click(within(lineRow(11)).getByRole("button", { name: /save cost/i }));
+
+    await waitFor(() => expect(writesTo(fetchFn, "/api/staging-items/11").length).toBe(1));
+    expect(
+      JSON.parse(String((writesTo(fetchFn, "/api/staging-items/11")[0][1] as RequestInit).body)),
+    ).toEqual({ unitCostCents: 1250 });
   });
 });
 

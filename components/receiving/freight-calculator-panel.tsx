@@ -33,7 +33,19 @@ import {
  *     which would read as "this product is free";
  *   - EDITS are re-validated against the total before Accept unlocks.
  *
+ * W1S-3 (W1-C fix round) — THE FLOOR IS A CHOICE, NEVER A DEFAULT. A suggested
+ * unit cost is `base + FLOOR(allocated / qty)`, so when the division is not
+ * exact the line's true landed total is `qty * unit + remainder` and writing the
+ * unit cost alone drops that remainder. Showing it was not enough: Accept wrote
+ * the line regardless, and the money disappeared from the valuation with nobody
+ * having agreed to lose it. So an inexact line is WITHHELD, and there are
+ * exactly two ways out — edit the split until it divides, or press this line's
+ * "write floored" and take the drop deliberately, with the cents named.
+ *
  * Accept hands back the per-line unit costs; writing them is the caller's job.
+ * A caller whose write FAILS must REJECT (W1S-5): the bill, the edits and the
+ * per-line choices all stay on screen, because a half-written allocation that
+ * looked clean would be re-entered and compounded.
  */
 
 export interface CalculatorLine {
@@ -93,6 +105,11 @@ export function FreightCalculatorPanel({
   const [edits, setEdits] = useState<Record<number, string>>({});
   // Set once a bill has been written onto the lines this session.
   const [applied, setApplied] = useState(false);
+  // Lines whose FLOORED unit cost the operator has explicitly agreed to write,
+  // remainder and all (W1S-3). Keyed by line id; absent = withheld.
+  const [flooredAccepted, setFlooredAccepted] = useState<Record<number, boolean>>({});
+  // Set when the caller's write REJECTED, so the panel never resets on a failure.
+  const [writeFailed, setWriteFailed] = useState<string | null>(null);
 
   const freightCents = parseDollarsToCents(freightInput);
   const freightInvalid = freightInput.trim() !== "" && freightCents === null;
@@ -159,9 +176,22 @@ export function FreightCalculatorPanel({
     }
   }, [ok, validation, freightLines, currentAllocations]);
 
-  const acceptable = suggestions.filter(
+  /** Lines that CAN be priced at all — the rest have no base to build on. */
+  const priceable = suggestions.filter(
     (s): s is typeof s & { suggestedUnitCostCents: number } =>
       s.suggestedUnitCostCents !== null,
+  );
+
+  /**
+   * The W1S-3 split. A line is written when its allocation divides exactly
+   * across its units, or when this operator has said out loud that the drop is
+   * acceptable for this line. Everything else is held back — visibly.
+   */
+  const writable = priceable.filter(
+    (s) => s.unitRoundingRemainderCents === 0 || flooredAccepted[s.id as number],
+  );
+  const withheld = priceable.filter(
+    (s) => s.unitRoundingRemainderCents > 0 && !flooredAccepted[s.id as number],
   );
 
   const canAccept =
@@ -169,16 +199,25 @@ export function FreightCalculatorPanel({
     !busy &&
     ok !== null &&
     (validation === null || validation.status === "ok") &&
-    acceptable.length > 0;
+    writable.length > 0;
 
   const handleAccept = async () => {
     if (!canAccept) return;
-    await onAccept(
-      acceptable.map((s) => ({
-        id: s.id as number,
-        unitCostCents: s.suggestedUnitCostCents,
-      })),
-    );
+    try {
+      await onAccept(
+        writable.map((s) => ({
+          id: s.id as number,
+          unitCostCents: s.suggestedUnitCostCents,
+        })),
+      );
+    } catch (error) {
+      // W1S-5: the write did not land, so NOTHING here may look like it did.
+      // The bill, the edits and the per-line choices all stay exactly as they
+      // were, ready to be retried against whatever actually wrote.
+      setWriteFailed(error instanceof Error ? error.message : "The costs were not written.");
+      setApplied(false);
+      return;
+    }
     // THE COMPOUNDING GUARD. Accepting rewrites each line's base cost to
     // base + freight — so leaving the bill in the box and pressing Accept again
     // would allocate the same freight ON TOP of itself, quietly inflating the
@@ -186,6 +225,8 @@ export function FreightCalculatorPanel({
     // bill has to be a deliberate act.
     setFreightInput("");
     setEdits({});
+    setFlooredAccepted({});
+    setWriteFailed(null);
     setApplied(true);
   };
 
@@ -210,7 +251,9 @@ export function FreightCalculatorPanel({
           onChange={(e) => {
             setFreightInput(e.target.value);
             setEdits({});
+            setFlooredAccepted({});
             setApplied(false);
+            setWriteFailed(null);
           }}
           placeholder="0.00"
           disabled={disabled}
@@ -226,6 +269,15 @@ export function FreightCalculatorPanel({
         <p data-testid="allocation-applied" className="text-xs text-muted-foreground">
           Costs written. Each line&apos;s base cost now INCLUDES that freight, so
           entering the same bill again would allocate it on top of itself.
+        </p>
+      )}
+
+      {writeFailed && (
+        <p
+          data-testid="allocation-write-failed"
+          className="text-xs font-medium text-destructive"
+        >
+          {`These costs were not written (${writeFailed}). The bill and your edits are kept — check which lines saved on the shipment above, then retry.`}
         </p>
       )}
 
@@ -341,6 +393,42 @@ export function FreightCalculatorPanel({
                                 {`+${suggestion.unitRoundingRemainderCents}¢ no unit cost can express`}
                               </span>
                             )}
+                            {/* W1S-3: the two ways an inexact line leaves this
+                                state — edit the split, or take the drop. */}
+                            {suggestion.unitRoundingRemainderCents > 0 &&
+                              (flooredAccepted[line.id] ? (
+                                <span
+                                  data-testid="floored-accepted"
+                                  className="block text-xs text-amber-700 dark:text-amber-400"
+                                >
+                                  {`Writing the floored cost — ${suggestion.unitRoundingRemainderCents}¢ of this line's freight is dropped.`}
+                                </span>
+                              ) : (
+                                <span className="block space-y-1">
+                                  <span
+                                    data-testid="needs-exact-split"
+                                    className="block text-xs text-amber-700 dark:text-amber-400"
+                                  >
+                                    Needs an exact split — not written. Edit the
+                                    allocation until it divides by the quantity.
+                                  </span>
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7"
+                                    onClick={() =>
+                                      setFlooredAccepted((prev) => ({
+                                        ...prev,
+                                        [line.id]: true,
+                                      }))
+                                    }
+                                    disabled={disabled || busy}
+                                  >
+                                    {`Write floored (drops ${suggestion.unitRoundingRemainderCents}¢)`}
+                                  </Button>
+                                </span>
+                              ))}
                           </>
                         )}
                       </td>
@@ -388,9 +476,14 @@ export function FreightCalculatorPanel({
         <Button type="button" onClick={handleAccept} disabled={!canAccept}>
           {busy ? "Saving…" : "Accept suggested costs"}
         </Button>
-        {ok && acceptable.length < lines.length && (
+        {ok && priceable.length < lines.length && (
           <span className="text-xs text-muted-foreground">
-            {`${lines.length - acceptable.length} line(s) have no base cost and will be left unpriced.`}
+            {`${lines.length - priceable.length} line(s) have no base cost and will be left unpriced.`}
+          </span>
+        )}
+        {ok && withheld.length > 0 && (
+          <span data-testid="allocation-withheld" className="text-xs text-amber-700 dark:text-amber-400">
+            {`${withheld.length} line(s) cannot be expressed as a whole unit cost and are held back. Accept writes the rest.`}
           </span>
         )}
       </div>
