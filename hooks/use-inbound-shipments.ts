@@ -28,8 +28,15 @@ export interface LineDiscrepancyFlags {
 }
 
 export interface DiscrepancyRollup {
+  /** Linked lines, any status. */
   itemCount: number;
+  /** Linked lines carrying a count, any status. */
   countedItemCount: number;
+  /**
+   * Linked + RECEIVED + never counted (QA-5) — the same number the close guard
+   * enforces, so the three counts here deliberately do NOT add up: a discarded
+   * or graduated line that was never counted is settled work, not outstanding.
+   */
   uncountedItemCount: number;
   discrepancyItemCount: number;
   /** Magnitudes, NON-CANCELLING: a +5 and a -3 report 5 and 3, never 2. */

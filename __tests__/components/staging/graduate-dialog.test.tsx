@@ -27,6 +27,14 @@ jest.mock("@/hooks/use-csrf", () => ({
     "x-csrf-token": "test-csrf",
   }),
 }));
+const toastSuccess = jest.fn();
+jest.mock("sonner", () => ({
+  toast: {
+    success: (...args: unknown[]) => toastSuccess(...args),
+    error: jest.fn(),
+    warning: jest.fn(),
+  },
+}));
 
 import { GraduateDialog } from "@/components/staging/graduate-dialog";
 
@@ -104,7 +112,7 @@ function renderDialog(
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const utils = render(
     <QueryClientProvider client={queryClient}>
       <GraduateDialog
         open
@@ -116,6 +124,7 @@ function renderDialog(
       />
     </QueryClientProvider>,
   );
+  return { ...utils, queryClient };
 }
 
 const PRODUCT = { id: 7, name: "BPC-157 5mg", approvalStatus: "APPROVED" };
@@ -422,6 +431,118 @@ async function graduateWithPrompt(costPrompt: unknown) {
   await user.click(screen.getByRole("button", { name: /confirm/i }));
   return user;
 }
+
+// ---------------------------------------------------------------------------
+// QA-3 — the success toast renders the SERVER's numbers
+// ---------------------------------------------------------------------------
+//
+// The dialog used to announce its OWN `bookedQuantity` (the row's count, or the
+// override it just typed). That is a PREDICTION of what the server would do,
+// and the one screen an operator reads after pressing Confirm has no business
+// guessing: the server answers with both numbers, and an override is exactly
+// the case where they differ.
+
+/** A /graduate response with quantities of the caller's choosing. */
+function mockFetchGraduateResult(result: Record<string, unknown>) {
+  const fn = jest.fn(async (url: RequestInfo | URL) => {
+    const u = String(url);
+    if (u.includes("/graduate")) {
+      return {
+        ok: true,
+        json: async () => ({
+          productId: 7,
+          approvalStatus: "APPROVED",
+          locationId: 1,
+          receiptCost: { unitCostCents: null, source: "product" },
+          costPrompt: null,
+          ...result,
+        }),
+      } as unknown as Response;
+    }
+    return {
+      ok: true,
+      json: async () => ({ products: u.includes("search=") ? [PRODUCT] : [] }),
+    } as unknown as Response;
+  });
+  global.fetch = fn as unknown as typeof fetch;
+  return fn;
+}
+
+describe("GraduateDialog — the success toast is the SERVER's answer (QA-3)", () => {
+  afterEach(() => jest.clearAllMocks());
+
+  it("announces the quantity the LEDGER booked, not the one the dialog predicted", async () => {
+    const user = userEvent.setup();
+    // The row says 46; the server booked 50. Only one of those is true.
+    mockFetchGraduateResult({ countedQuantity: 46, bookedQuantity: 50 });
+    renderDialog({ item: { ...ITEM, countedQuantity: 46 } });
+
+    await selectProduct(user);
+    await user.click(screen.getByRole("button", { name: /confirm/i }));
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    expect(String(toastSuccess.mock.calls[0][0])).toContain("50");
+  });
+
+  it("says BOTH numbers when the booked quantity differs from the count (override)", async () => {
+    const user = userEvent.setup();
+    mockFetchGraduateResult({ countedQuantity: 46, bookedQuantity: 40 });
+    renderDialog({ item: { ...ITEM, countedQuantity: 46 } });
+
+    await selectProduct(user);
+    await user.click(screen.getByRole("button", { name: /book a different quantity/i }));
+    await user.type(screen.getByLabelText(/quantity to book/i), "40");
+    await user.type(screen.getByLabelText(/reason/i), "six vials broken in transit");
+    await user.click(screen.getByRole("button", { name: /confirm/i }));
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    const message = String(toastSuccess.mock.calls[0][0]);
+    expect(message).toContain("40");
+    // The count survives on the record and in the message — an override that
+    // only ever says "40" hides the fact that the dock reported 46.
+    expect(message).toMatch(/counted 46/i);
+  });
+
+  it("says ONE number when the ledger booked exactly what was counted", async () => {
+    const user = userEvent.setup();
+    mockFetchGraduateResult({ countedQuantity: 46, bookedQuantity: 46 });
+    renderDialog({ item: { ...ITEM, countedQuantity: 46 } });
+
+    await selectProduct(user);
+    await user.click(screen.getByRole("button", { name: /confirm/i }));
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    const message = String(toastSuccess.mock.calls[0][0]);
+    expect(message).toContain("46");
+    expect(message).not.toMatch(/counted 46/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QA-9 — counting from inside the dialog refreshes the RECEIVING view too
+// ---------------------------------------------------------------------------
+
+describe("GraduateDialog — counting invalidates both key families (QA-9)", () => {
+  beforeEach(() => mockFetch());
+  afterEach(() => jest.clearAllMocks());
+
+  it("invalidates the shipment caches as well as the staging queue", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderDialog({ item: { ...ITEM, countedQuantity: null } });
+    const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+
+    await user.type(screen.getByLabelText(/record the count/i), "46");
+    await user.click(screen.getByRole("button", { name: /save count/i }));
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalled());
+    const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+    expect(keys).toContain(JSON.stringify(["staging-items"]));
+    // The receiving detail renders this count, and the freight calculator's
+    // quantity basis rests on it — leaving it stale is how a bill gets split
+    // across numbers nobody can see anymore.
+    expect(keys).toContain(JSON.stringify(["inbound-shipments"]));
+  });
+});
 
 describe("GraduateDialog — the cost prompt", () => {
   afterEach(() => jest.clearAllMocks());

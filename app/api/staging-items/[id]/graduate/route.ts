@@ -129,10 +129,12 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
         // can never leave a register row describing units that were never
         // booked.
         //
-        // cost-differs: the receiving user could not be prompted (no admin
-        // rights to edit a price), so the disagreement becomes a row instead of
-        // a dialog. The subject is decided in the helper, where the actor's
-        // rights are known; the route only writes what it was handed.
+        // cost-differs: the receipt disagreed with the catalog's standing cost.
+        // The row is written for EVERY actor (pack REV-7 T3 / QA-7) — an admin
+        // also gets the response prompt, but a prompt is a dialog that dies on
+        // reopen, so it can never be the only record that the disagreement
+        // happened. The subject is decided in the helper; the route only writes
+        // what it was handed.
         if (ctx.costDiffers) {
           await upsertException(tx, {
             kind: 'cost-differs',

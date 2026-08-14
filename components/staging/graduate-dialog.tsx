@@ -93,6 +93,22 @@ function formatCents(cents: number | null): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+/**
+ * What the success toast says was booked — from the SERVER's response, always
+ * (QA-3).
+ *
+ * The dialog's own `bookedQuantity` was a prediction: the row's count, or the
+ * override just typed. Predictions and ledgers are allowed to disagree, and the
+ * one screen an operator reads after pressing Confirm is the worst place to
+ * find out. When the two numbers differ — which is exactly what an override is
+ * for — BOTH are said, because "booked 40" alone hides that the dock counted 46.
+ */
+function bookedPhrase(result: GraduateResponse): string {
+  return result.bookedQuantity === result.countedQuantity
+    ? String(result.bookedQuantity)
+    : `${result.bookedQuantity} (counted ${result.countedQuantity})`;
+}
+
 export function GraduateDialog({
   open,
   onOpenChange,
@@ -241,7 +257,6 @@ export function GraduateDialog({
   const overrideFields = overrideActive
     ? { overrideQuantity: overrideNum, overrideReason: trimmedReason }
     : {};
-  const bookedQuantity = overrideActive ? overrideNum : countedQuantity;
 
   const baseGatePassed =
     !countMissing &&
@@ -290,7 +305,7 @@ export function GraduateDialog({
           ...overrideFields,
         },
       });
-      toast.success(`Added ${bookedQuantity} to ${selectedProduct.name}`);
+      toast.success(`Added ${bookedPhrase(result)} to ${selectedProduct.name}`);
       setCostPrompt(result.costPrompt ?? null);
       onOpenChange(false);
       onSuccess?.(result);
@@ -332,7 +347,7 @@ export function GraduateDialog({
           ...overrideFields,
         },
       });
-      toast.success(`Created product and added ${bookedQuantity} units`);
+      toast.success(`Created product and added ${bookedPhrase(result)} units`);
       setCostPrompt(result.costPrompt ?? null);
       onOpenChange(false);
       onSuccess?.(result);

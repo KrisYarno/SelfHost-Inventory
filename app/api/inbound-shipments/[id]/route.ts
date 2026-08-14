@@ -157,6 +157,37 @@ function heldMembers(
   return receiving;
 }
 
+/**
+ * The diff for the fields this PATCH explicitly provided (ER-B9: a `from === to`
+ * entry drops, and an empty diff attaches nothing).
+ *
+ * QA-14: this rides the CLOSE and CANCEL records too. Field edits are legal in
+ * the same request as a transition — one claim commits them together — but only
+ * the field-edit branch ever computed a diff, and that branch is unreachable
+ * when `status` is present. So notes rewritten on the way out were WRITTEN and
+ * recorded NOWHERE: the change feed, the one surface that answers "who changed
+ * this receipt's notes", was blind to every edit that travelled with a settle.
+ */
+function fieldChanges(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): ChangeDiff {
+  const changes: ChangeDiff = {};
+  for (const [field, to] of Object.entries(after)) {
+    const from = before[field] ?? null;
+    const normalizedTo = to ?? null;
+    if (!Object.is(from, normalizedTo)) {
+      changes[field] = { from, to: normalizedTo };
+    }
+  }
+  return changes;
+}
+
+/** `changes: {...}` when there is a diff, nothing at all when there is not. */
+function changesFragment(changes: ChangeDiff): { changes?: ChangeDiff } {
+  return Object.keys(changes).length > 0 ? { changes } : {};
+}
+
 // GET /api/inbound-shipments/[id] - One receiving header with its linked
 // staging lines, per-line discrepancy flags, and the computed rollup.
 export const GET = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
@@ -295,6 +326,10 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
             entityType: 'SHIPMENT',
             entityId: id,
             action: `Closed inbound shipment ${id}`,
+            // QA-14: fields edited on the way out ride this record's diff.
+            ...changesFragment(
+              fieldChanges(existing as unknown as Record<string, unknown>, after),
+            ),
             details: {
               itemCount: rollup.itemCount,
               countedItemCount: rollup.countedItemCount,
@@ -369,6 +404,10 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
             entityType: 'SHIPMENT',
             entityId: id,
             action: `Cancelled inbound shipment ${id}`,
+            // QA-14: fields edited on the way out ride this record's diff.
+            ...changesFragment(
+              fieldChanges(existing as unknown as Record<string, unknown>, after),
+            ),
             // cancelledBy rides this audit line — T1 deliberately gives the table
             // no cancelledBy column. The ids are the CURRENT membership (FD2-1),
             // not the snapshot: the record names the boxes that actually left.
@@ -386,16 +425,12 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
         if (claim.count === 0) refuse({ reason: 'NOT_OPEN' });
 
         // Diff over EXACTLY the provided fields (ER-B9: from===to entries drop; an
-        // empty diff writes no event).
-        const before = existing as unknown as Record<string, unknown>;
-        const changes: ChangeDiff = {};
-        for (const [field, to] of Object.entries(after)) {
-          const from = before[field] ?? null;
-          const normalizedTo = to ?? null;
-          if (!Object.is(from, normalizedTo)) {
-            changes[field] = { from, to: normalizedTo };
-          }
-        }
+        // empty diff writes no event). On THIS path the diff is the whole event,
+        // so an empty one records nothing at all rather than an empty record.
+        const changes = fieldChanges(
+          existing as unknown as Record<string, unknown>,
+          after,
+        );
 
         if (Object.keys(changes).length > 0) {
           await recordChange(tx, {

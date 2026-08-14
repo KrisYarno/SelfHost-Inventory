@@ -22,7 +22,8 @@ export type GraduateReceiptCost = {
  * D-COST (pack REV-3 T3, seam S11): the receipt priced these units differently
  * from the product's standing cost, and NOTHING was written. Present only for an
  * ADMIN actor — they are the ones who can settle it, through the real product
- * PUT. A non-admin gets `null` here and a `cost-differs` register row instead.
+ * PUT. Everybody's differ (the admin's included) also raises the durable
+ * `cost-differs` register row; this prompt is the fast path on top of it (QA-7).
  */
 export type GraduateCostPrompt = {
   productId: number;
@@ -67,12 +68,13 @@ export type GraduateRecordContext = {
   /** The same prompt the response carries (admin + disagreement, else null). */
   costPrompt: GraduateCostPrompt | null;
   /**
-   * D-COST, the OTHER half (pack REV-3 T1/T3). Non-null ONLY when a NON-ADMIN's
-   * receipt cost disagreed with the product's: they may not edit the price, so
-   * the disagreement becomes a `cost-differs` register row instead of a prompt.
-   * The subject is assembled HERE (this is where the actor's rights are known)
-   * and WRITTEN by the caller, because the exceptions write boundary allows only
-   * routes to reach the writer.
+   * D-COST, the DURABLE half (pack REV-7 T3, QA-7). Non-null whenever the
+   * receipt cost disagreed with the product's — for EVERY actor, admin included.
+   * The subject is assembled here and WRITTEN by the caller, because the
+   * exceptions write boundary allows only routes to reach the writer.
+   *
+   * It is not either/or with `costPrompt`: a non-admin gets the row alone, an
+   * admin gets the row AND the prompt that can settle it in one click.
    */
   costDiffers: CostDiffersSubject | null;
 };
@@ -109,8 +111,9 @@ export type GraduateRecordContext = {
  *      stamped with the receipt's inboundShipmentId and unit cost (T3).
  *   6. D-COST (T3): the receipt's cost meets the catalog's. A product with NO
  *      cost gets one, audited; a product whose cost DISAGREES is never rewritten
- *      here — the disagreement leaves as a prompt (admin) or as a register-row
- *      subject for the caller (everyone else).
+ *      here — the disagreement leaves as a register-row subject for the caller
+ *      (ALWAYS, pack REV-7/QA-7) plus a prompt when the actor is an admin and
+ *      can therefore settle it.
  *   7. Finalize the staging item: resolvedProductId AND locationId. The count is
  *      NOT rewritten — an override changes what the LEDGER books, never what the
  *      dock reported.
@@ -126,11 +129,13 @@ export type GraduateRecordContext = {
  * failure mode where "write the stock, lose the explanation" is worse than not
  * writing at all.
  *
- * LOCK-ORDER NOTE: this path takes the staging row's lock and then the
- * shipment's; the count endpoint takes them the other way round. Two people
- * counting and graduating the SAME item at the same instant can therefore
- * deadlock — which `withDeadlockRetry` below re-runs, and which the loser's 409
- * settles anyway.
+ * LOCK-ORDER NOTE (corrected, QA-11): this path takes the staging ROW's lock and
+ * then its shipment's — and so does every other writer in the lane. The count
+ * endpoint took them the other way round until W1-3b turned it around
+ * (app/api/staging-items/[id]/count/route.ts), which is what killed the
+ * count-vs-graduate ABBA; the order is now UNIFORM, item -> shipment. A deadlock
+ * is still possible against a shipment settle, which locks rows this transaction
+ * never touched, and `withDeadlockRetry` below re-runs it.
  */
 export async function graduateStagingItem(
   stagingItemId: number,
@@ -352,9 +357,13 @@ export async function graduateStagingItem(
         batchId,
       });
 
-      // A disagreement goes to whoever can act on it, and nowhere else. An admin
-      // is prompted (they can call the real product PUT); anybody else raises a
-      // register row — never silent, never blocking the receipt.
+      // A disagreement is a FACT about this receipt, so it is ALWAYS recorded
+      // (QA-7, pack REV-7 T3): every actor's differ raises the register row.
+      // An admin ALSO gets the prompt, because they alone can settle it through
+      // the real product PUT — but that prompt is React state that dies when the
+      // dialog closes, so leaving it as the admin's only trace meant the most
+      // authoritative user's disagreement was the one nobody could ever audit.
+      // The row is durable; the prompt is the fast path on top of it.
       const differs = costOutcome.outcome === 'differs';
       const costPrompt: GraduateCostPrompt | null =
         differs && actor.isAdmin
@@ -364,15 +373,14 @@ export async function graduateStagingItem(
               receiptCents: costOutcome.receiptCents as number,
             }
           : null;
-      const costDiffers: CostDiffersSubject | null =
-        differs && !actor.isAdmin
-          ? {
-              productId,
-              stagingItemId,
-              currentCents: costOutcome.currentCents,
-              receiptCents: costOutcome.receiptCents as number,
-            }
-          : null;
+      const costDiffers: CostDiffersSubject | null = differs
+        ? {
+            productId,
+            stagingItemId,
+            currentCents: costOutcome.currentCents,
+            receiptCents: costOutcome.receiptCents as number,
+          }
+        : null;
 
       // 7. Finalize the staging item. countedQuantity is NOT written here: the
       //    count belongs to the count endpoint, and an override changes what the

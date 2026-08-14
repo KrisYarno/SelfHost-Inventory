@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
+import { shipmentKeys } from "@/hooks/use-inbound-shipments";
 import type {
   StagingItem,
   StagingStatus,
@@ -249,6 +250,12 @@ export interface CountStagingResponse {
  * whatever the row holds afterwards. A `countedQuantity` of 0 is legal here —
  * "the box was empty" is a fact about the dock; the "a zero count is a Discard"
  * rule belongs to graduation.
+ *
+ * QA-9: a count invalidates BOTH key families. The same mutation is fired from
+ * the Graduate dialog, which is routinely opened from the RECEIVING detail —
+ * and that surface renders the count, the discrepancy rollup, and the freight
+ * calculator's quantity basis. Refreshing only the staging queue left a receipt
+ * splitting a freight bill across quantities the server had already replaced.
  */
 export function useCountStagingItem() {
   const queryClient = useQueryClient();
@@ -273,7 +280,9 @@ export function useCountStagingItem() {
       }
       return res.json();
     },
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["staging-items"] }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["staging-items"] });
+      await queryClient.invalidateQueries({ queryKey: shipmentKeys.all });
+    },
   });
 }

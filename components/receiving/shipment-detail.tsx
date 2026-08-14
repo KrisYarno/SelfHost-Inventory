@@ -140,6 +140,11 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
   // The close guard's 409, kept on screen: it NAMES the lines that blocked it,
   // and a toast that scrolls away would throw that away.
   const [closeBlocked, setCloseBlocked] = useState<number[] | null>(null);
+  // The cancel guard's 409, the same way (QA-4). The server sends
+  // `graduatedItemIds` and the client parsed them into ShipmentApiError, but the
+  // screen rendered only the sentence — leaving the operator to hunt for which
+  // of a receipt's lines had already become stock.
+  const [cancelBlocked, setCancelBlocked] = useState<number[] | null>(null);
 
   const [graduateItem, setGraduateItem] = useState<GraduateStagingItem | null>(null);
   const [graduateOpen, setGraduateOpen] = useState(false);
@@ -252,11 +257,18 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
     ) {
       return;
     }
+    setCancelBlocked(null);
     try {
       await updateShipment.mutateAsync({ id: shipmentId, body: { status: "CANCELLED" } });
       toast.success("Shipment cancelled");
     } catch (err) {
       const apiError = err as ShipmentApiError;
+      // Same treatment as the close's uncounted list: the named lines stay on
+      // screen, because they are the work this refusal is asking for.
+      if (apiError?.graduatedItemIds?.length) {
+        setCancelBlocked(apiError.graduatedItemIds);
+        return;
+      }
       console.error("Error cancelling shipment:", err);
       toast.error(apiError?.message ?? "Failed to cancel the shipment");
     }
@@ -440,6 +452,20 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
             </p>
             <p className="text-muted-foreground">
               {`Count these lines first: ${closeBlocked.join(", ")}.`}
+            </p>
+          </div>
+        )}
+
+        {cancelBlocked && (
+          <div
+            data-testid="cancel-blocked"
+            className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs"
+          >
+            <p className="font-medium">
+              This shipment has graduated lines and was not cancelled.
+            </p>
+            <p className="text-muted-foreground">
+              {`Unlink or reverse these lines first: ${cancelBlocked.join(", ")}.`}
             </p>
           </div>
         )}

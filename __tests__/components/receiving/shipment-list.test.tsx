@@ -195,11 +195,34 @@ describe("the open-shipment aging cue", () => {
 // ---------------------------------------------------------------------------
 
 describe("the status filter", () => {
-  it("asks the server for every status by default", async () => {
+  it("QA-6: opens on OPEN — the work in progress, not the whole archive", async () => {
     const { fetchFn } = renderList();
 
     await waitFor(() => expect(fetchFn).toHaveBeenCalled());
-    expect(String(fetchFn.mock.calls[0][0])).toBe("/api/inbound-shipments");
+    expect(String(fetchFn.mock.calls[0][0])).toBe("/api/inbound-shipments?status=OPEN");
+    // ...and the tab bar agrees with the request it just made.
+    expect(screen.getByRole("button", { name: /^open$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /^all$/i })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
+  it("QA-6: the whole archive is still one tap away", async () => {
+    const user = userEvent.setup();
+    const { fetchFn } = renderList();
+
+    await waitFor(() => expect(fetchFn).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: /^all$/i }));
+
+    await waitFor(() =>
+      expect(
+        fetchFn.mock.calls.some((c) => String(c[0]) === "/api/inbound-shipments"),
+      ).toBe(true),
+    );
   });
 
   it("passes the chosen status through as ?status=", async () => {

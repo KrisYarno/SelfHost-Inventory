@@ -409,6 +409,89 @@ describe("cancel", () => {
   });
 });
 
+describe("cancel, blocked by graduated lines (QA-4)", () => {
+  /** The T4 refusal a cancel meets when real stock already came off the receipt. */
+  const graduatedRefusal = (url: string, init?: RequestInit) => {
+    if (url.includes(`/api/inbound-shipments/${SHIPMENT_ID}`) && init?.method === "PATCH") {
+      return {
+        ok: false,
+        status: 409,
+        json: async () => ({
+          error:
+            "Inbound shipment has graduated lines and cannot be cancelled; unlink or reverse them first",
+          code: "CONFLICT",
+          graduatedItemIds: [11, 14],
+        }),
+      };
+    }
+    return undefined;
+  };
+
+  it("NAMES the graduated lines, exactly as a blocked close names the uncounted ones", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = jest.spyOn(window, "confirm").mockReturnValue(true);
+    renderDetail(detail(), graduatedRefusal);
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /cancel shipment/i }));
+
+    // The server sends the ids so the operator can go and deal with THOSE lines;
+    // rendering the sentence and dropping the list is a dead end.
+    const blocker = await screen.findByTestId("cancel-blocked");
+    expect(blocker).toHaveTextContent(/graduated/i);
+    expect(blocker).toHaveTextContent("11");
+    expect(blocker).toHaveTextContent("14");
+    confirmSpy.mockRestore();
+  });
+
+  it("clears the block on the next attempt (it is about THIS attempt)", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = jest.spyOn(window, "confirm").mockReturnValue(true);
+    let refuse = true;
+    renderDetail(detail(), (url, init) => {
+      if (!refuse) return undefined;
+      return graduatedRefusal(url, init);
+    });
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /cancel shipment/i }));
+    expect(await screen.findByTestId("cancel-blocked")).toBeInTheDocument();
+
+    refuse = false;
+    await user.click(screen.getByRole("button", { name: /cancel shipment/i }));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("cancel-blocked")).not.toBeInTheDocument(),
+    );
+    confirmSpy.mockRestore();
+  });
+
+  it("still reports a cancel refusal that names nothing", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = jest.spyOn(window, "confirm").mockReturnValue(true);
+    renderDetail(detail(), (url, init) => {
+      if (url.includes(`/api/inbound-shipments/${SHIPMENT_ID}`) && init?.method === "PATCH") {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({
+            error: "Inbound shipment is not open and cannot be changed",
+            code: "CONFLICT",
+          }),
+        };
+      }
+      return undefined;
+    });
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /cancel shipment/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    expect(screen.queryByTestId("cancel-blocked")).not.toBeInTheDocument();
+    confirmSpy.mockRestore();
+  });
+});
+
 describe("unlink", () => {
   it("clears shipmentId through the staging PATCH", async () => {
     const user = userEvent.setup();
@@ -605,6 +688,46 @@ describe("the freight calculator", () => {
     });
     expect(await screen.findByTestId("allocation-applied")).toBeInTheDocument();
     expect(screen.queryByTestId("cost-write-partial")).not.toBeInTheDocument();
+  });
+
+  it("QA-8: a line that GRADUATES mid-bill leaves the calculator and kills the session", async () => {
+    const user = userEvent.setup();
+    const twoReceived = detail({}, [
+      line({ id: 11, countedQuantity: 10, unitCostCents: 100 }),
+      line({ id: 12, description: "Caps", countedQuantity: 10, unitCostCents: 100 }),
+    ]);
+    const oneGraduated = detail({}, [
+      line({ id: 11, countedQuantity: 10, unitCostCents: 100 }),
+      line({
+        id: 12,
+        description: "Caps",
+        status: "GRADUATED",
+        countedQuantity: 10,
+        unitCostCents: 100,
+      }),
+    ]);
+    let body: unknown = twoReceived;
+    renderDetail(twoReceived, (url, init) => {
+      if (url.includes(`/api/inbound-shipments/${SHIPMENT_ID}`) && init?.method === undefined) {
+        return { ok: true, json: async () => body };
+      }
+      return undefined;
+    });
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await enterBill(user, "20.00");
+    expect(screen.getByTestId("allocation-row-12")).toBeInTheDocument();
+
+    // Somebody stocks that box while the bill is open. The refetch below drops
+    // it from the calculator's world — a GRADUATED line is settled stock, and a
+    // batch write against it can only ever be refused.
+    body = oneGraduated;
+    await user.type(within(lineRow(11)).getByLabelText(/count/i), "10");
+    await user.click(within(lineRow(11)).getByRole("button", { name: /save count/i }));
+
+    expect(await screen.findByTestId("allocation-invalidated")).toHaveTextContent(
+      /no longer on this shipment/i,
+    );
   });
 
   it("PIN 6: after a non-drift failure, Accept-again re-sends the IDENTICAL full bill", async () => {

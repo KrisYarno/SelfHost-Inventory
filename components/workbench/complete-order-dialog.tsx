@@ -89,15 +89,23 @@ export function CompleteOrderDialog({
   // persisted, and no request carries it.
   const [acknowledgedLines, setAcknowledgedLines] = useState<string[]>([]);
 
+  // QA-13: derived under the SAME gate the checklist renders under. The list
+  // and the gate on Complete have to be one fact — a checklist that is not on
+  // screen cannot be acknowledged, so deriving the gate from the raw store
+  // array meant any future path that left unmapped lines behind without a
+  // selected order would disable Complete permanently, with nothing rendered to
+  // explain it. Today's store clears both together; this stops depending on that.
   const skippedLines = useMemo(
     () =>
-      unmappedExternalItems.map((item, idx) => ({
-        // externalItemId is stamped on every push; the index is the fallback.
-        key: item.externalItemId ?? `line-${idx}`,
-        item,
-        lineClass: classifySkippedLine(item),
-      })),
-    [unmappedExternalItems]
+      isWCOrder
+        ? unmappedExternalItems.map((item, idx) => ({
+            // externalItemId is stamped on every push; the index is the fallback.
+            key: item.externalItemId ?? `line-${idx}`,
+            item,
+            lineClass: classifySkippedLine(item),
+          }))
+        : [],
+    [isWCOrder, unmappedExternalItems]
   );
 
   // Bundles are informational — they are excluded from the tap count.

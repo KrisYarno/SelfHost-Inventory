@@ -11,6 +11,11 @@
  *   - NON-CANCELLING: a +5 line and a -3 line report {over 5, under 3}, never a
  *     net of 2. Both totals are magnitudes.
  * An UNCOUNTED line contributes NOTHING (unknown is not zero — truthful data).
+ *
+ * QA-5 (pack REV-7): `uncountedItemCount` is RECEIVED-SCOPED — the same number
+ * the close guard enforces. A DISCARDED line that was never counted is a
+ * decision, not an omission, and counting it here pinned a permanent "1
+ * uncounted" on the list and suppressed "No discrepancies" forever.
  */
 
 import { lineDiscrepancy, rollupDiscrepancies } from '@/lib/shipments/rollup';
@@ -78,27 +83,34 @@ describe('lineDiscrepancy (per-item flags)', () => {
   });
 });
 
+/** A linked line as the rollup reads it; RECEIVED unless a test says otherwise. */
+const rl = (line: {
+  expectedQuantity: number | null;
+  countedQuantity: number | null;
+  status?: 'RECEIVED' | 'GRADUATED' | 'DISCARDED';
+}) => ({ status: 'RECEIVED' as const, ...line });
+
 describe('rollupDiscrepancies (header totals)', () => {
   it('does NOT cancel over against under', () => {
     const rollup = rollupDiscrepancies([
-      { expectedQuantity: 10, countedQuantity: 15 }, // +5
-      { expectedQuantity: 10, countedQuantity: 7 }, // -3
+      rl({ expectedQuantity: 10, countedQuantity: 15 }), // +5
+      rl({ expectedQuantity: 10, countedQuantity: 7 }), // -3
     ]);
     expect(rollup.totalOver).toBe(5);
     expect(rollup.totalUnder).toBe(3);
   });
 
   it('reports both totals as magnitudes (totalUnder is never negative)', () => {
-    const rollup = rollupDiscrepancies([{ expectedQuantity: 4, countedQuantity: 1 }]);
+    const rollup = rollupDiscrepancies([rl({ expectedQuantity: 4, countedQuantity: 1 })]);
     expect(rollup.totalOver).toBe(0);
     expect(rollup.totalUnder).toBe(3);
   });
 
   it('excludes uncounted lines from the totals but counts them in the census', () => {
     const rollup = rollupDiscrepancies([
-      { expectedQuantity: 10, countedQuantity: 12 }, // +2
-      { expectedQuantity: 10, countedQuantity: null }, // unknown
-      { expectedQuantity: null, countedQuantity: null }, // unknown
+      rl({ expectedQuantity: 10, countedQuantity: 12 }), // +2
+      rl({ expectedQuantity: 10, countedQuantity: null }), // unknown
+      rl({ expectedQuantity: null, countedQuantity: null }), // unknown
     ]);
     expect(rollup).toEqual({
       itemCount: 3,
@@ -110,10 +122,35 @@ describe('rollupDiscrepancies (header totals)', () => {
     });
   });
 
+  it('QA-5: a DISCARDED never-counted line is NOT uncounted work (RECEIVED-scoped)', () => {
+    const rollup = rollupDiscrepancies([
+      rl({ expectedQuantity: 10, countedQuantity: 10 }),
+      rl({ expectedQuantity: 4, countedQuantity: null, status: 'DISCARDED' }),
+    ]);
+    // The census still sees both lines — only the "still owed a count" number
+    // is scoped to the lines the close guard would actually block on.
+    expect(rollup.itemCount).toBe(2);
+    expect(rollup.countedItemCount).toBe(1);
+    expect(rollup.uncountedItemCount).toBe(0);
+  });
+
+  it('QA-5: a GRADUATED line with no count is settled work, not uncounted work', () => {
+    const rollup = rollupDiscrepancies([
+      rl({ expectedQuantity: 4, countedQuantity: null, status: 'GRADUATED' }),
+    ]);
+    expect(rollup.uncountedItemCount).toBe(0);
+    expect(rollup.itemCount).toBe(1);
+  });
+
+  it('QA-5: a RECEIVED never-counted line IS uncounted work', () => {
+    const rollup = rollupDiscrepancies([rl({ expectedQuantity: 4, countedQuantity: null })]);
+    expect(rollup.uncountedItemCount).toBe(1);
+  });
+
   it('sums the NULL-expected lines into totalOver in full', () => {
     const rollup = rollupDiscrepancies([
-      { expectedQuantity: null, countedQuantity: 6 },
-      { expectedQuantity: null, countedQuantity: 4 },
+      rl({ expectedQuantity: null, countedQuantity: 6 }),
+      rl({ expectedQuantity: null, countedQuantity: 4 }),
     ]);
     expect(rollup.totalOver).toBe(10);
     expect(rollup.discrepancyItemCount).toBe(2);
@@ -121,8 +158,8 @@ describe('rollupDiscrepancies (header totals)', () => {
 
   it('a perfectly matched shipment reports zeros with a non-zero census', () => {
     const rollup = rollupDiscrepancies([
-      { expectedQuantity: 5, countedQuantity: 5 },
-      { expectedQuantity: 0, countedQuantity: 0 },
+      rl({ expectedQuantity: 5, countedQuantity: 5 }),
+      rl({ expectedQuantity: 0, countedQuantity: 0 }),
     ]);
     expect(rollup).toEqual({
       itemCount: 2,

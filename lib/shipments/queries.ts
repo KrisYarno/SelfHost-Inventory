@@ -18,7 +18,9 @@ import {
  * `shipmentId` is a SOFT ref (cross-aggregate, no FK, no Prisma relation — T1),
  * so the lines are fetched with an explicit second query rather than an
  * `include`. That is the deliberate cost of the soft-ref rule, and it keeps the
- * list at two queries regardless of page size.
+ * list at two queries regardless of page size — bounded by
+ * `SHIPMENT_LIST_LIMIT`, so "regardless of page size" is now a promise about a
+ * page rather than about the whole table (QA-6).
  */
 
 const shipmentInclude = {
@@ -57,7 +59,13 @@ export type ShipmentSummary = {
   itemCount: number;
   receivedItemCount: number;
   graduatedItemCount: number;
-  /** Linked + RECEIVED + never counted — the ONLY thing that blocks a close. */
+  /**
+   * Linked + RECEIVED + never counted — the ONLY thing that blocks a close.
+   * Since QA-5 this equals `discrepancy.uncountedItemCount` BY CONSTRUCTION
+   * (the rollup adopted the same scope); both are kept because the header field
+   * is the close guard's number and the rollup field is the arithmetic's, and a
+   * caller reading either must get the same answer.
+   */
   uncountedReceivedItemCount: number;
   discrepancy: DiscrepancyRollup;
 };
@@ -128,9 +136,24 @@ export function toShipmentSummary(
 }
 
 /**
+ * The most headers one list request will ever return (QA-6).
+ *
+ * The list was unbounded: `findMany` with no `take`, followed by a second query
+ * with `shipmentId IN (every id it found)`. That is fine at five shipments and
+ * an unpayable bill at five thousand — both queries and the JSON grow forever,
+ * and receiving is precisely the surface that accumulates rows for years.
+ *
+ * A BOUND, not a cursor: the newest 100 headers are what a receiving screen is
+ * for, and cursor pagination is registered for W3 if growth ever demands it
+ * rather than invented here. The page is the newest-first slice the list already
+ * renders, so nothing about what an operator sees changes today.
+ */
+export const SHIPMENT_LIST_LIMIT = 100;
+
+/**
  * List shipments (optionally filtered by status), newest first, each with its
- * linked-line counts and computed discrepancy rollup. Two queries: the headers,
- * then every line belonging to any of them.
+ * linked-line counts and computed discrepancy rollup. Two queries: the newest
+ * page of headers, then every line belonging to THAT PAGE's shipments.
  */
 export async function listInboundShipments(
   status?: InboundShipmentStatus,
@@ -139,6 +162,7 @@ export async function listInboundShipments(
     where: status ? { status } : {},
     include: shipmentInclude,
     orderBy: { createdAt: 'desc' },
+    take: SHIPMENT_LIST_LIMIT,
   });
 
   if (shipments.length === 0) return [];

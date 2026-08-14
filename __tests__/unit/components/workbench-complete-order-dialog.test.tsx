@@ -320,6 +320,29 @@ describe("complete-order dialog — per-class skipped-line checklist (T6)", () =
     expect(completeButton()).toBeDisabled();
   });
 
+  // QA-13 (LOW, latent). The checklist renders under `isWCOrder &&
+  // skippedLines.length > 0`, but the gate on Complete was derived from
+  // `unmappedExternalItems` UNGATED. Today every store path clears the two
+  // together, so the states cannot diverge — which is exactly what makes this
+  // the kind of bug that ships: the first store edit that leaves unmapped lines
+  // behind without a selected order disables Complete forever, with no checklist
+  // on screen to explain why and no way to acknowledge anything.
+  it("QA-13: a non-WC order completes even with unmapped lines left in the store", () => {
+    seedOrder([CART_ITEM, UNAVAILABLE_ITEM, UNMAPPED_ITEM_A]);
+    // The divergence, forced: the order is gone, its unmapped lines are not.
+    act(() => {
+      useWorkbench.setState({ selectedExternalOrder: null });
+    });
+    renderDialog();
+
+    // Nothing to acknowledge is rendered, because the checklist is WC-only...
+    expect(tapTargets()).toHaveLength(0);
+    expect(screen.queryByText(/will not be deducted/i)).toBeNull();
+
+    // ...so nothing may be held back on the strength of it.
+    expect(screen.getByRole("button", { name: "Complete Order" })).toBeEnabled();
+  });
+
   it("sends nothing when the operator declines with lines still unacknowledged", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     seedOrder([CART_ITEM, UNAVAILABLE_ITEM, UNMAPPED_ITEM_A]);

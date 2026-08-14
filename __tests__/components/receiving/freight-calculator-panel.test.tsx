@@ -368,6 +368,83 @@ describe("inexact unit splits are withheld until somebody chooses (W1S-3)", () =
     await enterBill(user, "0.10");
 
     expect(screen.getByTestId("allocation-withheld")).toHaveTextContent(/1 line/i);
+    // There IS a rest to write here, so saying so is true.
+    expect(screen.getByTestId("allocation-withheld")).toHaveTextContent(/writes the rest/i);
+  });
+
+  it("QA-12a: does NOT promise to write 'the rest' when there is no rest", async () => {
+    const user = userEvent.setup();
+    renderPanel({
+      lines: [{ id: 1, description: "A", qty: 3, qtySource: "counted", baseCents: 100 }],
+    });
+
+    await enterBill(user, "0.10");
+
+    // Every line is held back and Accept is disabled: "Accept writes the rest"
+    // describes a button that cannot be pressed and a rest that does not exist.
+    expect(screen.getByRole("button", { name: /accept/i })).toBeDisabled();
+    const withheld = screen.getByTestId("allocation-withheld");
+    expect(withheld).not.toHaveTextContent(/writes the rest/i);
+    expect(withheld).toHaveTextContent(/all 1 line/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QA-12b — a write that changes nothing is not a write
+// ---------------------------------------------------------------------------
+//
+// A qty-0 line takes a 0 allocation (it has no value to allocate against), so
+// its "suggested" unit cost is its own base cost. Sending it meant a row lock,
+// an updatedAt bump and a precondition to lose the race on, all to store the
+// number already there.
+
+describe("no-op lines never reach the payload (QA-12b)", () => {
+  const WITH_ZERO_QTY = [
+    { id: 1, description: "Vials", qty: 10, qtySource: "counted" as const, baseCents: 500 },
+    // Logged but never counted and nothing expected: qty 0, priced 200c.
+    { id: 2, description: "Mystery box", qty: 0, qtySource: "none" as const, baseCents: 200 },
+  ];
+
+  it("leaves a qty-0 line out of the bill entirely", async () => {
+    const user = userEvent.setup();
+    const { onAccept } = renderPanel({ lines: WITH_ZERO_QTY });
+
+    await enterBill(user, "60.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(onAccept).toHaveBeenCalledWith([
+      { id: 1, unitCostCents: 1100, ifUnitCostCents: 500 },
+    ]);
+  });
+
+  it("still writes a 0-allocation line whose cost the operator EDITED upward", async () => {
+    const user = userEvent.setup();
+    const { onAccept } = renderPanel({ lines: WITH_ZERO_QTY });
+
+    await enterBill(user, "60.00");
+    // Hand the mystery box some of the freight; the totals must still add up.
+    await user.clear(allocationInput(1));
+    await user.type(allocationInput(1), "5990");
+    await user.clear(allocationInput(2));
+    await user.type(allocationInput(2), "10");
+
+    // qty 0 cannot express a per-unit share, so this line is now withheld
+    // (1c nothing can carry) rather than silently written at its old cost.
+    expect(within(lineRow(2)).getByTestId("needs-exact-split")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    expect(onAccept).toHaveBeenCalledWith([
+      { id: 1, unitCostCents: 1099, ifUnitCostCents: 500 },
+    ]);
+  });
+
+  it("a bill of nothing has nothing to write, and Accept says so by staying disabled", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+
+    await enterBill(user, "0");
+
+    // Every line is allocated 0 and would be restated at its own base cost.
+    expect(screen.getByRole("button", { name: /accept/i })).toBeDisabled();
   });
 });
 

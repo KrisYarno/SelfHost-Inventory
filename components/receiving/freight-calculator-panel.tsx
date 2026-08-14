@@ -331,6 +331,45 @@ export function FreightCalculatorPanel({
     (s) => s.unitRoundingRemainderCents > 0 && !consented(s),
   );
 
+  /** The allocation each line is carrying right now, by id (edits included). */
+  const allocatedById = new Map(
+    currentAllocations.map((allocation) => [allocation.id, allocation.allocatedCents]),
+  );
+  /** The base cost the split was computed from, by id — the write's precondition. */
+  const frozenBaseById = new Map(
+    (session?.lines ?? []).map((line) => [line.id as string | number, line.baseCents]),
+  );
+
+  /**
+   * What a press of Accept SENDS: the WHOLE bill (FD3-1) — every writable line
+   * at its frozen allocation, each guarded on the base the split was computed
+   * from (FD2-2). Withheld lines stay out (W1S-3: an inexact split is not
+   * consented to), and there is no "already written" category to subtract,
+   * because the caller writes all of these or none of them.
+   *
+   * QA-12b — A NO-OP IS NOT A WRITE. A line with no quantity (an uncounted box
+   * with nothing expected) has no value, so it takes 0 of the freight and its
+   * "suggested" unit cost is the base cost it already holds. Sending it bought
+   * nothing and cost something real: a row lock inside the bill's transaction,
+   * an `updatedAt` bump on a line nobody touched, and one more precondition for
+   * a concurrent edit to fail the WHOLE bill on. So a line is in this payload
+   * only if writing it would change the number stored on the row.
+   */
+  const payload: AllocationWrite[] = !session
+    ? []
+    : writable
+        .filter((s) => {
+          const allocated = allocatedById.get(s.id) ?? 0;
+          return !(
+            allocated === 0 && s.suggestedUnitCostCents === (frozenBaseById.get(s.id) ?? null)
+          );
+        })
+        .map((s) => ({
+          id: s.id as number,
+          unitCostCents: s.suggestedUnitCostCents,
+          ifUnitCostCents: frozenBaseById.get(s.id) ?? null,
+        }));
+
   const canAllocate =
     !disabled && !busy && !accepting &&
     freightCents !== null && lines.length > 0 && invalidation === null;
@@ -342,24 +381,9 @@ export function FreightCalculatorPanel({
     active &&
     ok !== null &&
     (validation === null || validation.status === "ok") &&
-    writable.length > 0;
-
-  /**
-   * What a press of Accept SENDS: the WHOLE bill (FD3-1) — every writable line
-   * at its frozen allocation, each guarded on the base the split was computed
-   * from (FD2-2). Withheld lines stay out (W1S-3: an inexact split is not
-   * consented to), and there is no "already written" category to subtract,
-   * because the caller writes all of these or none of them.
-   */
-  const buildPayload = (): AllocationWrite[] => {
-    if (!session) return [];
-    const frozenBase = new Map(session.lines.map((line) => [line.id, line.baseCents]));
-    return writable.map((s) => ({
-      id: s.id as number,
-      unitCostCents: s.suggestedUnitCostCents,
-      ifUnitCostCents: frozenBase.get(s.id as number) ?? null,
-    }));
-  };
+    // QA-12b: writable lines that would write what is already there leave
+    // nothing to send, and an empty bill is not a bill.
+    payload.length > 0;
 
   const handleAllocate = () => {
     if (!canAllocate || freightCents === null) return;
@@ -374,7 +398,6 @@ export function FreightCalculatorPanel({
 
   const handleAccept = async () => {
     if (!canAccept) return;
-    const payload = buildPayload();
     setAccepting(true);
     try {
       await onAccept(payload);
@@ -710,8 +733,13 @@ export function FreightCalculatorPanel({
           </span>
         )}
         {ok && withheld.length > 0 && (
+          // QA-12a: "Accept writes the rest" is only true when there IS a rest.
+          // With every line held back, Accept is disabled and that sentence sent
+          // an operator to press a button that does nothing.
           <span data-testid="allocation-withheld" className="text-xs text-amber-700 dark:text-amber-400">
-            {`${withheld.length} line(s) cannot be expressed as a whole unit cost and are held back. Accept writes the rest.`}
+            {payload.length > 0
+              ? `${withheld.length} line(s) cannot be expressed as a whole unit cost and are held back. Accept writes the rest.`
+              : `All ${withheld.length} line(s) are held back: none of them can be expressed as a whole unit cost, so there is nothing for Accept to write. Edit the split until it divides, or take the floored drop per line.`}
           </span>
         )}
       </div>

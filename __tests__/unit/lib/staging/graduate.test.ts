@@ -831,7 +831,7 @@ describe('graduateStagingItem — D-COST wiring (T3)', () => {
     expect(result.receiptCost).toEqual({ unitCostCents: 1234, source: 'line' });
   });
 
-  it('ADMIN + differ -> costPrompt on the response, and NO cost-differs row for the caller to write', async () => {
+  it('QA-7: ADMIN + differ -> the costPrompt AND the durable cost-differs subject', async () => {
     existingProduct(1.0);
     withLineCost();
     mockApplyReceiptCost.mockResolvedValue(
@@ -845,9 +845,18 @@ describe('graduateStagingItem — D-COST wiring (T3)', () => {
       },
     });
 
+    // The prompt is the FAST settlement path...
     expect(result.costPrompt).toEqual({ productId: 7, currentCents: 100, receiptCents: 1234 });
-    expect(ctxs[0].costDiffers).toBeNull();
     expect(ctxs[0].costPrompt).toEqual({ productId: 7, currentCents: 100, receiptCents: 1234 });
+    // ...but it is React state that dies with the dialog. The disagreement is a
+    // FACT about the receipt, so it lands on the register for every actor (pack
+    // REV-7 T3): an admin who dismisses the prompt used to leave no trace at all.
+    expect(ctxs[0].costDiffers).toEqual({
+      productId: 7,
+      stagingItemId: 55,
+      currentCents: 100,
+      receiptCents: 1234,
+    });
   });
 
   it('NON-ADMIN + differ -> NO prompt, and a cost-differs subject for the caller to register', async () => {

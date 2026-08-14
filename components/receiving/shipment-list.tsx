@@ -87,7 +87,11 @@ function DiscrepancyCell({ shipment }: { shipment: ShipmentSummary }) {
 }
 
 export function ShipmentList() {
-  const [status, setStatus] = useState<ShipmentStatusFilter>("ALL");
+  // QA-6: the list opens on OPEN. Receiving is a working surface — the receipts
+  // that still need counting are what somebody came here for — and defaulting to
+  // ALL asked the server for every shipment ever recorded on the first paint of
+  // every visit. Every other status stays one tap away.
+  const [status, setStatus] = useState<ShipmentStatusFilter>("OPEN");
   const [createOpen, setCreateOpen] = useState(false);
 
   const { data: shipments = [], isPending, isError, error } = useInboundShipments(status);
@@ -101,6 +105,7 @@ export function ShipmentList() {
               key={tab.value}
               size="sm"
               variant={status === tab.value ? "default" : "outline"}
+              aria-pressed={status === tab.value}
               onClick={() => setStatus(tab.value)}
             >
               {tab.label}

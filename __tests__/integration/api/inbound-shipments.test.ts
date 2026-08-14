@@ -62,6 +62,7 @@ jest.mock('@/lib/change-tracking', () => ({
   recordChange: jest.fn(async () => undefined),
 }));
 
+import { SHIPMENT_LIST_LIMIT } from '@/lib/shipments/queries';
 import { GET as listGET, POST as createPOST } from '@/app/api/inbound-shipments/route';
 import { GET as detailGET, PATCH } from '@/app/api/inbound-shipments/[id]/route';
 import { requireApproved } from '@/lib/api-utils';
@@ -323,6 +324,46 @@ describe('GET /api/inbound-shipments (list)', () => {
     expect(db.stagingItem.findMany).not.toHaveBeenCalled();
   });
 
+  it('QA-5: a DISCARDED never-counted line is not permanently "uncounted" on the list', async () => {
+    setApprovedUser();
+    db.inboundShipment.findMany.mockResolvedValue([shipmentRow()]);
+    db.stagingItem.findMany.mockResolvedValue([
+      { id: 1, shipmentId: SHIPMENT_ID, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: 10 },
+      // Logged, then thrown away before anybody counted it: a decision, not an
+      // omission. It used to pin "1 uncounted" on this shipment forever and
+      // suppress "No discrepancies" with it.
+      { id: 2, shipmentId: SHIPMENT_ID, status: 'DISCARDED', expectedQuantity: 4, countedQuantity: null },
+    ]);
+
+    const resp = await listGET(mkReq('http://t/api/inbound-shipments', 'GET'));
+    const entry = (await resp.json()).shipments[0];
+
+    expect(entry.discrepancy.uncountedItemCount).toBe(0);
+    // The close guard's number and the rollup's now AGREE, which is the whole fix.
+    expect(entry.uncountedReceivedItemCount).toBe(0);
+    // The census is unchanged: both lines are still linked to this shipment.
+    expect(entry.itemCount).toBe(2);
+    expect(entry.discrepancy.countedItemCount).toBe(1);
+  });
+
+  it('QA-6: bounds the page (newest first) instead of listing every shipment ever', async () => {
+    setApprovedUser();
+    db.inboundShipment.findMany.mockResolvedValue([shipmentRow()]);
+    db.stagingItem.findMany.mockResolvedValue([]);
+
+    await listGET(mkReq('http://t/api/inbound-shipments', 'GET'));
+
+    const args = db.inboundShipment.findMany.mock.calls[0][0];
+    expect(SHIPMENT_LIST_LIMIT).toBe(100);
+    expect(args.take).toBe(SHIPMENT_LIST_LIMIT);
+    expect(args.orderBy).toEqual({ createdAt: 'desc' });
+    // The line query is scoped to the ids the bounded page returned — never to
+    // "every shipment id in the table".
+    expect(db.stagingItem.findMany.mock.calls[0][0].where).toEqual({
+      shipmentId: { in: [SHIPMENT_ID] },
+    });
+  });
+
   it('counts an unexpected arrival (expected NULL) in full', async () => {
     setApprovedUser();
     db.inboundShipment.findMany.mockResolvedValue([shipmentRow()]);
@@ -580,6 +621,55 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CLOSED)', () => {
     });
   });
 
+  it('QA-14: notes riding the CLOSE carry their diff on the SHIPMENT_CLOSE record', async () => {
+    setApprovedUser();
+    db.inboundShipment.findUnique.mockResolvedValue(shipmentRow({ notes: null }));
+    shipmentLines([stagingLine({ id: 1, countedQuantity: 10 })]);
+    stagingClaims();
+    db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+
+    await PATCH(
+      mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', {
+        status: 'CLOSED',
+        notes: 'two boxes short, supplier notified',
+      }),
+      { params: { id: SHIPMENT_ID } }
+    );
+
+    // The claim writes the field...
+    expect(db.inboundShipment.updateMany.mock.calls[0][0].data.notes).toBe(
+      'two boxes short, supplier notified'
+    );
+    // ...and the ONE record this transition writes now says so.
+    expect(mockRecordChange).toHaveBeenCalledTimes(1);
+    const recorded = mockRecordChange.mock.calls[0][1];
+    expect(recorded.actionType).toBe('SHIPMENT_CLOSE');
+    expect(recorded.changes).toEqual({
+      notes: { from: null, to: 'two boxes short, supplier notified' },
+    });
+    // The rollup details ride the same record, unchanged.
+    expect(recorded.details).toMatchObject({ itemCount: 1 });
+  });
+
+  it('QA-14/ER-B9: a from === to field riding the CLOSE attaches no diff at all', async () => {
+    setApprovedUser();
+    db.inboundShipment.findUnique.mockResolvedValue(shipmentRow({ notes: 'late truck' }));
+    shipmentLines([stagingLine({ id: 1, countedQuantity: 10 })]);
+    stagingClaims();
+    db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+
+    await PATCH(
+      mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', {
+        status: 'CLOSED',
+        notes: 'late truck',
+      }),
+      { params: { id: SHIPMENT_ID } }
+    );
+
+    expect(mockRecordChange).toHaveBeenCalledTimes(1);
+    expect(mockRecordChange.mock.calls[0][1].changes).toBeUndefined();
+  });
+
   it('REFUSES to close with uncounted RECEIVED lines: 409 listing the offenders', async () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
@@ -690,6 +780,28 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CANCELLED)', () => {
       entityId: SHIPMENT_ID,
       details: { unlinkedItemIds: [11, 12] },
     });
+  });
+
+  it('QA-14: a supplierRef edit riding the CANCEL carries its diff on SHIPMENT_CANCEL', async () => {
+    setApprovedUser();
+    db.inboundShipment.findUnique.mockResolvedValue(shipmentRow({ supplierRef: 'PO-1' }));
+    db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+    shipmentLines([stagingLine({ id: 11 })]);
+    stagingClaims();
+
+    await PATCH(
+      mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', {
+        status: 'CANCELLED',
+        supplierRef: 'PO-1-VOID',
+      }),
+      { params: { id: SHIPMENT_ID } }
+    );
+
+    expect(mockRecordChange).toHaveBeenCalledTimes(1);
+    const recorded = mockRecordChange.mock.calls[0][1];
+    expect(recorded.actionType).toBe('SHIPMENT_CANCEL');
+    expect(recorded.changes).toEqual({ supplierRef: { from: 'PO-1', to: 'PO-1-VOID' } });
+    expect(recorded.details).toEqual({ unlinkedItemIds: [11] });
   });
 
   it('RACE (cancel vs graduate) — GRADUATE WON: a linked GRADUATED line aborts the cancel (409, no audit)', async () => {

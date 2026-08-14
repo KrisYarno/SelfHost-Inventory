@@ -172,21 +172,26 @@ describe('graduate -> cost-differs', () => {
     expect(gradTx.inventoryException.create).toHaveBeenCalledTimes(1);
   });
 
-  it('an ADMIN differ writes NO row — the response prompt settles it instead', async () => {
+  it('QA-7: an ADMIN differ writes the row AND returns the prompt (both, not either)', async () => {
     (requireApproved as jest.Mock).mockResolvedValue({ user: ADMIN_USER });
+    const prompt = { productId: 100, currentCents: 100, receiptCents: 1234 };
     driveHelper(
-      { ...baseCtx, costDiffers: null, costPrompt: { productId: 100, currentCents: 100, receiptCents: 1234 } },
       {
         ...baseCtx,
-        costPrompt: { productId: 100, currentCents: 100, receiptCents: 1234 },
+        costDiffers: { productId: 100, stagingItemId: 5, currentCents: 100, receiptCents: 1234 },
+        costPrompt: prompt,
       },
+      { ...baseCtx, costPrompt: prompt },
     );
 
     const res = await graduatePOST(mkReq(EXISTING_BODY), { params: { id: '5' } });
     const json = await res.json();
 
-    expect(writtenExceptions()).toHaveLength(0);
-    expect(json.costPrompt).toEqual({ productId: 100, currentCents: 100, receiptCents: 1234 });
+    // The prompt is a dialog that dies on reopen; the row is what W3 reads.
+    expect(json.costPrompt).toEqual(prompt);
+    const rows = writtenExceptions();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ key: 'cost-differs:5', kind: 'cost-differs' });
   });
 
   it('agreement (or no receipt cost) writes nothing and prompts nothing', async () => {
