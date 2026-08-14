@@ -91,8 +91,8 @@ export function CompleteOrderDialog({
   // persisted, and no request carries it.
   const [acknowledgedLines, setAcknowledgedLines] = useState<string[]>([]);
 
-  // W2-1 (T7): the intent chip for the MANUAL leg. null = never tapped, which
-  // is what lets the request omit the key entirely (see handleComplete).
+  // W2-1 (T7): the intent chip for the MANUAL leg. null = the operator has not
+  // tapped it; what that MEANS depends on the surface (see effectiveIntent).
   const [intent, setIntent] = useState<WorkbenchIntent | null>(null);
 
   // The chip only has something to say when there is an order to attribute TO
@@ -100,6 +100,26 @@ export function CompleteOrderDialog({
   // unconditionally by the fulfill route from the order it already resolved —
   // they need no operator input and get no chip.
   const showIntentChip = isWCOrder && manualItems.length > 0;
+
+  // W2-2 RIDER (pack REV-12): on THIS surface the answer is already known — the
+  // operator selected a WC order upstream and then added lines to that order's
+  // cart, which is the From-Order-auto-locks premise. `order` is therefore the
+  // PRE-SELECTED default here, not an unasked question: before this, an untapped
+  // chip made ledger stamping opt-in on the one surface where the attribution is
+  // least in doubt, and every skipped tap wrote an unattributed SALE row.
+  //
+  // Derived rather than seeded into state deliberately: `intent` keeps meaning
+  // "what the operator explicitly said" and this keeps meaning "what will be
+  // sent", so the pre-selection cannot go stale against a cart that changes
+  // under it, and the dialog's reset needs no second rule.
+  //
+  // NOT a lock and NOT a gate: `other` is one tap away, Confirm never reads
+  // either value, and a submit with zero chip interaction stays legal. Only the
+  // starting position moved. Away from this surface (no WC order, or no manual
+  // line to carry it) there is nothing to pre-select for, so the value stays
+  // null and the request omits the key exactly as it always has.
+  const effectiveIntent: WorkbenchIntent | null =
+    intent ?? (showIntentChip ? "order" : null);
 
   // QA-13: derived under the SAME gate the checklist renders under. The list
   // and the gate on Complete have to be one fact — a checklist that is not on
@@ -134,6 +154,8 @@ export function CompleteOrderDialog({
   // backs out and comes back re-reads what is about to ship undeducted. The
   // intent chip resets with them — a stale intent carried across a reopen would
   // attribute this deduction using an answer given about a different cart.
+  // Clearing to null restores the surface's pre-selected default (W2-2 rider),
+  // it does not clear the chip to "unstated".
   useEffect(() => {
     setAcknowledgedLines([]);
     setIntent(null);
@@ -216,10 +238,12 @@ export function CompleteOrderDialog({
           // already holds it; the server re-resolves it and checks membership
           // before recording. No UX change — omitted for a non-WC order.
           ...(selectedExternalOrder ? { selectedExternalOrderId: selectedExternalOrder.id } : {}),
-          // W2-1 (T7): the chip, sent ONLY when the packer tapped it. Omitting
-          // the key is what makes an untapped chip mean "unstated" server-side
-          // rather than an asserted `other`.
-          ...(intent ? { intent } : {}),
+          // W2-1 (T7) + W2-2 rider: the chip's EFFECTIVE value — the operator's
+          // tap when they made one, otherwise this surface's `order` default.
+          // The key is still omitted entirely when there is nothing to
+          // pre-select for, which is what keeps "unstated" distinguishable from
+          // an asserted `other` on every other path.
+          ...(effectiveIntent ? { intent: effectiveIntent } : {}),
         };
 
         const deductResponse = await fetch("/api/inventory/deduct-simple", {
@@ -462,7 +486,7 @@ export function CompleteOrderDialog({
               {showIntentChip && (
                 <IntentChip
                   surface="workbench"
-                  value={intent}
+                  value={effectiveIntent}
                   onChange={(next) => setIntent(next as WorkbenchIntent)}
                   disabled={isProcessing}
                 />

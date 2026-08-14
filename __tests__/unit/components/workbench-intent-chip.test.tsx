@@ -146,19 +146,46 @@ describe("workbench manual leg — the chip offers no damage-loss (PLG1-1)", () 
   });
 });
 
-describe("workbench manual leg — the chip never blocks", () => {
-  it("completes with no chip interaction and sends NO intent", async () => {
+// ---------------------------------------------------------------------------
+// W2-2 RIDER (pack REV-12): `order` is PRE-SELECTED on this surface.
+//
+// The premise the workbench is built on is that a cart packed against a WC order
+// IS that order's deduction — the operator already said so by selecting the
+// order upstream. Making them say it a second time meant ledger stamping was
+// opt-in on the one surface where the answer is already known, and an untapped
+// chip silently produced an unattributed SALE row.
+//
+// The friction ceiling is UNCHANGED: nothing blocks, the operator can still tap
+// `other`, and a submit with zero chip interaction is still legal. Only the
+// starting position moved.
+// ---------------------------------------------------------------------------
+
+describe("workbench manual leg — `order` is pre-selected against a WC order", () => {
+  it("renders Order already checked, with no interaction at all", () => {
+    seedManualCart();
+    renderDialog();
+
+    expect(chipGroup().getByRole("radio", { name: "Order" })).toBeChecked();
+    expect(chipGroup().getByRole("radio", { name: "Other" })).not.toBeChecked();
+  });
+
+  it("completes with no chip interaction and sends intent order", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     seedManualCart();
     renderDialog();
 
     const body = await completeAndReadDeductBody(user);
 
-    expect("intent" in body).toBe(false);
-    // 0b-2's accrual is untouched by the chip's absence.
+    // The flip: this used to send NO intent key, which landed server-side as
+    // `other` and stamped nothing. The row now carries the order it was packed
+    // against.
+    expect(body.intent).toBe("order");
+    // 0b-2's accrual is untouched by the chip's default.
     expect(body.selectedExternalOrderId).toBe("ord-1");
   });
+});
 
+describe("workbench manual leg — the chip never blocks", () => {
   it("sends intent order once the operator taps it", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     seedManualCart();
@@ -169,5 +196,36 @@ describe("workbench manual leg — the chip never blocks", () => {
 
     expect(body.intent).toBe("order");
     expect(body.selectedExternalOrderId).toBe("ord-1");
+  });
+
+  it("the pre-selection is a default, not a lock — Other still wins", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    seedManualCart();
+    renderDialog();
+
+    await user.click(chipGroup().getByRole("radio", { name: "Other" }));
+    const body = await completeAndReadDeductBody(user);
+
+    expect(body.intent).toBe("other");
+    // Sent, resolved and membership-checked server-side — and deliberately NOT
+    // stamped onto the row, because the operator said this was not the order.
+    expect(body.selectedExternalOrderId).toBe("ord-1");
+  });
+
+  it("sends no intent at all when there is no order to attribute to", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    act(() => {
+      useWorkbench.getState().addItem(LOADED_PRODUCTS[0], 2);
+      useWorkbench.getState().setOrderReference("manual-ref");
+    });
+    renderDialog();
+
+    expect(screen.queryByRole("radiogroup", { name: "What was this for?" })).toBeNull();
+    const body = await completeAndReadDeductBody(user);
+
+    // A cart with no WC order has nothing to pre-select FOR. The key stays
+    // absent and the route's own default (`other`) applies, exactly as before.
+    expect("intent" in body).toBe(false);
+    expect("selectedExternalOrderId" in body).toBe(false);
   });
 });

@@ -376,12 +376,31 @@ describe("deduct-simple — T7 mapping on the manual leg", () => {
     expect(details.selectedExternalOrderId).toBe(ORDER_CUID);
   });
 
-  it("no chip interaction -> legal submit, other/nothing, key ABSENT", async () => {
+  it("an absent key -> legal submit, other/nothing, key ABSENT in the accrual", async () => {
     const { row, details } = await deductRow({});
 
     expect(row.orderRecordId ?? null).toBeNull();
     expect(row.reasonCode ?? null).toBeNull();
     expect("intent" in details).toBe(false);
+  });
+
+  // W2-2 RIDER (pack REV-12): the pin above is a WIRE contract, not a statement
+  // about the workbench. Since the rider, that surface PRE-SELECTS `order`
+  // whenever a WC order is selected, so it no longer produces a key-absent body
+  // in that case (pinned in __tests__/unit/components/workbench-intent-chip.test.tsx).
+  // The route's own reading of an absent key is unchanged and still exercised —
+  // by a non-WC workbench cart and by any other client of this endpoint — which
+  // is exactly why the pin stays.
+  it("the ROUTE's default is untouched by the surface's default", async () => {
+    db.externalOrder.findUnique.mockResolvedValue({ companyId: COMPANY_ID } as any);
+
+    // The shape the workbench now sends: an explicit `order` alongside the id.
+    const stated = await deductRow({ intent: "order", selectedExternalOrderId: ORDER_CUID });
+    expect(stated.row.orderRecordId).toBe(ORDER_CUID);
+
+    // The shape it sends with no order in play: nothing stated, nothing stamped.
+    const unstated = await deductRow({});
+    expect(unstated.row.orderRecordId ?? null).toBeNull();
   });
 });
 
