@@ -2,10 +2,25 @@
 //
 // W2-2 — the order-attribution backfill (design REV-2 §W2 "Backfill", pack seam S6).
 //
-// Copies the order id that Phase 0b-2 accrued into an audit event's details onto
-// the inventory_logs rows that event describes. A FORWARD REPAIR, not history:
-// its value is proportional to how long the accrual has been running, and it can
-// say nothing about the movements that happened before 2026-08-13.
+// Copies the order a deduction's audit event names onto the inventory_logs rows
+// that event describes. A FORWARD REPAIR, not history: its value is proportional
+// to how long the accrual has been running, and it can say nothing about the
+// movements that happened before 2026-08-13.
+//
+// TWO EVIDENCE SOURCES, one machinery (reference-resolution round):
+//   `selected`            — 0b-2's `details.selectedExternalOrderId`, resolved
+//                           and membership-checked BEFORE it was written, so it
+//                           is copied without re-validation.
+//   `reference-resolved`  — `details.orderReference`, the free text a packer
+//                           TYPED. Never validated by anything, so it earns its
+//                           way in only by matching exactly ONE
+//                           `external_orders.orderNumber`. This is the source
+//                           that actually exists in production: the structured
+//                           key has never once been written there (0 of 1,897
+//                           events), and all 10 distinct typed references
+//                           resolve exactly.
+// The summary reports the two SEPARATELY — they do not carry the same
+// confidence and must never be read as one number.
 //
 // STANDALONE. It imports @prisma/client and its own pure planner and NOTHING
 // else — no app/, no lib/, nothing that drags next/server. It is meant to be run
@@ -66,7 +81,7 @@
 // re-running it — see above for why that is free.
 //
 // ---------------------------------------------------------------------------
-// NO RE-VALIDATION (design, verbatim)
+// NO RE-VALIDATION — of the STRUCTURED id (design, verbatim)
 // ---------------------------------------------------------------------------
 // "NO re-validation (validated at write; re-checking with no session would drop
 // admin-accrued rows)". The accrued id was resolved and membership-checked
@@ -76,10 +91,22 @@
 // discard correct rows, notably every id an admin accrued across companies. The
 // id is copied as recorded.
 //
+// THE REFERENCE SOURCE IS THE OTHER CASE and the distinction matters: free text
+// was never validated at write, so there is no earlier decision to preserve.
+// Its bar is set HERE and it is the exact-unique match (see ./plan.js). No
+// membership predicate is applied to it either — for the same structural reason
+// as above (no session, no actor) — which is why the bar is uniqueness of a
+// number rather than a permission: a reference that names exactly one order in
+// the whole system is not a claim about who may see it, it is an identification.
+//
 // PII DISCIPLINE (order-pipeline precedent, same as the 0a diagnostics): every
 // projection here is ids, dates, counts and enum values. `details` is touched
-// only through JSON path extraction of the two keys named below. No customer
-// field, no address, no note body, no product name is ever selected or printed.
+// only through JSON path extraction of the three keys named below. THE TYPED
+// REFERENCE ITSELF NEVER LEAVES THIS PROCESS: it is a free-text field, which is
+// exactly where a customer name arrives, so it is used as a lookup key and is
+// never written into the report, the summary or a skip entry (pinned). No
+// customer field, no address, no note body, no product name is ever selected or
+// printed.
 //
 const fs = require("fs");
 const path = require("path");
@@ -89,9 +116,13 @@ const { PrismaClient } = require("@prisma/client");
 const {
   ACCRUAL_ACTION_TYPE,
   ACCRUAL_DETAILS_KEY,
+  ACCRUAL_REFERENCE_KEY,
   ACCRUAL_INTENT_KEY,
   ACCRUAL_LOG_TYPE,
+  ATTRIBUTION_SOURCE,
   SKIP_CLASS,
+  isUsableOrderReference,
+  normalizeOrderReference,
   buildBackfillPlan,
   executeBackfillPlan,
 } = require("./plan");
@@ -200,9 +231,14 @@ function toNumber(v) {
 }
 
 /**
- * The 0b-2 accrual events. Scoped by actionType AND by the presence of the
- * accrual key, because INVENTORY_BULK_UPDATE is written by other paths (the
- * admin mass-update, for one) that never carry an order id.
+ * The accrual events. Scoped by actionType AND by the presence of EITHER
+ * evidence key, because INVENTORY_BULK_UPDATE is written by other paths (the
+ * admin mass-update, for one) that carry neither.
+ *
+ * The `OR` is the reference-resolution round's widening. Before it this query
+ * asked only for the structured key — and in production that set is EMPTY, which
+ * is how a clean-zero backfill ran three passes against 1,897 events that were
+ * carrying the answer in the other column all along.
  */
 async function selectAccrualEvents(prisma, since) {
   const params = [];
@@ -214,6 +250,9 @@ async function selectAccrualEvents(prisma, since) {
     // an array or an object. JSON_TYPE is the only witness; the planner requires
     // it to read STRING before it will copy anything into the ledger.
     `JSON_TYPE(JSON_EXTRACT(details, '$.\"${ACCRUAL_DETAILS_KEY}\"')) AS accruedOrderIdType, ` +
+    // The free-text key, under the SAME type discipline for the same reason.
+    `JSON_UNQUOTE(JSON_EXTRACT(details, '$.\"${ACCRUAL_REFERENCE_KEY}\"')) AS orderReference, ` +
+    `JSON_TYPE(JSON_EXTRACT(details, '$.\"${ACCRUAL_REFERENCE_KEY}\"')) AS orderReferenceType, ` +
     `JSON_UNQUOTE(JSON_EXTRACT(details, '$.\"${ACCRUAL_INTENT_KEY}\"')) AS intent, ` +
     // W2S-2: JSON_TYPE is NULL when the PATH does not exist and 'NULL' when the
     // value is JSON null — the only way to tell "this client never mentioned
@@ -221,7 +260,8 @@ async function selectAccrualEvents(prisma, since) {
     `JSON_TYPE(JSON_EXTRACT(details, '$.\"${ACCRUAL_INTENT_KEY}\"')) AS intentType ` +
     "FROM audit_logs " +
     "WHERE actionType = ? " +
-    `AND JSON_EXTRACT(details, '$.\"${ACCRUAL_DETAILS_KEY}\"') IS NOT NULL`;
+    `AND (JSON_EXTRACT(details, '$.\"${ACCRUAL_DETAILS_KEY}\"') IS NOT NULL ` +
+    `OR JSON_EXTRACT(details, '$.\"${ACCRUAL_REFERENCE_KEY}\"') IS NOT NULL)`;
   params.push(ACCRUAL_ACTION_TYPE);
   if (since) {
     sql += " AND createdAt >= ?";
@@ -236,9 +276,42 @@ async function selectAccrualEvents(prisma, since) {
     createdAt: r.createdAt ?? null,
     accruedOrderId: r.accruedOrderId ?? null,
     accruedOrderIdType: r.accruedOrderIdType ?? null,
+    orderReference: r.orderReference ?? null,
+    orderReferenceType: r.orderReferenceType ?? null,
     intent: r.intent ?? null,
     intentType: r.intentType ?? null,
   }));
+}
+
+/**
+ * Candidate orders for the references these events carry.
+ *
+ * A READ, and a narrow one: only references that already passed the planner's
+ * shape bar are asked about, so a run whose events carry no usable reference
+ * issues NO statement here at all (which is what keeps the structured-only path
+ * byte-identical to the pre-round script).
+ *
+ * The `IN (...)` is a CANDIDATE fetch under MySQL's case- and pad-insensitive
+ * collation; the planner decides exact equality and uniqueness itself. Doing it
+ * the other way — trusting the collation — would let `12345 ` and `12345`
+ * silently become the same order number, which is precisely the kind of "close
+ * enough" this bar exists to refuse.
+ */
+async function selectOrderNumberMatches(prisma, references) {
+  const out = [];
+  for (let i = 0; i < references.length; i += CHUNK) {
+    const chunk = references.slice(i, i + CHUNK);
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT id, orderNumber FROM external_orders WHERE orderNumber IN (${placeholders})`,
+      ...chunk
+    );
+    for (const r of rows) {
+      out.push({ orderNumber: r.orderNumber ?? null, orderId: r.id ?? null });
+    }
+  }
+  return out;
 }
 
 /** Every ledger row belonging to the collected batches — stamped ones included. */
@@ -318,6 +391,18 @@ function formatSummary(report) {
     lines.push(`    ${pad(`skipped [${cls}]`)} ${n}`);
   }
   lines.push("");
+  // WHICH EVIDENCE. Never a single "batches planned" figure: `selected` was
+  // proven server-side before it was written, `reference-resolved` is a number a
+  // human typed that happens to name exactly one order. Both are honest; they
+  // are not the same claim, and an operator deciding whether to --apply is
+  // deciding about the mix.
+  lines.push("  attributed by evidence (rows / batches)");
+  for (const source of Object.values(ATTRIBUTION_SOURCE)) {
+    const batches = summary.batchesPlannedBySource[source] || 0;
+    const rows = summary.rowsToFillBySource[source] || 0;
+    lines.push(`    ${pad(`[${source}]`)} ${rows} / ${batches}`);
+  }
+  lines.push("");
   lines.push("  ledger rows");
   lines.push(`    ${pad("examined")} ${summary.rowsExamined}`);
   lines.push(`    ${pad("to fill")} ${summary.rowsToFill}`);
@@ -353,11 +438,26 @@ function formatSummary(report) {
  */
 async function runBackfill(prisma, opts) {
   const events = await selectAccrualEvents(prisma, opts.since);
+  // The shape bar decides what we ASK about, using the planner's own rule so the
+  // question and the answer can never be scoped differently.
+  const references = [
+    ...new Set(
+      events
+        .filter((e) => isUsableOrderReference(e.orderReference, e.orderReferenceType))
+        .map((e) => normalizeOrderReference(e.orderReference))
+    ),
+  ].sort();
+  const orderNumberMatches = await selectOrderNumberMatches(prisma, references);
   const batchIds = [...new Set(events.map((e) => e.batchId).filter(Boolean))].sort();
   const ledgerRows = await selectLedgerRows(prisma, batchIds);
 
   // W2FD-1: the same strict parser validation used — never a bare `new Date`.
-  const plan = buildBackfillPlan({ events, ledgerRows, cutoff: parseCutoff(opts.until) });
+  const plan = buildBackfillPlan({
+    events,
+    ledgerRows,
+    orderNumberMatches,
+    cutoff: parseCutoff(opts.until),
+  });
   const execution = await executeBackfillPlan(plan, {
     apply: opts.apply,
     updateRows: makeWriter(prisma),
@@ -370,14 +470,20 @@ async function runBackfill(prisma, opts) {
     accrual: {
       actionType: ACCRUAL_ACTION_TYPE,
       detailsKey: ACCRUAL_DETAILS_KEY,
+      referenceKey: ACCRUAL_REFERENCE_KEY,
+      referenceBar: "trimmed reference == exactly ONE external_orders.orderNumber",
       logType: ACCRUAL_LOG_TYPE,
       linkage: "audit_logs.batchId = inventory_logs.batchId",
     },
     skipClasses: SKIP_CLASS,
+    attributionSources: ATTRIBUTION_SOURCE,
     summary: plan.summary,
     // Ids only, per class — enough for the orchestrator to go look, never enough
-    // to leak anything about a customer or an order's contents.
+    // to leak anything about a customer or an order's contents. The typed
+    // reference is NOT here, deliberately: it is free text.
     skips: plan.skips,
+    // Which evidence stamped which batch. Same discipline: ids and counts.
+    evidence: plan.evidence,
     execution,
   };
 }
@@ -417,7 +523,9 @@ async function main() {
   }
 
   const connection = describeConnection(process.env.DATABASE_URL);
-  console.log("[backfill] order-attribution — 0b-2 audit accrual -> inventory_logs.orderRecordId");
+  console.log(
+    "[backfill] order-attribution — audit accrual (selected id + resolved reference) -> inventory_logs.orderRecordId"
+  );
   console.log(`[backfill] database: ${connection.host ?? "unknown"}/${connection.database ?? "unknown"}`);
   console.log(`[backfill] mode:     ${opts.apply ? "APPLY" : "DRY RUN"}`);
 

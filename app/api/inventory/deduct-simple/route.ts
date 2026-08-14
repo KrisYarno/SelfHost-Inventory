@@ -3,6 +3,11 @@ import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { createInventoryTransaction } from "@/lib/inventory";
 import { mapDeductionIntent } from "@/lib/inventory/intent";
 import { resolveSelectedExternalOrderId } from "@/lib/orders/resolve-selected-order";
+import {
+  ORDER_ATTRIBUTION_SOURCE,
+  isReferenceResolutionEligible,
+  resolveOrderReference,
+} from "@/lib/orders/resolve-order-reference";
 import { SimpleDeductSchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
@@ -44,7 +49,45 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // puts the resolved id on the rows. 0b-2's AUDIT accrual below is deliberately
   // NOT gated on the chip — it predates it, it is the backfill's source, and
   // narrowing it would silently discard evidence that is already being written.
-  const orderRecordId = intentMapping.attributesOrder ? selectedExternalOrderId ?? null : null;
+  const selectedStamp = intentMapping.attributesOrder ? selectedExternalOrderId ?? null : null;
+
+  // REFERENCE RESOLUTION. The prod backfill proved 0b-2's premise unmet: the
+  // structured id has never been sent, because packers TYPE the Woo order number
+  // into `orderReference` instead — and every reference production has recorded
+  // names exactly one order. So resolve it server-side, under three conditions:
+  //
+  //   (a) no structured id came — the stronger evidence always wins, and a
+  //       SUPPLIED-but-unstampable id (chip said `other`) is that operator's
+  //       answer, which the reference must not walk around;
+  //   (b) no explicit NON-order intent — see isReferenceResolutionEligible for
+  //       why an ABSENT chip is not the same as a stated `other` here;
+  //   (c) the reference identifies exactly one order (the helper's bar).
+  //
+  // Anything else keeps today's behaviour exactly: the free text is accrued and
+  // no column is stamped, which is what W3's matcher inherits. A membership
+  // failure is in that group — the deduction is legal and commits; only the
+  // attribution is withheld, and nothing about the declined order is recorded.
+  const referenceResolution =
+    body.selectedExternalOrderId === undefined && isReferenceResolutionEligible(body.intent)
+      ? await resolveOrderReference(body.orderReference, user)
+      : null;
+
+  const orderRecordId =
+    selectedStamp ??
+    (referenceResolution?.outcome === "resolved" ? referenceResolution.orderRecordId : null);
+
+  // WHICH EVIDENCE attributed this movement. A stamped row alone cannot say
+  // whether an operator picked the order or a number they typed resolved to it,
+  // and the two do not carry the same confidence — a reconciliation that reads
+  // them as one thing is reading a number it cannot stand behind. Absent when
+  // nothing was stamped, never null-filled (the house rule the two keys below
+  // follow, for the same JSON-path-census reason).
+  const orderAttributionSource =
+    orderRecordId === null
+      ? null
+      : selectedStamp !== null
+        ? ORDER_ATTRIBUTION_SOURCE.SELECTED
+        : ORDER_ATTRIBUTION_SOURCE.REFERENCE_RESOLVED;
 
   // Transform items for inventory transaction
   const transactionItems = body.items.map((item) => ({
@@ -94,6 +137,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
           // for the same reason as the two keys above — a null would be counted
           // as a classification that never happened.
           ...(body.intent ? { intent: body.intent } : {}),
+          // The reference-resolution round: WHICH evidence stamped the ledger
+          // rows this event describes, when anything did. Additive — no existing
+          // key changes meaning, and the companion backfill names the same two
+          // sources with the same two tokens.
+          ...(orderAttributionSource ? { orderAttributionSource } : {}),
         },
         affectedCount: logs.length,
         batchId,

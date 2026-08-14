@@ -31,15 +31,79 @@
 // lib/orders/resolve-selected-order.ts before it was ever written. This script
 // has no session, no actor and no membership context; a re-check here would
 // evaluate the WRONG predicate and silently discard correct rows. The id is
-// copied as recorded.
+// copied as recorded. THIS APPLIES TO THE STRUCTURED ID ONLY — see below.
+//
+// ---------------------------------------------------------------------------
+// THE SECOND SOURCE (reference-resolution round): free text
+// ---------------------------------------------------------------------------
+// The prod backfill run was a CLEAN ZERO. `details.selectedExternalOrderId` has
+// never been written in production — 0 of 1,897 all-time accrual events — because
+// packers never pick an order in the workbench: they TYPE the Woo order number
+// into the free-text field, which lands as `details.orderReference`. All 10
+// distinct prod references resolve exactly against `external_orders.orderNumber`.
+// The evidence this script was written to move exists; it is in the other field.
+//
+// AND ITS BAR IS DIFFERENT. "No re-validation" is a statement about the
+// structured id, which a server-side resolver had already proven before it was
+// recorded. Free text was proven by nothing — it is a string a human typed while
+// packing. So the reference source carries its own evidence bar, and it is the
+// strictest one that still recovers the prod data:
+//
+//   the TRIMMED reference must look like an order number AND equal exactly ONE
+//   `external_orders.orderNumber`.
+//
+// Zero matches, two or more matches, and shapes that are not order numbers are
+// each skipped BY NAME (three new classes below), so everything W3's matcher
+// inherits is reported rather than guessed at here. Every OTHER guarantee — the
+// fill-only WHERE, the --until cutoff, batch linkage, stamped-conflict, foreign
+// rows, dry-run-by-default, ids-only output — is SHARED, one implementation,
+// exercised by both sources.
 //
 const ACCRUAL_ACTION_TYPE = "INVENTORY_BULK_UPDATE";
 const ACCRUAL_DETAILS_KEY = "selectedExternalOrderId";
+const ACCRUAL_REFERENCE_KEY = "orderReference";
 const ACCRUAL_INTENT_KEY = "intent";
 /** deduct-simple posts type "DEDUCTION", which lib/inventory.ts books as SALE. */
 const ACCRUAL_LOG_TYPE = "SALE";
 /** The one chip value that means "attribute this to the order" (lib/inventory/intent.ts). */
 const ORDER_INTENT = "order";
+
+/**
+ * WHICH EVIDENCE stamped a batch. Two sources, named identically here and in
+ * the live route (lib/orders/resolve-order-reference.ts writes the same two
+ * tokens into `details.orderAttributionSource`), because an operator reading a
+ * stamped row and an operator reading this summary must be reading one
+ * vocabulary. They do NOT carry the same confidence, which is exactly why the
+ * summary refuses to add them up into a single number.
+ */
+const ATTRIBUTION_SOURCE = Object.freeze({
+  /** 0b-2's structured id: resolved and membership-checked BEFORE it was written. */
+  SELECTED: "selected",
+  /** Free text, resolved HERE against a unique order number. */
+  REFERENCE_RESOLVED: "reference-resolved",
+});
+
+/**
+ * A PLAUSIBLE ORDER NUMBER, defined conservatively FROM THE DATA: a run of
+ * ASCII digits, 1–20 of them.
+ *
+ * Every one of the 10 distinct references production has ever recorded is a
+ * plain digit string, and every one of them resolves. So digits is what this
+ * bar admits, and nothing else — `#12345`, `WC-123`, `12 345` and `walk-in 88`
+ * are `reference-unusable` even when a normalization could plausibly have
+ * rescued the first two. Inventing that normalization is a MATCHER's job (W3),
+ * and it would create attributions from a rule nobody reviewed; this script
+ * only moves evidence that is already unambiguous. The 20-digit ceiling is not
+ * a real order-number bound, it is a sanity bound: nothing longer is a Woo
+ * order number, and a 200-character digit run is a paste accident.
+ *
+ * THE SAME RULE, DUPLICATED ON PURPOSE: lib/orders/resolve-order-reference.ts
+ * carries an identical regex because this script is standalone by contract (it
+ * imports @prisma/client and its own planner, never lib/ or next/). The two
+ * copies are pinned equal in
+ * __tests__/unit/lib/orders/resolve-order-reference.test.ts.
+ */
+const ORDER_REFERENCE_SHAPE = /^[0-9]{1,20}$/;
 
 /**
  * The closed skip vocabulary. Every event and every row this script declines to
@@ -81,6 +145,16 @@ const SKIP_CLASS = Object.freeze({
    * splitting one request across two orders.
    */
   STAMPED_CONFLICT: "stamped-conflict",
+
+  // -- EVENT level, REFERENCE source. The three ways free text fails the
+  //    exact-unique bar. All three are W3's inheritance, named so the operator
+  //    can size it before W3 is built.
+  /** The typed text is not a plausible order number at all (see ORDER_REFERENCE_SHAPE). */
+  REFERENCE_UNUSABLE: "reference-unusable",
+  /** A plausible number that matches NO order. Nothing to attribute to. */
+  REFERENCE_UNMATCHED: "reference-unmatched",
+  /** Two or more orders carry that number. Which one is unknowable here. */
+  REFERENCE_AMBIGUOUS: "reference-ambiguous",
 });
 
 /**
@@ -104,6 +178,59 @@ function isUsableOrderId(value, jsonType) {
     value.length > 0 &&
     value !== "null"
   );
+}
+
+/**
+ * Does this event carry the STRUCTURED key at all? Presence on either the value
+ * or the type claims the event for the 0b-2 source, whatever its contents.
+ *
+ * That precedence is the whole reason the two sources never compete: the id was
+ * validated at write and the free text was not, so when both are present the
+ * stronger evidence decides — and when the id is CORRUPT the event is still
+ * `unusable-accrued-id`, never quietly re-judged under a weaker bar. Corrupt
+ * structured evidence is a signal, not a licence to substitute.
+ */
+function hasStructuredAccrual(ev) {
+  return ev.accruedOrderIdType != null || ev.accruedOrderId != null;
+}
+
+/** The trimmed reference, or null when the value is not a string at all. */
+function normalizeOrderReference(value) {
+  return typeof value === "string" ? value.trim() : null;
+}
+
+/**
+ * A usable order reference is a JSON STRING whose TRIMMED value looks like an
+ * order number.
+ *
+ * The type discipline is W2S-3's, for W2S-3's reason: JSON_UNQUOTE renders a
+ * JSON number as the string "12345", so the value alone cannot say whether the
+ * route recorded text or something else got in. `orderReference` is written from
+ * a zod `z.string()`, so STRING is the only type it has ever had — and an event
+ * carrying any other type is not the shape this script maps.
+ */
+function isUsableOrderReference(value, jsonType) {
+  if (jsonType !== "STRING") return false;
+  const trimmed = normalizeOrderReference(value);
+  return trimmed !== null && ORDER_REFERENCE_SHAPE.test(trimmed);
+}
+
+/**
+ * orderNumber -> the DISTINCT order ids carrying it.
+ *
+ * The runner's `WHERE orderNumber IN (...)` is a CANDIDATE fetch, not the
+ * decision: MySQL's collation is case- and pad-insensitive, so `12345 ` comes
+ * back for `12345`. The bar is EXACT, so equality is decided here on the raw
+ * strings, and only exact hits count toward uniqueness.
+ */
+function buildOrderNumberIndex(matches) {
+  const index = new Map();
+  for (const m of matches) {
+    if (typeof m.orderNumber !== "string" || typeof m.orderId !== "string") continue;
+    if (!index.has(m.orderNumber)) index.set(m.orderNumber, new Set());
+    index.get(m.orderNumber).add(m.orderId);
+  }
+  return index;
 }
 
 /**
@@ -137,10 +264,15 @@ function add(counter, key, n) {
  * Build the fill plan.
  *
  * @param {object} input
- * @param {Array<{auditLogId:number, batchId:string|null, accruedOrderId:*, accruedOrderIdType:string|null, intent:string|null, intentType:string|null, createdAt:Date|null}>} input.events
- *        The 0b-2 accrual events, as the runner projects them (ids only).
+ * @param {Array<{auditLogId:number, batchId:string|null, accruedOrderId:*, accruedOrderIdType:string|null, orderReference:*, orderReferenceType:string|null, intent:string|null, intentType:string|null, createdAt:Date|null}>} input.events
+ *        The accrual events, as the runner projects them (ids only). An event
+ *        carries the structured key, the free-text key, or both.
  * @param {Array<{id:number, batchId:string|null, logType:string, orderRecordId:string|null}>} input.ledgerRows
  *        Every inventory_logs row belonging to those batchIds.
+ * @param {Array<{orderNumber:string, orderId:string}>} [input.orderNumberMatches]
+ *        Candidate `external_orders` rows for the references these events carry.
+ *        Empty (or omitted) is a legitimate world — it just means no reference
+ *        resolves, which is what the structured-only path always saw.
  * @param {Date} input.cutoff
  *        REQUIRED (W2S-2). The W2 deploy moment: the instant the live route
  *        started sending an intent. Before it, an event with no intent key had
@@ -150,7 +282,7 @@ function add(counter, key, n) {
  *        one of those two meanings for every row.
  * @returns {{fills:Array, skips:Array, summary:object}}
  */
-function buildBackfillPlan({ events = [], ledgerRows = [], cutoff } = {}) {
+function buildBackfillPlan({ events = [], ledgerRows = [], orderNumberMatches = [], cutoff } = {}) {
   if (!(cutoff instanceof Date) || Number.isNaN(cutoff.getTime())) {
     throw new Error(
       "buildBackfillPlan: a `cutoff` Date is required — the W2 deploy moment, " +
@@ -170,34 +302,62 @@ function buildBackfillPlan({ events = [], ledgerRows = [], cutoff } = {}) {
     eventsSkippedByClass: {},
     batchesSkippedByClass: {},
     rowsSkippedByClass: {},
+    // WHICH EVIDENCE. Two sources of very different strength, never summed into
+    // one figure: an operator must be able to see that (say) every fill in a run
+    // came from free text before deciding what the run proved.
+    eventsLinkableBySource: {},
+    batchesPlannedBySource: {},
+    rowsToFillBySource: {},
   };
   const skips = [];
+  const orderNumberIndex = buildOrderNumberIndex(orderNumberMatches);
+
+  /** One event-level skip: no fill derives from the event, so it owns no rows. */
+  const skipEvent = (cls, ev) => {
+    bump(summary.eventsSkippedByClass, cls);
+    skips.push({
+      class: cls,
+      batchId: ev.batchId ?? null,
+      auditLogIds: [ev.auditLogId],
+      rowCount: 0,
+    });
+  };
 
   // ---- event-level screening ----------------------------------------------
+  //
+  // ONE ORDER OF QUESTIONS, both sources: is the evidence usable? is its era
+  // readable? does it link to rows? and (references only) does it resolve? Every
+  // event lands in exactly one class, and the classes are asked in that order so
+  // an event never gets counted twice or filed under the second-most-true reason.
   const byBatch = new Map();
   for (const ev of events) {
-    if (!isUsableOrderId(ev.accruedOrderId, ev.accruedOrderIdType)) {
-      bump(summary.eventsSkippedByClass, SKIP_CLASS.UNUSABLE_ACCRUED_ID);
-      skips.push({
-        class: SKIP_CLASS.UNUSABLE_ACCRUED_ID,
-        batchId: ev.batchId ?? null,
-        auditLogIds: [ev.auditLogId],
-        rowCount: 0,
-      });
-      continue;
+    const structured = hasStructuredAccrual(ev);
+    let source;
+    let reference = null;
+
+    if (structured) {
+      if (!isUsableOrderId(ev.accruedOrderId, ev.accruedOrderIdType)) {
+        skipEvent(SKIP_CLASS.UNUSABLE_ACCRUED_ID, ev);
+        continue;
+      }
+      source = ATTRIBUTION_SOURCE.SELECTED;
+    } else {
+      if (!isUsableOrderReference(ev.orderReference, ev.orderReferenceType)) {
+        skipEvent(SKIP_CLASS.REFERENCE_UNUSABLE, ev);
+        continue;
+      }
+      source = ATTRIBUTION_SOURCE.REFERENCE_RESOLVED;
+      reference = normalizeOrderReference(ev.orderReference);
     }
+
     // W2S-2. An event that CARRIES an intent is judged on that intent whatever
     // its date (`order` fills; anything else is the operator's stated answer,
     // settled at batch level below). An event with NO intent key is only
     // readable as "the accrual had nowhere to go" while that was still true.
+    // The rule is about the ERA, not about which key the event carries, so it
+    // reaches the reference source unchanged.
     if (!hasIntentKey(ev) && !isBeforeCutoff(ev.createdAt, cutoff)) {
-      bump(summary.eventsSkippedByClass, SKIP_CLASS.POST_CUTOFF_NO_INTENT);
-      skips.push({
-        class: SKIP_CLASS.POST_CUTOFF_NO_INTENT,
-        batchId: ev.batchId ?? null,
-        auditLogIds: [ev.auditLogId],
-        rowCount: 0,
-      });
+      skipEvent(SKIP_CLASS.POST_CUTOFF_NO_INTENT, ev);
       continue;
     }
     if (typeof ev.batchId !== "string" || ev.batchId.length === 0) {
@@ -210,9 +370,32 @@ function buildBackfillPlan({ events = [], ledgerRows = [], cutoff } = {}) {
       });
       continue;
     }
+
+    let orderRecordId = ev.accruedOrderId;
+    if (source === ATTRIBUTION_SOURCE.REFERENCE_RESOLVED) {
+      // THE EVIDENCE BAR. Exactly one order, or nothing — with the two failure
+      // modes named apart, because they mean different things to W3: unmatched
+      // is "we have no such order" (a gap, or a number from another system) and
+      // ambiguous is "we have too many" (a real collision a matcher must break).
+      const candidates = orderNumberIndex.get(reference);
+      const ids = candidates ? [...candidates] : [];
+      if (ids.length === 0) {
+        skipEvent(SKIP_CLASS.REFERENCE_UNMATCHED, ev);
+        continue;
+      }
+      if (ids.length > 1) {
+        skipEvent(SKIP_CLASS.REFERENCE_AMBIGUOUS, ev);
+        continue;
+      }
+      orderRecordId = ids[0];
+    }
+
     summary.eventsLinkable += 1;
+    bump(summary.eventsLinkableBySource, source);
     if (!byBatch.has(ev.batchId)) byBatch.set(ev.batchId, []);
-    byBatch.get(ev.batchId).push(ev);
+    // The event is never mutated — the planner is handed the runner's rows and
+    // must leave them exactly as they arrived (pinned).
+    byBatch.get(ev.batchId).push({ ev, orderRecordId, source });
   }
 
   // ---- rows, grouped by their batch ---------------------------------------
@@ -224,9 +407,16 @@ function buildBackfillPlan({ events = [], ledgerRows = [], cutoff } = {}) {
   }
 
   // ---- batch-level decisions ----------------------------------------------
+  //
+  // From here down NOTHING knows which source an entry came from except the
+  // label it carries: a batch is a batch, and every guarantee below (stated
+  // intent, conflict, foreign rows, fill-only, stamped-conflict) is ONE
+  // implementation both sources are judged by.
   const fills = [];
+  const evidence = [];
   for (const batchId of [...byBatch.keys()].sort()) {
-    const batchEvents = byBatch.get(batchId);
+    const batchEntries = byBatch.get(batchId);
+    const batchEvents = batchEntries.map((e) => e.ev);
     const auditLogIds = batchEvents.map((e) => e.auditLogId).sort((a, b) => a - b);
     const rows = (rowsByBatch.get(batchId) || []).slice().sort((a, b) => a.id - b.id);
     summary.batchesExamined += 1;
@@ -252,7 +442,7 @@ function buildBackfillPlan({ events = [], ledgerRows = [], cutoff } = {}) {
       continue;
     }
 
-    const distinctIds = [...new Set(batchEvents.map((e) => e.accruedOrderId))];
+    const distinctIds = [...new Set(batchEntries.map((e) => e.orderRecordId))];
     if (distinctIds.length > 1) {
       // Two accruals, two orders, one set of rows: there is no honest way to
       // divide them. Nothing in this batch is touched.
@@ -269,6 +459,14 @@ function buildBackfillPlan({ events = [], ledgerRows = [], cutoff } = {}) {
     }
 
     const orderRecordId = distinctIds[0];
+    // A batch fed by both sources is labelled by the STRONGER one: the
+    // structured id was proven server-side at write, so once it is present it is
+    // what the fill rests on and the reference merely agrees. (Two events on one
+    // batchId is already a rarity; disagreement between them is a conflicting
+    // accrual and never reaches here.)
+    const source = batchEntries.some((e) => e.source === ATTRIBUTION_SOURCE.SELECTED)
+      ? ATTRIBUTION_SOURCE.SELECTED
+      : ATTRIBUTION_SOURCE.REFERENCE_RESOLVED;
 
     if (rows.length === 0) {
       bump(summary.batchesSkippedByClass, SKIP_CLASS.NO_LEDGER_ROWS);
@@ -332,12 +530,25 @@ function buildBackfillPlan({ events = [], ledgerRows = [], cutoff } = {}) {
       continue;
     }
 
+    // The writer's contract, THREE KEYS, unchanged since W2-2: the evidence
+    // label rides in `evidence` alongside rather than on the fill itself, so
+    // every existing assertion about what `updateRows` is handed still holds
+    // byte for byte.
     fills.push({ batchId, orderRecordId, logIds: fillable.map((r) => r.id) });
+    evidence.push({
+      batchId,
+      source,
+      orderRecordId,
+      auditLogIds,
+      rowCount: fillable.length,
+    });
     summary.batchesPlanned += 1;
+    bump(summary.batchesPlannedBySource, source);
     summary.rowsToFill += fillable.length;
+    add(summary.rowsToFillBySource, source, fillable.length);
   }
 
-  return { fills, skips, summary };
+  return { fills, evidence, skips, summary };
 }
 
 /**
@@ -371,11 +582,16 @@ async function executeBackfillPlan(plan, { apply = false, updateRows } = {}) {
 module.exports = {
   ACCRUAL_ACTION_TYPE,
   ACCRUAL_DETAILS_KEY,
+  ACCRUAL_REFERENCE_KEY,
   ACCRUAL_INTENT_KEY,
   ACCRUAL_LOG_TYPE,
   ORDER_INTENT,
+  ATTRIBUTION_SOURCE,
+  ORDER_REFERENCE_SHAPE,
   SKIP_CLASS,
   isUsableOrderId,
+  isUsableOrderReference,
+  normalizeOrderReference,
   buildBackfillPlan,
   executeBackfillPlan,
 };
