@@ -310,6 +310,20 @@ const plKey = (productId: number, locationId: number) => `${productId}:${locatio
 function makeStore(seed: {
   products: { id: number; name: string; quantity: number }[];
   productLocations?: Array<Partial<PlRow> & { productId: number; locationId: number }>;
+  /**
+   * When given, `location.findUnique` returns null for any id NOT listed — the
+   * pre-write refusal path (LOCATION_NOT_FOUND). Omitted = every location
+   * exists, which is what the pins written before T8R-1 assume.
+   */
+  locations?: number[];
+  /**
+   * Fault injection, called with the write args BEFORE `product.update` applies
+   * them. Throwing here models a statement-level failure of the loc-1 MIRROR
+   * write — the LAST write of a row, after its ledger row and its upsert have
+   * already landed. That is the exact T8R-1 shape: an error that is not
+   * transaction-fatal arriving mid-row.
+   */
+  onProductUpdate?: (args: { where: any; data: any }) => void;
 }) {
   const products = new Map(
     seed.products.map((p) => [p.id, { deletedAt: null, ...p } as Record<string, any>])
@@ -326,6 +340,7 @@ function makeStore(seed: {
     product: {
       findUnique: async ({ where }: any) => products.get(where.id) ?? null,
       update: async ({ where, data }: any) => {
+        seed.onProductUpdate?.({ where, data });
         const row = products.get(where.id);
         if (!row) throw new Error(`no product ${where.id}`);
         applyWrite(row, data);
@@ -333,7 +348,10 @@ function makeStore(seed: {
       },
     },
     location: {
-      findUnique: async ({ where }: any) => ({ id: where.id, name: `Location ${where.id}` }),
+      findUnique: async ({ where }: any) =>
+        seed.locations && !seed.locations.includes(where.id)
+          ? null
+          : { id: where.id, name: `Location ${where.id}` },
     },
     product_locations: {
       findUnique: async ({ where }: any) => {
@@ -361,9 +379,39 @@ function makeStore(seed: {
     },
   };
 
+  /**
+   * Run ONE batch callback with REAL transaction semantics (T8R-1). Writes land
+   * on the live maps — a row must be able to read its own writes inside the
+   * batch — but every table is snapshotted first and RESTORED if the callback
+   * rejects, because a Prisma interactive transaction that throws commits
+   * NOTHING. The stand-in used to always commit, which is exactly why it could
+   * not see T8R-1: "a half-written row survived a suppressed error" is
+   * invisible to a store that has no rollback.
+   */
+  const runTransaction = async (cb: (client: typeof tx) => Promise<any>) => {
+    // (Map#forEach rather than spread/for-of: this repo's tsc target predates
+    // downlevel Map iteration.)
+    const snapProducts = new Map<number, Record<string, any>>();
+    products.forEach((row, key) => snapProducts.set(key, { ...row }));
+    const snapProductLocations = new Map<string, PlRow>();
+    productLocations.forEach((row, key) => snapProductLocations.set(key, { ...row }));
+    const snapLogCount = logs.length;
+    try {
+      return await cb(tx);
+    } catch (error) {
+      products.clear();
+      snapProducts.forEach((row, key) => products.set(key, row));
+      productLocations.clear();
+      snapProductLocations.forEach((row, key) => productLocations.set(key, row));
+      logs.length = snapLogCount;
+      throw error;
+    }
+  };
+
   return {
     tx,
     logs,
+    runTransaction,
     product: (id: number) => products.get(id)!,
     productLocation: (productId: number, locationId: number) =>
       productLocations.get(plKey(productId, locationId)),
@@ -372,15 +420,24 @@ function makeStore(seed: {
 
 type Store = ReturnType<typeof makeStore>;
 
-/** Drive ONE mass-update POST against a store's live state. */
+/** Drive ONE mass-update POST against a store's live state; raw response. */
+async function massUpdateRaw(
+  store: Store,
+  changes: Array<{ productId: number; locationId: number; newQuantity: number }>,
+  body: { allowPartial?: boolean } = {}
+) {
+  db.$transaction.mockImplementation(async (cb: any) => store.runTransaction(cb));
+  return POST(
+    postWith({ changes: changes.map((c) => ({ ...c, delta: 0 })), ...body })
+  );
+}
+
+/** Drive ONE mass-update POST that is expected to succeed. */
 async function massUpdate(
   store: Store,
   changes: Array<{ productId: number; locationId: number; newQuantity: number }>
 ) {
-  db.$transaction.mockImplementation(async (cb: any) => cb(store.tx));
-  const res = await POST(
-    postWith({ changes: changes.map((c) => ({ ...c, delta: 0 })) })
-  );
+  const res = await massUpdateRaw(store, changes);
   expect(res.status).toBe(200);
   return res;
 }
@@ -469,5 +526,183 @@ describe("T8 — mass-update maintains the loc-1 products.quantity mirror", () =
     expect(row.quantity).toBe(4);
     expect(store.product(1).quantity).toBe(949); // untouched, still drifted
     expect(store.logs).toHaveLength(0); // and no ledger row, as before
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T8R-1 (codex T8 micro review, MED) — a row that has STARTED WRITING can no
+// longer be suppressed per-row.
+//
+// The per-row catch swallows errors under `allowPartial` (the UI default) and
+// only rethrows when !allowPartial. T8 added the loc-1 mirror write AFTER the
+// ledger row and the upsert, INSIDE that suppressible window: a statement-level
+// error in `product.update` that is not transaction-fatal recorded a row
+// failure while the SAME transaction went on to COMMIT that row's
+// inventory_logs row, its absolute quantity and its version bump — with the
+// mirror stale. The exact drift class T8 exists to kill, manufactured by T8's
+// own failure path. (The write ORDER makes the reverse impossible: a mirror
+// cannot commit without its upsert.)
+//
+// Fix: a flag flipped immediately before the row's FIRST write; once set, a row
+// error ALWAYS rethrows and takes the whole 50-row batch transaction down.
+// Pre-write failures (lookups, validation refusals) keep the established
+// per-row suppression. The response must then tell the truth about the aborted
+// batch — every one of its rows lands as a failure, none as a success.
+// ---------------------------------------------------------------------------
+
+/** A statement-level Prisma error: fatal to the STATEMENT, not to the tx. */
+function mirrorWriteFault(productId: number) {
+  return ({ where }: { where: any }) => {
+    if (where.id !== productId) return;
+    const error: any = new Error("mirror write failed");
+    error.code = "P2025"; // maps to DATABASE_ERROR in the route's reason table
+    throw error;
+  };
+}
+
+describe("T8R-1 — a mid-write row failure aborts the batch, even under allowPartial", () => {
+  it("PIN T8R-1: allowPartial + the mirror write throwing => NOTHING of the batch commits", async () => {
+    // Two rows in one batch. Row 1 succeeds completely; row 2 writes its ledger
+    // row and its upsert and THEN its mirror write throws. Pre-fix, allowPartial
+    // suppressed that error and the transaction committed both rows — including
+    // row 2's quantity + version with `products.quantity` left behind.
+    const store = makeStore({
+      products: [
+        { id: 1, name: "Widget", quantity: 10 },
+        { id: 2, name: "Gadget", quantity: 20 },
+      ],
+      productLocations: [
+        { productId: 1, locationId: 1, quantity: 10, version: 3 },
+        { productId: 2, locationId: 1, quantity: 20, version: 4 },
+      ],
+      onProductUpdate: mirrorWriteFault(2),
+    });
+
+    const res = await massUpdateRaw(
+      store,
+      [
+        { productId: 1, locationId: 1, newQuantity: 4 },
+        { productId: 2, locationId: 1, newQuantity: 7 },
+      ],
+      { allowPartial: true }
+    );
+
+    // The tx callback REJECTED, so the batch rolled back whole: not row 2's
+    // half-written state, and not row 1's fully-successful writes either.
+    expect(store.productLocation(1, 1)).toMatchObject({ quantity: 10, version: 3 });
+    expect(store.productLocation(2, 1)).toMatchObject({ quantity: 20, version: 4 });
+    expect(store.product(1).quantity).toBe(10);
+    expect(store.product(2).quantity).toBe(20);
+    expect(store.logs).toHaveLength(0); // no ledger row survived either
+    // The invariant T8 is about still holds on the row that failed mid-write.
+    expect(store.product(2).quantity).toBe(store.productLocation(2, 1)!.quantity);
+
+    // ...and the response says so: ZERO successes, both rows reported failed.
+    expect(res.status).toBe(200); // allowPartial keeps its 200-with-failures shape
+    const body = await res.json();
+    expect(body.successful).toBe(0);
+    expect(body.failed).toBe(2);
+    expect(body.failures.map((f: any) => f.productId).sort()).toEqual([1, 2]);
+    // The collateral row (rolled back, never at fault) is retriable.
+    const collateral = body.failures.find((f: any) => f.productId === 1);
+    expect(collateral.reason).toBe("DATABASE_ERROR");
+    expect(collateral.canRetry).toBe(true);
+    // No summary event for a batch that contributed nothing.
+    expect(recordIngestion).not.toHaveBeenCalled();
+  });
+
+  it("PIN T8R-1b: PRIOR batches stay committed — only the aborting batch rolls back", async () => {
+    // 51 changes => two batches (BATCH_SIZE 50). Batch 1 commits; batch 2's only
+    // row fails mid-write, so it rolls back and lands as a failure while the 50
+    // already-committed rows keep their writes and their success count.
+    const ids = Array.from({ length: 51 }, (_, i) => i + 1);
+    const store = makeStore({
+      products: ids.map((id) => ({ id, name: `P${id}`, quantity: 0 })),
+      onProductUpdate: mirrorWriteFault(51),
+    });
+
+    const res = await massUpdateRaw(
+      store,
+      ids.map((id) => ({ productId: id, locationId: 1, newQuantity: id })),
+      { allowPartial: true }
+    );
+
+    // Batch 1: all 50 rows committed (created at version 1, mirror written).
+    expect(store.productLocation(1, 1)).toMatchObject({ quantity: 1, version: 1 });
+    expect(store.productLocation(50, 1)).toMatchObject({ quantity: 50, version: 1 });
+    expect(store.product(50).quantity).toBe(50);
+    // Batch 2: rolled back entirely — no row, no mirror move, no ledger row.
+    expect(store.productLocation(51, 1)).toBeUndefined();
+    expect(store.product(51).quantity).toBe(0);
+    expect(store.logs).toHaveLength(50);
+
+    const body = await res.json();
+    expect(body.successful).toBe(50);
+    expect(body.failed).toBe(1);
+    expect(body.failures[0].productId).toBe(51);
+    // The summary counts only what committed.
+    expect(recordIngestion).toHaveBeenCalledTimes(1);
+    expect((recordIngestion as jest.Mock).mock.calls[0][0].affectedCount).toBe(50);
+  });
+
+  it("PIN T8R-2: a PRE-write failure is still suppressed per-row under allowPartial", async () => {
+    // The other half of the fix: nothing changes for a row that fails BEFORE its
+    // first write. It wrote nothing, so there is nothing to roll back and the
+    // batch's other rows must still commit.
+    const store = makeStore({
+      products: [{ id: 1, name: "Widget", quantity: 10 }],
+      productLocations: [{ productId: 1, locationId: 1, quantity: 10, version: 3 }],
+      locations: [1], // location 99 below does not exist
+    });
+
+    const res = await massUpdateRaw(
+      store,
+      [
+        { productId: 1, locationId: 99, newQuantity: 5 },
+        { productId: 1, locationId: 1, newQuantity: 4 },
+      ],
+      { allowPartial: true }
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.successful).toBe(1);
+    expect(body.failed).toBe(1);
+    expect(body.failures[0].reason).toBe("LOCATION_NOT_FOUND");
+    expect(body.failures[0].locationId).toBe(99);
+    expect(body.partial).toBe(true);
+
+    // The good row committed, mirror included.
+    expect(store.productLocation(1, 1)).toMatchObject({ quantity: 4, version: 4 });
+    expect(store.product(1).quantity).toBe(4);
+    expect(store.logs).toHaveLength(1);
+  });
+
+  it("PIN T8R-3: !allowPartial is unchanged — a mid-write failure still aborts the batch", async () => {
+    const store = makeStore({
+      products: [
+        { id: 1, name: "Widget", quantity: 10 },
+        { id: 2, name: "Gadget", quantity: 20 },
+      ],
+      productLocations: [
+        { productId: 1, locationId: 1, quantity: 10, version: 3 },
+        { productId: 2, locationId: 1, quantity: 20, version: 4 },
+      ],
+      onProductUpdate: mirrorWriteFault(2),
+    });
+
+    const res = await massUpdateRaw(store, [
+      { productId: 1, locationId: 1, newQuantity: 4 },
+      { productId: 2, locationId: 1, newQuantity: 7 },
+    ]); // allowPartial omitted => all-or-nothing
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.successful).toBe(0);
+    expect(body.failed).toBe(2);
+    expect(store.logs).toHaveLength(0);
+    expect(store.productLocation(1, 1)).toMatchObject({ quantity: 10, version: 3 });
+    expect(store.product(2).quantity).toBe(20);
+    expect(recordIngestion).not.toHaveBeenCalled();
   });
 });

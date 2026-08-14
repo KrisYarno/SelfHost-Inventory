@@ -268,6 +268,12 @@ export const POST = apiHandler(async (request: NextRequest) => {
           let batchSuccess = 0;
           // Process each change individually within the transaction
           for (const change of batch) {
+            // T8R-1: has THIS row started WRITING yet? Flipped immediately
+            // before its first write below. A row that fails BEFORE that point
+            // (lookup miss, validation refusal) wrote nothing and can still be
+            // suppressed per-row under allowPartial; a row that fails AFTER it
+            // cannot — see the catch at the bottom of the loop.
+            let rowWritesStarted = false;
             try {
               const { productId, locationId, newQuantity } = change;
 
@@ -331,6 +337,22 @@ export const POST = apiHandler(async (request: NextRequest) => {
                 batchSuccess++;
                 continue;
               }
+
+              // T8R-1 (codex T8 micro review) — MID-WRITE FROM HERE DOWN.
+              // The three writes that follow (ledger row, absolute quantity +
+              // version bump, loc-1 mirror) are ONE indivisible row-level unit.
+              // Under allowPartial (the UI default) the catch below used to
+              // swallow any row error and let the transaction COMMIT, so a
+              // statement-level error that is not transaction-fatal — the
+              // mirror `product.update` failing after the upsert already
+              // landed, say — recorded a row failure while the SAME tx
+              // committed that row's log, quantity and version bump with
+              // `products.quantity` left behind. That is precisely the
+              // mirror-drift class T8 exists to kill, manufactured by T8's own
+              // failure path. So once this flag is set a row error ALWAYS
+              // aborts the batch, no matter what allowPartial says. Pinned by
+              // __tests__/integration/api/mass-update-delta.test.ts (T8R-1).
+              rowWritesStarted = true;
 
               // Create inventory log entry
               const log = await tx.inventory_logs.create({
@@ -444,8 +466,14 @@ export const POST = apiHandler(async (request: NextRequest) => {
                 );
               }
 
-              // Re-throw to trigger transaction rollback if this is an all-or-nothing update
-              if (!body.allowPartial) {
+              // Re-throw to trigger transaction rollback: always for an
+              // all-or-nothing update, and — T8R-1 — always for a row that has
+              // already started writing, because suppressing it would leave a
+              // half-written row in the committing transaction. Rows that
+              // failed before their first write are still suppressed under
+              // allowPartial, unchanged. (The write ORDER makes the reverse
+              // hole impossible: the mirror cannot commit without its upsert.)
+              if (rowWritesStarted || !body.allowPartial) {
                 throw error;
               }
             }
@@ -466,27 +494,48 @@ export const POST = apiHandler(async (request: NextRequest) => {
       console.error(`=== BATCH ${batchIndex + 1} TRANSACTION ERROR ===`);
       console.error("Transaction error:", transactionError);
 
-      // If not allowing partial, convert all remaining changes to failures and stop
-      if (!body.allowPartial) {
-        for (let i = batchIndex; i < batches.length; i++) {
-          const failBatch = batches[i];
-          for (const change of failBatch) {
-            if (
-              !failures.find(
-                (f) => f.productId === change.productId && f.locationId === change.locationId
+      // The batch rolled back, so NOTHING in it committed — not even the rows
+      // that had already succeeded inside the callback (their batchProcessed /
+      // batchSuccess are local to the callback and are never folded in, so no
+      // rolled-back row can be counted a success). Report every row of the
+      // aborted batch as a retriable failure: the response has to tell the
+      // truth about what did not land. Rows that already carry a failure keep
+      // their more specific reason — the row that threw, and any earlier
+      // pre-write refusal in the same batch.
+      //
+      // T8R-1 made this reachable under allowPartial as well. It used to run
+      // only for !allowPartial, which meant an allowPartial batch that failed
+      // at the TRANSACTION level (timeout, serialization conflict) dropped its
+      // rows out of both counts silently. Reason vocabulary unchanged:
+      // DATABASE_ERROR + canRetry, the same record the all-or-nothing path has
+      // always produced for rolled-back rows.
+      //
+      // Scope differs by mode: !allowPartial abandons every REMAINING batch
+      // too (all-or-nothing), while allowPartial keeps the established batched
+      // semantics — prior batches stay committed and later batches still run.
+      const lastAbandonedBatch = body.allowPartial ? batchIndex : batches.length - 1;
+      for (let i = batchIndex; i <= lastAbandonedBatch; i++) {
+        const failBatch = batches[i];
+        for (const change of failBatch) {
+          if (
+            !failures.find(
+              (f) => f.productId === change.productId && f.locationId === change.locationId
+            )
+          ) {
+            failures.push(
+              createFailure(
+                change,
+                "DATABASE_ERROR",
+                `Batch transaction failed: ${transactionError.message || "Transaction rolled back"}`,
+                true
               )
-            ) {
-              failures.push(
-                createFailure(
-                  change,
-                  "DATABASE_ERROR",
-                  `Batch transaction failed: ${transactionError.message || "Transaction rolled back"}`,
-                  true
-                )
-              );
-            }
+            );
           }
         }
+      }
+
+      // All-or-nothing: stop after the first failed batch.
+      if (!body.allowPartial) {
         break;
       }
     }
