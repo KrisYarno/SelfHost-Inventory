@@ -63,6 +63,10 @@ jest.mock("@/lib/inventory", () => ({
   __esModule: true,
   OptimisticLockError: jest.requireActual("@/lib/inventory").OptimisticLockError,
   getCurrentQuantity: jest.fn(async () => 0),
+  // FD6-1: the staging PATCH now rides the house deadlock retry. Here it just
+  // runs its fn once — the retry's own behaviour is owned by
+  // __tests__/integration/api/staging-deadlock-retry.test.ts.
+  withDeadlockRetry: (fn: () => Promise<unknown>) => fn(),
 }));
 
 // One tx object per run, shared by every mutation and the audit write so the

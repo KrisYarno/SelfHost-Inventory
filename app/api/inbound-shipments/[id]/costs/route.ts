@@ -244,12 +244,26 @@ function assertSubmittedSetIsMembership(
  *
  * LOCK ORDER: ascending by staging id, then the header — the same item ->
  * header order the count endpoint, graduation and the settle paths take, so this
- * route queues behind those rather than colliding with them. The LINKER goes the
- * other way by design (it claims the headers, then moves the line), which is
- * exactly why the header held here is what makes the membership read STABLE: a
- * line cannot join this shipment without the header this transaction is holding.
- * It also means a genuine deadlock against an in-flight linker stays possible —
- * see the retry note at the transaction.
+ * route queues behind those rather than colliding with them.
+ *
+ * FD6-1 (fix round 8) corrected the sentence that used to stand here. At
+ * TRANSACTION scope there is no header-first writer: the staging PATCH preclaims
+ * its ITEM row before `applyShipmentLink` claims either header, so the linker is
+ * item-first like everybody else. What is header-first is only the link's own
+ * final sequence — and that is the half this route actually needs, because it is
+ * why the header held here makes the membership read STABLE rather than merely
+ * fresh: `applyShipmentLink` claims EVERY header it touches, the target
+ * included, before it moves the line — so a line cannot JOIN this shipment
+ * without a claim on the very row this transaction is holding. (Creation never
+ * links, so there is no other way in.)
+ *
+ * So the deadlock is not "the linker goes the other way". It is an item-first
+ * writer holding its line and waiting on the header while this transaction holds
+ * the header and asks for that line — a real cycle either way, and the retry is
+ * the answer. FD6-1 put it on ALL of the participants: the count endpoint and
+ * the staging PATCH are wrapped too, because InnoDB rolls back whichever
+ * transaction did the least work and that is never the bill. See the retry note
+ * at the transaction.
  *
  * NO STATUS GUARD on that header, and none wanted: the WHERE's `shipmentId` is
  * the membership guard. A CANCELLED shipment has already unlinked its RECEIVED

@@ -92,6 +92,13 @@ import {
  * submitted set IS the current RECEIVED membership); this is the local half, so
  * an operator finds out before pressing Accept rather than after.
  *
+ * FD6-2 (fix round 8) — ...BEFORE, OR AFTER, BUT NEVER DURING. That local half
+ * is a guess, and while a bill is in flight it is a guess about a question the
+ * server is already answering. Rendering it mid-request made the panel say
+ * "re-enter the bill" and then "Costs written" about the same bill, seconds
+ * apart. It is therefore computed but not SHOWN while `accepting` is true; a
+ * failure reveals it unchanged, a success has nothing left to invalidate.
+ *
  * Accept hands back the per-line unit costs; writing them ATOMICALLY is the
  * caller's job. A caller whose write fails must REJECT (W1S-5).
  */
@@ -275,8 +282,19 @@ export function FreightCalculatorPanel({
   /**
    * The one invalidation the panel renders. The SERVER's verdict wins: it is the
    * only one that saw the rows at the moment of the write.
+   *
+   * FD6-2 (fix round 8) — AND NOT WHILE THE BILL IS OUT. A refetch that lands
+   * between the request leaving and its answer arriving can make the LOCAL check
+   * fire mid-flight: the panel replaced the bill with "re-enter the bill" while
+   * the write was still deciding, and then — on success — cleared it and said
+   * "Costs written". Two contradictory sentences about the same bill, in that
+   * order, is worse than either one alone. The local verdict is a guess about a
+   * question already being answered authoritatively, so it is held back until the
+   * answer is in: a failure reveals it exactly as before (`accepting` is false by
+   * then), and a success has nothing left to invalidate. The SERVER's verdict is
+   * never suppressed — it only exists once the request has come back.
    */
-  const invalidation = driftInvalidation ?? localInvalidation;
+  const invalidation = driftInvalidation ?? (accepting ? null : localInvalidation);
 
   /** The bill is computable: frozen, and still describing this shipment. */
   const active = session !== null && invalidation === null;

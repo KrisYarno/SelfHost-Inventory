@@ -1082,6 +1082,46 @@ describe("the session cannot be orphaned (FD2-3)", () => {
     expect(screen.getByRole("button", { name: /allocate/i })).toBeEnabled();
   });
 
+  /**
+   * FD6-2 (fix round 8) — the invalidation may not FLASH underneath a bill that
+   * is still being decided. A refetch landing mid-request made the panel render
+   * "Costs changed — re-enter the bill" while `accepting` was true, and then, on
+   * success, clear it and say "Costs written": two contradictory verdicts on the
+   * same bill, seconds apart, the first of them a guess about a question the
+   * server was already answering. Held back while the bill is out; revealed
+   * exactly as before once it comes back refused.
+   */
+  it("PIN (FD6-2): a gained line does NOT invalidate mid-accept, and DOES once it fails", async () => {
+    const user = userEvent.setup();
+    let reject: ((error: Error) => void) | undefined;
+    const onAccept = jest.fn(
+      () =>
+        new Promise<void>((_resolve, rejectPromise) => {
+          reject = rejectPromise;
+        }),
+    );
+    const { rerender } = render(
+      <FreightCalculatorPanel lines={[PAIR[0]]} onAccept={onAccept} />,
+    );
+
+    await enterBill(user, "2.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    // The bill is OUT. A line links to the shipment and the refetch lands.
+    rerender(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
+
+    expect(screen.queryByTestId("allocation-invalidated")).not.toBeInTheDocument();
+    // ...and the bill on screen is still the bill that was sent, not a wiped one.
+    expect(screen.getByTestId("allocation-row-1")).toBeInTheDocument();
+
+    // The write comes back refused: nothing landed, and the gained line is now
+    // the operator's problem again — by name, exactly as it would have been.
+    reject?.(new Error("boom"));
+    expect(await screen.findByTestId("allocation-invalidated")).toHaveTextContent(
+      /added/i,
+    );
+  });
+
   it("Clear and the freight input are DISABLED while a fan-out is in flight", async () => {
     const user = userEvent.setup();
     let release: (() => void) | undefined;
