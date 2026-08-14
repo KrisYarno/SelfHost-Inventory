@@ -103,6 +103,47 @@ describe("W2S-2 — the runner refuses to run without the W2 deploy moment", () 
     expect(validate(opts({ until: UNTIL }))).toEqual([]);
   });
 
+  // W2FD-1 — the cutoff must carry its OWN timezone. `Date.parse` accepts a
+  // timezone-less ISO string and resolves it in the HOST timezone, so the same
+  // command classifies differently on an MDT laptop and a UTC server — a
+  // six-hour window in which a stale no-intent event flips to "pre-cutoff" and
+  // gets attributed. Locale forms and bare numbers parsed too. Strictness is
+  // the fix: an instant with an explicit Z or numeric offset, nothing else.
+  it("PIN W2FD-1a: a timezone-less --until is refused by name", () => {
+    expect(validate(opts({ until: "2026-08-14T19:13:29" }))).toEqual([
+      expect.stringContaining("offset"),
+    ]);
+  });
+
+  it("PIN W2FD-1b: locale-formatted and bare-number forms are refused", () => {
+    expect(validate(opts({ until: "08/14/2026 19:13:29" }))).toEqual([
+      expect.stringContaining("--until"),
+    ]);
+    expect(validate(opts({ until: "0" }))).toEqual([
+      expect.stringContaining("--until"),
+    ]);
+    expect(validate(opts({ until: "2026-08-14" }))).toEqual([
+      expect.stringContaining("--until"),
+    ]);
+  });
+
+  it("PIN W2FD-1c: explicit-offset instants are accepted, Z and numeric alike", () => {
+    expect(validate(opts({ until: "2026-08-14T19:13:29Z" }))).toEqual([]);
+    expect(validate(opts({ until: "2026-08-14T19:13:29.123Z" }))).toEqual([]);
+    expect(validate(opts({ until: "2026-08-14T13:13:29-06:00" }))).toEqual([]);
+  });
+
+  it("PIN W2FD-1d: the cutoff Date the planner receives is host-timezone-independent", () => {
+    const { parseCutoff } = require("../../../../scripts/backfill/order-attribution/run.js");
+    expect(parseCutoff("2026-08-14T19:13:29Z").getTime()).toBe(
+      Date.UTC(2026, 7, 14, 19, 13, 29)
+    );
+    expect(parseCutoff("2026-08-14T13:13:29-06:00").getTime()).toBe(
+      Date.UTC(2026, 7, 14, 19, 13, 29)
+    );
+    expect(parseCutoff("2026-08-14T19:13:29")).toBeNull();
+  });
+
   it("PIN W2S-2j: --until is parsed off argv and reported back in the summary", async () => {
     expect(parseArgs([`--until=${UNTIL}`])).toMatchObject({ until: UNTIL });
 

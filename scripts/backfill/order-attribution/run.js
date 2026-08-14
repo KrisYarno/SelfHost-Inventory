@@ -129,6 +129,21 @@ function parseArgs(argv) {
   return opts;
 }
 
+/**
+ * The ONE cutoff parser (W2FD-1): an ISO-8601 instant with an EXPLICIT
+ * offset — `Z` or `+HH:MM`/`-HH:MM` — or null. Both the validator and the
+ * planner call this, so the instant the operator was told is valid is the
+ * instant the planner classifies against, on every host, in every timezone.
+ */
+const CUTOFF_SHAPE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/;
+
+function parseCutoff(raw) {
+  if (typeof raw !== "string" || !CUTOFF_SHAPE.test(raw)) return null;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? null : new Date(ms);
+}
+
 function validate(opts) {
   const errors = [];
   // W2S-2. Named refusal, in BOTH modes: a dry run that misclassified an event
@@ -142,8 +157,18 @@ function validate(opts) {
         "'the live route defaulted to other and left it unattributed' AFTER it — " +
         "without the boundary this script cannot tell those apart, so it will not guess."
     );
-  } else if (Number.isNaN(Date.parse(opts.until))) {
-    errors.push("--until must be an ISO timestamp (e.g. 2026-08-14T19:13:29Z)");
+  } else if (parseCutoff(opts.until) === null) {
+    // W2FD-1: `Date.parse` alone accepted timezone-less and locale forms and
+    // resolved them in the HOST timezone — the same command meant different
+    // instants on an MDT laptop and a UTC server, and the difference is a
+    // window in which a stale no-intent event flips to "pre-cutoff" and gets
+    // attributed. The cutoff must carry its own offset.
+    errors.push(
+      "--until must be an ISO-8601 instant WITH an explicit offset " +
+        "(e.g. 2026-08-14T19:13:29Z or 2026-08-14T13:13:29-06:00) — " +
+        "timezone-less and locale forms resolve in the host timezone and " +
+        "would move the cutoff"
+    );
   }
   if (opts.since !== null && !/^\d{4}-\d{2}-\d{2}$/.test(opts.since)) {
     errors.push("--since must be YYYY-MM-DD");
@@ -331,7 +356,8 @@ async function runBackfill(prisma, opts) {
   const batchIds = [...new Set(events.map((e) => e.batchId).filter(Boolean))].sort();
   const ledgerRows = await selectLedgerRows(prisma, batchIds);
 
-  const plan = buildBackfillPlan({ events, ledgerRows, cutoff: new Date(opts.until) });
+  // W2FD-1: the same strict parser validation used — never a bare `new Date`.
+  const plan = buildBackfillPlan({ events, ledgerRows, cutoff: parseCutoff(opts.until) });
   const execution = await executeBackfillPlan(plan, {
     apply: opts.apply,
     updateRows: makeWriter(prisma),
@@ -418,4 +444,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, runBackfill, formatSummary, parseArgs, validate, describeConnection };
+module.exports = { main, runBackfill, formatSummary, parseArgs, validate, parseCutoff, describeConnection };
