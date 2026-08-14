@@ -83,6 +83,15 @@ import {
  * of them. What the panel refuses to WRITE is unchanged; what it refuses to
  * mention is nothing.
  *
+ * FD5-1 (fix round 7) — AND A GAINED LINE IS DRIFT TOO. Every invalidation
+ * above walks the SESSION's lines, so all of them look for a line that changed
+ * or left; a line that ARRIVED was invisible to the whole check. That is the
+ * case that costs money — a bill frozen on A alone puts all of the freight onto
+ * A, and a line linking mid-bill makes that split wrong while nothing the panel
+ * was watching moved at all. The server refuses it either way (it proves the
+ * submitted set IS the current RECEIVED membership); this is the local half, so
+ * an operator finds out before pressing Accept rather than after.
+ *
  * Accept hands back the per-line unit costs; writing them ATOMICALLY is the
  * caller's job. A caller whose write fails must REJECT (W1S-5).
  */
@@ -230,6 +239,14 @@ export function FreightCalculatorPanel({
    * old "unless it was OUR write" exemption is gone with the partial write it
    * existed for — a successful bill clears the session before its refetch lands,
    * and a failed one wrote nothing at all.
+   *
+   * FD5-1 (fix round 7) — AND THE OTHER DIRECTION. Every check above walks the
+   * SESSION's lines, so it can only ever see a line that changed or left. A line
+   * that ARRIVED is invisible to it, and that is the case that costs money: a
+   * bill frozen on A alone puts all 200c onto A, B links while the operator
+   * types, and every session line is still there and still unchanged. The split
+   * is wrong anyway — it describes a one-line receipt. `lines` is RECEIVED-only,
+   * so a live line the session never saw is exactly a gained one.
    */
   const localInvalidation = useMemo<string | null>(() => {
     if (!session) return null;
@@ -244,6 +261,12 @@ export function FreightCalculatorPanel({
       }
       if (now.qty !== snapshot.qty) {
         return `The quantity of "${snapshot.description}" changed while this bill was open, and the split rests on it.`;
+      }
+    }
+    const frozen = new Set(session.lines.map((line) => line.id));
+    for (const now of lines) {
+      if (!frozen.has(now.id)) {
+        return `Line "${now.description}" was added to this shipment while this bill was open, and the freight was not split across it.`;
       }
     }
     return null;
@@ -446,12 +469,15 @@ export function FreightCalculatorPanel({
         // WHOLE bill goes, by name, through the same surface a locally-detected
         // change uses. Safe advice now that it is also TRUE advice: nothing was
         // written, so re-entering the full freight cannot double-apply it.
-        // FD4-1: "cost or quantity", because both are now preconditions and the
-        // line it refused on may be one this bill was not even writing.
+        // FD4-1 made cost AND quantity preconditions; FD5-1 added a third — the
+        // bill's lines must BE the shipment's lines. So the lead sentence names
+        // none of them and the server's own reason, which is the only one that
+        // knows which it was, is quoted verbatim. A notice that says "cost"
+        // above a bracket that says "a line joined" teaches operators to skip it.
         setDriftInvalidation(
           error instanceof Error
-            ? `A line's cost or quantity changed while this bill was open (${error.message}).`
-            : "A line's cost or quantity changed while this bill was open.",
+            ? `This bill no longer describes the shipment it was split across (${error.message}).`
+            : "This bill no longer describes the shipment it was split across.",
         );
         setWriteFailed(null);
       } else {

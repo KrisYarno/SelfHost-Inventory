@@ -54,7 +54,10 @@ export const PatchInboundShipmentSchema = z.object({
  *   `qtySource`+`qty`  the quantity the share was divided by, and where that
  *                      number came from — the server builds a different WHERE
  *                      for each source, because "still 10 counted" and "still
- *                      uncounted, still expecting 10" are different questions;
+ *                      uncounted, still expecting 10" are different questions.
+ *                      Capped at the cents magnitude (fix round 7): the column
+ *                      is a MySQL INT, and an unbounded number would miss at the
+ *                      DRIVER — a 500 wearing a 400's clothes — instead of here;
  *   `ifUnitCostCents`  the cost the row must STILL hold. `null` is legal and
  *                      means "only if it is still unpriced" — the same
  *                      unknown-is-not-zero distinction the column itself keeps;
@@ -75,7 +78,7 @@ export const AllocateShipmentCostsSchema = z.object({
       z.object({
         id: z.number().int().positive(),
         qtySource: z.enum(['counted', 'expected', 'none']),
-        qty: z.number().int().min(0),
+        qty: z.number().int().min(0).max(100_000_000),
         ifUnitCostCents: z.number().int().min(0).max(100_000_000).nullable(),
         unitCostCents: z.number().int().min(0).max(100_000_000).optional(),
       }),

@@ -131,6 +131,88 @@ async function claimLineBasis(
 }
 
 /**
+ * THE HEADER LOCK — and deliberately NOT a status gate (FD5-1).
+ *
+ * It is taken for one reason: the membership read below has to happen with this
+ * receipt's shape held still, exactly as the settle route holds it. What it must
+ * NOT do is decide anything about the shipment's status. Bills stay legal on a
+ * CLOSED shipment (the stranded-line amendment: closing ends receiving, not
+ * stocking, and a stranded line's graduation still reads this cost), and a
+ * CANCELLED shipment has already unlinked its RECEIVED lines — so its lines miss
+ * their per-line claims first and refuse as CONFLICT, above, by name.
+ *
+ * Raw SQL because Prisma has no `FOR UPDATE` (house precedent: the settle
+ * route's `lockedHeader`/`currentLines`, lib/products/decline.ts). The id is a
+ * BOUND parameter, never interpolated. Nothing reads the row: the LOCK is the
+ * whole point of the statement.
+ */
+async function lockHeader(tx: Prisma.TransactionClient, id: string): Promise<void> {
+  await tx.$queryRaw(
+    Prisma.sql`SELECT id FROM inbound_shipments WHERE id = ${id} FOR UPDATE`,
+  );
+}
+
+/**
+ * THE CURRENT RECEIVED MEMBERSHIP, LOCKED (FD5-1).
+ *
+ * A plain `findMany` here would answer from the snapshot this transaction took
+ * at its first read, which is older than every claim above it — so a line linked
+ * since would be invisible to precisely the check that exists to see it.
+ * `SELECT ... FOR UPDATE` reads the latest COMMITTED rows and holds them.
+ *
+ * `ORDER BY id` keeps this read's lock order identical to the ascending claims,
+ * and makes the comparison below an element-wise one.
+ */
+function currentReceivedIds(
+  tx: Prisma.TransactionClient,
+  shipmentId: string,
+): Promise<{ id: number }[]> {
+  return tx.$queryRaw<{ id: number }[]>(
+    Prisma.sql`SELECT id FROM staging_items WHERE shipmentId = ${shipmentId} AND status = ${StagingItemStatus.RECEIVED} ORDER BY id FOR UPDATE`,
+  );
+}
+
+/**
+ * Prove that the bill's lines are ALL of this receipt's lines (FD5-1).
+ *
+ * Round 6 made every SUBMITTED line's basis a precondition. It never made the
+ * SUBMITTED SET one, and a freight split is a statement about the whole receipt:
+ *
+ *   freeze a bill with A alone (1 x 100c, 100c freight -> A = 200c); line C
+ *   links to the shipment before Accept; the payload still carries only A. Every
+ *   check passes — A's cost, A's quantity, A's membership — and A commits at
+ *   200c while the current basis says 150c/150c. Nothing drifted; the request
+ *   simply described a shipment that no longer exists. The same hole answers to
+ *   any stale client that omits a line which IS a current member.
+ *
+ * So the settle route's FD2-1 proof comes here in its own shape: the submitted
+ * ids (already ascending) must EQUAL the current RECEIVED ids, element-wise. A
+ * size comparison would pass one line out and one line in, which is a different
+ * shipment wearing the same count.
+ *
+ * The refusal is BASIS_DRIFT — the same name and the same 409 a moved cost or
+ * quantity takes, because it is the same sentence to the operator: the split on
+ * screen is no longer the right answer for this receipt. It THROWS, so the lines
+ * this bill already wrote roll back with it.
+ */
+function assertSubmittedSetIsMembership(
+  submittedIds: readonly number[],
+  current: readonly { id: number }[],
+): void {
+  if (
+    current.length === submittedIds.length &&
+    current.every((row, index) => row.id === submittedIds[index])
+  ) {
+    return;
+  }
+  throw new AppError(
+    'A line joined or left this shipment while the bill was open, so the freight was split across the wrong set of lines; reload the shipment and re-enter the freight against the lines on screen',
+    'BASIS_DRIFT',
+    409,
+  );
+}
+
+/**
  * POST /api/inbound-shipments/[id]/costs — WRITE A WHOLE FREIGHT BILL, ATOMICALLY.
  *
  * The receiving detail's freight calculator used to fan Accept out into one
@@ -153,16 +235,28 @@ async function claimLineBasis(
  * moved refuses the bill exactly as a failed write does — there is no such thing
  * here as a stale premise that only affects the lines we were not writing.
  *
- * LOCK ORDER: ascending by staging id, the same order the count endpoint,
- * graduation and the settle paths take their lines in. This route takes NO
- * header lock — it never touches the shipment row — so it cannot be the second
- * half of an ABBA with the writers that go item -> shipment.
+ * FD5-1 — AND "THE WHOLE BASIS" MEANS THE WHOLE MEMBERSHIP. Checking every line
+ * the client sent is not the same as checking that those lines are all of them:
+ * a line that links after the freeze is examined by nothing, and the bill
+ * commits a split computed for a receipt that no longer exists. So after the
+ * per-line claims the route takes the header and ONE ordered locking read of the
+ * current RECEIVED ids, and the submitted set must EQUAL them.
  *
- * NO HEADER GUARD, and none needed: the WHERE's `shipmentId` is the guard. A
- * CANCELLED shipment has already unlinked its RECEIVED lines (T4), so its lines
- * match nothing here; a CLOSED one keeps them, which is exactly the stranded-line
- * amendment — closing ends receiving, not stocking, and a stranded line's
- * graduation still reads this cost.
+ * LOCK ORDER: ascending by staging id, then the header — the same item ->
+ * header order the count endpoint, graduation and the settle paths take, so this
+ * route queues behind those rather than colliding with them. The LINKER goes the
+ * other way by design (it claims the headers, then moves the line), which is
+ * exactly why the header held here is what makes the membership read STABLE: a
+ * line cannot join this shipment without the header this transaction is holding.
+ * It also means a genuine deadlock against an in-flight linker stays possible —
+ * see the retry note at the transaction.
+ *
+ * NO STATUS GUARD on that header, and none wanted: the WHERE's `shipmentId` is
+ * the membership guard. A CANCELLED shipment has already unlinked its RECEIVED
+ * lines (T4), so its lines miss their claims and refuse as CONFLICT before the
+ * header is ever taken; a CLOSED one keeps them, which is exactly the
+ * stranded-line amendment — closing ends receiving, not stocking, and a stranded
+ * line's graduation still reads this cost.
  */
 export const POST = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   const { user } = await requireApproved();
@@ -186,9 +280,13 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
   const lines = [...body.lines].sort((a, b) => a.id - b.id);
 
   // A deadlock is still possible against a writer holding one of these rows
-  // while waiting on something we hold; the house retry re-runs the WHOLE
-  // transaction, which is safe precisely BECAUSE nothing partial committed —
-  // every line's precondition is re-evaluated from scratch.
+  // while waiting on something we hold — and FD5-1's `FOR UPDATE` membership
+  // read makes it likelier still, because it deliberately touches rows this
+  // transaction does NOT hold (a line an in-flight linker is holding is exactly
+  // the line it exists to find). The house retry re-runs the WHOLE transaction,
+  // which is safe precisely BECAUSE nothing partial committed — every line's
+  // precondition, and the membership itself, is re-evaluated from scratch
+  // against a snapshot that now includes whatever moved.
   await withDeadlockRetry(() =>
     prisma.$transaction(async (tx): Promise<void> => {
       for (const line of lines) {
@@ -213,6 +311,15 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
           });
         }
       }
+
+      // FD5-1: with every submitted line claimed and held, the header — and with
+      // it, the one question the per-line claims cannot answer: are these lines
+      // ALL of them? Item -> header, unchanged.
+      await lockHeader(tx, id);
+      assertSubmittedSetIsMembership(
+        lines.map((line) => line.id),
+        await currentReceivedIds(tx, id),
+      );
     }),
   );
 

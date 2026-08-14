@@ -64,6 +64,8 @@ jest.mock('@/lib/prisma', () => {
     stagingItem: {
       updateMany: jest.fn(),
     },
+    // FD5-1: the header lock and the current-membership read (`... FOR UPDATE`).
+    $queryRaw: jest.fn(async () => []),
   };
   return {
     __esModule: true,
@@ -185,6 +187,31 @@ const costWrites = () =>
 const reclaims = () => claims().filter((args: any) => !('unitCostCents' in (args?.where ?? {})));
 
 /**
+ * FD5-1 — the CURRENT RECEIVED membership, as the locking read finds it.
+ *
+ * NULL means "exactly what this bill submitted", which is the uneventful case
+ * and keeps every pre-FD5-1 pin honest: nothing joined, nothing left. It is
+ * derived from the claims the transaction just ran rather than restated by hand,
+ * so a test that changes its bill never has to remember to change this too.
+ */
+let currentMembership: number[] | null = null;
+const membershipIs = (ids: number[]) => {
+  currentMembership = ids;
+};
+
+/** Every raw statement the route ran, as Prisma.Sql, in call order. */
+const rawStatements = () => tx.$queryRaw.mock.calls.map((c: any[]) => c[0]);
+const rawHeaderReads = () =>
+  rawStatements().filter((s: any) => /inbound_shipments/i.test(String(s?.sql ?? '')));
+const rawMembershipReads = () =>
+  rawStatements().filter((s: any) => /staging_items/i.test(String(s?.sql ?? '')));
+/** When the first statement matching `table` ran, on jest's global call clock. */
+const rawOrder = (table: RegExp) => {
+  const index = rawStatements().findIndex((s: any) => table.test(String(s?.sql ?? '')));
+  return tx.$queryRaw.mock.invocationCallOrder[index];
+};
+
+/**
  * Drive the per-line claims. `drifted` names lines whose BASIS precondition
  * misses while the line is otherwise untouched (somebody repriced or recounted
  * it); `departed` names lines that are no longer this shipment's RECEIVED lines
@@ -208,6 +235,7 @@ function lineClaims({
 beforeEach(() => {
   jest.clearAllMocks();
   txRejected = false;
+  currentMembership = null;
   mockValidateCSRF.mockResolvedValue(true);
   mockEnforceRateLimit.mockReturnValue({});
   setApprovedUser();
@@ -221,6 +249,14 @@ beforeEach(() => {
   });
   tx.stagingItem.updateMany.mockResolvedValue({ count: 1 });
   db.stagingItem.updateMany.mockResolvedValue({ count: 1 });
+  // ONE `$queryRaw` mock for the route's TWO raw statements (FD5-1), told apart
+  // by the table they name: the header LOCK (which selects nothing anybody
+  // reads) and the current RECEIVED membership.
+  tx.$queryRaw.mockImplementation(async (statement: any) => {
+    if (!/staging_items/i.test(String(statement?.sql ?? ''))) return [];
+    const ids = currentMembership ?? basisClaims().map((args: any) => args.where.id);
+    return [...ids].sort((a, b) => a - b).map((id) => ({ id }));
+  });
   primeDetailRead();
 });
 
@@ -506,7 +542,186 @@ describe('POST /api/inbound-shipments/[id]/costs — the frozen basis (FD4-1)', 
 });
 
 // ---------------------------------------------------------------------------
-// 3. FD3-1 — a refusal on ANY line rolls back EVERY line
+// 3. FD5-1 — THE SUBMITTED SET *IS* THE CURRENT RECEIVED MEMBERSHIP
+//
+// Round 6 proved every line the client sent. It never proved that those lines
+// were ALL of them, and a freight split is a statement about the whole receipt:
+//
+//   freeze a bill with A alone (1 x 100c, 100c freight -> A = 200c); line C
+//   links to the shipment before Accept; the payload still carries only A; the
+//   server iterates only what it was given, so A commits at 200c while the
+//   current basis says 150c/150c. Nothing drifted. Nothing was mis-sent. The
+//   request simply described a shipment that no longer exists, and every check
+//   in it passed.
+//
+// The same hole answers to any stale client that omits a line that IS a current
+// member. So the settle route's FD2-1 proof comes here: with the per-line claims
+// held, lock the header (no status gate — bills are legal on CLOSED shipments
+// per the stranded-line amendment) and take ONE ordered locking read of the
+// current RECEIVED ids. The submitted ids must EQUAL them, element-wise.
+// ---------------------------------------------------------------------------
+
+describe('POST /api/inbound-shipments/[id]/costs — the membership proof (FD5-1)', () => {
+  describe('the two locking reads', () => {
+    it('locks the header with NO status gate, by bound id', async () => {
+      lineClaims();
+
+      const resp = await post({ lines: [write({ id: 11 })] });
+
+      expect(resp.status).toBe(200);
+      expect(rawHeaderReads()).toHaveLength(1);
+      const statement = rawHeaderReads()[0];
+      expect(statement.sql).toMatch(/FROM\s+inbound_shipments/i);
+      expect(statement.sql).toMatch(/FOR UPDATE/i);
+      expect(statement.values).toEqual([SHIPMENT_ID]);
+      // THE STRANDED-LINE AMENDMENT, structurally: closing a receipt ends
+      // RECEIVING, not stocking, and a stranded line's graduation still reads
+      // this cost. A status in this WHERE would make a CLOSED shipment's bill
+      // unwritable — which is the amendment, reversed.
+      expect(statement.sql).not.toMatch(/status/i);
+    });
+
+    it('reads the CURRENT RECEIVED ids of this shipment, ordered, FOR UPDATE', async () => {
+      lineClaims();
+
+      await post({ lines: [write({ id: 11 })] });
+
+      expect(rawMembershipReads()).toHaveLength(1);
+      const statement = rawMembershipReads()[0];
+      expect(statement.sql).toMatch(/FROM\s+staging_items/i);
+      expect(statement.sql).toMatch(/ORDER BY id/i);
+      expect(statement.sql).toMatch(/FOR UPDATE/i);
+      // Both halves BOUND, never interpolated — including the status, which is
+      // the enum value the column actually stores.
+      expect(statement.values).toEqual([SHIPMENT_ID, 'RECEIVED']);
+    });
+
+    it('takes them in the house order: the LINES, then the header, then the membership', async () => {
+      lineClaims();
+
+      await post({ lines: [write({ id: 11 }), write({ id: 12, ifUnitCostCents: 200 })] });
+
+      // item -> header, the same order the count endpoint, graduation and the
+      // settle paths take — so this route cannot be half of an ABBA.
+      const lastClaim = Math.max(...tx.stagingItem.updateMany.mock.invocationCallOrder);
+      expect(rawOrder(/inbound_shipments/i)).toBeGreaterThan(lastClaim);
+      // ...and the membership read runs with that header HELD.
+      expect(rawOrder(/staging_items/i)).toBeGreaterThan(rawOrder(/inbound_shipments/i));
+    });
+
+    it('a per-line refusal never reaches either of them', async () => {
+      lineClaims({ drifted: [11] });
+
+      const resp = await post({ lines: [write({ id: 11 })] });
+
+      expect(resp.status).toBe(409);
+      expect((await resp.json()).code).toBe('BASIS_DRIFT');
+      // The claimed-line diagnosis still NAMES its line; the membership proof is
+      // the check that comes after, not the one that replaces it.
+      expect(rawStatements()).toHaveLength(0);
+    });
+  });
+
+  describe('the proof itself', () => {
+    it('PIN 1 — THE FD5-1 SCENARIO: a line that JOINED after the freeze refuses the bill', async () => {
+      lineClaims();
+      // The bill was frozen on A alone and is arithmetically complete for it:
+      // 100c of freight, all of it onto A. C linked while the operator typed.
+      membershipIs([11, 13]);
+
+      const resp = await post({
+        lines: [write({ id: 11, qty: 1, ifUnitCostCents: 100, unitCostCents: 200 })],
+      });
+
+      expect(resp.status).toBe(409);
+      const json = await resp.json();
+      expect(json.code).toBe('BASIS_DRIFT');
+      expect(json.error).toMatch(/joined|left/i);
+      // A's write really ran — every precondition on it passed — and the throw
+      // is what unwinds it. 200c never lands when the truth is 150c/150c.
+      expect(costWrites().map((args: any) => args.where.id)).toEqual([11]);
+      expect(txRejected).toBe(true);
+      expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('PIN 2: a STALE client omitting a current RECEIVED line is refused on the same terms', async () => {
+      // Same defect wearing different clothes: nobody has to link anything if
+      // the client was already holding a membership one line out of date.
+      lineClaims();
+      membershipIs([11, 12]);
+
+      const resp = await post({ lines: [write({ id: 11 })] });
+
+      expect(resp.status).toBe(409);
+      expect((await resp.json()).code).toBe('BASIS_DRIFT');
+      // The audit ran too, and rolls back with the write it belongs to (D4).
+      expect(txRejected).toBe(true);
+      expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('compares ELEMENT-WISE, not by size: one line out and one in has the same count', async () => {
+      lineClaims();
+      membershipIs([11, 13]);
+
+      const resp = await post({
+        lines: [write({ id: 11 }), write({ id: 12, ifUnitCostCents: 200 })],
+      });
+
+      expect(resp.status).toBe(409);
+      expect((await resp.json()).code).toBe('BASIS_DRIFT');
+    });
+
+    it('says what happened in the vocabulary of the operator, not of the schema', async () => {
+      lineClaims();
+      membershipIs([11, 13]);
+
+      const resp = await post({ lines: [write({ id: 11 })] });
+
+      const json = await resp.json();
+      expect(json.error).toMatch(/joined|left/i);
+      expect(json.error).toMatch(/bill/i);
+    });
+
+    it('passes a bill whose lines ARE the whole current membership', async () => {
+      lineClaims();
+      membershipIs([11, 12]);
+
+      const resp = await post({
+        lines: [write({ id: 12, ifUnitCostCents: 200 }), write({ id: 11 })],
+      });
+
+      expect(resp.status).toBe(200);
+      expect(txRejected).toBe(false);
+    });
+
+    it('counts VERIFY-ONLY lines as membership — they are in the bill, just not written', async () => {
+      lineClaims();
+      membershipIs([11, 12]);
+
+      const resp = await post({ lines: [write({ id: 11 }), verify({ id: 12 })] });
+
+      expect(resp.status).toBe(200);
+    });
+  });
+
+  describe('the CLOSED shipment keeps its bill (the stranded-line amendment)', () => {
+    it('PIN 3: a bill against a CLOSED shipment still writes', async () => {
+      lineClaims();
+      membershipIs([11]);
+      primeDetailRead();
+      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow({ status: 'CLOSED' }));
+
+      const resp = await post({ lines: [write({ id: 11 })] });
+
+      expect(resp.status).toBe(200);
+      expect(txRejected).toBe(false);
+      expect(costWrites()).toHaveLength(1);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. FD3-1 — a refusal on ANY line rolls back EVERY line
 // ---------------------------------------------------------------------------
 
 describe('POST /api/inbound-shipments/[id]/costs — all or nothing (FD3-1)', () => {
@@ -602,7 +817,7 @@ describe('POST /api/inbound-shipments/[id]/costs — all or nothing (FD3-1)', ()
 });
 
 // ---------------------------------------------------------------------------
-// 4. The request contract
+// 5. The request contract
 // ---------------------------------------------------------------------------
 
 describe('POST /api/inbound-shipments/[id]/costs — the request', () => {
@@ -661,6 +876,16 @@ describe('POST /api/inbound-shipments/[id]/costs — the request', () => {
     expect((await post({ lines: [write({ ifUnitCostCents: 1.5 })] })).status).toBe(400);
   });
 
+  it('PIN 5: 400s a quantity past the cap — a pathological value misses at the schema', async () => {
+    // Not a business rule: an unbounded integer reaches MySQL as an out-of-range
+    // INT and errors at the DRIVER, which is a 500 wearing a 400's clothes. The
+    // cap matches the cents cap's magnitude.
+    const resp = await post({ lines: [write({ qty: 100_000_001 })] });
+
+    expect(resp.status).toBe(400);
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
   it('400s a NULL cost — un-pricing a line is the manual save\'s job, not a bill\'s', async () => {
     const resp = await post({ lines: [write({ unitCostCents: null })] });
 
@@ -670,7 +895,7 @@ describe('POST /api/inbound-shipments/[id]/costs — the request', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. The guards every mutating receiving route carries
+// 6. The guards every mutating receiving route carries
 // ---------------------------------------------------------------------------
 
 describe('POST /api/inbound-shipments/[id]/costs — guards', () => {
@@ -708,7 +933,7 @@ describe('POST /api/inbound-shipments/[id]/costs — guards', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. D9 — a new mutating route joins the change-tracking gate, unexempted
+// 7. D9 — a new mutating route joins the change-tracking gate, unexempted
 // ---------------------------------------------------------------------------
 
 describe('D9 coverage', () => {

@@ -713,6 +713,27 @@ describe("the bill session (FD-1)", () => {
     expect(screen.getByRole("button", { name: /allocate/i })).toBeDisabled();
   });
 
+  it("PIN 4 (FD5-1): invalidates when a line is ADDED to the shipment mid-bill", async () => {
+    const user = userEvent.setup();
+    const onAccept = jest.fn();
+    const { rerender } = render(
+      <FreightCalculatorPanel lines={[PAIR[0]]} onAccept={onAccept} />,
+    );
+
+    // The bill was frozen on A alone: 200c of freight, all of it onto A. The
+    // session's own lines are all still there and all unchanged, so the
+    // departures-and-edits check has nothing to say — and the split on screen is
+    // nonetheless the wrong answer now, because it describes a one-line receipt.
+    await enterBill(user, "2.00");
+    rerender(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
+
+    expect(screen.getByTestId("allocation-invalidated")).toHaveTextContent(/added/i);
+    // ...by NAME, like every other invalidation this panel renders.
+    expect(screen.getByTestId("allocation-invalidated")).toHaveTextContent(/B/);
+    expect(screen.queryByTestId("allocation-row-1")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /accept/i })).toBeDisabled();
+  });
+
   it("invalidates when a line LEAVES the shipment mid-bill", async () => {
     const user = userEvent.setup();
     const onAccept = jest.fn();
@@ -931,6 +952,27 @@ describe("the write carries its own precondition (FD2-2)", () => {
     expect(screen.getByRole("button", { name: /allocate/i })).toBeDisabled();
     // ...and there IS a way out.
     expect(screen.getByRole("button", { name: /clear the bill/i })).toBeEnabled();
+  });
+
+  it("FD5-1: a MEMBERSHIP refusal is not described as a cost change", async () => {
+    const user = userEvent.setup();
+    // The server's BASIS_DRIFT now covers a third thing — the bill's lines are
+    // not the shipment's lines — and the panel's own lead sentence used to
+    // hard-code "cost or quantity". A notice that contradicts the reason quoted
+    // inside its own brackets teaches an operator to stop reading it.
+    const drift = Object.assign(
+      new Error("A line joined or left this shipment while the bill was open"),
+      { code: "BASIS_DRIFT" },
+    );
+    const onAccept = jest.fn().mockRejectedValue(drift);
+    render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
+
+    await enterBill(user, "2.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    const invalidated = await screen.findByTestId("allocation-invalidated");
+    expect(invalidated).toHaveTextContent(/joined or left/i);
+    expect(invalidated.textContent).not.toMatch(/A line's cost or quantity changed/i);
   });
 
   it("clearing a drift-invalidated bill starts from nothing", async () => {

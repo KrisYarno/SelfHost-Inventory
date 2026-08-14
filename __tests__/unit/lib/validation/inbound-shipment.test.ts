@@ -151,6 +151,22 @@ describe('AllocateShipmentCostsSchema', () => {
     ).toBe(false);
   });
 
+  it('FD5-1 (c): caps the frozen QUANTITY at the same magnitude as the cents', () => {
+    // The cap is not a business rule, it is a BOUNDARY: an unbounded integer
+    // reaches MySQL as an out-of-range INT and fails at the driver, which is a
+    // 500 dressed as a bug report. A pathological quantity misses cleanly here.
+    expect(
+      AllocateShipmentCostsSchema.safeParse({ lines: [raw({ qty: 100_000_000 })] }).success,
+    ).toBe(true);
+    expect(
+      AllocateShipmentCostsSchema.safeParse({ lines: [raw({ qty: 100_000_001 })] }).success,
+    ).toBe(false);
+    expect(
+      AllocateShipmentCostsSchema.safeParse({ lines: [raw({ qty: Number.MAX_SAFE_INTEGER })] })
+        .success,
+    ).toBe(false);
+  });
+
   it('rejects a non-positive line id', () => {
     expect(AllocateShipmentCostsSchema.safeParse({ lines: [raw({ id: 0 })] }).success).toBe(false);
     expect(AllocateShipmentCostsSchema.safeParse({ lines: [raw({ id: -3 })] }).success).toBe(false);
