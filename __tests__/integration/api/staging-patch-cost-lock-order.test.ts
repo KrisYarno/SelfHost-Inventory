@@ -316,6 +316,32 @@ describe('PATCH /api/staging-items/[id] — lock order (residual ABBA)', () => {
     expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
     expect(mockRecordChange).not.toHaveBeenCalled();
   });
+
+  /**
+   * The gap FD-3's fix left un-pinned: a body carrying BOTH an expectedQuantity
+   * edit and a `shipmentId` equal to the line's CURRENT one. `relinking` is
+   * false (the link is a NOOP), so the early quantity guard is the one that must
+   * run — and `applyShipmentLink` must then take no header at all, or the source
+   * header would be claimed twice in two vocabularies.
+   */
+  it('a combined expectedQuantity + SAME-shipment PATCH claims the header EXACTLY ONCE', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ shipmentId: SHIPMENT_A }));
+    const order = claimOrder();
+
+    const resp = await patch({ expectedQuantity: 25, shipmentId: SHIPMENT_A });
+
+    expect(resp.status).toBe(200);
+    // The early item lock still runs (a shipment IS touched: the quantity guard).
+    expect(order[0]).toBe('item');
+    // ...and the header is claimed once, by that guard, not twice.
+    expect(shipmentClaimIds()).toEqual([SHIPMENT_A]);
+    // The link itself NOOPs: no link/unlink verb, only the quantity edit.
+    expect(mockRecordChange).toHaveBeenCalledTimes(1);
+    expect(mockRecordChange.mock.calls[0][1]).toMatchObject({
+      actionType: 'STAGING_UPDATE',
+      changes: { expectedQuantity: { from: 10, to: 25 } },
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -400,5 +426,108 @@ describe('PATCH /api/staging-items/[id] — unitCostCents', () => {
     expect(resp.status).toBe(200);
     // No OPEN-only claim is taken, so a CLOSED shipment cannot refuse it.
     expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. FD2-2 (fix round 3) — `ifUnitCostCents`: the cost precondition.
+//
+// The freight panel checked for drift on the CLIENT, which leaves the whole
+// check-then-write window unguarded. Two concrete losses came out of it:
+//
+//   (a) a third party REVERTS a line this bill already wrote back to exactly the
+//       frozen base. The panel's own-write-or-frozen-base test passes, the retry
+//       skips the line as "already written", and the bill completes claiming a
+//       full allocation while that line's freight is silently missing;
+//   (b) any foreign change to an UNWRITTEN line between the freeze and the write
+//       is simply overwritten by the allocation.
+//
+// So the check moves into the WHERE. `ifUnitCostCents` is optional: absent means
+// the as-built unconditional write (the manual per-line cost save is untouched),
+// present means "write this cost only if the line still carries THAT one", and a
+// miss is a NAMED, retriable 409 — never a silent overwrite.
+// ---------------------------------------------------------------------------
+
+describe('PATCH /api/staging-items/[id] — ifUnitCostCents (FD2-2)', () => {
+  it('rides the state write\'s WHERE when present', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
+
+    const resp = await patch({ unitCostCents: 200, ifUnitCostCents: 100 });
+
+    expect(resp.status).toBe(200);
+    const write = stateWrites()[0];
+    expect(write.where).toEqual({ id: 5, status: 'RECEIVED', unitCostCents: 100 });
+    // The precondition is a GUARD, never a written column.
+    expect(write.data).toEqual({ unitCostCents: 200 });
+  });
+
+  it('an explicit NULL precondition means "only if it is still unpriced"', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: null }));
+
+    const resp = await patch({ unitCostCents: 200, ifUnitCostCents: null });
+
+    expect(resp.status).toBe(200);
+    expect(stateWrites()[0].where).toEqual({ id: 5, status: 'RECEIVED', unitCostCents: null });
+  });
+
+  it('is ABSENT from the WHERE when the caller does not send it (the manual save)', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
+
+    const resp = await patch({ unitCostCents: 200 });
+
+    expect(resp.status).toBe(200);
+    expect(stateWrites()[0].where).toEqual({ id: 5, status: 'RECEIVED' });
+  });
+
+  it('THE REVERT: a miss on a line that is still RECEIVED is a named 409 COST_DRIFT', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
+    db.stagingItem.updateMany.mockImplementation(async (args: any) => ({
+      // the conditional write misses; the no-op re-claim (no cost in its WHERE)
+      // still matches, so the row is RECEIVED and it was the COST that moved
+      count: args.where.unitCostCents !== undefined ? 0 : 1,
+    }));
+
+    const resp = await patch({ unitCostCents: 200, ifUnitCostCents: 100 });
+
+    expect(resp.status).toBe(409);
+    const json = await resp.json();
+    expect(json.code).toBe('COST_DRIFT');
+    expect(json.error).toMatch(/cost changed/i);
+    expect(mockRecordChange).not.toHaveBeenCalled();
+  });
+
+  it('a miss because the line GRADUATED stays the state-change 409, not COST_DRIFT', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
+    // nothing matches any more: the row left RECEIVED
+    db.stagingItem.updateMany.mockResolvedValue({ count: 0 });
+
+    const resp = await patch({ unitCostCents: 200, ifUnitCostCents: 100 });
+
+    expect(resp.status).toBe(409);
+    const json = await resp.json();
+    expect(json.code).toBe('CONFLICT');
+    expect(json.error).toMatch(/changed state/i);
+  });
+
+  it('400s a precondition with no cost write — it would guard nothing', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
+
+    const resp = await patch({ notes: 'pallet 3', ifUnitCostCents: 100 });
+
+    expect(resp.status).toBe(400);
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(db.stagingItem.update).not.toHaveBeenCalled();
+  });
+
+  it('never writes the precondition as a column, and never diffs it', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
+    db.stagingItem.update.mockResolvedValue(itemRow({ unitCostCents: 200 }));
+
+    await patch({ unitCostCents: 200, ifUnitCostCents: 100 });
+
+    expect(stateWrites()[0].data).not.toHaveProperty('ifUnitCostCents');
+    expect(mockRecordChange.mock.calls[0][1].changes).toEqual({
+      unitCostCents: { from: 100, to: 200 },
+    });
   });
 });

@@ -34,6 +34,8 @@ jest.mock('@/lib/prisma', () => {
       findMany: jest.fn(),
       updateMany: jest.fn(),
     },
+    // FD2-1: the settle paths' ONE current read (`... FOR UPDATE`).
+    $queryRaw: jest.fn(async () => []),
   };
   return {
     __esModule: true,
@@ -131,55 +133,50 @@ function primeDetailRead(shipment = shipmentRow(), items: any[] = []) {
   db.stagingItem.findMany.mockResolvedValue(items);
 }
 
-/**
- * Drive `stagingItem.findMany` by its WHERE, the way MySQL would, instead of by
- * call order — W1S-2 reordered the settle paths and a positional mock would pin
- * the order of the mocks rather than the behavior of the route.
- *
- *   status RECEIVED  -> the lines a settle locks / unlinks
- *   status GRADUATED -> the naming read on the refusal path
- *   include          -> getInboundShipmentDetail's re-read (shape-only here)
- *   otherwise        -> the close path's rollup read
- */
-function stagingLines({ lines = [], graduated = [] }: { lines?: any[]; graduated?: any[] } = {}) {
-  db.stagingItem.findMany.mockImplementation(async (args: any) => {
-    if (args?.include) return [];
-    const status = args?.where?.status;
-    if (status === 'GRADUATED') return graduated;
-    if (status === 'RECEIVED') {
-      return lines.filter((l: any) => l.status === undefined || l.status === 'RECEIVED');
-    }
-    return lines;
-  });
+/** A staging line as the two reads below hand it back. */
+function stagingLine(over: Record<string, unknown> = {}) {
+  return { id: 1, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: 10, ...over };
 }
 
 /**
- * Drive the staging-item CLAIMS by their WHERE. Four shapes reach the delegate
- * on the settle paths: the per-line no-op LOCK, the current-read GATES
- * (GRADUATED / uncounted), the set-wide MEMBERSHIP re-read (FD-2), and the
- * unlink.
+ * Drive the settle paths' TWO reads of the shipment's lines, which FD2-1 made
+ * deliberately different things:
  *
- * `members` is what MySQL would currently answer with — pass it to simulate a
- * line linked or unlinked since this transaction's snapshot. Left null, the
- * membership read agrees with the set the locks were taken over, which is the
- * uneventful case every other test wants.
+ *   SNAPSHOT  `stagingItem.findMany` — what this transaction's REPEATABLE READ
+ *             snapshot shows, and therefore the set the ascending first-pass
+ *             locks are taken over (deadlock ordering);
+ *   CURRENT   `$queryRaw ... FOR UPDATE` — what MySQL holds RIGHT NOW, after the
+ *             header claim. Every downstream decision reads THIS.
+ *
+ * Passing only `snapshot` makes the two agree, which is the uneventful case.
+ * `include` is getInboundShipmentDetail's re-read (shape-only here).
  */
-function stagingClaims({
-  graduated = 0,
-  uncounted = 0,
-  members = null,
-}: { graduated?: number; uncounted?: number; members?: number[] | null } = {}) {
-  const locked = new Set<number>();
+function shipmentLines(snapshot: any[], current: any[] = snapshot) {
+  db.stagingItem.findMany.mockImplementation(async (args: any) => {
+    if (args?.include) return [];
+    const status = args?.where?.status;
+    if (status === undefined) return snapshot;
+    return snapshot.filter((l: any) => (l.status ?? 'RECEIVED') === status);
+  });
+  db.$queryRaw.mockResolvedValue(current);
+}
+
+/**
+ * Drive the staging-item CLAIMS. After FD2-1 exactly two shapes reach the
+ * delegate on a settle path: the per-line no-op LOCK of the first pass, and the
+ * cancel's set-wide unlink.
+ *
+ * `lockable` is which lines the first pass can still claim — leave it null for
+ * "all of them" (nothing moved), or name a subset to simulate a line that left
+ * the shipment (or graduated) between the snapshot and the locks.
+ */
+function stagingClaims({ lockable = null }: { lockable?: number[] | null } = {}) {
   db.stagingItem.updateMany.mockImplementation(async (args: any) => {
     if (args.data && 'shipmentId' in args.data) return { count: 1 };
-    if (args.where.status === 'GRADUATED') return { count: graduated };
-    if (args.where.countedQuantity === null) return { count: uncounted };
     if (args.where.id !== undefined) {
-      const present = members === null || members.includes(args.where.id);
-      if (present) locked.add(args.where.id);
-      return { count: present ? 1 : 0 };
+      return { count: lockable === null || lockable.includes(args.where.id) ? 1 : 0 };
     }
-    return { count: members === null ? locked.size : members.length };
+    return { count: 1 };
   });
 }
 
@@ -187,6 +184,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockValidateCSRF.mockResolvedValue(true);
   (db.$transaction as jest.Mock) = jest.fn(async (fn: any) => fn(db));
+  db.$queryRaw.mockResolvedValue([]);
 });
 
 // ---------------------------------------------------------------------------
@@ -538,12 +536,10 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CLOSED)', () => {
   it('closes when every linked RECEIVED line is counted, stamping closedBy/closedAt', async () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-    stagingLines({
-      lines: [
-        { id: 1, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: 10 },
-        { id: 2, status: 'GRADUATED', expectedQuantity: 5, countedQuantity: 5 },
-      ],
-    });
+    shipmentLines([
+      stagingLine({ id: 1 }),
+      stagingLine({ id: 2, status: 'GRADUATED', expectedQuantity: 5, countedQuantity: 5 }),
+    ]);
     stagingClaims();
     db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
 
@@ -563,12 +559,10 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CLOSED)', () => {
   it('records SHIPMENT_CLOSE carrying the computed rollup', async () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-    stagingLines({
-      lines: [
-        { id: 1, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: 12 },
-        { id: 2, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: 9 },
-      ],
-    });
+    shipmentLines([
+      stagingLine({ id: 1, countedQuantity: 12 }),
+      stagingLine({ id: 2, countedQuantity: 9 }),
+    ]);
     stagingClaims();
     db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
 
@@ -589,15 +583,13 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CLOSED)', () => {
   it('REFUSES to close with uncounted RECEIVED lines: 409 listing the offenders', async () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-    stagingLines({
-      lines: [
-        { id: 1, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: 10 },
-        { id: 4, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: null },
-        { id: 6, status: 'RECEIVED', expectedQuantity: null, countedQuantity: null },
-      ],
-    });
-    // the CURRENT read agrees with the snapshot: two lines are uncounted
-    stagingClaims({ uncounted: 2 });
+    shipmentLines([
+      stagingLine({ id: 1 }),
+      stagingLine({ id: 4, countedQuantity: null }),
+      stagingLine({ id: 6, expectedQuantity: null, countedQuantity: null }),
+    ]);
+    stagingClaims();
+    db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
 
     const resp = await PATCH(
       mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
@@ -607,20 +599,19 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CLOSED)', () => {
     expect(resp.status).toBe(409);
     const body = await resp.json();
     expect(body.uncountedItemIds).toEqual([4, 6]);
-    // nothing was written and nothing was recorded
-    expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
+    // The header claim happened and ROLLED BACK with the throw (FD2-1: the
+    // uncounted verdict is read from rows only a claimed header can hold
+    // still), so nothing settled and nothing was recorded.
     expect(mockRecordChange).not.toHaveBeenCalled();
   });
 
   it('ignores GRADUATED/DISCARDED lines when deciding closeability', async () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-    stagingLines({
-      lines: [
-        { id: 1, status: 'DISCARDED', expectedQuantity: 10, countedQuantity: null },
-        { id: 2, status: 'GRADUATED', expectedQuantity: 5, countedQuantity: 5 },
-      ],
-    });
+    shipmentLines([
+      stagingLine({ id: 1, status: 'DISCARDED', countedQuantity: null }),
+      stagingLine({ id: 2, status: 'GRADUATED', expectedQuantity: 5, countedQuantity: 5 }),
+    ]);
     stagingClaims();
     db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
 
@@ -635,7 +626,7 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CLOSED)', () => {
   it('RACE: a lost close claim (count 0) is a 409 and records nothing', async () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-    stagingLines();
+    shipmentLines([]);
     stagingClaims();
     db.inboundShipment.updateMany.mockResolvedValue({ count: 0 });
 
@@ -658,7 +649,7 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CANCELLED)', () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
     db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-    stagingLines({ lines: [{ id: 11 }, { id: 12 }] });
+    shipmentLines([stagingLine({ id: 11 }), stagingLine({ id: 12 })]);
     stagingClaims(); // no GRADUATED line remains linked
 
     const resp = await PATCH(
@@ -684,7 +675,7 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CANCELLED)', () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
     db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-    stagingLines({ lines: [{ id: 11 }, { id: 12 }] });
+    shipmentLines([stagingLine({ id: 11 }), stagingLine({ id: 12 })]);
     stagingClaims();
 
     await PATCH(
@@ -705,10 +696,10 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CANCELLED)', () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
     db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-    // the racing line already flipped out of RECEIVED...
-    stagingLines({ lines: [], graduated: [{ id: 12 }] });
+    // the racing line already flipped out of RECEIVED in the snapshot...
+    shipmentLines([], [stagingLine({ id: 12, status: 'GRADUATED' })]);
     // ...and the CURRENT read finds it linked as GRADUATED
-    stagingClaims({ graduated: 1 });
+    stagingClaims();
 
     const resp = await PATCH(
       mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CANCELLED' }),
@@ -727,7 +718,7 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CANCELLED)', () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
     db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-    stagingLines({ lines: [{ id: 12 }] });
+    shipmentLines([stagingLine({ id: 12 })]);
     stagingClaims();
 
     const resp = await PATCH(
@@ -747,7 +738,7 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CANCELLED)', () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
     db.inboundShipment.updateMany.mockResolvedValue({ count: 0 });
-    stagingLines({ lines: [{ id: 12 }] });
+    shipmentLines([stagingLine({ id: 12 })]);
     stagingClaims();
 
     const resp = await PATCH(
@@ -770,7 +761,7 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CANCELLED)', () => {
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow({ status: 'CANCELLED' }));
     db.inboundShipment.updateMany.mockResolvedValue({ count: 0 });
-    stagingLines();
+    shipmentLines([]);
     stagingClaims();
 
     const resp = await PATCH(
@@ -782,49 +773,42 @@ describe('PATCH /api/inbound-shipments/[id] (OPEN -> CANCELLED)', () => {
   });
 });
 
+
 // ---------------------------------------------------------------------------
-// W1S-2 (W1-C fix round) — LOCK ORDER + CURRENT READS on the settle paths.
+// W1S-2 (W1-C fix round) — LOCK ORDER on the settle paths.
 //
 // Every other writer in this lane takes the STAGING ROW first and its SHIPMENT
 // second (the count endpoint, the staging PATCH, graduation). Close and cancel
 // took them the other way round — header first, lines after — which is a
-// textbook ABBA against the very acts they race with. And both decided on lines
-// they had read BEFORE taking any lock, so a line that graduated (or arrived)
-// mid-flight was invisible to the decision.
+// textbook ABBA against the very acts they race with.
 //
-// The fix is order plus re-reads: lock each linked line in ASCENDING id order,
-// then the header, then re-check with a NO-OP CLAIM — an `updateMany` reads the
-// latest committed rows, where a plain SELECT in this transaction still answers
-// from the snapshot taken before the locks. A refusal throws, so every lock the
-// attempt took rolls back with it.
+// So each settle locks the lines it knows about in ASCENDING id order and only
+// then claims the header. FD2-1 kept that pass exactly as the deadlock ordering
+// it is, and moved every DECISION onto the current read below.
 //
 // NOTE: this pins the CALL SEQUENCE. Real MySQL row-lock behavior rides the
 // W1-C drive.
 // ---------------------------------------------------------------------------
 
-describe('PATCH /api/inbound-shipments/[id] — lock order and current reads (W1S-2)', () => {
-  /**
-   * Records which table each claim hit, in call order. The set-wide membership
-   * read (FD-2) answers with the lines locked so far, so an untouched shipment
-   * settles: only the tests that WANT a mid-flight change say otherwise.
-   */
+describe('PATCH /api/inbound-shipments/[id] — lock order (W1S-2)', () => {
+  /** Records which table each claim hit, in call order. */
   function recorder() {
     const order: string[] = [];
-    const locked = new Set<number>();
     db.stagingItem.updateMany.mockImplementation(async (args: any) => {
-      order.push(`item:${args.where.id ?? args.where.status}`);
-      if (args.where.status === 'GRADUATED' || args.where.countedQuantity === null) {
-        return { count: 0 };
-      }
-      if (args.where.id !== undefined) {
-        locked.add(args.where.id);
+      if (args.data && 'shipmentId' in args.data) {
+        order.push('unlink');
         return { count: 1 };
       }
-      return { count: locked.size };
+      order.push(`item:${args.where.id}`);
+      return { count: 1 };
     });
     db.inboundShipment.updateMany.mockImplementation(async () => {
       order.push('shipment');
       return { count: 1 };
+    });
+    db.$queryRaw.mockImplementation(async () => {
+      order.push('current');
+      return [];
     });
     return order;
   }
@@ -834,11 +818,6 @@ describe('PATCH /api/inbound-shipments/[id] — lock order and current reads (W1
     db.stagingItem.updateMany.mock.calls
       .map((c: any[]) => c[0])
       .filter((a: any) => a.where.id !== undefined && a.data?.status === a.where.status);
-  /** The claim that actually unlinks (the only one whose data names shipmentId). */
-  const unlinkClaims = () =>
-    db.stagingItem.updateMany.mock.calls
-      .map((c: any[]) => c[0])
-      .filter((a: any) => a.data && 'shipmentId' in a.data);
 
   describe('CANCEL', () => {
     it('locks every linked line ASCENDING, and only then claims the header', async () => {
@@ -852,61 +831,15 @@ describe('PATCH /api/inbound-shipments/[id] — lock order and current reads (W1
         { params: { id: SHIPMENT_ID } }
       );
 
-      expect(resp.status).toBe(200);
-      // ascending ids, both BEFORE the header claim
-      expect(order.slice(0, 3)).toEqual(['item:7', 'item:12', 'shipment']);
-      // The PRE-header locks. (FD-2 added a second, identical pass after the
-      // header claim — the membership re-read — so this names the first two.)
-      expect(lockClaims().slice(0, 2).map((a: any) => a.where)).toEqual([
+      expect(resp.status).toBe(409); // the current read below is empty -> membership drift
+      // ascending ids, both BEFORE the header claim, and the current read last
+      expect(order.slice(0, 4)).toEqual(['item:7', 'item:12', 'shipment', 'current']);
+      expect(lockClaims().map((a: any) => a.where)).toEqual([
         { id: 7, shipmentId: SHIPMENT_ID, status: 'RECEIVED' },
         { id: 12, shipmentId: SHIPMENT_ID, status: 'RECEIVED' },
       ]);
       // and it asked the DB for that order rather than sorting in JS
       expect(db.stagingItem.findMany.mock.calls[0][0].orderBy).toEqual({ id: 'asc' });
-    });
-
-    it('re-checks GRADUATED lines with a CLAIM (a current read), after the locks', async () => {
-      setApprovedUser();
-      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-      db.stagingItem.findMany.mockResolvedValue([{ id: 7 }]);
-      const order = recorder();
-
-      await PATCH(
-        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CANCELLED' }),
-        { params: { id: SHIPMENT_ID } }
-      );
-
-      const gate = db.stagingItem.updateMany.mock.calls
-        .map((c: any[]) => c[0])
-        .find((a: any) => a.where.status === 'GRADUATED');
-      expect(gate).toBeDefined();
-      // a NO-OP write: it restates GRADUATED, so its only effect is the read
-      expect(gate.data).toEqual({ status: 'GRADUATED' });
-      // and it runs AFTER the header claim, not before
-      expect(order.indexOf('shipment')).toBeLessThan(order.lastIndexOf('item:GRADUATED'));
-    });
-
-    it('a line that graduated AFTER the snapshot aborts the cancel (409, nothing unlinked)', async () => {
-      setApprovedUser();
-      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-      db.stagingItem.findMany
-        .mockResolvedValueOnce([{ id: 12 }]) // the snapshot still calls it RECEIVED
-        .mockResolvedValue([{ id: 12 }]); // ...the naming read finds it GRADUATED
-      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-      db.stagingItem.updateMany.mockImplementation(async (args: any) => ({
-        // the current read sees what the snapshot could not
-        count: args.where.status === 'GRADUATED' ? 1 : 1,
-      }));
-
-      const resp = await PATCH(
-        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CANCELLED' }),
-        { params: { id: SHIPMENT_ID } }
-      );
-
-      expect(resp.status).toBe(409);
-      expect((await resp.json()).graduatedItemIds).toEqual([12]);
-      expect(unlinkClaims()).toHaveLength(0);
-      expect(mockRecordChange).not.toHaveBeenCalled();
     });
   });
 
@@ -914,12 +847,20 @@ describe('PATCH /api/inbound-shipments/[id] — lock order and current reads (W1
     it('locks the RECEIVED lines ASCENDING before the header claim', async () => {
       setApprovedUser();
       db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-      db.stagingItem.findMany.mockResolvedValue([
-        { id: 4, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: 10 },
-        { id: 9, status: 'GRADUATED', expectedQuantity: 5, countedQuantity: 5 },
-        { id: 11, status: 'RECEIVED', expectedQuantity: 2, countedQuantity: 2 },
+      shipmentLines([
+        stagingLine({ id: 4 }),
+        stagingLine({ id: 9, status: 'GRADUATED', expectedQuantity: 5, countedQuantity: 5 }),
+        stagingLine({ id: 11, expectedQuantity: 2, countedQuantity: 2 }),
       ]);
       const order = recorder();
+      db.$queryRaw.mockImplementation(async () => {
+        order.push('current');
+        return [
+          stagingLine({ id: 4 }),
+          stagingLine({ id: 9, status: 'GRADUATED', expectedQuantity: 5, countedQuantity: 5 }),
+          stagingLine({ id: 11, expectedQuantity: 2, countedQuantity: 2 }),
+        ];
+      });
 
       const resp = await PATCH(
         mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
@@ -927,77 +868,120 @@ describe('PATCH /api/inbound-shipments/[id] — lock order and current reads (W1
       );
 
       expect(resp.status).toBe(200);
-      // only the RECEIVED lines are locked (a graduated line is not receiving
-      // work); the pass after the header claim is FD-2's membership re-read.
-      expect(lockClaims().slice(0, 2).map((a: any) => a.where.id)).toEqual([4, 11]);
-      expect(order.indexOf('shipment')).toBeGreaterThan(order.indexOf('item:11'));
+      // only the RECEIVED lines are locked (a graduated line is not receiving work)
+      expect(lockClaims().map((a: any) => a.where.id)).toEqual([4, 11]);
+      expect(order).toEqual(['item:4', 'item:11', 'shipment', 'current']);
     });
 
-    it('re-checks "uncounted" with a CLAIM after the locks, and refuses on its answer', async () => {
+    it('locks only the RECEIVED lines — the snapshot read is scoped to them', async () => {
       setApprovedUser();
       db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-      // The snapshot says everything is counted...
-      db.stagingItem.findMany.mockResolvedValue([
-        { id: 4, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: 10 },
-      ]);
-      // ...but the current read finds an uncounted RECEIVED line linked since.
-      db.stagingItem.updateMany.mockImplementation(async (args: any) => ({
-        count: args.where.countedQuantity === null ? 1 : 1,
-      }));
+      shipmentLines([stagingLine({ id: 4 })]);
+      stagingClaims();
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+
+      await PATCH(
+        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
+        { params: { id: SHIPMENT_ID } }
+      );
+
+      expect(db.stagingItem.findMany.mock.calls[0][0]).toMatchObject({
+        where: { shipmentId: SHIPMENT_ID, status: 'RECEIVED' },
+        orderBy: { id: 'asc' },
+      });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD2-1 (fix round 3) — the settle's ONE CURRENT READ.
+//
+// Fix round 2 re-derived the membership with a second pass of no-op claims, and
+// left two holes open:
+//
+//   (a) THE ABA. The FIRST pass's results were thrown away, so a line that
+//       departed before its claim and rejoined before the final check slipped
+//       through the continuous-coverage proof: it was counted (or graduated, or
+//       priced) while it was away, and this transaction never held it.
+//   (b) THE STALE AUDIT. The close's rollup and its UNCOUNTED list were computed
+//       from the PRE-LOCK snapshot. Under REPEATABLE READ a plain re-read
+//       answers from that same snapshot, so a count committed between the
+//       findMany and the claims was invisible to the audit even when NOTHING
+//       raced at all — the close recorded numbers that were already wrong.
+//
+// One mechanism closes both. The ascending first pass stays (it is the deadlock
+// ordering), but a MISS is now fatal — MEMBERSHIP_CHANGED, retriable, even if
+// the id reappears. And after the header claim, ONE locking read
+// (`SELECT ... FOR UPDATE`) becomes the single source of current truth: the
+// membership comparison, the graduation gate, the uncounted gate and its ids,
+// the rollup and the unlink set are ALL derived from it. FOR UPDATE reads the
+// latest committed rows and re-confirms our locks; a row that joined since is
+// not held by us, so that read can genuinely deadlock — which is what
+// withDeadlockRetry is wrapped around the whole transaction for.
+// ---------------------------------------------------------------------------
+
+describe('PATCH /api/inbound-shipments/[id] — the ONE current read (FD2-1)', () => {
+  const itemClaims = () => db.stagingItem.updateMany.mock.calls.map((c: any[]) => c[0]);
+  const unlinkClaims = () => itemClaims().filter((a: any) => a.data && 'shipmentId' in a.data);
+  const lineClaims = () => itemClaims().filter((a: any) => a.where.id !== undefined);
+
+  describe('the read itself', () => {
+    it('is a LOCKING read of this shipment, ordered by id, taken AFTER the header claim', async () => {
+      setApprovedUser();
+      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+      shipmentLines([stagingLine({ id: 11 })]);
+      stagingClaims();
+
+      const resp = await PATCH(
+        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CANCELLED' }),
+        { params: { id: SHIPMENT_ID } }
+      );
+
+      expect(resp.status).toBe(200);
+      expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+      const statement = db.$queryRaw.mock.calls[0][0];
+      expect(statement.sql).toMatch(/FROM\s+staging_items/i);
+      expect(statement.sql).toMatch(/ORDER BY id/i);
+      expect(statement.sql).toMatch(/FOR UPDATE/i);
+      // scoped to THIS shipment, as a bound parameter (never interpolated)
+      expect(statement.values).toEqual([SHIPMENT_ID]);
+      // ...and it runs with the header already held.
+      expect(db.$queryRaw.mock.invocationCallOrder[0]).toBeGreaterThan(
+        db.inboundShipment.updateMany.mock.invocationCallOrder[0]
+      );
+    });
+
+    it('the close path takes exactly ONE of them (no second snapshot read decides anything)', async () => {
+      setApprovedUser();
+      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+      shipmentLines([stagingLine({ id: 4 })]);
+      stagingClaims();
 
       const resp = await PATCH(
         mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
         { params: { id: SHIPMENT_ID } }
       );
 
-      expect(resp.status).toBe(409);
-      expect((await resp.json()).code).toBe('CONFLICT');
-      const gate = db.stagingItem.updateMany.mock.calls
-        .map((c: any[]) => c[0])
-        .find((a: any) => a.where.countedQuantity === null);
-      expect(gate).toBeDefined();
-      expect(gate.data).toEqual({ status: 'RECEIVED' });
-      // the header was never claimed and nothing was recorded
-      expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
-      expect(mockRecordChange).not.toHaveBeenCalled();
+      expect(resp.status).toBe(200);
+      expect(db.$queryRaw).toHaveBeenCalledTimes(1);
     });
   });
-});
 
-// ---------------------------------------------------------------------------
-// FD-2 (fix round 2) — the LOCK SET was still a pre-header snapshot.
-//
-// W1S-2 locked the lines before the header, but it locked the lines this
-// transaction had READ, and that read is older than the header claim. A line
-// linked into the shipment in between was therefore never locked — and the
-// cancel unlinked it anyway (the unlink is a set-wide claim) while the audit
-// line named only the snapshot, so a box left staging with no record of having
-// been there. Worse, the linker that put it there holds the ITEM and waits on
-// the header: a narrow ABBA against the settle that is walking the other way.
-//
-// So the membership is RE-DERIVED after the header claim, as a current read
-// (the no-op claim idiom — a plain SELECT still answers from the snapshot), and
-// ANY difference aborts the whole transaction with a retriable 409. The route
-// runs inside the house `withDeadlockRetry`, so the genuine MySQL deadlock is
-// re-run from the top and re-derives the set instead of surfacing.
-// ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // PIN 1 — the ABA.
+  // -------------------------------------------------------------------------
 
-describe('PATCH /api/inbound-shipments/[id] — membership re-read (FD-2)', () => {
-  /** Every line lock / membership claim, in call order. */
-  const itemClaims = () => db.stagingItem.updateMany.mock.calls.map((c: any[]) => c[0]);
-  const unlinkClaims = () =>
-    itemClaims().filter((a: any) => a.data && 'shipmentId' in a.data);
-  /** The per-line no-op claims (the locks and the re-read). */
-  const lineClaims = () => itemClaims().filter((a: any) => a.where.id !== undefined);
-
-  describe('CANCEL', () => {
-    it('ABORTS with a retriable 409 when a line was LINKED since the snapshot', async () => {
+  describe('the ABA (a first-pass MISS is fatal even if the id comes back)', () => {
+    it('CANCEL: a line that left and rejoined by the current read is a retriable 409', async () => {
       setApprovedUser();
       db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
       db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-      stagingLines({ lines: [{ id: 11 }] });
-      // MySQL's current answer: line 12 was linked after this tx's snapshot.
-      stagingClaims({ members: [11, 12] });
+      // The snapshot named line 11; the lock MISSED it (it was somewhere else at
+      // that instant); by the current read it is linked and RECEIVED again.
+      shipmentLines([stagingLine({ id: 11 })], [stagingLine({ id: 11 })]);
+      stagingClaims({ lockable: [] });
 
       const resp = await PATCH(
         mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CANCELLED' }),
@@ -1008,7 +992,209 @@ describe('PATCH /api/inbound-shipments/[id] — membership re-read (FD-2)', () =
       const body = await resp.json();
       expect(body.error).toMatch(/membership changed/i);
       expect(body.retriable).toBe(true);
-      // Nothing settled: the unlink never ran and the cancel was never recorded.
+      // The set LOOKED identical — that is exactly the trap. Nothing settled.
+      expect(unlinkClaims()).toHaveLength(0);
+      expect(mockRecordChange).not.toHaveBeenCalled();
+    });
+
+    it('CLOSE: the same ABA refuses instead of closing over an unheld line', async () => {
+      setApprovedUser();
+      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+      shipmentLines([stagingLine({ id: 4 })], [stagingLine({ id: 4 })]);
+      stagingClaims({ lockable: [] });
+
+      const resp = await PATCH(
+        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
+        { params: { id: SHIPMENT_ID } }
+      );
+
+      expect(resp.status).toBe(409);
+      expect((await resp.json()).retriable).toBe(true);
+      expect(mockRecordChange).not.toHaveBeenCalled();
+    });
+
+    it('CANCEL: a GRADUATED line still gets its NAMED refusal, not the generic one', async () => {
+      setApprovedUser();
+      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+      // It graduated mid-flight: the first-pass claim missed it (it is no longer
+      // RECEIVED) AND the current read shows why.
+      shipmentLines(
+        [stagingLine({ id: 11 })],
+        [stagingLine({ id: 11, status: 'GRADUATED' })]
+      );
+      stagingClaims({ lockable: [] });
+
+      const resp = await PATCH(
+        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CANCELLED' }),
+        { params: { id: SHIPMENT_ID } }
+      );
+
+      expect(resp.status).toBe(409);
+      const body = await resp.json();
+      expect(body.graduatedItemIds).toEqual([11]);
+      expect(body.error).toMatch(/graduated/i);
+      expect(mockRecordChange).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // PIN 2 — the stale rollup. NOTHING races here: one count simply committed
+  // between this transaction's snapshot and its locks, which is enough to make a
+  // plain re-read lie under REPEATABLE READ.
+  // -------------------------------------------------------------------------
+
+  describe('the audit rollup is the CURRENT truth', () => {
+    it('a count that landed between the snapshot and the locks is IN the close audit', async () => {
+      setApprovedUser();
+      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+      shipmentLines(
+        // the snapshot still says "nobody counted this"...
+        [stagingLine({ id: 4, expectedQuantity: 10, countedQuantity: null })],
+        // ...MySQL says it was counted at 12 (+2 over) before we took the locks
+        [stagingLine({ id: 4, expectedQuantity: 10, countedQuantity: 12 })]
+      );
+      stagingClaims();
+
+      const resp = await PATCH(
+        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
+        { params: { id: SHIPMENT_ID } }
+      );
+
+      expect(resp.status).toBe(200);
+      expect(mockRecordChange.mock.calls[0][1]).toMatchObject({
+        actionType: 'SHIPMENT_CLOSE',
+        details: {
+          itemCount: 1,
+          countedItemCount: 1,
+          discrepancyItemCount: 1,
+          totalOver: 2,
+          totalUnder: 0,
+        },
+      });
+    });
+
+    it('the rollup censuses every linked line, GRADUATED ones included (unchanged)', async () => {
+      setApprovedUser();
+      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+      shipmentLines([stagingLine({ id: 4, countedQuantity: 9 })], [
+        stagingLine({ id: 4, countedQuantity: 9 }),
+        stagingLine({ id: 9, status: 'GRADUATED', expectedQuantity: 5, countedQuantity: 5 }),
+      ]);
+      stagingClaims();
+
+      await PATCH(
+        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
+        { params: { id: SHIPMENT_ID } }
+      );
+
+      expect(mockRecordChange.mock.calls[0][1].details).toMatchObject({
+        itemCount: 2,
+        countedItemCount: 2,
+        totalUnder: 1,
+      });
+    });
+
+    it('the UNCOUNTED list names the CURRENT offenders, not the snapshot approximation', async () => {
+      setApprovedUser();
+      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+      shipmentLines(
+        // the snapshot believes both lines are counted...
+        [stagingLine({ id: 4 }), stagingLine({ id: 9 })],
+        // ...but line 9's count was undone (or it was linked uncounted) since
+        [stagingLine({ id: 4 }), stagingLine({ id: 9, countedQuantity: null })]
+      );
+      stagingClaims();
+
+      const resp = await PATCH(
+        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
+        { params: { id: SHIPMENT_ID } }
+      );
+
+      expect(resp.status).toBe(409);
+      const body = await resp.json();
+      // The OLD code named the snapshot's uncounted lines, which here was the
+      // empty list: the guard blocked and could not say what blocked it.
+      expect(body.uncountedItemIds).toEqual([9]);
+      expect(mockRecordChange).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // PIN 3 — the exact close-vs-graduation race, both halves.
+  // -------------------------------------------------------------------------
+
+  describe('close vs graduation', () => {
+    it('a line that graduates mid-close is a retriable 409, and the RETRY closes clean', async () => {
+      setApprovedUser();
+      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+      // Attempt 1: the snapshot still calls line 4 RECEIVED, the lock misses
+      // (graduation took it), and the current read shows it GRADUATED.
+      shipmentLines(
+        [stagingLine({ id: 4, countedQuantity: null })],
+        [stagingLine({ id: 4, status: 'GRADUATED', countedQuantity: 10 })]
+      );
+      stagingClaims({ lockable: [] });
+
+      const first = await PATCH(
+        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
+        { params: { id: SHIPMENT_ID } }
+      );
+
+      expect(first.status).toBe(409);
+      expect((await first.json()).retriable).toBe(true);
+      expect(mockRecordChange).not.toHaveBeenCalled();
+
+      // Attempt 2: the caller re-sends the identical request. Its snapshot now
+      // agrees — line 4 is GRADUATED, so it is not receiving work, nothing is
+      // locked, and the close settles with the graduated line in its rollup.
+      shipmentLines(
+        [stagingLine({ id: 4, status: 'GRADUATED', countedQuantity: 10 })],
+        [stagingLine({ id: 4, status: 'GRADUATED', countedQuantity: 10 })]
+      );
+      stagingClaims();
+
+      const second = await PATCH(
+        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
+        { params: { id: SHIPMENT_ID } }
+      );
+
+      expect(second.status).toBe(200);
+      expect(mockRecordChange).toHaveBeenCalledTimes(1);
+      expect(mockRecordChange.mock.calls[0][1]).toMatchObject({
+        actionType: 'SHIPMENT_CLOSE',
+        details: { itemCount: 1, countedItemCount: 1 },
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The membership comparison is a real SET comparison now.
+  // -------------------------------------------------------------------------
+
+  describe('membership', () => {
+    it('ABORTS when a line was LINKED since the snapshot', async () => {
+      setApprovedUser();
+      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+      shipmentLines([stagingLine({ id: 11 })], [
+        stagingLine({ id: 11 }),
+        stagingLine({ id: 12 }),
+      ]);
+      stagingClaims();
+
+      const resp = await PATCH(
+        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CANCELLED' }),
+        { params: { id: SHIPMENT_ID } }
+      );
+
+      expect(resp.status).toBe(409);
+      expect((await resp.json()).error).toMatch(/membership changed/i);
       expect(unlinkClaims()).toHaveLength(0);
       expect(mockRecordChange).not.toHaveBeenCalled();
     });
@@ -1017,9 +1203,10 @@ describe('PATCH /api/inbound-shipments/[id] — membership re-read (FD-2)', () =
       setApprovedUser();
       db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
       db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-      stagingLines({ lines: [{ id: 11 }, { id: 12 }] });
-      // line 12 was unlinked by somebody else in the meantime
-      stagingClaims({ members: [11] });
+      shipmentLines([stagingLine({ id: 11 }), stagingLine({ id: 12 })], [
+        stagingLine({ id: 11 }),
+      ]);
+      stagingClaims({ lockable: [11] });
 
       const resp = await PATCH(
         mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CANCELLED' }),
@@ -1031,49 +1218,35 @@ describe('PATCH /api/inbound-shipments/[id] — membership re-read (FD-2)', () =
       expect(mockRecordChange).not.toHaveBeenCalled();
     });
 
-    it('re-reads the membership AFTER the header claim, ascending', async () => {
+    it('THE SIZE-EQUALITY TRAP: one line out, one line in, same COUNT — still refused', async () => {
       setApprovedUser();
       db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-      const order: string[] = [];
-      const locked = new Set<number>();
-      db.stagingItem.updateMany.mockImplementation(async (args: any) => {
-        if (args.data && 'shipmentId' in args.data) return { count: 1 };
-        if (args.where.status === 'GRADUATED') {
-          order.push('gate:GRADUATED');
-          return { count: 0 };
-        }
-        if (args.where.id !== undefined) {
-          order.push(`item:${args.where.id}`);
-          locked.add(args.where.id);
-          return { count: 1 };
-        }
-        order.push('membership');
-        return { count: locked.size };
-      });
-      db.inboundShipment.updateMany.mockImplementation(async () => {
-        order.push('shipment');
-        return { count: 1 };
-      });
-      db.stagingItem.findMany.mockResolvedValue([{ id: 7 }, { id: 12 }]);
+      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
+      // Locked {11,12}; current {11,13}. Two before, two after — the old
+      // size-equality argument would have called this an unchanged membership
+      // and unlinked a box (13) it never held.
+      shipmentLines([stagingLine({ id: 11 }), stagingLine({ id: 12 })], [
+        stagingLine({ id: 11 }),
+        stagingLine({ id: 13 }),
+      ]);
+      stagingClaims();
 
       const resp = await PATCH(
         mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CANCELLED' }),
         { params: { id: SHIPMENT_ID } }
       );
 
-      expect(resp.status).toBe(200);
-      // locks first, then the header, then the re-read — ascending both times
-      expect(order.slice(0, 3)).toEqual(['item:7', 'item:12', 'shipment']);
-      const reread = order.slice(order.indexOf('shipment') + 1);
-      expect(reread.filter((o) => o.startsWith('item:'))).toEqual(['item:7', 'item:12']);
-      expect(reread).toContain('membership');
+      expect(resp.status).toBe(409);
+      expect((await resp.json()).error).toMatch(/membership changed/i);
+      expect(unlinkClaims()).toHaveLength(0);
+      expect(mockRecordChange).not.toHaveBeenCalled();
     });
 
     it('pins shipmentId in EVERY line claim (a line cannot be locked through another header)', async () => {
       setApprovedUser();
       db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
       db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-      stagingLines({ lines: [{ id: 11 }] });
+      shipmentLines([stagingLine({ id: 11 })]);
       stagingClaims();
 
       await PATCH(
@@ -1092,65 +1265,28 @@ describe('PATCH /api/inbound-shipments/[id] — membership re-read (FD-2)', () =
       }
     });
 
-    it('names the CONFIRMED-current lines as unlinkedItemIds', async () => {
+    it('names the CURRENT RECEIVED members as unlinkedItemIds', async () => {
       setApprovedUser();
       db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
       db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-      stagingLines({ lines: [{ id: 11 }, { id: 12 }] });
+      // A DISCARDED line rides along in the current read: it is linked, but it
+      // is not what the unlink touches, so it must not be reported as unlinked.
+      shipmentLines([stagingLine({ id: 11 }), stagingLine({ id: 12 })], [
+        stagingLine({ id: 11 }),
+        stagingLine({ id: 12 }),
+        stagingLine({ id: 20, status: 'DISCARDED', countedQuantity: null }),
+      ]);
       stagingClaims();
 
-      await PATCH(
+      const resp = await PATCH(
         mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CANCELLED' }),
         { params: { id: SHIPMENT_ID } }
       );
 
+      expect(resp.status).toBe(200);
       expect(mockRecordChange.mock.calls[0][1].details).toEqual({
         unlinkedItemIds: [11, 12],
       });
-    });
-  });
-
-  describe('CLOSE', () => {
-    it('ABORTS with a retriable 409 when a line was LINKED since the snapshot', async () => {
-      setApprovedUser();
-      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-      db.stagingItem.findMany.mockResolvedValue([
-        { id: 4, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: 10 },
-      ]);
-      // counted, so the close guard passes — but a second line is linked now
-      stagingClaims({ members: [4, 9] });
-
-      const resp = await PATCH(
-        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
-        { params: { id: SHIPMENT_ID } }
-      );
-
-      expect(resp.status).toBe(409);
-      const body = await resp.json();
-      expect(body.error).toMatch(/membership changed/i);
-      expect(body.retriable).toBe(true);
-      expect(mockRecordChange).not.toHaveBeenCalled();
-    });
-
-    it('pins shipmentId in every line claim on the close path too', async () => {
-      setApprovedUser();
-      db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
-      db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-      db.stagingItem.findMany.mockResolvedValue([
-        { id: 4, status: 'RECEIVED', expectedQuantity: 10, countedQuantity: 10 },
-      ]);
-      stagingClaims();
-
-      const resp = await PATCH(
-        mkReq(`http://t/api/inbound-shipments/${SHIPMENT_ID}`, 'PATCH', { status: 'CLOSED' }),
-        { params: { id: SHIPMENT_ID } }
-      );
-
-      expect(resp.status).toBe(200);
-      for (const claim of lineClaims()) {
-        expect(claim.where.shipmentId).toBe(SHIPMENT_ID);
-      }
     });
   });
 
@@ -1158,7 +1294,7 @@ describe('PATCH /api/inbound-shipments/[id] — membership re-read (FD-2)', () =
     setApprovedUser();
     db.inboundShipment.findUnique.mockResolvedValue(shipmentRow());
     db.inboundShipment.updateMany.mockResolvedValue({ count: 1 });
-    stagingLines({ lines: [{ id: 11 }] });
+    shipmentLines([stagingLine({ id: 11 })]);
     stagingClaims();
 
     const deadlock: any = new Error('Transaction failed due to a write conflict or a deadlock');

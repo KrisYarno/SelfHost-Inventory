@@ -52,6 +52,18 @@ export const PatchStagingSchema = CreateStagingSchema.partial().extend({
   // truthful-data north star forbids — graduation reads this field and books
   // its ledger receipt cost from it. Absent = untouched.
   unitCostCents: z.number().int().min(0).max(100_000_000).nullable().optional(),
+  // FD2-2 (fix round 3): the OPTIONAL cost PRECONDITION. When present, the cost
+  // write only lands if the row still carries exactly this value — the check
+  // becomes the WHERE instead of a client-side comparison the caller made some
+  // milliseconds ago. A miss is a named, retriable 409 (COST_DRIFT).
+  //
+  // ABSENT and NULL are different requests, and the route reads them that way:
+  // absent = write unconditionally (the manual per-line cost save, unchanged);
+  // `null` = "only if this line is still unpriced". Both `.nullable()` and
+  // `.optional()` are therefore load-bearing.
+  //
+  // NOT a written column: it never reaches `data` and never reaches the diff.
+  ifUnitCostCents: z.number().int().min(0).max(100_000_000).nullable().optional(),
 });
 
 /**
@@ -123,6 +135,33 @@ export function assertStagingPatchOmitsCount(raw: unknown): void {
       },
     ]);
   }
+}
+
+/**
+ * A cost precondition must guard an actual cost write (FD2-2).
+ *
+ * `ifUnitCostCents` conditions the `unitCostCents` write and nothing else, so a
+ * body that sends the precondition WITHOUT the write asks for a guard over a
+ * statement that will never run — and would get a 200 back, having enforced
+ * nothing. Refusing is the only honest answer.
+ *
+ * Post-parse `assert*` helper, per the house rule: request schemas stay plain
+ * ZodObjects (the MCP adapter reads `.shape`), so cross-field rules never become
+ * `.refine`. The issue is addressed to `unitCostCents` — the half that is
+ * missing.
+ */
+export function assertStagingCostPreconditionPaired(input: PatchStagingInput): void {
+  if (input.ifUnitCostCents === undefined) return;
+  if (input.unitCostCents !== undefined) return;
+
+  throw new z.ZodError([
+    {
+      code: z.ZodIssueCode.custom,
+      path: ['unitCostCents'],
+      message:
+        'ifUnitCostCents is a precondition on the unitCostCents write — send the cost it should guard, or drop the precondition',
+    },
+  ]);
 }
 
 /**

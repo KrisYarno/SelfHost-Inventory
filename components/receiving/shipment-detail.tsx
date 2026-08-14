@@ -37,6 +37,7 @@ import {
 } from "@/components/staging/graduate-dialog";
 import {
   FreightCalculatorPanel,
+  type AllocationWrite,
   type CalculatorLine,
   type PartialAllocationWriteError,
 } from "@/components/receiving/freight-calculator-panel";
@@ -146,6 +147,8 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
   const [costWriteReport, setCostWriteReport] = useState<{
     written: number[];
     pending: number[];
+    /** The server refused a cost precondition (FD2-2): the bill is dead. */
+    drift: boolean;
   } | null>(null);
 
   const [graduateItem, setGraduateItem] = useState<GraduateStagingItem | null>(null);
@@ -305,22 +308,33 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
       });
   }, [shipment]);
 
-  const handleAcceptAllocation = async (
-    updates: Array<{ id: number; unitCostCents: number }>,
-  ) => {
+  const handleAcceptAllocation = async (updates: AllocationWrite[]) => {
     const written: number[] = [];
     setCostWriteReport(null);
     try {
       // Sequential on purpose: each PATCH is its own audited change, and a
       // half-applied burst is easier to read in the log than a racing one.
+      //
+      // FD2-2: every write carries `ifUnitCostCents` — the cost the panel's
+      // frozen bill expects that row to still hold — so the drift check runs in
+      // the server's WHERE rather than in a comparison the panel made a render
+      // ago. The panel's leading entries are RESTATES of lines this bill already
+      // wrote (same value, guarded), which is how a revert-to-frozen-base is
+      // caught before any further money is written.
       for (const update of updates) {
         await updateLine.mutateAsync({
           id: update.id,
-          body: { unitCostCents: update.unitCostCents },
+          body: {
+            unitCostCents: update.unitCostCents,
+            ifUnitCostCents: update.ifUnitCostCents,
+          },
         });
         written.push(update.id);
       }
-      toast.success(`Landed cost written to ${updates.length} line(s)`);
+      // "written or confirmed": on a retry some of these were RESTATES of lines
+      // this bill had already written, and claiming they were all fresh writes
+      // would overstate what just happened.
+      toast.success(`Landed cost written or confirmed on ${updates.length} line(s)`);
     } catch (err) {
       // W1S-5: RETHROW. These PATCHes are not one transaction, so swallowing the
       // failure told the operator "done" while some lines carried the new landed
@@ -328,9 +342,14 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
       // written, cleared the bill they would need to finish the job. Record where
       // it stopped, say so, and let the panel keep everything.
       console.error("Error writing allocated costs:", err);
+      // FD2-2: a refused PRECONDITION is a different failure from a broken one.
+      // Nothing is retriable after it — the shipment is no longer the one this
+      // split describes — so the report must not say "Accept again".
+      const drift = (err as ShipmentApiError)?.code === "COST_DRIFT";
       setCostWriteReport({
         written,
         pending: updates.map((u) => u.id).filter((id) => !written.includes(id)),
+        drift,
       });
       toast.error(err instanceof Error ? err.message : "Failed to write the costs");
       // FD-1: the rethrow now CARRIES the ids that wrote. Each successful PATCH
@@ -342,6 +361,9 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
       const failure: PartialAllocationWriteError =
         err instanceof Error ? err : new Error("Failed to write the costs");
       failure.writtenLineIds = written;
+      // FD2-2: and the KIND, so the panel invalidates the whole bill rather than
+      // offering a retry that cannot succeed. A named field, not parsed prose.
+      if (drift) failure.kind = "COST_DRIFT";
       throw failure;
     }
   };
@@ -478,7 +500,14 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
               {costWriteReport.written.length > 0
                 ? `Written: line(s) ${costWriteReport.written.join(", ")}.`
                 : "No line was written."}
-              {` Not written: line(s) ${costWriteReport.pending.join(", ")}. The bill is still in the calculator — fix the problem and Accept again, but re-enter costs only for the lines above.`}
+              {` Not written: line(s) ${costWriteReport.pending.join(", ")}.`}
+              {costWriteReport.drift
+                ? // FD2-2: the server refused a cost precondition, so the bill in
+                  // the calculator no longer describes this shipment. Telling the
+                  // operator to Accept again would be telling them to do the one
+                  // thing that cannot work.
+                  " A line's cost changed while the bill was open, so the whole bill was thrown away — clear it and re-enter the freight against the costs on screen."
+                : " The bill is still in the calculator — fix the problem and Accept again, but re-enter costs only for the lines above."}
             </p>
           </div>
         )}

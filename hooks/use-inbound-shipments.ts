@@ -210,6 +210,13 @@ export function useUpdateInboundShipment() {
 export interface UpdateStagingLineInput {
   /** INT cents; `null` un-prices the line (unknown), which is NOT 0. */
   unitCostCents?: number | null;
+  /**
+   * FD2-2: the cost PRECONDITION for the write above. Present = "write only if
+   * the row still carries exactly this"; a miss is a 409 with code COST_DRIFT.
+   * ABSENT and `null` mean different things (unconditional vs "still unpriced"),
+   * so this is never sent as `undefined` deliberately — omit the key instead.
+   */
+  ifUnitCostCents?: number | null;
   /** Join a receipt, or `null` to leave one. */
   shipmentId?: string | null;
 }

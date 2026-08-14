@@ -53,6 +53,24 @@ import {
  * invalidates the whole bill by name instead of quietly re-basing it. Nothing is
  * ever recomputed mid-session.
  *
+ * FD2-2 (fix round 3) — THE DRIFT CHECK IS THE SERVER'S. Everything compared
+ * above is a render old, and the window between the comparison and the write is
+ * exactly where somebody REVERTS a written line to the frozen base: the check
+ * passes (it looks like our own line waiting to refresh), the retry skips it as
+ * already written, and the bill completes with that line's freight silently
+ * missing. So every write carries `ifUnitCostCents` — the value it expects the
+ * row to still hold — and the server makes that its WHERE. A retry also
+ * RESTATES the lines it already wrote, at the cost it wrote them with: an
+ * idempotent no-op whose only job is to make the server prove they are
+ * untouched.
+ *
+ * THE SEAM (S12, extended): the caller rethrows a `PartialAllocationWriteError`.
+ * `writtenLineIds` names the lines that landed; `kind: "COST_DRIFT"` says the
+ * SERVER refused a precondition. A named field rather than a parsed message —
+ * error prose is not a contract. On drift the whole bill is invalidated through
+ * the same surface a row-level change uses, because half a bill is not an
+ * answer.
+ *
  * Accept hands back the per-line unit costs; writing them is the caller's job.
  * A caller whose write FAILS must REJECT (W1S-5), and must name the lines that
  * DID write (`writtenLineIds`), because that is the only way this panel can tell
@@ -75,9 +93,22 @@ export interface CalculatorLine {
  * partly. Without `writtenLineIds` the panel assumes NOTHING wrote and offers
  * every line again — safe (the frozen bill re-sends the identical unit cost, so
  * a re-write is idempotent) but noisier than the truth.
+ *
+ * `kind: "COST_DRIFT"` (FD2-2) is the server's precondition refusal: a line no
+ * longer carries the cost this bill was written against. It invalidates the
+ * whole bill, so it is a named field rather than something read out of prose.
  */
 export interface PartialAllocationWriteError extends Error {
   writtenLineIds?: number[];
+  kind?: "COST_DRIFT";
+}
+
+/** One line's write: the cost to set, and the cost it must still hold (FD2-2). */
+export interface AllocationWrite {
+  id: number;
+  unitCostCents: number;
+  /** The precondition. NULL is legal and means "still unpriced". */
+  ifUnitCostCents: number | null;
 }
 
 /** The frozen inputs of one bill: what the split was computed from. */
@@ -88,9 +119,7 @@ interface BillSession {
 
 interface FreightCalculatorPanelProps {
   lines: CalculatorLine[];
-  onAccept: (
-    updates: Array<{ id: number; unitCostCents: number }>,
-  ) => void | Promise<void>;
+  onAccept: (updates: AllocationWrite[]) => void | Promise<void>;
   disabled?: boolean;
   busy?: boolean;
 }
@@ -120,6 +149,11 @@ function writtenIdsFrom(error: unknown): number[] {
   const reported = (error as { writtenLineIds?: unknown } | null)?.writtenLineIds;
   if (!Array.isArray(reported)) return [];
   return reported.filter((id): id is number => typeof id === "number");
+}
+
+/** Did the SERVER refuse a cost precondition (FD2-2)? Same defensive read. */
+function isCostDrift(error: unknown): boolean {
+  return (error as { kind?: unknown } | null)?.kind === "COST_DRIFT";
 }
 
 const QTY_SOURCE_LABEL: Record<CalculatorLine["qtySource"], string> = {
@@ -160,10 +194,31 @@ export function FreightCalculatorPanel({
   const [written, setWritten] = useState<Record<number, number>>({});
   // Set when the caller's write REJECTED, so the panel never resets on a failure.
   const [writeFailed, setWriteFailed] = useState<string | null>(null);
+  /**
+   * The SERVER's drift refusal (FD2-2), rendered through the same invalidation
+   * surface a locally-detected change uses. Its own state because it survives a
+   * refetch: the rows may look perfectly consistent by the time it lands, and
+   * the bill is dead anyway.
+   */
+  const [driftInvalidation, setDriftInvalidation] = useState<string | null>(null);
+  /**
+   * A fan-out is OUT and its outcome is unknown (FD2-3). While that is true the
+   * bill may not be thrown away or re-entered: a late rejection carries
+   * `writtenLineIds` for lines that would otherwise land on a cleared session.
+   */
+  const [accepting, setAccepting] = useState(false);
 
   const freightCents = parseDollarsToCents(freightInput);
   const freightInvalid = freightInput.trim() !== "" && freightCents === null;
   const writtenIds = Object.keys(written).map(Number);
+  /**
+   * FD2-3: once ANY line of this bill has been written, the total is settled —
+   * part of it is already sitting in real row costs. Editing it would drop the
+   * session while `written` survived, leaving a panel with no bill, no Clear,
+   * and an Allocate blocked forever by ids nothing could clear. So the input
+   * goes read-only and Clear becomes the one transition out.
+   */
+  const totalLocked = writtenIds.length > 0;
 
   /** Wipe the bill entirely — the only way back from an invalidated session. */
   const clearBill = () => {
@@ -173,6 +228,7 @@ export function FreightCalculatorPanel({
     setFlooredConsent({});
     setWritten({});
     setWriteFailed(null);
+    setDriftInvalidation(null);
     setApplied(false);
   };
 
@@ -188,7 +244,7 @@ export function FreightCalculatorPanel({
    * and the honest answer is to throw the whole bill away rather than re-base
    * half of it.
    */
-  const invalidation = useMemo<string | null>(() => {
+  const localInvalidation = useMemo<string | null>(() => {
     if (!session) return null;
     const live = new Map(lines.map((line) => [line.id, line]));
     for (const snapshot of session.lines) {
@@ -206,6 +262,12 @@ export function FreightCalculatorPanel({
     }
     return null;
   }, [session, lines, written]);
+
+  /**
+   * The one invalidation the panel renders. The SERVER's verdict wins: it is the
+   * only one that saw the rows at the moment of the write.
+   */
+  const invalidation = driftInvalidation ?? localInvalidation;
 
   /** The bill is computable: frozen, and still describing this shipment. */
   const active = session !== null && invalidation === null;
@@ -309,18 +371,51 @@ export function FreightCalculatorPanel({
   const pending = writable.filter((s) => written[s.id as number] === undefined);
 
   const canAllocate =
-    !disabled && !busy && freightCents !== null && lines.length > 0 && invalidation === null &&
+    !disabled && !busy && !accepting &&
+    freightCents !== null && lines.length > 0 && invalidation === null &&
     // A partial write already landed part of this freight in the row costs;
     // re-freezing over them would allocate it a second time. Clear first.
-    writtenIds.length === 0;
+    !totalLocked;
 
   const canAccept =
     !disabled &&
     !busy &&
+    !accepting &&
     active &&
     ok !== null &&
     (validation === null || validation.status === "ok") &&
     pending.length > 0;
+
+  /**
+   * What a press of Accept SENDS (FD2-2). Two kinds of line, one shape:
+   *
+   *   RESTATES  lines this bill already wrote, re-sent at exactly the cost they
+   *             were written with and guarded on it. The write is a no-op; the
+   *             GUARD is the point — it is the only way to notice that somebody
+   *             put the line back to its old cost while the bill was open, which
+   *             would otherwise let a retry "complete" with that line's freight
+   *             quietly missing. They go FIRST, so a drift is caught before any
+   *             further money is written;
+   *   PENDING   the lines that have not written, at their frozen allocation,
+   *             guarded on the base the split was computed from.
+   */
+  const buildPayload = (): AllocationWrite[] => {
+    if (!session) return [];
+    const restates: AllocationWrite[] = session.lines
+      .filter((line) => written[line.id] !== undefined)
+      .map((line) => ({
+        id: line.id,
+        unitCostCents: written[line.id],
+        ifUnitCostCents: written[line.id],
+      }));
+    const frozenBase = new Map(session.lines.map((line) => [line.id, line.baseCents]));
+    const fresh: AllocationWrite[] = pending.map((s) => ({
+      id: s.id as number,
+      unitCostCents: s.suggestedUnitCostCents,
+      ifUnitCostCents: frozenBase.get(s.id as number) ?? null,
+    }));
+    return [...restates, ...fresh];
+  };
 
   const handleAllocate = () => {
     if (!canAllocate || freightCents === null) return;
@@ -336,10 +431,8 @@ export function FreightCalculatorPanel({
 
   const handleAccept = async () => {
     if (!canAccept) return;
-    const payload = pending.map((s) => ({
-      id: s.id as number,
-      unitCostCents: s.suggestedUnitCostCents,
-    }));
+    const payload = buildPayload();
+    setAccepting(true);
     try {
       await onAccept(payload);
     } catch (error) {
@@ -361,9 +454,27 @@ export function FreightCalculatorPanel({
           ),
         }));
       }
-      setWriteFailed(error instanceof Error ? error.message : "The costs were not written.");
+      if (isCostDrift(error)) {
+        // FD2-2: the server refused a precondition, so the shipment is not the
+        // one this split describes — and no amount of retrying makes it so. The
+        // WHOLE bill goes, by name, through the same surface a locally-detected
+        // change uses. Deliberately NOT also a "retry the rest" notice: there is
+        // nothing left to retry, and saying both would be incoherent.
+        setDriftInvalidation(
+          error instanceof Error
+            ? `A line's cost changed while this bill was open (${error.message}).`
+            : "A line's cost changed while this bill was open.",
+        );
+        setWriteFailed(null);
+      } else {
+        setWriteFailed(
+          error instanceof Error ? error.message : "The costs were not written.",
+        );
+      }
       setApplied(false);
       return;
+    } finally {
+      setAccepting(false);
     }
     // THE COMPOUNDING GUARD. Accepting rewrites each line's base cost to
     // base + freight — so leaving the bill in the box and pressing Accept again
@@ -396,6 +507,10 @@ export function FreightCalculatorPanel({
             inputMode="decimal"
             value={freightInput}
             onChange={(e) => {
+              // FD2-3: a written line makes this total history, not an input.
+              // (The field is read-only below; this is the same rule stated
+              // where the state actually changes.)
+              if (totalLocked) return;
               // A different total is a different bill: the frozen one goes.
               setFreightInput(e.target.value);
               setSession(null);
@@ -405,7 +520,8 @@ export function FreightCalculatorPanel({
               setWriteFailed(null);
             }}
             placeholder="0.00"
-            disabled={disabled}
+            readOnly={totalLocked}
+            disabled={disabled || accepting}
           />
         </div>
         <Button type="button" variant="secondary" onClick={handleAllocate} disabled={!canAllocate}>
@@ -662,10 +778,18 @@ export function FreightCalculatorPanel({
         <Button type="button" onClick={handleAccept} disabled={!canAccept}>
           {busy ? "Saving…" : "Accept suggested costs"}
         </Button>
-        {session && (
-          // Deliberately never disabled: throwing away a local bill needs no
-          // token and no permission, and an invalidated one has no other exit.
-          <Button type="button" variant="outline" onClick={clearBill}>
+        {(session !== null || totalLocked) && (
+          // FD2-3: offered whenever there is ANY session state to throw away —
+          // a bill, or the written lines that outlive one. It needs no token and
+          // no permission, and an invalidated bill has no other exit; the ONE
+          // moment it is refused is while a fan-out is in flight, because a late
+          // rejection would otherwise repopulate a bill somebody just cleared.
+          <Button
+            type="button"
+            variant="outline"
+            onClick={clearBill}
+            disabled={accepting}
+          >
             Clear the bill
           </Button>
         )}

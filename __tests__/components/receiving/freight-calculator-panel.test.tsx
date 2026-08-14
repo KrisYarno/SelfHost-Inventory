@@ -223,10 +223,11 @@ describe("edited allocations", () => {
     expect(screen.getByTestId("allocation-validation")).toHaveTextContent(/add up/i);
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
-    // Line 1: 500 + 4000/10 = 900. Line 2: 200 + 2000/5 = 600.
+    // Line 1: 500 + 4000/10 = 900. Line 2: 200 + 2000/5 = 600. Each carries the
+    // FROZEN base as its server-side precondition (FD2-2).
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 900 },
-      { id: 2, unitCostCents: 600 },
+      { id: 1, unitCostCents: 900, ifUnitCostCents: 500 },
+      { id: 2, unitCostCents: 600, ifUnitCostCents: 200 },
     ]);
   });
 
@@ -242,7 +243,9 @@ describe("edited allocations", () => {
     await enterBill(user, "60.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
-    expect(onAccept).toHaveBeenCalledWith([{ id: 1, unitCostCents: 1100 }]);
+    expect(onAccept).toHaveBeenCalledWith([
+      { id: 1, unitCostCents: 1100, ifUnitCostCents: 500 },
+    ]);
   });
 
   it("CLEARS the bill after Accept — the same freight must never land twice", async () => {
@@ -303,7 +306,9 @@ describe("inexact unit splits are withheld until somebody chooses (W1S-3)", () =
     await enterBill(user, "0.10");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
-    expect(onAccept).toHaveBeenCalledWith([{ id: 1, unitCostCents: 102 }]);
+    expect(onAccept).toHaveBeenCalledWith([
+      { id: 1, unitCostCents: 102, ifUnitCostCents: 100 },
+    ]);
   });
 
   it("holds Accept entirely when NO line can be written exactly", async () => {
@@ -332,8 +337,8 @@ describe("inexact unit splits are withheld until somebody chooses (W1S-3)", () =
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 102 },
-      { id: 2, unitCostCents: 102 },
+      { id: 1, unitCostCents: 102, ifUnitCostCents: 100 },
+      { id: 2, unitCostCents: 102, ifUnitCostCents: 100 },
     ]);
   });
 
@@ -351,8 +356,8 @@ describe("inexact unit splits are withheld until somebody chooses (W1S-3)", () =
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 101 },
-      { id: 2, unitCostCents: 103 },
+      { id: 1, unitCostCents: 101, ifUnitCostCents: 100 },
+      { id: 2, unitCostCents: 103, ifUnitCostCents: 100 },
     ]);
   });
 
@@ -458,7 +463,13 @@ describe("the bill session (FD-1)", () => {
     expect(screen.queryByTestId("allocation-invalidated")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
-    expect(onAccept).toHaveBeenLastCalledWith([{ id: 2, unitCostCents: 200 }]);
+    // The retry restates line 1 AT THE COST IT WAS WRITTEN WITH — an idempotent
+    // no-op whose only job is to make the server prove the line still carries it
+    // (FD2-2) — and then sends the line that did not write, at its frozen base.
+    expect(onAccept).toHaveBeenLastCalledWith([
+      { id: 1, unitCostCents: 200, ifUnitCostCents: 200 },
+      { id: 2, unitCostCents: 200, ifUnitCostCents: 100 },
+    ]);
     // 333 is the number the old panel would have re-sent for line 1.
     expect(JSON.stringify(onAccept.mock.calls)).not.toContain("333");
   });
@@ -600,7 +611,9 @@ describe("floored consent is keyed to the amounts (FD-4)", () => {
     ).toHaveTextContent("3");
 
     await user.click(screen.getByRole("button", { name: /accept/i }));
-    expect(onAccept).toHaveBeenCalledWith([{ id: 1, unitCostCents: 102 }]);
+    expect(onAccept).toHaveBeenCalledWith([
+      { id: 1, unitCostCents: 102, ifUnitCostCents: 100 },
+    ]);
   });
 
   it("re-consenting at the new amount releases the line again", async () => {
@@ -620,9 +633,241 @@ describe("floored consent is keyed to the amounts (FD-4)", () => {
 
     // 100 + floor(11/4) = 102, the 3c named above deliberately dropped.
     expect(onAccept).toHaveBeenCalledWith([
-      { id: 1, unitCostCents: 102 },
-      { id: 2, unitCostCents: 102 },
+      { id: 1, unitCostCents: 102, ifUnitCostCents: 100 },
+      { id: 2, unitCostCents: 102, ifUnitCostCents: 100 },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD2-2 (fix round 3) — the drift check moves to the SERVER.
+//
+// Everything the panel compares is a render old. Two losses came out of that
+// window: a third party reverting a written line to EXACTLY the frozen base
+// (the panel's own-write-or-frozen-base test passes, the retry skips the line,
+// and the bill "completes" with that line's freight missing), and any foreign
+// change to an unwritten line simply being overwritten. So every write now
+// carries the value it EXPECTS the row to hold, the server makes that the WHERE,
+// and a refusal invalidates the whole bill rather than half of it.
+// ---------------------------------------------------------------------------
+
+describe("the write carries its own precondition (FD2-2)", () => {
+  const PAIR = [
+    { id: 1, description: "A", qty: 1, qtySource: "counted" as const, baseCents: 100 },
+    { id: 2, description: "B", qty: 1, qtySource: "counted" as const, baseCents: 100 },
+  ];
+
+  it("sends the FROZEN base as the precondition, not the live row", async () => {
+    const user = userEvent.setup();
+    const onAccept = jest.fn();
+    const { rerender } = render(
+      <FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />,
+    );
+
+    await enterBill(user, "2.00");
+    // A refetch that does not change anything must not change the precondition.
+    rerender(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(onAccept).toHaveBeenCalledWith([
+      { id: 1, unitCostCents: 200, ifUnitCostCents: 100 },
+      { id: 2, unitCostCents: 200, ifUnitCostCents: 100 },
+    ]);
+  });
+
+  it("an unpriced line's precondition is NULL, not 0 (unknown is not free)", async () => {
+    const user = userEvent.setup();
+    const { onAccept } = renderPanel({
+      lines: [
+        { id: 1, description: "Priced", qty: 1, qtySource: "counted", baseCents: 100 },
+        { id: 2, description: "Unpriced", qty: 1, qtySource: "counted", baseCents: null },
+      ],
+    });
+
+    await enterBill(user, "1.00");
+    await user.clear(allocationInput(1));
+    await user.type(allocationInput(1), "50");
+    await user.clear(allocationInput(2));
+    await user.type(allocationInput(2), "50");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    // Line 2 has no base, so it is not writable at all — the only precondition
+    // sent is line 1's frozen 100c.
+    expect(onAccept).toHaveBeenCalledWith([
+      { id: 1, unitCostCents: 150, ifUnitCostCents: 100 },
+    ]);
+  });
+
+  it("THE REVERT: a COST_DRIFT refusal invalidates the WHOLE bill by name", async () => {
+    const user = userEvent.setup();
+    const drift = Object.assign(new Error("the cost changed while the bill was open"), {
+      kind: "COST_DRIFT" as const,
+      writtenLineIds: [] as number[],
+    });
+    const onAccept = jest
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Database is unavailable"), { writtenLineIds: [1] }),
+      )
+      .mockRejectedValueOnce(drift);
+    render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
+
+    await enterBill(user, "2.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    await screen.findByTestId("allocation-write-failed");
+
+    // The retry restates line 1 — and the server says that line no longer holds
+    // the cost we wrote (somebody put it back to 100c).
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    const invalidated = await screen.findByTestId("allocation-invalidated");
+    expect(invalidated).toHaveTextContent(/cost/i);
+    expect(invalidated).toHaveTextContent(/re-enter the bill/i);
+    // NOTHING may look completed: no applied notice, nothing further writable.
+    expect(screen.queryByTestId("allocation-applied")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /accept/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /allocate/i })).toBeDisabled();
+    // ...and there IS a way out.
+    expect(screen.getByRole("button", { name: /clear the bill/i })).toBeEnabled();
+  });
+
+  it("clearing a drift-invalidated bill starts from nothing", async () => {
+    const user = userEvent.setup();
+    const drift = Object.assign(new Error("the cost changed while the bill was open"), {
+      kind: "COST_DRIFT" as const,
+    });
+    const onAccept = jest.fn().mockRejectedValue(drift);
+    render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
+
+    await enterBill(user, "2.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    await screen.findByTestId("allocation-invalidated");
+    await user.click(screen.getByRole("button", { name: /clear the bill/i }));
+
+    expect(screen.queryByTestId("allocation-invalidated")).not.toBeInTheDocument();
+    expect(freightInput()).toHaveValue("");
+    expect(freightInput()).not.toHaveAttribute("readonly");
+    // ...and a fresh bill can be entered against the costs as they now are.
+    await user.type(freightInput(), "2.00");
+    expect(screen.getByRole("button", { name: /allocate/i })).toBeEnabled();
+  });
+
+  it("an ORDINARY failure (no drift) still keeps the bill retriable", async () => {
+    const user = userEvent.setup();
+    const onAccept = jest.fn().mockRejectedValue(new Error("Database is unavailable"));
+    render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
+
+    await enterBill(user, "2.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(await screen.findByTestId("allocation-write-failed")).toBeInTheDocument();
+    expect(screen.queryByTestId("allocation-invalidated")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /accept/i })).toBeEnabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD2-3 (fix round 3) — no orphaned session state.
+//
+// `written` outlived `session`: editing the freight total after a partial
+// failure dropped the bill but kept the written lines, so Clear (rendered only
+// when there was a session) vanished, Allocate stayed blocked by writtenIds, and
+// the panel was dead until the page remounted. And Clear was live DURING a
+// fan-out, so a late rejection could repopulate state on a bill the operator had
+// just thrown away.
+// ---------------------------------------------------------------------------
+
+describe("the session cannot be orphaned (FD2-3)", () => {
+  const PAIR = [
+    { id: 1, description: "A", qty: 1, qtySource: "counted" as const, baseCents: 100 },
+    { id: 2, description: "B", qty: 1, qtySource: "counted" as const, baseCents: 100 },
+  ];
+
+  /** A partial write: line 1 landed, line 2 did not. */
+  const partial = () =>
+    jest
+      .fn()
+      .mockRejectedValue(Object.assign(new Error("boom"), { writtenLineIds: [1] }));
+
+  it("THE ORPHAN: the freight total is READ-ONLY once a line has been written", async () => {
+    const user = userEvent.setup();
+    render(<FreightCalculatorPanel lines={PAIR} onAccept={partial()} />);
+
+    await enterBill(user, "2.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    await screen.findByTestId("allocation-write-failed");
+
+    expect(freightInput()).toHaveAttribute("readonly");
+    // Typing into it changes nothing — the bill and its written lines survive.
+    await user.type(freightInput(), "9");
+    expect(freightInput()).toHaveValue("2.00");
+    expect(screen.getByTestId("allocation-row-1")).toBeInTheDocument();
+    // Clear is the one transition, and it is offered.
+    expect(screen.getByRole("button", { name: /clear the bill/i })).toBeEnabled();
+  });
+
+  it("Clear is offered even when the bill is gone but written lines remain", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <FreightCalculatorPanel lines={PAIR} onAccept={partial()} />,
+    );
+
+    await enterBill(user, "2.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    await screen.findByTestId("allocation-write-failed");
+    // A line leaves the shipment: the bill is invalidated, written lines remain.
+    rerender(<FreightCalculatorPanel lines={[PAIR[0]]} onAccept={partial()} />);
+
+    expect(screen.getByTestId("allocation-invalidated")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /clear the bill/i })).toBeEnabled();
+  });
+
+  it("clearing recovers the panel completely (Allocate live, input writable)", async () => {
+    const user = userEvent.setup();
+    render(<FreightCalculatorPanel lines={PAIR} onAccept={partial()} />);
+
+    await enterBill(user, "2.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    await screen.findByTestId("allocation-write-failed");
+    await user.click(screen.getByRole("button", { name: /clear the bill/i }));
+
+    expect(freightInput()).toHaveValue("");
+    expect(freightInput()).not.toHaveAttribute("readonly");
+    expect(screen.queryByTestId("allocation-write-failed")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("line-written")).not.toBeInTheDocument();
+    await user.type(freightInput(), "1.00");
+    expect(screen.getByRole("button", { name: /allocate/i })).toBeEnabled();
+  });
+
+  it("Clear and the freight input are DISABLED while a fan-out is in flight", async () => {
+    const user = userEvent.setup();
+    let release: (() => void) | undefined;
+    const onAccept = jest.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
+
+    await enterBill(user, "2.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    // The writes are out and their outcome is unknown: nothing may be thrown
+    // away underneath them, or a late completion lands on a cleared bill.
+    expect(screen.getByRole("button", { name: /clear the bill/i })).toBeDisabled();
+    expect(freightInput()).toBeDisabled();
+    expect(screen.getByRole("button", { name: /accept/i })).toBeDisabled();
+
+    release?.();
+    // The write landed: the compounding guard clears the bill, and the panel is
+    // usable again (no orphaned lock, no stranded Clear).
+    await screen.findByTestId("allocation-applied");
+    expect(freightInput()).toBeEnabled();
+    expect(freightInput()).not.toHaveAttribute("readonly");
+    expect(
+      screen.queryByRole("button", { name: /clear the bill/i }),
+    ).not.toBeInTheDocument();
   });
 });
 
