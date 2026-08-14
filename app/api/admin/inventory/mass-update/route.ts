@@ -307,7 +307,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
                 throw new Error("Location not found");
               }
 
-              // Truthful delta: recompute from the in-tx current quantity, never trust the client-supplied delta (backfill reconciliation depends on logged delta == actual change). Client-version optimistic locking (reject stale overwrites) is a separate follow-up.
+              // Truthful delta: recompute from the in-tx current quantity, never trust the client-supplied delta (backfill reconciliation depends on logged delta == actual change). The row's `version` now increments on every write (T8, below), so stale-overwrite REJECTION (comparing a client-supplied expectedVersion) remains the separate follow-up — the counter it would read is finally maintained here.
               const existing = await tx.product_locations.findUnique({
                 where: {
                   productId_locationId: {
@@ -320,7 +320,13 @@ export const POST = apiHandler(async (request: NextRequest) => {
               const currentQuantity = existing?.quantity ?? 0;
               const serverDelta = newQuantity - currentQuantity;
 
-              // Skip if no actual change (based on the REAL delta, not the client's)
+              // Skip if no actual change (based on the REAL delta, not the
+              // client's). A no-change row stays a NO-WRITE row under T8 too:
+              // no ledger row, no `version` bump (the out-of-band drift
+              // detector reads that counter — bumping it for a row nobody
+              // moved would manufacture a change signal), and no mirror write.
+              // Consequence, deliberate: a no-op row does not repair a
+              // PRE-EXISTING mirror drift; the next real change to it does.
               if (serverDelta === 0) {
                 batchSuccess++;
                 continue;
@@ -348,7 +354,17 @@ export const POST = apiHandler(async (request: NextRequest) => {
                 },
               });
 
-              // Update or create product_locations entry with absolute quantity
+              // Update or create product_locations entry with absolute quantity.
+              // T8 (pack 2026-08-13 §T8): the version increment is the half of
+              // the house write block this route was missing. Every other stock
+              // writer goes through applyStockDelta, which bumps `version` on
+              // update and creates at 1 (the schema default is 0) — mass-update
+              // wrote the quantity and left the counter frozen, so the
+              // out-of-band drift detector could not see a mass count at all.
+              // Deliberately NOT adopting applyStockDelta: this route's
+              // semantics are absolute-set (`quantity: newQuantity`), not
+              // delta-increment, and its writes are batched into 50-row
+              // transactions. Only the missing fields are added, in place.
               await tx.product_locations.upsert({
                 where: {
                   productId_locationId: {
@@ -358,14 +374,41 @@ export const POST = apiHandler(async (request: NextRequest) => {
                 },
                 update: {
                   quantity: newQuantity,
+                  version: {
+                    increment: 1,
+                  },
                   updatedAt: new Date(),
                 },
                 create: {
                   productId,
                   locationId,
                   quantity: newQuantity,
+                  version: 1,
                 },
               });
+
+              // T8: the legacy loc-1 mirror. `products.quantity` is what the
+              // legacy readers consume for location 1, and applyStockDelta
+              // maintains it on every other stock path (`if (locationId === 1)`
+              // — non-loc-1 rows never touch it, which holds here too). A mass
+              // update moved product_locations and left the mirror behind, and
+              // since every weekly COUNT is entered through this route the two
+              // drifted apart by hundreds of units (the +939 phantom class).
+              //
+              // DIVERGENCE from applyStockDelta, deliberate: the house block
+              // writes `{ increment: delta }` because it IS a delta path. Here
+              // the value written is ABSOLUTE — `newQuantity`, the same value
+              // the upsert just set — which is what the pack's "writes the
+              // loc-1 mirror to MATCH" asks for. The two agree exactly whenever
+              // the mirror is already in sync; where they differ is on rows
+              // that ALREADY drifted, and absolute heals those instead of
+              // carrying the error forward forever.
+              if (locationId === 1) {
+                await tx.product.update({
+                  where: { id: productId },
+                  data: { quantity: newQuantity },
+                });
+              }
 
               batchProcessed.push({
                 ...change,

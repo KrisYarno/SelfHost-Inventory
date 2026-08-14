@@ -48,6 +48,9 @@ function makeTx(currentQuantity: number | null) {
       findUnique: jest
         .fn()
         .mockResolvedValue({ id: 1, name: "Widget", deletedAt: null }),
+      // T8: the loc-1 `products.quantity` mirror write. Call-shape suites only
+      // need it to exist; the mirror's VALUE is pinned by the state suite below.
+      update: jest.fn().mockResolvedValue({}),
     },
     location: {
       findUnique: jest.fn().mockResolvedValue({ id: 1, name: "Warehouse" }),
@@ -223,6 +226,7 @@ test("phantom-summary fix: a batch that throws mid-way contributes ZERO rows to 
         .fn()
         .mockResolvedValueOnce({ id: 1, name: "Widget", deletedAt: null })
         .mockResolvedValueOnce(null), // second product missing -> throw -> rollback
+      update: jest.fn().mockResolvedValue({}), // T8 loc-1 mirror write
     },
     location: {
       findUnique: jest.fn().mockResolvedValue({ id: 1, name: "Warehouse" }),
@@ -254,4 +258,216 @@ test("phantom-summary fix: a batch that throws mid-way contributes ZERO rows to 
   // Change 1 DID write a log inside the tx — proving the rollback (not a skipped
   // write) is what keeps the phantom row out of the summary.
   expect(tx.inventory_logs.create).toHaveBeenCalledTimes(1);
+});
+
+// ---------------------------------------------------------------------------
+// T8 (contract pack 2026-08-13-fulllane-contracts §"T8 — Mass-update
+// ride-along") — the upsert maintains BOTH the row's `version` AND the loc-1
+// `products.quantity` mirror, in place, keeping absolute-set + batched-tx
+// semantics (mass-update deliberately does NOT adopt applyStockDelta).
+//
+// These are STATE assertions, not call-shape ones, on purpose. mass-update
+// writes an ABSOLUTE quantity while the house core `applyStockDelta` writes a
+// DELTA, so "was upsert called with the right argument" cannot answer the
+// question the bug is about: does `products.quantity` END UP EQUAL to the
+// location-1 row? That inequality is the +939-unit phantom drift class — every
+// weekly COUNT entered through mass-import moved product_locations and left the
+// legacy mirror (which legacy readers still consume) behind, and skipped the
+// `version` bump the registered out-of-band drift detector reads.
+//
+// This repo has no test DB (see __tests__/unit/lib/inventory.applyStockDelta.test.ts),
+// so the store below is a small in-memory Prisma stand-in modelling exactly the
+// semantics these pins depend on: scalar-vs-`{increment}` writes, and the
+// prisma/schema.prisma DEFAULTS on create — `quantity` 0 and **`version` 0**,
+// so a create that omits `version` lands at 0, NOT at 1.
+// ---------------------------------------------------------------------------
+
+type PlRow = {
+  productId: number;
+  locationId: number;
+  quantity: number;
+  version: number;
+};
+
+/** Prisma write-value semantics: `{ increment: n }` adds, anything else sets. */
+function applyWrite(row: Record<string, any>, data: Record<string, any>) {
+  for (const [field, value] of Object.entries(data)) {
+    if (value && typeof value === "object" && "increment" in value) {
+      row[field] = (row[field] ?? 0) + value.increment;
+    } else {
+      row[field] = value;
+    }
+  }
+}
+
+const plKey = (productId: number, locationId: number) => `${productId}:${locationId}`;
+
+/**
+ * A stateful stand-in for the batch TransactionClient. Every POST driven
+ * against the same store sees the previous POST's committed state, which is
+ * what makes the "two sequential mass-updates" pin a real sequence.
+ */
+function makeStore(seed: {
+  products: { id: number; name: string; quantity: number }[];
+  productLocations?: Array<Partial<PlRow> & { productId: number; locationId: number }>;
+}) {
+  const products = new Map(
+    seed.products.map((p) => [p.id, { deletedAt: null, ...p } as Record<string, any>])
+  );
+  const productLocations = new Map<string, PlRow>(
+    (seed.productLocations ?? []).map((r) => [
+      plKey(r.productId, r.locationId),
+      { quantity: 0, version: 0, ...r } as PlRow,
+    ])
+  );
+  const logs: any[] = [];
+
+  const tx = {
+    product: {
+      findUnique: async ({ where }: any) => products.get(where.id) ?? null,
+      update: async ({ where, data }: any) => {
+        const row = products.get(where.id);
+        if (!row) throw new Error(`no product ${where.id}`);
+        applyWrite(row, data);
+        return row;
+      },
+    },
+    location: {
+      findUnique: async ({ where }: any) => ({ id: where.id, name: `Location ${where.id}` }),
+    },
+    product_locations: {
+      findUnique: async ({ where }: any) => {
+        const { productId, locationId } = where.productId_locationId;
+        return productLocations.get(plKey(productId, locationId)) ?? null;
+      },
+      upsert: async ({ where, update, create }: any) => {
+        const { productId, locationId } = where.productId_locationId;
+        const existing = productLocations.get(plKey(productId, locationId));
+        if (existing) {
+          applyWrite(existing, update);
+          return existing;
+        }
+        // Schema defaults fill what `create` omits — see the note above.
+        const row = { quantity: 0, version: 0, ...create } as PlRow;
+        productLocations.set(plKey(productId, locationId), row);
+        return row;
+      },
+    },
+    inventory_logs: {
+      create: async ({ data }: any) => {
+        logs.push(data);
+        return { id: logs.length };
+      },
+    },
+  };
+
+  return {
+    tx,
+    logs,
+    product: (id: number) => products.get(id)!,
+    productLocation: (productId: number, locationId: number) =>
+      productLocations.get(plKey(productId, locationId)),
+  };
+}
+
+type Store = ReturnType<typeof makeStore>;
+
+/** Drive ONE mass-update POST against a store's live state. */
+async function massUpdate(
+  store: Store,
+  changes: Array<{ productId: number; locationId: number; newQuantity: number }>
+) {
+  db.$transaction.mockImplementation(async (cb: any) => cb(store.tx));
+  const res = await POST(
+    postWith({ changes: changes.map((c) => ({ ...c, delta: 0 })) })
+  );
+  expect(res.status).toBe(200);
+  return res;
+}
+
+describe("T8 — mass-update maintains product_locations.version", () => {
+  it("PIN 1: two sequential mass-updates on one loc-1 row => version +2, quantity = the LATER value", async () => {
+    const store = makeStore({
+      products: [{ id: 1, name: "Widget", quantity: 10 }],
+      productLocations: [{ productId: 1, locationId: 1, quantity: 10, version: 5 }],
+    });
+
+    await massUpdate(store, [{ productId: 1, locationId: 1, newQuantity: 4 }]);
+    await massUpdate(store, [{ productId: 1, locationId: 1, newQuantity: 7 }]);
+
+    const row = store.productLocation(1, 1)!;
+    expect(row.version).toBe(7); // 5 + 2 — one bump per real change
+    expect(row.quantity).toBe(7); // absolute-set semantics: the later value wins
+    expect(store.product(1).quantity).toBe(7); // and the mirror followed it
+  });
+
+  it("PIN 5: a first-ever (product, location) row is CREATED at version 1", async () => {
+    // The schema default is 0; applyStockDelta's create writes `version: 1`
+    // explicitly, and the pack says mass-update must too.
+    const store = makeStore({ products: [{ id: 1, name: "Widget", quantity: 0 }] });
+
+    await massUpdate(store, [{ productId: 1, locationId: 1, newQuantity: 4 }]);
+
+    const row = store.productLocation(1, 1)!;
+    expect(row.version).toBe(1);
+    expect(row.quantity).toBe(4);
+    expect(store.product(1).quantity).toBe(4); // the create path mirrors too
+  });
+});
+
+describe("T8 — mass-update maintains the loc-1 products.quantity mirror", () => {
+  it("PIN 2 (mirror-drift): post-write products.quantity == location-1 product_locations.quantity", async () => {
+    // Seeded ALREADY DRIFTED (+939), the exact production shape: past mass
+    // updates moved the location row and never touched the mirror. The write is
+    // ABSOLUTE, so the next real change heals the drift instead of carrying it.
+    const store = makeStore({
+      products: [{ id: 1, name: "Widget", quantity: 949 }],
+      productLocations: [{ productId: 1, locationId: 1, quantity: 10, version: 3 }],
+    });
+
+    await massUpdate(store, [{ productId: 1, locationId: 1, newQuantity: 42 }]);
+
+    const row = store.productLocation(1, 1)!;
+    expect(row.quantity).toBe(42);
+    expect(store.product(1).quantity).toBe(42);
+    expect(store.product(1).quantity).toBe(row.quantity); // the invariant itself
+  });
+
+  it("PIN 3: a NON-loc-1 update bumps its own row's version and leaves the mirror untouched", async () => {
+    const store = makeStore({
+      products: [{ id: 1, name: "Widget", quantity: 10 }],
+      productLocations: [
+        { productId: 1, locationId: 1, quantity: 10, version: 3 },
+        { productId: 1, locationId: 2, quantity: 10, version: 3 },
+      ],
+    });
+
+    await massUpdate(store, [{ productId: 1, locationId: 2, newQuantity: 4 }]);
+
+    expect(store.productLocation(1, 2)!.version).toBe(4);
+    expect(store.productLocation(1, 2)!.quantity).toBe(4);
+    // The mirror is location-1's, and location 1 did not move (house rule,
+    // verified against applyStockDelta's `if (locationId === 1)` guard).
+    expect(store.product(1).quantity).toBe(10);
+    expect(store.productLocation(1, 1)!.version).toBe(3);
+  });
+
+  it("PIN 4: a serverDelta === 0 row writes NEITHER the version NOR the mirror", async () => {
+    // Seeded drifted again, which makes the skip's scope explicit: a no-change
+    // row is a no-write row (no false 'this row changed' signal for the
+    // out-of-band detector), so it does NOT heal a pre-existing mirror drift
+    // either — the next REAL change does. Deliberate; see the route comment.
+    const store = makeStore({
+      products: [{ id: 1, name: "Widget", quantity: 949 }],
+      productLocations: [{ productId: 1, locationId: 1, quantity: 4, version: 5 }],
+    });
+
+    await massUpdate(store, [{ productId: 1, locationId: 1, newQuantity: 4 }]);
+
+    const row = store.productLocation(1, 1)!;
+    expect(row.version).toBe(5); // untouched
+    expect(row.quantity).toBe(4);
+    expect(store.product(1).quantity).toBe(949); // untouched, still drifted
+    expect(store.logs).toHaveLength(0); // and no ledger row, as before
+  });
 });
