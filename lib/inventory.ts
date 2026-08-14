@@ -32,6 +32,12 @@ export async function createInventoryLog(
     // the receiving header this movement came in on. Pure passthrough, same as
     // the three above — the writer decides, this function only stores.
     inboundShipmentId?: string | null;
+    // Inventory-accuracy lane (pack REV-11 T7, W2-1): the SOFT ref naming the
+    // external order this movement went out against. Same passthrough contract —
+    // and the same warning: every caller must hand over a SERVER-RESOLVED id
+    // (the fulfill/unfulfill path's own order, or resolveSelectedExternalOrderId's
+    // return). A client-supplied id written here is a forged attribution.
+    orderRecordId?: string | null;
   },
   tx?: Prisma.TransactionClient
 ) {
@@ -51,6 +57,7 @@ export async function createInventoryLog(
       unitCostCents: data.unitCostCents ?? null,
       batchId: data.batchId ?? null,
       inboundShipmentId: data.inboundShipmentId ?? null,
+      orderRecordId: data.orderRecordId ?? null,
     },
     // SECURITY: never `users: true` here — these rows are returned verbatim by
     // adjust/stock-in/transfer/batch-adjust responses, so a full User include
@@ -211,6 +218,8 @@ export async function applyStockDelta(
     batchId?: string | null;
     // Inventory-accuracy lane (seam S4): passthrough to createInventoryLog.
     inboundShipmentId?: string | null;
+    // Inventory-accuracy lane (W2-1): the same, for the order attribution.
+    orderRecordId?: string | null;
   }
 ): Promise<{
   log: Awaited<ReturnType<typeof createInventoryLog>>;
@@ -226,6 +235,7 @@ export async function applyStockDelta(
     unitCostCents,
     batchId,
     inboundShipmentId,
+    orderRecordId,
   } = args;
 
   // Create the log entry
@@ -240,6 +250,7 @@ export async function applyStockDelta(
       unitCostCents,
       batchId,
       inboundShipmentId,
+      orderRecordId,
     },
     tx
   );
@@ -329,14 +340,25 @@ export async function createInventoryAdjustment(
     reasonCode?: string | null;
     unitCostCents?: number | null;
     batchId?: string | null;
+    // W2-1 (pack T7): the chip's `order` value stamps the SERVER-RESOLVED order
+    // id onto the adjustment's ledger row. Passthrough only — this function does
+    // not resolve, validate or infer it.
+    orderRecordId?: string | null;
     record?: (
       tx: Prisma.TransactionClient,
       result: { log: Awaited<ReturnType<typeof createInventoryLog>>; newVersion: number }
     ) => Promise<void>;
   }
 ) {
-  const { logType, expectedVersion, reasonCode, unitCostCents, batchId, record } =
-    opts ?? {};
+  const {
+    logType,
+    expectedVersion,
+    reasonCode,
+    unitCostCents,
+    batchId,
+    orderRecordId,
+    record,
+  } = opts ?? {};
 
   const maxRetries = 3;
   let retryCount = 0;
@@ -405,6 +427,7 @@ export async function createInventoryAdjustment(
           reasonCode,
           unitCostCents,
           batchId,
+          orderRecordId,
         });
 
         // Record the change inside the SAME transaction as the stock write.
@@ -654,6 +677,13 @@ export async function createInventoryTransaction(
     quantityChange: number;
     notes?: string;
     expectedVersion?: number;
+    // W2-1 (pack T7): per-item coded reason, threaded to applyStockDelta. This
+    // path passed NONE before the chip — every row it wrote carried a null
+    // reason, which is why the manual leg is invisible to every classifier that
+    // reads one. PER ITEM, not per request, because the batch is a list of
+    // independent movements; today's callers happen to pass one value for all
+    // of them, and the shape does not force that to stay true.
+    reasonCode?: string | null;
   }>,
   metadata?: Record<string, unknown>,
   // Optional in-transaction recorder (change-tracking Task 8): invoked with the
@@ -665,9 +695,14 @@ export async function createInventoryTransaction(
   ) => Promise<void>,
   // Phase C (P-C1): NEW trailing options object (this path had none). opts.batchId
   // is threaded onto every ledger row so the companion audit event joins them.
-  opts?: { batchId?: string | null }
+  //
+  // W2-1: opts.orderRecordId is REQUEST-level (unlike reasonCode above) because
+  // one deduction is packed against at most one order — the caller resolved it
+  // once and every row it writes names that same order.
+  opts?: { batchId?: string | null; orderRecordId?: string | null }
 ) {
   const batchId = opts?.batchId ?? null;
+  const orderRecordId = opts?.orderRecordId ?? null;
   // Phase C (D6 / R-D18): the manual-order fulfillment path (deduct-simple ->
   // workbench complete-order) posts type "DEDUCTION" — the same business event as
   // an external-order sale, so it gets the SALE logType. Every other transaction
@@ -751,7 +786,12 @@ export async function createInventoryTransaction(
         locationId: item.locationId,
         delta: item.quantityChange,
         logType,
+        // W2-1: the chip's reason (per item) and the resolved order (per
+        // request). Both default to null, so a caller that sets neither writes
+        // exactly the row this path wrote before the chip existed.
+        reasonCode: item.reasonCode ?? null,
         batchId,
+        orderRecordId,
       });
 
       versions[`${item.productId}-${item.locationId}`] = newVersion;

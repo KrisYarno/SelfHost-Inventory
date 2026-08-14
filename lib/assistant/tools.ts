@@ -61,7 +61,11 @@ import {
   SALES_COMPANY_COVERAGE_NOTE,
   type CallerScopedSalesCoverage,
 } from "@/lib/assistant/sales-coverage";
-import { classifyWindowCoverage, type WindowCoverage } from "@/lib/reports/metrics-contract";
+import {
+  classifyWindowCoverage,
+  SHRINKAGE_CLASSIFICATION_DEFINITION,
+  type WindowCoverage,
+} from "@/lib/reports/metrics-contract";
 import {
   approvedProductIds,
   productIdentities,
@@ -2069,7 +2073,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `reason-less rows (how this shop ships pre-Lane-4) — is surfaced as ` +
       `coverage.unclassifiedOutboundUnits, NEVER as loss. valueAtCurrentCostCents is a ` +
       `known-cost subtotal — check costCoverage. UNCLASSIFIED is always relayed. ` +
-      `scope echoes the effective { days } this result covers. ${DATA_POSTURE}`,
+      `scope echoes the effective { days } this result covers. ` +
+      // W2-1 (design REV-2 disclosure): the intent chip makes the DAMAGE bucket
+      // step up on its deploy date. Carried in the DESCRIPTION, not in the tool's
+      // output, so the assistant reads it before it ever narrates a trend — and
+      // so no consumer's parsed result shape changes.
+      `${SHRINKAGE_CLASSIFICATION_DEFINITION} ${DATA_POSTURE}`,
     inputSchema: getShrinkageSchema,
     run: async (input) => {
       const args = getShrinkageSchema.parse(input);

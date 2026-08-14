@@ -60,14 +60,30 @@ export const SKIPPED_LINE_CLASSES: readonly SkippedLineClass[] = [
   'bundle',
 ];
 
-/** The only three fields the classification reads. */
+/**
+ * The fields the classification reads. `class` (W2-1 ride-along) is the
+ * STRUCTURAL answer stamped by the push site itself; the other three are the
+ * as-built heuristic that has to reconstruct it.
+ */
 export type ClassifiableLine = {
+  class?: SkippedLineClass;
   isBundle?: boolean;
   externalProductId?: string | null;
   externalVariantId?: string | null;
 };
 
+/**
+ * A RECORDED class always wins: the hook branch that pushed the line knew which
+ * of the three truths it was pushing, and that beats re-deducing it from the
+ * shape of the payload.
+ *
+ * The heuristic stays as the fallback rather than being deleted, because a line
+ * that reaches here without the field (built outside the hook, or by a caller
+ * written before it existed) must degrade to the old answer — not to a wrong
+ * one. `unavailable` is what an empty object has always meant here.
+ */
 export function classifySkippedLine(item: ClassifiableLine): SkippedLineClass {
+  if (item.class) return item.class;
   if (item.isBundle) return 'bundle';
   if (!item.externalProductId && !item.externalVariantId) return 'unavailable';
   return 'unmapped';

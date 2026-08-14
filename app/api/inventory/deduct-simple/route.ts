@@ -1,68 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  requireApproved,
-  requireCompanyMembership,
-  apiHandler,
-  requireCSRF,
-} from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { createInventoryTransaction } from "@/lib/inventory";
+import { mapDeductionIntent } from "@/lib/inventory/intent";
+import { resolveSelectedExternalOrderId } from "@/lib/orders/resolve-selected-order";
 import { SimpleDeductSchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
-import { AppError } from "@/lib/error-handling";
-import prisma from "@/lib/prisma";
 import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
 
-/**
- * Phase 0b-2 (spec REV-2 / OC-1 / G2-5): resolve the packer's selected external
- * order and prove the caller may reference it, BEFORE its id is written into the
- * audit event's details JSON.
- *
- * A client-supplied id is not evidence. Recording it unvalidated would
- * manufacture the exact false attribution this lane exists to remove — a forged
- * id would make another company's order look fulfilled out of our stock, and the
- * D1 reconciliation would read it as class-(c) evidence and believe it.
- *
- * BOTH failure modes — an id that resolves to nothing, and one that resolves to a
- * company the caller is not a member of — collapse into ONE 400 VALIDATION_ERROR.
- * Deliberate, and a departure from the fulfill route's 404s: there the order is
- * the addressed resource in the PATH, so "not found" is the honest answer. Here
- * it is an annotation on a body that WRITES STOCK, so the honest answer is "this
- * payload is not valid" — and one uniform outcome keeps the route from becoming
- * an order-id existence oracle for an approved user of another company. Never a
- * silent drop: an intent we cannot verify must fail the request, not ride along
- * as if it were true.
- *
- * The membership decision itself stays in `requireCompanyMembership` (the ONE
- * membership predicate — never re-implemented here); only its documented failure
- * signal is translated. A non-AppError (a DB fault) propagates untouched.
- */
-async function resolveSelectedExternalOrderId(
-  selectedExternalOrderId: string,
-  user: { id: number; isAdmin: boolean }
-): Promise<string> {
-  const order = await prisma.externalOrder.findUnique({
-    where: { id: selectedExternalOrderId },
-    select: { companyId: true },
-  });
-
-  if (order) {
-    try {
-      await requireCompanyMembership(user.id, order.companyId, user.isAdmin);
-      return selectedExternalOrderId;
-    } catch (error) {
-      if (!(error instanceof AppError)) throw error;
-    }
-  }
-
-  throw new AppError(
-    "selectedExternalOrderId does not reference an order you can access",
-    "VALIDATION_ERROR",
-    400
-  );
-}
+// W2-1 (pack REV-11 T7): the 0b-2 resolver that used to live here is now
+// lib/orders/resolve-selected-order.ts — the adjust surface's chip needs the
+// identical membership-validated lookup, and two copies of "prove the caller may
+// reference this order" is one copy too many. This route's behaviour across the
+// extraction is UNCHANGED and pinned as such by the untouched 0b-2 suite in
+// __tests__/integration/api/change-tracking-ledger-semantics.test.ts.
 
 export const POST = apiHandler(async (request: NextRequest) => {
   const { user } = await requireApproved();
@@ -81,12 +34,25 @@ export const POST = apiHandler(async (request: NextRequest) => {
     ? await resolveSelectedExternalOrderId(body.selectedExternalOrderId, user)
     : undefined;
 
+  // W2-1 (pack T7): the chip's TWO values on this surface. `damage-loss` never
+  // arrives — the schema refuses it (see lib/validation/workbench.ts) — so the
+  // reason is always null here; the mapping is still read through the shared
+  // table rather than assumed, so the surfaces cannot drift apart.
+  const intentMapping = mapDeductionIntent(body.intent);
+
+  // The LEDGER stamp is the chip's decision: only an explicit `order` intent
+  // puts the resolved id on the rows. 0b-2's AUDIT accrual below is deliberately
+  // NOT gated on the chip — it predates it, it is the backfill's source, and
+  // narrowing it would silently discard evidence that is already being written.
+  const orderRecordId = intentMapping.attributesOrder ? selectedExternalOrderId ?? null : null;
+
   // Transform items for inventory transaction
   const transactionItems = body.items.map((item) => ({
     productId: item.productId,
     locationId: body.locationId,
     quantityChange: -Math.abs(item.quantity),
     notes: body.notes,
+    reasonCode: intentMapping.reasonCode,
   }));
 
   const operationId = randomUUID();
@@ -124,14 +90,19 @@ export const POST = apiHandler(async (request: NextRequest) => {
           // does not exist.
           ...(body.orderReference ? { orderReference: body.orderReference } : {}),
           ...(selectedExternalOrderId ? { selectedExternalOrderId } : {}),
+          // W2-1: the chip, when the packer actually tapped it. ABSENT otherwise,
+          // for the same reason as the two keys above — a null would be counted
+          // as a classification that never happened.
+          ...(body.intent ? { intent: body.intent } : {}),
         },
         affectedCount: logs.length,
         batchId,
       });
     },
     // ER-C3: thread the event batchId so every DEDUCTION->SALE ledger row joins
-    // this deduction's bulk-update event.
-    { batchId }
+    // this deduction's bulk-update event. W2-1 adds the order attribution, which
+    // is null unless the chip said `order` AND the resolver returned an id.
+    { batchId, orderRecordId }
   );
 
   const response = NextResponse.json({

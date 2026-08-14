@@ -589,6 +589,11 @@ export async function fulfillExternalOrder(
                   // neutral adjustment; batchId joins the row to the audit event.
                   logType: inventory_logs_logType.SALE,
                   batchId,
+                  // W2-1 (pack T7 stamping): every component row names the order
+                  // it went out against. `order.id` is the row this transaction
+                  // LOADED from the path parameter, already membership-checked by
+                  // the route — never a body field, so there is nothing to forge.
+                  orderRecordId: order.id,
                 },
                 tx
               );
@@ -725,6 +730,10 @@ export async function fulfillExternalOrder(
               // the row to the fulfillment audit event.
               logType: inventory_logs_logType.SALE,
               batchId,
+              // W2-1 (pack T7 stamping): the order this sale belongs to, taken
+              // from the transaction's own loaded order (path-addressed and
+              // membership-checked by the route), never from the request body.
+              orderRecordId: order.id,
             },
             tx
           );

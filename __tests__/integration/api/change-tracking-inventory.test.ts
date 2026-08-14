@@ -141,7 +141,13 @@ describe("adjust — INVENTORY_ADJUSTMENT recorded in the stock-write tx", () =>
   // Phase C (P-C5): reasonCode persists on the ledger row; the previously-stripped
   // free-text reason + notes now persist in the event details; row<->event join by
   // the shared batchId.
-  it("persists reasonCode on the ledger + reason/notes in details, joined by batchId", async () => {
+  //
+  // AMENDED at W2-1 (pack REV-11 T7). The ledger row still carries a reasonCode
+  // and the join still holds — but the code is now DERIVED from the intent chip
+  // instead of taken from the request body, because the chip replaced the
+  // coded-reason select and the route refuses the old vocabulary outright (see
+  // the refusal pin below). The `damage-loss` chip is this test's DAMAGE.
+  it("persists the chip-derived reasonCode on the ledger + reason/notes in details, joined by batchId", async () => {
     const tx = makeTx();
     driveTxWith(tx);
     db.product.findUnique.mockResolvedValue({ name: "Widget" } as any);
@@ -151,7 +157,7 @@ describe("adjust — INVENTORY_ADJUSTMENT recorded in the stock-write tx", () =>
       productId: 5,
       locationId: 2,
       delta: -4,
-      reasonCode: "DAMAGE",
+      intent: "damage-loss",
       reason: "Broken on arrival",
       notes: "Two cartons crushed",
     }));
@@ -186,7 +192,34 @@ describe("adjust — INVENTORY_ADJUSTMENT recorded in the stock-write tx", () =>
     expect(details.notes).toBeUndefined();
   });
 
-  it("rejects an unknown reasonCode before any write (400 via ZodError)", async () => {
+  // SUPERSEDED at W2-1 (pack REV-11 T7): this route used to accept the closed
+  // reasonCode enum and reject only values outside it. The chip replaced that
+  // select, so the WHOLE vocabulary — valid members included — is now refused
+  // here before any write. Refused rather than stripped, so a stale client is
+  // told, instead of quietly having its classification dropped on the floor.
+  //
+  // (The shared InventoryAdjustmentSchema still carries reasonCode for
+  // batch-adjust, whose journal path legitimately uses it; the pins for that
+  // schema below are unchanged.)
+  it("refuses ANY reasonCode before any write, valid enum members included", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+    db.product.findUnique.mockResolvedValue({ name: "Widget" } as any);
+
+    for (const reasonCode of ["DAMAGE", "BOGUS"]) {
+      await expect(
+        ADJUST(post("http://x/api/inventory/adjust", {
+          productId: 5,
+          locationId: 2,
+          delta: 3,
+          reasonCode,
+        }))
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR", statusCode: 400 });
+    }
+    expect(tx.inventory_logs.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown INTENT before any write (400 via ZodError)", async () => {
     const tx = makeTx();
     driveTxWith(tx);
     db.product.findUnique.mockResolvedValue({ name: "Widget" } as any);
@@ -196,7 +229,7 @@ describe("adjust — INVENTORY_ADJUSTMENT recorded in the stock-write tx", () =>
         productId: 5,
         locationId: 2,
         delta: 3,
-        reasonCode: "BOGUS",
+        intent: "BOGUS",
       }))
     ).rejects.toBeInstanceOf(ZodError);
     expect(tx.inventory_logs.create).not.toHaveBeenCalled();

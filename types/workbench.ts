@@ -1,5 +1,6 @@
 import { ProductWithQuantity } from "./product";
 import type { ExternalOrder } from "./external-orders";
+import type { SkippedLineClass } from "@/lib/workbench/skipped-lines";
 
 // Order item represents a product in the current order
 export interface OrderItem {
@@ -29,6 +30,14 @@ export interface SelectedExternalOrder {
 // 1:1 with a single internal product). They are surfaced as a separate row so
 // operators see "Bundle — fulfill via Order Details" instead of an unmapped
 // warning that suggests no mapping exists.
+//
+// class (W2-1 ride-along, registered at W0.5-a): the STRUCTURAL truth — which of
+// `selectExternalOrder`'s three push branches produced this line. Until now that
+// was re-derived downstream from "does the line carry an external product
+// reference?", which is correct only because the branch that omits the reference
+// happens to be the one that means `unavailable`. The hook knows which branch it
+// took; recording it removes the inference. Optional so a line built anywhere
+// else still type-checks — classifySkippedLine falls back to the old heuristic.
 export interface UnmappedExternalItem {
   name: string;
   sku?: string;
@@ -37,6 +46,7 @@ export interface UnmappedExternalItem {
   externalProductId?: string;
   externalVariantId?: string;
   isBundle?: boolean;
+  class?: SkippedLineClass;
 }
 
 // Workbench state interface

@@ -19,17 +19,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { ValueChip } from "@/components/ui/value-chip";
 import { ContextTag } from "@/components/ui/context-tag";
 import { InlineHighlight } from "@/components/ui/inline-highlight";
 import { ReceivingRedirectPrompt } from "@/components/inventory/receiving-redirect-prompt";
+import { IntentChip } from "@/components/inventory/intent-chip";
+import type { DeductionIntent } from "@/lib/inventory/intent";
 import type { DialogProduct } from "@/types/inventory";
 
 interface QuickAdjustDialogProps {
@@ -39,15 +34,11 @@ interface QuickAdjustDialogProps {
   onSuccess?: () => void;
 }
 
-// Phase C (P-C5): the optional coded reasons (mirrors REASON_CODES in
-// lib/validation/inventory.ts) with human-facing labels.
-const REASON_CODE_OPTIONS: { value: string; label: string }[] = [
-  { value: "COUNT", label: "Count correction" },
-  { value: "DAMAGE", label: "Damage" },
-  { value: "THEFT", label: "Theft" },
-  { value: "EXPIRY", label: "Expiry" },
-  { value: "CORRECTION", label: "Correction" },
-];
+// W2-1 (pack REV-11 T7): the Phase-C coded-reason SELECT that used to live here
+// is gone. The intent chip replaced it — three values instead of five, mapped
+// server-side — and the adjust route now REFUSES the old vocabulary outright,
+// so leaving the select in place would have offered operators a field the API
+// rejects. One question, one answer, one place it is interpreted.
 
 export function QuickAdjustDialog({
   open,
@@ -59,7 +50,10 @@ export function QuickAdjustDialog({
   const [adjustmentType, setAdjustmentType] = useState<"add" | "remove">("add");
   const [quantity, setQuantity] = useState("");
   const [reason, setReason] = useState("");
-  const [reasonCode, setReasonCode] = useState("");
+  // null = the operator has not tapped the chip. Deliberately NOT pre-filled
+  // with "other": the request must be able to say "nothing was stated", and a
+  // default selection would make every untouched adjustment look answered.
+  const [intent, setIntent] = useState<DeductionIntent | null>(null);
   const [notes, setNotes] = useState("");
 
   const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
@@ -112,7 +106,9 @@ export function QuickAdjustDialog({
         delta: adjustmentType === "add" ? quantityNum : -quantityNum,
         reason,
         notes: notes || undefined,
-        reasonCode: reasonCode || undefined,
+        // Absent, not null, when the chip was never tapped — the route reads
+        // key PRESENCE to tell "unstated" from "stated as other".
+        intent: intent ?? undefined,
       });
 
       toast.success(
@@ -127,7 +123,7 @@ export function QuickAdjustDialog({
       // Reset form
       setQuantity("");
       setReason("");
-      setReasonCode("");
+      setIntent(null);
       setNotes("");
       setAdjustmentType("add");
     } catch (error) {
@@ -276,22 +272,14 @@ export function QuickAdjustDialog({
             />
           </div>
 
-          {/* Reason code (optional, coded) — persists on the ledger row (Phase C) */}
-          <div className="space-y-2">
-            <Label htmlFor="reasonCode">Reason code (optional)</Label>
-            <Select value={reasonCode || undefined} onValueChange={setReasonCode}>
-              <SelectTrigger id="reasonCode">
-                <SelectValue placeholder="Select a reason code" />
-              </SelectTrigger>
-              <SelectContent>
-                {REASON_CODE_OPTIONS.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {/* W2-1 (T7): the intent chip, replacing the coded-reason select.
+              Skippable — Confirm below never reads it. */}
+          <IntentChip
+            surface="adjust"
+            value={intent}
+            onChange={setIntent}
+            disabled={isSubmitting}
+          />
 
           {/* Notes */}
           <div className="space-y-2">

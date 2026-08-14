@@ -211,6 +211,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
             externalProductId: item.externalProductId ?? undefined,
             externalVariantId: item.externalVariantId ?? undefined,
             isBundle: true,
+            // W2-1 ride-along: this branch KNOWS the line is a bundle; the class
+            // is recorded rather than left for a downstream heuristic to infer.
+            class: 'bundle',
           });
         } else if (item.isMapped && item.productLink?.internalProduct) {
           // Find matching product in the loaded products array
@@ -244,6 +247,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
               sku: item.sku ?? undefined,
               quantity: remainingQty,
               externalItemId: item.id,
+              // W2-1 ride-along: the class this branch means, stated outright.
+              // It used to be inferred from the ABSENCE of the external product
+              // reference below — true today, but true only by coincidence of
+              // this branch not forwarding it.
+              class: 'unavailable',
             });
           }
         } else {
@@ -255,6 +263,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
             externalItemId: item.id,
             externalProductId: item.externalProductId ?? undefined,
             externalVariantId: item.externalVariantId ?? undefined,
+            // W2-1 ride-along: never mapped, and this branch is the only one
+            // that can say so.
+            class: 'unmapped',
           });
         }
       }

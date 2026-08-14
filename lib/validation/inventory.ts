@@ -1,7 +1,24 @@
 import { z } from 'zod';
 import { inventory_logs_logType } from '@prisma/client';
+import { DEDUCTION_INTENTS } from '@/lib/inventory/intent';
 
 const positiveInt = z.number().int().positive();
+
+/**
+ * W2-1 (pack REV-11 T7): the intent chip's closed vocabulary, shared by both
+ * surfaces' request schemas so neither can drift from lib/inventory/intent.ts.
+ * `recount` / `receiving` are NOT here and never were — see that module.
+ */
+export const DeductionIntentSchema = z.enum(DEDUCTION_INTENTS);
+
+/**
+ * An external order id, bounded by external_orders.id's native shape
+ * (String @id @default(cuid()) => VarChar(191)). The SCHEMA only bounds it — the
+ * ROUTE resolves it through lib/orders/resolve-selected-order.ts and enforces
+ * company membership before anything is written, because a client-supplied id is
+ * not evidence of anything on its own.
+ */
+export const selectedExternalOrderId = z.string().trim().min(1).max(191);
 
 // Phase C (P-C5): closed set of coded adjustment reasons. Kept alongside the
 // free-text reason so the ledger row carries a machine-filterable reasonCode while
@@ -30,6 +47,27 @@ export const InventoryAdjustmentSchema = z.object({
   reasonCode: z.enum(REASON_CODES).optional(),
   reason: z.string().trim().min(1).max(500).optional(),
   notes: z.string().trim().max(2000).optional(),
+});
+
+/**
+ * W2-1 (pack REV-11 T7): what POST /api/inventory/adjust parses — the shared
+ * adjustment shape PLUS the intent chip and the order id the chip's `order`
+ * value resolves against.
+ *
+ * A SEPARATE schema rather than fields on InventoryAdjustmentSchema, because
+ * that schema is also the item shape for batch-adjust (the journal), and zod
+ * strips unknown keys: an `intent` sent to batch-adjust would be silently
+ * dropped, which is precisely the kind of quiet no-op the truthful-data rule
+ * exists to prevent. The journal's route does not implement the chip, so its
+ * schema does not advertise it.
+ *
+ * `reasonCode` is still INHERITED here and that is deliberate: the adjust route
+ * REFUSES it explicitly (400) before parsing, so the refusal is a stated
+ * outcome rather than zod's silent strip. Pinned at the route, per the pack.
+ */
+export const AdjustWithIntentSchema = InventoryAdjustmentSchema.extend({
+  intent: DeductionIntentSchema.optional(),
+  selectedExternalOrderId: selectedExternalOrderId.optional(),
 });
 
 export const BatchInventoryAdjustmentSchema = z.object({
@@ -97,6 +135,7 @@ export const MassUpdateSchema = z.object({
 });
 
 export type InventoryAdjustmentInput = z.infer<typeof InventoryAdjustmentSchema>;
+export type AdjustWithIntentInput = z.infer<typeof AdjustWithIntentSchema>;
 export type BatchInventoryAdjustmentInput = z.infer<typeof BatchInventoryAdjustmentSchema>;
 export type StockInInput = z.infer<typeof StockInSchema>;
 export type TransferInput = z.infer<typeof TransferSchema>;

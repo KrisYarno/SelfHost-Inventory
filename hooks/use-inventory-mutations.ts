@@ -2,6 +2,7 @@
 
 import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import type { DeductionIntent } from "@/lib/inventory/intent";
 
 export interface ApiMutationError extends Error {
   code?: string;
@@ -52,7 +53,7 @@ async function postJSON(url: string, body: unknown, csrfToken: string | null) {
 }
 
 // Field names mirror the dialogs' live POST bodies (zod strips extras server-side):
-// quick-adjust-dialog sends { productId, locationId, delta, reason, notes, reasonCode? };
+// quick-adjust-dialog sends { productId, locationId, delta, reason, notes, intent? };
 // the transfer auto-add path additionally sends { autoAddForTransfer: true }.
 export interface AdjustInput {
   productId: number;
@@ -60,7 +61,14 @@ export interface AdjustInput {
   delta: number;
   reason?: string;
   notes?: string;
-  reasonCode?: string; // Phase C (P-C5): optional coded reason (COUNT/DAMAGE/THEFT/EXPIRY/CORRECTION)
+  // W2-1 (pack T7): the intent chip. `reasonCode` is GONE from this input — the
+  // adjust route refuses the old vocabulary with a 400, so typing it here would
+  // advertise a field the API rejects. The server derives the ledger row's
+  // reasonCode from this value.
+  intent?: DeductionIntent;
+  // W2-1: an order id for the `order` intent. Resolved and membership-checked
+  // server-side — sending it is a claim, never a fact.
+  selectedExternalOrderId?: string;
   autoAddForTransfer?: boolean; // transfer auto-add audit flag (route reads it outside zod)
 }
 // stock-in-dialog sends { productId, locationId, quantity, orderNumber, notes }.

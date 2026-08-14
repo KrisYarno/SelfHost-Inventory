@@ -205,6 +205,33 @@ export const REORDER_DEMAND_DEFINITION =
   "window, never 0-as-measurement).";
 
 /**
+ * Definition string for the classified-shrinkage buckets (spec §2 D3 house rule:
+ * a definition rides with every rate). Canonical text, consumed by get_shrinkage's
+ * tool description.
+ *
+ * THE SECOND PARAGRAPH IS A DISCLOSURE, not decoration (design REV-2, W2). The
+ * intent chip (pack REV-11 T7) is the first surface that ever let an operator say
+ * "this went in the bin", so the DAMAGE bucket steps up the day it ships — not
+ * because losses increased, but because tested-bad disposals that were previously
+ * reason-less negative adjustments now carry a reason and land in a bucket. Every
+ * one of those units was ALREADY leaving; they were counted in
+ * `coverage.unclassifiedOutboundUnits` and are now counted as DAMAGE. A
+ * before/after comparison across the chip's deploy date compares two different
+ * measurement regimes, and reading the step as a real increase in breakage is the
+ * exact false conclusion this note exists to prevent.
+ */
+export const SHRINKAGE_CLASSIFICATION_DEFINITION =
+  "Classified shrinkage = negative ledger rows with logType ADJUSTMENT or CORRECTION " +
+  "whose reasonCode is one of DAMAGE/THEFT/EXPIRY/COUNT. Everything else that leaves — " +
+  "reason-less rows, bare corrections, and the negative adjustments this shop ships " +
+  "product with — is coverage.unclassifiedOutboundUnits, NEVER loss. " +
+  "MEASUREMENT-REGIME CHANGE: the intent chip (2026-08, adjust surface) is the first " +
+  "way to record a disposal as DAMAGE, so the DAMAGE bucket STEPS UP from that date " +
+  "as tested-bad disposals classify for the first time. Those units were already " +
+  "leaving and were already reported, under unclassifiedOutboundUnits — the step is " +
+  "reclassification, not a rise in breakage, and totals must not be compared across it.";
+
+/**
  * Definition string for the outbound-usage velocity rate (spec §2 D3): the units/day
  * figure derived from physicalOutbound over the days actually covered.
  */

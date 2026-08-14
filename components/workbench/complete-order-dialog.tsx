@@ -27,6 +27,8 @@ import {
   SKIPPED_LINE_LABEL,
   classifySkippedLine,
 } from "@/lib/workbench/skipped-lines";
+import { IntentChip } from "@/components/inventory/intent-chip";
+import type { WorkbenchIntent } from "@/lib/inventory/intent";
 
 // ---------------------------------------------------------------------------
 // W0.5-a (contract pack T6): the skipped-line checklist.
@@ -89,6 +91,16 @@ export function CompleteOrderDialog({
   // persisted, and no request carries it.
   const [acknowledgedLines, setAcknowledgedLines] = useState<string[]>([]);
 
+  // W2-1 (T7): the intent chip for the MANUAL leg. null = never tapped, which
+  // is what lets the request omit the key entirely (see handleComplete).
+  const [intent, setIntent] = useState<WorkbenchIntent | null>(null);
+
+  // The chip only has something to say when there is an order to attribute TO
+  // and a manual line that would carry the attribution. WC lines are stamped
+  // unconditionally by the fulfill route from the order it already resolved —
+  // they need no operator input and get no chip.
+  const showIntentChip = isWCOrder && manualItems.length > 0;
+
   // QA-13: derived under the SAME gate the checklist renders under. The list
   // and the gate on Complete have to be one fact — a checklist that is not on
   // screen cannot be acknowledged, so deriving the gate from the raw store
@@ -119,9 +131,12 @@ export function CompleteOrderDialog({
   const allAcknowledged = acknowledgedCount === tapRequiredKeys.length;
 
   // Reopening the dialog RESETS the taps. Intended friction: an operator who
-  // backs out and comes back re-reads what is about to ship undeducted.
+  // backs out and comes back re-reads what is about to ship undeducted. The
+  // intent chip resets with them — a stale intent carried across a reopen would
+  // attribute this deduction using an answer given about a different cart.
   useEffect(() => {
     setAcknowledgedLines([]);
+    setIntent(null);
   }, [open]);
 
   const toggleAcknowledged = (key: string) => {
@@ -201,6 +216,10 @@ export function CompleteOrderDialog({
           // already holds it; the server re-resolves it and checks membership
           // before recording. No UX change — omitted for a non-WC order.
           ...(selectedExternalOrder ? { selectedExternalOrderId: selectedExternalOrder.id } : {}),
+          // W2-1 (T7): the chip, sent ONLY when the packer tapped it. Omitting
+          // the key is what makes an untapped chip mean "unstated" server-side
+          // rather than an asserted `other`.
+          ...(intent ? { intent } : {}),
         };
 
         const deductResponse = await fetch("/api/inventory/deduct-simple", {
@@ -434,6 +453,19 @@ export function CompleteOrderDialog({
                     ))}
                   </ul>
                 </div>
+              )}
+
+              {/* W2-1 (T7): the intent chip for the manual lines above. The WC
+                  lines beside them are attributed automatically by the fulfill
+                  route; these are the ones nothing else can speak for. Two
+                  values only — damage-loss is not offered on this surface. */}
+              {showIntentChip && (
+                <IntentChip
+                  surface="workbench"
+                  value={intent}
+                  onChange={(next) => setIntent(next as WorkbenchIntent)}
+                  disabled={isProcessing}
+                />
               )}
 
               {/* Non-WC: show flat list (original behavior) */}

@@ -209,6 +209,11 @@ export const POST = apiHandler(async (
                 logType: inventory_logs_logType.CORRECTION,
                 reasonCode: 'CORRECTION',
                 batchId,
+                // W2-1 (pack T7 stamping): the reversal names the same order the
+                // deduction did, so a reconciliation sees BOTH halves of the
+                // movement. `order.id` is this transaction's loaded order (path
+                // parameter, membership-checked above) — never a body field.
+                orderRecordId: order.id,
               },
               tx
             );
@@ -325,6 +330,9 @@ export const POST = apiHandler(async (
             logType: inventory_logs_logType.CORRECTION,
             reasonCode: 'CORRECTION',
             batchId,
+            // W2-1 (pack T7 stamping): as above — the reversal is attributed to
+            // the order it reverses, from the loaded order, not the body.
+            orderRecordId: order.id,
           },
           tx
         );
