@@ -396,13 +396,19 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     expect(result.skipped[0].details).toMatch(/concurrent/i);
     expect(result.fulfilled).toHaveLength(0);
 
-    // SAVEPOINT was opened AND rolled back (RELEASE never fires on the loser path)
+    // The BUNDLE savepoint was opened AND rolled back (RELEASE never fires on
+    // the loser path). W2S-1 added an ITEM savepoint around the whole item; on
+    // this SKIP path it releases normally — the bundle rollback has already
+    // undone the components, and a skipped item is not a failed one — so the
+    // assertions name the savepoint they are about.
     const unsafeCalls = (tx.$executeRawUnsafe as jest.Mock).mock.calls.map(
       (c: any[]) => c[0] as string
     );
-    expect(unsafeCalls.some((s) => /^SAVEPOINT /.test(s))).toBe(true);
-    expect(unsafeCalls.some((s) => /^ROLLBACK TO SAVEPOINT /.test(s))).toBe(true);
-    expect(unsafeCalls.some((s) => /^RELEASE SAVEPOINT /.test(s))).toBe(false);
+    expect(unsafeCalls.some((s) => /^SAVEPOINT bundle_/.test(s))).toBe(true);
+    expect(unsafeCalls.some((s) => /^ROLLBACK TO SAVEPOINT bundle_/.test(s))).toBe(true);
+    expect(unsafeCalls.some((s) => /^RELEASE SAVEPOINT bundle_/.test(s))).toBe(false);
+    expect(unsafeCalls.some((s) => /^RELEASE SAVEPOINT item_/.test(s))).toBe(true);
+    expect(unsafeCalls.some((s) => /^ROLLBACK TO SAVEPOINT item_/.test(s))).toBe(false);
 
     // fulfilledQty must NOT have been incremented
     expect(tx.externalOrderItem.update).not.toHaveBeenCalled();

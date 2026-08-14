@@ -142,6 +142,12 @@ function makeFulfillTx() {
       findMany: jest.fn().mockResolvedValue([{ quantity: 2, fulfilledQty: 2 }]),
     },
     $executeRaw: jest.fn().mockResolvedValue(1),
+    // W2S-1: fulfillment brackets each item's writes in a SAVEPOINT, issued
+    // through $executeRawUnsafe. This stand-in only ever takes the happy path,
+    // so the statements are accepted and ignored — the savepoint's own semantics
+    // are pinned in fulfillment.item-savepoint.test.ts against a store that
+    // actually models them.
+    $executeRawUnsafe: jest.fn().mockResolvedValue(0),
     auditLog: { create: jest.fn().mockResolvedValue({ id: 1 }) },
   };
 }

@@ -13,16 +13,29 @@
 //
 // Usage:
 //   DATABASE_URL='mysql://user:pass@host:3306/db' \
-//     node scripts/backfill/order-attribution/run.js [--apply] [options]
+//     node scripts/backfill/order-attribution/run.js --until=<ISO> [--apply] [options]
 //
 // Options:
+//   --until=<ISO>        REQUIRED. The W2 deploy moment — the instant the live
+//                        route started sending an intent with every deduction.
+//                        BEFORE it, an event with no intent key had nowhere to
+//                        record one and its rows are backfillable; AFTER it, the
+//                        same event is a STALE CLIENT, and the live route read
+//                        the missing intent as `other` and left the movement
+//                        unattributed ON PURPOSE. Filling those rows would
+//                        manufacture the attribution the route declined, so the
+//                        script refuses to run rather than guess which era a row
+//                        belongs to. Events that DO carry an intent are judged on
+//                        it whatever their date. (Take the value from the deploy's
+//                        `/api/version` builtAt.)
 //   --apply              WRITE. Without it this is a DRY RUN and no statement
 //                        other than a SELECT is ever issued.
 //   --since=YYYY-MM-DD   Only examine accrual events created on/after this date.
 //                        Optional; a narrowing for large audit tables. When set,
 //                        every "unmatched"/"skipped" figure in the summary is a
 //                        statement about the WINDOW, not about all of history —
-//                        the summary says so itself.
+//                        the summary says so itself. Unrelated to --until, which
+//                        classifies rather than narrows.
 //   --json=<path>        Also write the summary as JSON here.
 //   --help               Print this header.
 //
@@ -87,7 +100,7 @@ const {
 const CHUNK = 500;
 
 function parseArgs(argv) {
-  const opts = { apply: false, since: null, json: null, help: false };
+  const opts = { apply: false, since: null, until: null, json: null, help: false };
   for (const arg of argv) {
     const m = /^--([a-z-]+)(?:=(.*))?$/.exec(arg);
     if (!m) throw new Error(`Unexpected argument: ${arg}`);
@@ -99,6 +112,9 @@ function parseArgs(argv) {
         break;
       case "since":
         opts.since = value;
+        break;
+      case "until":
+        opts.until = value;
         break;
       case "json":
         opts.json = value;
@@ -115,6 +131,20 @@ function parseArgs(argv) {
 
 function validate(opts) {
   const errors = [];
+  // W2S-2. Named refusal, in BOTH modes: a dry run that misclassified an event
+  // would be read as a plan and applied later. The message carries the REASON,
+  // because an operator told only "required" would pass today's date and quietly
+  // re-attribute every stale-client event the live route had declined.
+  if (opts.until === null || opts.until === "") {
+    errors.push(
+      "--until=<ISO timestamp> is REQUIRED: it is the W2 deploy moment. An event " +
+        "with no intent key means 'nowhere to record one' BEFORE that instant and " +
+        "'the live route defaulted to other and left it unattributed' AFTER it — " +
+        "without the boundary this script cannot tell those apart, so it will not guess."
+    );
+  } else if (Number.isNaN(Date.parse(opts.until))) {
+    errors.push("--until must be an ISO timestamp (e.g. 2026-08-14T19:13:29Z)");
+  }
   if (opts.since !== null && !/^\d{4}-\d{2}-\d{2}$/.test(opts.since)) {
     errors.push("--since must be YYYY-MM-DD");
   }
@@ -152,9 +182,18 @@ function toNumber(v) {
 async function selectAccrualEvents(prisma, since) {
   const params = [];
   let sql =
-    "SELECT id, batchId, " +
+    "SELECT id, batchId, createdAt, " +
     `JSON_UNQUOTE(JSON_EXTRACT(details, '$.\"${ACCRUAL_DETAILS_KEY}\"')) AS accruedOrderId, ` +
-    `JSON_UNQUOTE(JSON_EXTRACT(details, '$.\"${ACCRUAL_INTENT_KEY}\"')) AS intent ` +
+    // W2S-3: JSON_UNQUOTE flattens every JSON scalar to a string, so the value
+    // alone cannot say whether the accrual recorded an id or a number, a boolean,
+    // an array or an object. JSON_TYPE is the only witness; the planner requires
+    // it to read STRING before it will copy anything into the ledger.
+    `JSON_TYPE(JSON_EXTRACT(details, '$.\"${ACCRUAL_DETAILS_KEY}\"')) AS accruedOrderIdType, ` +
+    `JSON_UNQUOTE(JSON_EXTRACT(details, '$.\"${ACCRUAL_INTENT_KEY}\"')) AS intent, ` +
+    // W2S-2: JSON_TYPE is NULL when the PATH does not exist and 'NULL' when the
+    // value is JSON null — the only way to tell "this client never mentioned
+    // intent" from "it said nothing meaningful".
+    `JSON_TYPE(JSON_EXTRACT(details, '$.\"${ACCRUAL_INTENT_KEY}\"')) AS intentType ` +
     "FROM audit_logs " +
     "WHERE actionType = ? " +
     `AND JSON_EXTRACT(details, '$.\"${ACCRUAL_DETAILS_KEY}\"') IS NOT NULL`;
@@ -169,8 +208,11 @@ async function selectAccrualEvents(prisma, since) {
   return rows.map((r) => ({
     auditLogId: toNumber(r.id),
     batchId: r.batchId ?? null,
+    createdAt: r.createdAt ?? null,
     accruedOrderId: r.accruedOrderId ?? null,
+    accruedOrderIdType: r.accruedOrderIdType ?? null,
     intent: r.intent ?? null,
+    intentType: r.intentType ?? null,
   }));
 }
 
@@ -231,6 +273,9 @@ function formatSummary(report) {
   lines.push("");
   lines.push(execution.applied ? "  MODE: APPLY (rows were written)" : "  MODE: DRY RUN (nothing was written)");
   lines.push(`  window: ${options.since ? `events created on/after ${options.since}` : "all accrual events"}`);
+  lines.push(
+    `  cutoff: ${options.until} — events with NO intent key are only fillable BEFORE it`
+  );
   lines.push("");
   const pad = (label) => `${label} ${".".repeat(Math.max(1, 30 - label.length))}`;
 
@@ -286,7 +331,7 @@ async function runBackfill(prisma, opts) {
   const batchIds = [...new Set(events.map((e) => e.batchId).filter(Boolean))].sort();
   const ledgerRows = await selectLedgerRows(prisma, batchIds);
 
-  const plan = buildBackfillPlan({ events, ledgerRows });
+  const plan = buildBackfillPlan({ events, ledgerRows, cutoff: new Date(opts.until) });
   const execution = await executeBackfillPlan(plan, {
     apply: opts.apply,
     updateRows: makeWriter(prisma),
@@ -295,7 +340,7 @@ async function runBackfill(prisma, opts) {
   return {
     script: "backfill/order-attribution",
     generatedAt: new Date().toISOString(),
-    options: { apply: opts.apply, since: opts.since },
+    options: { apply: opts.apply, since: opts.since, until: opts.until },
     accrual: {
       actionType: ACCRUAL_ACTION_TYPE,
       detailsKey: ACCRUAL_DETAILS_KEY,

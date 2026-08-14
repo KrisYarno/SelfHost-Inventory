@@ -32,12 +32,30 @@ const ORDER_B = "cm0order0000000000000000b";
 const BATCH_1 = "11111111-1111-4111-8111-111111111111";
 const BATCH_2 = "22222222-2222-4222-8222-222222222222";
 
-/** One 0b-2 accrual event: the audit row deduct-simple writes. */
+/**
+ * W2S-2: the W2 deploy moment. Every plan below is built against it, because
+ * "was there an intent key?" only means something relative to the deploy that
+ * started sending one.
+ */
+const CUTOFF = new Date("2026-08-14T19:13:29Z");
+const BEFORE_CUTOFF = new Date("2026-08-13T12:00:00Z");
+const AFTER_CUTOFF = new Date("2026-08-15T09:00:00Z");
+
+/** Build a plan against the standing cutoff (the runner always supplies one). */
+const buildPlan = (input) => buildBackfillPlan({ cutoff: CUTOFF, ...input });
+
+/**
+ * One 0b-2 accrual event, in the shape the runner projects: the JSON_UNQUOTEd
+ * values AND their JSON_TYPEs (W2S-3), plus the event's own createdAt (W2S-2).
+ */
 const event = (over = {}) => ({
   auditLogId: 1,
   batchId: BATCH_1,
   accruedOrderId: ORDER_A,
+  accruedOrderIdType: "STRING",
   intent: null,
+  intentType: null,
+  createdAt: BEFORE_CUTOFF,
   ...over,
 });
 
@@ -100,7 +118,7 @@ describe("S6 — the accrual shape the backfill reads is the one deduct-simple w
 
 describe("fill-only — a stamped row is never overwritten", () => {
   it("fills the NULL row and leaves the stamped one alone", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event()],
       ledgerRows: [
         row({ id: 10, orderRecordId: null }),
@@ -116,7 +134,7 @@ describe("fill-only — a stamped row is never overwritten", () => {
   });
 
   it("plans nothing at all for a batch whose rows are all stamped", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event()],
       ledgerRows: [row({ id: 10, orderRecordId: ORDER_A })],
     });
@@ -128,7 +146,7 @@ describe("fill-only — a stamped row is never overwritten", () => {
   });
 
   it("counts a row stamped with a DIFFERENT id, and still does not touch it", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event()],
       ledgerRows: [row({ id: 10, orderRecordId: ORDER_B })],
     });
@@ -154,7 +172,7 @@ describe("idempotency — running twice is running once", () => {
       row({ id: 12, orderRecordId: ORDER_A }),
     ]);
 
-    const first = buildBackfillPlan({ events, ledgerRows: ledger.rows });
+    const first = buildPlan({ events, ledgerRows: ledger.rows });
     const firstRun = await executeBackfillPlan(first, {
       apply: true,
       updateRows: ledger.updateRows,
@@ -163,7 +181,7 @@ describe("idempotency — running twice is running once", () => {
     expect(firstRun.rowsRaced).toBe(0);
 
     // Re-read the world exactly as a second invocation would.
-    const second = buildBackfillPlan({ events, ledgerRows: ledger.rows });
+    const second = buildPlan({ events, ledgerRows: ledger.rows });
     const secondRun = await executeBackfillPlan(second, {
       apply: true,
       updateRows: ledger.updateRows,
@@ -177,7 +195,7 @@ describe("idempotency — running twice is running once", () => {
 
   it("reports rows that were stamped by someone else between plan and write", async () => {
     const ledger = fakeLedger([row({ id: 10 }), row({ id: 11 })]);
-    const plan = buildBackfillPlan({ events: [event()], ledgerRows: ledger.rows });
+    const plan = buildPlan({ events: [event()], ledgerRows: ledger.rows });
 
     // The live W2-1 path stamps one of them after the SELECT and before the
     // UPDATE. The fill-only WHERE drops it; the summary says so.
@@ -200,7 +218,7 @@ describe("idempotency — running twice is running once", () => {
 describe("dry run — the default writes nothing", () => {
   it("never calls the writer and reports zero", async () => {
     const updateRows = jest.fn();
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event()],
       ledgerRows: [row({ id: 10 })],
     });
@@ -216,7 +234,7 @@ describe("dry run — the default writes nothing", () => {
 
   it("omitting the flag entirely is a dry run", async () => {
     const updateRows = jest.fn();
-    const plan = buildBackfillPlan({ events: [event()], ledgerRows: [row({ id: 10 })] });
+    const plan = buildPlan({ events: [event()], ledgerRows: [row({ id: 10 })] });
 
     const result = await executeBackfillPlan(plan, { updateRows });
 
@@ -226,7 +244,7 @@ describe("dry run — the default writes nothing", () => {
 
   it("apply issues exactly one write per planned batch, carrying its own ids", async () => {
     const updateRows = jest.fn(async ({ logIds }) => logIds.length);
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [
         event({ auditLogId: 1, batchId: BATCH_1, accruedOrderId: ORDER_A }),
         event({ auditLogId: 2, batchId: BATCH_2, accruedOrderId: ORDER_B }),
@@ -261,7 +279,7 @@ describe("dry run — the default writes nothing", () => {
 
 describe("ambiguity — an unmappable event is skipped by name", () => {
   it("an event with no batchId links to nothing", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event({ batchId: null })],
       ledgerRows: [row({ id: 10 })],
     });
@@ -272,7 +290,7 @@ describe("ambiguity — an unmappable event is skipped by name", () => {
   });
 
   it("two events on one batch naming DIFFERENT orders skip the whole batch", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [
         event({ auditLogId: 1, accruedOrderId: ORDER_A }),
         event({ auditLogId: 2, accruedOrderId: ORDER_B }),
@@ -288,7 +306,7 @@ describe("ambiguity — an unmappable event is skipped by name", () => {
   });
 
   it("two events on one batch naming the SAME order are not a conflict", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event({ auditLogId: 1 }), event({ auditLogId: 2 })],
       ledgerRows: [row({ id: 10 })],
     });
@@ -299,14 +317,14 @@ describe("ambiguity — an unmappable event is skipped by name", () => {
   });
 
   it("a batch with no ledger rows at all is reported, not silently dropped", () => {
-    const plan = buildBackfillPlan({ events: [event()], ledgerRows: [] });
+    const plan = buildPlan({ events: [event()], ledgerRows: [] });
 
     expect(plan.fills).toEqual([]);
     expect(plan.summary.batchesSkippedByClass[SKIP_CLASS.NO_LEDGER_ROWS]).toBe(1);
   });
 
   it("a batch carrying any non-SALE row is not the accrual class — skipped whole", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event()],
       ledgerRows: [row({ id: 10 }), row({ id: 11, logType: "ADJUSTMENT" })],
     });
@@ -319,7 +337,7 @@ describe("ambiguity — an unmappable event is skipped by name", () => {
   it.each([[""], ["null"], [null], [undefined], [42]])(
     "an accrued id of %p is unusable, never coerced",
     (accruedOrderId) => {
-      const plan = buildBackfillPlan({
+      const plan = buildPlan({
         events: [event({ accruedOrderId })],
         ledgerRows: [row({ id: 10 })],
       });
@@ -336,7 +354,7 @@ describe("ambiguity — an unmappable event is skipped by name", () => {
 
 describe("a stated non-order intent is a decision, not a gap", () => {
   it("skips a batch whose operator classified the movement as `other`", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event({ intent: "other" })],
       ledgerRows: [row({ id: 10 }), row({ id: 11 })],
     });
@@ -350,7 +368,7 @@ describe("a stated non-order intent is a decision, not a gap", () => {
   });
 
   it("a stated `other` settles the batch even when the accruals also conflict", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [
         event({ auditLogId: 1, accruedOrderId: ORDER_A, intent: "other" }),
         event({ auditLogId: 2, accruedOrderId: ORDER_B, intent: null }),
@@ -366,7 +384,7 @@ describe("a stated non-order intent is a decision, not a gap", () => {
   });
 
   it("fills an event with an explicit `order` intent", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event({ intent: "order" })],
       ledgerRows: [row({ id: 10 })],
     });
@@ -375,7 +393,7 @@ describe("a stated non-order intent is a decision, not a gap", () => {
   });
 
   it("fills a pre-chip event, which is the whole reason this script exists", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event({ intent: null })],
       ledgerRows: [row({ id: 10 })],
     });
@@ -403,8 +421,8 @@ describe("plan shape", () => {
     ];
     const snapshot = JSON.stringify({ events, ledgerRows });
 
-    const a = buildBackfillPlan({ events, ledgerRows });
-    const b = buildBackfillPlan({ events, ledgerRows });
+    const a = buildPlan({ events, ledgerRows });
+    const b = buildPlan({ events, ledgerRows });
 
     expect(a).toEqual(b);
     expect(a.fills.map((f) => f.batchId)).toEqual([BATCH_1, BATCH_2]);
@@ -413,7 +431,7 @@ describe("plan shape", () => {
   });
 
   it("carries no PII — ids, counts and class names only", () => {
-    const plan = buildBackfillPlan({
+    const plan = buildPlan({
       events: [event()],
       ledgerRows: [row({ id: 10 })],
     });
@@ -436,12 +454,14 @@ describe("plan shape", () => {
         "no-ledger-rows",
         "foreign-rows-in-batch",
         "already-stamped",
+        "post-cutoff-no-intent",
+        "stamped-conflict",
       ])
     );
   });
 
   it("handles an empty world without inventing a summary", () => {
-    const plan = buildBackfillPlan({ events: [], ledgerRows: [] });
+    const plan = buildPlan({ events: [], ledgerRows: [] });
 
     expect(plan.fills).toEqual([]);
     expect(plan.summary.eventsExamined).toBe(0);
@@ -450,8 +470,185 @@ describe("plan shape", () => {
   });
 
   it("refuses to apply without a writer rather than reporting a phantom success", async () => {
-    const plan = buildBackfillPlan({ events: [event()], ledgerRows: [row({ id: 10 })] });
+    const plan = buildPlan({ events: [event()], ledgerRows: [row({ id: 10 })] });
 
     await expect(executeBackfillPlan(plan, { apply: true })).rejects.toThrow(/updateRows/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W2S-2 (codex W2 dual seam check, MED) — the W2 deploy is a semantic boundary.
+//
+// Before W2-1 shipped the chip, deduct-simple accrued an order id and said
+// nothing about intent: absent intent meant "we had nowhere to record one", and
+// filling those rows is the whole reason this script exists. AFTER the chip
+// shipped, the live route defaults to `other` and leaves the movement
+// UNATTRIBUTED — so an event that still arrives with an order id and NO intent
+// key is a stale client, and the live route already decided not to attribute it.
+// Backfilling it would manufacture the attribution the route declined.
+//
+// The two eras are told apart by ONE timestamp the operator must supply.
+// ---------------------------------------------------------------------------
+
+describe("W2S-2 — absent intent means different things either side of the cutoff", () => {
+  it("PIN W2S-2a: a POST-cutoff event with no intent key is skipped by name", () => {
+    const plan = buildPlan({
+      events: [event({ auditLogId: 9, createdAt: AFTER_CUTOFF })],
+      ledgerRows: [row({ id: 10 })],
+    });
+
+    expect(plan.fills).toEqual([]);
+    expect(plan.summary.eventsSkippedByClass[SKIP_CLASS.POST_CUTOFF_NO_INTENT]).toBe(1);
+    const skip = plan.skips.find((s) => s.class === SKIP_CLASS.POST_CUTOFF_NO_INTENT);
+    expect(skip).toMatchObject({ batchId: BATCH_1, auditLogIds: [9] });
+    // Nothing was filled, so the summary must not claim a linkable event either.
+    expect(plan.summary.eventsLinkable).toBe(0);
+  });
+
+  it("PIN W2S-2b: a PRE-cutoff event with no intent key is eligible — the script's whole point", () => {
+    const plan = buildPlan({
+      events: [event({ createdAt: BEFORE_CUTOFF })],
+      ledgerRows: [row({ id: 10 })],
+    });
+
+    expect(plan.fills).toEqual([
+      { batchId: BATCH_1, orderRecordId: ORDER_A, logIds: [10] },
+    ]);
+    expect(plan.summary.eventsSkippedByClass[SKIP_CLASS.POST_CUTOFF_NO_INTENT]).toBeUndefined();
+  });
+
+  it("PIN W2S-2c: an event CARRYING intent=order is eligible whatever its date", () => {
+    const plan = buildPlan({
+      events: [event({ intent: "order", intentType: "STRING", createdAt: AFTER_CUTOFF })],
+      ledgerRows: [row({ id: 10 })],
+    });
+
+    expect(plan.fills).toHaveLength(1);
+  });
+
+  it("PIN W2S-2d: a post-cutoff event carrying a NON-order intent is the operator's answer, not a cutoff skip", () => {
+    const plan = buildPlan({
+      events: [event({ intent: "other", intentType: "STRING", createdAt: AFTER_CUTOFF })],
+      ledgerRows: [row({ id: 10 })],
+    });
+
+    expect(plan.fills).toEqual([]);
+    expect(plan.summary.batchesSkippedByClass[SKIP_CLASS.EXPLICIT_NON_ORDER_INTENT]).toBe(1);
+    expect(plan.summary.eventsSkippedByClass[SKIP_CLASS.POST_CUTOFF_NO_INTENT]).toBeUndefined();
+  });
+
+  it("PIN W2S-2e: an event whose createdAt cannot be read is not PROVEN pre-cutoff", () => {
+    const plan = buildPlan({
+      events: [event({ createdAt: null })],
+      ledgerRows: [row({ id: 10 })],
+    });
+
+    expect(plan.fills).toEqual([]);
+    expect(plan.summary.eventsSkippedByClass[SKIP_CLASS.POST_CUTOFF_NO_INTENT]).toBe(1);
+  });
+
+  it("PIN W2S-2f: the planner refuses to classify anything without a cutoff", () => {
+    expect(() =>
+      buildBackfillPlan({ events: [event()], ledgerRows: [row({ id: 10 })] })
+    ).toThrow(/cutoff/i);
+    expect(() =>
+      buildBackfillPlan({ events: [], ledgerRows: [], cutoff: new Date("nonsense") })
+    ).toThrow(/cutoff/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W2S-3 (codex W2 dual seam check, MED) — JSON_UNQUOTE hands everything over as
+// a string, so `typeof value === "string"` cannot tell an order id from a JSON
+// number, boolean, array or object. The TYPE has to come from the database too.
+//
+// Fixtures below are DRIVER-SHAPED: exactly what MySQL returns for
+// JSON_UNQUOTE(JSON_EXTRACT(...)) paired with JSON_TYPE(JSON_EXTRACT(...)).
+// ---------------------------------------------------------------------------
+
+describe("W2S-3 — only a JSON STRING is an order id", () => {
+  it.each([
+    ["a JSON null", "null", "NULL"],
+    ["a JSON number", "42", "INTEGER"],
+    ["a JSON double", "4.5", "DOUBLE"],
+    ["a JSON boolean", "true", "BOOLEAN"],
+    ["a JSON array", '["cm0order0000000000000000a"]', "ARRAY"],
+    ["a JSON object", '{"id": "cm0order0000000000000000a"}', "OBJECT"],
+  ])("PIN W2S-3: %s never reaches the ledger", (_label, accruedOrderId, accruedOrderIdType) => {
+    const plan = buildPlan({
+      events: [event({ accruedOrderId, accruedOrderIdType })],
+      ledgerRows: [row({ id: 10 })],
+    });
+
+    expect(plan.fills).toEqual([]);
+    expect(plan.summary.eventsSkippedByClass[SKIP_CLASS.UNUSABLE_ACCRUED_ID]).toBe(1);
+  });
+
+  it("PIN W2S-3: a JSON STRING is the one shape that plans", () => {
+    const plan = buildPlan({
+      events: [event({ accruedOrderId: ORDER_A, accruedOrderIdType: "STRING" })],
+      ledgerRows: [row({ id: 10 })],
+    });
+
+    expect(plan.fills).toEqual([
+      { batchId: BATCH_1, orderRecordId: ORDER_A, logIds: [10] },
+    ]);
+  });
+
+  it("PIN W2S-3: an event with no type at all is unusable, not assumed", () => {
+    const plan = buildPlan({
+      events: [event({ accruedOrderIdType: undefined })],
+      ledgerRows: [row({ id: 10 })],
+    });
+
+    expect(plan.fills).toEqual([]);
+    expect(plan.summary.eventsSkippedByClass[SKIP_CLASS.UNUSABLE_ACCRUED_ID]).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W2S-4 (codex W2 dual seam check, MED) — one request, one order.
+//
+// A batch is ONE deduct-simple request. If a row in it already carries a
+// DIFFERENT order id than the accrual names, the two sources disagree about
+// that request — and filling the null siblings would split one request across
+// two orders, which is a state the live path can never produce. The batch is
+// left whole and reported.
+// ---------------------------------------------------------------------------
+
+describe("W2S-4 — a conflicted batch is never split across two orders", () => {
+  it("PIN W2S-4: one row stamped B under an A accrual skips the WHOLE batch, null sibling included", () => {
+    const plan = buildPlan({
+      events: [event({ auditLogId: 3, accruedOrderId: ORDER_A })],
+      ledgerRows: [
+        row({ id: 10, orderRecordId: ORDER_B }),
+        row({ id: 11, orderRecordId: null }),
+      ],
+    });
+
+    expect(plan.fills).toEqual([]);
+    expect(plan.summary.rowsToFill).toBe(0);
+    expect(plan.summary.batchesSkippedByClass[SKIP_CLASS.STAMPED_CONFLICT]).toBe(1);
+    expect(plan.summary.rowsSkippedByClass[SKIP_CLASS.STAMPED_CONFLICT]).toBe(2);
+    expect(plan.summary.rowsSkipped).toBe(2);
+    // The disagreement is still reported as the signal it is.
+    expect(plan.summary.rowsAlreadyStampedDiffering).toBe(1);
+    const skip = plan.skips.find((s) => s.class === SKIP_CLASS.STAMPED_CONFLICT);
+    expect(skip).toMatchObject({ batchId: BATCH_1, auditLogIds: [3], rowCount: 2 });
+  });
+
+  it("PIN W2S-4: stamps that AGREE with the accrual still let the null siblings fill", () => {
+    const plan = buildPlan({
+      events: [event()],
+      ledgerRows: [
+        row({ id: 10, orderRecordId: ORDER_A }),
+        row({ id: 11, orderRecordId: null }),
+      ],
+    });
+
+    expect(plan.fills).toEqual([
+      { batchId: BATCH_1, orderRecordId: ORDER_A, logIds: [11] },
+    ]);
+    expect(plan.summary.batchesSkippedByClass[SKIP_CLASS.STAMPED_CONFLICT]).toBeUndefined();
   });
 });

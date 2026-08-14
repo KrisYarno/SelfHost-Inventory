@@ -17,6 +17,14 @@
 // stamps it on the audit event AND on every ledger row that request writes, in
 // the SAME transaction (lib/inventory.ts `createInventoryTransaction` opts).
 //
+// WHAT IT NEEDS FROM ITS CALLER. Two facts this module cannot derive, both
+// added by the W2 seam check: the W2 DEPLOY MOMENT (`cutoff` — before it an
+// absent intent key meant "nowhere to record one", after it the live route read
+// it as `other` and deliberately left the movement unattributed) and the
+// JSON_TYPE of each projected value (`accruedOrderIdType` — JSON_UNQUOTE hands
+// numbers, booleans, arrays and objects over as strings). Neither has a safe
+// default, so a missing cutoff throws and a missing type is unusable.
+//
 // WHAT THIS DOES NOT DO — and why (design, verbatim): "NO re-validation
 // (validated at write; re-checking with no session would drop admin-accrued
 // rows)". The accrued id was resolved and membership-checked by
@@ -46,6 +54,13 @@ const SKIP_CLASS = Object.freeze({
   NO_BATCH_ID: "no-batch-id",
   /** The accrued value is not a usable order id (empty, JSON null, non-string). */
   UNUSABLE_ACCRUED_ID: "unusable-accrued-id",
+  /**
+   * W2S-2: the event was written AFTER the W2 deploy and carries no intent key
+   * at all — a stale client. The live route reads that as `other` and leaves the
+   * movement unattributed on purpose; filling it would manufacture exactly the
+   * attribution the route declined.
+   */
+  POST_CUTOFF_NO_INTENT: "post-cutoff-no-intent",
 
   // -- BATCH level. Rows exist and are deliberately left alone; every one of
   //    them is counted under its class.
@@ -59,17 +74,55 @@ const SKIP_CLASS = Object.freeze({
   FOREIGN_ROWS_IN_BATCH: "foreign-rows-in-batch",
   /** Every row in the batch already carries an orderRecordId. Fill-only, so: nothing to do. */
   ALREADY_STAMPED: "already-stamped",
+  /**
+   * W2S-4: a row in the batch already names a DIFFERENT order than the accrual.
+   * One batch is one request and one request is one order, so the disagreement
+   * is about the whole batch — its null rows are left alone too, rather than
+   * splitting one request across two orders.
+   */
+  STAMPED_CONFLICT: "stamped-conflict",
 });
 
 /**
- * A usable accrued id is a non-empty string that is not the literal token
- * "null". MySQL's JSON_UNQUOTE(JSON_EXTRACT(...)) renders a JSON null as the
- * four-character string "null", and `JSON_EXTRACT(...) IS NOT NULL` is TRUE for
- * it — so without this guard a JSON null would be copied into the ledger as an
- * order id spelled "null". Never coerced, never trimmed into existence.
+ * A usable accrued id is a JSON STRING whose value is non-empty and not the
+ * literal token "null".
+ *
+ * W2S-3: the TYPE has to come from the database. The projection is
+ * JSON_UNQUOTE(JSON_EXTRACT(...)), which renders a JSON number, boolean, array
+ * or object as a STRING — so `typeof value === "string"` is satisfied by all of
+ * them and a `42` or a `["cm0..."]` would be copied into the ledger as an order
+ * id. The paired JSON_TYPE(JSON_EXTRACT(...)) is the only thing that can tell
+ * them apart, and an event that does not carry one is unusable rather than
+ * assumed. The literal-"null" guard stays: JSON_UNQUOTE renders a JSON null as
+ * the four-character string "null" and `JSON_EXTRACT(...) IS NOT NULL` is TRUE
+ * for it. Never coerced, never trimmed into existence.
  */
-function isUsableOrderId(value) {
-  return typeof value === "string" && value.length > 0 && value !== "null";
+function isUsableOrderId(value, jsonType) {
+  return (
+    jsonType === "STRING" &&
+    typeof value === "string" &&
+    value.length > 0 &&
+    value !== "null"
+  );
+}
+
+/**
+ * W2S-2: does this event carry an `intent` key at all? A key present with any
+ * value (including JSON null, which arrives as the string "null") is a client
+ * that knows about the chip; the batch-level explicit-non-order check then
+ * decides what its answer was. Absent on BOTH the value and the type means the
+ * event never mentioned intent.
+ */
+function hasIntentKey(ev) {
+  return ev.intentType != null || ev.intent != null;
+}
+
+/** Strictly before the cutoff. An unreadable date is never PROVEN pre-cutoff. */
+function isBeforeCutoff(createdAt, cutoff) {
+  if (createdAt == null) return false;
+  const at = createdAt instanceof Date ? createdAt : new Date(createdAt);
+  if (Number.isNaN(at.getTime())) return false;
+  return at.getTime() < cutoff.getTime();
 }
 
 function bump(counter, key) {
@@ -84,13 +137,26 @@ function add(counter, key, n) {
  * Build the fill plan.
  *
  * @param {object} input
- * @param {Array<{auditLogId:number, batchId:string|null, accruedOrderId:*, intent:string|null}>} input.events
+ * @param {Array<{auditLogId:number, batchId:string|null, accruedOrderId:*, accruedOrderIdType:string|null, intent:string|null, intentType:string|null, createdAt:Date|null}>} input.events
  *        The 0b-2 accrual events, as the runner projects them (ids only).
  * @param {Array<{id:number, batchId:string|null, logType:string, orderRecordId:string|null}>} input.ledgerRows
  *        Every inventory_logs row belonging to those batchIds.
+ * @param {Date} input.cutoff
+ *        REQUIRED (W2S-2). The W2 deploy moment: the instant the live route
+ *        started sending an intent. Before it, an event with no intent key had
+ *        nowhere to record one and IS backfillable; after it, the same event is
+ *        a stale client whose movement the route deliberately left unattributed.
+ *        There is no safe default — a planner that guessed would silently pick
+ *        one of those two meanings for every row.
  * @returns {{fills:Array, skips:Array, summary:object}}
  */
-function buildBackfillPlan({ events = [], ledgerRows = [] } = {}) {
+function buildBackfillPlan({ events = [], ledgerRows = [], cutoff } = {}) {
+  if (!(cutoff instanceof Date) || Number.isNaN(cutoff.getTime())) {
+    throw new Error(
+      "buildBackfillPlan: a `cutoff` Date is required — the W2 deploy moment, " +
+        "which is what makes an absent intent key readable either way"
+    );
+  }
   const summary = {
     eventsExamined: events.length,
     eventsLinkable: 0,
@@ -110,10 +176,24 @@ function buildBackfillPlan({ events = [], ledgerRows = [] } = {}) {
   // ---- event-level screening ----------------------------------------------
   const byBatch = new Map();
   for (const ev of events) {
-    if (!isUsableOrderId(ev.accruedOrderId)) {
+    if (!isUsableOrderId(ev.accruedOrderId, ev.accruedOrderIdType)) {
       bump(summary.eventsSkippedByClass, SKIP_CLASS.UNUSABLE_ACCRUED_ID);
       skips.push({
         class: SKIP_CLASS.UNUSABLE_ACCRUED_ID,
+        batchId: ev.batchId ?? null,
+        auditLogIds: [ev.auditLogId],
+        rowCount: 0,
+      });
+      continue;
+    }
+    // W2S-2. An event that CARRIES an intent is judged on that intent whatever
+    // its date (`order` fills; anything else is the operator's stated answer,
+    // settled at batch level below). An event with NO intent key is only
+    // readable as "the accrual had nowhere to go" while that was still true.
+    if (!hasIntentKey(ev) && !isBeforeCutoff(ev.createdAt, cutoff)) {
+      bump(summary.eventsSkippedByClass, SKIP_CLASS.POST_CUTOFF_NO_INTENT);
+      skips.push({
+        class: SKIP_CLASS.POST_CUTOFF_NO_INTENT,
         batchId: ev.batchId ?? null,
         auditLogIds: [ev.auditLogId],
         rowCount: 0,
@@ -214,10 +294,31 @@ function buildBackfillPlan({ events = [], ledgerRows = [] } = {}) {
     }
 
     const stamped = rows.filter((r) => r.orderRecordId != null);
+    const differing = stamped.filter((r) => r.orderRecordId !== orderRecordId);
     summary.rowsAlreadyStamped += stamped.length;
-    summary.rowsAlreadyStampedDiffering += stamped.filter(
-      (r) => r.orderRecordId !== orderRecordId
-    ).length;
+    summary.rowsAlreadyStampedDiffering += differing.length;
+
+    // W2S-4: a batch is ONE deduct-simple request, and one request went out
+    // against one order. A row already stamped with a DIFFERENT id means the
+    // live path and the accrual disagree about this request — so filling its
+    // null siblings from the accrual would split one request across two orders,
+    // a state the live path cannot produce and no reconciliation could read.
+    // Fill-only already spared the stamped rows; the siblings are spared too,
+    // and the whole batch is reported under its own class. (Distinct from
+    // conflicting-accrual, which is two ACCRUALS disagreeing — a different
+    // question with a different answer.)
+    if (differing.length > 0) {
+      bump(summary.batchesSkippedByClass, SKIP_CLASS.STAMPED_CONFLICT);
+      add(summary.rowsSkippedByClass, SKIP_CLASS.STAMPED_CONFLICT, rows.length);
+      summary.rowsSkipped += rows.length;
+      skips.push({
+        class: SKIP_CLASS.STAMPED_CONFLICT,
+        batchId,
+        auditLogIds,
+        rowCount: rows.length,
+      });
+      continue;
+    }
 
     const fillable = rows.filter((r) => r.orderRecordId == null);
     if (fillable.length === 0) {

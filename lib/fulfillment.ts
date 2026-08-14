@@ -420,6 +420,42 @@ export async function fulfillExternalOrder(
 
       // Process each fulfillment item
       for (const fulfillmentItem of items) {
+        // W2S-1 (codex W2 dual seam check, HIGH): EVERY write this item makes —
+        // stock decrement, loc-1 mirror, the stamped SALE row, the fulfilledQty
+        // update — lives inside this item's SAVEPOINT. The per-item catch below
+        // swallows the error and the OUTER transaction goes on to commit; before
+        // this savepoint a LATE failure (the fulfilledQty update, after the
+        // deduction and the ledger row) therefore committed a SALE row naming an
+        // order whose item was reported `failed`. A rollback to this savepoint
+        // undoes the whole item and nothing else: the established per-item
+        // partial semantics are unchanged, other items in the same request still
+        // succeed. (This is NOT T8R-1's whole-transaction abort — a different
+        // rule for a different surface.)
+        //
+        // Taken LAZILY, at the item's first write, so the paths that decline an
+        // item without touching anything (unmapped, already fulfilled, pre-flight
+        // short, malformed snapshot) still issue no statement at all. The bundle
+        // path keeps its own inner savepoint: that one exists for the concurrent-
+        // race SKIP, which must roll back the item's components while the item's
+        // own outer savepoint is released normally.
+        const itemSavepoint = `item_${fulfillmentItem.itemId.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+        let itemSavepointOpen = false;
+        const openItemSavepoint = async () => {
+          if (itemSavepointOpen) return;
+          await tx.$executeRawUnsafe(`SAVEPOINT ${itemSavepoint}`);
+          itemSavepointOpen = true;
+        };
+        // What the result looked like before this item touched it. A rolled-back
+        // item must not leave entries behind either: the reported outcome has to
+        // describe what actually committed.
+        const resultMark = {
+          fulfilled: result.fulfilled.length,
+          skipped: result.skipped.length,
+          inventoryLogIds: result.inventoryLogIds.length,
+          componentIds: Array.from(affectedComponentIdSet),
+        };
+        let itemFailed = false;
+
         try {
           // Find the order item
           const orderItem = order.items.find(
@@ -490,6 +526,11 @@ export async function fulfillExternalOrder(
             // be PATCHed between fulfill and unfulfill — unfulfill would restore
             // stock for components that were never deducted.
             if (snapshotSource === 'live') {
+              // W2S-1: the freeze is a WRITE, so the item's savepoint opens here.
+              // It still persists across every SKIP path below (a released
+              // savepoint keeps its work) — only an item FAILURE undoes it, and a
+              // failed item must leave nothing behind.
+              await openItemSavepoint();
               await tx.externalOrderItem.update({
                 where: { id: orderItem.id },
                 data: { bundleComponentSnapshot: components as unknown as Prisma.InputJsonValue },
@@ -551,6 +592,7 @@ export async function fulfillExternalOrder(
             // result.skipped, and continue with the next item. The outer
             // transaction continues for other items unaffected.
             const savepoint = `bundle_${orderItem.id.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+            await openItemSavepoint(); // W2S-1: the item's savepoint encloses this one
             await tx.$executeRawUnsafe(`SAVEPOINT ${savepoint}`);
 
             let concurrentRace: { productId: number; deductQty: number } | null = null;
@@ -692,6 +734,11 @@ export async function fulfillExternalOrder(
           // that sufficient stock exists and decrements it in one statement.
           // Race-safe: two concurrent transactions cannot both succeed because
           // the WHERE clause is evaluated against the committed row at UPDATE time.
+          //
+          // W2S-1: the item's first write on this path — savepoint opens here, so
+          // the decrement, the ledger row, the mirror and the fulfilledQty update
+          // that follow are one unit that survives or vanishes together.
+          await openItemSavepoint();
           const affectedRows = await tx.$executeRaw(Prisma.sql`
             UPDATE product_locations
             SET quantity = quantity - ${quantityToFulfill},
@@ -773,15 +820,39 @@ export async function fulfillExternalOrder(
 
           result.inventoryLogIds.push(log.id);
         } catch (error) {
+          itemFailed = true;
           console.error(
             `Error fulfilling item ${fulfillmentItem.itemId}:`,
             error
           );
+          // W2S-1: discard whatever this item recorded before it failed, so the
+          // reported result and the committed rows say the same thing.
+          result.fulfilled.length = resultMark.fulfilled;
+          result.skipped.length = resultMark.skipped;
+          result.inventoryLogIds.length = resultMark.inventoryLogIds;
+          affectedComponentIdSet.clear();
+          for (const id of resultMark.componentIds) {
+            affectedComponentIdSet.add(id);
+          }
           result.failed.push({
             itemId: fulfillmentItem.itemId,
             error:
               error instanceof Error ? error.message : 'Unknown error occurred',
           });
+        } finally {
+          // W2S-1: `continue` inside the try runs this block before it takes
+          // effect, so every exit path settles the savepoint exactly once. A
+          // failure rolls the item back; anything else releases it and lets the
+          // outer transaction commit the item's work. If the settling statement
+          // itself throws, it escapes the loop and the whole transaction aborts —
+          // fail-closed is the only safe direction here.
+          if (itemSavepointOpen) {
+            await tx.$executeRawUnsafe(
+              itemFailed
+                ? `ROLLBACK TO SAVEPOINT ${itemSavepoint}`
+                : `RELEASE SAVEPOINT ${itemSavepoint}`
+            );
+          }
         }
       }
 
