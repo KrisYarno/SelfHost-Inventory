@@ -12,7 +12,6 @@ import {
   GraduateSchema,
   CountStagingSchema,
   assertStagingPatchOmitsCount,
-  assertStagingCostPreconditionPaired,
   assertGraduateOmitsCount,
   assertGraduateOverridePair,
 } from '@/lib/validation/staging';
@@ -113,85 +112,26 @@ describe('PatchStagingSchema', () => {
 });
 
 // ---------------------------------------------------------------------------
-// FD2-2 (fix round 3) — `ifUnitCostCents`, the cost PRECONDITION.
-//
-// The freight panel's drift check was client-side only, so the window between
-// "the panel looked" and "the server wrote" was unguarded: a third party could
-// revert a written line to EXACTLY the frozen base (the panel's own-write-or-
-// frozen-base test passes, the retry skips the line, and the bill "completes"
-// with that line's freight silently missing), or change an unwritten line and
-// have the allocation overwrite it. The check has to BE the WHERE.
-//
-// Absence and explicit null are DIFFERENT requests here — absent means "write
-// unconditionally" (the manual per-line save), `null` means "only if this line
-// is still unpriced" — so the schema keeps them distinguishable.
+// FD3-1 (fix round 4) — round 3's `ifUnitCostCents` precondition is GONE from
+// this schema, with the per-line fan-out it was built for. The paired rule now
+// belongs to the batch bill: see AllocateShipmentCostsSchema in
+// lib/validation/inbound-shipment.ts (and its suite next door). What survives
+// here is the MANUAL per-line cost save, unconditional as originally built.
 // ---------------------------------------------------------------------------
 
-describe('PatchStagingSchema — ifUnitCostCents (FD2-2)', () => {
-  it('declares the field', () => {
-    expect(Object.keys(PatchStagingSchema.shape)).toContain('ifUnitCostCents');
+describe('PatchStagingSchema — no cost precondition (FD3-1)', () => {
+  it('does NOT declare ifUnitCostCents', () => {
+    expect(Object.keys(PatchStagingSchema.shape)).not.toContain('ifUnitCostCents');
   });
 
-  it('accepts a cents precondition alongside the write', () => {
-    const parsed = PatchStagingSchema.safeParse({ unitCostCents: 200, ifUnitCostCents: 100 });
-    expect(parsed.success).toBe(true);
-    expect(parsed.success && parsed.data.ifUnitCostCents).toBe(100);
-  });
-
-  it('accepts an explicit NULL precondition ("only if it is still unpriced")', () => {
-    const parsed = PatchStagingSchema.safeParse({ unitCostCents: 200, ifUnitCostCents: null });
-    expect(parsed.success).toBe(true);
-    expect(parsed.success && parsed.data.ifUnitCostCents).toBeNull();
-  });
-
-  it('keeps ABSENT distinguishable from explicit null', () => {
-    const absent = PatchStagingSchema.parse({ unitCostCents: 200 });
-    expect('ifUnitCostCents' in absent).toBe(false);
-    expect(absent.ifUnitCostCents).toBeUndefined();
-  });
-
-  it('rejects a fractional / negative precondition (cents are whole)', () => {
-    expect(PatchStagingSchema.safeParse({ unitCostCents: 1, ifUnitCostCents: 1.5 }).success).toBe(
-      false,
-    );
-    expect(PatchStagingSchema.safeParse({ unitCostCents: 1, ifUnitCostCents: -1 }).success).toBe(
-      false,
-    );
+  it('STRIPS a precondition a stale client still sends (it guards nothing here)', () => {
+    const parsed = PatchStagingSchema.parse({ unitCostCents: 200, ifUnitCostCents: 100 });
+    expect('ifUnitCostCents' in parsed).toBe(false);
+    expect(parsed.unitCostCents).toBe(200);
   });
 
   it('stays a plain ZodObject (the MCP adapter reads .shape — no .refine)', () => {
     expect(PatchStagingSchema).toBeInstanceOf(z.ZodObject);
-  });
-});
-
-describe('assertStagingCostPreconditionPaired (FD2-2)', () => {
-  it('accepts the precondition when it guards an actual cost write', () => {
-    expect(() =>
-      assertStagingCostPreconditionPaired({ unitCostCents: 200, ifUnitCostCents: 100 }),
-    ).not.toThrow();
-    expect(() =>
-      assertStagingCostPreconditionPaired({ unitCostCents: null, ifUnitCostCents: 100 }),
-    ).not.toThrow();
-  });
-
-  it('REFUSES a precondition with no cost write — it would guard nothing', () => {
-    expect(() => assertStagingCostPreconditionPaired({ ifUnitCostCents: 100 })).toThrow(
-      z.ZodError,
-    );
-    expect(() =>
-      assertStagingCostPreconditionPaired({ notes: 'x', ifUnitCostCents: null }),
-    ).toThrow(z.ZodError);
-    try {
-      assertStagingCostPreconditionPaired({ ifUnitCostCents: 100 });
-    } catch (err) {
-      expect((err as z.ZodError).errors[0].path).toEqual(['unitCostCents']);
-    }
-  });
-
-  it('leaves every ordinary body alone', () => {
-    expect(() => assertStagingCostPreconditionPaired({})).not.toThrow();
-    expect(() => assertStagingCostPreconditionPaired({ unitCostCents: 200 })).not.toThrow();
-    expect(() => assertStagingCostPreconditionPaired({ notes: 'pallet 3' })).not.toThrow();
   });
 });
 

@@ -3,11 +3,7 @@ import { requireApproved, apiHandler, requireCSRF } from '@/lib/api-utils';
 import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
 import { Prisma, StagingItemStatus } from '@prisma/client';
-import {
-  PatchStagingSchema,
-  assertStagingPatchOmitsCount,
-  assertStagingCostPreconditionPaired,
-} from '@/lib/validation/staging';
+import { PatchStagingSchema, assertStagingPatchOmitsCount } from '@/lib/validation/staging';
 import { getStagingItem } from '@/lib/staging/queries';
 import { recordChange, type ChangeDiff } from '@/lib/change-tracking';
 import { applyShipmentLink, claimShipmentForCount } from '@/lib/shipments/lifecycle';
@@ -89,7 +85,6 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
   const raw = await request.json();
   assertStagingPatchOmitsCount(raw);
   const body = PatchStagingSchema.parse(raw);
-  assertStagingCostPreconditionPaired(body);
 
   // Build a true partial update: only keys explicitly present in the body are
   // written, so PATCH never clobbers untouched columns.
@@ -144,10 +139,6 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
   // Its write is already conditional — `applyShipmentLink`'s claim pins
   // (id, RECEIVED, current link) — so W1S-1 leaves it alone.
   const writesState = Object.keys(stateData).length > 0;
-
-  // FD2-2: the OPTIONAL cost precondition. It is a guard, never a column — it
-  // joins the write's WHERE below and never `stateData`, `after`, or the diff.
-  const costPrecondition = body.ifUnitCostCents !== undefined;
 
   // Update + record atomically (D4); the before-image is read inside the tx.
   const item = await prisma.$transaction(async (tx) => {
@@ -265,42 +256,19 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     // `status: RECEIVED` hands the decision to MySQL, and the loser writes
     // nothing at all — label fields included, since they ride the same statement.
     //
-    // FD2-2 hangs the caller's OWN precondition off the same statement: when the
-    // request names `ifUnitCostCents`, the row must still carry exactly that
-    // cost. That is the difference between a check and a guarantee — the freight
-    // panel's client-side drift test can only describe the shipment as it was
-    // when it last rendered, and the window between that render and this write
-    // is exactly where a third party reverts a line to the frozen base and makes
-    // a bill look complete with one line's freight silently missing.
+    // FD3-1 (fix round 4) took round 3's caller-supplied cost precondition back
+    // OUT of this statement. It existed for the freight panel's per-line
+    // fan-out, and the fan-out itself was the defect — a bill is now ONE atomic
+    // request (POST /api/inbound-shipments/[id]/costs) which owns those
+    // preconditions. What is left here is the MANUAL per-line save,
+    // unconditional as originally built.
     let updated;
     if (writesState) {
       const write = await tx.stagingItem.updateMany({
-        where: {
-          id,
-          status: StagingItemStatus.RECEIVED,
-          ...(costPrecondition ? { unitCostCents: body.ifUnitCostCents } : {}),
-        },
+        where: { id, status: StagingItemStatus.RECEIVED },
         data: { ...stateData, ...labelData },
       });
       if (write.count === 0) {
-        // Two different refusals hide behind one `count === 0`, and the caller
-        // needs to tell them apart: a drifted cost is retriable against the
-        // reloaded shipment, a graduated line is not. Re-claiming WITHOUT the
-        // cost is a current read (the no-op claim idiom) that answers which one
-        // this was; it writes nothing and rolls back with the throw either way.
-        if (costPrecondition) {
-          const stillReceiving = await tx.stagingItem.updateMany({
-            where: { id, status: StagingItemStatus.RECEIVED },
-            data: { status: StagingItemStatus.RECEIVED },
-          });
-          if (stillReceiving.count > 0) {
-            throw new AppError(
-              `Staging item ${id}: the cost changed while the bill was open; reload the shipment and re-enter the freight against the costs on screen`,
-              'COST_DRIFT',
-              409,
-            );
-          }
-        }
         throw new AppError(
           `Staging item ${id} changed state while it was being updated; reload and retry`,
           'CONFLICT',

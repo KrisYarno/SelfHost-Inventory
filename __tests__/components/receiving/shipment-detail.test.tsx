@@ -181,7 +181,6 @@ async function enterBill(user: ReturnType<typeof userEvent.setup>, dollars: stri
 }
 
 const lineRow = (id: number) => screen.getByTestId(`receiving-line-${id}`);
-const fetchSpy = () => global.fetch as unknown as jest.Mock;
 const writesTo = (fn: jest.Mock, fragment: string) =>
   fn.mock.calls.filter(
     (c) => String(c[0]).includes(fragment) && (c[1] as RequestInit)?.method !== undefined,
@@ -479,22 +478,32 @@ describe("a settled shipment", () => {
 // ---------------------------------------------------------------------------
 
 describe("the freight calculator", () => {
-  it("Accept writes each line's unitCostCents through the staging PATCH", async () => {
+  it("Accept sends the WHOLE bill to the batch route, in ONE request", async () => {
     const user = userEvent.setup();
     const { fetchFn } = renderDetail(
-      detail({}, [line({ countedQuantity: 10, unitCostCents: 500 })]),
+      detail({}, [
+        line({ id: 11, countedQuantity: 10, unitCostCents: 500 }),
+        line({ id: 12, description: "Caps", countedQuantity: 5, unitCostCents: 200 }),
+      ]),
     );
 
     await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
-    await enterBill(user, "10.00");
+    await enterBill(user, "60.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
-    await waitFor(() => expect(writesTo(fetchFn, "/api/staging-items/11").length).toBe(1));
-    // The whole 1000c bill lands on the one line: 500 + 1000/10 = 600/unit.
-    expect(
-      JSON.parse(String((writesTo(fetchFn, "/api/staging-items/11")[0][1] as RequestInit).body)),
-      // FD2-2: the allocation's write is CONDITIONAL on the frozen base cost.
-    ).toEqual({ unitCostCents: 600, ifUnitCostCents: 500 });
+    await waitFor(() => expect(writesTo(fetchFn, "/costs").length).toBe(1));
+    const [, init] = writesTo(fetchFn, "/costs")[0];
+    expect((init as RequestInit).method).toBe("POST");
+    // 6000c of freight over values 5000 and 1000: 5000c and 1000c, i.e. +500 and
+    // +200 per unit. Every line carries the frozen base as its precondition.
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      lines: [
+        { id: 11, unitCostCents: 1000, ifUnitCostCents: 500 },
+        { id: 12, unitCostCents: 400, ifUnitCostCents: 200 },
+      ],
+    });
+    // FD3-1: the per-line fan-out is GONE. Not one staging PATCH was sent.
+    expect(writesTo(fetchFn, "/api/staging-items/")).toHaveLength(0);
   });
 
   it("is offered on a CLOSED shipment too — a stranded line still needs a cost", async () => {
@@ -516,223 +525,41 @@ describe("the freight calculator", () => {
   });
 
   // -------------------------------------------------------------------------
-  // W1S-5 — the sequential PATCHes are not all-or-nothing, so a failure has to
-  // say WHERE it stopped. Swallowing it left the operator with a cleared bill,
-  // a success-shaped screen, and some lines priced and some not.
-  // -------------------------------------------------------------------------
-
-  it("a mid-sequence failure names the lines that DID write and keeps the bill", async () => {
-    const user = userEvent.setup();
-    let costPatches = 0;
-    renderDetail(
-      detail({}, [
-        line({ id: 11, countedQuantity: 10, unitCostCents: 500 }),
-        line({ id: 12, description: "Caps", countedQuantity: 5, unitCostCents: 200 }),
-      ]),
-      (url, init) => {
-        if (url.includes("/api/staging-items/") && init?.method === "PATCH") {
-          costPatches += 1;
-          // the first line writes, the second one 500s
-          if (costPatches === 1) return { ok: true, json: async () => ({ id: 11 }) };
-          return {
-            ok: false,
-            status: 500,
-            json: async () => ({ error: "Database is unavailable" }),
-          };
-        }
-        return undefined;
-      },
-    );
-
-    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
-    await enterBill(user, "60.00");
-    await user.click(screen.getByRole("button", { name: /accept/i }));
-
-    const report = await screen.findByTestId("cost-write-partial");
-    // WHICH lines wrote — the whole point of not swallowing the throw.
-    expect(report).toHaveTextContent("11");
-    expect(report).toHaveTextContent(/not written/i);
-    expect(report).toHaveTextContent("12");
-    // The panel kept the bill, so the operator can retry the rest.
-    expect(screen.getByLabelText(/freight/i)).toHaveValue("60.00");
-    expect(await screen.findByTestId("allocation-write-failed")).toBeInTheDocument();
-  });
-
-  it("a fully successful Accept reports nothing partial (the success path is unchanged)", async () => {
-    const user = userEvent.setup();
-    renderDetail(detail({}, [line({ countedQuantity: 10, unitCostCents: 500 })]));
-
-    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
-    await enterBill(user, "10.00");
-    await user.click(screen.getByRole("button", { name: /accept/i }));
-
-    await waitFor(() => expect(writesTo(fetchSpy(), "/api/staging-items/11").length).toBe(1));
-    expect(screen.queryByTestId("cost-write-partial")).not.toBeInTheDocument();
-  });
-
-  // -------------------------------------------------------------------------
-  // FD-1 — the partial write, END TO END through the real hook.
+  // FD3-1 (fix round 4) — THE BILL IS ONE TRANSACTION.
   //
-  // Each successful line PATCH invalidates the shipment query, so the lines that
-  // wrote come back carrying their LANDED costs. The panel used to recompute
-  // against them and the retry re-sent the written line at a higher number
-  // again: 100c -> 200c -> 333c on a line nobody meant to touch twice. The
-  // detail's job in that fix is to name the lines that DID write when it
-  // rethrows; this pins that the two halves are actually wired together.
+  // W1S-5, FD-1 and FD3-1 were three readings of one defect: Accept fanned out
+  // into a PATCH per line, and those PATCHes were not atomic. The last reading
+  // is the one that costs money — line A lands, line B is refused, and the
+  // recovery the panel offers ("clear and re-enter the FULL freight")
+  // re-allocates the whole invoice INCLUDING onto A's base, which has already
+  // absorbed its share. The landed cost of A is then overstated, silently, by
+  // an operator following the instructions on screen.
+  //
+  // So Accept is now ONE POST of the whole bill, written in one transaction.
+  // Everything below pins the two halves of that: on success every line wrote,
+  // and on ANY failure nothing did — which is what makes "clear and re-enter"
+  // safe again.
   // -------------------------------------------------------------------------
 
-  it("a retry after a partial write sends ONLY the unwritten line (FD-1)", async () => {
+  it("PIN 1: a drifted line takes the WHOLE bill down — no line's cost changes", async () => {
     const user = userEvent.setup();
-    // Two identical 100c lines of 10 units: 20.00 of freight lands 100c on each,
-    // so each line's landed unit cost is 200c.
-    let items = [
+    // Two lines at 100c; whatever happens, neither may come back repriced.
+    const items = [
       line({ id: 11, countedQuantity: 10, unitCostCents: 100 }),
       line({ id: 12, description: "Caps", countedQuantity: 10, unitCostCents: 100 }),
     ];
-    let firstAttempt = true;
-    const { fetchFn } = renderDetail(detail(), (url, init) => {
-      if (url.includes(`/api/inbound-shipments/${SHIPMENT_ID}`) && !init?.method) {
-        return { ok: true, json: async () => detail({}, items) };
-      }
-      if (url.includes("/api/staging-items/") && init?.method === "PATCH") {
-        if (url.includes("/11")) {
-          // Line 11 writes — and the shipment now reports its LANDED cost.
-          items = [line({ id: 11, countedQuantity: 10, unitCostCents: 200 }), items[1]];
-          return { ok: true, json: async () => ({ id: 11 }) };
-        }
-        if (firstAttempt) {
-          firstAttempt = false;
-          return {
-            ok: false,
-            status: 500,
-            json: async () => ({ error: "Database is unavailable" }),
-          };
-        }
-        return { ok: true, json: async () => ({ id: 12 }) };
-      }
-      return undefined;
-    });
-
-    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
-    await enterBill(user, "20.00");
-    await user.click(screen.getByRole("button", { name: /accept/i }));
-    await screen.findByTestId("cost-write-partial");
-
-    // The refetch has landed: line 11 reads 200c now.
-    await waitFor(() =>
-      expect(within(lineRow(11)).getByTestId("line-cost")).toHaveTextContent("$2.00"),
-    );
-
-    await user.click(screen.getByRole("button", { name: /accept/i }));
-    await waitFor(() => expect(writesTo(fetchFn, "/api/staging-items/12").length).toBe(2));
-
-    // Line 11 was written at 200c, then RESTATED at the same 200c under a
-    // precondition (FD2-2) — a no-op whose only job is to prove the line still
-    // holds what this bill wrote. Never a new number, never compounded.
-    const line11Writes = writesTo(fetchFn, "/api/staging-items/11");
-    expect(line11Writes).toHaveLength(2);
-    expect(JSON.parse(String((line11Writes[0][1] as RequestInit).body))).toEqual({
-      unitCostCents: 200,
-      ifUnitCostCents: 100,
-    });
-    expect(JSON.parse(String((line11Writes[1][1] as RequestInit).body))).toEqual({
-      unitCostCents: 200,
-      ifUnitCostCents: 200,
-    });
-    // And the retry sent line 12 at the ORIGINAL allocation, still guarded on
-    // the base the split was frozen against.
-    const line12Writes = writesTo(fetchFn, "/api/staging-items/12");
-    expect(JSON.parse(String((line12Writes[1][1] as RequestInit).body))).toEqual({
-      unitCostCents: 200,
-      ifUnitCostCents: 100,
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // FD2-2 — the drift check is the SERVER's, end to end.
-  //
-  // The panel can only compare the rows as of its last render, so the window
-  // between that render and the PATCH was unguarded. Now every allocation write
-  // carries the cost it EXPECTS the row to hold, and a server refusal
-  // (409 COST_DRIFT) invalidates the whole bill instead of letting a retry
-  // "complete" one.
-  // -------------------------------------------------------------------------
-
-  it("PIN 5: a foreign change to an unwritten line is refused by the SERVER", async () => {
-    const user = userEvent.setup();
-    const { fetchFn } = renderDetail(
-      detail({}, [line({ id: 11, countedQuantity: 10, unitCostCents: 100 })]),
-      (url, init) => {
-        if (url.includes("/api/staging-items/") && init?.method === "PATCH") {
-          // Somebody repriced the line between the freeze and this write, so the
-          // precondition in the WHERE matched nothing.
-          return {
-            ok: false,
-            status: 409,
-            json: async () => ({
-              error: "the cost changed while the bill was open",
-              code: "COST_DRIFT",
-            }),
-          };
-        }
-        return undefined;
-      },
-    );
-
-    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
-    await enterBill(user, "10.00");
-    await user.click(screen.getByRole("button", { name: /accept/i }));
-
-    // The write CARRIED the precondition: the check is the WHERE, not the panel.
-    const writes = writesTo(fetchFn, "/api/staging-items/11");
-    expect(JSON.parse(String((writes[0][1] as RequestInit).body))).toEqual({
-      unitCostCents: 200,
-      ifUnitCostCents: 100,
-    });
-    // ...and the refusal took the whole bill with it, by name.
-    expect(await screen.findByTestId("allocation-invalidated")).toHaveTextContent(/cost/i);
-    expect(screen.queryByTestId("allocation-applied")).not.toBeInTheDocument();
-  });
-
-  it("PIN 4: a written line REVERTED to the frozen base kills the retry, no completion", async () => {
-    const user = userEvent.setup();
-    // Two 100c lines of 10 units: 20.00 of freight lands 100c on each (200c
-    // landed unit cost).
-    let items = [
-      line({ id: 11, countedQuantity: 10, unitCostCents: 100 }),
-      line({ id: 12, description: "Caps", countedQuantity: 10, unitCostCents: 100 }),
-    ];
-    let attempt = 0;
-    const { fetchFn } = renderDetail(detail(), (url, init) => {
-      if (url.includes(`/api/inbound-shipments/${SHIPMENT_ID}`) && !init?.method) {
-        return { ok: true, json: async () => detail({}, items) };
-      }
-      if (url.includes("/api/staging-items/") && init?.method === "PATCH") {
-        const sent = JSON.parse(String(init?.body ?? "{}"));
-        if (url.includes("/11")) {
-          attempt += 1;
-          if (attempt === 1) {
-            // The first write lands...
-            items = [line({ id: 11, countedQuantity: 10, unitCostCents: 200 }), items[1]];
-            return { ok: true, json: async () => ({ id: 11 }) };
-          }
-          // ...and by the retry somebody has put line 11 back to 100c, which is
-          // EXACTLY the frozen base — invisible to any client-side comparison.
-          expect(sent.ifUnitCostCents).toBe(200);
-          return {
-            ok: false,
-            status: 409,
-            json: async () => ({
-              error: "the cost changed while the bill was open",
-              code: "COST_DRIFT",
-            }),
-          };
-        }
-        // Line 12 fails the first time (that is what makes the write partial).
+    const { fetchFn } = renderDetail(detail({}, items), (url, init) => {
+      if (url.includes("/costs") && init?.method === "POST") {
+        // The server refused line 12's precondition, so the transaction rolled
+        // back — INCLUDING line 11's write, which had already run inside it.
         return {
           ok: false,
-          status: 500,
-          json: async () => ({ error: "Database is unavailable" }),
+          status: 409,
+          json: async () => ({
+            error:
+              "Staging item 12: the cost changed while the bill was open; reload the shipment and re-enter the freight against the costs on screen",
+            code: "COST_DRIFT",
+          }),
         };
       }
       return undefined;
@@ -741,19 +568,142 @@ describe("the freight calculator", () => {
     await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
     await enterBill(user, "20.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
-    await screen.findByTestId("cost-write-partial");
 
-    const before = writesTo(fetchFn, "/api/staging-items/12").length;
+    // ONE request, and it failed: nothing else was ever sent, so nothing landed.
+    await waitFor(() => expect(writesTo(fetchFn, "/costs").length).toBe(1));
+    expect(writesTo(fetchFn, "/api/staging-items/")).toHaveLength(0);
+    // Both lines still read at their original cost — the recovery below cannot
+    // double-apply freight onto a base that already absorbed some.
+    expect(within(lineRow(11)).getByTestId("line-cost")).toHaveTextContent("$1.00");
+    expect(within(lineRow(12)).getByTestId("line-cost")).toHaveTextContent("$1.00");
+    // The panel shows the INVALIDATION, not a partial-write report.
+    expect(await screen.findByTestId("allocation-invalidated")).toHaveTextContent(/cost/i);
+    expect(screen.queryByTestId("cost-write-partial")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("line-written")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("allocation-applied")).not.toBeInTheDocument();
+  });
+
+  it("PIN 2: a successful bill writes every line and clears, with the applied notice", async () => {
+    const user = userEvent.setup();
+    const { fetchFn } = renderDetail(
+      detail({}, [
+        line({ id: 11, countedQuantity: 10, unitCostCents: 100 }),
+        line({ id: 12, description: "Caps", countedQuantity: 10, unitCostCents: 100 }),
+      ]),
+    );
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await enterBill(user, "20.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
-    // The restate ran FIRST and was refused, so no further money was written.
-    expect(await screen.findByTestId("allocation-invalidated")).toBeInTheDocument();
-    expect(writesTo(fetchFn, "/api/staging-items/12")).toHaveLength(before);
-    // Nothing may claim the allocation completed.
-    expect(screen.queryByTestId("allocation-applied")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /accept/i })).toBeDisabled();
-    // The detail's own report says the bill is dead, not "Accept again".
-    expect(screen.getByTestId("cost-write-partial")).toHaveTextContent(/re-enter/i);
+    await waitFor(() => expect(writesTo(fetchFn, "/costs").length).toBe(1));
+    expect(JSON.parse(String((writesTo(fetchFn, "/costs")[0][1] as RequestInit).body))).toEqual({
+      lines: [
+        { id: 11, unitCostCents: 200, ifUnitCostCents: 100 },
+        { id: 12, unitCostCents: 200, ifUnitCostCents: 100 },
+      ],
+    });
+    expect(await screen.findByTestId("allocation-applied")).toBeInTheDocument();
+    expect(screen.queryByTestId("cost-write-partial")).not.toBeInTheDocument();
+  });
+
+  it("PIN 6: after a non-drift failure, Accept-again re-sends the IDENTICAL full bill", async () => {
+    const user = userEvent.setup();
+    let attempt = 0;
+    const { fetchFn } = renderDetail(
+      detail({}, [
+        line({ id: 11, countedQuantity: 10, unitCostCents: 100 }),
+        line({ id: 12, description: "Caps", countedQuantity: 10, unitCostCents: 100 }),
+      ]),
+      (url, init) => {
+        if (url.includes("/costs") && init?.method === "POST") {
+          attempt += 1;
+          if (attempt === 1) {
+            return {
+              ok: false,
+              status: 500,
+              json: async () => ({ error: "Database is unavailable" }),
+            };
+          }
+          return undefined;
+        }
+        return undefined;
+      },
+    );
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await enterBill(user, "20.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    await screen.findByTestId("allocation-write-failed");
+
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    await waitFor(() => expect(writesTo(fetchFn, "/costs").length).toBe(2));
+
+    // Nothing landed on the first attempt, so the retry is the SAME bill —
+    // idempotent by construction, never "the rest of" anything.
+    const bodies = writesTo(fetchFn, "/costs").map((c) =>
+      JSON.parse(String((c[1] as RequestInit).body)),
+    );
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(await screen.findByTestId("allocation-applied")).toBeInTheDocument();
+  });
+
+  it("a failure keeps the bill on screen and reports nothing as written", async () => {
+    const user = userEvent.setup();
+    renderDetail(
+      detail({}, [line({ id: 11, countedQuantity: 10, unitCostCents: 500 })]),
+      (url, init) => {
+        if (url.includes("/costs") && init?.method === "POST") {
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({ error: "Database is unavailable" }),
+          };
+        }
+        return undefined;
+      },
+    );
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await enterBill(user, "10.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(await screen.findByTestId("allocation-write-failed")).toBeInTheDocument();
+    expect(screen.getByLabelText(/freight/i)).toHaveValue("10.00");
+    // The partial-write report is GONE: there is no partial write to report.
+    expect(screen.queryByTestId("cost-write-partial")).not.toBeInTheDocument();
+    expect(within(lineRow(11)).getByTestId("line-cost")).toHaveTextContent("$5.00");
+  });
+
+  it("a CONFLICT (a line left the shipment) keeps the bill retriable, nothing written", async () => {
+    const user = userEvent.setup();
+    const { fetchFn } = renderDetail(
+      detail({}, [line({ id: 11, countedQuantity: 10, unitCostCents: 500 })]),
+      (url, init) => {
+        if (url.includes("/costs") && init?.method === "POST") {
+          return {
+            ok: false,
+            status: 409,
+            json: async () => ({
+              error:
+                "Staging item 11 changed state or left this shipment while the bill was being written; reload and retry",
+              code: "CONFLICT",
+            }),
+          };
+        }
+        return undefined;
+      },
+    );
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await enterBill(user, "10.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+
+    expect(await screen.findByTestId("allocation-write-failed")).toBeInTheDocument();
+    // Not a drift: the bill still describes the costs on screen, so a retry is
+    // legal (and would be refused again until the line comes back).
+    expect(screen.queryByTestId("allocation-invalidated")).not.toBeInTheDocument();
+    expect(writesTo(fetchFn, "/api/staging-items/")).toHaveLength(0);
   });
 });
 

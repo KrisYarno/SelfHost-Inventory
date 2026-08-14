@@ -210,20 +210,16 @@ export function useUpdateInboundShipment() {
 export interface UpdateStagingLineInput {
   /** INT cents; `null` un-prices the line (unknown), which is NOT 0. */
   unitCostCents?: number | null;
-  /**
-   * FD2-2: the cost PRECONDITION for the write above. Present = "write only if
-   * the row still carries exactly this"; a miss is a 409 with code COST_DRIFT.
-   * ABSENT and `null` mean different things (unconditional vs "still unpriced"),
-   * so this is never sent as `undefined` deliberately — omit the key instead.
-   */
-  ifUnitCostCents?: number | null;
   /** Join a receipt, or `null` to leave one. */
   shipmentId?: string | null;
 }
 
 /**
- * The receiving detail's writes against a staging LINE — the per-line cost and
- * link/unlink — through the existing `PATCH /api/staging-items/[id]`.
+ * The receiving detail's writes against a staging LINE — the MANUAL per-line
+ * cost save and link/unlink — through the existing `PATCH /api/staging-items/[id]`.
+ *
+ * A freight BILL no longer comes through here (FD3-1): see
+ * `useAllocateShipmentCosts`.
  *
  * It invalidates BOTH caches: a line's cost belongs to the shipment view and to
  * the pre-staging queue, and a link moves the row between two shipment details.
@@ -246,6 +242,52 @@ export function useUpdateStagingLine() {
       return res.json();
     },
     onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: shipmentKeys.all });
+      await queryClient.invalidateQueries({ queryKey: ["staging-items"] });
+    },
+  });
+}
+
+/** One line of a freight bill: the cost to write, and the cost it must still hold. */
+export interface AllocateShipmentCostLine {
+  id: number;
+  unitCostCents: number;
+  /** The precondition. NULL is legal and means "still unpriced". */
+  ifUnitCostCents: number | null;
+}
+
+/**
+ * THE WHOLE FREIGHT BILL, in one request (FD3-1).
+ *
+ * The calculator's Accept used to fan out into one staging PATCH per line, which
+ * meant a failure halfway left some lines carrying their share of the freight
+ * and some not — and the recovery on offer ("re-enter the full bill")
+ * double-applied it onto the ones that had landed. `POST
+ * /api/inbound-shipments/[id]/costs` writes every line in one transaction, so
+ * there are exactly two outcomes and the failing one wrote nothing.
+ *
+ * Invalidation is on SETTLE, not on success: a refusal is the moment the panel's
+ * frozen bill is most likely to be describing rows that have moved, and after it
+ * there is nothing partial to leave stale.
+ */
+export function useAllocateShipmentCosts() {
+  const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
+  return useMutation<
+    ShipmentDetail,
+    ShipmentApiError,
+    { id: string; lines: AllocateShipmentCostLine[] }
+  >({
+    mutationFn: async ({ id, lines }) => {
+      const res = await fetch(`/api/inbound-shipments/${id}/costs`, {
+        method: "POST",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+        body: JSON.stringify({ lines }),
+      });
+      if (!res.ok) throw await readError(res, "Failed to write the landed costs");
+      return res.json();
+    },
+    onSettled: async () => {
       await queryClient.invalidateQueries({ queryKey: shipmentKeys.all });
       await queryClient.invalidateQueries({ queryKey: ["staging-items"] });
     },

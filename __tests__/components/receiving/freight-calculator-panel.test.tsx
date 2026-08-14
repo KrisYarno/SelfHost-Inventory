@@ -415,17 +415,21 @@ describe("a failing write keeps the bill (W1S-5)", () => {
 // FD-1 (fix round 2) — THE BILL SESSION.
 //
 // W1S-5 kept the bill on screen after a partial write, but the panel's INPUTS
-// are the shipment's live rows, and every successful PATCH invalidates that
+// are the shipment's live rows, and every successful PATCH invalidated that
 // query. So the retry recomputed against the lines it had just written: a line
 // that went 100c -> 200c came back as a 200c BASE, the same freight was split
 // again over the new values, and Accept re-sent it at 333c. The guard against
 // entering the same bill twice did nothing about entering it once and having it
 // applied twice.
 //
-// Now the bill is a SESSION: Allocate freezes the base costs it was computed
-// from, a retry sends only the lines that did NOT write, at their ORIGINAL
-// allocations, and a row cost that moves underneath an open bill invalidates the
-// whole thing by name rather than quietly re-basing it.
+// The bill is a SESSION: Allocate freezes the base costs it was computed from,
+// nothing recomputes mid-session, and a row that moves underneath an open bill
+// invalidates the whole thing by name rather than quietly re-basing it.
+//
+// FD3-1 (fix round 4) removed the OTHER half of that fix — the partial-write
+// bookkeeping. The caller now writes the whole bill in one transaction, so
+// "which lines wrote" is no longer a question with an answer: either all of
+// them did, or none did.
 // ---------------------------------------------------------------------------
 
 describe("the bill session (FD-1)", () => {
@@ -435,57 +439,61 @@ describe("the bill session (FD-1)", () => {
     { id: 2, description: "B", qty: 1, qtySource: "counted" as const, baseCents: 100 },
   ];
 
-  it("THE COMPOUNDING SCENARIO: a retry writes only the failed line, at its ORIGINAL allocation", async () => {
+  it("PIN 6: Accept-again after a failure re-sends the IDENTICAL full bill", async () => {
     const user = userEvent.setup();
-    const failure = Object.assign(new Error("Database is unavailable"), {
-      // line 1 wrote, line 2 did not — what the caller must report back
-      writtenLineIds: [1],
-    });
-    const onAccept = jest.fn().mockRejectedValueOnce(failure).mockResolvedValueOnce(undefined);
-    const { rerender } = render(
-      <FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />,
-    );
+    const onAccept = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("Database is unavailable"))
+      .mockResolvedValueOnce(undefined);
+    render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
 
     await enterBill(user, "2.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
     await screen.findByTestId("allocation-write-failed");
-
-    // The invalidation that follows a successful PATCH: line 1 now reads back at
-    // the landed cost it was just written with.
-    rerender(
-      <FreightCalculatorPanel
-        lines={[{ ...PAIR[0], baseCents: 200 }, PAIR[1]]}
-        onAccept={onAccept}
-      />,
-    );
-
-    // The bill is NOT re-based on that: line 1 came back as what we wrote.
-    expect(screen.queryByTestId("allocation-invalidated")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
-    // The retry restates line 1 AT THE COST IT WAS WRITTEN WITH — an idempotent
-    // no-op whose only job is to make the server prove the line still carries it
-    // (FD2-2) — and then sends the line that did not write, at its frozen base.
-    expect(onAccept).toHaveBeenLastCalledWith([
-      { id: 1, unitCostCents: 200, ifUnitCostCents: 200 },
+    // Nothing landed, so the retry is the SAME request — a legal full retry, not
+    // a "retry of the rest" that has to be reasoned about.
+    const bill = [
+      { id: 1, unitCostCents: 200, ifUnitCostCents: 100 },
       { id: 2, unitCostCents: 200, ifUnitCostCents: 100 },
-    ]);
-    // 333 is the number the old panel would have re-sent for line 1.
+    ];
+    expect(onAccept).toHaveBeenNthCalledWith(1, bill);
+    expect(onAccept).toHaveBeenNthCalledWith(2, bill);
+    // 333 is the number the compounding panel would have re-sent for line 1.
     expect(JSON.stringify(onAccept.mock.calls)).not.toContain("333");
   });
 
-  it("marks the lines that already wrote and stops offering to write them again", async () => {
+  it("PIN 8: NO partial-write state is reachable, even from a legacy-shaped rejection", async () => {
     const user = userEvent.setup();
-    const failure = Object.assign(new Error("boom"), { writtenLineIds: [1] });
-    const onAccept = jest.fn().mockRejectedValue(failure);
+    // The dead S12 seam, deliberately still on the error: a caller that reports
+    // "line 1 landed" is now WRONG (the write is one transaction), and the panel
+    // must not act on it at all.
+    const onAccept = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error("Database is unavailable"), { writtenLineIds: [1] }),
+      );
     render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
 
     await enterBill(user, "2.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
     await screen.findByTestId("allocation-write-failed");
 
-    expect(within(lineRow(1)).getByTestId("line-written")).toHaveTextContent(/already written/i);
-    expect(within(lineRow(2)).queryByTestId("line-written")).not.toBeInTheDocument();
+    // No "already written" badge, no locked total, no disabled allocation input:
+    // every state the fan-out needed is gone because the failure mode is gone.
+    expect(screen.queryByTestId("line-written")).not.toBeInTheDocument();
+    expect(freightInput()).not.toHaveAttribute("readonly");
+    expect(allocationInput(1)).toBeEnabled();
+    expect(allocationInput(2)).toBeEnabled();
+    expect(screen.getByRole("button", { name: /accept/i })).toBeEnabled();
+
+    // ...and the retry is still the WHOLE bill, line 1 included.
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    expect(onAccept).toHaveBeenLastCalledWith([
+      { id: 1, unitCostCents: 200, ifUnitCostCents: 100 },
+      { id: 2, unitCostCents: 200, ifUnitCostCents: 100 },
+    ]);
   });
 
   it("INVALIDATES the whole bill by name when a line's cost moves underneath it", async () => {
@@ -640,15 +648,17 @@ describe("floored consent is keyed to the amounts (FD-4)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// FD2-2 (fix round 3) — the drift check moves to the SERVER.
+// FD2-2 (fix round 3) — the drift check is the SERVER's.
 //
-// Everything the panel compares is a render old. Two losses came out of that
-// window: a third party reverting a written line to EXACTLY the frozen base
-// (the panel's own-write-or-frozen-base test passes, the retry skips the line,
-// and the bill "completes" with that line's freight missing), and any foreign
-// change to an unwritten line simply being overwritten. So every write now
-// carries the value it EXPECTS the row to hold, the server makes that the WHERE,
-// and a refusal invalidates the whole bill rather than half of it.
+// Everything the panel compares is a render old, so any foreign change to a line
+// between the freeze and the write would simply be overwritten. Every line of
+// the bill therefore carries the value it EXPECTS the row to hold, the server
+// makes that the WHERE, and a refusal (409 COST_DRIFT on the house envelope)
+// invalidates the whole bill.
+//
+// FD3-1 (fix round 4): the refusal now arrives as the API error's `code` — the
+// same field the server sent — rather than through a bespoke seam field on a
+// partial-write error class. That class is gone with the fan-out it described.
 // ---------------------------------------------------------------------------
 
 describe("the write carries its own precondition (FD2-2)", () => {
@@ -698,28 +708,23 @@ describe("the write carries its own precondition (FD2-2)", () => {
     ]);
   });
 
-  it("THE REVERT: a COST_DRIFT refusal invalidates the WHOLE bill by name", async () => {
+  it("PIN 1: a COST_DRIFT refusal invalidates the WHOLE bill by name, with no partial report", async () => {
     const user = userEvent.setup();
-    const drift = Object.assign(new Error("the cost changed while the bill was open"), {
-      kind: "COST_DRIFT" as const,
-      writtenLineIds: [] as number[],
-    });
-    const onAccept = jest
-      .fn()
-      .mockRejectedValueOnce(
-        Object.assign(new Error("Database is unavailable"), { writtenLineIds: [1] }),
-      )
-      .mockRejectedValueOnce(drift);
+    const drift = Object.assign(
+      new Error("Staging item 2: the cost changed while the bill was open"),
+      { code: "COST_DRIFT" },
+    );
+    const onAccept = jest.fn().mockRejectedValue(drift);
     render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
 
     await enterBill(user, "2.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
-    await screen.findByTestId("allocation-write-failed");
 
-    // The retry restates line 1 — and the server says that line no longer holds
-    // the cost we wrote (somebody put it back to 100c).
-    await user.click(screen.getByRole("button", { name: /accept/i }));
-
+    // FD3-1: the bill was ONE transaction, so a drift on line 2 rolled line 1
+    // back with it. Nothing may report a line as written, and the invalidation
+    // — not a partial-write notice — is what the operator sees.
+    expect(screen.queryByTestId("line-written")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("allocation-write-failed")).not.toBeInTheDocument();
     const invalidated = await screen.findByTestId("allocation-invalidated");
     expect(invalidated).toHaveTextContent(/cost/i);
     expect(invalidated).toHaveTextContent(/re-enter the bill/i);
@@ -734,7 +739,7 @@ describe("the write carries its own precondition (FD2-2)", () => {
   it("clearing a drift-invalidated bill starts from nothing", async () => {
     const user = userEvent.setup();
     const drift = Object.assign(new Error("the cost changed while the bill was open"), {
-      kind: "COST_DRIFT" as const,
+      code: "COST_DRIFT",
     });
     const onAccept = jest.fn().mockRejectedValue(drift);
     render(<FreightCalculatorPanel lines={PAIR} onAccept={onAccept} />);
@@ -775,6 +780,10 @@ describe("the write carries its own precondition (FD2-2)", () => {
 // the panel was dead until the page remounted. And Clear was live DURING a
 // fan-out, so a late rejection could repopulate state on a bill the operator had
 // just thrown away.
+//
+// FD3-1 killed the orphan at the root: there is no `written` any more. What
+// survives is the LIVE half — Clear is reachable from every session state, and
+// refused only while a write is in flight.
 // ---------------------------------------------------------------------------
 
 describe("the session cannot be orphaned (FD2-3)", () => {
@@ -783,40 +792,34 @@ describe("the session cannot be orphaned (FD2-3)", () => {
     { id: 2, description: "B", qty: 1, qtySource: "counted" as const, baseCents: 100 },
   ];
 
-  /** A partial write: line 1 landed, line 2 did not. */
-  const partial = () =>
-    jest
-      .fn()
-      .mockRejectedValue(Object.assign(new Error("boom"), { writtenLineIds: [1] }));
+  /** A bill that did not write. Nothing landed, so nothing is left behind. */
+  const failing = () => jest.fn().mockRejectedValue(new Error("boom"));
 
-  it("THE ORPHAN: the freight total is READ-ONLY once a line has been written", async () => {
+  it("the freight total stays WRITABLE after a failure — the bill did not land", async () => {
     const user = userEvent.setup();
-    render(<FreightCalculatorPanel lines={PAIR} onAccept={partial()} />);
+    render(<FreightCalculatorPanel lines={PAIR} onAccept={failing()} />);
 
     await enterBill(user, "2.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
     await screen.findByTestId("allocation-write-failed");
 
-    expect(freightInput()).toHaveAttribute("readonly");
-    // Typing into it changes nothing — the bill and its written lines survive.
+    expect(freightInput()).not.toHaveAttribute("readonly");
+    // A different total is a different bill, and entering one is legal again:
+    // no part of this one is sitting in a row cost.
     await user.type(freightInput(), "9");
-    expect(freightInput()).toHaveValue("2.00");
-    expect(screen.getByTestId("allocation-row-1")).toBeInTheDocument();
-    // Clear is the one transition, and it is offered.
-    expect(screen.getByRole("button", { name: /clear the bill/i })).toBeEnabled();
+    expect(freightInput()).toHaveValue("2.009");
+    expect(screen.queryByTestId("allocation-row-1")).not.toBeInTheDocument();
   });
 
-  it("Clear is offered even when the bill is gone but written lines remain", async () => {
+  it("Clear is offered on an invalidated bill (its only exit)", async () => {
     const user = userEvent.setup();
     const { rerender } = render(
-      <FreightCalculatorPanel lines={PAIR} onAccept={partial()} />,
+      <FreightCalculatorPanel lines={PAIR} onAccept={failing()} />,
     );
 
     await enterBill(user, "2.00");
-    await user.click(screen.getByRole("button", { name: /accept/i }));
-    await screen.findByTestId("allocation-write-failed");
-    // A line leaves the shipment: the bill is invalidated, written lines remain.
-    rerender(<FreightCalculatorPanel lines={[PAIR[0]]} onAccept={partial()} />);
+    // A line leaves the shipment: the bill is invalidated and cannot be accepted.
+    rerender(<FreightCalculatorPanel lines={[PAIR[0]]} onAccept={failing()} />);
 
     expect(screen.getByTestId("allocation-invalidated")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /clear the bill/i })).toBeEnabled();
@@ -824,7 +827,7 @@ describe("the session cannot be orphaned (FD2-3)", () => {
 
   it("clearing recovers the panel completely (Allocate live, input writable)", async () => {
     const user = userEvent.setup();
-    render(<FreightCalculatorPanel lines={PAIR} onAccept={partial()} />);
+    render(<FreightCalculatorPanel lines={PAIR} onAccept={failing()} />);
 
     await enterBill(user, "2.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));

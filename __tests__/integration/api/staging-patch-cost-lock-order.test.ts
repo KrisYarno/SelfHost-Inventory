@@ -430,102 +430,59 @@ describe('PATCH /api/staging-items/[id] — unitCostCents', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. FD2-2 (fix round 3) — `ifUnitCostCents`: the cost precondition.
+// 3. FD3-1 (fix round 4) — the cost PRECONDITION left this route.
 //
-// The freight panel checked for drift on the CLIENT, which leaves the whole
-// check-then-write window unguarded. Two concrete losses came out of it:
+// Round 3 gave this PATCH an optional `ifUnitCostCents` so the freight panel's
+// per-line fan-out could guard each write. Round 4 deleted the fan-out itself:
+// three consecutive partial-commit hazards (W1S-5, FD-1, FD3-1) adjudicated it
+// THE defect, and a bill is now one atomic request to
+// POST /api/inbound-shipments/[id]/costs (own suite, own preconditions).
 //
-//   (a) a third party REVERTS a line this bill already wrote back to exactly the
-//       frozen base. The panel's own-write-or-frozen-base test passes, the retry
-//       skips the line as "already written", and the bill completes claiming a
-//       full allocation while that line's freight is silently missing;
-//   (b) any foreign change to an UNWRITTEN line between the freeze and the write
-//       is simply overwritten by the allocation.
-//
-// So the check moves into the WHERE. `ifUnitCostCents` is optional: absent means
-// the as-built unconditional write (the manual per-line cost save is untouched),
-// present means "write this cost only if the line still carries THAT one", and a
-// miss is a NAMED, retriable 409 — never a silent overwrite.
+// What is left here is the MANUAL per-line save, unconditional as originally
+// built — and a stale client that still sends the precondition must not be able
+// to turn this write into a guarded one by accident.
 // ---------------------------------------------------------------------------
 
-describe('PATCH /api/staging-items/[id] — ifUnitCostCents (FD2-2)', () => {
-  it('rides the state write\'s WHERE when present', async () => {
-    db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
-
-    const resp = await patch({ unitCostCents: 200, ifUnitCostCents: 100 });
-
-    expect(resp.status).toBe(200);
-    const write = stateWrites()[0];
-    expect(write.where).toEqual({ id: 5, status: 'RECEIVED', unitCostCents: 100 });
-    // The precondition is a GUARD, never a written column.
-    expect(write.data).toEqual({ unitCostCents: 200 });
-  });
-
-  it('an explicit NULL precondition means "only if it is still unpriced"', async () => {
-    db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: null }));
-
-    const resp = await patch({ unitCostCents: 200, ifUnitCostCents: null });
-
-    expect(resp.status).toBe(200);
-    expect(stateWrites()[0].where).toEqual({ id: 5, status: 'RECEIVED', unitCostCents: null });
-  });
-
-  it('is ABSENT from the WHERE when the caller does not send it (the manual save)', async () => {
+describe('PATCH /api/staging-items/[id] — no cost precondition (FD3-1)', () => {
+  it('writes the cost with the plain (id, RECEIVED) WHERE', async () => {
     db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
 
     const resp = await patch({ unitCostCents: 200 });
 
     expect(resp.status).toBe(200);
     expect(stateWrites()[0].where).toEqual({ id: 5, status: 'RECEIVED' });
+    expect(stateWrites()[0].data).toEqual({ unitCostCents: 200 });
   });
 
-  it('THE REVERT: a miss on a line that is still RECEIVED is a named 409 COST_DRIFT', async () => {
+  it('IGNORES an ifUnitCostCents a stale client still sends (Zod strips it)', async () => {
     db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
-    db.stagingItem.updateMany.mockImplementation(async (args: any) => ({
-      // the conditional write misses; the no-op re-claim (no cost in its WHERE)
-      // still matches, so the row is RECEIVED and it was the COST that moved
-      count: args.where.unitCostCents !== undefined ? 0 : 1,
-    }));
 
-    const resp = await patch({ unitCostCents: 200, ifUnitCostCents: 100 });
+    const resp = await patch({ unitCostCents: 200, ifUnitCostCents: 999 });
 
-    expect(resp.status).toBe(409);
-    const json = await resp.json();
-    expect(json.code).toBe('COST_DRIFT');
-    expect(json.error).toMatch(/cost changed/i);
-    expect(mockRecordChange).not.toHaveBeenCalled();
+    expect(resp.status).toBe(200);
+    expect(stateWrites()[0].where).toEqual({ id: 5, status: 'RECEIVED' });
+    expect(stateWrites()[0].data).not.toHaveProperty('ifUnitCostCents');
   });
 
-  it('a miss because the line GRADUATED stays the state-change 409, not COST_DRIFT', async () => {
+  it('a lost write is the plain state-change 409 — COST_DRIFT is gone from here', async () => {
     db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
-    // nothing matches any more: the row left RECEIVED
     db.stagingItem.updateMany.mockResolvedValue({ count: 0 });
 
-    const resp = await patch({ unitCostCents: 200, ifUnitCostCents: 100 });
+    const resp = await patch({ unitCostCents: 200 });
 
     expect(resp.status).toBe(409);
     const json = await resp.json();
     expect(json.code).toBe('CONFLICT');
-    expect(json.error).toMatch(/changed state/i);
+    expect(json.code).not.toBe('COST_DRIFT');
+    expect(mockRecordChange).not.toHaveBeenCalled();
   });
 
-  it('400s a precondition with no cost write — it would guard nothing', async () => {
-    db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
-
-    const resp = await patch({ notes: 'pallet 3', ifUnitCostCents: 100 });
-
-    expect(resp.status).toBe(400);
-    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
-    expect(db.stagingItem.update).not.toHaveBeenCalled();
-  });
-
-  it('never writes the precondition as a column, and never diffs it', async () => {
+  it('still diffs exactly the cost it wrote', async () => {
     db.stagingItem.findUnique.mockResolvedValue(itemRow({ unitCostCents: 100 }));
     db.stagingItem.update.mockResolvedValue(itemRow({ unitCostCents: 200 }));
 
-    await patch({ unitCostCents: 200, ifUnitCostCents: 100 });
+    await patch({ unitCostCents: 200 });
 
-    expect(stateWrites()[0].data).not.toHaveProperty('ifUnitCostCents');
     expect(mockRecordChange.mock.calls[0][1].changes).toEqual({
       unitCostCents: { from: 100, to: 200 },
     });

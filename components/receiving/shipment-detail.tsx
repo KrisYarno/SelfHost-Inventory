@@ -19,6 +19,7 @@ import { Label } from "@/components/ui/label";
 import { useCSRF } from "@/hooks/use-csrf";
 import {
   shipmentKeys,
+  useAllocateShipmentCosts,
   useInboundShipment,
   useUpdateInboundShipment,
   useUpdateStagingLine,
@@ -39,7 +40,6 @@ import {
   FreightCalculatorPanel,
   type AllocationWrite,
   type CalculatorLine,
-  type PartialAllocationWriteError,
 } from "@/components/receiving/freight-calculator-panel";
 
 /**
@@ -128,6 +128,7 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
   const { data: locations = [] } = useLocations();
   const updateShipment = useUpdateInboundShipment();
   const updateLine = useUpdateStagingLine();
+  const allocateCosts = useAllocateShipmentCosts();
   const countMutation = useCountStagingItem();
 
   // Per-line drafts, keyed by staging id. Kept OUT of the row objects so a
@@ -139,17 +140,6 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
   // The close guard's 409, kept on screen: it NAMES the lines that blocked it,
   // and a toast that scrolls away would throw that away.
   const [closeBlocked, setCloseBlocked] = useState<number[] | null>(null);
-
-  // W1S-5: where a sequential cost write stopped. The calculator's Accept fans
-  // out into one PATCH per line, and those PATCHes are NOT one transaction — so
-  // a failure halfway leaves some lines priced and some not, and the operator
-  // has to be told which is which before retrying anything.
-  const [costWriteReport, setCostWriteReport] = useState<{
-    written: number[];
-    pending: number[];
-    /** The server refused a cost precondition (FD2-2): the bill is dead. */
-    drift: boolean;
-  } | null>(null);
 
   const [graduateItem, setGraduateItem] = useState<GraduateStagingItem | null>(null);
   const [graduateOpen, setGraduateOpen] = useState(false);
@@ -308,63 +298,29 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
       });
   }, [shipment]);
 
+  /**
+   * THE BILL, IN ONE REQUEST (FD3-1).
+   *
+   * This used to fan out into one staging PATCH per line. Those PATCHes were not
+   * one transaction, and three review rounds running found a new way for a
+   * half-landed bill to hurt somebody — the last and worst being that the
+   * recovery on offer ("clear and re-enter the full freight") re-allocated the
+   * whole invoice onto bases that had already absorbed their share.
+   *
+   * `POST /api/inbound-shipments/[id]/costs` writes every line or none, so there
+   * is nothing to record about "where it stopped": it did not stop anywhere. The
+   * rejection is RETHROWN unchanged (W1S-5) — it already carries the server's
+   * `code`, which is how the panel tells a COST_DRIFT (the bill is dead) from a
+   * plain failure (Accept again, unchanged).
+   */
   const handleAcceptAllocation = async (updates: AllocationWrite[]) => {
-    const written: number[] = [];
-    setCostWriteReport(null);
     try {
-      // Sequential on purpose: each PATCH is its own audited change, and a
-      // half-applied burst is easier to read in the log than a racing one.
-      //
-      // FD2-2: every write carries `ifUnitCostCents` — the cost the panel's
-      // frozen bill expects that row to still hold — so the drift check runs in
-      // the server's WHERE rather than in a comparison the panel made a render
-      // ago. The panel's leading entries are RESTATES of lines this bill already
-      // wrote (same value, guarded), which is how a revert-to-frozen-base is
-      // caught before any further money is written.
-      for (const update of updates) {
-        await updateLine.mutateAsync({
-          id: update.id,
-          body: {
-            unitCostCents: update.unitCostCents,
-            ifUnitCostCents: update.ifUnitCostCents,
-          },
-        });
-        written.push(update.id);
-      }
-      // "written or confirmed": on a retry some of these were RESTATES of lines
-      // this bill had already written, and claiming they were all fresh writes
-      // would overstate what just happened.
-      toast.success(`Landed cost written or confirmed on ${updates.length} line(s)`);
+      await allocateCosts.mutateAsync({ id: shipmentId, lines: updates });
+      toast.success(`Landed cost written on ${updates.length} line(s)`);
     } catch (err) {
-      // W1S-5: RETHROW. These PATCHes are not one transaction, so swallowing the
-      // failure told the operator "done" while some lines carried the new landed
-      // cost and some still carried the old one — and the panel, believing it had
-      // written, cleared the bill they would need to finish the job. Record where
-      // it stopped, say so, and let the panel keep everything.
       console.error("Error writing allocated costs:", err);
-      // FD2-2: a refused PRECONDITION is a different failure from a broken one.
-      // Nothing is retriable after it — the shipment is no longer the one this
-      // split describes — so the report must not say "Accept again".
-      const drift = (err as ShipmentApiError)?.code === "COST_DRIFT";
-      setCostWriteReport({
-        written,
-        pending: updates.map((u) => u.id).filter((id) => !written.includes(id)),
-        drift,
-      });
       toast.error(err instanceof Error ? err.message : "Failed to write the costs");
-      // FD-1: the rethrow now CARRIES the ids that wrote. Each successful PATCH
-      // above invalidated the shipment query, so those lines are about to come
-      // back with their landed costs as row costs — and without this list the
-      // panel would offer them again and allocate the same freight on top of
-      // itself (100c -> 200c -> 333c). Naming them is what makes the retry a
-      // retry of the REST.
-      const failure: PartialAllocationWriteError =
-        err instanceof Error ? err : new Error("Failed to write the costs");
-      failure.writtenLineIds = written;
-      // FD2-2: and the KIND, so the panel invalidates the whole bill rather than
-      // offering a retry that cannot succeed. A named field, not parsed prose.
-      if (drift) failure.kind = "COST_DRIFT";
-      throw failure;
+      throw err;
     }
   };
 
@@ -488,29 +444,9 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
           </div>
         )}
 
-        {costWriteReport && (
-          <div
-            data-testid="cost-write-partial"
-            className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs"
-          >
-            <p className="font-medium">
-              The landed costs were only partly written.
-            </p>
-            <p className="text-muted-foreground">
-              {costWriteReport.written.length > 0
-                ? `Written: line(s) ${costWriteReport.written.join(", ")}.`
-                : "No line was written."}
-              {` Not written: line(s) ${costWriteReport.pending.join(", ")}.`}
-              {costWriteReport.drift
-                ? // FD2-2: the server refused a cost precondition, so the bill in
-                  // the calculator no longer describes this shipment. Telling the
-                  // operator to Accept again would be telling them to do the one
-                  // thing that cannot work.
-                  " A line's cost changed while the bill was open, so the whole bill was thrown away — clear it and re-enter the freight against the costs on screen."
-                : " The bill is still in the calculator — fix the problem and Accept again, but re-enter costs only for the lines above."}
-            </p>
-          </div>
-        )}
+        {/* FD3-1: the partial-write report that used to sit here is GONE with the
+            fan-out it described. A bill now lands whole or not at all, and the
+            calculator panel already says which of those two happened. */}
 
         {pendingApproval.length > 0 && (
           <div
@@ -726,7 +662,7 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
         <FreightCalculatorPanel
           lines={calculatorLines}
           onAccept={handleAcceptAllocation}
-          busy={updateLine.isPending}
+          busy={allocateCosts.isPending}
           disabled={!csrfToken}
         />
       )}

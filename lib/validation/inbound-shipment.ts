@@ -8,6 +8,8 @@ import { InboundShipmentStatus } from '@prisma/client';
  * - PatchInboundShipmentSchema:  PATCH /api/inbound-shipments/[id] — field
  *     edits (notes / supplierRef, legal only while OPEN) and the two status
  *     transitions of the T4 state matrix.
+ * - AllocateShipmentCostsSchema: POST /api/inbound-shipments/[id]/costs — a
+ *     WHOLE freight bill, written atomically (FD3-1).
  *
  * House rule: plain `z.object` with no `.refine`; cross-field rules are
  * post-parse `assert*` helpers that throw a ZodError (-> apiHandler 400).
@@ -28,6 +30,41 @@ export const PatchInboundShipmentSchema = z.object({
   status: z.enum([InboundShipmentStatus.CLOSED, InboundShipmentStatus.CANCELLED]).optional(),
 });
 
+/**
+ * ONE FREIGHT BILL (FD3-1, fix round 4).
+ *
+ * The freight calculator used to fan its Accept out into one staging PATCH per
+ * line. Three review rounds of partial-commit hazards later, the fan-out itself
+ * was adjudicated the defect: a bill that lands on some lines and not others
+ * leaves the operator with a recovery ("re-enter the full freight") that
+ * DOUBLE-APPLIES it onto the bases that already absorbed a share. So a bill is
+ * one request and one transaction, and this is its shape.
+ *
+ * Every line carries BOTH halves, and both are required:
+ *   `unitCostCents`    the landed cost to write. Never null — un-pricing a line
+ *                      is the manual per-line save's job, not a bill's;
+ *   `ifUnitCostCents`  the cost the row must STILL hold for that write to land.
+ *                      `null` is legal and means "only if it is still unpriced"
+ *                      — the same unknown-is-not-zero distinction the column
+ *                      itself keeps.
+ *
+ * The array is non-empty because a write request that writes nothing is a client
+ * bug, not a 200. Uniqueness of the ids is a CROSS-LINE rule, so it lives in the
+ * post-parse `assert*` helper below (house rule: request schemas stay plain
+ * ZodObjects — the MCP adapter reads `.shape` — and never carry `.refine`).
+ */
+export const AllocateShipmentCostsSchema = z.object({
+  lines: z
+    .array(
+      z.object({
+        id: z.number().int().positive(),
+        unitCostCents: z.number().int().min(0).max(100_000_000),
+        ifUnitCostCents: z.number().int().min(0).max(100_000_000).nullable(),
+      }),
+    )
+    .min(1),
+});
+
 /** The `?status=` list filter. Absent = every status. */
 export const ShipmentStatusFilterSchema = z.enum([
   InboundShipmentStatus.OPEN,
@@ -37,6 +74,7 @@ export const ShipmentStatusFilterSchema = z.enum([
 
 export type CreateInboundShipmentInput = z.infer<typeof CreateInboundShipmentSchema>;
 export type PatchInboundShipmentInput = z.infer<typeof PatchInboundShipmentSchema>;
+export type AllocateShipmentCostsInput = z.infer<typeof AllocateShipmentCostsSchema>;
 
 /**
  * A PATCH that asks for nothing is a client bug, not a silent no-op write.
@@ -55,6 +93,33 @@ export function assertShipmentPatchNotEmpty(body: PatchInboundShipmentInput): vo
         message: 'provide at least one of supplierRef, notes or status',
       },
     ]);
+  }
+}
+
+/**
+ * One line, one answer (FD3-1).
+ *
+ * The batch writes ascending by id and each line's write is a claim on the cost
+ * the row must still hold, so a repeated id would be two claims whose order
+ * decides the outcome — the second guarded on a value the first just replaced.
+ * There is no reading of that request worth guessing at: refuse it.
+ *
+ * Post-parse `assert*` helper (house rule), naming the repeated line so the
+ * client can point at it.
+ */
+export function assertAllocationLineIdsUnique(body: AllocateShipmentCostsInput): void {
+  const seen = new Set<number>();
+  for (const line of body.lines) {
+    if (seen.has(line.id)) {
+      throw new z.ZodError([
+        {
+          code: z.ZodIssueCode.custom,
+          path: ['lines'],
+          message: `line ${line.id} appears twice in this bill — every line takes exactly one cost`,
+        },
+      ]);
+    }
+    seen.add(line.id);
   }
 }
 

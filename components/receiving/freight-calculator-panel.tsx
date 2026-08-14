@@ -43,38 +43,36 @@ import {
  * "write floored" and take the drop deliberately, with the cents named.
  *
  * FD-1 (fix round 2) — THE BILL IS A SESSION. W1S-5 kept the bill on screen
- * after a partial write, but the panel's inputs are the shipment's LIVE rows and
- * every successful write refreshes them: the lines that had just been written
- * came back with their landed costs as new BASES, the same freight was split
- * again over the new values, and the retry re-sent the written lines at a higher
- * number still (100c -> 200c -> 333c). So Allocate now FREEZES the bill's
- * inputs; a retry sends only the lines that did NOT write, at the allocations
- * they were computed with; and a row that moves underneath an open bill
- * invalidates the whole bill by name instead of quietly re-basing it. Nothing is
- * ever recomputed mid-session.
+ * after a failed write, but the panel's inputs are the shipment's LIVE rows and
+ * a successful write refreshes them: a line that had just been written came
+ * back with its landed cost as a new BASE, the same freight was split again over
+ * the new values, and the retry re-sent it at a higher number still (100c ->
+ * 200c -> 333c). So Allocate FREEZES the bill's inputs, nothing is ever
+ * recomputed mid-session, and a row that moves underneath an open bill
+ * invalidates the whole bill by name instead of quietly re-basing it.
  *
  * FD2-2 (fix round 3) — THE DRIFT CHECK IS THE SERVER'S. Everything compared
- * above is a render old, and the window between the comparison and the write is
- * exactly where somebody REVERTS a written line to the frozen base: the check
- * passes (it looks like our own line waiting to refresh), the retry skips it as
- * already written, and the bill completes with that line's freight silently
- * missing. So every write carries `ifUnitCostCents` — the value it expects the
- * row to still hold — and the server makes that its WHERE. A retry also
- * RESTATES the lines it already wrote, at the cost it wrote them with: an
- * idempotent no-op whose only job is to make the server prove they are
- * untouched.
+ * here is a render old, so every line carries `ifUnitCostCents` — the value it
+ * expects the row to still hold — and the server makes that its WHERE. A refusal
+ * arrives as the API error's `code: "COST_DRIFT"` and invalidates the whole bill
+ * through the same surface a locally-detected change uses.
  *
- * THE SEAM (S12, extended): the caller rethrows a `PartialAllocationWriteError`.
- * `writtenLineIds` names the lines that landed; `kind: "COST_DRIFT"` says the
- * SERVER refused a precondition. A named field rather than a parsed message —
- * error prose is not a contract. On drift the whole bill is invalidated through
- * the same surface a row-level change uses, because half a bill is not an
- * answer.
+ * FD3-1 (fix round 4) — THE PARTIAL WRITE IS GONE, AND SO IS EVERY STATE THAT
+ * DESCRIBED ONE. Accept used to fan out into one request per line, and three
+ * review rounds running found a new way for a half-landed bill to hurt somebody.
+ * The last was the sharpest: after a partial commit the panel's own recovery
+ * ("clear and re-enter the FULL freight") re-allocated the whole invoice
+ * including onto bases that had already absorbed their share. The caller now
+ * writes the WHOLE bill in one transaction, so there are exactly two outcomes:
+ * everything wrote, or nothing did. `written` / `writtenIds` / `totalLocked`,
+ * the restated lines, the "already written" row badge and SEAM S12 (the
+ * `PartialAllocationWriteError` carrying `writtenLineIds` + `kind`) are all
+ * DELETED — there is no partial state left for them to describe. A failure keeps
+ * the bill exactly as it is and Accept-again re-sends it whole, which is safe
+ * precisely because nothing landed.
  *
- * Accept hands back the per-line unit costs; writing them is the caller's job.
- * A caller whose write FAILS must REJECT (W1S-5), and must name the lines that
- * DID write (`writtenLineIds`), because that is the only way this panel can tell
- * a retry from a re-application.
+ * Accept hands back the per-line unit costs; writing them ATOMICALLY is the
+ * caller's job. A caller whose write fails must REJECT (W1S-5).
  */
 
 export interface CalculatorLine {
@@ -86,21 +84,6 @@ export interface CalculatorLine {
   qtySource: "counted" | "expected" | "none";
   /** Per-unit base cost in cents; NULL when the line has not been priced. */
   baseCents: number | null;
-}
-
-/**
- * The rejection a caller owes this panel when its fan-out write lands only
- * partly. Without `writtenLineIds` the panel assumes NOTHING wrote and offers
- * every line again — safe (the frozen bill re-sends the identical unit cost, so
- * a re-write is idempotent) but noisier than the truth.
- *
- * `kind: "COST_DRIFT"` (FD2-2) is the server's precondition refusal: a line no
- * longer carries the cost this bill was written against. It invalidates the
- * whole bill, so it is a named field rather than something read out of prose.
- */
-export interface PartialAllocationWriteError extends Error {
-  writtenLineIds?: number[];
-  kind?: "COST_DRIFT";
 }
 
 /** One line's write: the cost to set, and the cost it must still hold (FD2-2). */
@@ -144,16 +127,13 @@ function parseDollarsToCents(raw: string): number | null {
   return Number.isSafeInteger(cents) ? cents : null;
 }
 
-/** The ids a failed write reported as written, defensively (it crosses a seam). */
-function writtenIdsFrom(error: unknown): number[] {
-  const reported = (error as { writtenLineIds?: unknown } | null)?.writtenLineIds;
-  if (!Array.isArray(reported)) return [];
-  return reported.filter((id): id is number => typeof id === "number");
-}
-
-/** Did the SERVER refuse a cost precondition (FD2-2)? Same defensive read. */
+/**
+ * Did the SERVER refuse a cost precondition (FD2-2)? Read off the API error's
+ * house `code`, defensively — the panel takes no dependency on the caller's
+ * error class, only on the field the server itself sent.
+ */
 function isCostDrift(error: unknown): boolean {
-  return (error as { kind?: unknown } | null)?.kind === "COST_DRIFT";
+  return (error as { code?: unknown } | null)?.code === "COST_DRIFT";
 }
 
 const QTY_SOURCE_LABEL: Record<CalculatorLine["qtySource"], string> = {
@@ -188,10 +168,6 @@ export function FreightCalculatorPanel({
   const [flooredConsent, setFlooredConsent] = useState<
     Record<number, { unitCostCents: number; remainderCents: number }>
   >({});
-  // Lines this session already wrote, with the unit cost they were written at
-  // (FD-1). A retry must skip them, and the drift check below must EXPECT the
-  // row to come back carrying exactly this number.
-  const [written, setWritten] = useState<Record<number, number>>({});
   // Set when the caller's write REJECTED, so the panel never resets on a failure.
   const [writeFailed, setWriteFailed] = useState<string | null>(null);
   /**
@@ -202,23 +178,13 @@ export function FreightCalculatorPanel({
    */
   const [driftInvalidation, setDriftInvalidation] = useState<string | null>(null);
   /**
-   * A fan-out is OUT and its outcome is unknown (FD2-3). While that is true the
-   * bill may not be thrown away or re-entered: a late rejection carries
-   * `writtenLineIds` for lines that would otherwise land on a cleared session.
+   * The bill is OUT and its outcome is unknown (FD2-3). While that is true it may
+   * not be thrown away or re-entered underneath the request that is deciding it.
    */
   const [accepting, setAccepting] = useState(false);
 
   const freightCents = parseDollarsToCents(freightInput);
   const freightInvalid = freightInput.trim() !== "" && freightCents === null;
-  const writtenIds = Object.keys(written).map(Number);
-  /**
-   * FD2-3: once ANY line of this bill has been written, the total is settled —
-   * part of it is already sitting in real row costs. Editing it would drop the
-   * session while `written` survived, leaving a panel with no bill, no Clear,
-   * and an Allocate blocked forever by ids nothing could clear. So the input
-   * goes read-only and Clear becomes the one transition out.
-   */
-  const totalLocked = writtenIds.length > 0;
 
   /** Wipe the bill entirely — the only way back from an invalidated session. */
   const clearBill = () => {
@@ -226,7 +192,6 @@ export function FreightCalculatorPanel({
     setSession(null);
     setEdits({});
     setFlooredConsent({});
-    setWritten({});
     setWriteFailed(null);
     setDriftInvalidation(null);
     setApplied(false);
@@ -235,14 +200,13 @@ export function FreightCalculatorPanel({
   /**
    * Has the shipment moved underneath the frozen bill?
    *
-   * A line this session WROTE may legitimately read back two ways: still at the
-   * frozen base (the caller's refetch has not landed yet) or at the cost it was
-   * written with (it has). Both are this bill happening, not a stranger's edit —
-   * and accepting both is what keeps the retry window from flickering into an
-   * invalidation and back. Anything else (a cost changed elsewhere, a recount, a
-   * line unlinked) means the split on screen no longer describes this shipment,
-   * and the honest answer is to throw the whole bill away rather than re-base
-   * half of it.
+   * FD3-1 simplified this back to what it says: ANY difference between the frozen
+   * line and the live one (a cost changed elsewhere, a recount, a line unlinked)
+   * means the split on screen no longer describes this shipment, and the honest
+   * answer is to throw the whole bill away rather than re-base part of it. The
+   * old "unless it was OUR write" exemption is gone with the partial write it
+   * existed for — a successful bill clears the session before its refetch lands,
+   * and a failed one wrote nothing at all.
    */
   const localInvalidation = useMemo<string | null>(() => {
     if (!session) return null;
@@ -252,8 +216,7 @@ export function FreightCalculatorPanel({
       if (!now) {
         return `Line "${snapshot.description}" is no longer on this shipment.`;
       }
-      const ourOwnWrite = written[snapshot.id];
-      if (now.baseCents !== snapshot.baseCents && now.baseCents !== ourOwnWrite) {
+      if (now.baseCents !== snapshot.baseCents) {
         return `The cost of "${snapshot.description}" changed while this bill was open.`;
       }
       if (now.qty !== snapshot.qty) {
@@ -261,7 +224,7 @@ export function FreightCalculatorPanel({
       }
     }
     return null;
-  }, [session, lines, written]);
+  }, [session, lines]);
 
   /**
    * The one invalidation the panel renders. The SERVER's verdict wins: it is the
@@ -367,15 +330,10 @@ export function FreightCalculatorPanel({
   const withheld = priceable.filter(
     (s) => s.unitRoundingRemainderCents > 0 && !consented(s),
   );
-  /** What a press of Accept would send: the writable lines that have NOT written. */
-  const pending = writable.filter((s) => written[s.id as number] === undefined);
 
   const canAllocate =
     !disabled && !busy && !accepting &&
-    freightCents !== null && lines.length > 0 && invalidation === null &&
-    // A partial write already landed part of this freight in the row costs;
-    // re-freezing over them would allocate it a second time. Clear first.
-    !totalLocked;
+    freightCents !== null && lines.length > 0 && invalidation === null;
 
   const canAccept =
     !disabled &&
@@ -384,37 +342,23 @@ export function FreightCalculatorPanel({
     active &&
     ok !== null &&
     (validation === null || validation.status === "ok") &&
-    pending.length > 0;
+    writable.length > 0;
 
   /**
-   * What a press of Accept SENDS (FD2-2). Two kinds of line, one shape:
-   *
-   *   RESTATES  lines this bill already wrote, re-sent at exactly the cost they
-   *             were written with and guarded on it. The write is a no-op; the
-   *             GUARD is the point — it is the only way to notice that somebody
-   *             put the line back to its old cost while the bill was open, which
-   *             would otherwise let a retry "complete" with that line's freight
-   *             quietly missing. They go FIRST, so a drift is caught before any
-   *             further money is written;
-   *   PENDING   the lines that have not written, at their frozen allocation,
-   *             guarded on the base the split was computed from.
+   * What a press of Accept SENDS: the WHOLE bill (FD3-1) — every writable line
+   * at its frozen allocation, each guarded on the base the split was computed
+   * from (FD2-2). Withheld lines stay out (W1S-3: an inexact split is not
+   * consented to), and there is no "already written" category to subtract,
+   * because the caller writes all of these or none of them.
    */
   const buildPayload = (): AllocationWrite[] => {
     if (!session) return [];
-    const restates: AllocationWrite[] = session.lines
-      .filter((line) => written[line.id] !== undefined)
-      .map((line) => ({
-        id: line.id,
-        unitCostCents: written[line.id],
-        ifUnitCostCents: written[line.id],
-      }));
     const frozenBase = new Map(session.lines.map((line) => [line.id, line.baseCents]));
-    const fresh: AllocationWrite[] = pending.map((s) => ({
+    return writable.map((s) => ({
       id: s.id as number,
       unitCostCents: s.suggestedUnitCostCents,
       ifUnitCostCents: frozenBase.get(s.id as number) ?? null,
     }));
-    return [...restates, ...fresh];
   };
 
   const handleAllocate = () => {
@@ -424,7 +368,6 @@ export function FreightCalculatorPanel({
     setSession({ freightCents, lines });
     setEdits({});
     setFlooredConsent({});
-    setWritten({});
     setWriteFailed(null);
     setApplied(false);
   };
@@ -436,30 +379,15 @@ export function FreightCalculatorPanel({
     try {
       await onAccept(payload);
     } catch (error) {
-      // W1S-5: the write did not land, so NOTHING here may look like it did.
-      // The bill, the edits and the per-line choices all stay exactly as they
-      // were, ready to be retried against whatever actually wrote.
-      //
-      // FD-1: record WHICH lines wrote, at the cost they were written with. The
-      // retry then offers only the rest — never the same freight twice on a line
-      // whose base cost has already absorbed it.
-      const landed = writtenIdsFrom(error);
-      if (landed.length > 0) {
-        setWritten((prev) => ({
-          ...prev,
-          ...Object.fromEntries(
-            payload
-              .filter((update) => landed.includes(update.id))
-              .map((update) => [update.id, update.unitCostCents]),
-          ),
-        }));
-      }
+      // W1S-5 / FD3-1: the bill did not land — NONE of it — so nothing here may
+      // look like it did. The bill, the edits and the per-line choices all stay
+      // exactly as they were, and Accept-again re-sends the same request.
       if (isCostDrift(error)) {
         // FD2-2: the server refused a precondition, so the shipment is not the
         // one this split describes — and no amount of retrying makes it so. The
         // WHOLE bill goes, by name, through the same surface a locally-detected
-        // change uses. Deliberately NOT also a "retry the rest" notice: there is
-        // nothing left to retry, and saying both would be incoherent.
+        // change uses. Safe advice now that it is also TRUE advice: nothing was
+        // written, so re-entering the full freight cannot double-apply it.
         setDriftInvalidation(
           error instanceof Error
             ? `A line's cost changed while this bill was open (${error.message}).`
@@ -507,10 +435,6 @@ export function FreightCalculatorPanel({
             inputMode="decimal"
             value={freightInput}
             onChange={(e) => {
-              // FD2-3: a written line makes this total history, not an input.
-              // (The field is read-only below; this is the same rule stated
-              // where the state actually changes.)
-              if (totalLocked) return;
               // A different total is a different bill: the frozen one goes.
               setFreightInput(e.target.value);
               setSession(null);
@@ -520,7 +444,6 @@ export function FreightCalculatorPanel({
               setWriteFailed(null);
             }}
             placeholder="0.00"
-            readOnly={totalLocked}
             disabled={disabled || accepting}
           />
         </div>
@@ -546,7 +469,7 @@ export function FreightCalculatorPanel({
           data-testid="allocation-write-failed"
           className="text-xs font-medium text-destructive"
         >
-          {`These costs were not written (${writeFailed}). The bill and your edits are kept — Accept again to write only the lines that did not save.`}
+          {`These costs were not written (${writeFailed}). The whole bill is written at once, so NOTHING landed — the bill and your edits are kept, and Accept again re-sends it unchanged.`}
         </p>
       )}
 
@@ -609,7 +532,6 @@ export function FreightCalculatorPanel({
                 {session.lines.map((line, index) => {
                   const allocation = ok.allocations[index];
                   const suggestion = suggestions.find((s) => s.id === line.id);
-                  const alreadyWritten = written[line.id];
                   return (
                     <tr
                       key={line.id}
@@ -621,14 +543,6 @@ export function FreightCalculatorPanel({
                         <span className="block text-xs text-muted-foreground">
                           {QTY_SOURCE_LABEL[line.qtySource]}
                         </span>
-                        {alreadyWritten !== undefined && (
-                          <span
-                            data-testid="line-written"
-                            className="block text-xs text-positive"
-                          >
-                            {`Already written this bill at ${formatCents(alreadyWritten)} — it will not be sent again.`}
-                          </span>
-                        )}
                       </td>
                       <td className="py-2 pr-2 text-right tabular-nums">{line.qty}</td>
                       <td className="py-2 pr-2 text-right tabular-nums">
@@ -651,10 +565,7 @@ export function FreightCalculatorPanel({
                           onChange={(e) =>
                             setEdits((prev) => ({ ...prev, [line.id]: e.target.value }))
                           }
-                          // A written line's share of this bill is already in
-                          // the row cost; re-splitting it here would describe a
-                          // write that cannot happen again.
-                          disabled={disabled || alreadyWritten !== undefined}
+                          disabled={disabled}
                         />
                       </td>
                       <td
@@ -778,12 +689,12 @@ export function FreightCalculatorPanel({
         <Button type="button" onClick={handleAccept} disabled={!canAccept}>
           {busy ? "Saving…" : "Accept suggested costs"}
         </Button>
-        {(session !== null || totalLocked) && (
-          // FD2-3: offered whenever there is ANY session state to throw away —
-          // a bill, or the written lines that outlive one. It needs no token and
-          // no permission, and an invalidated bill has no other exit; the ONE
-          // moment it is refused is while a fan-out is in flight, because a late
-          // rejection would otherwise repopulate a bill somebody just cleared.
+        {session !== null && (
+          // FD2-3: offered whenever there is a bill to throw away. It needs no
+          // token and no permission, and an invalidated bill has no other exit;
+          // the ONE moment it is refused is while a write is in flight, because a
+          // late rejection would otherwise repopulate a bill somebody just
+          // cleared.
           <Button
             type="button"
             variant="outline"
