@@ -171,6 +171,15 @@ function renderDetail(body: unknown = detail(), extra?: Responder) {
   return { ...utils, fetchFn };
 }
 
+/**
+ * Type a freight bill and FREEZE it (FD-1): Allocate is the calculator's session
+ * start, and everything it computes hangs off the costs as they were then.
+ */
+async function enterBill(user: ReturnType<typeof userEvent.setup>, dollars: string) {
+  await user.type(screen.getByLabelText(/freight/i), dollars);
+  await user.click(screen.getByRole("button", { name: /allocate/i }));
+}
+
 const lineRow = (id: number) => screen.getByTestId(`receiving-line-${id}`);
 const fetchSpy = () => global.fetch as unknown as jest.Mock;
 const writesTo = (fn: jest.Mock, fragment: string) =>
@@ -477,7 +486,7 @@ describe("the freight calculator", () => {
     );
 
     await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
-    await user.type(screen.getByLabelText(/freight/i), "10.00");
+    await enterBill(user, "10.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
     await waitFor(() => expect(writesTo(fetchFn, "/api/staging-items/11").length).toBe(1));
@@ -535,7 +544,7 @@ describe("the freight calculator", () => {
     );
 
     await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
-    await user.type(screen.getByLabelText(/freight/i), "60.00");
+    await enterBill(user, "60.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
     const report = await screen.findByTestId("cost-write-partial");
@@ -553,11 +562,80 @@ describe("the freight calculator", () => {
     renderDetail(detail({}, [line({ countedQuantity: 10, unitCostCents: 500 })]));
 
     await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
-    await user.type(screen.getByLabelText(/freight/i), "10.00");
+    await enterBill(user, "10.00");
     await user.click(screen.getByRole("button", { name: /accept/i }));
 
     await waitFor(() => expect(writesTo(fetchSpy(), "/api/staging-items/11").length).toBe(1));
     expect(screen.queryByTestId("cost-write-partial")).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // FD-1 — the partial write, END TO END through the real hook.
+  //
+  // Each successful line PATCH invalidates the shipment query, so the lines that
+  // wrote come back carrying their LANDED costs. The panel used to recompute
+  // against them and the retry re-sent the written line at a higher number
+  // again: 100c -> 200c -> 333c on a line nobody meant to touch twice. The
+  // detail's job in that fix is to name the lines that DID write when it
+  // rethrows; this pins that the two halves are actually wired together.
+  // -------------------------------------------------------------------------
+
+  it("a retry after a partial write sends ONLY the unwritten line (FD-1)", async () => {
+    const user = userEvent.setup();
+    // Two identical 100c lines of 10 units: 20.00 of freight lands 100c on each,
+    // so each line's landed unit cost is 200c.
+    let items = [
+      line({ id: 11, countedQuantity: 10, unitCostCents: 100 }),
+      line({ id: 12, description: "Caps", countedQuantity: 10, unitCostCents: 100 }),
+    ];
+    let firstAttempt = true;
+    const { fetchFn } = renderDetail(detail(), (url, init) => {
+      if (url.includes(`/api/inbound-shipments/${SHIPMENT_ID}`) && !init?.method) {
+        return { ok: true, json: async () => detail({}, items) };
+      }
+      if (url.includes("/api/staging-items/") && init?.method === "PATCH") {
+        if (url.includes("/11")) {
+          // Line 11 writes — and the shipment now reports its LANDED cost.
+          items = [line({ id: 11, countedQuantity: 10, unitCostCents: 200 }), items[1]];
+          return { ok: true, json: async () => ({ id: 11 }) };
+        }
+        if (firstAttempt) {
+          firstAttempt = false;
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({ error: "Database is unavailable" }),
+          };
+        }
+        return { ok: true, json: async () => ({ id: 12 }) };
+      }
+      return undefined;
+    });
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await enterBill(user, "20.00");
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    await screen.findByTestId("cost-write-partial");
+
+    // The refetch has landed: line 11 reads 200c now.
+    await waitFor(() =>
+      expect(within(lineRow(11)).getByTestId("line-cost")).toHaveTextContent("$2.00"),
+    );
+
+    await user.click(screen.getByRole("button", { name: /accept/i }));
+    await waitFor(() => expect(writesTo(fetchFn, "/api/staging-items/12").length).toBe(2));
+
+    // Line 11 was written ONCE, at 200c — never re-sent, never compounded.
+    const line11Writes = writesTo(fetchFn, "/api/staging-items/11");
+    expect(line11Writes).toHaveLength(1);
+    expect(JSON.parse(String((line11Writes[0][1] as RequestInit).body))).toEqual({
+      unitCostCents: 200,
+    });
+    // And the retry sent line 12 at the ORIGINAL allocation, not a re-split one.
+    const line12Writes = writesTo(fetchFn, "/api/staging-items/12");
+    expect(JSON.parse(String((line12Writes[1][1] as RequestInit).body))).toEqual({
+      unitCostCents: 200,
+    });
   });
 });
 

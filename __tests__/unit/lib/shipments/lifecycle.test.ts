@@ -217,6 +217,59 @@ describe('applyShipmentLink — deterministic multi-shipment lock order', () => 
 
     expect(claimedIds(tx)).toEqual([A]);
   });
+
+  // -------------------------------------------------------------------------
+  // FD-3 (fix round 2) — a CALLER's own OPEN-guard header joins this same
+  // sorted set instead of being claimed before it. The staging PATCH used to
+  // claim the source header itself (its expectedQuantity guard) and only then
+  // call in here, so a combined quantity+relink PATCH took the pair
+  // source-then-sorted — breaking the one global order this function exists to
+  // impose. `alsoOpen` is how a caller hands its guard over.
+  // -------------------------------------------------------------------------
+
+  const C = 'ckshipment00000000000000c';
+
+  it('folds a caller guard header into the SORTED set (never claimed first)', async () => {
+    const tx = linkTx();
+
+    await applyShipmentLink(tx, {
+      item: { id: 5, status: 'RECEIVED' as any, shipmentId: C },
+      targetShipmentId: B,
+      alsoOpen: [A],
+    });
+
+    expect(claimedIds(tx)).toEqual([A, B, C]);
+  });
+
+  it('DEDUPES a guard header that is already part of the link', async () => {
+    const tx = linkTx();
+
+    await applyShipmentLink(tx, {
+      item: { id: 5, status: 'RECEIVED' as any, shipmentId: B },
+      targetShipmentId: A,
+      alsoOpen: [B],
+    });
+
+    expect(claimedIds(tx)).toEqual([A, B]);
+  });
+
+  it('refuses a guard-only header that is not OPEN, in the QUANTITY vocabulary', async () => {
+    const tx = linkTx();
+    tx.inboundShipment.updateMany.mockImplementation(async (args: any) => ({
+      count: args.where.id === A ? 0 : 1,
+    }));
+    tx.inboundShipment.findUnique.mockResolvedValue({ id: A, status: 'CLOSED' });
+
+    await expect(
+      applyShipmentLink(tx, {
+        item: { id: 5, status: 'RECEIVED' as any, shipmentId: C },
+        targetShipmentId: B,
+        alsoOpen: [A],
+      }),
+    ).rejects.toThrow(/receipt quantities/i);
+    // and it never reached the item write
+    expect(tx.stagingItem.updateMany).not.toHaveBeenCalled();
+  });
 });
 
 describe('the two guards diverge exactly where the amendment says they do', () => {

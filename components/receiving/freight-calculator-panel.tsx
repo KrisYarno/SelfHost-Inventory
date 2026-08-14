@@ -42,10 +42,21 @@ import {
  * exactly two ways out — edit the split until it divides, or press this line's
  * "write floored" and take the drop deliberately, with the cents named.
  *
+ * FD-1 (fix round 2) — THE BILL IS A SESSION. W1S-5 kept the bill on screen
+ * after a partial write, but the panel's inputs are the shipment's LIVE rows and
+ * every successful write refreshes them: the lines that had just been written
+ * came back with their landed costs as new BASES, the same freight was split
+ * again over the new values, and the retry re-sent the written lines at a higher
+ * number still (100c -> 200c -> 333c). So Allocate now FREEZES the bill's
+ * inputs; a retry sends only the lines that did NOT write, at the allocations
+ * they were computed with; and a row that moves underneath an open bill
+ * invalidates the whole bill by name instead of quietly re-basing it. Nothing is
+ * ever recomputed mid-session.
+ *
  * Accept hands back the per-line unit costs; writing them is the caller's job.
- * A caller whose write FAILS must REJECT (W1S-5): the bill, the edits and the
- * per-line choices all stay on screen, because a half-written allocation that
- * looked clean would be re-entered and compounded.
+ * A caller whose write FAILS must REJECT (W1S-5), and must name the lines that
+ * DID write (`writtenLineIds`), because that is the only way this panel can tell
+ * a retry from a re-application.
  */
 
 export interface CalculatorLine {
@@ -57,6 +68,22 @@ export interface CalculatorLine {
   qtySource: "counted" | "expected" | "none";
   /** Per-unit base cost in cents; NULL when the line has not been priced. */
   baseCents: number | null;
+}
+
+/**
+ * The rejection a caller owes this panel when its fan-out write lands only
+ * partly. Without `writtenLineIds` the panel assumes NOTHING wrote and offers
+ * every line again — safe (the frozen bill re-sends the identical unit cost, so
+ * a re-write is idempotent) but noisier than the truth.
+ */
+export interface PartialAllocationWriteError extends Error {
+  writtenLineIds?: number[];
+}
+
+/** The frozen inputs of one bill: what the split was computed from. */
+interface BillSession {
+  freightCents: number;
+  lines: CalculatorLine[];
 }
 
 interface FreightCalculatorPanelProps {
@@ -88,6 +115,13 @@ function parseDollarsToCents(raw: string): number | null {
   return Number.isSafeInteger(cents) ? cents : null;
 }
 
+/** The ids a failed write reported as written, defensively (it crosses a seam). */
+function writtenIdsFrom(error: unknown): number[] {
+  const reported = (error as { writtenLineIds?: unknown } | null)?.writtenLineIds;
+  if (!Array.isArray(reported)) return [];
+  return reported.filter((id): id is number => typeof id === "number");
+}
+
 const QTY_SOURCE_LABEL: Record<CalculatorLine["qtySource"], string> = {
   counted: "counted",
   expected: "expected",
@@ -101,22 +135,87 @@ export function FreightCalculatorPanel({
   busy = false,
 }: FreightCalculatorPanelProps) {
   const [freightInput, setFreightInput] = useState("");
+  // The frozen bill. NULL until Allocate is pressed: nothing is computed from
+  // rows that are still moving.
+  const [session, setSession] = useState<BillSession | null>(null);
   // Hand edits, keyed by line id, as typed. Absent = "use the suggestion".
   const [edits, setEdits] = useState<Record<number, string>>({});
   // Set once a bill has been written onto the lines this session.
   const [applied, setApplied] = useState(false);
-  // Lines whose FLOORED unit cost the operator has explicitly agreed to write,
-  // remainder and all (W1S-3). Keyed by line id; absent = withheld.
-  const [flooredAccepted, setFlooredAccepted] = useState<Record<number, boolean>>({});
+  /**
+   * The floored drops this operator has agreed to (W1S-3), keyed by line id and
+   * by the AMOUNTS they were agreed for (FD-4). A bare `true` outlived the edit
+   * that changed what the line would lose, so somebody who accepted a 2c drop
+   * could be held to a 3c one; matching on the amounts sends the line straight
+   * back to withheld the moment either number moves. Editing back to the
+   * original split restores the consent, because the sentence it stands for
+   * ("drop THESE cents on THIS line") is true again.
+   */
+  const [flooredConsent, setFlooredConsent] = useState<
+    Record<number, { unitCostCents: number; remainderCents: number }>
+  >({});
+  // Lines this session already wrote, with the unit cost they were written at
+  // (FD-1). A retry must skip them, and the drift check below must EXPECT the
+  // row to come back carrying exactly this number.
+  const [written, setWritten] = useState<Record<number, number>>({});
   // Set when the caller's write REJECTED, so the panel never resets on a failure.
   const [writeFailed, setWriteFailed] = useState<string | null>(null);
 
   const freightCents = parseDollarsToCents(freightInput);
   const freightInvalid = freightInput.trim() !== "" && freightCents === null;
+  const writtenIds = Object.keys(written).map(Number);
+
+  /** Wipe the bill entirely — the only way back from an invalidated session. */
+  const clearBill = () => {
+    setFreightInput("");
+    setSession(null);
+    setEdits({});
+    setFlooredConsent({});
+    setWritten({});
+    setWriteFailed(null);
+    setApplied(false);
+  };
+
+  /**
+   * Has the shipment moved underneath the frozen bill?
+   *
+   * A line this session WROTE may legitimately read back two ways: still at the
+   * frozen base (the caller's refetch has not landed yet) or at the cost it was
+   * written with (it has). Both are this bill happening, not a stranger's edit —
+   * and accepting both is what keeps the retry window from flickering into an
+   * invalidation and back. Anything else (a cost changed elsewhere, a recount, a
+   * line unlinked) means the split on screen no longer describes this shipment,
+   * and the honest answer is to throw the whole bill away rather than re-base
+   * half of it.
+   */
+  const invalidation = useMemo<string | null>(() => {
+    if (!session) return null;
+    const live = new Map(lines.map((line) => [line.id, line]));
+    for (const snapshot of session.lines) {
+      const now = live.get(snapshot.id);
+      if (!now) {
+        return `Line "${snapshot.description}" is no longer on this shipment.`;
+      }
+      const ourOwnWrite = written[snapshot.id];
+      if (now.baseCents !== snapshot.baseCents && now.baseCents !== ourOwnWrite) {
+        return `The cost of "${snapshot.description}" changed while this bill was open.`;
+      }
+      if (now.qty !== snapshot.qty) {
+        return `The quantity of "${snapshot.description}" changed while this bill was open, and the split rests on it.`;
+      }
+    }
+    return null;
+  }, [session, lines, written]);
+
+  /** The bill is computable: frozen, and still describing this shipment. */
+  const active = session !== null && invalidation === null;
 
   const freightLines: FreightLine[] = useMemo(
-    () => lines.map((l) => ({ id: l.id, qty: l.qty, baseCents: l.baseCents })),
-    [lines],
+    () =>
+      session
+        ? session.lines.map((l) => ({ id: l.id, qty: l.qty, baseCents: l.baseCents }))
+        : [],
+    [session],
   );
 
   // The module can THROW on a caller contract violation (duplicate ids, a
@@ -126,16 +225,19 @@ export function FreightCalculatorPanel({
   const outcome = useMemo<
     { kind: "result"; result: AllocationResult } | { kind: "error"; message: string } | null
   >(() => {
-    if (freightCents === null || lines.length === 0) return null;
+    if (!session || !active) return null;
     try {
-      return { kind: "result", result: allocateFreight(freightLines, freightCents) };
+      return {
+        kind: "result",
+        result: allocateFreight(freightLines, session.freightCents),
+      };
     } catch (error) {
       return {
         kind: "error",
         message: error instanceof Error ? error.message : "Allocation failed",
       };
     }
-  }, [freightCents, freightLines, lines.length]);
+  }, [session, active, freightLines]);
 
   const ok =
     outcome?.kind === "result" && outcome.result.status === "ok" ? outcome.result : null;
@@ -157,12 +259,12 @@ export function FreightCalculatorPanel({
   const edited = Object.keys(edits).length > 0;
 
   const validation: EditedAllocationValidation | null = useMemo(() => {
-    if (!ok || !edited || freightCents === null) return null;
+    if (!ok || !edited || !session) return null;
     return validateEditedAllocations(
       currentAllocations.map((a) => ({ id: a.id, allocatedCents: a.allocatedCents })),
-      freightCents,
+      session.freightCents,
     );
-  }, [ok, edited, currentAllocations, freightCents]);
+  }, [ok, edited, currentAllocations, session]);
 
   // Unit costs are derived from what is ON SCREEN, so the suggestion column and
   // the Accept payload can never disagree. Invalid edits make them unaskable.
@@ -182,38 +284,83 @@ export function FreightCalculatorPanel({
       s.suggestedUnitCostCents !== null,
   );
 
+  /** FD-4: consent counts only for the exact amounts it was given for. */
+  const consented = (s: (typeof priceable)[number]) => {
+    const agreed = flooredConsent[s.id as number];
+    return (
+      agreed !== undefined &&
+      agreed.unitCostCents === s.suggestedUnitCostCents &&
+      agreed.remainderCents === s.unitRoundingRemainderCents
+    );
+  };
+
   /**
    * The W1S-3 split. A line is written when its allocation divides exactly
    * across its units, or when this operator has said out loud that the drop is
    * acceptable for this line. Everything else is held back — visibly.
    */
   const writable = priceable.filter(
-    (s) => s.unitRoundingRemainderCents === 0 || flooredAccepted[s.id as number],
+    (s) => s.unitRoundingRemainderCents === 0 || consented(s),
   );
   const withheld = priceable.filter(
-    (s) => s.unitRoundingRemainderCents > 0 && !flooredAccepted[s.id as number],
+    (s) => s.unitRoundingRemainderCents > 0 && !consented(s),
   );
+  /** What a press of Accept would send: the writable lines that have NOT written. */
+  const pending = writable.filter((s) => written[s.id as number] === undefined);
+
+  const canAllocate =
+    !disabled && !busy && freightCents !== null && lines.length > 0 && invalidation === null &&
+    // A partial write already landed part of this freight in the row costs;
+    // re-freezing over them would allocate it a second time. Clear first.
+    writtenIds.length === 0;
 
   const canAccept =
     !disabled &&
     !busy &&
+    active &&
     ok !== null &&
     (validation === null || validation.status === "ok") &&
-    writable.length > 0;
+    pending.length > 0;
+
+  const handleAllocate = () => {
+    if (!canAllocate || freightCents === null) return;
+    // THE FREEZE. Everything downstream reads this snapshot, so a refetch can
+    // change what the screen COMPARES against but never what it computed.
+    setSession({ freightCents, lines });
+    setEdits({});
+    setFlooredConsent({});
+    setWritten({});
+    setWriteFailed(null);
+    setApplied(false);
+  };
 
   const handleAccept = async () => {
     if (!canAccept) return;
+    const payload = pending.map((s) => ({
+      id: s.id as number,
+      unitCostCents: s.suggestedUnitCostCents,
+    }));
     try {
-      await onAccept(
-        writable.map((s) => ({
-          id: s.id as number,
-          unitCostCents: s.suggestedUnitCostCents,
-        })),
-      );
+      await onAccept(payload);
     } catch (error) {
       // W1S-5: the write did not land, so NOTHING here may look like it did.
       // The bill, the edits and the per-line choices all stay exactly as they
       // were, ready to be retried against whatever actually wrote.
+      //
+      // FD-1: record WHICH lines wrote, at the cost they were written with. The
+      // retry then offers only the rest — never the same freight twice on a line
+      // whose base cost has already absorbed it.
+      const landed = writtenIdsFrom(error);
+      if (landed.length > 0) {
+        setWritten((prev) => ({
+          ...prev,
+          ...Object.fromEntries(
+            payload
+              .filter((update) => landed.includes(update.id))
+              .map((update) => [update.id, update.unitCostCents]),
+          ),
+        }));
+      }
       setWriteFailed(error instanceof Error ? error.message : "The costs were not written.");
       setApplied(false);
       return;
@@ -223,10 +370,7 @@ export function FreightCalculatorPanel({
     // would allocate the same freight ON TOP of itself, quietly inflating the
     // valuation of real stock. The form resets and says why; entering a second
     // bill has to be a deliberate act.
-    setFreightInput("");
-    setEdits({});
-    setFlooredAccepted({});
-    setWriteFailed(null);
+    clearBill();
     setApplied(true);
   };
 
@@ -239,31 +383,40 @@ export function FreightCalculatorPanel({
       <p className="text-xs text-muted-foreground">
         The bill is split across the lines by what each one is WORTH (quantity x
         base cost), not by line count. Every cent is accounted for: the leftovers
-        go one apiece to the largest remainders and are shown per line.
+        go one apiece to the largest remainders and are shown per line. Allocate
+        freezes the costs it splits, so a line saved elsewhere mid-bill cannot
+        quietly change the answer.
       </p>
 
-      <div className="space-y-1.5 sm:max-w-[220px]">
-        <Label htmlFor="freight-total">Freight / fees total</Label>
-        <Input
-          id="freight-total"
-          inputMode="decimal"
-          value={freightInput}
-          onChange={(e) => {
-            setFreightInput(e.target.value);
-            setEdits({});
-            setFlooredAccepted({});
-            setApplied(false);
-            setWriteFailed(null);
-          }}
-          placeholder="0.00"
-          disabled={disabled}
-        />
-        {freightInvalid && (
-          <p data-testid="allocation-input-error" className="text-xs text-destructive">
-            Enter a non-negative amount in dollars.
-          </p>
-        )}
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="space-y-1.5 sm:max-w-[220px]">
+          <Label htmlFor="freight-total">Freight / fees total</Label>
+          <Input
+            id="freight-total"
+            inputMode="decimal"
+            value={freightInput}
+            onChange={(e) => {
+              // A different total is a different bill: the frozen one goes.
+              setFreightInput(e.target.value);
+              setSession(null);
+              setEdits({});
+              setFlooredConsent({});
+              setApplied(false);
+              setWriteFailed(null);
+            }}
+            placeholder="0.00"
+            disabled={disabled}
+          />
+        </div>
+        <Button type="button" variant="secondary" onClick={handleAllocate} disabled={!canAllocate}>
+          Allocate
+        </Button>
       </div>
+      {freightInvalid && (
+        <p data-testid="allocation-input-error" className="text-xs text-destructive">
+          Enter a non-negative amount in dollars.
+        </p>
+      )}
 
       {applied && (
         <p data-testid="allocation-applied" className="text-xs text-muted-foreground">
@@ -277,8 +430,20 @@ export function FreightCalculatorPanel({
           data-testid="allocation-write-failed"
           className="text-xs font-medium text-destructive"
         >
-          {`These costs were not written (${writeFailed}). The bill and your edits are kept — check which lines saved on the shipment above, then retry.`}
+          {`These costs were not written (${writeFailed}). The bill and your edits are kept — Accept again to write only the lines that did not save.`}
         </p>
+      )}
+
+      {invalidation && (
+        <div
+          data-testid="allocation-invalidated"
+          className="rounded-md border border-destructive/40 bg-destructive/5 p-3 space-y-1"
+        >
+          <p className="text-sm font-medium">Costs changed — re-enter the bill.</p>
+          <p className="text-xs text-muted-foreground">
+            {`${invalidation} This bill was split across the costs as they were, so it is no longer the right answer. Clear it and enter the freight again against the costs on screen.`}
+          </p>
+        </div>
       )}
 
       {lines.length === 0 && (
@@ -310,7 +475,7 @@ export function FreightCalculatorPanel({
         </div>
       )}
 
-      {ok && (
+      {ok && session && (
         <div className="space-y-3">
           <div className="overflow-x-auto">
             <table className="w-full min-w-[560px] text-sm">
@@ -325,9 +490,10 @@ export function FreightCalculatorPanel({
                 </tr>
               </thead>
               <tbody>
-                {lines.map((line, index) => {
+                {session.lines.map((line, index) => {
                   const allocation = ok.allocations[index];
                   const suggestion = suggestions.find((s) => s.id === line.id);
+                  const alreadyWritten = written[line.id];
                   return (
                     <tr
                       key={line.id}
@@ -339,6 +505,14 @@ export function FreightCalculatorPanel({
                         <span className="block text-xs text-muted-foreground">
                           {QTY_SOURCE_LABEL[line.qtySource]}
                         </span>
+                        {alreadyWritten !== undefined && (
+                          <span
+                            data-testid="line-written"
+                            className="block text-xs text-positive"
+                          >
+                            {`Already written this bill at ${formatCents(alreadyWritten)} — it will not be sent again.`}
+                          </span>
+                        )}
                       </td>
                       <td className="py-2 pr-2 text-right tabular-nums">{line.qty}</td>
                       <td className="py-2 pr-2 text-right tabular-nums">
@@ -361,7 +535,10 @@ export function FreightCalculatorPanel({
                           onChange={(e) =>
                             setEdits((prev) => ({ ...prev, [line.id]: e.target.value }))
                           }
-                          disabled={disabled}
+                          // A written line's share of this bill is already in
+                          // the row cost; re-splitting it here would describe a
+                          // write that cannot happen again.
+                          disabled={disabled || alreadyWritten !== undefined}
                         />
                       </td>
                       <td
@@ -394,9 +571,13 @@ export function FreightCalculatorPanel({
                               </span>
                             )}
                             {/* W1S-3: the two ways an inexact line leaves this
-                                state — edit the split, or take the drop. */}
+                                state — edit the split, or take the drop. FD-4:
+                                the consent below is read back at the CURRENT
+                                amounts, so an edit revokes it. */}
                             {suggestion.unitRoundingRemainderCents > 0 &&
-                              (flooredAccepted[line.id] ? (
+                              (consented(
+                                suggestion as (typeof priceable)[number],
+                              ) ? (
                                 <span
                                   data-testid="floored-accepted"
                                   className="block text-xs text-amber-700 dark:text-amber-400"
@@ -418,9 +599,14 @@ export function FreightCalculatorPanel({
                                     variant="outline"
                                     className="h-7"
                                     onClick={() =>
-                                      setFlooredAccepted((prev) => ({
+                                      setFlooredConsent((prev) => ({
                                         ...prev,
-                                        [line.id]: true,
+                                        [line.id]: {
+                                          unitCostCents:
+                                            suggestion.suggestedUnitCostCents as number,
+                                          remainderCents:
+                                            suggestion.unitRoundingRemainderCents,
+                                        },
                                       }))
                                     }
                                     disabled={disabled || busy}
@@ -476,9 +662,16 @@ export function FreightCalculatorPanel({
         <Button type="button" onClick={handleAccept} disabled={!canAccept}>
           {busy ? "Saving…" : "Accept suggested costs"}
         </Button>
-        {ok && priceable.length < lines.length && (
+        {session && (
+          // Deliberately never disabled: throwing away a local bill needs no
+          // token and no permission, and an invalidated one has no other exit.
+          <Button type="button" variant="outline" onClick={clearBill}>
+            Clear the bill
+          </Button>
+        )}
+        {ok && session && priceable.length < session.lines.length && (
           <span className="text-xs text-muted-foreground">
-            {`${lines.length - priceable.length} line(s) have no base cost and will be left unpriced.`}
+            {`${session.lines.length - priceable.length} line(s) have no base cost and will be left unpriced.`}
           </span>
         )}
         {ok && withheld.length > 0 && (

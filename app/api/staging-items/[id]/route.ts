@@ -198,7 +198,14 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     // this claim — under the stranded-line amendment a CLOSED shipment's lines
     // can still graduate, and those three fields are exactly what a graduation
     // consumes.
-    if (reclaimingQuantity && existing.shipmentId !== null) {
+    //
+    // FD-3 (fix round 2): this claim runs here ONLY when the request changes no
+    // link. A combined quantity+relink PATCH would otherwise claim the source
+    // header before `applyShipmentLink`'s sorted pair, putting one request's
+    // headers in request order and another's in id order — the very ABBA the
+    // sort exists to remove. On that path the guard travels INTO the link as
+    // `alsoOpen`, so all three headers are claimed once each, in one order.
+    if (reclaimingQuantity && !relinking && existing.shipmentId !== null) {
       await claimShipmentForCount(tx, existing.shipmentId);
     }
 
@@ -210,6 +217,13 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
       const link = await applyShipmentLink(tx, {
         item: existing,
         targetShipmentId: body.shipmentId,
+        // The quantity guard, when this request also carries one. It is the
+        // source header — already in the link's own set — but naming it keeps
+        // the rule structural instead of incidental.
+        alsoOpen:
+          reclaimingQuantity && relinking && existing.shipmentId !== null
+            ? [existing.shipmentId]
+            : [],
       });
 
       if (link.action === 'UNLINK' || link.action === 'RELINK') {

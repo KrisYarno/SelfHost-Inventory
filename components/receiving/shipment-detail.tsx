@@ -38,6 +38,7 @@ import {
 import {
   FreightCalculatorPanel,
   type CalculatorLine,
+  type PartialAllocationWriteError,
 } from "@/components/receiving/freight-calculator-panel";
 
 /**
@@ -332,7 +333,16 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
         pending: updates.map((u) => u.id).filter((id) => !written.includes(id)),
       });
       toast.error(err instanceof Error ? err.message : "Failed to write the costs");
-      throw err;
+      // FD-1: the rethrow now CARRIES the ids that wrote. Each successful PATCH
+      // above invalidated the shipment query, so those lines are about to come
+      // back with their landed costs as row costs — and without this list the
+      // panel would offer them again and allocate the same freight on top of
+      // itself (100c -> 200c -> 333c). Naming them is what makes the retry a
+      // retry of the REST.
+      const failure: PartialAllocationWriteError =
+        err instanceof Error ? err : new Error("Failed to write the costs");
+      failure.writtenLineIds = written;
+      throw failure;
     }
   };
 

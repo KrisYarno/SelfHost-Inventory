@@ -127,6 +127,9 @@ const stateWrites = () =>
 /** The leading NO-OP lock claims — the ones this file is actually about. */
 const lockClaims = () =>
   itemClaims().filter((args: any) => args?.data && Object.keys(args.data).every((k) => k === 'status'));
+/** Every shipment header claimed, in call order (FD-3: order AND multiplicity). */
+const shipmentClaimIds = () =>
+  db.inboundShipment.updateMany.mock.calls.map((c: any[]) => c[0].where.id);
 /** The interleaving of item-table and shipment-table claims, in call order. */
 function claimOrder(): string[] {
   const order: string[] = [];
@@ -243,6 +246,64 @@ describe('PATCH /api/staging-items/[id] — lock order (residual ABBA)', () => {
     // itself is still a conditional claim; that is W1S-1, not this rule.)
     expect(lockClaims()).toHaveLength(0);
     expect(db.inboundShipment.updateMany).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // FD-3 (fix round 2) — the residual W1S-7 hole. `applyShipmentLink` sorts the
+  // headers it claims, but this route claimed the SOURCE header first (the
+  // expectedQuantity OPEN-guard) and only then called in. A PATCH carrying BOTH
+  // an expectedQuantity edit and a relink therefore took source-then-sorted:
+  // two operators relinking the same pair in opposite directions were back to
+  // claiming the two headers in opposite orders. Every header claim now rides
+  // the ONE sorted, deduped set inside applyShipmentLink.
+  // -------------------------------------------------------------------------
+
+  it('a combined expectedQuantity + relink claims the headers SORTED, once each', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ shipmentId: SHIPMENT_B }));
+
+    const resp = await patch({ expectedQuantity: 25, shipmentId: SHIPMENT_A });
+
+    expect(resp.status).toBe(200);
+    expect(shipmentClaimIds()).toEqual([SHIPMENT_A, SHIPMENT_B]);
+  });
+
+  it('claims the SAME order for the opposite move (A -> B carrying a quantity edit)', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ shipmentId: SHIPMENT_A }));
+
+    const resp = await patch({ expectedQuantity: 25, shipmentId: SHIPMENT_B });
+
+    expect(resp.status).toBe(200);
+    expect(shipmentClaimIds()).toEqual([SHIPMENT_A, SHIPMENT_B]);
+  });
+
+  it('claims the header ONCE on a combined expectedQuantity + UNLINK', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ shipmentId: SHIPMENT_A }));
+
+    const resp = await patch({ expectedQuantity: 25, shipmentId: null });
+
+    expect(resp.status).toBe(200);
+    expect(shipmentClaimIds()).toEqual([SHIPMENT_A]);
+  });
+
+  it('still claims the shipment for an expectedQuantity edit with NO link change', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ shipmentId: SHIPMENT_A }));
+
+    const resp = await patch({ expectedQuantity: 25 });
+
+    expect(resp.status).toBe(200);
+    expect(shipmentClaimIds()).toEqual([SHIPMENT_A]);
+  });
+
+  it('a combined PATCH still refuses when a header is not OPEN (409, nothing written)', async () => {
+    db.stagingItem.findUnique.mockResolvedValue(itemRow({ shipmentId: SHIPMENT_B }));
+    db.inboundShipment.updateMany.mockResolvedValue({ count: 0 });
+    db.inboundShipment.findUnique.mockResolvedValue({ id: SHIPMENT_A, status: 'CLOSED' });
+
+    const resp = await patch({ expectedQuantity: 25, shipmentId: SHIPMENT_A });
+
+    expect(resp.status).toBe(409);
+    expect(stateWrites()).toHaveLength(0);
+    expect(mockRecordChange).not.toHaveBeenCalled();
   });
 
   it('takes NO lock for a link that is already where it was asked to be', async () => {

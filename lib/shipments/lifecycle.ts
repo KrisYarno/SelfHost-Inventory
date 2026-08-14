@@ -153,6 +153,14 @@ export type ShipmentLinkResult = {
  * property of the PAIR rather than of the direction, so the two requests queue
  * instead of colliding.
  *
+ * FD-3 (fix round 2) closed the residual hole in that: sorting here is only a
+ * global order if EVERY header claim of the request rides this set. The staging
+ * PATCH also has an OPEN-guard of its own (expectedQuantity), and taking it
+ * before calling in put the source header ahead of the sorted pair on any
+ * combined quantity+relink PATCH. `alsoOpen` is how such a caller hands its
+ * guard over: those ids join the same sort, and a header that is ONLY a guard is
+ * refused in the quantity vocabulary rather than the link one.
+ *
  * The audit verbs are emitted by the CALLER from the returned action (house
  * pattern: recordChange lives in the route, inside this same transaction).
  */
@@ -161,9 +169,16 @@ export async function applyShipmentLink(
   args: {
     item: { id: number; status: StagingItemStatus; shipmentId: string | null };
     targetShipmentId: string | null;
+    /**
+     * Headers the CALLER also needs held OPEN for this request. Honoured only
+     * when the link actually moves the line: a NOOP link takes no locks at all
+     * (below), so a caller whose guard must run regardless keeps claiming it
+     * itself on that path.
+     */
+    alsoOpen?: readonly string[];
   },
 ): Promise<ShipmentLinkResult> {
-  const { item, targetShipmentId } = args;
+  const { item, targetShipmentId, alsoOpen = [] } = args;
   const previousShipmentId = item.shipmentId ?? null;
 
   // Already where it was asked to be: no write, no audit line.
@@ -179,14 +194,22 @@ export async function applyShipmentLink(
     );
   }
 
-  // Both headers involved, sorted + deduped: the deadlock-free order (see the
-  // header note). Dedupe is belt-and-braces — the NOOP short-circuit above
-  // already removed the only way the two ids can be equal.
-  const headers = Array.from(
-    new Set([previousShipmentId, targetShipmentId].filter((s): s is string => s !== null)),
-  ).sort();
+  // EVERY header this request needs, sorted + deduped: the deadlock-free order
+  // (see the header note). Dedupe matters now that a caller's guard can name a
+  // header the link already claims — the same row must be claimed once, not
+  // twice in two vocabularies.
+  const linkHeaders = [previousShipmentId, targetShipmentId].filter(
+    (s): s is string => s !== null,
+  );
+  const headers = Array.from(new Set([...linkHeaders, ...alsoOpen])).sort();
   for (const shipmentId of headers) {
-    await claimShipmentForLink(tx, shipmentId);
+    // A header that is only the caller's quantity guard refuses in the quantity
+    // vocabulary; anything the link itself touches refuses in the link one.
+    if (linkHeaders.includes(shipmentId)) {
+      await claimShipmentForLink(tx, shipmentId);
+    } else {
+      await claimShipmentForCount(tx, shipmentId);
+    }
   }
 
   const claim = await tx.stagingItem.updateMany({
