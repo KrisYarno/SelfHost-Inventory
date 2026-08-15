@@ -36,6 +36,7 @@ import {
   GraduateDialog,
   type GraduateStagingItem,
 } from "@/components/staging/graduate-dialog";
+import { CreateStagingDialog } from "@/components/staging/create-staging-dialog";
 import {
   FreightCalculatorPanel,
   type AllocationLine,
@@ -148,6 +149,8 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
 
   const [graduateItem, setGraduateItem] = useState<GraduateStagingItem | null>(null);
   const [graduateOpen, setGraduateOpen] = useState(false);
+  // W2.5: logging a box FROM here, through the pre-staging dialog itself.
+  const [addBoxOpen, setAddBoxOpen] = useState(false);
   // Products this session created that are NOT live yet. A non-admin's new
   // product is booked with stock but held for approval, and the operator has to
   // hear that from the surface that just created it.
@@ -648,14 +651,31 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
         )}
       </div>
 
-      {/* Link an already-logged box. Only while receiving is still open. */}
+      {/* Add a box, or link one that is already logged. Both only while
+          receiving is still open — the link PATCH refuses a settled header.
+
+          W2.5: "Add box" opens the SAME dialog /pre-staging opens, with this
+          header prefilled and locked. The link picker below it stays, because
+          attaching a box somebody already logged is a real thing that happens;
+          what was missing was the path that does not require having guessed
+          the receipt in advance. */}
       {receivingActive && (
         <div className="space-y-2">
-          <h3 className="text-sm font-semibold">Link a received box</h3>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-semibold">Link a received box</h3>
+            <Button
+              size="sm"
+              onClick={() => setAddBoxOpen(true)}
+              disabled={!csrfToken}
+            >
+              <PackagePlus className="mr-1 h-4 w-4" />
+              Add box
+            </Button>
+          </div>
           {linkable.length === 0 ? (
             <p className="text-xs text-muted-foreground">
-              Every received box is already attributed to a shipment. Log new
-              boxes in Pre-Staging, then link them here.
+              Every received box is already attributed to a shipment. Add a box
+              above, or log one in Pre-Staging and link it here.
             </p>
           ) : (
             <ul className="space-y-2">
@@ -704,6 +724,14 @@ export function ShipmentDetail({ shipmentId }: ShipmentDetailProps) {
         item={graduateItem}
         locations={locations}
         onSuccess={handleGraduated}
+      />
+
+      <CreateStagingDialog
+        open={addBoxOpen}
+        onOpenChange={setAddBoxOpen}
+        lockedShipmentId={shipmentId}
+        lockedShipmentLabel={shipment.supplierRef ?? shipment.id}
+        onSuccess={refreshShipment}
       />
     </div>
   );

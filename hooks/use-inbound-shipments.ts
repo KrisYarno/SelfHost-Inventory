@@ -126,8 +126,17 @@ export const shipmentKeys = {
 // Reads
 // ---------------------------------------------------------------------------
 
-/** Receiving headers, newest first. "ALL" sends no filter at all. */
-export function useInboundShipments(status: ShipmentStatusFilter = "ALL") {
+/**
+ * Receiving headers, newest first. "ALL" sends no filter at all.
+ *
+ * `enabled` mirrors `useLocations`: the W2.5 shipment picker lives inside a
+ * dialog that is mounted long before it is opened, and a header list nobody can
+ * see yet is a request nobody asked for.
+ */
+export function useInboundShipments(
+  status: ShipmentStatusFilter = "ALL",
+  enabled = true,
+) {
   return useQuery<ShipmentSummary[], ShipmentApiError>({
     queryKey: shipmentKeys.list(status),
     queryFn: async () => {
@@ -140,6 +149,7 @@ export function useInboundShipments(status: ShipmentStatusFilter = "ALL") {
       const data = await res.json();
       return (data.shipments ?? []) as ShipmentSummary[];
     },
+    enabled,
   });
 }
 

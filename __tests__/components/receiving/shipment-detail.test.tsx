@@ -1016,3 +1016,65 @@ describe("failure", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// W2.5 — "Add box": the receiving header is an ENTRY POINT, not just a picker
+// ---------------------------------------------------------------------------
+
+describe("add a box from the receiving header", () => {
+  /** POST a box, then accept the link PATCH the dialog composes after it. */
+  const boxRoutes: Responder = (url, init) => {
+    if (url.endsWith("/api/staging-items") && init?.method === "POST") {
+      return { ok: true, json: async () => ({ id: 99, description: "New box" }) };
+    }
+    if (url.includes("/api/staging-items/99") && init?.method === "PATCH") {
+      return { ok: true, json: async () => ({ id: 99 }) };
+    }
+    return undefined;
+  };
+
+  it("opens the SHARED create dialog, prefilled and locked to this shipment", async () => {
+    const user = userEvent.setup();
+    renderDetail(detail(), boxRoutes);
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /add box/i }));
+
+    // The same dialog /pre-staging opens — not a second one — with the header
+    // fixed rather than choosable.
+    expect(await screen.findByTestId("staging-locked-shipment")).toHaveTextContent("PO-1001");
+    expect(
+      screen.queryByRole("combobox", { name: /receiving shipment/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lands the created box LINKED to this shipment", async () => {
+    const user = userEvent.setup();
+    const { fetchFn } = renderDetail(detail(), boxRoutes);
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /add box/i }));
+    await screen.findByTestId("staging-locked-shipment");
+
+    await user.type(screen.getByLabelText(/description/i), "New box");
+    await user.click(screen.getByRole("button", { name: /log item/i }));
+
+    await waitFor(() => expect(writesTo(fetchFn, "/api/staging-items/99").length).toBe(1));
+    const [, init] = writesTo(fetchFn, "/api/staging-items/99")[0];
+    expect((init as RequestInit).method).toBe("PATCH");
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      shipmentId: SHIPMENT_ID,
+    });
+  });
+
+  it("offers no Add box on a CLOSED shipment — receiving is over", async () => {
+    renderDetail(
+      detail({ status: "CLOSED", closedAt: new Date().toISOString(), closedBy: 7 }, [
+        line({ countedQuantity: 10 }),
+      ]),
+    );
+
+    await waitFor(() => expect(lineRow(11)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /add box/i })).not.toBeInTheDocument();
+  });
+});
