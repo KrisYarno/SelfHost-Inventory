@@ -123,6 +123,17 @@ describe("the candidate read is bounded, and skipped when nothing needs it", () 
     expect(prisma.queries.some((q) => /FROM external_orders/.test(q.sql))).toBe(false);
   });
 
+  it("RR-2: issues NO candidate read for an event whose STRUCTURED key is present — its reference is ignored, so it must not be asked about", async () => {
+    const prisma = fakePrisma({
+      eventRows: [idEventRow({ orderReference: "23645", orderReferenceType: "STRING" })],
+      ledgerRows: [ledgerRow()],
+    });
+
+    await runBackfill(prisma, opts());
+
+    expect(prisma.queries.some((q) => /FROM external_orders/.test(q.sql))).toBe(false);
+  });
+
   it("issues NO candidate read for references that fail the shape bar", async () => {
     const prisma = fakePrisma({
       eventRows: [refEventRow({ orderReference: "walk-in 88" })],

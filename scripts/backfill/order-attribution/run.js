@@ -443,6 +443,11 @@ async function runBackfill(prisma, opts) {
   const references = [
     ...new Set(
       events
+        // RR-2: an event carrying the STRUCTURED key never fills from its
+        // reference (key-presence precedence, even when the id is corrupt or
+        // its rows are already stamped) — so its reference must not be ASKED
+        // about either. Same presence test the planner applies.
+        .filter((e) => e.accruedOrderIdType == null && e.accruedOrderId == null)
         .filter((e) => isUsableOrderReference(e.orderReference, e.orderReferenceType))
         .map((e) => normalizeOrderReference(e.orderReference))
     ),

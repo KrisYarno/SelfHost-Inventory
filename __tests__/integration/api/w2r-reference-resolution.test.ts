@@ -297,6 +297,38 @@ describe("PIN 4 — a resolved order in another company does not fail the reques
 // The structured path still wins, and still behaves exactly as W2-1 left it
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// RR-1 — attribution is OPPORTUNISTIC: its infrastructure failing is not the
+// deduction's problem
+// ---------------------------------------------------------------------------
+
+describe("RR-1: resolver infrastructure failure never blocks the deduction", () => {
+  it("a DB fault during the reference lookup => the deduction COMMITS, unstamped", async () => {
+    db.externalOrder.findMany.mockRejectedValue(new Error("connection lost"));
+
+    const { row, details } = await deductRow({
+      orderReference: REF,
+      intent: "order",
+    });
+
+    expect(row.orderRecordId).toBeNull();
+    expect(details.orderAttributionSource).toBeUndefined();
+    expect(details.orderReference).toBe(REF);
+  });
+
+  it("the redacted operational log names the failure class, never the reference", async () => {
+    const spy = jest.spyOn(console, "error").mockImplementation(() => {});
+    db.externalOrder.findMany.mockRejectedValue(new Error(`boom ${REF} boom`));
+
+    await deductRow({ orderReference: REF, intent: "order" });
+
+    const logged = spy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(logged).toContain("reference resolution");
+    expect(logged).not.toContain(REF);
+    spy.mockRestore();
+  });
+});
+
 describe("the structured id outranks the reference", () => {
   it("stamps the SELECTED id and never resolves the reference", async () => {
     db.externalOrder.findUnique.mockResolvedValue({ companyId: COMPANY_ID } as any);

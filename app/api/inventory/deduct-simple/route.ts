@@ -67,10 +67,27 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // no column is stamped, which is what W3's matcher inherits. A membership
   // failure is in that group — the deduction is legal and commits; only the
   // attribution is withheld, and nothing about the declined order is recorded.
-  const referenceResolution =
-    body.selectedExternalOrderId === undefined && isReferenceResolutionEligible(body.intent)
-      ? await resolveOrderReference(body.orderReference, user)
-      : null;
+  // RR-1: this lookup is OPPORTUNISTIC ENRICHMENT, not the validation of an
+  // explicit claim — the structured-id sibling above fails loudly because the
+  // operator asserted something; here the operator asserted nothing, so the
+  // lookup's INFRASTRUCTURE failing (the unindexed orderNumber scan timing
+  // out, a dropped connection) must cost only the attribution, never the
+  // deduction. Named declines (no match, ambiguous, not-a-member) come back as
+  // outcomes; anything THROWN from here is an ops event: log the failure class
+  // redacted — never the typed reference, which is free text and free text is
+  // where customer names arrive — and proceed unstamped exactly as if the
+  // reference had not matched.
+  let referenceResolution = null;
+  if (body.selectedExternalOrderId === undefined && isReferenceResolutionEligible(body.intent)) {
+    try {
+      referenceResolution = await resolveOrderReference(body.orderReference, user);
+    } catch {
+      console.error(
+        "[deduct-simple] reference resolution failed (infrastructure); deduction proceeds unattributed"
+      );
+      referenceResolution = null;
+    }
+  }
 
   const orderRecordId =
     selectedStamp ??
