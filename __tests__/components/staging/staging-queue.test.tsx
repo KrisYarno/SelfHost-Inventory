@@ -48,6 +48,7 @@ beforeAll(() => {
 
 const SHIP_A = "ckship0000000000000000aaa";
 const SHIP_CLOSED = "ckship00000000000000shut";
+const SHIP_NEW = "ckship0000000000000000new";
 
 function summary(over: Record<string, unknown> = {}) {
   return {
@@ -255,5 +256,117 @@ describe("assigning a box to a shipment", () => {
 
     await waitFor(() => expect(cell(11)).toHaveTextContent("PO-1001"));
     expect(within(cell(11)).queryByRole("button")).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W25-1 PIN 3 — the queue's Save path keeps the header it opened
+// ---------------------------------------------------------------------------
+
+describe("an inline header opened from the queue editor", () => {
+  it("is REUSED on the retry after the link is refused — never re-created", async () => {
+    const user = userEvent.setup();
+    const { fetchFn } = renderQueue([item()], (url, init) => {
+      if (url.includes("/api/inbound-shipments") && init?.method === "POST") {
+        return {
+          ok: true,
+          json: async () => summary({ id: SHIP_NEW, supplierRef: "PO-NEW" }),
+        };
+      }
+      if (url.includes("/api/staging-items/11") && init?.method === "PATCH") {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ error: "Item has already graduated", code: "CONFLICT" }),
+        };
+      }
+      return undefined;
+    });
+
+    await waitFor(() => expect(cell(11)).toBeInTheDocument());
+    await user.click(within(cell(11)).getByRole("button", { name: /assign to shipment/i }));
+    const editor = await screen.findByTestId("staging-assign-11");
+    await user.click(within(editor).getByRole("combobox", { name: /receiving shipment/i }));
+    await user.click(await screen.findByRole("option", { name: /new shipment/i }));
+    await user.click(within(editor).getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith("Item has already graduated"));
+
+    // The editor is still open and the choice now NAMES the header it opened.
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId("staging-assign-11")).getByRole("combobox", {
+          name: /receiving shipment/i,
+        }),
+      ).toHaveTextContent(/PO-NEW/),
+    );
+
+    await user.click(
+      within(screen.getByTestId("staging-assign-11")).getByRole("button", { name: /^save$/i }),
+    );
+
+    await waitFor(() => expect(writes(fetchFn).filter((w) => w.method === "PATCH")).toHaveLength(2));
+    const sent = writes(fetchFn);
+    // ONE header, for two Saves.
+    expect(sent.filter((w) => w.url.endsWith("/api/inbound-shipments"))).toHaveLength(1);
+    expect(sent.filter((w) => w.method === "PATCH").map((w) => w.body)).toEqual([
+      { shipmentId: SHIP_NEW },
+      { shipmentId: SHIP_NEW },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W25-2 PIN 4 + PIN 5 — Change is not offered against a SETTLED receipt
+// ---------------------------------------------------------------------------
+//
+// A counted RECEIVED box legitimately stays linked after its receipt closes
+// (the stranded-line amendment). `applyShipmentLink` demands BOTH headers OPEN,
+// so every action from such a row is a guaranteed 409 — and "New shipment…"
+// would mint an orphan header on the way to that refusal.
+
+describe("a row whose receipt has settled", () => {
+  const settled = () => [
+    item({ id: 11, shipmentId: SHIP_A }),
+    item({ id: 12, description: "Counted box", shipmentId: SHIP_CLOSED, countedQuantity: 4 }),
+  ];
+
+  it("shows the badge WITHOUT Change, while an OPEN-linked row keeps it", async () => {
+    renderQueue(settled());
+
+    // Wait for the OPEN list to LAND — before it does, membership is unknown.
+    await waitFor(() => expect(cell(11)).toHaveTextContent("PO-1001"));
+
+    expect(within(cell(11)).getByRole("button", { name: /change/i })).toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(within(cell(12)).queryByRole("button", { name: /change/i })).not.toBeInTheDocument(),
+    );
+    expect(cell(12)).toHaveTextContent(/0shut/i);
+    expect(cell(12)).toHaveTextContent(/receipt settled/i);
+  });
+
+  it("keeps Change when the list FAILED — unknown is not settled (fail-open)", async () => {
+    const user = userEvent.setup();
+    renderQueue(settled(), (url, init) => {
+      if (url.includes("/api/inbound-shipments") && init?.method === undefined) {
+        return { ok: false, status: 503, json: async () => ({ error: "Database is unavailable" }) };
+      }
+      return undefined;
+    });
+
+    // The picker is the surface that reports the failed read, so open one to
+    // pin the read as DEFINITIVELY errored before asserting on the other row.
+    await waitFor(() => expect(cell(11)).toBeInTheDocument());
+    await user.click(within(cell(11)).getByRole("button", { name: /change/i }));
+    const editor = await screen.findByTestId("staging-assign-11");
+    expect(
+      await within(editor).findByTestId("staging-shipment-11-list-error"),
+    ).toHaveTextContent(/Database is unavailable/);
+
+    // Row 12 is linked to a header the list cannot vouch for either way. It
+    // keeps its action: a guaranteed-409 button beats a silently frozen row.
+    expect(within(cell(12)).getByRole("button", { name: /change/i })).toBeInTheDocument();
+    expect(cell(12)).not.toHaveTextContent(/receipt settled/i);
   });
 });

@@ -23,7 +23,7 @@
  */
 
 import * as React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -335,6 +335,150 @@ describe("a link failure after a successful create", () => {
     expect(sent.filter((w) => w.method === "POST" && w.url.endsWith("/api/staging-items")))
       .toHaveLength(1);
     expect(sent.some((w) => w.url.includes("/discard"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W25-1 PIN 1 + PIN 2 — an inline header that OUTLIVES the step that failed
+// ---------------------------------------------------------------------------
+//
+// The as-built hole: "New shipment…" opened a header, the box create then
+// failed, and the only word about it was a toast reading "Failed to log item".
+// The choice stayed on `__new__`, so the operator's obvious next move — press
+// the button again — minted a SECOND empty header. Repeat until he gave up, and
+// receiving is left holding a row of orphans nobody can explain.
+
+describe("an inline header survives a failure in the step after it", () => {
+  /** POST /api/staging-items fails `times` times, then behaves. */
+  function flakyBoxCreate(times: number) {
+    let seen = 0;
+    const responder: Responder = (url, init) => {
+      if (url.endsWith("/api/staging-items") && init?.method === "POST") {
+        seen += 1;
+        if (seen <= times) {
+          return { ok: false, status: 500, json: async () => ({ error: "Box create exploded" }) };
+        }
+      }
+      return undefined;
+    };
+    return responder;
+  }
+
+  it("KEEPS the created header as the choice and NAMES it on screen", async () => {
+    const user = userEvent.setup();
+    renderDialog({}, flakyBoxCreate(1));
+
+    await waitFor(() => expect(shipmentSelect()).toBeInTheDocument());
+    await chooseShipment(user, /new shipment/i);
+    await user.type(screen.getByLabelText(/supplier reference/i), "PO-NEW");
+    await fillAndSubmit(user);
+
+    // The header EXISTS. Saying so is the whole point — a toast about the box
+    // leaves the operator with no idea a receipt was opened in his name.
+    const notice = await screen.findByTestId("staging-created-shipment");
+    expect(notice).toHaveTextContent(/PO-NEW/);
+    expect(notice).toHaveTextContent(/created/i);
+    expect(notice).toHaveTextContent(/open/i);
+
+    // …and the choice has stopped meaning "make me one": it is now a plain
+    // selection of that header, which is what makes the retry safe.
+    await waitFor(() => expect(shipmentSelect()).toHaveTextContent(/PO-NEW/));
+    expect(screen.queryByLabelText(/supplier reference/i)).not.toBeInTheDocument();
+  });
+
+  it("RETRIES against it — one header total, and the link carries its id", async () => {
+    const user = userEvent.setup();
+    const { fetchFn } = renderDialog({}, flakyBoxCreate(1));
+
+    await waitFor(() => expect(shipmentSelect()).toBeInTheDocument());
+    await chooseShipment(user, /new shipment/i);
+    await fillAndSubmit(user);
+    await screen.findByTestId("staging-created-shipment");
+
+    await user.click(screen.getByRole("button", { name: /log item/i }));
+
+    await waitFor(() =>
+      expect(writes(fetchFn).filter((w) => w.method === "PATCH")).toHaveLength(1),
+    );
+    const sent = writes(fetchFn);
+    // ONE header, for two submissions.
+    expect(sent.filter((w) => w.url.endsWith("/api/inbound-shipments"))).toHaveLength(1);
+    expect(sent.filter((w) => w.url.endsWith("/api/staging-items"))).toHaveLength(2);
+    expect(sent.find((w) => w.method === "PATCH")?.body).toEqual({ shipmentId: NEW_SHIP });
+  });
+
+  it("names the created header on the LINK-failure screen too", async () => {
+    const user = userEvent.setup();
+    renderDialog({}, (url, init) => {
+      if (url.includes("/api/staging-items/") && init?.method === "PATCH") {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ error: "Inbound shipment is not open", code: "CONFLICT" }),
+        };
+      }
+      return undefined;
+    });
+
+    await waitFor(() => expect(shipmentSelect()).toBeInTheDocument());
+    await chooseShipment(user, /new shipment/i);
+    await fillAndSubmit(user);
+
+    const panel = await screen.findByTestId("staging-link-failed");
+    expect(panel).toHaveTextContent(/PO-NEW/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W25-3 PIN 7 + PIN 8 — a failed list read is NOT an empty list
+// ---------------------------------------------------------------------------
+
+describe("the open-shipment list as a fallible read", () => {
+  const failList: Responder = (url, init) => {
+    if (url.includes("/api/inbound-shipments") && init?.method === undefined) {
+      return { ok: false, status: 503, json: async () => ({ error: "Database is unavailable" }) };
+    }
+    return undefined;
+  };
+
+  it("says the list FAILED, in the server's words, with a way to try again", async () => {
+    renderDialog({}, failList);
+
+    const failure = await screen.findByTestId("staging-shipment-list-error");
+    expect(failure).toHaveTextContent(/couldn.t load shipments/i);
+    expect(failure).toHaveTextContent(/Database is unavailable/);
+    expect(within(failure).getByRole("button", { name: /retry/i })).toBeInTheDocument();
+    // NOT the empty copy: "none exist" and "we could not ask" are different facts.
+    expect(screen.queryByText(/no open shipments yet/i)).not.toBeInTheDocument();
+  });
+
+  it("still logs a box — a failed list must never block the operator", async () => {
+    const user = userEvent.setup();
+    const { fetchFn } = renderDialog({}, failList);
+
+    await screen.findByTestId("staging-shipment-list-error");
+    await user.click(shipmentSelect());
+    expect(await screen.findByRole("option", { name: /none/i })).toBeInTheDocument();
+    await user.click(await screen.findByRole("option", { name: /new shipment/i }));
+    await fillAndSubmit(user);
+
+    await waitFor(() => expect(writes(fetchFn).length).toBe(3));
+    const [header, create, link] = writes(fetchFn);
+    expect(header.url).toContain("/api/inbound-shipments");
+    expect(create.url).toContain("/api/staging-items");
+    expect(link.body).toEqual({ shipmentId: NEW_SHIP });
+  });
+
+  it("says an EMPTY list is empty, without the failure styling", async () => {
+    renderDialog({}, (url, init) => {
+      if (url.includes("/api/inbound-shipments") && init?.method === undefined) {
+        return { ok: true, json: async () => ({ shipments: [] }) };
+      }
+      return undefined;
+    });
+
+    expect(await screen.findByText(/no open shipments yet/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("staging-shipment-list-error")).not.toBeInTheDocument();
   });
 });
 

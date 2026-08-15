@@ -10,6 +10,7 @@ import { useCreateStagingItem, useLocations } from "@/hooks/use-staging";
 import { useUpdateStagingLine } from "@/hooks/use-inbound-shipments";
 import {
   ShipmentPicker,
+  shipmentLabel,
   useShipmentChoice,
 } from "@/components/staging/shipment-picker";
 import {
@@ -169,6 +170,10 @@ export function CreateStagingDialog({
     // 1. THE HEADER, when one is being opened inline. It runs before the box on
     //    purpose: a failure here has written nothing at all, which is the only
     //    step of this composition that can still say that.
+    //
+    //    Once it SUCCEEDS the choice transitions to the created id (W25-1), so
+    //    a retry after any later failure links against that header instead of
+    //    opening another one. `choice.createdShipment` then names it on screen.
     let targetShipmentId: string | null;
     try {
       targetShipmentId = locked ? lockedShipmentId : await choice.resolve();
@@ -266,6 +271,14 @@ export function CreateStagingDialog({
                 failed:
               </p>
               <p className="text-muted-foreground">{linkFailure.message}</p>
+              {/* W25-1: an inline-opened header is a row somebody has to
+                  account for. It gets named here rather than left for the
+                  operator to discover in the receiving list next week. */}
+              {choice.createdShipment && (
+                <p className="text-muted-foreground">
+                  {`Shipment ${shipmentLabel(choice.createdShipment)} was created and is OPEN — assign the box to it from the queue.`}
+                </p>
+              )}
               <Link
                 href="/pre-staging"
                 className="inline-block font-medium underline underline-offset-4"
@@ -329,6 +342,29 @@ export function CreateStagingDialog({
             </div>
           ) : (
             <ShipmentPicker id="staging-shipment" choice={choice} />
+          )}
+
+          {/* W25-1 — THE HEADER THAT ALREADY LANDED.
+              Reachable only when a step AFTER the inline create failed (success
+              closes the dialog; a failed link takes the report screen above).
+              It says two things the operator cannot otherwise know: a receipt
+              was opened in his name, and pressing the button again will use it
+              rather than open a third one. */}
+          {choice.createdShipment && (
+            <div
+              data-testid="staging-created-shipment"
+              className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm"
+            >
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+              <p>
+                Shipment{" "}
+                <span className="font-medium">
+                  {shipmentLabel(choice.createdShipment)}
+                </span>{" "}
+                was created and is OPEN. Logging the box did not complete —
+                retrying will use the created shipment, not a new one.
+              </p>
+            </div>
           )}
 
           {/* Expected quantity + Location */}

@@ -99,6 +99,11 @@ export function StagingQueue({
     return map;
   }, [choice.shipments]);
 
+  const openIds = useMemo(
+    () => new Set(choice.shipments.map((shipment) => shipment.id)),
+    [choice.shipments],
+  );
+
   const openEditor = (item: StagingItem) => {
     choice.reset(item.shipmentId ?? undefined);
     setEditingId(item.id);
@@ -183,9 +188,26 @@ export function StagingQueue({
           {items.map((item) => {
             const isPending = pendingId === item.id;
             const shipmentId = item.shipmentId ?? null;
+            /**
+             * W25-2 — THE SETTLED SOURCE. A counted RECEIVED box legitimately
+             * stays linked after its receipt closes (the stranded-line
+             * amendment), and `applyShipmentLink` requires BOTH headers OPEN.
+             * Offering Change from such a row therefore offered a guaranteed
+             * 409 — and reaching it through "New shipment…" opened an orphan
+             * header on the way to the refusal.
+             *
+             * FAIL-OPEN, deliberately (W25-3): absence from the OPEN list only
+             * MEANS anything when that list is a completed, successful read. A
+             * failed — or still-running — list read leaves membership unknown,
+             * and unknown is not settled, so the action stays on offer. A
+             * guaranteed-409 button beats a row silently frozen by a GET that
+             * never landed, and the PATCH is the authority either way.
+             */
+            const settledSource =
+              shipmentId !== null && choice.isListSettled && !openIds.has(shipmentId);
             // Only a RECEIVED line's link is still movable: after graduation the
             // receipt is the history of real stock, and the PATCH freezes it.
-            const linkable = item.status === "RECEIVED";
+            const linkable = item.status === "RECEIVED" && !settledSource;
             const editing = editingId === item.id;
             const busy = updateLine.isPending || choice.isCreating;
 
@@ -232,6 +254,18 @@ export function StagingQueue({
                           <Link2 className="mr-1 h-3.5 w-3.5" />
                           {shipmentId ? "Change" : "Assign to shipment"}
                         </Button>
+                      )}
+                      {/* Why the action is missing from a row that otherwise
+                          looks movable. Quiet on purpose: the box is exactly
+                          where it belongs — the receipt it arrived on is simply
+                          no longer open to edits. */}
+                      {item.status === "RECEIVED" && settledSource && (
+                        <span
+                          className="text-xs text-muted-foreground"
+                          title="This receipt is no longer open, so the box cannot be moved off it."
+                        >
+                          receipt settled
+                        </span>
                       )}
                     </div>
                   </TableCell>

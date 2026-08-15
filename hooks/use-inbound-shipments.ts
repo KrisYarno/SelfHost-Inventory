@@ -132,6 +132,11 @@ export const shipmentKeys = {
  * `enabled` mirrors `useLocations`: the W2.5 shipment picker lives inside a
  * dialog that is mounted long before it is opened, and a header list nobody can
  * see yet is a request nobody asked for.
+ *
+ * A FAILURE THROWS, and callers must carry that through rather than defaulting
+ * `data` to `[]` and rendering the result as "no shipments exist" (W25-3): the
+ * operator's answer to an empty list is to open a NEW receipt, which is the
+ * wrong move when the truth was only that the read did not land.
  */
 export function useInboundShipments(
   status: ShipmentStatusFilter = "ALL",
