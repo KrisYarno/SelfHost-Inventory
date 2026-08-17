@@ -6,7 +6,7 @@
 set -euo pipefail
 NAME=lane5-fresh-bootstrap-$$
 docker run -d --name "$NAME" -e MYSQL_ROOT_PASSWORD=proof -e MYSQL_DATABASE=fresh mysql:8.4 >/dev/null
-trap 'docker rm -f "$NAME" >/dev/null' EXIT
+trap 'docker rm -f -v "$NAME" >/dev/null 2>&1 || true' EXIT   # -v: drop the anonymous data volume too (P1 QA-1)
 until docker exec "$NAME" mysqladmin ping -uroot -pproof --silent 2>/dev/null; do sleep 2; done
 IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NAME")
 # MySQL's docker entrypoint answers `mysqladmin ping` over its unix socket during the

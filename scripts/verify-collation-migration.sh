@@ -8,13 +8,15 @@ set -euo pipefail
 NAME=p1-collation-fixture-$$
 TMPD=$(mktemp -d)
 # cleanup tolerates a container that never started (docker run failed) so the temp dir is still removed
-trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$TMPD"' EXIT
-NEWDIR=$(ls -d prisma/migrations/*_storage_hygiene_collation_indexes)
-[ "$(echo "$NEWDIR" | wc -l)" = 1 ] || { echo "COLLATION FIXTURE: FAIL exactly one *_storage_hygiene_collation_indexes dir expected" >&2; exit 1; }
+trap 'docker rm -f -v "$NAME" >/dev/null 2>&1 || true; rm -rf "$TMPD"' EXIT   # -v: drop the anonymous data volume too
+NEWDIR=$(ls -d prisma/migrations/*_storage_hygiene_collation_indexes 2>/dev/null || true)
+[ -n "$NEWDIR" ] && [ "$(echo "$NEWDIR" | wc -l)" = 1 ] || { echo "COLLATION FIXTURE: FAIL exactly one *_storage_hygiene_collation_indexes dir expected" >&2; exit 1; }
+# chain lengths are DERIVED (the next migration must not turn this fixture red)
+CHAIN_TOTAL=$(ls -d prisma/migrations/*/ | wc -l); CHAIN_MINUS_ONE=$((CHAIN_TOTAL-1))
 docker run -d --name "$NAME" -e MYSQL_ROOT_PASSWORD=proof -e MYSQL_DATABASE=fresh mysql:8.4 >/dev/null
-until docker exec "$NAME" mysqladmin ping -uroot -pproof --silent 2>/dev/null; do sleep 2; done
+n=0; until docker exec "$NAME" mysqladmin ping -uroot -pproof --silent 2>/dev/null; do sleep 2; n=$((n+1)); [ $n -lt 60 ] || { echo "COLLATION FIXTURE: FAIL mysql never answered ping" >&2; exit 1; }; done
 IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NAME")
-until bash -c "exec 3<>/dev/tcp/${IP}/3306" 2>/dev/null; do sleep 1; done
+n=0; until [ -n "$IP" ] && bash -c "exec 3<>/dev/tcp/${IP}/3306" 2>/dev/null; do sleep 1; n=$((n+1)); [ $n -lt 120 ] || { echo "COLLATION FIXTURE: FAIL mysql TCP never came up" >&2; exit 1; }; done
 URL="mysql://root:proof@${IP}:3306/fresh"
 q() { docker exec "$NAME" mysql -uroot -pproof fresh -N -e "$1"; }
 assert_eq() { local label="$1" sql="$2" want="$3" got; got=$(q "$sql" 2>&1 | tail -1 || true); [ "$got" = "$want" ] || { echo "COLLATION FIXTURE: FAIL [$label] want=$want got=$got" >&2; exit 1; }; }
@@ -24,7 +26,7 @@ SIG="CONCAT(COUNT(*),'|',COALESCE(MIN(NON_UNIQUE),-1),'|',COALESCE(MIN(INDEX_TYP
 # 1) chain MINUS the new migration, from a temp copy (never touch prisma/ in place)
 cp -r prisma "$TMPD"/ && rm -rf "$TMPD"/prisma/migrations/*_storage_hygiene_collation_indexes
 DATABASE_URL="$URL" ./node_modules/.bin/prisma migrate deploy --schema "$TMPD/prisma/schema.prisma"
-assert_eq "chain-minus-one applied" "SELECT COUNT(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL;" "51"
+assert_eq "chain-minus-one applied (derived from prisma/migrations)" "SELECT COUNT(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL;" "$CHAIN_MINUS_ONE"
 
 # 2) manufacture prod's collation/FK shape — ONE session (foreign_key_checks is session-scoped)
 q "SET foreign_key_checks=0; ALTER TABLE users CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci; ALTER TABLE products CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci; ALTER TABLE products MODIFY priceSourceLinkId VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL; ALTER TABLE locations CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci; ALTER TABLE notification_history CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci; ALTER TABLE product_locations CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci; ALTER TABLE inventory_logs CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci; SET foreign_key_checks=1;"
@@ -36,7 +38,7 @@ assert_err "join batchId 1267" "SELECT COUNT(*) FROM inventory_logs il JOIN audi
 
 # 4) the new migration through Prisma's executor
 DATABASE_URL="$URL" ./node_modules/.bin/prisma migrate deploy
-assert_eq "chain complete" "SELECT COUNT(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL;" "52"
+assert_eq "chain complete (derived)" "SELECT COUNT(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL;" "$CHAIN_TOTAL"
 green() {
   assert_eq "$1 non-unicode tables" "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='fresh' AND TABLE_TYPE='BASE TABLE' AND TABLE_COLLATION<>'utf8mb4_unicode_ci';" "0"
   assert_eq "$1 non-unicode columns" "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND COLLATION_NAME IS NOT NULL AND COLLATION_NAME<>'utf8mb4_unicode_ci';" "0"
