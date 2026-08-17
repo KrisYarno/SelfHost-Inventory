@@ -7,7 +7,8 @@
 set -euo pipefail
 NAME=p1-collation-fixture-$$
 TMPD=$(mktemp -d)
-trap 'docker rm -f "$NAME" >/dev/null 2>&1; rm -rf "$TMPD"' EXIT
+# cleanup tolerates a container that never started (docker run failed) so the temp dir is still removed
+trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$TMPD"' EXIT
 NEWDIR=$(ls -d prisma/migrations/*_storage_hygiene_collation_indexes)
 [ "$(echo "$NEWDIR" | wc -l)" = 1 ] || { echo "COLLATION FIXTURE: FAIL exactly one *_storage_hygiene_collation_indexes dir expected" >&2; exit 1; }
 docker run -d --name "$NAME" -e MYSQL_ROOT_PASSWORD=proof -e MYSQL_DATABASE=fresh mysql:8.4 >/dev/null
@@ -62,6 +63,9 @@ MIG=$(basename "$NEWDIR")
 q "DELETE FROM _prisma_migrations WHERE migration_name='$MIG';"
 if DATABASE_URL="$URL" ./node_modules/.bin/prisma migrate deploy; then echo "COLLATION FIXTURE: FAIL [1062 probe] deploy unexpectedly succeeded" >&2; exit 1; fi
 assert_eq "probe: migration recorded FAILED" "SELECT COUNT(*) FROM _prisma_migrations WHERE migration_name='$MIG' AND finished_at IS NULL AND rolled_back_at IS NULL;" "1"
+# the failure must be THE 1062 collision on the probe key (Prisma stores the engine error in `logs`),
+# not any failure: a 1205 / transient error resolved-and-retried would otherwise pass this phase
+assert_eq "probe: failure is 1062 on p1_probe_name" "SELECT COUNT(*) FROM _prisma_migrations WHERE migration_name='$MIG' AND finished_at IS NULL AND rolled_back_at IS NULL AND logs LIKE '%1062%' AND logs LIKE '%p1_probe_name%';" "1"
 q "DELETE FROM locations WHERE id=990002;"
 DATABASE_URL="$URL" ./node_modules/.bin/prisma migrate resolve --rolled-back "$MIG"
 DATABASE_URL="$URL" ./node_modules/.bin/prisma migrate deploy
