@@ -318,6 +318,8 @@ model AuditLog {
   @@index([batchId], map: "idx_audit_batch")
   @@index([createdAt], map: "idx_audit_created")
   @@index([companyId, createdAt], map: "idx_audit_company_time")
+  // P1 storage hygiene: scalar actionType + createdAt window/sort (lib/change-tracking.ts, admin audit-logs)
+  @@index([actionType, createdAt])
   @@map("audit_logs")
 }
 
@@ -615,6 +617,12 @@ model ExternalOrder {
   @@index([integrationId, externalUpdatedAt])
   @@index([stockedOut], map: "idx_stocked_out")
   @@index([updatedAt], map: "external_orders_updatedAt_idx")
+  // P1 storage hygiene: typed-reference lookup (lib/orders/resolve-order-reference.ts) + the backfill IN-list
+  @@index([orderNumber])
+  // P1 storage hygiene: the orders list page (app/api/orders/external/route.ts), sorted by externalCreatedAt
+  @@index([companyId, externalCreatedAt])
+  // P1 storage hygiene: company-agnostic externalCreatedAt windows (lib/analytics/rebuild-sales.ts)
+  @@index([externalCreatedAt])
   @@map("external_orders")
 }
 

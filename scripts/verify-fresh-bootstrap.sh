@@ -50,4 +50,28 @@ q "SELECT COUNT(DISTINCT INDEX_NAME) FROM information_schema.STATISTICS WHERE TA
 # W1-1: the exception key must be UNIQUE — the whole upsert-on-key lifecycle rests on it.
 q "SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inventory_exceptions' AND CONSTRAINT_NAME='inventory_exceptions_key_key' AND CONSTRAINT_TYPE='UNIQUE';" | tail -1 | grep -q '^1$'
 
+# P1: labelled assertion — under `set -e` a bare failing grep says nothing about WHICH line died.
+assert_eq() { local label="$1" sql="$2" want="$3" got; got=$(q "$sql" 2>&1 | tail -1 || true); [ "$got" = "$want" ] || { echo "FRESH BOOTSTRAP: FAIL [$label] want=$want got=$got" >&2; exit 1; }; }
+
+# P1 storage hygiene: after the chain, EVERY table (37 models + _prisma_migrations, which Prisma
+# creates as unicode_ci) is utf8mb4_unicode_ci and no column carries another collation. On a
+# fresh chain the CONVERT statements are no-ops (the baseline already emits unicode_ci) — this
+# asserts the END STATE the migration guarantees on prod, where the six Railway-era tables start
+# at 0900_ai_ci. NOTHING here exercises a CONVERT: that proof is scripts/verify-collation-migration.sh.
+assert_eq "P1 table-count tripwire (UPDATE when a migration adds a table)" "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='fresh' AND TABLE_TYPE='BASE TABLE';" "38"
+assert_eq "P1 non-unicode tables" "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='fresh' AND TABLE_TYPE='BASE TABLE' AND TABLE_COLLATION<>'utf8mb4_unicode_ci';" "0"
+assert_eq "P1 non-unicode columns" "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND COLLATION_NAME IS NOT NULL AND COLLATION_NAME<>'utf8mb4_unicode_ci';" "0"
+assert_eq "P1 six legacy tables unicode" "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME IN ('inventory_logs','products','users','locations','product_locations','notification_history') AND TABLE_COLLATION='utf8mb4_unicode_ci';" "6"
+
+# P1: the four evidenced indexes by EXACT signature (count|non_unique|type|visible|prefixed|ordered cols).
+SIG="CONCAT(COUNT(*),'|',COALESCE(MIN(NON_UNIQUE),-1),'|',COALESCE(MIN(INDEX_TYPE),''),'|',COALESCE(MIN(IS_VISIBLE),''),'|',COALESCE(SUM(SUB_PART IS NOT NULL),0),'|',COALESCE(GROUP_CONCAT(CONCAT(COLUMN_NAME,':',COLLATION) ORDER BY SEQ_IN_INDEX SEPARATOR ','),''))"
+assert_eq "P1 idx orderNumber" "SELECT $SIG FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='external_orders' AND INDEX_NAME='external_orders_orderNumber_idx';" "1|1|BTREE|YES|0|orderNumber:A"
+assert_eq "P1 idx companyId,externalCreatedAt" "SELECT $SIG FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='external_orders' AND INDEX_NAME='external_orders_companyId_externalCreatedAt_idx';" "2|1|BTREE|YES|0|companyId:A,externalCreatedAt:A"
+assert_eq "P1 idx externalCreatedAt" "SELECT $SIG FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='external_orders' AND INDEX_NAME='external_orders_externalCreatedAt_idx';" "1|1|BTREE|YES|0|externalCreatedAt:A"
+assert_eq "P1 idx actionType,createdAt" "SELECT $SIG FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='audit_logs' AND INDEX_NAME='audit_logs_actionType_createdAt_idx';" "2|1|BTREE|YES|0|actionType:A,createdAt:A"
+
+# P1: the string FK on a converted table and the auth unique key survive the chain.
+assert_eq "P1 fk_price_source_link" "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='products' AND CONSTRAINT_NAME='fk_price_source_link' AND COLUMN_NAME='priceSourceLinkId' AND REFERENCED_TABLE_NAME='product_links' AND REFERENCED_COLUMN_NAME='id';" "1"
+assert_eq "P1 users.email unique" "SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='users' AND CONSTRAINT_NAME='email' AND CONSTRAINT_TYPE='UNIQUE';" "1"
+
 echo "FRESH BOOTSTRAP: PASS"
