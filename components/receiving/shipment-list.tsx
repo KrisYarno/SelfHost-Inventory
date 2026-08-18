@@ -296,6 +296,14 @@ function OrderRow({ order }: { order: SupplyOrderSummary }) {
 // The list
 // ---------------------------------------------------------------------------
 
+/** Which FAMILY's request came back FULL — one bound per request (FD2-2). */
+export interface OrdersTruncation {
+  newFlow: boolean;
+  legacy: boolean;
+}
+
+const NOTHING_TRUNCATED: OrdersTruncation = { newFlow: false, legacy: false };
+
 export interface ShipmentListProps {
   orders: SupplyOrderSummary[];
   filter: OrdersFilter;
@@ -303,8 +311,13 @@ export interface ShipmentListProps {
    * A request came back FULL, so the server cut the page (QA-3). The page owns
    * this because it owns the reads: after the client narrowing below, the number
    * of rows here says nothing about what the bound left out.
+   *
+   * PER FAMILY (FD2-2), because the two families are two requests and each is
+   * bounded on its own. Collapsed into one boolean, a full page of supply orders
+   * plus a single legacy receipt rendered 101 rows under a claim that the
+   * newest 100 were being shown — and said nothing about WHICH list to refine.
    */
-  truncated?: boolean;
+  truncated?: OrdersTruncation;
   onFilterChange: (filter: OrdersFilter) => void;
   onNew: () => void;
 }
@@ -312,7 +325,7 @@ export interface ShipmentListProps {
 export function ShipmentList({
   orders,
   filter,
-  truncated = false,
+  truncated = NOTHING_TRUNCATED,
   onFilterChange,
   onNew,
 }: ShipmentListProps) {
@@ -360,9 +373,18 @@ export function ShipmentList({
         </div>
       )}
 
-      {truncated && (
-        <p data-testid="shipment-list-truncated" className="text-xs text-muted-foreground">
-          {`Showing the newest ${SUPPLY_ORDER_LIST_LIMIT} — refine the chips.`}
+      {truncated.newFlow && (
+        <p
+          data-testid="shipment-list-truncated-new-flow"
+          className="text-xs text-muted-foreground"
+        >
+          {`Showing the newest ${SUPPLY_ORDER_LIST_LIMIT} supply orders — refine the chips.`}
+        </p>
+      )}
+
+      {truncated.legacy && (
+        <p data-testid="shipment-list-truncated-legacy" className="text-xs text-muted-foreground">
+          {`Showing the newest ${SUPPLY_ORDER_LIST_LIMIT} legacy receipts — refine the chips.`}
         </p>
       )}
 

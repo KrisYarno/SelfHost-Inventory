@@ -175,21 +175,87 @@ it("QA-3: issues NO request at all when no chip is selected", async () => {
   expect(mockFetch.mock.calls.length).toBe(2);
 });
 
-it("QA-3: says the list is BOUNDED when a full page comes back", async () => {
-  const page = Array.from({ length: 100 }, (_, index) =>
+/** A full page of new-flow orders, each with its own id. */
+function fullSupplyOrderPage() {
+  return Array.from({ length: 100 }, (_, index) =>
     supplyOrder({ id: `cksupply00000000000000${String(index).padStart(4, "0")}` }),
   );
+}
+
+/** A full page of legacy receipts, each with its own id. */
+function fullLegacyPage() {
+  return Array.from({ length: 100 }, (_, index) => {
+    const receipt = legacyReceipt();
+    return {
+      ...receipt,
+      legacy: {
+        ...receipt.legacy,
+        id: `cklegacy00000000000000${String(index).padStart(4, "0")}`,
+        supplierRef: `LEG-${index}`,
+      },
+    };
+  });
+}
+
+it("QA-3: says the list is BOUNDED when a full page comes back", async () => {
   mockFetch.mockResolvedValue({
     ok: true,
     status: 200,
-    json: async () => ({ shipments: page }),
+    json: async () => ({ shipments: fullSupplyOrderPage() }),
   } as unknown as Response);
 
   renderPage();
 
-  expect(await screen.findByTestId("shipment-list-truncated")).toHaveTextContent(
-    "Showing the newest 100 — refine the chips.",
+  expect(await screen.findByTestId("shipment-list-truncated-new-flow")).toHaveTextContent(
+    "Showing the newest 100 supply orders — refine the chips.",
   );
+});
+
+it("FD2-2: 100 orders + 1 legacy receipt bounds ONLY the family that hit the bound", async () => {
+  const user = userEvent.setup();
+  mockFetch.mockImplementation(async (input: RequestInfo) => {
+    const legacyAsked = String(input).includes("model=legacy");
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ shipments: legacyAsked ? [legacyReceipt()] : fullSupplyOrderPage() }),
+    } as unknown as Response;
+  });
+
+  renderPage();
+  await screen.findByTestId("shipment-list-truncated-new-flow");
+
+  await user.click(screen.getByRole("button", { name: "Legacy receipts" }));
+  expect(await screen.findByText("LEG-77")).toBeInTheDocument();
+
+  // 101 rows are on screen. One boolean over both families said "showing the
+  // newest 100" about all of them — a bound the legacy half never reached.
+  expect(screen.getByTestId("shipment-list-truncated-new-flow")).toHaveTextContent(
+    "Showing the newest 100 supply orders — refine the chips.",
+  );
+  expect(screen.queryByTestId("shipment-list-truncated-legacy")).not.toBeInTheDocument();
+});
+
+it("FD2-2: 100 + 100 states BOTH bounds, one per family", async () => {
+  const user = userEvent.setup();
+  mockFetch.mockImplementation(async (input: RequestInfo) => {
+    const legacyAsked = String(input).includes("model=legacy");
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ shipments: legacyAsked ? fullLegacyPage() : fullSupplyOrderPage() }),
+    } as unknown as Response;
+  });
+
+  renderPage();
+  await screen.findByTestId("shipment-list-truncated-new-flow");
+
+  await user.click(screen.getByRole("button", { name: "Legacy receipts" }));
+
+  expect(await screen.findByTestId("shipment-list-truncated-legacy")).toHaveTextContent(
+    "Showing the newest 100 legacy receipts — refine the chips.",
+  );
+  expect(screen.getByTestId("shipment-list-truncated-new-flow")).toBeInTheDocument();
 });
 
 it("renders the ERROR BANNER INSTEAD OF the list when the read fails", async () => {

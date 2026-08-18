@@ -152,8 +152,9 @@ const ALLOWED_WRITER_CALLERS: WriterCaller[] = [
     reason:
       'REV-10 clause 3 (challenger CH-3): an UNORDERED ARRIVAL is born VERIFIED and raises its ' +
       'recv-discrepancy row at create time, so removing a duplicate arrival has to settle that ' +
-      "row — `recount-corrected`, note 'line removed' — inside the discard's own transaction. A " +
-      'no-op for an ORDERED line, which never had a row',
+      "row — `recount-corrected`, note 'line removed' — inside the discard's own transaction, " +
+      'and ZERO its money with it (FD2-1), because a line that left the order has neither a ' +
+      'shortage nor a surplus. A no-op for an ORDERED line, which never had a row',
   },
   {
     path: 'app/api/inbound-shipments/[id]/lines/[lineId]/resolve/route.ts',

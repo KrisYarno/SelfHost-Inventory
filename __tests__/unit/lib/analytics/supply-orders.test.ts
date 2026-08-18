@@ -23,6 +23,7 @@ jest.mock('@/lib/prisma', () => ({
   default: {
     inboundShipment: { findMany: jest.fn(), count: jest.fn() },
     inventoryException: { findMany: jest.fn() },
+    stagingItem: { findMany: jest.fn() },
   },
 }));
 
@@ -32,6 +33,7 @@ import { getSupplyOrdersAnalytics } from '@/lib/analytics/supply-orders';
 const m = prisma as unknown as {
   inboundShipment: { findMany: jest.Mock; count: jest.Mock };
   inventoryException: { findMany: jest.Mock };
+  stagingItem: { findMany: jest.Mock };
 };
 
 const WINDOW = { from: '2026-08-01', to: '2026-08-31' };
@@ -40,10 +42,12 @@ function setup(fixture: {
   headers?: Array<{ status: string; feesCents: number | null }>;
   legacyCount?: number;
   exceptions?: Array<{ kind: string; subject: unknown }>;
+  lines?: Array<{ id: number; status: string }>;
 }) {
   m.inboundShipment.findMany.mockResolvedValue(fixture.headers ?? []);
   m.inboundShipment.count.mockResolvedValue(fixture.legacyCount ?? 0);
   m.inventoryException.findMany.mockResolvedValue(fixture.exceptions ?? []);
+  m.stagingItem.findMany.mockResolvedValue(fixture.lines ?? []);
 }
 
 const recv = (subject: Record<string, unknown>) => ({ kind: 'recv-discrepancy', subject });
@@ -408,5 +412,161 @@ describe('nullable labeling-loss money (CR-5/CR-6)', () => {
     expect(result.metrics.fees.reason).toBe(
       '1 non-cancelled supply orders were ordered in this window; none records a fee amount',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD2-1 — a row whose LINE was REMOVED from the order
+// ---------------------------------------------------------------------------
+
+describe('rows naming a line that left the order (FD2-1)', () => {
+  it('resolves every row against its line in ONE read, by id', async () => {
+    setup({
+      exceptions: [
+        recv({ stagingItemId: 11, lossCents: 5_000 }),
+        loss({ stagingItemId: 12, lossCents: 1_000 }),
+        // The same line twice — one query, one id.
+        recv({ stagingItemId: 11, surplusValueCents: 100 }),
+      ],
+      lines: [
+        { id: 11, status: 'VERIFIED' },
+        { id: 12, status: 'LABELING' },
+      ],
+    });
+
+    await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(m.stagingItem.findMany).toHaveBeenCalledTimes(1);
+    expect(m.stagingItem.findMany).toHaveBeenCalledWith({
+      where: { id: { in: [11, 12] } },
+      select: { id: true, status: true },
+    });
+  });
+
+  it('asks for NO lines when no subject names one', async () => {
+    setup({ exceptions: [recv({ lossCents: 5_000 })] });
+
+    await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(m.stagingItem.findMany).not.toHaveBeenCalled();
+  });
+
+  it('a DISCARDED line contributes NOTHING to shortage or surplus', async () => {
+    setup({
+      exceptions: [
+        recv({ stagingItemId: 11, lossCents: 5_000, surplusValueCents: 500 }),
+        recv({ stagingItemId: 12, lossCents: 2_000, surplusValueCents: 300 }),
+      ],
+      lines: [
+        // Removed from the order: it was never delivered short, because it was
+        // never on the order at all once it went.
+        { id: 11, status: 'DISCARDED' },
+        { id: 12, status: 'VERIFIED' },
+      ],
+    });
+
+    const result = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(result.metrics.supplierShortageCost.valueCents).toBe(2_000);
+    expect(result.metrics.supplierShortageCost.contributingRows).toBe(1);
+    expect(result.metrics.surplusValue.valueCents).toBe(300);
+    expect(result.metrics.surplusValue.contributingRows).toBe(1);
+  });
+
+  it('names the excluded rows in the coverage of every exception metric', async () => {
+    setup({
+      exceptions: [
+        recv({ stagingItemId: 11, lossCents: 5_000, surplusValueCents: 500 }),
+        recv({ stagingItemId: 12, lossCents: 2_000, surplusValueCents: 300 }),
+        loss({ stagingItemId: 11, lossCents: 900 }),
+      ],
+      lines: [
+        { id: 11, status: 'DISCARDED' },
+        { id: 12, status: 'VERIFIED' },
+      ],
+    });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    // The denominator is the population the number SPEAKS about, and the
+    // excluded rows are counted beside it rather than folded into it.
+    expect(metrics.supplierShortageCost.coverage).toContain('1 of 1 recv-discrepancy rows');
+    expect(metrics.supplierShortageCost.coverage).toContain(
+      '1 further recv-discrepancy row(s) belong to removed lines and are excluded.',
+    );
+    expect(metrics.surplusValue.coverage).toContain(
+      '1 further recv-discrepancy row(s) belong to removed lines and are excluded.',
+    );
+    expect(metrics.labelingLossCost.coverage).toContain(
+      '1 further labeling-loss row(s) belong to removed lines and are excluded.',
+    );
+  });
+
+  it('says ZERO excluded when every line is still on its order', async () => {
+    setup({
+      exceptions: [recv({ stagingItemId: 12, lossCents: 2_000 })],
+      lines: [{ id: 12, status: 'COMPLETE' }],
+    });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(metrics.supplierShortageCost.valueCents).toBe(2_000);
+    expect(metrics.supplierShortageCost.coverage).toContain(
+      '0 further recv-discrepancy row(s) belong to removed lines and are excluded.',
+    );
+  });
+
+  it('a labeling-loss row on a removed line is excluded too', async () => {
+    setup({
+      exceptions: [
+        loss({ stagingItemId: 11, lossCents: 900 }),
+        loss({ stagingItemId: 12, lossCents: 100 }),
+      ],
+      lines: [
+        { id: 11, status: 'DISCARDED' },
+        { id: 12, status: 'LABELING' },
+      ],
+    });
+
+    const result = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(result.metrics.labelingLossCost.valueCents).toBe(100);
+    expect(result.metrics.labelingLossCost.contributingRows).toBe(1);
+    expect(result.metrics.labelingLossCost.coverage).toContain('1 of 1 labeling-loss rows');
+  });
+
+  it('the reason SAYS the rows were seen and excluded, never "no row was seen"', async () => {
+    setup({
+      exceptions: [
+        recv({ stagingItemId: 11, lossCents: 0, surplusValueCents: 0 }),
+        loss({ stagingItemId: 11, lossCents: 900 }),
+      ],
+      lines: [{ id: 11, status: 'DISCARDED' }],
+    });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(metrics.supplierShortageCost.valueCents).toBeNull();
+    expect(metrics.supplierShortageCost.reason).toBe(
+      '1 recv-discrepancy row(s) were seen in this window; every one belongs to a line removed from its order',
+    );
+    expect(metrics.surplusValue.reason).toBe(
+      '1 recv-discrepancy row(s) were seen in this window; every one belongs to a line removed from its order',
+    );
+    expect(metrics.labelingLossCost.reason).toBe(
+      '1 labeling-loss row(s) were seen in this window; every one belongs to a line removed from its order',
+    );
+  });
+
+  it('a subject naming NO line is never excluded — an unknown line is not a removed one', async () => {
+    setup({
+      exceptions: [recv({ lossCents: 4_000 }), recv({ stagingItemId: 11, lossCents: 5_000 })],
+      lines: [{ id: 11, status: 'DISCARDED' }],
+    });
+
+    const result = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(result.metrics.supplierShortageCost.valueCents).toBe(4_000);
+    expect(result.metrics.supplierShortageCost.contributingRows).toBe(1);
   });
 });

@@ -1,5 +1,5 @@
 import prisma from '@/lib/prisma';
-import { InboundShipmentStatus } from '@prisma/client';
+import { InboundShipmentStatus, StagingItemStatus } from '@prisma/client';
 
 /**
  * SUPPLY-ORDER ANALYTICS (spec §8, contract pack C3b/PK2-13, seam S18).
@@ -28,6 +28,15 @@ import { InboundShipmentStatus } from '@prisma/client';
  *   this lane — the subject's cumulative money IS the current truth — so
  *   `lastSeenAt` is the only honest window basis, and a settled shortage still
  *   cost what it cost, which is why resolution is not a filter.
+ *
+ * ROWS WHOSE LINE LEFT THE ORDER ARE NOT MONEY (FD2-1). Resolution is not a
+ * filter, but REMOVAL is: a line the operator took off the order (`DISCARDED`)
+ * never had a shortage or a surplus, and its settled row survives only as the
+ * history of something that is no longer there. The removal zeroes the row's
+ * money at the source; this read is the second half of the same fact, so a row
+ * written before that fix — or by any other path — cannot report a supplier
+ * loss for a line nobody ordered. The excluded rows are COUNTED and named in
+ * the coverage rather than quietly dropped.
  */
 
 export type SupplyOrderAnalyticsMetric = {
@@ -99,6 +108,18 @@ function centsOf(subject: Record<string, unknown>, field: string): number | null
 }
 
 /**
+ * The staging line a subject names, when it names one at all.
+ *
+ * A row whose subject carries no usable id CANNOT be judged against a line, and
+ * an unknown line is not a removed one: it stays in the fold. Dropping it would
+ * silently delete real money on the strength of a missing field.
+ */
+function stagingItemIdOf(subject: Record<string, unknown>): number | null {
+  const value = subject.stagingItemId;
+  return typeof value === 'number' && Number.isInteger(value) ? value : null;
+}
+
+/**
  * Assemble one metric from a fold, applying the null-only-when-empty rule.
  *
  * The `reason` is DENOMINATOR-AWARE (spec REV-10 clause 8 / codex CR-6): "no row
@@ -138,6 +159,30 @@ function legacyNote(legacyHeaders: number): string {
     `Legacy pre-staging receipts are excluded: ${legacyHeaders} were created in this window ` +
     'and none carries an order date or the money fields this lane added.'
   );
+}
+
+/**
+ * The rows this window saw whose LINE has since left the order (FD2-1).
+ *
+ * Stated ALWAYS, zero included, for the same reason `legacyNote` is: a reader
+ * who cannot see that the exclusion exists cannot tell a window with nothing
+ * removed from a window whose removals were never accounted for.
+ */
+function removedNote(kind: string, removed: number): string {
+  return `${removed} further ${kind} row(s) belong to removed lines and are excluded.`;
+}
+
+/**
+ * The EMPTY reason for an exception metric, aware of the exclusion above.
+ *
+ * "No row was seen in this window" is false about a window whose only rows name
+ * lines that have since been removed — they were seen, and then deliberately
+ * left out, which is a different fact and a different thing to go looking for.
+ */
+function emptyExceptionReason(noun: string, kind: string, removed: number): string {
+  return removed > 0
+    ? `${removed} ${kind} row(s) were seen in this window; every one belongs to a line removed from its order`
+    : `no ${noun} row was seen in this window`;
 }
 
 /**
@@ -183,6 +228,28 @@ export async function getSupplyOrdersAnalytics(opts: {
     }
   }
 
+  // --- the lines those rows name (FD2-1) ----------------------------------
+  //
+  // ONE read, after the subjects are parsed once, so every row in this answer is
+  // judged against the SAME line state — two reads could put the same line on
+  // both sides of the exclusion within one card.
+
+  const rows = exceptions.map((row) => ({ kind: row.kind, subject: subjectObject(row.subject) }));
+  const stagingItemIds = Array.from(
+    new Set(
+      rows.map((row) => stagingItemIdOf(row.subject)).filter((id): id is number => id !== null),
+    ),
+  );
+  const lines = stagingItemIds.length
+    ? await prisma.stagingItem.findMany({
+        where: { id: { in: stagingItemIds } },
+        select: { id: true, status: true },
+      })
+    : [];
+  const removedLines = new Set(
+    lines.filter((line) => line.status === StagingItemStatus.DISCARDED).map((line) => line.id),
+  );
+
   // --- the register metrics ----------------------------------------------
 
   let shortageCents = 0;
@@ -193,10 +260,18 @@ export async function getSupplyOrdersAnalytics(opts: {
   let surplusRows = 0;
   let discrepancyRows = 0;
   let labelingRows = 0;
+  let removedDiscrepancyRows = 0;
+  let removedLabelingRows = 0;
 
-  for (const row of exceptions) {
-    const subject = subjectObject(row.subject);
+  for (const row of rows) {
+    const subject = row.subject;
+    const stagingItemId = stagingItemIdOf(subject);
+    const removed = stagingItemId !== null && removedLines.has(stagingItemId);
     if (row.kind === 'recv-discrepancy') {
+      if (removed) {
+        removedDiscrepancyRows += 1;
+        continue;
+      }
       discrepancyRows += 1;
       const short = centsOf(subject, 'lossCents');
       if (short !== null) {
@@ -209,6 +284,10 @@ export async function getSupplyOrdersAnalytics(opts: {
         surplusRows += 1;
       }
     } else {
+      if (removed) {
+        removedLabelingRows += 1;
+        continue;
+      }
       labelingRows += 1;
       const lost = centsOf(subject, 'lossCents');
       if (lost !== null) {
@@ -219,6 +298,8 @@ export async function getSupplyOrdersAnalytics(opts: {
   }
 
   const legacy = legacyNote(legacyHeaders);
+  const removedDiscrepancy = removedNote('recv-discrepancy', removedDiscrepancyRows);
+  const removedLabeling = removedNote('labeling-loss', removedLabelingRows);
 
   return {
     window: { from: opts.from, to: opts.to },
@@ -249,9 +330,13 @@ export async function getSupplyOrdersAnalytics(opts: {
         coverage:
           `${shortageRows} of ${discrepancyRows} recv-discrepancy rows whose lastSeenAt falls ` +
           'in this window carry a loss figure (open and resolved rows both count; rows raised ' +
-          `before this lane carry no money fields). ${legacy}`,
+          `before this lane carry no money fields). ${removedDiscrepancy} ${legacy}`,
         kindRows: discrepancyRows,
-        emptyReason: 'no receiving-discrepancy row was seen in this window',
+        emptyReason: emptyExceptionReason(
+          'receiving-discrepancy',
+          'recv-discrepancy',
+          removedDiscrepancyRows,
+        ),
         unpricedReason: (rows) =>
           `${rows} recv-discrepancy rows were seen in this window; none carries a loss figure`,
       }),
@@ -265,9 +350,9 @@ export async function getSupplyOrdersAnalytics(opts: {
         coverage:
           `${lossRows} of ${labelingRows} labeling-loss rows whose lastSeenAt falls in this ` +
           'window carry a loss figure (each row is cumulative for its line; open and resolved ' +
-          `rows both count). ${legacy}`,
+          `rows both count). ${removedLabeling} ${legacy}`,
         kindRows: labelingRows,
-        emptyReason: 'no labeling-loss row was seen in this window',
+        emptyReason: emptyExceptionReason('labeling-loss', 'labeling-loss', removedLabelingRows),
         unpricedReason: (rows) =>
           `${rows} labeling-loss rows were seen in this window; none carries a loss figure`,
       }),
@@ -281,9 +366,13 @@ export async function getSupplyOrdersAnalytics(opts: {
         coverage:
           `${surplusRows} of ${discrepancyRows} recv-discrepancy rows whose lastSeenAt falls ` +
           'in this window carry a surplus figure (open and resolved rows both count; rows ' +
-          `raised before this lane carry no money fields). ${legacy}`,
+          `raised before this lane carry no money fields). ${removedDiscrepancy} ${legacy}`,
         kindRows: discrepancyRows,
-        emptyReason: 'no receiving-discrepancy row was seen in this window',
+        emptyReason: emptyExceptionReason(
+          'receiving-discrepancy',
+          'recv-discrepancy',
+          removedDiscrepancyRows,
+        ),
         unpricedReason: (rows) =>
           `${rows} recv-discrepancy rows were seen in this window; none carries a surplus figure`,
       }),

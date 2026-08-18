@@ -684,6 +684,28 @@ describe('POST /api/inbound-shipments/[id]/lines/[lineId]/discard', () => {
     });
   });
 
+  it('FD2-1: the settlement ZEROES the removed line money on the subject', async () => {
+    headerStatus = 'RECEIVING';
+    lockedLineRow = lineRow({ status: 'VERIFIED', verifiedQuantity: 0 });
+
+    await discardPOST(mkReq(`/lines/${LINE_ID}/discard`, {}), lineParams);
+
+    // The row survives as settled history, and the analytics fold RESOLVED rows
+    // too — so a stored shortage/surplus left on it keeps reporting a supplier
+    // loss for a line that is no longer on the order. A removed line has no
+    // shortage and no surplus, and the register has to say so itself.
+    const [, args] = mockResolveExc.mock.calls[0];
+    expect(args.subjectPatch).toEqual({
+      shortUnits: 0,
+      overUnits: 0,
+      lossCents: 0,
+      surplusValueCents: 0,
+    });
+    // The classification and the note are untouched by the money patch.
+    expect(args.resolution).toBe('recount-corrected');
+    expect(args.note).toBe('line removed');
+  });
+
   it('409s a VERIFIED line that already has booked units, writing nothing', async () => {
     headerStatus = 'RECEIVING';
     lockedLineRow = lineRow({ status: 'VERIFIED', verifiedQuantity: 90, stockedQuantity: 10 });

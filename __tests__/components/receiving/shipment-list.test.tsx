@@ -96,7 +96,11 @@ function legacy(over: Record<string, unknown> = {}): SupplyOrderSummary {
 function renderList(
   orders: SupplyOrderSummary[],
   filter: OrdersFilter = DEFAULT_ORDERS_FILTER,
-  handlers: { onFilterChange?: jest.Mock; onNew?: jest.Mock; truncated?: boolean } = {},
+  handlers: {
+    onFilterChange?: jest.Mock;
+    onNew?: jest.Mock;
+    truncated?: { newFlow: boolean; legacy: boolean };
+  } = {},
 ) {
   const onFilterChange = handlers.onFilterChange ?? jest.fn();
   const onNew = handlers.onNew ?? jest.fn();
@@ -104,7 +108,7 @@ function renderList(
     <ShipmentList
       orders={orders}
       filter={filter}
-      truncated={handlers.truncated ?? false}
+      truncated={handlers.truncated ?? { newFlow: false, legacy: false }}
       onFilterChange={onFilterChange}
       onNew={onNew}
     />,
@@ -307,16 +311,40 @@ describe("status chips", () => {
     expect(supplyOrdersRequests({ chips: [] })).toEqual({ newFlow: null, legacy: null });
   });
 
-  it("QA-3: says the page is BOUNDED rather than implying it is the whole list", () => {
-    renderList([supplyOrder()], DEFAULT_ORDERS_FILTER, { truncated: true });
-    expect(screen.getByTestId("shipment-list-truncated")).toHaveTextContent(
-      "Showing the newest 100 — refine the chips.",
+  it("QA-3/FD2-2: says which FAMILY was bounded — the supply orders", () => {
+    renderList([supplyOrder()], DEFAULT_ORDERS_FILTER, {
+      truncated: { newFlow: true, legacy: false },
+    });
+    expect(screen.getByTestId("shipment-list-truncated-new-flow")).toHaveTextContent(
+      "Showing the newest 100 supply orders — refine the chips.",
     );
+    // The legacy half never hit its own bound, and saying so about it would be
+    // a claim about rows nobody cut.
+    expect(screen.queryByTestId("shipment-list-truncated-legacy")).not.toBeInTheDocument();
   });
 
-  it("says nothing about the bound when the page did not reach it", () => {
+  it("FD2-2: says which FAMILY was bounded — the legacy receipts", () => {
+    renderList([supplyOrder()], { chips: ["RECEIVING", "LEGACY"] }, {
+      truncated: { newFlow: false, legacy: true },
+    });
+    expect(screen.getByTestId("shipment-list-truncated-legacy")).toHaveTextContent(
+      "Showing the newest 100 legacy receipts — refine the chips.",
+    );
+    expect(screen.queryByTestId("shipment-list-truncated-new-flow")).not.toBeInTheDocument();
+  });
+
+  it("FD2-2: BOTH bounds are stated when both families were cut", () => {
+    renderList([supplyOrder()], { chips: ["RECEIVING", "LEGACY"] }, {
+      truncated: { newFlow: true, legacy: true },
+    });
+    expect(screen.getByTestId("shipment-list-truncated-new-flow")).toBeInTheDocument();
+    expect(screen.getByTestId("shipment-list-truncated-legacy")).toBeInTheDocument();
+  });
+
+  it("says nothing about the bound when neither family reached it", () => {
     renderList([supplyOrder()]);
-    expect(screen.queryByTestId("shipment-list-truncated")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("shipment-list-truncated-new-flow")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("shipment-list-truncated-legacy")).not.toBeInTheDocument();
   });
 
   it("Legacy receipts means model 'legacy', ANY status (REV-10 clause 6)", () => {

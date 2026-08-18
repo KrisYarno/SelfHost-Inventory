@@ -44,8 +44,9 @@ interface RouteParams {
  * The counters are the real line: once anything is stocked or disposed the units
  * exist in the ledger and the line is history, not a typo. A VERIFIED line also
  * carries a `recv-discrepancy` row (an unordered arrival IS a discrepancy), and
- * removing the line settles it `recount-corrected` in the SAME transaction —
- * which is why this route is on the exceptions write-boundary allow-list.
+ * removing the line settles it `recount-corrected` AND ZEROES ITS MONEY in the
+ * SAME transaction — which is why this route is on the exceptions
+ * write-boundary allow-list.
  *
  * The line is taken `FOR UPDATE` first so the audit can state the status it
  * actually removed, and the claim's WHERE still carries the whole precondition:
@@ -139,11 +140,24 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
         // The line is gone, so its discrepancy is no longer true. `recount-corrected`
         // is the honest classification: the count that raised the row was a
         // mistake. A no-op when the line never had a row (spec REV-10 clause 3).
+        //
+        // THE MONEY GOES WITH THE LINE (FD2-1). The register row SURVIVES as
+        // settled history, and `lib/analytics/supply-orders.ts` folds resolved
+        // rows too — so a stored shortage or surplus left on it keeps reporting
+        // a supplier loss for a line that is no longer on the order. A removed
+        // line has neither, and the row has to say so itself: the identity
+        // fields are the caller's business, the money is this route's.
         await resolveException(tx, {
           key: recvDiscrepancyKey(lineId),
           resolvedBy: user.id,
           resolution: 'recount-corrected',
           note: 'line removed',
+          subjectPatch: {
+            shortUnits: 0,
+            overUnits: 0,
+            lossCents: 0,
+            surplusValueCents: 0,
+          },
         });
       }
 

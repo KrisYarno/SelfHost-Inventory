@@ -66,8 +66,16 @@ export default function ReceivingPage() {
     ...(requests.legacy ? (legacyOrders.data ?? []) : []),
   ];
   // A FULL page is a CUT page: the list response carries no count, so an exactly
-  // bounded answer is the only signal that more exist.
-  const truncated = live.some((query) => (query.data?.length ?? 0) >= SUPPLY_ORDER_LIST_LIMIT);
+  // bounded answer is the only signal that more exist — and the bound is PER
+  // REQUEST (FD2-2). Collapsed into one boolean over both families, 100 supply
+  // orders merged with a single legacy receipt claimed "the newest 100" about
+  // 101 rows, and named neither list as the one that was cut.
+  const truncated = {
+    newFlow:
+      requests.newFlow !== null && (newFlowOrders.data?.length ?? 0) >= SUPPLY_ORDER_LIST_LIMIT,
+    legacy:
+      requests.legacy !== null && (legacyOrders.data?.length ?? 0) >= SUPPLY_ORDER_LIST_LIMIT,
+  };
 
   return (
     <div className="flex flex-col h-full overflow-x-hidden">
