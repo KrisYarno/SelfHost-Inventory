@@ -1164,6 +1164,13 @@ describe('discardRemaining — the same prologue, the labeling-loss half (§4.3.
     ).rejects.toMatchObject({ statusCode: 409, code: 'NOT_BOOKABLE' });
   });
 
+  it('fix-delta 6 FD6-2: a NEVER-VERIFIED line with a stated belief still answers NOT_BOOKABLE (null is not 0)', async () => {
+    const tx = mkTx({ line: lockedLine({ status: StagingItemStatus.ORDERED, verifiedQuantity: null }) });
+    await expect(
+      discardRemaining(tx, discardArgs({ expectRemaining: 3 }), { onRecord: jest.fn(), batchId: BATCH }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'NOT_BOOKABLE' });
+  });
+
   it('REV-11 clause 1: an expectRemaining that MATCHES the locked remainder proceeds', async () => {
     const tx = mkTx({
       line: lockedLine({ status: StagingItemStatus.LABELING, stockedQuantity: 4, disposedQuantity: 1 }),

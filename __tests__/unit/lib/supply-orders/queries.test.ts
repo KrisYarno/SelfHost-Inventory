@@ -349,7 +349,7 @@ describe('getSupplyOrderDetail', () => {
     const detail = await getSupplyOrderDetail('ord_1');
     if (!detail || detail.model !== 'supply-order') throw new Error('expected a supply order');
 
-    expect(detail.lines[0]).toMatchObject({ id: 11, lineRemoved: true, discrepancy: null });
+    expect(detail.lines[0]).toMatchObject({ id: 11, lineRemoved: true, discrepancy: null, remaining: 0 }); // FD6-1: nothing left to label on a removed line
     // A LIVE line is unchanged: the flag is false and the shortage still lands.
     expect(detail.lines[1]).toMatchObject({
       id: 12,

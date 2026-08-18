@@ -1054,7 +1054,9 @@ export function SupplyOrderDetail({ detail }: SupplyOrderDetailProps) {
   const [feesNote, setFeesNote] = useState(detail.feesNote ?? "");
 
   const remaining = useMemo(
-    () => detail.lines.reduce((sum, line) => sum + line.remaining, 0),
+    // The wire already answers 0 for a removed line (FD6-1); the guard here is the
+    // belt so an older payload cannot light "Label now" for a line nobody can label.
+    () => detail.lines.reduce((sum, line) => sum + (line.lineRemoved ? 0 : line.remaining), 0),
     [detail.lines],
   );
 

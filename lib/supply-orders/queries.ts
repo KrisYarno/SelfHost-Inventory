@@ -379,7 +379,12 @@ function toSupplyOrderLine(line: LineRow, exceptionKeys: string[] = []): SupplyO
     verifiedQuantity: line.verifiedQuantity,
     stockedQuantity: line.stockedQuantity,
     disposedQuantity: line.disposedQuantity,
-    remaining: (line.verifiedQuantity ?? 0) - line.stockedQuantity - line.disposedQuantity,
+    // A REMOVED line has nothing left to label (fix-delta 6 FD6-1): its counters
+    // are frozen history, and a live `remaining` here would light "Label now" for
+    // a line the queue structurally excludes. Same home as `discrepancy: null`.
+    remaining: lineRemoved
+      ? 0
+      : (line.verifiedQuantity ?? 0) - line.stockedQuantity - line.disposedQuantity,
     lineTotalCents: line.lineTotalCents,
     unitCostCents: money.unitCostCents,
     derivation: money.derivation,

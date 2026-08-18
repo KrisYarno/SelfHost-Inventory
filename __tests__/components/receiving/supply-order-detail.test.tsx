@@ -215,6 +215,17 @@ describe("the header", () => {
     );
   });
 
+  it("fix-delta 6 FD6-1: offers no Label now when the only remainder belongs to a REMOVED line", () => {
+    // An older payload could still carry the removed line's frozen counters; the
+    // detail must not light a link into a queue that structurally excludes it.
+    renderDetail(
+      detail({ status: "RECEIVING" }, [
+        line({ status: "DISCARDED", verifiedQuantity: 4, remaining: 4, stockedQuantity: 0 }),
+      ]),
+    );
+    expect(screen.queryByRole("link", { name: /label now/i })).toBeNull();
+  });
+
   it("offers no Label now when nothing is left to label", () => {
     renderDetail(
       detail({ status: "RECEIVING" }, [
@@ -333,7 +344,7 @@ describe("the controls follow the line's status", () => {
   it("FD5-1 (OCs-6): a CANCELLED order's removed lines still say what was ORDERED", () => {
     renderDetail(
       detail({ status: "CANCELLED" }, [
-        line({ status: "DISCARDED", orderedQuantity: 6, verifiedQuantity: null, remaining: 6 }),
+        line({ status: "DISCARDED", orderedQuantity: 6, verifiedQuantity: null, remaining: 0 }),
       ]),
     );
     const card = lineCard(11);
