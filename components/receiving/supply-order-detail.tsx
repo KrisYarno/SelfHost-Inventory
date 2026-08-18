@@ -492,9 +492,19 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
           "Verified 4 · Remaining 4" reads as work still waiting at the bench for
           a line nobody is going to label. The removal itself is the fact. */}
       {line.lineRemoved ? (
-        <p data-testid={`line-facts-${line.id}`} className="text-sm text-muted-foreground">
-          Removed from the order — its counts no longer apply
-        </p>
+        <div data-testid={`line-facts-${line.id}`} className="space-y-1 text-sm">
+          {/* WHAT WAS ORDERED SURVIVES REMOVAL (fix-delta 5 FD5-1, OCs-6): a cancelled
+              order's lines are DISCARDED, not unlinked, precisely so the order still
+              says what it ordered. Only the PROGRESS counters (verified / stocked /
+              disposed / remaining) stop being facts about a removed line. */}
+          {line.orderedQuantity !== null && (
+            <p className="tabular-nums">
+              <span className="text-xs text-muted-foreground">Ordered </span>
+              {line.orderedQuantity}
+            </p>
+          )}
+          <p className="text-muted-foreground">Removed from the order — its progress counts no longer apply</p>
+        </div>
       ) : (
         <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-5">
           <div>
@@ -922,7 +932,7 @@ function ExceptionRow({ orderId, exception, lineRemoved = false }: ExceptionRowP
         )}
       </div>
 
-      {open && (
+      {open && !lineRemoved && (
         <div className="space-y-2 rounded-md border border-border p-3">
           <div className="space-y-1.5">
             <Label htmlFor={`resolution-${exception.key}`} className="text-xs">

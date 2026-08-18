@@ -601,22 +601,31 @@ export async function discardRemaining(
   const { onRecord, batchId } = opts;
 
   const line = await lockLine(tx, lineId, shipmentId);
-  assertBookableStatus(line);
-  const verified = assertVerified(line);
 
-  // THE CLIENT'S BELIEF, CHECKED AGAINST THE LOCKED ROW (REV-11 clause 1).
+  // THE CLIENT'S BELIEF, CHECKED AGAINST THE LOCKED ROW (REV-11 clause 1) — and
+  // checked FIRST whenever the line HAS a count (fix-delta 5 FD5-2): the likeliest
+  // stale card is one whose line a colleague just finished (COMPLETE). Testing
+  // bookability first would answer that operator "only a VERIFIED or LABELING line
+  // can be stocked" — a sentence about stocking that names no counter — instead
+  // of the counters they need. A never-verified line has no remainder to compare
+  // and keeps its NOT_BOOKABLE answer below.
   // "Write off the remainder" names a quantity the operator read off a card, and
   // a colleague who stocked or disposed since makes that card older than the
   // line. Refusing here — BEFORE the header claim and before every write — costs
   // the raced operator a reload; not refusing costs them units they never saw.
-  const remaining = remainingOf(line, verified);
-  if (expectRemaining !== undefined && expectRemaining !== remaining) {
-    throw new AppError(
-      `The remainder changed since you loaded this line — it is now ${remaining} (verified ${verified}, stocked ${line.stockedQuantity}, disposed ${line.disposedQuantity}). Reload and try again.`,
-      'CONFLICT',
-      409,
-    );
+  if (expectRemaining !== undefined && line.verifiedQuantity !== null) {
+    const seen = remainingOf(line, line.verifiedQuantity);
+    if (expectRemaining !== seen) {
+      throw new AppError(
+        `The remainder changed since you loaded this line — it is now ${seen} (verified ${line.verifiedQuantity}, stocked ${line.stockedQuantity}, disposed ${line.disposedQuantity}). Reload and try again.`,
+        'CONFLICT',
+        409,
+      );
+    }
   }
+  assertBookableStatus(line);
+  const verified = assertVerified(line);
+  const remaining = remainingOf(line, verified);
 
   await claimShipmentForBooking(tx, shipmentId);
 

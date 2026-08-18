@@ -350,9 +350,12 @@ it("shows the server's refusal VERBATIM when the remainder is already gone", asy
   await user.type(screen.getByTestId("discard-remaining-reason-501"), "spilled");
   await user.click(screen.getByTestId("discard-remaining-confirm-501"));
 
+  // fix-delta 5 FD5-3: the refusal ALSO reaches a toast — the inline banner unmounts
+  // with the card when the refetched queue no longer contains the finished line.
   expect(await screen.findByTestId("labeling-refusal-501")).toHaveTextContent(
     "Nothing remains to discard on this line (stocked 96, disposed 0 of 96 verified)",
   );
+  expect(toastError).toHaveBeenCalledWith(expect.stringMatching(/Nothing remains to discard/));
 });
 
 // ---------------------------------------------------------------------------

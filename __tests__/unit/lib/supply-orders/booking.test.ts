@@ -1144,6 +1144,26 @@ describe('discardRemaining — the same prologue, the labeling-loss half (§4.3.
     expect(rec.calls()).toBe(0);
   });
 
+  it('fix-delta 5 FD5-2: on a COMPLETE line a stale expectRemaining is answered with the COUNTERS (CONFLICT), not with NOT_BOOKABLE', async () => {
+    // The likeliest stale card: a colleague finished the line. The operator needs
+    // the counters, not a sentence about stocking.
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.COMPLETE, stockedQuantity: 10, disposedQuantity: 0 }),
+    });
+    const rec = discardRecorder();
+    await expect(
+      discardRemaining(tx, discardArgs({ expectRemaining: 4 }), { onRecord: rec.onRecord, batchId: BATCH }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+    expect(kinds(tx)).toEqual(['line-lock']);
+    // With NO belief stated the status assert still answers (the gate drives it that way).
+    const tx2 = mkTx({
+      line: lockedLine({ status: StagingItemStatus.COMPLETE, stockedQuantity: 10, disposedQuantity: 0 }),
+    });
+    await expect(
+      discardRemaining(tx2, discardArgs({}), { onRecord: rec.onRecord, batchId: BATCH }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'NOT_BOOKABLE' });
+  });
+
   it('REV-11 clause 1: an expectRemaining that MATCHES the locked remainder proceeds', async () => {
     const tx = mkTx({
       line: lockedLine({ status: StagingItemStatus.LABELING, stockedQuantity: 4, disposedQuantity: 1 }),

@@ -121,7 +121,12 @@ function QueueLine({ orderId, line, locations }: QueueLineProps) {
     } catch (error) {
       // C4b.4: the caches are already refreshed (the mutation invalidates on
       // settle), so the server's sentence lands next to the new truth.
-      setRefusal(messageOf(error, "Failed to write off the remainder"));
+      const refusalText = messageOf(error, "Failed to write off the remainder");
+      setRefusal(refusalText);
+      // fix-delta 5 FD5-3: when a colleague FINISHED the line, the refetch drops
+      // this card from the queue and the inline refusal unmounts with it — the
+      // toast is what survives to tell the operator why nothing happened.
+      toast.error(refusalText);
     }
   };
 
@@ -219,10 +224,11 @@ function QueueLine({ orderId, line, locations }: QueueLineProps) {
               onClick={submitDiscard}
               disabled={trimmedReason === "" || discardRemaining.isPending}
             >
-              {/* NO CACHED NUMBER (REV-10 clause 10): the server writes off
-                  what the LOCKED row still has, which may not be the figure
-                  this card was drawn with. The success toast reports the
-                  server's count. */}
+              {/* NO CACHED NUMBER on the BUTTON (REV-10 clause 10): the card's
+                  remainder DOES travel and is CHECKED (`expectRemaining`, REV-11
+                  clause 1 — a stale card is refused, never silently written off);
+                  the button carries no number because the SERVER's count is what
+                  the success toast reports back. */}
               {discardRemaining.isPending ? "Writing it off…" : "Write off the remainder"}
             </Button>
             <Button size="sm" variant="ghost" onClick={closePanel}>

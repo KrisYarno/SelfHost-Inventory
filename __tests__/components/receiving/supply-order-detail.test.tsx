@@ -147,12 +147,23 @@ function renderDetail(data: Record<string, unknown> = detail()) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
       <SupplyOrderDetail detail={data as any} />
     </QueryClientProvider>,
   );
+  return {
+    ...rendered,
+    // Re-render the same tree with a refetched detail (same client, same keys).
+    rerender: (next: Record<string, unknown>) =>
+      rendered.rerender(
+        <QueryClientProvider client={queryClient}>
+          {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+          <SupplyOrderDetail detail={next as any} />
+        </QueryClientProvider>,
+      ),
+  };
 }
 
 const writes = () =>
@@ -313,8 +324,22 @@ describe("the controls follow the line's status", () => {
     // more: "Verified 4 / Remaining 4" reads as work still waiting at the bench.
     const card = lineCard(11);
     expect(within(card).getByTestId("line-facts-11")).toHaveTextContent(
-      "Removed from the order — its counts no longer apply",
+      "Removed from the order — its progress counts no longer apply",
     );
+    expect(within(card).queryByText("Verified")).toBeNull();
+    expect(within(card).queryByText("Remaining")).toBeNull();
+  });
+
+  it("FD5-1 (OCs-6): a CANCELLED order's removed lines still say what was ORDERED", () => {
+    renderDetail(
+      detail({ status: "CANCELLED" }, [
+        line({ status: "DISCARDED", orderedQuantity: 6, verifiedQuantity: null, remaining: 6 }),
+      ]),
+    );
+    const card = lineCard(11);
+    const facts = within(card).getByTestId("line-facts-11");
+    expect(facts).toHaveTextContent(/Ordered\s*6/);
+    expect(facts).toHaveTextContent("Removed from the order");
     expect(within(card).queryByText("Verified")).toBeNull();
     expect(within(card).queryByText("Remaining")).toBeNull();
   });
@@ -706,6 +731,22 @@ describe("the follow-up panel", () => {
     expect(within(row).getByText("Removed from the order — nothing to settle")).toBeInTheDocument();
     expect(within(row).queryByRole("button", { name: /resolve/i })).toBeNull();
     expect(within(row).queryByText(/\$2\.00 loss/)).toBeNull();
+  });
+
+  it("fix-delta 5 FD5-4: an ALREADY-OPEN Resolve panel closes when the line becomes removed", async () => {
+    const user = userEvent.setup();
+    const live = detail({ status: "RECEIVING", exceptions: [shortage] }, [line({ status: "VERIFIED" })]);
+    const { rerender } = renderDetail(live);
+    const row = screen.getByTestId("exception-recv-discrepancy:11");
+    await user.click(within(row).getByRole("button", { name: /resolve/i }));
+    expect(within(row).getByLabelText(/resolution/i)).toBeInTheDocument();
+    // The line is removed (by this or another actor); the refetched detail carries the flag.
+    const removed = detail({ status: "RECEIVING", exceptions: [shortage] }, [line({ status: "DISCARDED" })]);
+    rerender(removed);
+    const rowAfter = screen.getByTestId("exception-recv-discrepancy:11");
+    expect(within(rowAfter).queryByLabelText(/resolution/i)).toBeNull();
+    expect(within(rowAfter).queryByRole("button", { name: /resolve/i })).toBeNull();
+    expect(within(rowAfter).getByText("Removed from the order — nothing to settle")).toBeInTheDocument();
   });
 
   it("OC-3: the panel reads the WIRE's lineRemoved, not the rendered status", () => {
