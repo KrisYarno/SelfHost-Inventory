@@ -32,7 +32,7 @@ jest.mock('@/lib/api-utils', () => {
 // One fixed tx object, shared by the top-level client and by $transaction's
 // callback (spread), so "same tx instance" is provable via __tx.
 jest.mock('@/lib/prisma', () => {
-  const tx = {
+  const tx: any = {
     product: {
       create: jest.fn(),
       update: jest.fn(),
@@ -52,6 +52,14 @@ jest.mock('@/lib/prisma', () => {
       create: jest.fn(),
       update: jest.fn(),
     },
+    // Receiving/Labeling overhaul (pack C2b.3 / PK-11): the writer's read is now a
+    // LOCKING `SELECT ... FOR UPDATE` rather than a `findUnique`. The stub answers
+    // from the same `findUnique` mock these cases already configure, so the
+    // register's row shape stays set up in exactly one place.
+    $queryRaw: jest.fn(async () => {
+      const row = await tx.inventoryException.findUnique({});
+      return row ? [row] : [];
+    }),
   };
   return {
     __esModule: true,
@@ -88,6 +96,10 @@ jest.mock('@/lib/inventory', () => ({
   __esModule: true,
   OptimisticLockError: jest.requireActual('@/lib/inventory').OptimisticLockError,
   getCurrentQuantity: jest.fn(async () => 0),
+  // Receiving/Labeling overhaul (pack C2b.3): the approve route now wraps its
+  // transaction in the house deadlock retry. Run the fn once — the retry
+  // BEHAVIOUR is pinned in product-approval-exceptions.test.ts.
+  withDeadlockRetry: (fn: () => Promise<unknown>) => fn(),
 }));
 
 // declineProduct owns its own (retried) transaction — unit-tested separately.

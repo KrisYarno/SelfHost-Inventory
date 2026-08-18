@@ -68,13 +68,21 @@ const ADMIN_USER = { id: 3, isAdmin: true, isApproved: true };
 let gradTx: any;
 
 function mkTx() {
-  return {
+  const tx: any = {
     inventoryException: {
       findUnique: jest.fn(async () => null),
       create: jest.fn(async ({ data }: any) => ({ id: 1, ...data })),
       update: jest.fn(async ({ data }: any) => ({ id: 1, ...data })),
     },
   };
+  // Receiving/Labeling overhaul (pack C2b.3 / PK-11): the writer reads the row
+  // with `SELECT ... FOR UPDATE`. It answers from the same `findUnique` stub the
+  // cases configure, so the register's row shape stays in one place.
+  tx.$queryRaw = jest.fn(async () => {
+    const row = await tx.inventoryException.findUnique({});
+    return row ? [row] : [];
+  });
+  return tx;
 }
 
 function mkReq(body: unknown, id = '5') {

@@ -48,13 +48,29 @@ const LATER = new Date('2026-08-14T09:30:00.000Z');
 const KEY = 'recv-discrepancy:5';
 
 function mkTx() {
-  return {
+  const tx: any = {
+    /** The row the LOCKING read answers with (null = the key was never raised). */
+    __existing: null,
+    __raw: [] as { sql: string; values: unknown[] }[],
+    $queryRaw: jest.fn(async (query: any) => {
+      tx.__raw.push({ sql: String(query.sql), values: query.values });
+      return tx.__existing ? [tx.__existing] : [];
+    }),
     inventoryException: {
+      // Kept ONLY so the pins below can prove the writer no longer uses it: the
+      // prior read was a plain `findUnique`, which answers from the
+      // transaction's snapshot rather than from the row it is about to write.
       findUnique: jest.fn(),
       create: jest.fn(async ({ data }: any) => ({ id: 1, ...data })),
       update: jest.fn(async ({ data }: any) => ({ id: 1, ...data })),
     },
-  } as any;
+  };
+  return tx;
+}
+
+/** Configure what the locking read finds. */
+function setExisting(tx: any, existing: Record<string, unknown> | null) {
+  tx.__existing = existing;
 }
 
 /** A stored row as the DB would hand it back. */
@@ -87,7 +103,7 @@ const updateArgs = (tx: any) => tx.inventoryException.update.mock.calls[0][0];
 describe('upsertException — first sighting INSERTS', () => {
   it('creates the row with kind/key/subject and both timestamps at the caller instant', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(null);
+    setExisting(tx, null);
 
     await upsertException(tx, {
       kind: 'recv-discrepancy',
@@ -109,7 +125,7 @@ describe('upsertException — first sighting INSERTS', () => {
 
   it('stores a supplied note as the note (no prior lines to preserve)', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(null);
+    setExisting(tx, null);
 
     await upsertException(tx, {
       kind: 'recv-discrepancy',
@@ -124,7 +140,7 @@ describe('upsertException — first sighting INSERTS', () => {
 
   it('defaults `now` to the current instant when the caller has none', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(null);
+    setExisting(tx, null);
     const before = Date.now();
 
     await upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT });
@@ -137,7 +153,7 @@ describe('upsertException — first sighting INSERTS', () => {
 
   it('keeps the SUBJECT VALUES, not just the ids (retroactive-tolerance rule)', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(null);
+    setExisting(tx, null);
 
     await upsertException(tx, {
       kind: 'recv-discrepancy',
@@ -159,7 +175,7 @@ describe('upsertException — first sighting INSERTS', () => {
 describe('upsertException — a known key UPDATES', () => {
   it('advances lastSeenAt and refreshes subject, never rewriting firstSeenAt', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(row());
+    setExisting(tx, row());
 
     await upsertException(tx, {
       kind: 'recv-discrepancy',
@@ -178,7 +194,7 @@ describe('upsertException — a known key UPDATES', () => {
 
   it('leaves an UNRESOLVED row unresolved (no spurious resolve fields)', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(row());
+    setExisting(tx, row());
 
     await upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT, now: LATER });
 
@@ -189,7 +205,7 @@ describe('upsertException — a known key UPDATES', () => {
 
   it('leaves the note untouched when the caller supplies none', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(row({ note: 'counted twice, still short' }));
+    setExisting(tx, row({ note: 'counted twice, still short' }));
 
     await upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT, now: LATER });
 
@@ -198,7 +214,7 @@ describe('upsertException — a known key UPDATES', () => {
 
   it('APPENDS a new note line, preserving what was written before', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(row({ note: 'supplier notified' }));
+    setExisting(tx, row({ note: 'supplier notified' }));
 
     await upsertException(tx, {
       kind: 'recv-discrepancy',
@@ -213,7 +229,7 @@ describe('upsertException — a known key UPDATES', () => {
 
   it('does not repeat a note line that is already the last one', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(row({ note: 'supplier notified' }));
+    setExisting(tx, row({ note: 'supplier notified' }));
 
     await upsertException(tx, {
       kind: 'recv-discrepancy',
@@ -230,7 +246,7 @@ describe('upsertException — a known key UPDATES', () => {
 describe('upsertException — recurrence REOPENS a resolved key', () => {
   it('clears resolvedAt AND resolvedBy', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(
+    setExisting(tx, 
       row({ resolvedAt: NOW, resolvedBy: 7 }),
     );
 
@@ -244,7 +260,7 @@ describe('upsertException — recurrence REOPENS a resolved key', () => {
 
   it('preserves the prior note and appends an audit-visible reopen line carrying the instant', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(
+    setExisting(tx, 
       row({ resolvedAt: NOW, resolvedBy: 7, note: 'auto: recount matched' }),
     );
 
@@ -260,7 +276,7 @@ describe('upsertException — recurrence REOPENS a resolved key', () => {
 
   it('writes the reopen line even when the resolved row had no note at all', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(row({ resolvedAt: NOW, note: null }));
+    setExisting(tx, row({ resolvedAt: NOW, note: null }));
 
     await upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT, now: LATER });
 
@@ -271,7 +287,7 @@ describe('upsertException — recurrence REOPENS a resolved key', () => {
 
   it('orders reopen line BEFORE a caller note (what happened, then what was said)', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(
+    setExisting(tx, 
       row({ resolvedAt: NOW, resolvedBy: 7, note: 'closed out by Kris' }),
     );
 
@@ -298,7 +314,7 @@ describe('upsertException — the guards that keep the register coherent', () =>
       upsertException(tx, { kind: 'cost-differs', key: 'recv-discrepancy:5', subject: SUBJECT, now: NOW }),
     ).rejects.toThrow(/kind/i);
 
-    expect(tx.inventoryException.findUnique).not.toHaveBeenCalled();
+    expect(tx.$queryRaw).not.toHaveBeenCalled();
     expect(tx.inventoryException.create).not.toHaveBeenCalled();
     expect(tx.inventoryException.update).not.toHaveBeenCalled();
   });
@@ -316,7 +332,7 @@ describe('upsertException — the guards that keep the register coherent', () =>
 
   it('accepts a key of exactly the column width', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(null);
+    setExisting(tx, null);
     const exact = 'recv-discrepancy:' + '9'.repeat(EXCEPTION_KEY_MAX_LENGTH - 'recv-discrepancy:'.length);
     expect(exact).toHaveLength(EXCEPTION_KEY_MAX_LENGTH);
 
@@ -329,7 +345,7 @@ describe('upsertException — the guards that keep the register coherent', () =>
 describe('resolveException', () => {
   it('is a NO-OP returning null when the key was never raised', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(null);
+    setExisting(tx, null);
 
     await expect(resolveException(tx, { key: KEY, note: 'auto: recount matched' })).resolves.toBeNull();
 
@@ -339,7 +355,7 @@ describe('resolveException', () => {
 
   it('stamps resolvedAt + resolvedBy for a human resolution', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(row());
+    setExisting(tx, row());
 
     await resolveException(tx, { key: KEY, resolvedBy: 7, note: 'counted again with Kris', now: LATER });
 
@@ -351,7 +367,7 @@ describe('resolveException', () => {
 
   it('resolves with resolvedBy NULL when nobody is named (the auto-resolve shape)', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(row());
+    setExisting(tx, row());
 
     await resolveException(tx, { key: KEY, note: 'auto: recount matched', now: LATER });
 
@@ -361,7 +377,7 @@ describe('resolveException', () => {
 
   it('APPENDS its note, preserving what the row already carried', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(row({ note: 'supplier notified' }));
+    setExisting(tx, row({ note: 'supplier notified' }));
 
     await resolveException(tx, { key: KEY, resolvedBy: 7, note: 'credit received', now: LATER });
 
@@ -370,7 +386,7 @@ describe('resolveException', () => {
 
   it('does NOT advance lastSeenAt — resolving is not another sighting', async () => {
     const tx = mkTx();
-    tx.inventoryException.findUnique.mockResolvedValue(row());
+    setExisting(tx, row());
 
     await resolveException(tx, { key: KEY, now: LATER });
 
@@ -380,7 +396,7 @@ describe('resolveException', () => {
   it('is IDEMPOTENT: an already-resolved key is not re-resolved and is not rewritten', async () => {
     const tx = mkTx();
     const resolved = row({ resolvedAt: NOW, resolvedBy: 7, note: 'auto: recount matched' });
-    tx.inventoryException.findUnique.mockResolvedValue(resolved);
+    setExisting(tx, resolved);
 
     await expect(
       resolveException(tx, { key: KEY, note: 'auto: recount matched', now: LATER }),
@@ -494,5 +510,283 @@ describe('the kind vocabulary + key encodings (pack REV-3 T1)', () => {
     };
     expect(w1Only.countedQty).toBe(12);
     expect(overhaul.overUnits).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Receiving/Labeling overhaul (contract pack C2b.3 / PK-11, spec §6; seams
+// S6/S14). Two changes, and both are about a register that two transactions can
+// reach at the same instant:
+//
+//   THE READ IS A LOCKING READ. `findUnique` answers from the transaction's
+//   REPEATABLE READ snapshot, which is older than every lock the caller holds —
+//   so a decline's resolve and a concurrent booking's raise could each decide
+//   from a state the other had already replaced. `SELECT ... FOR UPDATE` on the
+//   key serializes them ON THE ROW ITSELF, and the loser waits rather than
+//   overwriting.
+//
+//   RESOLUTION IS A CLASSIFICATION, NOT THE SETTLEMENT INSTANT. `resolvedAt` /
+//   `resolvedBy` stay at the FIRST settlement; a later, DIFFERENT `resolution`
+//   re-labels the row and says so in the note. And every resolution refreshes
+//   the subject's money through `subjectPatch`, because the register must be
+//   able to answer "how much" from the row alone.
+// ---------------------------------------------------------------------------
+
+const LOCKING_READ =
+  /^SELECT id, `key`, kind, subject, firstSeenAt, lastSeenAt, resolvedAt, resolvedBy, note, resolution FROM inventory_exceptions WHERE `key` = \? FOR UPDATE$/;
+
+describe('the LOCKING read (PK-11)', () => {
+  it('upsertException reads the row FOR UPDATE, by bound key', async () => {
+    const tx = mkTx();
+    setExisting(tx, null);
+
+    await upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT, now: NOW });
+
+    expect(tx.__raw).toHaveLength(1);
+    expect(tx.__raw[0].sql).toMatch(LOCKING_READ);
+    expect(tx.__raw[0].values).toEqual([KEY]);
+  });
+
+  it('resolveException reads the row FOR UPDATE, by bound key', async () => {
+    const tx = mkTx();
+    setExisting(tx, row());
+
+    await resolveException(tx, { key: KEY, resolvedBy: 7, now: LATER });
+
+    expect(tx.__raw).toHaveLength(1);
+    expect(tx.__raw[0].sql).toMatch(LOCKING_READ);
+    expect(tx.__raw[0].values).toEqual([KEY]);
+  });
+
+  it('NEITHER writer takes a plain snapshot read any more', async () => {
+    const tx = mkTx();
+    setExisting(tx, row());
+
+    await upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT, now: LATER });
+    await resolveException(tx, { key: KEY, resolvedBy: 7, now: LATER });
+
+    expect(tx.inventoryException.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('the raw statement only ACQUIRES and READS — the write is still the delegate', async () => {
+    const tx = mkTx();
+    setExisting(tx, null);
+
+    await upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT, now: NOW });
+
+    expect(tx.__raw[0].sql).toMatch(/^SELECT /);
+    expect(tx.inventoryException.create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('resolveException — the RESOLUTION classification (spec §6 / D5)', () => {
+  it('stamps the supplied resolution alongside resolvedAt/resolvedBy', async () => {
+    const tx = mkTx();
+    setExisting(tx, row());
+
+    await resolveException(tx, {
+      key: KEY,
+      resolvedBy: 7,
+      resolution: 'supplier-credited',
+      now: LATER,
+    });
+
+    const { data } = updateArgs(tx);
+    expect(data.resolvedAt).toBe(LATER);
+    expect(data.resolvedBy).toBe(7);
+    expect(data.resolution).toBe('supplier-credited');
+  });
+
+  it('writes an EXPLICIT null resolution when the caller classified nothing', async () => {
+    const tx = mkTx();
+    setExisting(tx, row());
+
+    await resolveException(tx, { key: KEY, resolvedBy: 7, now: LATER });
+
+    expect(updateArgs(tx).data.resolution).toBeNull();
+  });
+
+  it('MERGES subjectPatch into the locked subject before settling (every resolution refreshes the money)', async () => {
+    const tx = mkTx();
+    setExisting(tx, row());
+
+    await resolveException(tx, {
+      key: KEY,
+      resolvedBy: 7,
+      resolution: 'accepted-loss',
+      subjectPatch: { lossCents: 2500, shortUnits: 2 },
+      now: LATER,
+    });
+
+    expect(updateArgs(tx).data.subject).toEqual({
+      // everything the row already carried survives...
+      stagingItemId: 5,
+      shipmentId: null,
+      productId: null,
+      expectedQty: 10,
+      countedQty: 12,
+      // ...and the patch refreshes what moved.
+      lossCents: 2500,
+      shortUnits: 2,
+    });
+  });
+
+  it('applies a subjectPatch to an ALREADY-RESOLVED row without touching the settlement', async () => {
+    const tx = mkTx();
+    setExisting(
+      tx,
+      row({ resolvedAt: NOW, resolvedBy: 7, resolution: 'accepted-loss', note: 'closed by Kris' }),
+    );
+
+    await resolveException(tx, {
+      key: KEY,
+      resolvedBy: 9,
+      resolution: 'accepted-loss',
+      subjectPatch: { lossCents: 3000 },
+      now: LATER,
+    });
+
+    const { data } = updateArgs(tx);
+    expect(data.subject).toMatchObject({ lossCents: 3000, countedQty: 12 });
+    expect(data).not.toHaveProperty('resolvedAt');
+    expect(data).not.toHaveProperty('resolvedBy');
+    expect(data).not.toHaveProperty('resolution');
+    expect(data).not.toHaveProperty('note');
+  });
+
+  it('is settlement-idempotent: the SAME resolution again rewrites nothing at all', async () => {
+    const tx = mkTx();
+    const resolved = row({ resolvedAt: NOW, resolvedBy: 7, resolution: 'accepted-loss' });
+    setExisting(tx, resolved);
+
+    await expect(
+      resolveException(tx, { key: KEY, resolvedBy: 9, resolution: 'accepted-loss', now: LATER }),
+    ).resolves.toBe(resolved);
+
+    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+  });
+
+  it('never ERASES a classification when a later call supplies none', async () => {
+    const tx = mkTx();
+    const resolved = row({ resolvedAt: NOW, resolvedBy: 7, resolution: 'reshipped' });
+    setExisting(tx, resolved);
+
+    await resolveException(tx, { key: KEY, resolvedBy: 9, now: LATER });
+
+    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+  });
+
+  it('RE-LABELS a differing resolution, keeping the ORIGINAL settlement instant and actor', async () => {
+    const tx = mkTx();
+    setExisting(tx, row({ resolvedAt: NOW, resolvedBy: 7, resolution: 'accepted-loss' }));
+
+    await resolveException(tx, {
+      key: KEY,
+      resolvedBy: 9,
+      resolution: 'supplier-credited',
+      now: LATER,
+    });
+
+    const { data } = updateArgs(tx);
+    expect(data.resolution).toBe('supplier-credited');
+    expect(data).not.toHaveProperty('resolvedAt');
+    expect(data).not.toHaveProperty('resolvedBy');
+    expect(data).not.toHaveProperty('lastSeenAt');
+  });
+
+  it('says so in the note: "<old> -> <new>"', async () => {
+    const tx = mkTx();
+    setExisting(tx, row({ resolvedAt: NOW, resolvedBy: 7, resolution: 'accepted-loss', note: 'closed by Kris' }));
+
+    await resolveException(tx, {
+      key: KEY,
+      resolvedBy: 9,
+      resolution: 'supplier-credited',
+      now: LATER,
+    });
+
+    const lines = (updateArgs(tx).data.note as string).split('\n');
+    expect(lines[0]).toBe('closed by Kris');
+    expect(lines[1]).toBe('resolution relabeled: accepted-loss -> supplier-credited');
+  });
+
+  it('names an UNCLASSIFIED prior resolution rather than pretending there was one', async () => {
+    const tx = mkTx();
+    setExisting(tx, row({ resolvedAt: NOW, resolvedBy: 7, resolution: null }));
+
+    await resolveException(tx, { key: KEY, resolvedBy: 9, resolution: 'reshipped', now: LATER });
+
+    expect(updateArgs(tx).data.note).toBe('resolution relabeled: unclassified -> reshipped');
+  });
+
+  it('appends the CALLER\'s note after the relabel line (what happened, then what was said)', async () => {
+    const tx = mkTx();
+    setExisting(tx, row({ resolvedAt: NOW, resolvedBy: 7, resolution: 'accepted-loss' }));
+
+    await resolveException(tx, {
+      key: KEY,
+      resolvedBy: 9,
+      resolution: 'reshipped',
+      note: 'box 2 landed today',
+      now: LATER,
+    });
+
+    const lines = (updateArgs(tx).data.note as string).split('\n');
+    expect(lines[0]).toBe('resolution relabeled: accepted-loss -> reshipped');
+    expect(lines[1]).toBe('box 2 landed today');
+  });
+
+  it('refreshes the subject on a relabel too', async () => {
+    const tx = mkTx();
+    setExisting(tx, row({ resolvedAt: NOW, resolvedBy: 7, resolution: 'accepted-loss' }));
+
+    await resolveException(tx, {
+      key: KEY,
+      resolvedBy: 9,
+      resolution: 'reshipped',
+      subjectPatch: { lossCents: 0, relatedShipmentId: 'ord_2' },
+      now: LATER,
+    });
+
+    expect(updateArgs(tx).data.subject).toMatchObject({
+      countedQty: 12,
+      lossCents: 0,
+      relatedShipmentId: 'ord_2',
+    });
+  });
+
+  it('stays a NO-OP for a key nobody ever raised, subjectPatch or not', async () => {
+    const tx = mkTx();
+    setExisting(tx, null);
+
+    await expect(
+      resolveException(tx, { key: KEY, resolution: 'accepted-loss', subjectPatch: { lossCents: 1 } }),
+    ).resolves.toBeNull();
+
+    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+    expect(tx.inventoryException.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('upsertException — a reopen clears the CLASSIFICATION too', () => {
+  it('clears resolution alongside resolvedAt/resolvedBy', async () => {
+    const tx = mkTx();
+    setExisting(tx, row({ resolvedAt: NOW, resolvedBy: 7, resolution: 'accepted-loss' }));
+
+    await upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT, now: LATER });
+
+    const { data } = updateArgs(tx);
+    expect(data.resolvedAt).toBeNull();
+    expect(data.resolvedBy).toBeNull();
+    expect(data.resolution).toBeNull();
+  });
+
+  it('leaves the classification alone when the row was never resolved', async () => {
+    const tx = mkTx();
+    setExisting(tx, row({ resolution: null }));
+
+    await upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT, now: LATER });
+
+    expect(updateArgs(tx).data).not.toHaveProperty('resolution');
   });
 });

@@ -21,6 +21,15 @@
  * vocabulary: every write joins the CALLER's transaction, which is what makes
  * "the discrepancy row and the count commit together, or neither does" true.
  *
+ * THE READ IS A LOCKING READ (Receiving/Labeling overhaul, PK-11, spec §6).
+ * `findUnique` answers from the transaction's REPEATABLE READ snapshot — taken
+ * at its FIRST read, which is older than every lock the caller holds by the time
+ * it gets here. A product decline's resolve and a concurrent booking's raise
+ * would then each decide from a state the other had already replaced. `SELECT
+ * ... FOR UPDATE` on the key serializes them ON THE ROW ITSELF: the loser waits
+ * for the winner to commit and reads what it actually wrote. Callers with
+ * competing product/exception locks own the deadlock retry (seam S14).
+ *
  * WRITE BOUNDARY (binding, zero-business-writes adjacent): only explicitly-
  * mutating routes may import this module. No GET, no assistant tool, ever —
  * enforced by __tests__/integration/exceptions-write-boundary.test.ts, which
@@ -29,7 +38,7 @@
 
 import { Prisma } from '@prisma/client';
 import type { InventoryException } from '@prisma/client';
-import type { ExceptionKind } from '@/lib/exceptions/kinds';
+import type { ExceptionKind, Resolution } from '@/lib/exceptions/kinds';
 
 /** `inventory_exceptions.key` is VarChar(191) and UNIQUE. */
 export const EXCEPTION_KEY_MAX_LENGTH = 191;
@@ -60,6 +69,20 @@ export type ResolveExceptionArgs = {
   /** NULL (the default) means the SYSTEM resolved it — an auto-resolve, not a person. */
   resolvedBy?: number | null;
   note?: string;
+  /**
+   * HOW it was settled (spec §6 / D5) — a CLASSIFICATION, stored beside
+   * `resolvedAt`/`resolvedBy` rather than inside `subject`, which the upsert
+   * replaces wholesale. Absent leaves an existing classification alone; a
+   * DIFFERENT one RE-LABELS the row (see below).
+   */
+  resolution?: Resolution;
+  /**
+   * Fields to refresh on the subject before settling (PK2-2). Every resolution
+   * recomputes the money from the line's current counters, so the register can
+   * answer "how much" from the row alone — MERGED into the locked subject, never
+   * replacing it, because the caller knows the money and not the identity.
+   */
+  subjectPatch?: ExceptionSubject;
   now?: Date;
 };
 
@@ -101,6 +124,50 @@ function reopenNoteLine(now: Date): string {
 }
 
 /**
+ * The row for `key`, READ UNDER ITS OWN LOCK (PK-11).
+ *
+ * Raw SQL because Prisma has no `FOR UPDATE` (house precedent:
+ * `lib/products/decline.ts`, `app/api/inbound-shipments/[id]/route.ts`). The key
+ * is a BOUND parameter, never interpolated; `key` is backticked because it is a
+ * MySQL reserved word. The statement only ACQUIRES and READS — every write below
+ * still goes through the Prisma delegate, which is what the boundary gate scans
+ * for.
+ */
+async function lockedException(
+  tx: Prisma.TransactionClient,
+  key: string,
+): Promise<InventoryException | null> {
+  const rows = await tx.$queryRaw<InventoryException[]>(
+    Prisma.sql`SELECT id, \`key\`, kind, subject, firstSeenAt, lastSeenAt, resolvedAt, resolvedBy, note, resolution FROM inventory_exceptions WHERE \`key\` = ${key} FOR UPDATE`,
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * The stored subject as an object to merge onto.
+ *
+ * `subject` is a JSON column, and a raw read can hand it back as the parsed
+ * value or as the JSON TEXT depending on the connector. Spreading a string would
+ * silently produce a character map — a corrupted register row — so the string
+ * case is parsed, and anything that is not an object at all degrades to `{}`
+ * rather than to nonsense.
+ */
+function subjectObject(subject: unknown): Record<string, unknown> {
+  const value = typeof subject === 'string' ? safeParse(subject) : subject;
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function safeParse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Raise (or re-raise) an exception. Returns the row as it now stands.
  *
  * RACE NOTE: the prior row is READ before the write, because the reopen decision
@@ -118,7 +185,7 @@ export async function upsertException(
   assertKeyMatchesKind(kind, key);
   const now = args.now ?? new Date();
 
-  const existing = await tx.inventoryException.findUnique({ where: { key } });
+  const existing = await lockedException(tx, key);
 
   if (!existing) {
     return tx.inventoryException.create({
@@ -144,6 +211,10 @@ export async function upsertException(
   if (reopening) {
     data.resolvedAt = null;
     data.resolvedBy = null;
+    // The CLASSIFICATION goes with the settlement it described: this row is open
+    // again, and "supplier-credited" would now be a statement about a state that
+    // no longer holds (spec §6).
+    data.resolution = null;
     nextNote = appendNoteLine(nextNote, reopenNoteLine(now));
   }
   if (note) {
@@ -156,6 +227,11 @@ export async function upsertException(
   return tx.inventoryException.update({ where: { key }, data });
 }
 
+/** "resolution relabeled: accepted-loss -> supplier-credited". */
+function relabelNoteLine(from: string | null, to: Resolution): string {
+  return `resolution relabeled: ${from ?? 'unclassified'} -> ${to}`;
+}
+
 /**
  * Resolve an exception. Returns the row, or `null` when the key was never
  * raised.
@@ -163,27 +239,68 @@ export async function upsertException(
  * `lastSeenAt` is deliberately NOT advanced: resolving is not another sighting,
  * and letting it move would make "how long has this been open" unanswerable.
  *
- * IDEMPOTENT: an already-resolved key is returned untouched — the FIRST
- * resolution's instant, actor and note are the truth, and a second call (a
- * confirming recount, a repeated recompute) must not overwrite them. A note
- * passed to a call that does not resolve is therefore not written; re-raise
- * through `upsertException` if the condition actually came back.
+ * SETTLEMENT-IDEMPOTENT: an already-resolved key keeps the FIRST resolution's
+ * instant, actor and note — a second call (a confirming recount, a repeated
+ * recompute) must not overwrite them. A note passed to a call that does not
+ * settle anything is therefore not written; re-raise through `upsertException`
+ * if the condition actually came back.
+ *
+ * Three things the overhaul adds on top of that (spec §6 / D5, PK2-2), all of
+ * them about the difference between WHEN something was settled and HOW:
+ *
+ *   subjectPatch  MERGED into the locked subject BEFORE any of the branching
+ *                 below, so EVERY resolution refreshes the row's current money
+ *                 even when the settlement itself is idempotent. The register
+ *                 has to answer "how much" from the row alone.
+ *   resolution    the CLASSIFICATION. Stamped with the settlement on an open
+ *                 row; absent on a later call, it is never erased — silence is
+ *                 not a reclassification.
+ *   RE-LABEL      a DIFFERENT resolution on an already-resolved row updates the
+ *                 classification and says so in the note, while `resolvedAt` /
+ *                 `resolvedBy` stay at the FIRST settlement. "We thought this
+ *                 was an accepted loss, the supplier credited it after all" is a
+ *                 correction to the label, not a second settlement.
  */
 export async function resolveException(
   tx: Prisma.TransactionClient,
   args: ResolveExceptionArgs,
 ): Promise<InventoryException | null> {
-  const { key, note } = args;
+  const { key, note, resolution, subjectPatch } = args;
   const now = args.now ?? new Date();
 
-  const existing = await tx.inventoryException.findUnique({ where: { key } });
+  const existing = await lockedException(tx, key);
   if (!existing) return null;
-  if (existing.resolvedAt !== null) return existing;
+
+  // The money first, whatever branch settles below.
+  const mergedSubject = subjectPatch
+    ? ({ ...subjectObject(existing.subject), ...subjectPatch } as Prisma.InputJsonObject)
+    : null;
+
+  if (existing.resolvedAt !== null) {
+    const relabelling = resolution !== undefined && resolution !== existing.resolution;
+    if (!relabelling && mergedSubject === null) {
+      // Nothing to say and nothing to refresh: the first settlement stands.
+      return existing;
+    }
+
+    const data: Prisma.InventoryExceptionUpdateInput = {};
+    if (mergedSubject !== null) data.subject = mergedSubject;
+    if (relabelling) {
+      data.resolution = resolution;
+      let nextNote = appendNoteLine(existing.note, relabelNoteLine(existing.resolution, resolution));
+      if (note) nextNote = appendNoteLine(nextNote, note);
+      data.note = nextNote;
+    }
+
+    return tx.inventoryException.update({ where: { key }, data });
+  }
 
   const data: Prisma.InventoryExceptionUpdateInput = {
     resolvedAt: now,
     resolvedBy: args.resolvedBy ?? null,
+    resolution: resolution ?? null,
   };
+  if (mergedSubject !== null) data.subject = mergedSubject;
 
   const nextNote = note ? appendNoteLine(existing.note, note) : existing.note;
   if (nextNote !== existing.note) {

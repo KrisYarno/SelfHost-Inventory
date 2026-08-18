@@ -1,5 +1,10 @@
 import { Prisma, InboundShipmentStatus, StagingItemStatus } from '@prisma/client';
 import { AppError } from '@/lib/error-handling';
+// Receiving/Labeling overhaul (seam S5): `claimShipmentIn` MOVED to
+// `lib/supply-orders/claims.ts`, where the new flow's claims live, and is
+// imported back here PRIVATELY — this module keeps exporting only its own
+// wrappers, so there is no re-export and no cycle. M6 deletes this file.
+import { claimShipmentIn } from '@/lib/supply-orders/claims';
 
 /**
  * Shipment-membership guards (contract pack REV-2 T4, W1-2a).
@@ -19,48 +24,6 @@ import { AppError } from '@/lib/error-handling';
  *   graduate                                         OPEN or CLOSED
  *   anything at all on a CANCELLED shipment          refused
  */
-
-/**
- * Claim the shipment in one of `allowed`, returning the status that won.
- *
- * Each attempt is a deliberate NO-OP write (`status: X` on rows already X): its
- * value is the row LOCK it takes, which serializes this caller against a
- * concurrent close/cancel whose own claim is `WHERE id = ? AND status = 'OPEN'`.
- * Exactly one of them can win, and the loser sees `count === 0`.
- *
- * Statuses are tried ONE AT A TIME rather than as a single `status: { in: [...] }`
- * claim, because that form would have to pick one value to WRITE — and writing
- * 'OPEN' to a shipment matched as CLOSED would silently reopen a settled
- * receipt. One extra round-trip on the CLOSED path buys a write that cannot
- * change anything.
- *
- * Throws 404 when the id is unknown and 409 when the shipment is in none of the
- * allowed statuses (the read that separates those two runs only AFTER every
- * claim has failed, when nothing has been written).
- */
-async function claimShipmentIn(
-  tx: Prisma.TransactionClient,
-  shipmentId: string,
-  allowed: readonly InboundShipmentStatus[],
-  blocked: (status: InboundShipmentStatus) => string,
-): Promise<InboundShipmentStatus> {
-  for (const status of allowed) {
-    const claim = await tx.inboundShipment.updateMany({
-      where: { id: shipmentId, status },
-      data: { status },
-    });
-    if (claim.count > 0) return status;
-  }
-
-  const existing = await tx.inboundShipment.findUnique({
-    where: { id: shipmentId },
-    select: { id: true, status: true },
-  });
-  if (!existing) {
-    throw new AppError('Inbound shipment not found', 'NOT_FOUND', 404);
-  }
-  throw new AppError(blocked(existing.status), 'CONFLICT', 409);
-}
 
 const OPEN_ONLY: readonly InboundShipmentStatus[] = [InboundShipmentStatus.OPEN];
 

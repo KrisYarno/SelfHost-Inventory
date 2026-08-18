@@ -5,6 +5,7 @@ import { pendingWithStockKey } from '@/lib/exceptions/kinds';
 import { resolveException } from '@/lib/exceptions/write';
 import { recordChange } from '@/lib/change-tracking';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
+import { withDeadlockRetry } from '@/lib/inventory';
 
 export const dynamic = 'force-dynamic';
 
@@ -36,39 +37,49 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
   }
 
   // One instant for the review stamp and the resolution, so the register and the
-  // product agree on WHEN this was settled.
+  // product agree on WHEN this was settled — minted OUTSIDE the retry below, so
+  // a re-run stamps the instant of the REVIEW, not of the retry (the house rule:
+  // the count route's countedAt, the graduation's batchId).
   const reviewedAt = new Date();
 
-  const updated = await prisma.$transaction(async (tx) => {
-    const u = await tx.product.update({
-      where: { id },
-      data: {
-        approvalStatus: 'APPROVED',
-        reviewedBy: user.id,
-        reviewedAt,
-      },
-    });
+  // Receiving/Labeling overhaul (pack C2b.3, OCp2-4): the resolution below now
+  // takes a LOCKING read on the register row, so this transaction can genuinely
+  // deadlock — a booking that holds that exception row may be waiting on the
+  // product row this approval holds. Decline has always retried (declineProduct
+  // carries its own wrapper); approve had nothing, so the loser's answer to the
+  // admin was a 500. A deadlock is a RETRY, not an answer.
+  const updated = await withDeadlockRetry(() =>
+    prisma.$transaction(async (tx) => {
+      const u = await tx.product.update({
+        where: { id },
+        data: {
+          approvalStatus: 'APPROVED',
+          reviewedBy: user.id,
+          reviewedAt,
+        },
+      });
 
-    await recordChange(tx, {
-      actor: { userId: user.id },
-      actionType: 'PRODUCT_APPROVE',
-      entityType: 'PRODUCT',
-      entityId: u.id,
-      action: `Approved product ${u.id}`,
-    });
+      await recordChange(tx, {
+        actor: { userId: user.id },
+        actionType: 'PRODUCT_APPROVE',
+        entityType: 'PRODUCT',
+        entityId: u.id,
+        action: `Approved product ${u.id}`,
+      });
 
-    // Fired unconditionally: resolving a key nobody raised is a silent no-op, so
-    // an admin-created product (which never raised a row) costs one read and
-    // nothing else.
-    await resolveException(tx, {
-      key: pendingWithStockKey(id),
-      resolvedBy: user.id,
-      note: 'resolved: product approved',
-      now: reviewedAt,
-    });
+      // Fired unconditionally: resolving a key nobody raised is a silent no-op, so
+      // an admin-created product (which never raised a row) costs one read and
+      // nothing else.
+      await resolveException(tx, {
+        key: pendingWithStockKey(id),
+        resolvedBy: user.id,
+        note: 'resolved: product approved',
+        now: reviewedAt,
+      });
 
-    return u;
-  });
+      return u;
+    })
+  );
 
   const response = NextResponse.json({
     id: updated.id,

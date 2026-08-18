@@ -13,7 +13,7 @@ jest.mock('@/lib/api-utils', () => {
 });
 
 jest.mock('@/lib/prisma', () => {
-  const tx = {
+  const tx: any = {
     product: {
       update: jest.fn(),
     },
@@ -25,6 +25,14 @@ jest.mock('@/lib/prisma', () => {
       create: jest.fn(),
       update: jest.fn(),
     },
+    // Receiving/Labeling overhaul (pack C2b.3 / PK-11): the writer's read is now a
+    // LOCKING `SELECT ... FOR UPDATE` rather than a `findUnique`. The stub answers
+    // from the same `findUnique` mock these cases already configure, so the
+    // register's row shape stays set up in exactly one place.
+    $queryRaw: jest.fn(async () => {
+      const row = await tx.inventoryException.findUnique({});
+      return row ? [row] : [];
+    }),
   };
   return {
     __esModule: true,
@@ -182,9 +190,12 @@ describe('POST /api/admin/products/[id]/decline', () => {
     // also resolves `pending-with-stock`, so the stand-in tx carries that
     // delegate — the resolution itself is pinned in
     // __tests__/integration/api/product-approval-exceptions.test.ts.
-    const declineTx = {
+    const declineTx: any = {
       inventoryException: { findUnique: jest.fn(async () => null), update: jest.fn() },
     };
+    // PK-11: the writer reads FOR UPDATE now; the stand-in answers from the same
+    // stub (an absent key, so the resolution is the documented no-op).
+    declineTx.$queryRaw = jest.fn(async () => []);
     await opts.record(declineTx, { reversed: true, alreadyDeclined: false });
     expect(mockRecordChange).toHaveBeenCalledWith(
       expect.anything(),

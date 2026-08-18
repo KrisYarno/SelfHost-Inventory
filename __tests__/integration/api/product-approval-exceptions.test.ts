@@ -26,13 +26,21 @@ jest.mock('@/lib/api-utils', () => {
 });
 
 jest.mock('@/lib/prisma', () => {
-  const tx = {
+  const tx: any = {
     product: { update: jest.fn() },
     inventoryException: {
       findUnique: jest.fn(),
       update: jest.fn(),
       create: jest.fn(),
     },
+    // Receiving/Labeling overhaul (pack C2b.3 / PK-11): the writer's read is now a
+    // LOCKING `SELECT ... FOR UPDATE` rather than a `findUnique`. The stub answers
+    // from the same `findUnique` mock these cases already configure, so the
+    // register's row shape stays set up in exactly one place.
+    $queryRaw: jest.fn(async () => {
+      const row = await tx.inventoryException.findUnique({});
+      return row ? [row] : [];
+    }),
   };
   return {
     __esModule: true,
@@ -63,6 +71,7 @@ import { requireAdmin } from '@/lib/api-utils';
 import { declineProduct } from '@/lib/products/decline';
 import { validateCSRFToken } from '@/lib/csrf';
 import prisma from '@/lib/prisma';
+import { AppError } from '@/lib/error-handling';
 
 const db: any = prisma as any;
 const mockDecline = declineProduct as jest.Mock;
@@ -85,6 +94,11 @@ function openRow(overrides: Record<string, unknown> = {}) {
     note: null,
     ...overrides,
   };
+}
+
+/** What the writer's LOCKING read finds for this key. */
+function setExistingRow(row: Record<string, unknown> | null) {
+  db.inventoryException.findUnique.mockResolvedValue(row);
 }
 
 function mkReq(path: string) {
@@ -121,7 +135,11 @@ describe('POST /api/admin/products/[id]/approve — resolves pending-with-stock'
     const res = await approvePOST(mkReq('approve'), { params: { id: '101' } });
 
     expect(res.status).toBe(200);
-    expect(db.inventoryException.findUnique).toHaveBeenCalledWith({ where: { key: KEY } });
+    // PK-11: the row is read UNDER ITS OWN LOCK, so the approval and a
+    // concurrent booking's raise serialize on the register row itself.
+    const read = db.$queryRaw.mock.calls[0][0];
+    expect(String(read.sql)).toMatch(/FROM inventory_exceptions WHERE `key` = \? FOR UPDATE$/);
+    expect(read.values).toEqual([KEY]);
     const call = db.inventoryException.update.mock.calls[0][0];
     expect(call.where).toEqual({ key: KEY });
     expect(call.data.resolvedAt).toBeInstanceOf(Date);
@@ -159,6 +177,61 @@ describe('POST /api/admin/products/[id]/approve — resolves pending-with-stock'
   });
 });
 
+describe('POST /api/admin/products/[id]/approve — the deadlock retry (pack C2b.3, OCp2-4)', () => {
+  // The approval's resolve now takes a LOCKING read on the register row, so this
+  // transaction can genuinely deadlock against a booking that holds that row and
+  // is waiting on the product this approval holds. Decline has always retried
+  // (declineProduct's own wrapper); approve had nothing, so the loser's 500 was
+  // the user's answer. Same envelope, same rule: the stamp is minted OUTSIDE.
+  it('is RE-RUN after a P2034 rollback and succeeds on the second attempt', async () => {
+    setExistingRow(openRow());
+    let attempts = 0;
+    db.$transaction = jest.fn(async (fn: any) => {
+      attempts += 1;
+      if (attempts === 1) throw Object.assign(new Error('write conflict'), { code: 'P2034' });
+      return fn(db);
+    });
+
+    const res = await approvePOST(mkReq('approve'), { params: { id: '101' } });
+
+    expect(res.status).toBe(200);
+    expect(attempts).toBe(2);
+  });
+
+  it('keeps the SAME reviewedAt across the retry — the instant of the review, not of the retry', async () => {
+    setExistingRow(openRow());
+    let attempts = 0;
+    db.$transaction = jest.fn(async (fn: any) => {
+      attempts += 1;
+      if (attempts === 1) {
+        // The first attempt runs far enough to stamp, then rolls back.
+        await fn(db).catch(() => undefined);
+        throw Object.assign(new Error('deadlock'), { code: 'P2034' });
+      }
+      return fn(db);
+    });
+
+    await approvePOST(mkReq('approve'), { params: { id: '101' } });
+
+    const stamps = db.product.update.mock.calls.map((c: any) => c[0].data.reviewedAt);
+    expect(stamps).toHaveLength(2);
+    expect(stamps[0]).toBe(stamps[1]);
+  });
+
+  it('does NOT retry an ordinary failure — it is an ANSWER, once', async () => {
+    setExistingRow(openRow());
+    const boom = new AppError('nope', 'CONFLICT', 409);
+    db.$transaction = jest.fn(async () => {
+      throw boom;
+    });
+
+    const res = await approvePOST(mkReq('approve'), { params: { id: '101' } });
+
+    expect(res.status).toBe(409);
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('POST /api/admin/products/[id]/decline — resolves pending-with-stock', () => {
   it('resolves the product key inside declineProduct\'s transaction', async () => {
     db.inventoryException.findUnique.mockResolvedValue(openRow());
@@ -178,6 +251,8 @@ describe('POST /api/admin/products/[id]/decline — resolves pending-with-stock'
         findUnique: jest.fn(async () => openRow()),
         update: jest.fn(async ({ data }: any) => ({ ...openRow(), ...data })),
       },
+      // PK-11: this stand-in tx answers the writer's LOCKING read.
+      $queryRaw: jest.fn(async () => [openRow()]),
     };
 
     await declinePOST(mkReq('decline'), { params: { id: '101' } });

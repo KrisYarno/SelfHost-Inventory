@@ -193,6 +193,8 @@ describe('graduate POST /api/staging-items/[id]/graduate — flagship fan-out', 
         create: jest.fn(async ({ data }: any) => ({ id: 1, ...data })),
         update: jest.fn(async ({ data }: any) => ({ id: 1, ...data })),
       },
+      // PK-11: the writer's read is a LOCKING one now; an absent key here.
+      $queryRaw: jest.fn(async () => []),
     };
     mockGraduate.mockImplementation(async (_id: number, _body: any, _actor: any, opts: any) => {
       if (opts?.onRecord) {
