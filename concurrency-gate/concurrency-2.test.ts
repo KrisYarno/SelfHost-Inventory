@@ -175,33 +175,48 @@ type BookOutcome = {
  * ONE booking, exactly the way the stock-in route makes it: the batchId minted
  * OUTSIDE the retry envelope, the core inside the client's own interactive
  * transaction, and an `onRecord` that writes THE REAL exception rows (C3b).
+ *
+ * `duringRecord` (pack amendment C7b.2 — the booking-first variants) fires
+ * INSIDE `onRecord`: after the register writes, before the commit, with every
+ * lock the primitive took still held. It is the only place a test can PIN the
+ * ordering of a cross-actor race rather than hope for it.
  */
-async function book(client: PrismaClient, args: BookingArgs): Promise<BookOutcome> {
+async function book(
+  client: PrismaClient,
+  args: BookingArgs,
+  opts: { duringRecord?: () => Promise<void>; timeoutMs?: number } = {},
+): Promise<BookOutcome> {
   const batchId = changeTracking.newBatchId();
   const contexts: BookingRecordContext[] = [];
   const result = await booking.withBookingRetry(() => {
     contexts.length = 0;
-    return client.$transaction((tx) =>
-      booking.bookSupplyOrderBatch(tx, args, {
-        batchId,
-        onRecord: async (txn, ctx) => {
-          contexts.push(ctx);
-          if (ctx.costDiffers) {
-            await exceptionsWrite.upsertException(txn, {
-              kind: "cost-differs",
-              key: kinds.costDiffersKey(ctx.lineId),
-              subject: { ...ctx.costDiffers },
-            });
-          }
-          if (ctx.pendingWithStock) {
-            await exceptionsWrite.upsertException(txn, {
-              kind: "pending-with-stock",
-              key: kinds.pendingWithStockKey(ctx.productId),
-              subject: { ...ctx.pendingWithStock },
-            });
-          }
-        },
-      }),
+    return client.$transaction(
+      (tx) =>
+        booking.bookSupplyOrderBatch(tx, args, {
+          batchId,
+          onRecord: async (txn, ctx) => {
+            contexts.push(ctx);
+            if (ctx.costDiffers) {
+              await exceptionsWrite.upsertException(txn, {
+                kind: "cost-differs",
+                key: kinds.costDiffersKey(ctx.lineId),
+                subject: { ...ctx.costDiffers },
+              });
+            }
+            if (ctx.pendingWithStock) {
+              await exceptionsWrite.upsertException(txn, {
+                kind: "pending-with-stock",
+                key: kinds.pendingWithStockKey(ctx.productId),
+                subject: { ...ctx.pendingWithStock },
+              });
+            }
+            // LAST, so the held locks are exactly the ones a committed booking
+            // would have held. The default transaction budget is 5s, so a caller
+            // that holds the tx open here raises it explicitly.
+            if (opts.duringRecord) await opts.duringRecord();
+          },
+        }),
+      opts.timeoutMs === undefined ? undefined : { timeout: opts.timeoutMs },
     );
   });
   return { result, contexts, batchId };
@@ -328,6 +343,46 @@ function l2Args(
  *  starting line together. */
 async function warmUp(...clients: PrismaClient[]): Promise<void> {
   await Promise.all(clients.map((client) => client.$queryRawUnsafe("SELECT 1")));
+}
+
+/**
+ * Block until the DATABASE says some session is waiting on a row lock.
+ *
+ * The deterministic half of the booking-first variants (C7b.2). The handler is
+ * fired from inside the booking's `onRecord` and never awaited there, and it
+ * CANNOT finish: the booking holds the `product_locations` range (step 5) and
+ * the product row (step 6b) until it commits. So the handler is either not yet
+ * at its blocking statement or waiting on that lock — and the lock tables are
+ * the server itself saying which. By the time it blocks, its own first statement
+ * has run, so its REPEATABLE READ snapshot predates the booking's commit. That is
+ * precisely the ordering M7B-D1 used to break.
+ *
+ * A poll, not a sleep: a fixed delay would be a guess about scheduling, and the
+ * variants exist to stop guessing.
+ *
+ * TWO SOURCES, OR'd — `performance_schema.data_lock_waits` (one row per
+ * requester/blocker pair) FIRST, because `information_schema.INNODB_TRX` was
+ * MEASURED here to omit a session that `PROCESSLIST` showed executing a blocked
+ * `UPDATE`: a transaction whose very first InnoDB statement is still acquiring
+ * its lock is not always in the transaction list yet.
+ *
+ * THE BUDGET IS DELIBERATELY SMALL. Every millisecond spent here is spent inside
+ * BOTH open transactions, and the handler's is a plain `prisma.$transaction` with
+ * the DEFAULT 5s limit — hold it that long and the engine closes its connection
+ * (P1017) and the route answers 500. Detection takes tens of milliseconds; 2s is
+ * already a generous failure line, not a working budget.
+ */
+async function waitForLockWait(probe: PrismaClient, timeoutMs = 2000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await probe.$queryRawUnsafe<{ waiting: bigint | number }[]>(
+      `SELECT (SELECT COUNT(*) FROM performance_schema.data_lock_waits)
+            + (SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_state = 'LOCK WAIT') AS waiting`,
+    );
+    if (Number(rows[0]?.waiting ?? 0) > 0) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return false;
 }
 
 const asError = (reason: unknown): { code?: string; statusCode?: number } =>
@@ -508,6 +563,109 @@ describe("supply-order cross-actor races — real-DB concurrency", () => {
     }
   });
 
+  test("scenario 3b: the BOOKING commits first, then the decline handler — the reversal is exact and the register row is settled (C7b.2)", async () => {
+    await resetGateFixtures({ lineIds: [LINE_L2], productIds: [P_PENDING] });
+    const bookingClient = openClient();
+    const probe = openClient();
+
+    try {
+      await warmUp(bookingClient, probe);
+
+      // The other ordering, PINNED. Scenario 3 above is a real race and it lands
+      // decline-first every time (the handler reaches its first lock after one
+      // statement; the booking needs five). This variant fires the handler from
+      // inside the booking's `onRecord` — step 9, `product_locations` and the
+      // product row locked — and waits for InnoDB to report it blocked. The
+      // decline's own snapshot is therefore older than the booking's commit.
+      const fired: Promise<RouteAnswer>[] = [];
+      let blocked = false;
+      const outcome = await book(
+        bookingClient,
+        l2Args({ bookingKey: "gate-s3b-a", quantity: 3 }),
+        {
+          timeoutMs: 20_000,
+          duringRecord: async () => {
+            fired.push(callProductRoute(declineRoute, "decline", P_PENDING));
+            blocked = await waitForLockWait(probe);
+          },
+        },
+      );
+
+      expect(fired).toHaveLength(1);
+      expect(blocked).toBe(true);
+      console.log(
+        "[scenario 3b] observed ordering: BOOKING first (the handler was blocked on the booking's locks)",
+      );
+
+      expect(outcome.result.stockedQuantity).toBe(3);
+      expect(outcome.result.remaining).toBe(3);
+
+      // Only now can the decline finish — against units that really are on hand.
+      const declined = await fired[0];
+      expect(declined.status).toBe(200);
+      expect(declined.body).toEqual({ reversed: true, alreadyDeclined: false });
+
+      const product = await probe.product.findUniqueOrThrow({
+        where: { id: P_PENDING },
+        select: { deletedAt: true, quantity: true, costPrice: true },
+      });
+      expect(product.deletedAt).not.toBeNull();
+      // THE EXACTNESS THE LOCKING READ BUYS: declineProduct reverses the quantity
+      // it read FOR UPDATE, so it takes back the 3 units this booking had just
+      // committed — a snapshot read would have seen 0 and reversed nothing.
+      expect(product.quantity).toBe(0);
+      expect(product.costPrice).toBeNull();
+
+      const locations = await probe.product_locations.findMany({
+        where: { productId: P_PENDING },
+        orderBy: { locationId: "asc" },
+        select: { locationId: true, quantity: true },
+      });
+      expect(locations).toEqual([
+        { locationId: 1, quantity: 0 },
+        { locationId: 2, quantity: 0 },
+      ]);
+
+      // The LINE keeps its counter: those units were stocked and then corrected,
+      // which is a different fact from never having been stocked.
+      const line = await probe.stagingItem.findUniqueOrThrow({ where: { id: LINE_L2 } });
+      expect(line.stockedQuantity).toBe(3);
+      expect(line.disposedQuantity).toBe(0);
+      expect(line.status).toBe(StagingItemStatus.LABELING);
+
+      const productLogs = await probe.inventory_logs.findMany({
+        where: { productId: P_PENDING },
+        orderBy: { id: "asc" },
+        select: { logType: true, delta: true, stagingItemId: true },
+      });
+      expect(productLogs).toEqual([
+        { logType: "STOCK_IN", delta: 3, stagingItemId: LINE_L2 },
+        { logType: "CORRECTION", delta: -3, stagingItemId: null },
+      ]);
+
+      // The row the OLD writer could not update (M7B-D1): raised by the booking
+      // AFTER the decline's snapshot, so the decline's locking read sees a row
+      // that its `update`'s plain pre-SELECT could not.
+      const pendingRow = await probe.inventoryException.findUniqueOrThrow({
+        where: { key: kinds.pendingWithStockKey(P_PENDING) },
+      });
+      expect(pendingRow.resolvedAt).not.toBeNull();
+      expect(pendingRow.resolvedBy).toBe(GATE_ADMIN_ID);
+      expect(pendingRow.note ?? "").toContain("resolved: product declined");
+      expect(pendingRow.subject).toEqual({
+        productId: P_PENDING,
+        stagingItemId: LINE_L2,
+        units: 3,
+      });
+
+      await unitsOracle(LINE_L2);
+      await moneyOracle(LINE_L2);
+      await productOracle(P_PENDING, 0);
+    } finally {
+      await Promise.all([bookingClient.$disconnect(), probe.$disconnect()]);
+    }
+  });
+
   test("scenario 4: a booking races the REAL approve handler — the product is approved and no pending-with-stock row is left open", async () => {
     await resetGateFixtures({ lineIds: [LINE_L2], productIds: [P_PENDING] });
     const bookingClient = openClient();
@@ -583,6 +741,107 @@ describe("supply-order cross-actor races — real-DB concurrency", () => {
           units: 3,
         });
       }
+      const openPending = await probe.inventoryException.count({
+        where: { kind: "pending-with-stock", resolvedAt: null },
+      });
+      expect(openPending).toBe(0);
+
+      await unitsOracle(LINE_L2);
+      await moneyOracle(LINE_L2);
+      await productOracle(P_PENDING, 3);
+    } finally {
+      await Promise.all([bookingClient.$disconnect(), probe.$disconnect()]);
+    }
+  });
+
+  test("scenario 4b: the BOOKING commits first, then the approve handler — the raised row is settled, not orphaned (C7b.2)", async () => {
+    await resetGateFixtures({ lineIds: [LINE_L2], productIds: [P_PENDING] });
+    const bookingClient = openClient();
+    const probe = openClient();
+
+    try {
+      await warmUp(bookingClient, probe);
+
+      // The ordering scenario 4 never reaches on its own, and the one that
+      // matters most: this is the exact shape that broke before M7B-D1 was fixed
+      // — the approval's `resolveException` meeting a register row that was
+      // inserted after the approval's transaction took its snapshot.
+      const fired: Promise<RouteAnswer>[] = [];
+      let blocked = false;
+      const outcome = await book(
+        bookingClient,
+        l2Args({ bookingKey: "gate-s4b-a", quantity: 3 }),
+        {
+          timeoutMs: 20_000,
+          duringRecord: async () => {
+            fired.push(callProductRoute(approveRoute, "approve", P_PENDING));
+            blocked = await waitForLockWait(probe);
+          },
+        },
+      );
+
+      expect(fired).toHaveLength(1);
+      expect(blocked).toBe(true);
+      console.log(
+        "[scenario 4b] observed ordering: BOOKING first (the handler was blocked on the booking's product lock)",
+      );
+
+      expect(outcome.result.stockedQuantity).toBe(3);
+      // The booking read the product at step 6b BEFORE the approval committed,
+      // which is why it raised the row at all.
+      expect(outcome.result.approvalStatus).toBe("PENDING_REVIEW");
+
+      const approval = await fired[0];
+      expect(approval.status).toBe(200);
+      expect(approval.body).toEqual({ id: P_PENDING, approvalStatus: "APPROVED" });
+
+      const product = await probe.product.findUniqueOrThrow({
+        where: { id: P_PENDING },
+        select: { approvalStatus: true, deletedAt: true, quantity: true, reviewedBy: true },
+      });
+      expect(product.approvalStatus).toBe("APPROVED");
+      expect(product.deletedAt).toBeNull();
+      expect(product.quantity).toBe(3);
+      expect(product.reviewedBy).toBe(GATE_ADMIN_ID);
+
+      const line = await probe.stagingItem.findUniqueOrThrow({ where: { id: LINE_L2 } });
+      expect(line.stockedQuantity).toBe(3);
+      expect(line.disposedQuantity).toBe(0);
+      expect(line.status).toBe(StagingItemStatus.LABELING);
+
+      const ledger = await probe.inventory_logs.findMany({
+        where: { stagingItemId: LINE_L2 },
+        orderBy: { id: "asc" },
+        select: { logType: true, delta: true, locationId: true, receiptCostCents: true },
+      });
+      expect(ledger).toEqual([
+        { logType: "STOCK_IN", delta: 3, locationId: LOCATION_MAIN, receiptCostCents: null },
+      ]);
+
+      const locations = await probe.product_locations.findMany({
+        where: { productId: P_PENDING },
+        orderBy: { locationId: "asc" },
+        select: { locationId: true, quantity: true },
+      });
+      expect(locations).toEqual([
+        { locationId: 1, quantity: 3 },
+        { locationId: 2, quantity: 0 },
+      ]);
+
+      // RAISED, then SETTLED — the row EXISTS (unlike the approval-first
+      // ordering, where nothing was ever raised) and it is resolved.
+      const pendingRow = await probe.inventoryException.findUniqueOrThrow({
+        where: { key: kinds.pendingWithStockKey(P_PENDING) },
+      });
+      expect(pendingRow.resolvedAt).not.toBeNull();
+      expect(pendingRow.resolvedBy).toBe(GATE_ADMIN_ID);
+      expect(pendingRow.note ?? "").toContain("resolved: product approved");
+      expect(pendingRow.subject).toEqual({
+        productId: P_PENDING,
+        stagingItemId: LINE_L2,
+        units: 3,
+      });
+
       const openPending = await probe.inventoryException.count({
         where: { kind: "pending-with-stock", resolvedAt: null },
       });
