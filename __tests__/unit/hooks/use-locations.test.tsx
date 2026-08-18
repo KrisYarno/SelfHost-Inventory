@@ -102,9 +102,12 @@ describe('ONE PARSER PER KEY (the reason this hook exists)', () => {
     expect(owners).toEqual(['use-locations.ts']);
   });
 
-  it('`use-staging` no longer exports a locations hook, not even a re-export', () => {
-    const source = fs.readFileSync(path.join(process.cwd(), 'hooks', 'use-staging.ts'), 'utf8');
-    expect(source).not.toMatch(/useLocations/);
+  it('the retired `use-staging` module is gone, so its copy cannot come back', () => {
+    // M6 deleted the pre-staging flow outright. The absence of the file is a
+    // STRONGER form of the original assertion (it exports no locations hook,
+    // not even a re-export) and keeps this pin honest rather than throwing
+    // ENOENT at a path that no longer exists.
+    expect(fs.existsSync(path.join(process.cwd(), 'hooks', 'use-staging.ts'))).toBe(false);
   });
 });
 

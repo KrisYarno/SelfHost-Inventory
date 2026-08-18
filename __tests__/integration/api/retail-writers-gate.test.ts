@@ -9,8 +9,10 @@
 // column over, because a single re-coercing writer silently re-materializes the
 // exact "$0.00 on unknown price" lie the migration removes.
 //
-// The persistence writers gated here are the two product routes; the graduation
-// writer (lib/staging/graduate.ts) is gated in __tests__/unit/lib/staging/graduate.test.ts.
+// The persistence writers gated here are the two product routes; the OTHER
+// mapping that mints a product — `resolveSupplyOrderProduct` (seam S10), which
+// replaced the graduation writer in the Receiving/Labeling overhaul — is gated in
+// __tests__/unit/lib/supply-orders/product-resolve.test.ts.
 
 // Keep the REAL apiHandler so ZodError -> 400 and AppError -> its status get
 // mapped centrally; stub the auth guards.

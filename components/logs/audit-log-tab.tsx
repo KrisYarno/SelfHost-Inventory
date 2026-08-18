@@ -78,7 +78,7 @@ const ENTITY_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "ORDER", label: "Order" },
   { value: "COMPANY", label: "Company" },
   { value: "INTEGRATION", label: "Integration" },
-  { value: "STAGING", label: "Pre-staging" },
+  { value: "STAGING", label: "Receiving & Labeling" },
   { value: "SETTINGS", label: "Settings" },
   { value: "SYSTEM", label: "System" },
 ];

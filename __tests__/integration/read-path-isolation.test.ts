@@ -12,10 +12,6 @@
  * on every outward / decision read path — and the SHOW surfaces must NOT apply
  * it (a PENDING_REVIEW product is real stock and stays visible in browse).
  *
- * It also pins the graduate route's concurrency contract end-to-end: two
- * near-simultaneous claims on the same box yield exactly one 200 and one 409,
- * with the AppError(409) surfaced through the REAL apiHandler mapping.
- *
  * Prisma is mocked with jest-mock-extended (no real DB). The real apiHandler is
  * preserved so ZodError -> 400 and AppError -> its status map centrally; only
  * the auth guards / CSRF / rate-limit / audit / email side-effects are stubbed.
@@ -67,17 +63,9 @@ jest.mock('@/lib/email', () => ({
   },
 }));
 
-// graduateStagingItem is unit-tested in __tests__/unit/lib/staging/graduate.test.ts;
-// here we mock it to drive the route's HTTP-level concurrency behavior.
-jest.mock('@/lib/staging/graduate', () => ({
-  graduateStagingItem: jest.fn(),
-}));
-
 import prisma from '@/lib/prisma';
 import { requireApproved, requireAdmin } from '@/lib/api-utils';
 import { validateCSRFToken } from '@/lib/csrf';
-import { graduateStagingItem } from '@/lib/staging/graduate';
-import { AppError } from '@/lib/error-handling';
 
 // Route handlers under test
 import { GET as metricsGET } from '@/app/api/reports/metrics/route';
@@ -87,13 +75,11 @@ import { GET as adminProductsGET } from '@/app/api/admin/products/route';
 import { GET as lowStockGET } from '@/app/api/reports/low-stock/route';
 import { GET as optimizedGET } from '@/app/api/products/optimized/route';
 import { GET as variantsGET } from '@/app/api/inventory/variants/route';
-import { POST as graduatePOST } from '@/app/api/staging-items/[id]/graduate/route';
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 const mockRequireApproved = requireApproved as jest.Mock;
 const mockRequireAdmin = requireAdmin as jest.Mock;
 const mockValidateCSRF = validateCSRFToken as jest.Mock;
-const mockGraduate = graduateStagingItem as jest.Mock;
 
 const APPROVED_USER = {
   id: 7,
@@ -311,85 +297,5 @@ describe('SHOW route: GET /api/inventory/variants does not exclude provisional',
     expect(findWhere).not.toHaveProperty('approvalStatus');
     expect(countWhere).not.toHaveProperty('approvalStatus');
     expect(findWhere).toMatchObject({ deletedAt: null });
-  });
-});
-
-// ===========================================================================
-// Concurrency at the route level: two near-simultaneous graduate POSTs on the
-// SAME box -> exactly one 200 and one 409. The losing claim's AppError(409)
-// (thrown by graduateStagingItem's atomic updateMany count===0 guard) must
-// surface as a 409 through the real apiHandler.
-// ===========================================================================
-
-describe('CONCURRENCY: POST /api/staging-items/[id]/graduate (same item, two callers)', () => {
-  function graduateReq() {
-    return mkReq('http://t/api/staging-items/5/graduate', {
-      method: 'POST',
-      body: JSON.stringify({
-        mode: 'existing',
-        productId: 100,
-        locationId: 1,
-      }),
-    });
-  }
-
-  it('yields exactly one 200 and one 409 when both fire at once', async () => {
-    // Simulate the DB-level race: the first claim wins (count:1 -> result),
-    // the second sees count:0 inside the lib and throws AppError(409).
-    let claimTaken = false;
-    mockGraduate.mockImplementation(async () => {
-      if (claimTaken) {
-        throw new AppError(
-          'Item already graduated or discarded',
-          'CONFLICT',
-          409
-        );
-      }
-      claimTaken = true;
-      return {
-        productId: 100,
-        approvalStatus: 'PENDING_REVIEW',
-        locationId: 1,
-        countedQuantity: 5,
-        bookedQuantity: 5,
-      };
-    });
-
-    // Fire both near-simultaneously and await together.
-    const [r1, r2] = await Promise.all([
-      graduatePOST(graduateReq(), { params: { id: '5' } }),
-      graduatePOST(graduateReq(), { params: { id: '5' } }),
-    ]);
-
-    const statuses = [r1.status, r2.status].sort();
-    expect(statuses).toEqual([200, 409]);
-
-    // The lib (the atomic claim) was invoked once per caller.
-    expect(mockGraduate).toHaveBeenCalledTimes(2);
-
-    // The 409 body is the conflict message, surfaced via apiHandler's AppError map.
-    const conflict = r1.status === 409 ? r1 : r2;
-    const body = await conflict.json();
-    expect(body.error).toMatch(/already graduated/i);
-  });
-
-  it('surfaces the loser as 409 regardless of which Promise settles first', async () => {
-    // Deterministic variant: first call resolves, every subsequent call 409s.
-    mockGraduate
-      .mockResolvedValueOnce({
-        productId: 100,
-        approvalStatus: 'PENDING_REVIEW',
-        locationId: 1,
-        countedQuantity: 5,
-      })
-      .mockRejectedValue(
-        new AppError('Item already graduated or discarded', 'CONFLICT', 409)
-      );
-
-    const winner = await graduatePOST(graduateReq(), { params: { id: '5' } });
-    const loser = await graduatePOST(graduateReq(), { params: { id: '5' } });
-
-    expect(winner.status).toBe(200);
-    expect(loser.status).toBe(409);
   });
 });

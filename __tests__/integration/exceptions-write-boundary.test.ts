@@ -82,10 +82,14 @@ const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx']);
  *
  * Entries are ROUTE files on purpose: the boundary is stated at the HTTP verb,
  * so a caller that is not a route (a shared lib, a server component) cannot be
- * added without consciously re-opening this rule. W1-3b adds the graduate route
- * plus admin/products/[id]/approve + decline (pending-with-stock resolution and
- * the non-admin cost-differs row); W3 adds its admin recompute POST. Each lands
- * with its own entry, in its own wave.
+ * added without consciously re-opening this rule. Each lands with its own entry,
+ * in its own wave.
+ *
+ * M6 (Receiving/Labeling overhaul) leaves SEVEN: the two admin product acts that
+ * settle pending-with-stock, and the five supply-order routes that raise and
+ * settle the lane's rows. The W1 count and graduate entries went with their
+ * routes — the register's births moved to add-line / verify / stock-in, which is
+ * why the allow-list shrank without the boundary widening.
  */
 interface WriterCaller {
   path: string;
@@ -93,22 +97,6 @@ interface WriterCaller {
 }
 
 const ALLOWED_WRITER_CALLERS: WriterCaller[] = [
-  {
-    path: 'app/api/staging-items/[id]/count/route.ts',
-    reason:
-      'W1-2c: the count endpoint is where a receiving discrepancy becomes known, so it ' +
-      'raises / auto-resolves recv-discrepancy in the same transaction as the count write',
-  },
-  {
-    path: 'app/api/staging-items/[id]/graduate/route.ts',
-    reason:
-      'W1-3b: graduation is where both W1 register rows are BORN — cost-differs (a ' +
-      'non-admin received goods at a cost that disagrees with the product, and may not ' +
-      'edit the price) and pending-with-stock (a non-admin minted a product, so real ' +
-      'units now sit against an unapproved catalog entry). Both are written through the ' +
-      "graduation's own transaction via its onRecord hook, so a rolled-back graduation " +
-      'can never strand one',
-  },
   {
     path: 'app/api/admin/products/[id]/approve/route.ts',
     reason:
@@ -312,9 +300,12 @@ describe('exceptions write boundary — no GET handler writes', () => {
     ).toBe('');
   });
 
-  it('the segment slicer is not vacuous — it finds the count route POST', () => {
-    const countRoute = path.join(REPO_ROOT, 'app/api/staging-items/[id]/count/route.ts');
-    const segments = handlerSegments(fs.readFileSync(countRoute, 'utf8'));
+  it('the segment slicer is not vacuous — it finds the verify route POST', () => {
+    const verifyRoute = path.join(
+      REPO_ROOT,
+      'app/api/inbound-shipments/[id]/lines/[lineId]/verify/route.ts',
+    );
+    const segments = handlerSegments(fs.readFileSync(verifyRoute, 'utf8'));
     expect(segments.has('POST')).toBe(true);
     expect(/\b(upsertException|resolveException)\s*\(/.test(segments.get('POST')!)).toBe(true);
   });

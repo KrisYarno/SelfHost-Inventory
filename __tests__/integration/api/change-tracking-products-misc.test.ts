@@ -1,7 +1,7 @@
 // @jest-environment node
 /**
  * Task 7 characterization tests — products-misc lane (D8 held-stock snapshots +
- * thresholds bulk PRODUCT_UPDATE + staging PATCH STAGING_UPDATE).
+ * thresholds bulk PRODUCT_UPDATE).
  *
  * Mirrors the Phase A change-tracking-users.test.ts pattern: a mocked Prisma whose
  * $transaction hands the handler a single shared `tx` object (exposed as db.__tx).
@@ -11,9 +11,9 @@
  *   - D8 heldStock captures nonzero product_locations rows on delete AND restore,
  *   - thresholds converts the array-form tx to callback form (record + writes
  *     share the tx client), fetches before-images, builds R-D14 rows, drops
- *     no-op rows (ER-B9), and degrades >500 rows to rowCount + rowsOmitted,
- *   - staging PATCH diffs over EXACTLY the provided fields (scalar after-values,
- *     not connect objects) and writes no event on an empty diff.
+ *     no-op rows (ER-B9), and degrades >500 rows to rowCount + rowsOmitted.
+ *
+ * The staging PATCH half went with the route (Receiving/Labeling overhaul, M6).
  */
 import { NextRequest } from "next/server";
 
@@ -63,10 +63,6 @@ jest.mock("@/lib/inventory", () => ({
   __esModule: true,
   OptimisticLockError: jest.requireActual("@/lib/inventory").OptimisticLockError,
   getCurrentQuantity: jest.fn(async () => 0),
-  // FD6-1: the staging PATCH now rides the house deadlock retry. Here it just
-  // runs its fn once — the retry's own behaviour is owned by
-  // __tests__/integration/api/staging-deadlock-retry.test.ts.
-  withDeadlockRetry: (fn: () => Promise<unknown>) => fn(),
 }));
 
 // One tx object per run, shared by every mutation and the audit write so the
@@ -81,12 +77,6 @@ jest.mock("@/lib/prisma", () => {
       findMany: jest.fn(async () => []),
       upsert: jest.fn(async () => ({})),
     },
-    stagingItem: {
-      findUnique: jest.fn(),
-      update: jest.fn(),
-      // W1S-1: a state-bearing PATCH writes through a conditional claim.
-      updateMany: jest.fn(async () => ({ count: 1 })),
-    },
     auditLog: { create: jest.fn(async () => ({ id: 1 })) },
   };
   const db = {
@@ -100,7 +90,6 @@ jest.mock("@/lib/prisma", () => {
 import { DELETE as productDELETE } from "@/app/api/products/[id]/route";
 import { POST as restorePOST } from "@/app/api/admin/products/[id]/restore/route";
 import { PATCH as thresholdsPATCH } from "@/app/api/admin/products/thresholds/route";
-import { PATCH as stagingPATCH } from "@/app/api/staging-items/[id]/route";
 import { requireApproved, requireAdmin } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 
@@ -369,114 +358,5 @@ describe("PATCH thresholds — per-product PRODUCT_UPDATE events (R-L6)", () => 
     expect(resp.status).toBe(200);
     expect(tx.product.update).toHaveBeenCalledTimes(1); // write still applied
     expect(tx.auditLog.create).not.toHaveBeenCalled(); // but no event
-  });
-});
-
-// ---------------------------------------------------------------------------
-// PATCH /api/staging-items/[id] — STAGING_UPDATE (provided-fields-only diff)
-// ---------------------------------------------------------------------------
-describe("PATCH staging-items/[id] — STAGING_UPDATE", () => {
-  it("diffs over EXACTLY the provided fields on the same tx as the update", async () => {
-    tx.stagingItem.findUnique.mockResolvedValue({
-      id: 5,
-      description: "Old",
-      status: "RECEIVED",
-      vendor: null,
-      countedQuantity: null,
-      expectedQuantity: null,
-      reference: null,
-      notes: null,
-      locationId: 1,
-      resolvedProductId: null,
-      shipmentId: null,
-    });
-    tx.stagingItem.updateMany.mockResolvedValue({ count: 1 });
-
-    // W1-2b: countedQuantity left the PATCH surface (pack REV-3 T2); the
-    // provided-fields-only diff is pinned on expectedQuantity instead.
-    const resp = await stagingPATCH(
-      mkReq("http://t/api/staging-items/5", "PATCH", { expectedQuantity: 12, vendor: "Acme" }),
-      { params: { id: "5" } } as any
-    );
-
-    expect(resp.status).toBe(200);
-    expect(db.$transaction).toHaveBeenCalledTimes(1);
-    // W1S-1: expectedQuantity is state-bearing, so the write is the conditional
-    // claim rather than an unconditional `update`.
-    expect(tx.stagingItem.updateMany).toHaveBeenCalledTimes(1);
-    expect(tx.auditLog.create).toHaveBeenCalledTimes(1);
-
-    const [row] = auditRows();
-    expect(row.actionType).toBe("STAGING_UPDATE");
-    expect(row.entityType).toBe("STAGING");
-    expect(row.entityId).toBe("5");
-    // ONLY the two provided fields appear — nothing else diffed.
-    expect(row.details.changes).toEqual({
-      expectedQuantity: { from: null, to: 12 },
-      vendor: { from: null, to: "Acme" },
-    });
-  });
-
-  it("records SCALAR after-values for relation fields, and writes scalar FKs", async () => {
-    tx.stagingItem.findUnique.mockResolvedValue({
-      id: 5,
-      status: "RECEIVED",
-      locationId: 1,
-      resolvedProductId: null,
-      shipmentId: null,
-    });
-    tx.stagingItem.updateMany.mockResolvedValue({ count: 1 });
-
-    const resp = await stagingPATCH(
-      mkReq("http://t/api/staging-items/5", "PATCH", { locationId: 2, resolvedProductId: 88 }),
-      { params: { id: "5" } } as any
-    );
-
-    expect(resp.status).toBe(200);
-    const [row] = auditRows();
-    expect(row.details.changes).toEqual({
-      locationId: { from: 1, to: 2 },
-      resolvedProductId: { from: null, to: 88 },
-    });
-    // W1S-1: both are state-bearing, so the write carries `status: RECEIVED` in
-    // its WHERE — which means scalar FK columns, not relation connects
-    // (`updateMany` takes no nested writes). The DIFF is unchanged: it always
-    // reported scalars.
-    const claim = tx.stagingItem.updateMany.mock.calls[0][0];
-    expect(claim.where).toEqual({ id: 5, status: "RECEIVED" });
-    expect(claim.data).toEqual({ locationId: 2, resolvedProductId: 88 });
-  });
-
-  it("ER-B9: providing the same value => NO event (update still applied)", async () => {
-    tx.stagingItem.findUnique.mockResolvedValue({
-      id: 5,
-      status: "RECEIVED",
-      expectedQuantity: 12,
-      shipmentId: null,
-    });
-    tx.stagingItem.updateMany.mockResolvedValue({ count: 1 });
-
-    const resp = await stagingPATCH(
-      mkReq("http://t/api/staging-items/5", "PATCH", { expectedQuantity: 12 }),
-      { params: { id: "5" } } as any
-    );
-
-    expect(resp.status).toBe(200);
-    expect(tx.stagingItem.updateMany).toHaveBeenCalledTimes(1);
-    expect(tx.auditLog.create).not.toHaveBeenCalled();
-  });
-
-  it("404 when the item is missing — no update, no event", async () => {
-    tx.stagingItem.findUnique.mockResolvedValue(null);
-
-    const resp = await stagingPATCH(
-      mkReq("http://t/api/staging-items/999", "PATCH", { expectedQuantity: 1 }),
-      { params: { id: "999" } } as any
-    );
-
-    expect(resp.status).toBe(404);
-    expect(tx.stagingItem.update).not.toHaveBeenCalled();
-    expect(tx.stagingItem.updateMany).not.toHaveBeenCalled();
-    expect(tx.auditLog.create).not.toHaveBeenCalled();
   });
 });

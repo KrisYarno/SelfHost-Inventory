@@ -1,4 +1,3 @@
-import prisma from '@/lib/prisma';
 import type { InboundShipmentStatus, Prisma, StagingItemStatus } from '@prisma/client';
 import {
   lineDiscrepancy,
@@ -9,33 +8,22 @@ import {
 import { assertLegacyLine } from '@/lib/staging/legacy-line';
 
 /**
- * Read helpers for the receiving header (contract pack REV-2 T4, W1-2a).
+ * The LEGACY (W1) receiving shape and its PURE mappers (contract pack REV-2 T4,
+ * W1-2a; trimmed by the Receiving/Labeling overhaul's M6).
  *
- * The list and the detail hydrate the SAME header shape (`ShipmentSummary`) so
- * the receiving pages (W1-4b, seam S10) render one contract; the detail simply
- * adds `items`. Every quantity on the header is COMPUTED ON READ from the
- * linked staging rows — see lib/shipments/rollup.ts for the three rules.
+ * The runtime entry points that used to live here — `listInboundShipments` and
+ * `getInboundShipmentDetail` — are gone, and with them this module's Prisma
+ * singleton: `lib/supply-orders/queries.ts` is now THE ONE owner of every
+ * receiving read (seams S16/S17), and it renders a legacy header by handing its
+ * rows to the mappers below. What survives is therefore SHAPE, not I/O — the
+ * types, the two folds, the line read the legacy detail issues, and the page
+ * bound the polymorphic list must agree with.
  *
- * `shipmentId` is a SOFT ref (cross-aggregate, no FK, no Prisma relation — T1),
- * so the lines are fetched with an explicit second query rather than an
- * `include`. That is the deliberate cost of the soft-ref rule, and it keeps the
- * list at two queries regardless of page size — bounded by
- * `SHIPMENT_LIST_LIMIT`, so "regardless of page size" is now a promise about a
- * page rather than about the whole table (QA-6).
+ * Every quantity on the header is still COMPUTED ON READ from the linked
+ * staging rows — see lib/shipments/rollup.ts for the three rules. `shipmentId`
+ * remains a SOFT ref (cross-aggregate, no FK, no Prisma relation — T1), which
+ * is why the lines arrive as a separate argument rather than an `include`.
  */
-
-const shipmentInclude = {
-  creator: { select: { id: true, username: true } },
-} as const;
-
-/** The columns the rollup + the close guard read off each linked line. */
-const lineSelect = {
-  id: true,
-  status: true,
-  expectedQuantity: true,
-  countedQuantity: true,
-  shipmentId: true,
-} as const;
 
 export type ShipmentLine = {
   id: number;
@@ -139,50 +127,15 @@ export function toShipmentSummary(
 /**
  * The most headers one list request will ever return (QA-6).
  *
- * The list was unbounded: `findMany` with no `take`, followed by a second query
- * with `shipmentId IN (every id it found)`. That is fine at five shipments and
- * an unpayable bill at five thousand — both queries and the JSON grow forever,
- * and receiving is precisely the surface that accumulates rows for years.
- *
  * A BOUND, not a cursor: the newest 100 headers are what a receiving screen is
  * for, and cursor pagination is registered for W3 if growth ever demands it
- * rather than invented here. The page is the newest-first slice the list already
- * renders, so nothing about what an operator sees changes today.
+ * rather than invented here.
+ *
+ * RETAINED after M6 deleted the legacy list it used to bound, because the
+ * polymorphic list reads the SAME table: `SUPPLY_ORDER_LIST_LIMIT` is pinned
+ * equal to this number, so one dataset cannot end up with two page sizes.
  */
 export const SHIPMENT_LIST_LIMIT = 100;
-
-/**
- * List shipments (optionally filtered by status), newest first, each with its
- * linked-line counts and computed discrepancy rollup. Two queries: the newest
- * page of headers, then every line belonging to THAT PAGE's shipments.
- */
-export async function listInboundShipments(
-  status?: InboundShipmentStatus,
-): Promise<ShipmentSummary[]> {
-  const shipments = await prisma.inboundShipment.findMany({
-    where: status ? { status } : {},
-    include: shipmentInclude,
-    orderBy: { createdAt: 'desc' },
-    take: SHIPMENT_LIST_LIMIT,
-  });
-
-  if (shipments.length === 0) return [];
-
-  const lines = (await prisma.stagingItem.findMany({
-    where: { shipmentId: { in: shipments.map((s) => s.id) } },
-    select: lineSelect,
-  })) as ShipmentLine[];
-
-  const byShipment = new Map<string, ShipmentLine[]>();
-  for (const line of lines) {
-    if (line.shipmentId === null) continue;
-    const bucket = byShipment.get(line.shipmentId);
-    if (bucket) bucket.push(line);
-    else byShipment.set(line.shipmentId, [line]);
-  }
-
-  return shipments.map((s) => toShipmentSummary(s, byShipment.get(s.id) ?? []));
-}
 
 /** The line columns the legacy DETAIL mapper reads (Prisma rows satisfy it). */
 export type ShipmentDetailRow = {
@@ -254,23 +207,4 @@ export function toShipmentDetail(
       };
     }),
   };
-}
-
-/**
- * A single shipment with its linked staging lines, per-line discrepancy flags,
- * and the same header rollup the list carries. `null` when the id is unknown.
- */
-export async function getInboundShipmentDetail(id: string): Promise<ShipmentDetail | null> {
-  const shipment = await prisma.inboundShipment.findUnique({
-    where: { id },
-    include: shipmentInclude,
-  });
-  if (!shipment) return null;
-
-  const items = await prisma.stagingItem.findMany({
-    where: { shipmentId: id },
-    ...shipmentDetailLineQuery,
-  });
-
-  return toShipmentDetail(shipment, items);
 }

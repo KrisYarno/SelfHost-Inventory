@@ -84,10 +84,6 @@ jest.mock("@/lib/email", () => ({
   },
 }));
 
-jest.mock("@/lib/staging/graduate", () => ({
-  graduateStagingItem: jest.fn(),
-}));
-
 // --- EXTENSIONS beyond the read-path-isolation set -------------------------
 
 // jest.setup.js mocks "next-auth" as { getServerSession } — NOT callable. The
@@ -290,7 +286,7 @@ const PHASE_PENDING_EXEMPT: Exemption[] = [
   //     stock-write transaction; stock-in absorbed here per the Task 7 seam, so
   //     its former phase-B entry is removed too; transfers is GET-only read-switch). ---
   // --- Task 9: products group — MIGRATED (create/update/delete/price-source/approve/decline now recordChange) ---
-  // --- Task 10: staging/scratchpad group — MIGRATED (create/discard/graduate + scratchpad create/patch/delete now recordChange; graduation groups STAGING_GRADUATE + PRODUCT_CREATE under one batchId) ---
+  // --- Task 10: staging/scratchpad group — MIGRATED (scratchpad create/patch/delete recordChange; the staging create/discard/graduate routes were RETIRED by the Receiving/Labeling overhaul, and route discovery drops them on its own) ---
   // --- Task 11: users group — MIGRATED (all 6 admin/users routes now recordChange) ---
   // --- Task 12: orders group — MIGRATED (fulfill/unfulfill now recordChange) ---
   // --- Phase B: coverage closure (not in any A2 task group) ---
