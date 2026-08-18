@@ -209,7 +209,7 @@ export interface DiscardLineResult {
 }
 
 /** M3b's verify response: the core's result plus the refreshed line view. */
-export type VerifyLineResult = VerifyResult & { line: SupplyOrderLineView };
+export type VerifyLineResult = VerifyResult & { line: SupplyOrderLineView | null }; // the route re-reads the line and may return null (same idiom as stock-in / resolve)
 
 /**
  * M3b's stock-in response: the booking primitive's result PLUS the refreshed
