@@ -22,6 +22,38 @@ export function useAnalyticsRebuildState() {
   });
 }
 
+// --- supply-order analytics (the hub's "Supply orders" card) ---------------
+
+// The shape is the producer's (lib/analytics/supply-orders.ts, seam S18) — imported
+// as a TYPE so the client never pulls that module's Prisma runtime. `valueCents` is
+// null EXACTLY when `contributingRows === 0`, and the card renders that as "—" plus
+// the reason; a row contributing a known zero renders $0.00.
+export type {
+  SupplyOrderAnalyticsMetric,
+  SupplyOrdersAnalytics,
+} from "@/lib/analytics/supply-orders";
+import type { SupplyOrdersAnalytics } from "@/lib/analytics/supply-orders";
+
+// Keyed on BOTH ends of the window: the two dates are the whole query, so a card
+// that changed only its `to` and reused a cached `from` would report a window
+// nobody asked for.
+export function useSupplyOrdersAnalytics({ from, to }: { from: string; to: string }) {
+  return useQuery<SupplyOrdersAnalytics>({
+    queryKey: ["analytics-supply-orders", from, to],
+    queryFn: async ({ signal }) => {
+      const params = new URLSearchParams({ from, to });
+      const res = await fetch(`/api/analytics/supply-orders?${params.toString()}`, { signal });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          (json as { error?: string })?.error ?? "Failed to load the supply-order analytics"
+        );
+      }
+      return json as SupplyOrdersAnalytics;
+    },
+  });
+}
+
 // --- per-product analytics (product page) ----------------------------------
 
 // Shape of GET /api/analytics/product/[id]. revenue is serialized to a string per-row

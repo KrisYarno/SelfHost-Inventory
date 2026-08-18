@@ -268,8 +268,44 @@ export function AnalyticsHub() {
           Ask the Assistant
         </Link>
       </div>
+      {/* THE WINDOW, HOISTED (contract pack C4b.5). The two date inputs used to
+          live inside the Sales-only controls row, which left the Operations view
+          with no way to move a window its "Supply orders" card depends on. They
+          are shared now, and each view says what the window applies to — the
+          operations TABLE keeps its own fixed 30/90-day basis. */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <Input
+            type="date"
+            value={from}
+            onChange={(e) => {
+              setFrom(e.target.value);
+              setPage(1);
+            }}
+            className="w-full sm:w-40"
+            aria-label="From date"
+          />
+          <span className="text-muted-foreground">to</span>
+          <Input
+            type="date"
+            value={to}
+            onChange={(e) => {
+              setTo(e.target.value);
+              setPage(1);
+            }}
+            className="w-full sm:w-40"
+            aria-label="To date"
+          />
+        </div>
+        <p className="text-body-sm text-muted-foreground">
+          {view === "operations"
+            ? "Supply-order window. The operations table below uses fixed 30- and 90-day windows."
+            : "Sales window."}
+        </p>
+      </div>
+
       {view === "operations" ? (
-        <OperationsView />
+        <OperationsView from={from} to={to} />
       ) : (
         <>
       {/* Controls */}
@@ -361,29 +397,6 @@ export function AnalyticsHub() {
             </Button>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Input
-              type="date"
-              value={from}
-              onChange={(e) => {
-                setFrom(e.target.value);
-                setPage(1);
-              }}
-              className="w-full sm:w-40"
-              aria-label="From date"
-            />
-            <span className="text-muted-foreground">to</span>
-            <Input
-              type="date"
-              value={to}
-              onChange={(e) => {
-                setTo(e.target.value);
-                setPage(1);
-              }}
-              className="w-full sm:w-40"
-              aria-label="To date"
-            />
-          </div>
         </div>
 
         <Button

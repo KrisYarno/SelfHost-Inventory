@@ -89,6 +89,16 @@ describe("ReceivingRedirectPrompt", () => {
     );
   });
 
+  it("speaks the supply-order vocabulary (contract pack C4b.3)", () => {
+    render(<ReceivingRedirectPrompt active />);
+
+    expect(
+      screen.getByText(
+        /Entering this as a supply order records what you ordered, what arrived, and each labeled stock-in batch — an adjustment records only the number\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("renders NOTHING while the delta is not positive", () => {
     const { container } = render(<ReceivingRedirectPrompt active={false} />);
     expect(container).toBeEmptyDOMElement();

@@ -9,6 +9,7 @@ import type {
   ValuationSummary,
 } from "@/lib/analytics/queries";
 import { OperationsTiles } from "@/components/analytics/operations-tiles";
+import { SupplyOrdersCard } from "@/components/analytics/supply-orders-card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
@@ -147,12 +148,28 @@ function SaleDataNotice({ saleStart }: { saleStart: string | null }) {
   );
 }
 
-export function OperationsView() {
+export interface OperationsViewProps {
+  /** The hub's shared window (`YYYY-MM-DD`) — the SUPPLY-ORDER card's basis. */
+  from: string;
+  to: string;
+}
+
+/**
+ * The operations table keeps its own FIXED 30/90-day windows (they are what its
+ * velocity and shrinkage columns mean) and says so; the hub's date window drives
+ * the supply-order card, which is why that card takes `from`/`to` as props and
+ * is mounted INDEPENDENTLY of this read's rows-empty branch (C4b.5). A shop with
+ * no products still spent money on orders, and hiding the card behind "no
+ * products yet" would silently withhold that.
+ */
+export function OperationsView({ from, to }: OperationsViewProps) {
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["analytics-operations"],
     queryFn: ({ signal }) => fetchOperations(signal),
   });
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const rows = data?.rows ?? [];
+  const hasRows = !isLoading && !isError && !!data && rows.length > 0;
 
   const toggle = (id: number) =>
     setExpanded((prev) => {
@@ -196,7 +213,15 @@ export function OperationsView() {
         <>
           <SaleDataNotice saleStart={data.dataStarts.sale} />
           <OperationsTiles data={data} />
+        </>
+      )}
 
+      {/* The supply orders card belongs to the WINDOW, not to this read: it is
+          rendered whether or not the operations table found rows. */}
+      <SupplyOrdersCard from={from} to={to} />
+
+      {hasRows && data && (
+        <>
           {/* md+: the per-product decision table with an expandable detail row. */}
           <div className="hidden md:block">
             <Table>

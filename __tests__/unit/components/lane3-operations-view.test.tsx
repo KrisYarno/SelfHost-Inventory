@@ -67,8 +67,39 @@ function payload(over: Partial<any> = {}) {
   };
 }
 
+// The view now mounts the "Supply orders" card (M4b/C4b.5), which reads its own
+// endpoint — so the stub answers PER URL rather than handing every caller the
+// operations payload.
 function mockFetch(body: any, ok = true) {
-  global.fetch = jest.fn().mockResolvedValue({ ok, json: async () => body }) as unknown as typeof fetch;
+  global.fetch = jest.fn(async (url: RequestInfo | URL) => {
+    if (String(url).includes("/api/analytics/supply-orders")) {
+      return { ok: true, status: 200, json: async () => supplyOrdersPayload() } as unknown as Response;
+    }
+    return { ok, status: ok ? 200 : 500, json: async () => body } as unknown as Response;
+  }) as unknown as typeof fetch;
+}
+
+function supplyOrdersMetric() {
+  return {
+    valueCents: 0,
+    definition: "definition",
+    coverage: "coverage",
+    contributingRows: 1,
+    reason: null,
+  };
+}
+
+function supplyOrdersPayload() {
+  return {
+    window: { from: "2026-08-01", to: "2026-08-31" },
+    orders: { count: 0, byStatus: {} },
+    metrics: {
+      fees: supplyOrdersMetric(),
+      supplierShortageCost: supplyOrdersMetric(),
+      labelingLossCost: supplyOrdersMetric(),
+      surplusValue: supplyOrdersMetric(),
+    },
+  };
 }
 
 afterEach(() => jest.restoreAllMocks());
@@ -89,7 +120,7 @@ describe("ViewToggle", () => {
 describe("OperationsView", () => {
   test("renders the persistent global scope label", async () => {
     mockFetch(payload());
-    renderWithClient(<OperationsView />);
+    renderWithClient(<OperationsView from="2026-08-01" to="2026-08-31" />);
     expect(await screen.findByText("Global inventory — all companies")).toBeInTheDocument();
   });
 
@@ -100,7 +131,7 @@ describe("OperationsView", () => {
         dataStarts: { sale: null, outbound: null, adjustment: null, receipt: null, snapshot: null },
       })
     );
-    renderWithClient(<OperationsView />);
+    renderWithClient(<OperationsView from="2026-08-01" to="2026-08-31" />);
     expect(await screen.findByText(/No fulfilled-order history yet/i)).toBeInTheDocument();
     expect(
       screen.getByText(/Metrics appear as fulfilled orders and stock movements record/i)
@@ -109,7 +140,7 @@ describe("OperationsView", () => {
 
   test("renders the tiles + decision table with data", async () => {
     mockFetch(payload());
-    renderWithClient(<OperationsView />);
+    renderWithClient(<OperationsView from="2026-08-01" to="2026-08-31" />);
     expect(await screen.findByText("Inventory value")).toBeInTheDocument();
     expect(screen.getByText("Blended turns (90 days)")).toBeInTheDocument();
     // product name renders in both table + mobile list under jsdom.
@@ -118,7 +149,7 @@ describe("OperationsView", () => {
 
   test("turns cell carries the D-L6 coverage tooltip when turns are unavailable", async () => {
     mockFetch(payload({ rows: [makeRow({ turns: null, turnsCoverage: { days: 10, windowDays: 90 } })] }));
-    renderWithClient(<OperationsView />);
+    renderWithClient(<OperationsView from="2026-08-01" to="2026-08-31" />);
     await screen.findByText("Inventory value");
     expect(
       document.querySelector('[title="Turns unavailable — stock snapshots cover 10 of 90 days"]')
@@ -127,7 +158,7 @@ describe("OperationsView", () => {
 
   test("Units out header carries the un-fulfillment honesty tooltip", async () => {
     mockFetch(payload());
-    renderWithClient(<OperationsView />);
+    renderWithClient(<OperationsView from="2026-08-01" to="2026-08-31" />);
     await screen.findByText("Inventory value");
     expect(
       document.querySelector('[title="Later un-fulfillments are not subtracted"]')
@@ -136,7 +167,7 @@ describe("OperationsView", () => {
 
   test("expanding a row reveals the detail grid (aging / receipt / corrections)", async () => {
     mockFetch(payload());
-    renderWithClient(<OperationsView />);
+    renderWithClient(<OperationsView from="2026-08-01" to="2026-08-31" />);
     await screen.findByText("Inventory value");
     // The first expander button (desktop table row).
     const expander = screen.getAllByRole("button", { name: /Expand details for Widget Alpha/i })[0];
@@ -149,8 +180,34 @@ describe("OperationsView", () => {
 
   test("error state shows a Retry affordance", async () => {
     mockFetch({}, false);
-    renderWithClient(<OperationsView />);
+    renderWithClient(<OperationsView from="2026-08-01" to="2026-08-31" />);
     expect(await screen.findByText(/Could not load operations analytics/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+  });
+});
+
+// M4b (contract pack C4b.5): the "Supply orders" card belongs to the hub's date
+// window, not to the operations read — so it is mounted whether or not the
+// per-product table found rows. A shop with no products still paid fees.
+describe("the Supply orders card", () => {
+  test("renders after the tiles when rows exist", async () => {
+    mockFetch(payload());
+    renderWithClient(<OperationsView from="2026-08-01" to="2026-08-31" />);
+    expect(await screen.findByTestId("supply-orders-tile-fees")).toBeInTheDocument();
+    expect(await screen.findByText("Inventory value")).toBeInTheDocument();
+  });
+
+  test("still renders when the operations read found NO rows", async () => {
+    mockFetch(payload({ rows: [] }));
+    renderWithClient(<OperationsView from="2026-08-01" to="2026-08-31" />);
+    expect(await screen.findByText("No products yet.")).toBeInTheDocument();
+    expect(await screen.findByTestId("supply-orders-tile-fees")).toBeInTheDocument();
+  });
+
+  test("still renders when the operations read FAILED", async () => {
+    mockFetch({}, false);
+    renderWithClient(<OperationsView from="2026-08-01" to="2026-08-31" />);
+    expect(await screen.findByText(/Could not load operations analytics/)).toBeInTheDocument();
+    expect(await screen.findByTestId("supply-orders-tile-fees")).toBeInTheDocument();
   });
 });

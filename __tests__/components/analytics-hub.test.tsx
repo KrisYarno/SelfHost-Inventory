@@ -235,3 +235,72 @@ test("mobile cards expose the four metric labels", async () => {
   expect(card.getByText("Orders")).toBeInTheDocument();
   expect(card.getByText("Revenue")).toBeInTheDocument();
 });
+
+// ---------------------------------------------------------------------------
+// The hoisted window (M4b / contract pack C4b.5)
+// ---------------------------------------------------------------------------
+
+test("the date window stays visible in the OPERATIONS view, labeled as the supply-order window", async () => {
+  mockHook.mockReturnValue(hookState({ data: rows }));
+  // The operations read and the supply-order card each answer for themselves.
+  global.fetch = jest.fn(async (url: RequestInfo | URL) => {
+    if (String(url).includes("/api/analytics/supply-orders")) {
+      const metric = {
+        valueCents: 0,
+        definition: "definition",
+        coverage: "coverage",
+        contributingRows: 1,
+        reason: null,
+      };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          window: { from: "2026-08-01", to: "2026-08-31" },
+          orders: { count: 0, byStatus: {} },
+          metrics: {
+            fees: metric,
+            supplierShortageCost: metric,
+            labelingLossCost: metric,
+            surplusValue: metric,
+          },
+        }),
+      } as unknown as Response;
+    }
+    if (String(url).includes("/api/analytics/operations")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          scope: "global",
+          windowDays: 90,
+          rows: [],
+          dataStarts: { sale: null, outbound: null, adjustment: null, receipt: null, snapshot: null },
+          shrinkage90: null,
+          valuation: null,
+        }),
+      } as unknown as Response;
+    }
+    return { ok: true, status: 200, json: async () => ({ unattributed: 0 }) } as unknown as Response;
+  }) as unknown as typeof fetch;
+
+  await act(async () => {
+    renderHub();
+  });
+
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /Inventory operations/i }));
+  });
+
+  expect(screen.getByLabelText("From date")).toBeInTheDocument();
+  expect(screen.getByLabelText("To date")).toBeInTheDocument();
+  expect(
+    screen.getByText(
+      /Supply-order window\. The operations table below uses fixed 30- and 90-day windows\./
+    )
+  ).toBeInTheDocument();
+  // ...and the card is mounted even though the operations read found NO rows.
+  await waitFor(() =>
+    expect(screen.getByTestId("supply-orders-tile-fees")).toBeInTheDocument()
+  );
+});

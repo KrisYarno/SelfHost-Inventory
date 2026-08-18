@@ -2,19 +2,21 @@
 
 import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
-import { ShipmentDetail } from "@/components/receiving/shipment-detail";
+import { ReceivingDetailScreen } from "@/components/receiving/receiving-detail-screen";
 
 interface ReceivingDetailPageProps {
   params: { id: string };
 }
 
 /**
- * /receiving/[id] — one receipt: its lines, their counts, their costs, and the
- * lifecycle actions the T4 state matrix allows from here.
+ * /receiving/[id] — one order: what was ordered, what arrived, what was labeled,
+ * and what is still being followed up. A legacy W1 receipt renders here too, as
+ * read-only history.
  *
- * A route rather than an in-page panel so a receipt is LINKABLE: the list, the
- * exceptions register (W3) and a message to whoever counted can all point at
- * the same URL.
+ * A route rather than an in-page panel so an order is LINKABLE: the orders list,
+ * the labeling queue and a message to whoever counted can all point at the same
+ * URL. The page itself is deliberately thin — the read, the `model` fork and
+ * every control live in `ReceivingDetailScreen` (contract pack C4b.1).
  */
 export default function ReceivingDetailPage({ params }: ReceivingDetailPageProps) {
   return (
@@ -25,10 +27,10 @@ export default function ReceivingDetailPage({ params }: ReceivingDetailPageProps
           className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
         >
           <ChevronLeft className="h-4 w-4" />
-          All shipments
+          All orders
         </Link>
 
-        <ShipmentDetail shipmentId={params.id} />
+        <ReceivingDetailScreen id={params.id} />
       </div>
     </div>
   );

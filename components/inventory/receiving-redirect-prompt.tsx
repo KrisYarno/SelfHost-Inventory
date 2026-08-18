@@ -91,8 +91,9 @@ export function ReceivingRedirectPrompt({
       <div className="min-w-0 flex-1 space-y-2">
         <p className="text-sm font-medium">Receiving a shipment?</p>
         <p className="text-xs text-muted-foreground">
-          Receiving records what you expected, what you counted, and what the
-          units cost — an adjustment records only the number.
+          Entering this as a supply order records what you ordered, what arrived,
+          and each labeled stock-in batch — an adjustment records only the
+          number.
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <Button asChild size="sm" variant="secondary">
