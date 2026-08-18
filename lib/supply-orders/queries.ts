@@ -106,6 +106,7 @@ export type SupplyOrderLineView = {
   verifiedQuantity: number | null;
   stockedQuantity: number;
   disposedQuantity: number;
+  /** verified - stocked - disposed for a live line; 0 on a REMOVED line — its counters are frozen history (see `lineRemoved`; fix-delta 6). */
   remaining: number;
   lineTotalCents: number | null;
   unitCostCents: number | null;
