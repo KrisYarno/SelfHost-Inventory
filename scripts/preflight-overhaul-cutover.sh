@@ -74,7 +74,22 @@ print_runbook() {
 --                  a VERIFIED supply-order line (an UNORDERED arrival) and the box
 --                  is closed pointing at it.
 --
--- BOTH run as ONE transaction, both check ROW_COUNT() before committing, and both
+-- THE GUARDS ARE MECHANICAL, NOT HUMAN (rehearsed on a prod-dump restore, and this
+-- is what the rehearsal caught). An earlier draft printed `SELECT ROW_COUNT();`
+-- after each write with a comment saying it had to be 1 — a step a human is
+-- supposed to read and act on. Pasted as a script, nobody reads it: re-running (a)
+-- against a row that was ALREADY discarded sailed straight past the zero-row UPDATE
+-- and inserted a SECOND `STAGING_DISCARD` audit row, so the ledger claimed the box
+-- was discarded twice. Every write below is therefore gated on a captured flag:
+--
+--   * each guarded write is followed IMMEDIATELY by `SET @rcN = ROW_COUNT();`
+--     (ROW_COUNT() reports the statement that just ran, so nothing may come between);
+--   * every later write is `INSERT ... SELECT ... WHERE <flags>`, so a failed
+--     precondition writes NOTHING rather than writing half the story;
+--   * each procedure ends with a VERDICT row before the COMMIT.
+--
+-- Re-running either procedure is therefore safe: the second run reports NOTHING
+-- CHANGED and its COMMIT is a no-op. Both still run as ONE transaction, and both
 -- end by re-running the preflight, which must then read 0 0.
 --
 -- TWO RULES THAT ARE NOT NEGOTIABLE:
@@ -94,37 +109,57 @@ SET @actor  = 0;   -- users.id of the admin running this
 
 START TRANSACTION;
 
--- 1. LOCK the source row and look at it before deciding anything.
+-- 1. LOCK the source row and look at it before deciding anything. This read is
+--    for the eye and for the lock; the GUARD is the WHERE on the write below.
 SELECT id, status, description, shipmentId, resolvedProductId,
        expectedQuantity, countedQuantity, locationId, receivedBy, receivedAt
   FROM staging_items
  WHERE id = @source
-   FOR UPDATE;                                   -- MUST return exactly 1 row, status RECEIVED
+   FOR UPDATE;
 
 -- 2. THE GUARDED WRITE. The WHERE is the entire precondition: a row somebody else
---    already settled matches nothing, and this transaction rolls back.
+--    already settled matches nothing and this write moves zero rows.
 UPDATE staging_items
    SET status    = 'DISCARDED',
        notes     = CONCAT_WS('\n', NULLIF(notes,''), '[cutover straggler discarded]'),
        updatedAt = UTC_TIMESTAMP(3)
  WHERE id = @source
    AND status = 'RECEIVED';
+SET @rc1 = ROW_COUNT();
+-- 3. (the line above) CAPTURED THE OUTCOME IMMEDIATELY. NOTHING may sit between a
+--    write's `;` and its `SET @rcN = ROW_COUNT();` — not even a comment line: the
+--    MySQL 8 client sends comment-only lines to the server as their own statements,
+--    which resets ROW_COUNT() to 0 (the rehearsal caught exactly that: the row was
+--    discarded, @rc1 read 0, no audit row was written).
 
--- 3. EXACTLY ONE row must have moved. Anything else -> ROLLBACK; re-read; start again.
-SELECT ROW_COUNT() AS rows_discarded;            -- MUST be 1
-
--- 4. The audit row, in the SAME transaction as the write it describes.
+-- 4. The audit row, in the SAME transaction as the write it describes AND gated on
+--    that write having happened. On a re-run @rc1 is 0 and no row is inserted.
 INSERT INTO audit_logs
   (userId, actorKind, actionType, entityType, entityId, action, details, affectedCount, createdAt)
-VALUES
-  (@actor, 'USER', 'STAGING_DISCARD', 'STAGING', CAST(@source AS CHAR),
-   CONCAT('Discarded cutover straggler staging item ', @source),
-   JSON_OBJECT('source', 'cutover-runbook', 'disposition', 'discarded'),
-   1, UTC_TIMESTAMP(3));
+SELECT @actor, 'USER', 'STAGING_DISCARD', 'STAGING', CAST(@source AS CHAR),
+       CONCAT('Discarded cutover straggler staging item ', @source),
+       JSON_OBJECT('source', 'cutover-runbook', 'disposition', 'discarded'),
+       1, UTC_TIMESTAMP(3)
+  FROM DUAL
+ WHERE @rc1 = 1;
+
+-- 5. READ IT BACK. `discard_audit_rows` is deliberately a COUNT: one row per
+--    discard, however many times this procedure is pasted.
+SELECT (SELECT status FROM staging_items WHERE id = @source)      AS source_status,
+       (SELECT COUNT(*) FROM audit_logs
+         WHERE entityType = 'STAGING'
+           AND entityId   = CAST(@source AS CHAR)
+           AND actionType = 'STAGING_DISCARD')                    AS discard_audit_rows;
+
+-- 6. THE VERDICT. Read this line before typing COMMIT.
+SELECT IF(@rc1 = 1,
+          'OK — commit',
+          'NOTHING CHANGED — precondition failed (row not RECEIVED); COMMIT is a no-op')
+       AS verdict;
 
 COMMIT;
 
--- 5. Re-run scripts/preflight-overhaul-cutover.sh — it must now print PREFLIGHT: GO.
+-- 7. Re-run scripts/preflight-overhaul-cutover.sh — it must now print PREFLIGHT: GO.
 
 
 -- ---------------------------------------------------------------------------
@@ -140,9 +175,9 @@ SET @lineTotal   = NULL;   -- lineTotalCents: the TOTAL PAID for these units, or
 
 START TRANSACTION;
 
--- 1. LOCK + VALIDATE. Each of these three MUST return exactly one row; an empty
---    result means the precondition does not hold -> ROLLBACK.
-SELECT id, status, countedQuantity, receivedAt, receivedBy, locationId, description
+-- 1. LOCK + VALIDATE, AS FLAGS. Each read takes its row lock and answers 1 or 0;
+--    nothing below writes unless all three answered 1.
+SELECT COUNT(*) INTO @okSource
   FROM staging_items
  WHERE id = @source
    AND status = 'RECEIVED'
@@ -150,24 +185,26 @@ SELECT id, status, countedQuantity, receivedAt, receivedBy, locationId, descript
    AND receivedAt IS NOT NULL                     -- the receipt instant is preserved, not invented
    FOR UPDATE;
 
-SELECT id, status, orderedAt
+SELECT COUNT(*) INTO @okOrder
   FROM inbound_shipments
  WHERE id = @targetOrder
    AND orderedAt IS NOT NULL                      -- a supply order, never a legacy W1 receipt
    AND status IN ('RECEIVING','CLOSED')           -- a line may still be added to a closed order
    FOR UPDATE;
 
-SELECT id, name, approvalStatus, deletedAt
+SELECT COUNT(*) INTO @okProduct
   FROM products
  WHERE id = @product
    AND deletedAt IS NULL                          -- a declined product is soft-deleted
    AND approvalStatus IN ('APPROVED','PENDING_REVIEW')
    FOR UPDATE;
 
--- 2. THE NEW SUPPLY-ORDER LINE, built FROM the straggler. It is an UNORDERED
---    arrival: nothing was ordered, so orderedProductId and orderedQuantity stay
---    NULL and the money basis is the verified count. The receipt facts
---    (locationId, receivedBy, receivedAt) are PRESERVED, not re-stamped.
+SELECT @okSource AS ok_source, @okOrder AS ok_order, @okProduct AS ok_product;
+
+-- 2. THE NEW SUPPLY-ORDER LINE, built FROM the straggler and gated on all three
+--    flags. It is an UNORDERED arrival: nothing was ordered, so orderedProductId
+--    and orderedQuantity stay NULL and the money basis is the verified count. The
+--    receipt facts (locationId, receivedBy, receivedAt) are PRESERVED, not re-stamped.
 INSERT INTO staging_items
   (description, status, shipmentId,
    orderedProductId, resolvedProductId, orderedQuantity, lineTotalCents,
@@ -182,16 +219,18 @@ SELECT p.name, 'VERIFIED', @targetOrder,
   FROM staging_items s
   JOIN products p ON p.id = @product
  WHERE s.id = @source
-   AND s.status = 'RECEIVED';
+   AND s.status = 'RECEIVED'
+   AND @okSource  = 1
+   AND @okOrder   = 1
+   AND @okProduct = 1;
+SET @rc1 = ROW_COUNT();
+SET @newLine = IF(@rc1 = 1, LAST_INSERT_ID(), NULL);
 
-SELECT ROW_COUNT() AS rows_inserted;             -- MUST be 1
-SET @newLine = LAST_INSERT_ID();                 -- captured BEFORE any later INSERT moves it
-
--- 3. THE REGISTER ROW. An unordered arrival IS a receiving discrepancy by
---    construction, so the row is raised with the COMPLETE subject: expected and
---    ordered are NULL (nothing was expected, so nothing is short or over), the
---    counts are the verified count, and the unit cost is the HALF-EVEN share of a
---    KNOWN total. A NULL (or zero) total leaves the unit cost NULL.
+-- 3. THE REGISTER ROW, gated on the line having been created. An unordered arrival
+--    IS a receiving discrepancy by construction, so the row is raised with the
+--    COMPLETE subject: expected and ordered are NULL (nothing was expected, so
+--    nothing is short or over), the counts are the verified count, and the unit cost
+--    is the HALF-EVEN share of a KNOWN total. A NULL (or zero) total leaves it NULL.
 INSERT INTO inventory_exceptions
   (`key`, kind, subject, firstSeenAt, lastSeenAt, note)
 SELECT CONCAT('recv-discrepancy:', @newLine),
@@ -228,51 +267,68 @@ SELECT CONCAT('recv-discrepancy:', @newLine),
        UTC_TIMESTAMP(3), UTC_TIMESTAMP(3),
        CONCAT('cutover straggler hand-linked from staging item ', @source)
   FROM staging_items s
- WHERE s.id = @newLine;
+ WHERE s.id = @newLine
+   AND @rc1 = 1;
+SET @rc2 = ROW_COUNT();
 
-SELECT ROW_COUNT() AS register_rows_written;     -- MUST be 1
-
--- 4. THE SOURCE, closed, naming where its units went.
+-- 4. THE SOURCE, closed, naming where its units went — gated on the line AND its
+--    register row both existing, so the box is never closed against a half-built line.
 UPDATE staging_items
    SET status    = 'DISCARDED',
        notes     = CONCAT_WS('\n', NULLIF(notes,''),
                              CONCAT('[cutover straggler hand-linked to line ', @newLine, ']')),
        updatedAt = UTC_TIMESTAMP(3)
  WHERE id = @source
-   AND status = 'RECEIVED';
-
-SELECT ROW_COUNT() AS rows_discarded;            -- MUST be 1
+   AND status = 'RECEIVED'
+   AND @rc1 = 1
+   AND @rc2 = 1;
+SET @rc3 = ROW_COUNT();
 
 -- 5. TWO CORRELATED audit rows under ONE batchId: the line that was created and the
 --    box that was closed are one act, and the ledger must read that way afterwards.
+--    Both are gated on the whole procedure having succeeded — an audit trail that
+--    describes writes which did not happen is worse than no audit trail.
 SET @batch = UUID();
 
 INSERT INTO audit_logs
   (userId, actorKind, actionType, entityType, entityId, batchId, action, details, affectedCount, createdAt)
-VALUES
-  (@actor, 'USER', 'STAGING_CREATE', 'STAGING', CAST(@newLine AS CHAR), @batch,
-   CONCAT('Hand-linked cutover straggler ', @source, ' as supply-order line ', @newLine),
-   JSON_OBJECT('source', 'cutover-runbook', 'shipmentId', @targetOrder, 'productId', @product,
-               'fromStagingItemId', @source, 'lineTotalCents', @lineTotal,
-               'labelingRequired', @choice),
-   1, UTC_TIMESTAMP(3)),
-  (@actor, 'USER', 'STAGING_DISCARD', 'STAGING', CAST(@source AS CHAR), @batch,
-   CONCAT('Discarded cutover straggler ', @source, ' - hand-linked to line ', @newLine),
-   JSON_OBJECT('source', 'cutover-runbook', 'disposition', 'hand-linked',
-               'toStagingItemId', @newLine),
-   1, UTC_TIMESTAMP(3));
+SELECT @actor, 'USER', 'STAGING_CREATE', 'STAGING', CAST(@newLine AS CHAR), @batch,
+       CONCAT('Hand-linked cutover straggler ', @source, ' as supply-order line ', @newLine),
+       JSON_OBJECT('source', 'cutover-runbook', 'shipmentId', @targetOrder, 'productId', @product,
+                   'fromStagingItemId', @source, 'lineTotalCents', @lineTotal,
+                   'labelingRequired', @choice),
+       1, UTC_TIMESTAMP(3)
+  FROM DUAL
+ WHERE @rc1 = 1 AND @rc2 = 1 AND @rc3 = 1;
 
--- 6. VERIFY BEFORE COMMITTING. Read it back; if any column disagrees -> ROLLBACK.
-SELECT (SELECT status           FROM staging_items WHERE id = @newLine) AS new_line_status,    -- VERIFIED
-       (SELECT verifiedQuantity FROM staging_items WHERE id = @newLine) AS new_line_verified,  -- = the source count
-       (SELECT shipmentId       FROM staging_items WHERE id = @newLine) AS new_line_order,     -- = @targetOrder
-       (SELECT status           FROM staging_items WHERE id = @source)  AS source_status,      -- DISCARDED
+INSERT INTO audit_logs
+  (userId, actorKind, actionType, entityType, entityId, batchId, action, details, affectedCount, createdAt)
+SELECT @actor, 'USER', 'STAGING_DISCARD', 'STAGING', CAST(@source AS CHAR), @batch,
+       CONCAT('Discarded cutover straggler ', @source, ' - hand-linked to line ', @newLine),
+       JSON_OBJECT('source', 'cutover-runbook', 'disposition', 'hand-linked',
+                   'toStagingItemId', @newLine),
+       1, UTC_TIMESTAMP(3)
+  FROM DUAL
+ WHERE @rc1 = 1 AND @rc2 = 1 AND @rc3 = 1;
+
+-- 6. READ IT BACK. On a successful run: VERIFIED / the source count / the target
+--    order / DISCARDED / 1. On a refused run: all NULL and 0.
+SELECT (SELECT status           FROM staging_items WHERE id = @newLine) AS new_line_status,
+       (SELECT verifiedQuantity FROM staging_items WHERE id = @newLine) AS new_line_verified,
+       (SELECT shipmentId       FROM staging_items WHERE id = @newLine) AS new_line_order,
+       (SELECT status           FROM staging_items WHERE id = @source)  AS source_status,
        (SELECT COUNT(*) FROM inventory_exceptions
-         WHERE `key` = CONCAT('recv-discrepancy:', @newLine))           AS register_rows;      -- 1
+         WHERE `key` = CONCAT('recv-discrepancy:', @newLine))           AS register_rows;
+
+-- 7. THE VERDICT. Read this line before typing COMMIT.
+SELECT IF(@rc1 = 1 AND @rc2 = 1 AND @rc3 = 1,
+          'OK — commit',
+          'NOTHING CHANGED — precondition failed (row not RECEIVED / order not a RECEIVING|CLOSED supply order / product not eligible); COMMIT is a no-op')
+       AS verdict;
 
 COMMIT;
 
--- 7. Re-run scripts/preflight-overhaul-cutover.sh — it must now print PREFLIGHT: GO.
+-- 8. Re-run scripts/preflight-overhaul-cutover.sh — it must now print PREFLIGHT: GO.
 RUNBOOK
 }
 

@@ -29,10 +29,12 @@ assert_eq() {
   [ "$2" = "$3" ] || fail "$1" "want=[$3] got=[$2]"
 }
 
+# The haystack here is a 270-line SQL runbook; echoing it back buries the label that
+# says WHICH pin broke. Report the needle, not the hay.
 assert_contains() {
   case "$2" in
     *"$3"*) ;;
-    *) fail "$1" "output does not contain [$3]; got=[$2]" ;;
+    *) fail "$1" "output does not contain [$3]" ;;
   esac
 }
 
@@ -96,10 +98,39 @@ assert_contains "runbook (a) discard" "$RUNBOOK_OUT" "(a) DISCARD a cutover stra
 assert_contains "runbook (b) hand-link" "$RUNBOOK_OUT" "(b) HAND-LINK a cutover straggler"
 assert_contains "runbook discard guard" "$RUNBOOK_OUT" "AND status = 'RECEIVED'"
 assert_contains "runbook discard note" "$RUNBOOK_OUT" "[cutover straggler discarded]"
-assert_contains "runbook row-count check" "$RUNBOOK_OUT" "SELECT ROW_COUNT()"
+# THE MECHANICAL GUARDS (rehearsal finding: a human-read `SELECT ROW_COUNT();`
+# checkpoint is not a guard — re-running (a) on an already-DISCARDED row inserted a
+# SECOND audit row). Every guarded write captures its outcome into a flag, and every
+# later write is gated on the accumulated flags.
+assert_contains "runbook (a) captures rc1" "$RUNBOOK_OUT" "SET @rc1 = ROW_COUNT();"
+assert_contains "runbook (b) captures rc2" "$RUNBOOK_OUT" "SET @rc2 = ROW_COUNT();"
+assert_contains "runbook (b) captures rc3" "$RUNBOOK_OUT" "SET @rc3 = ROW_COUNT();"
+assert_contains "runbook (a) gates its audit row" "$RUNBOOK_OUT" " WHERE @rc1 = 1;"
+assert_contains "runbook (b) validates the source as a flag" "$RUNBOOK_OUT" "SELECT COUNT(*) INTO @okSource"
+assert_contains "runbook (b) validates the order as a flag" "$RUNBOOK_OUT" "SELECT COUNT(*) INTO @okOrder"
+assert_contains "runbook (b) validates the product as a flag" "$RUNBOOK_OUT" "SELECT COUNT(*) INTO @okProduct"
+assert_contains "runbook (b) gates the new line on all three flags" "$RUNBOOK_OUT" "   AND @okSource  = 1"
+assert_contains "runbook (b) gates the register row" "$RUNBOOK_OUT" "   AND @rc1 = 1;"
+assert_contains "runbook (b) gates the source close" "$RUNBOOK_OUT" "   AND @rc2 = 1;"
+assert_contains "runbook (b) gates both audit rows" "$RUNBOOK_OUT" " WHERE @rc1 = 1 AND @rc2 = 1 AND @rc3 = 1;"
+# Three gated INSERT ... SELECT writes in all: (a)'s audit row, (b)'s two.
+DUAL_GATES=$(printf '%s\n' "$RUNBOOK_OUT" | grep -c "FROM DUAL")
+[ "$DUAL_GATES" -ge 3 ] || fail "runbook gated inserts" "expected at least 3 FROM DUAL gates, found $DUAL_GATES"
+# NO human-only checkpoint may come back: this is the exact regression the
+# rehearsal found, and prose is where it would reappear.
+assert_not_contains "runbook has no human-read row-count checkpoint" "$RUNBOOK_OUT" "MUST be 1"
+assert_not_contains "runbook has no human-read validation checkpoint" "$RUNBOOK_OUT" "MUST return exactly"
+# THE VERDICT ROW — the last thing read before COMMIT, in both procedures.
+assert_contains "runbook (a) verdict ok" "$RUNBOOK_OUT" "'OK — commit',"
+assert_contains "runbook (a) verdict refusal" "$RUNBOOK_OUT" \
+  "'NOTHING CHANGED — precondition failed (row not RECEIVED); COMMIT is a no-op'"
+assert_contains "runbook (b) verdict refusal" "$RUNBOOK_OUT" \
+  "'NOTHING CHANGED — precondition failed (row not RECEIVED / order not a RECEIVING|CLOSED supply order / product not eligible); COMMIT is a no-op'"
+assert_contains "runbook (b) verdict is gated on every flag" "$RUNBOOK_OUT" "SELECT IF(@rc1 = 1 AND @rc2 = 1 AND @rc3 = 1,"
 assert_contains "runbook new line is VERIFIED" "$RUNBOOK_OUT" "SELECT p.name, 'VERIFIED', @targetOrder,"
 assert_contains "runbook verified count is the COUNT" "$RUNBOOK_OUT" "s.countedQuantity, @actor, UTC_TIMESTAMP(3), @choice,"
-assert_contains "runbook captures the new line id" "$RUNBOOK_OUT" "SET @newLine = LAST_INSERT_ID();"
+assert_contains "runbook captures the new line id only on success" "$RUNBOOK_OUT" \
+  "SET @newLine = IF(@rc1 = 1, LAST_INSERT_ID(), NULL);"
 assert_contains "runbook register row" "$RUNBOOK_OUT" "'recv-discrepancy',"
 assert_contains "runbook unordered subject" "$RUNBOOK_OUT" "'expectedQty',       NULL,"
 assert_contains "runbook audit fan-out (create)" "$RUNBOOK_OUT" "'STAGING_CREATE'"
@@ -172,9 +203,27 @@ if grep -qE 'echo .*MYSQL_(PASSWORD|PWD)|printf .*MYSQL_(PASSWORD|PWD)' "$PREFLI
   fail "secret hygiene" "the preflight prints a credential"
 fi
 
+# --------------------------------------------------------------------------
+# 7. ROW_COUNT ADJACENCY (rehearsal 2026-08-18): the MySQL 8 client sends a comment-only
+#    line to the server as its own statement, which resets ROW_COUNT() to 0. So the line
+#    right BEFORE every `SET @rcN = ROW_COUNT();` must be the write's terminating `;`
+#    line — never a comment, never blank.
+# --------------------------------------------------------------------------
+RUNBOOK_TEXT=$("$PREFLIGHT" --print-runbook)
+ADJ_BAD=$(printf '%s\n' "$RUNBOOK_TEXT" | awk '
+  /^SET @rc[0-9]+ = ROW_COUNT\(\);/ { if (prev !~ /;[[:space:]]*$/ || prev ~ /^[[:space:]]*--/) { print NR": "prev } }
+  { prev = $0 }')
+if [ -n "$ADJ_BAD" ]; then
+  fail "ROW_COUNT capture adjacency" "a comment/blank line precedes a SET @rcN capture: $ADJ_BAD"
+fi
+ADJ_COUNT=$(printf '%s\n' "$RUNBOOK_TEXT" | grep -c '^SET @rc[0-9]* = ROW_COUNT();')
+if [ "$ADJ_COUNT" -lt 4 ]; then
+  fail "ROW_COUNT captures present" "expected >= 4 captures, found $ADJ_COUNT"
+fi
+
 if [ "$FAILURES" -ne 0 ]; then
   echo "PREFLIGHT SELF-TEST: $FAILURES check(s) FAILED" >&2
   exit 1
 fi
 
-echo "PREFLIGHT SELF-TEST: PASS (print-sql, print-runbook, compose argv, GO/NO-GO parse, fail-closed, secret hygiene)"
+echo "PREFLIGHT SELF-TEST: PASS (print-sql, print-runbook + mechanical guards + ROW_COUNT adjacency, compose argv, GO/NO-GO parse, fail-closed, secret hygiene)"
