@@ -323,6 +323,37 @@ describe('POST .../resolve — recv-discrepancy', () => {
     expect(res.status).toBe(422);
     expect(mockResolveException).not.toHaveBeenCalled();
   });
+
+  it('FD3-1: 409s a line REMOVED from the order, writing nothing', async () => {
+    // A removed line's money is ZERO BY CONSTRUCTION — fix-delta 2 FD2-1
+    // (removed-line money): the
+    // discard settled the row and zeroed it. Recomputing from the counters the
+    // line still carries would put a shortage back on a line that is no longer
+    // on the order — so the refusal comes BEFORE the recompute, not after it.
+    lockedLineRow = lineRow({ status: StagingItemStatus.DISCARDED });
+
+    const res = await resolvePOST(
+      mkReq({ exceptionKey: `recv-discrepancy:${LINE_ID}`, resolution: 'supplier-credited' }),
+      lineParams,
+    );
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('CONFLICT');
+    expect(mockResolveException).not.toHaveBeenCalled();
+    expect(recorded('EXCEPTION_RESOLVE')).toHaveLength(0);
+  });
+
+  it('FD3-1: refuses a REMOVED line that was never verified either', async () => {
+    lockedLineRow = lineRow({ status: StagingItemStatus.DISCARDED, verifiedQuantity: null });
+
+    const res = await resolvePOST(
+      mkReq({ exceptionKey: `recv-discrepancy:${LINE_ID}`, resolution: 'accepted-loss' }),
+      lineParams,
+    );
+
+    expect(res.status).toBe(409);
+    expect(mockResolveException).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST .../resolve — labeling-loss', () => {
@@ -353,6 +384,30 @@ describe('POST .../resolve — labeling-loss', () => {
     // `reason` is deliberately NOT in the patch: the writer merges, so the
     // operator's own words survive the settlement (spec §6 "reason (latest)").
     expect(Object.keys(args.subjectPatch)).not.toContain('reason');
+  });
+
+  it('FD3-1: still settles on a REMOVED line — a bench loss really happened', async () => {
+    // The removal refusal is about SUPPLIER money (short/over), which a removed
+    // line cannot have. Units the bench lost are a different fact: they were
+    // counted, they were destroyed, and the line leaving the order later does
+    // not un-lose them.
+    lockedLineRow = lineRow({
+      status: StagingItemStatus.DISCARDED,
+      verifiedQuantity: 100,
+      stockedQuantity: 60,
+      disposedQuantity: 40,
+    });
+
+    const res = await resolvePOST(
+      mkReq({ exceptionKey: `labeling-loss:${LINE_ID}`, resolution: 'accepted-loss' }),
+      lineParams,
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockResolveException.mock.calls[0][1].subjectPatch).toMatchObject({
+      units: 40,
+      lossCents: 40_000,
+    });
   });
 
   it('carries lossCents NULL when the line was never priced (REV-10 clause 8)', async () => {

@@ -430,6 +430,15 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
   };
 
   const discrepancyCell = (): string => {
+    // A LINE THAT LEFT THE ORDER CARRIES NO MONEY — fix-delta 2 FD2-1
+    // (removed-line money), FD3-2 — and that is the FIRST thing this cell
+    // decides. The rollup still COMPUTES a per-line discrepancy from the
+    // counters the line was holding when it went (only the header total skips
+    // it, lib/shipments/rollup.ts), so rendering that would report a supplier
+    // shortage on a line nobody is owed anything for. "Not verified yet" is
+    // wrong for the same reason: the line is gone, and what it was still
+    // waiting for is no longer the fact about it.
+    if (line.status === "DISCARDED") return "Removed from the order";
     if (line.verifiedQuantity === null) return "Not verified yet";
     const discrepancy = line.discrepancy;
     if (discrepancy === null) return "Matches the order";
@@ -809,9 +818,13 @@ function LineEditPanel({ line, busy, onCancel, onSubmit }: LineEditPanelProps) {
 interface ExceptionRowProps {
   orderId: string;
   exception: SupplyOrderExceptionView;
+  /** The line this row belongs to was REMOVED from the order (fix-delta 3 FD3-1/FD3-2 follow-up):
+   *  its recv-discrepancy money is zero by construction and the resolve route refuses to settle
+   *  it — so the panel offers no Resolve control (no dead controls) and says why. */
+  lineRemoved?: boolean;
 }
 
-function ExceptionRow({ orderId, exception }: ExceptionRowProps) {
+function ExceptionRow({ orderId, exception, lineRemoved = false }: ExceptionRowProps) {
   const resolveException = useResolveException(orderId);
   const [open, setOpen] = useState(false);
   const [resolution, setResolution] = useState<Resolution | "">("");
@@ -868,7 +881,9 @@ function ExceptionRow({ orderId, exception }: ExceptionRowProps) {
             )}
           </div>
           <p className="text-sm">
-            {[
+            {lineRemoved && exception.kind === "recv-discrepancy"
+              ? "Removed from the order — no shortage or surplus to settle"
+              : [
               units !== null ? `${units} unit(s)` : null,
               lossCents !== null ? `${formatCents(lossCents)} loss` : null,
               // NOT $0.00 (REV-10 clause 8): an unbilled arrival's loss is a
@@ -890,9 +905,11 @@ function ExceptionRow({ orderId, exception }: ExceptionRowProps) {
             </p>
           )}
         </div>
-        <Button size="sm" variant="outline" onClick={() => setOpen((prev) => !prev)}>
-          Resolve
-        </Button>
+        {lineRemoved && exception.kind === "recv-discrepancy" ? null : (
+          <Button size="sm" variant="outline" onClick={() => setOpen((prev) => !prev)}>
+            Resolve
+          </Button>
+        )}
       </div>
 
       {open && (
@@ -1327,7 +1344,14 @@ export function SupplyOrderDetail({ detail }: SupplyOrderDetailProps) {
         ) : (
           <ul className="space-y-3">
             {detail.exceptions.map((exception) => (
-              <ExceptionRow key={exception.key} orderId={detail.id} exception={exception} />
+              <ExceptionRow
+                key={exception.key}
+                orderId={detail.id}
+                exception={exception}
+                lineRemoved={detail.lines.some(
+                  (line) => line.id === exception.lineId && line.status === "DISCARDED",
+                )}
+              />
             ))}
           </ul>
         )}

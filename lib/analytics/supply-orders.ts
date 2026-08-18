@@ -29,14 +29,15 @@ import { InboundShipmentStatus, StagingItemStatus } from '@prisma/client';
  *   `lastSeenAt` is the only honest window basis, and a settled shortage still
  *   cost what it cost, which is why resolution is not a filter.
  *
- * ROWS WHOSE LINE LEFT THE ORDER ARE NOT MONEY (FD2-1). Resolution is not a
- * filter, but REMOVAL is: a line the operator took off the order (`DISCARDED`)
- * never had a shortage or a surplus, and its settled row survives only as the
- * history of something that is no longer there. The removal zeroes the row's
- * money at the source; this read is the second half of the same fact, so a row
- * written before that fix — or by any other path — cannot report a supplier
- * loss for a line nobody ordered. The excluded rows are COUNTED and named in
- * the coverage rather than quietly dropped.
+ * ROWS WHOSE LINE LEFT THE ORDER ARE NOT MONEY — fix-delta 2 FD2-1
+ * (removed-line money). Resolution is not a filter, but REMOVAL is: a line the
+ * operator took off the order (`DISCARDED`) never had a shortage or a surplus,
+ * and its settled row survives only as the history of something that is no
+ * longer there. The removal zeroes the row's money at the source; this read is
+ * the second half of the same fact, so a row written before that fix — or by
+ * any other path — cannot report a supplier loss for a line nobody ordered. The
+ * excluded rows are COUNTED and named in the coverage rather than quietly
+ * dropped.
  */
 
 export type SupplyOrderAnalyticsMetric = {
@@ -136,7 +137,7 @@ function metric(args: {
   coverage: string;
   /** "labeling-loss row", "recv-discrepancy rows", "non-cancelled supply orders". */
   emptyReason: string;
-  /** "N <rows> were seen ...; none carries a <figure> figure". */
+  /** "N <rows> remain in this window's population (K further ...); none carries ...". */
   unpricedReason: (kindRows: number) => string;
 }): SupplyOrderAnalyticsMetric {
   const empty = args.contributingRows === 0;
@@ -162,7 +163,8 @@ function legacyNote(legacyHeaders: number): string {
 }
 
 /**
- * The rows this window saw whose LINE has since left the order (FD2-1).
+ * The rows this window saw whose LINE has since left the order — fix-delta 2
+ * FD2-1 (removed-line money).
  *
  * Stated ALWAYS, zero included, for the same reason `legacyNote` is: a reader
  * who cannot see that the exclusion exists cannot tell a window with nothing
@@ -183,6 +185,25 @@ function emptyExceptionReason(noun: string, kind: string, removed: number): stri
   return removed > 0
     ? `${removed} ${kind} row(s) were seen in this window; every one belongs to a line removed from its order`
     : `no ${noun} row was seen in this window`;
+}
+
+/**
+ * The UNPRICED reason for an exception metric, aware of the same exclusion.
+ *
+ * The denominator this sentence speaks about is the population AFTER the removed
+ * lines left it (FD3-4), and a reader who sees only the reason would take "N
+ * rows, none priced" for the whole window. Naming the excluded rows here as well
+ * means the reason ALONE can never understate what the window held — the same
+ * job `removedNote` does for the coverage string, zero included.
+ */
+function unpricedExceptionReason(
+  kind: string,
+  removed: number,
+  figure: string,
+): (kindRows: number) => string {
+  return (kindRows) =>
+    `${kindRows} ${kind} rows remain in this window's population (${removed} further belong ` +
+    `to removed lines); none carries a ${figure} figure`;
 }
 
 /**
@@ -228,7 +249,7 @@ export async function getSupplyOrdersAnalytics(opts: {
     }
   }
 
-  // --- the lines those rows name (FD2-1) ----------------------------------
+  // --- the lines those rows name (fix-delta 2 FD2-1, removed-line money) ---
   //
   // ONE read, after the subjects are parsed once, so every row in this answer is
   // judged against the SAME line state — two reads could put the same line on
@@ -337,8 +358,11 @@ export async function getSupplyOrdersAnalytics(opts: {
           'recv-discrepancy',
           removedDiscrepancyRows,
         ),
-        unpricedReason: (rows) =>
-          `${rows} recv-discrepancy rows were seen in this window; none carries a loss figure`,
+        unpricedReason: unpricedExceptionReason(
+          'recv-discrepancy',
+          removedDiscrepancyRows,
+          'loss',
+        ),
       }),
       labelingLossCost: metric({
         valueCents: lossCents,
@@ -353,8 +377,7 @@ export async function getSupplyOrdersAnalytics(opts: {
           `rows both count). ${removedLabeling} ${legacy}`,
         kindRows: labelingRows,
         emptyReason: emptyExceptionReason('labeling-loss', 'labeling-loss', removedLabelingRows),
-        unpricedReason: (rows) =>
-          `${rows} labeling-loss rows were seen in this window; none carries a loss figure`,
+        unpricedReason: unpricedExceptionReason('labeling-loss', removedLabelingRows, 'loss'),
       }),
       surplusValue: metric({
         valueCents: surplusCents,
@@ -373,8 +396,11 @@ export async function getSupplyOrdersAnalytics(opts: {
           'recv-discrepancy',
           removedDiscrepancyRows,
         ),
-        unpricedReason: (rows) =>
-          `${rows} recv-discrepancy rows were seen in this window; none carries a surplus figure`,
+        unpricedReason: unpricedExceptionReason(
+          'recv-discrepancy',
+          removedDiscrepancyRows,
+          'surplus',
+        ),
       }),
     },
   };

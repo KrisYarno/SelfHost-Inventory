@@ -46,7 +46,9 @@ interface RouteParams {
  * carries a `recv-discrepancy` row (an unordered arrival IS a discrepancy), and
  * removing the line settles it `recount-corrected` AND ZEROES ITS MONEY in the
  * SAME transaction — which is why this route is on the exceptions
- * write-boundary allow-list.
+ * write-boundary allow-list. The note 'line removed' rides that settlement when
+ * the settlement is NEW; a row already settled the same way keeps the note it
+ * has, and the STAGING_DISCARD audit carries the fact either way.
  *
  * The line is taken `FOR UPDATE` first so the audit can state the status it
  * actually removed, and the claim's WHERE still carries the whole precondition:
@@ -141,12 +143,23 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
         // is the honest classification: the count that raised the row was a
         // mistake. A no-op when the line never had a row (spec REV-10 clause 3).
         //
-        // THE MONEY GOES WITH THE LINE (FD2-1). The register row SURVIVES as
-        // settled history, and `lib/analytics/supply-orders.ts` folds resolved
-        // rows too — so a stored shortage or surplus left on it keeps reporting
-        // a supplier loss for a line that is no longer on the order. A removed
-        // line has neither, and the row has to say so itself: the identity
-        // fields are the caller's business, the money is this route's.
+        // THE NOTE RIDES A NEW SETTLEMENT (FD3-3). The writer is
+        // settlement-idempotent: on a row somebody already settled as
+        // `recount-corrected` it refreshes the subject and appends nothing, so
+        // 'line removed' lands only when this call is the settlement. That is
+        // fine — the STAGING_DISCARD audit below carries the fact
+        // unconditionally, and the note is a convenience on the register row,
+        // never the record of the act.
+        //
+        // THE MONEY GOES WITH THE LINE — fix-delta 2 FD2-1 (removed-line
+        // money). The register row SURVIVES as settled history, and
+        // `lib/analytics/supply-orders.ts` folds resolved rows too — so a
+        // stored shortage or surplus left on it keeps reporting a supplier loss
+        // for a line that is no longer on the order. A removed line has
+        // neither, and the row has to say so itself: the identity fields are
+        // the caller's business, the money is this route's. The subject patch
+        // is applied on the already-settled path too, so the zeroing is not
+        // conditional on the note.
         await resolveException(tx, {
           key: recvDiscrepancyKey(lineId),
           resolvedBy: user.id,

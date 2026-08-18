@@ -700,6 +700,43 @@ describe('resolveException — the RESOLUTION classification (spec §6 / D5)', (
     expect(data).not.toHaveProperty('note');
   });
 
+  it("FD3-3: the DISCARD's zeroing lands on an already-settled row, its note does not", async () => {
+    const tx = mkTx();
+    setExisting(
+      tx,
+      row({
+        resolvedAt: NOW,
+        resolvedBy: 7,
+        resolution: 'recount-corrected',
+        note: 'counted again',
+        subject: { stagingItemId: 5, shortUnits: 3, lossCents: 4500, surplusValueCents: 0 },
+      }),
+    );
+
+    // The shape the discard route calls with, on a row somebody already settled
+    // the same way. The MONEY still goes with the line; the 'line removed' note
+    // is dropped, because this call is not the settlement — which is why the
+    // STAGING_DISCARD audit, not the note, is the record of the removal.
+    await resolveException(tx, {
+      key: KEY,
+      resolvedBy: 9,
+      resolution: 'recount-corrected',
+      note: 'line removed',
+      subjectPatch: { shortUnits: 0, overUnits: 0, lossCents: 0, surplusValueCents: 0 },
+      now: LATER,
+    });
+
+    const { data } = updateArgs(tx);
+    expect(data.subject).toMatchObject({
+      shortUnits: 0,
+      overUnits: 0,
+      lossCents: 0,
+      surplusValueCents: 0,
+    });
+    expect(data).not.toHaveProperty('note');
+    expect(data).not.toHaveProperty('resolvedAt');
+  });
+
   it('is settlement-idempotent: the SAME resolution again rewrites nothing at all', async () => {
     const tx = mkTx();
     const resolved = row({ resolvedAt: NOW, resolvedBy: 7, resolution: 'accepted-loss' });

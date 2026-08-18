@@ -374,7 +374,8 @@ describe('nullable labeling-loss money (CR-5/CR-6)', () => {
 
     expect(result.metrics.labelingLossCost.valueCents).toBeNull();
     expect(result.metrics.labelingLossCost.reason).toBe(
-      '2 labeling-loss rows were seen in this window; none carries a loss figure',
+      "2 labeling-loss rows remain in this window's population (0 further belong to removed " +
+        'lines); none carries a loss figure',
     );
   });
 
@@ -397,10 +398,12 @@ describe('nullable labeling-loss money (CR-5/CR-6)', () => {
     const result = await getSupplyOrdersAnalytics(WINDOW);
 
     expect(result.metrics.supplierShortageCost.reason).toBe(
-      '1 recv-discrepancy rows were seen in this window; none carries a loss figure',
+      "1 recv-discrepancy rows remain in this window's population (0 further belong to removed " +
+        'lines); none carries a loss figure',
     );
     expect(result.metrics.surplusValue.reason).toBe(
-      '1 recv-discrepancy rows were seen in this window; none carries a surplus figure',
+      "1 recv-discrepancy rows remain in this window's population (0 further belong to removed " +
+        'lines); none carries a surplus figure',
     );
   });
 
@@ -555,6 +558,38 @@ describe('rows naming a line that left the order (FD2-1)', () => {
     );
     expect(metrics.labelingLossCost.reason).toBe(
       '1 labeling-loss row(s) were seen in this window; every one belongs to a line removed from its order',
+    );
+  });
+
+  it('FD3-4: the UNPRICED reason names the removed rows too, so it never understates', async () => {
+    setup({
+      exceptions: [
+        // One row still on its order, carrying no money at all...
+        recv({ stagingItemId: 12, expectedQty: 10, countedQty: 8 }),
+        // ...and two whose lines have left it.
+        recv({ stagingItemId: 11, lossCents: 5_000 }),
+        recv({ stagingItemId: 13, lossCents: 900 }),
+      ],
+      lines: [
+        { id: 11, status: 'DISCARDED' },
+        { id: 12, status: 'VERIFIED' },
+        { id: 13, status: 'DISCARDED' },
+      ],
+    });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    // "1 row, none priced" alone would send the reader looking at one row in a
+    // window that actually held three. The denominator this sentence speaks
+    // about is the population AFTER the removals, and it says so.
+    expect(metrics.supplierShortageCost.valueCents).toBeNull();
+    expect(metrics.supplierShortageCost.reason).toBe(
+      "1 recv-discrepancy rows remain in this window's population (2 further belong to removed " +
+        'lines); none carries a loss figure',
+    );
+    expect(metrics.surplusValue.reason).toBe(
+      "1 recv-discrepancy rows remain in this window's population (2 further belong to removed " +
+        'lines); none carries a surplus figure',
     );
   });
 

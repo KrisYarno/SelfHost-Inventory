@@ -260,6 +260,43 @@ describe("the controls follow the line's status", () => {
     expect(screen.queryByRole("button", { name: /remove line/i })).not.toBeInTheDocument();
   });
 
+  it("FD3-2: a REMOVED line says so, and never reports money from its stale counters", () => {
+    renderDetail(
+      detail({ status: "RECEIVING" }, [
+        line({
+          status: "DISCARDED",
+          verifiedQuantity: 4,
+          remaining: 4,
+          // The rollup still COMPUTES a per-line discrepancy from the counters
+          // the line was carrying when it left the order (lib/shipments/rollup
+          // skips removed lines in the HEADER total only). Rendering it would
+          // report a supplier shortage for a line nobody is owed anything on.
+          discrepancy: {
+            shortUnits: 6,
+            overUnits: 0,
+            lossCents: 75000,
+            surplusValueCents: 0,
+            unordered: false,
+          },
+        }),
+      ]),
+    );
+    const cell = screen.getByTestId("line-discrepancy-11");
+    expect(cell).toHaveTextContent("Removed from the order");
+    expect(cell).not.toHaveTextContent(/short/i);
+    expect(cell).not.toHaveTextContent(/loss/i);
+    expect(cell).not.toHaveTextContent(/\$750\.00/);
+  });
+
+  it("FD3-2: a REMOVED line that was never counted says the same thing", () => {
+    renderDetail(detail({ status: "RECEIVING" }, [line({ status: "DISCARDED" })]));
+    // Not "Not verified yet": the line is gone, and what it was waiting for is
+    // no longer the fact about it.
+    expect(screen.getByTestId("line-discrepancy-11")).toHaveTextContent(
+      "Removed from the order",
+    );
+  });
+
   it("a COMPLETE line offers no batch row — there is nothing left to book", () => {
     renderDetail(
       detail({ status: "RECEIVING" }, [
@@ -609,6 +646,26 @@ describe("the follow-up panel", () => {
     note: null,
     lineId: 11,
   };
+
+  it("a REMOVED line's discrepancy row offers NO Resolve control and says why (no dead controls: the route refuses it)", () => {
+    const zeroed = { ...shortage, resolvedAt: "2026-08-15T10:00:00.000Z", resolution: "recount-corrected", subject: { lineId: 11, shortUnits: 0, lossCents: 0, surplusValueCents: 0 } };
+    renderDetail(
+      detail({ status: "RECEIVING", exceptions: [zeroed] }, [line({ status: "DISCARDED" })]),
+    );
+    const row = screen.getByTestId("exception-recv-discrepancy:11");
+    expect(within(row).getByText(/Removed from the order — no shortage or surplus to settle/)).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: /resolve/i })).toBeNull();
+    expect(within(row).queryByText(/\$0\.00 loss/)).toBeNull();
+  });
+
+  it("a REMOVED line's labeling-loss row keeps its Resolve control (a bench loss is real)", () => {
+    const loss = { ...shortage, key: "labeling-loss:11", kind: "labeling-loss", subject: { lineId: 11, units: 2, lossCents: 200, reason: "broke" } };
+    renderDetail(
+      detail({ status: "RECEIVING", exceptions: [loss] }, [line({ status: "DISCARDED" })]),
+    );
+    const row = screen.getByTestId("exception-labeling-loss:11");
+    expect(within(row).getByRole("button", { name: /resolve/i })).toBeInTheDocument();
+  });
 
   it("lists the order's exceptions with their money", () => {
     renderDetail(detail({ status: "RECEIVING", exceptions: [shortage] }));

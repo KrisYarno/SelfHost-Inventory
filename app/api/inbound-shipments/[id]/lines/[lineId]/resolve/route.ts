@@ -129,6 +129,21 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
 
       let subjectPatch: ExceptionSubject;
       if (isDiscrepancy) {
+        if (line.status === StagingItemStatus.DISCARDED) {
+          // A LINE THAT LEFT THE ORDER HAS NO SUPPLIER MONEY — fix-delta 2
+          // FD2-1 (removed-line money), FD3-1. The removal already settled this
+          // row and ZEROED it, and the counters the line still carries are the
+          // ones it was holding when it went. Recomputing from them here would
+          // write the shortage back onto a line that is no longer on the order,
+          // so the refusal comes BEFORE the recompute rather than after it. A
+          // labeling loss on the same line is a different fact and stays
+          // settleable: those units really were counted, and really were lost.
+          throw new AppError(
+            'A line removed from the order has no shortage or surplus to settle',
+            'CONFLICT',
+            409,
+          );
+        }
         if (line.verifiedQuantity === null) {
           // A discrepancy subject states a COUNTED quantity. There is none yet,
           // and inventing a 0 would report a whole-line shortage nobody counted.
