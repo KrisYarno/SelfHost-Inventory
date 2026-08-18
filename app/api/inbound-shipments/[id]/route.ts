@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, apiHandler, requireCSRF } from '@/lib/api-utils';
+import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
 import { InboundShipmentStatus, Prisma, StagingItemStatus } from '@prisma/client';
-import { recordChange, type ChangeDiff } from '@/lib/change-tracking';
+import { recordChange, newBatchId, type ChangeDiff } from '@/lib/change-tracking';
 import {
-  PatchInboundShipmentSchema,
-  assertShipmentPatchNotEmpty,
-} from '@/lib/validation/inbound-shipment';
-import { getInboundShipmentDetail } from '@/lib/shipments/queries';
+  PatchSupplyOrderSchema,
+  assertPatchNotEmpty,
+  assertRealCalendarDate,
+} from '@/lib/validation/supply-orders';
+import { getSupplyOrderDetail, modelOf } from '@/lib/supply-orders/queries';
+import { claimHeaderTransition, lockLinesForUpdate } from '@/lib/supply-orders/claims';
+import { UnverifiedRefusal } from '@/lib/supply-orders/refusals';
 import { rollupDiscrepancies } from '@/lib/shipments/rollup';
 import { withDeadlockRetry } from '@/lib/inventory';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
@@ -20,182 +24,44 @@ interface RouteParams {
   };
 }
 
-type PatchRefusal =
-  | { reason: 'NOT_FOUND' }
-  | { reason: 'NOT_OPEN' }
-  | { reason: 'UNCOUNTED'; itemIds: number[] }
-  | { reason: 'GRADUATED'; itemIds: number[] }
-  | { reason: 'MEMBERSHIP_CHANGED' };
-
-/**
- * Every way this PATCH can say no, as a THROW.
- *
- * W1S-2 made that uniform. A refusal now unwinds the transaction, which is the
- * only way to keep the promise the state matrix makes — "the loser writes
- * nothing and records nothing" — once the guards run AFTER the locks. The locks
- * are no-op writes (see the transaction below); returning a refusal instead of
- * throwing would COMMIT them, and a shipment that was never closed would carry
- * a fresh `updatedAt` on every line of it.
- *
- * Caught in the handler and mapped to the house envelope; never escapes here.
- */
-class PatchRefusedError extends Error {
-  constructor(readonly refusal: PatchRefusal) {
-    super(`inbound shipment patch refused: ${refusal.reason}`);
-    this.name = 'PatchRefusedError';
-  }
-}
-
-const refuse = (refusal: PatchRefusal): never => {
-  throw new PatchRefusedError(refusal);
-};
-
-/**
- * Take the row lock on one staging line WITHOUT changing it: `data` restates the
- * status the WHERE matched, so the statement's only effect is the lock and the
- * current read that precedes it. The house idiom (lib/staging/graduate.ts:69,
- * lib/shipments/lifecycle.ts), applied line by line so the ORDER is ours.
- *
- * FD-2 pins `shipmentId` in the WHERE: the claim is not merely a lock, it is the
- * question "is this line STILL one of mine?", and the answer (`count > 0`) is
- * only meaningful if membership is part of what it matched.
- */
-async function lockLine(
-  tx: Prisma.TransactionClient,
-  shipmentId: string,
-  itemId: number,
-): Promise<boolean> {
-  const claim = await tx.stagingItem.updateMany({
-    where: { id: itemId, shipmentId, status: StagingItemStatus.RECEIVED },
-    data: { status: StagingItemStatus.RECEIVED },
-  });
-  return claim.count > 0;
-}
-
-/** One CURRENT staging line, exactly as the locking read below returns it. */
-type CurrentLine = {
-  id: number;
-  status: StagingItemStatus;
-  expectedQuantity: number | null;
-  countedQuantity: number | null;
-};
-
-/**
- * THE SETTLE'S ONE SOURCE OF CURRENT TRUTH (FD2-1).
- *
- * Every decision below — the membership comparison, the graduation gate, the
- * uncounted gate and the ids it names, the audit rollup, the set this cancel
- * unlinks — reads THESE rows and nothing else.
- *
- * It has to be a LOCKING read. Under REPEATABLE READ a plain `findMany` answers
- * from the snapshot this transaction took at its first read, which is older than
- * every lock above it: a count committed in between is invisible to it, so the
- * close's audit would record numbers that were already wrong even with nothing
- * racing. `SELECT ... FOR UPDATE` reads the latest COMMITTED rows instead, and
- * re-confirms the locks the first pass took.
- *
- * It can genuinely DEADLOCK, and that is correct: a row linked into this
- * shipment since the snapshot was never locked by us, so this statement may
- * queue behind a linker that holds it and is waiting on our header. The whole
- * transaction runs inside the house `withDeadlockRetry`, which re-runs it from a
- * fresh snapshot that includes the newcomer. `ORDER BY id` keeps this read's own
- * lock order identical to the first pass's ascending claims.
- *
- * Raw SQL because Prisma has no `FOR UPDATE` (house precedent:
- * lib/products/decline.ts's product_locations lock). The shipment id is a BOUND
- * parameter, never interpolated.
- */
-function currentLines(
-  tx: Prisma.TransactionClient,
-  shipmentId: string,
-): Promise<CurrentLine[]> {
-  return tx.$queryRaw<CurrentLine[]>(
-    Prisma.sql`SELECT id, status, expectedQuantity, countedQuantity FROM staging_items WHERE shipmentId = ${shipmentId} ORDER BY id FOR UPDATE`,
-  );
-}
-
-/**
- * Prove that the lines this settle HOLDS are exactly the lines it is settling,
- * and return them (FD2-1).
- *
- * Two independent ways that proof fails, and both are fatal:
- *
- *   a FIRST-PASS MISS  the claim matched nothing, so this transaction never held
- *                      that row — even if the id is back in the current read.
- *                      That is the ABA: the line departed, was counted (or
- *                      graduated, or repriced) while it was away, and rejoined
- *                      looking untouched. Coverage has to be CONTINUOUS, so a
- *                      miss refuses regardless of what the final read shows;
- *   a SET DIFFERENCE   the current RECEIVED members are not the set we locked.
- *                      A real id-by-id comparison, not a size one: one line out
- *                      and one line in leaves the COUNT identical while the
- *                      shipment being settled is a different shipment.
- *
- * Both sides are ascending (the snapshot read orders by id, the locking read
- * does too), so the element-wise comparison IS the set comparison.
- *
- * The refusal is RETRIABLE — the request was legal, it just raced — and the
- * caller's re-run starts from a snapshot that includes whatever moved.
- */
-function heldMembers(
-  lockedIds: readonly number[],
-  current: readonly CurrentLine[],
-  missedFirstPass: boolean,
-): number[] {
-  if (missedFirstPass) refuse({ reason: 'MEMBERSHIP_CHANGED' });
-
-  const receiving = current
-    .filter((line) => line.status === StagingItemStatus.RECEIVED)
-    .map((line) => line.id);
-  if (
-    receiving.length !== lockedIds.length ||
-    receiving.some((id, index) => id !== lockedIds[index])
-  ) {
-    refuse({ reason: 'MEMBERSHIP_CHANGED' });
-  }
-
-  return receiving;
-}
-
-/** The header fields a diff on this route can name, plus the status the claim re-matches. */
+/** The header fields a diff on this route can name, plus the current status. */
 type CurrentHeader = {
   status: InboundShipmentStatus;
-  notes: string | null;
+  supplier: string | null;
   supplierRef: string | null;
+  notes: string | null;
+  feesCents: number | null;
+  feesNote: string | null;
+  orderedAt: Date | null;
 };
 
 /**
- * THE AUDIT'S BEFORE-IMAGE, LOCKED (FD4-2).
+ * THE AUDIT'S BEFORE-IMAGE, LOCKED (the FD4-2 idiom this route was rebuilt on).
  *
- * `existing` — the `findUnique` whose real job is the 404 — answers from the
- * snapshot this transaction took before it held anything. A field-only PATCH
- * that commits A -> B in between is invisible to it, and the diff then lies in
- * one of two directions: it records A -> C when the truth is B -> C, or (worse)
- * it records NOTHING at all when this request restates A over that B, because
- * from === to against a value that is no longer there. An overwrite IS a change,
- * and the change feed is the only surface that can say whose note survived.
+ * The `findUnique` above answers the 404 and the MODEL question from this
+ * transaction's snapshot, which is older than every lock below it. A field-only
+ * PATCH that commits A -> B in between is invisible to it, and the diff would
+ * then lie in one of two directions: A -> C when the truth is B -> C, or nothing
+ * at all when this request restates A over that B. An overwrite IS a change.
  *
- * So the before-image comes from HERE: one `SELECT ... FOR UPDATE` of exactly
- * the fields a diff can name. It is taken with the lines already locked and
- * immediately BEFORE the status claim — which is where that claim takes the
- * header lock anyway, so this adds no lock and changes no order (item -> header,
- * unchanged). The claim still re-matches on `{ id, status: OPEN }`, so a header
- * that settled since the snapshot is still refused by its own `count === 0`
- * rather than by anything read here.
+ * So the before-image — and the STATUS every refusal below is worded from —
+ * comes from HERE: one `SELECT ... FOR UPDATE` of exactly the diffable fields,
+ * taken with the lines already locked (lock order lines -> header, uniform
+ * across the lane) and immediately before the claim that would take that lock
+ * anyway.
  *
- * Raw SQL because Prisma has no `FOR UPDATE` (house precedent: `currentLines`
- * above, lib/products/decline.ts). The id is a BOUND parameter.
+ * Raw SQL because Prisma has no `FOR UPDATE` (house precedent:
+ * `lib/products/decline.ts`, `lib/supply-orders/claims.ts`). The id is a BOUND
+ * parameter, never interpolated.
  */
 async function lockedHeader(
   tx: Prisma.TransactionClient,
   id: string,
-): Promise<Record<string, unknown>> {
+): Promise<CurrentHeader | null> {
   const rows = await tx.$queryRaw<CurrentHeader[]>(
-    Prisma.sql`SELECT status, notes, supplierRef FROM inbound_shipments WHERE id = ${id} FOR UPDATE`,
+    Prisma.sql`SELECT status, supplier, supplierRef, notes, feesCents, feesNote, orderedAt FROM inbound_shipments WHERE id = ${id} FOR UPDATE`,
   );
-  // A row that vanished between the 404 pre-check and this read leaves nothing
-  // to diff against — and the claim below is about to refuse anyway.
-  return rows[0] ?? {};
+  return rows[0] ?? null;
 }
 
 /**
@@ -203,11 +69,9 @@ async function lockedHeader(
  * entry drops, and an empty diff attaches nothing).
  *
  * QA-14: this rides the CLOSE and CANCEL records too. Field edits are legal in
- * the same request as a transition — one claim commits them together — but only
- * the field-edit branch ever computed a diff, and that branch is unreachable
- * when `status` is present. So notes rewritten on the way out were WRITTEN and
- * recorded NOWHERE: the change feed, the one surface that answers "who changed
- * this receipt's notes", was blind to every edit that travelled with a settle.
+ * the same request as a transition, and one transaction commits them together —
+ * so a note rewritten on the way out must be recorded by the event that carried
+ * it, not by nothing at all.
  */
 function fieldChanges(
   before: Record<string, unknown>,
@@ -217,11 +81,21 @@ function fieldChanges(
   for (const [field, to] of Object.entries(after)) {
     const from = before[field] ?? null;
     const normalizedTo = to ?? null;
-    if (!Object.is(from, normalizedTo)) {
+    if (!sameValue(from, normalizedTo)) {
       changes[field] = { from, to: normalizedTo };
     }
   }
   return changes;
+}
+
+/**
+ * `orderedAt` is the one diffable field that arrives as a Date, and two Date
+ * objects holding the same instant are never `Object.is`-equal — restating
+ * today's date would otherwise record a change that did not happen.
+ */
+function sameValue(from: unknown, to: unknown): boolean {
+  if (from instanceof Date && to instanceof Date) return from.getTime() === to.getTime();
+  return Object.is(from, to);
 }
 
 /** `changes: {...}` when there is a diff, nothing at all when there is not. */
@@ -229,12 +103,24 @@ function changesFragment(changes: ChangeDiff): { changes?: ChangeDiff } {
   return Object.keys(changes).length > 0 ? { changes } : {};
 }
 
-// GET /api/inbound-shipments/[id] - One receiving header with its linked
-// staging lines, per-line discrepancy flags, and the computed rollup.
+/** The line-status census a close records beside its money rollup. */
+function lineStatusCounts(lines: readonly { status: StagingItemStatus }[]) {
+  const counts = { ordered: 0, verified: 0, labeling: 0, complete: 0, discarded: 0 };
+  for (const line of lines) {
+    if (line.status === StagingItemStatus.ORDERED) counts.ordered += 1;
+    else if (line.status === StagingItemStatus.VERIFIED) counts.verified += 1;
+    else if (line.status === StagingItemStatus.LABELING) counts.labeling += 1;
+    else if (line.status === StagingItemStatus.COMPLETE) counts.complete += 1;
+    else if (line.status === StagingItemStatus.DISCARDED) counts.discarded += 1;
+  }
+  return counts;
+}
+
+// GET /api/inbound-shipments/[id] — one order (or one legacy receipt), whole.
 export const GET = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   await requireApproved();
 
-  const detail = await getInboundShipmentDetail(params.id);
+  const detail = await getSupplyOrderDetail(params.id);
   if (!detail) {
     return NextResponse.json({ error: 'Inbound shipment not found' }, { status: 404 });
   }
@@ -243,38 +129,30 @@ export const GET = apiHandler(async (request: NextRequest, { params }: RoutePara
 });
 
 /**
- * PATCH /api/inbound-shipments/[id] — the T4 state matrix.
+ * PATCH /api/inbound-shipments/[id] — the SUPPLY-ORDER state machine (§4.0).
  *
- *   OPEN -> CLOSED     requires ZERO linked RECEIVED lines with a NULL count
- *                      (else 409 listing the offenders); stamps closedBy/At.
- *   OPEN -> CANCELLED  atomic claim conditional on NO linked GRADUATED line;
- *                      linked RECEIVED lines AUTO-UNLINK and stay in staging.
- *   notes/supplierRef  editable while OPEN only.
- *   CLOSED / CANCELLED reject every one of the above with 409.
+ * It forks on the header's MODEL first and on its STATUS second, never on the
+ * body: CLOSED and CANCELLED exist in both machines, so status could never tell
+ * the two families apart. A legacy (W1) receipt is history — 409
+ * `LEGACY_READ_ONLY`, with no mutation path at all.
  *
- * Every transition goes through an `updateMany` CLAIM whose WHERE is the
- * precondition (the lib/staging/graduate.ts:69 idiom): `count === 0` means a
- * concurrent actor won, and the loser writes nothing and records nothing. The
- * one `findUnique` below answers 404 ONLY — it never gates a transition.
+ *   fields          supplier / supplierRef / orderedAt / notes / fees, legal
+ *                   while ORDERED or RECEIVING (audit `SHIPMENT_UPDATE`).
+ *   action: close   RECEIVING only. Refused while ANY line is still ORDERED —
+ *                   the frozen 409 `UNVERIFIED` naming them, because closing a
+ *                   receipt nobody counted is exactly the lie this flow exists
+ *                   to stop. An ORDERED header is refused BY NAME: nothing was
+ *                   verified, so cancel is the honest act, not close.
+ *   action: cancel  ORDERED only. Its lines go DISCARDED (they are kept, not
+ *                   unlinked — the order records what was ordered), and the
+ *                   header is CANCELLED, never CLOSED.
  *
- * LOCK ORDER (W1S-2, W1-C fix round): the LINES first, in ascending id order,
- * then the header. Every other writer in this lane — the count endpoint, the
- * staging PATCH, graduation — takes the staging row before its shipment, and
- * settling a shipment header-first was an ABBA against all three. Ascending id
- * order does the same job among the lines themselves, so two settles that
- * overlap queue instead of colliding.
- *
- * CURRENT TRUTH (FD2-1): that first pass ORDERS the locks and proves continuous
- * coverage (a missed claim is fatal). Everything a settle then DECIDES —
- * membership, the graduation gate, the uncounted gate and its ids, the rollup,
- * the unlink set — comes from ONE locking read taken after the header claim
- * (`currentLines`), because a plain re-read in this transaction still answers
- * from a snapshot older than the locks.
- *
- * The HEADER has the same problem and the same answer (FD4-2): `lockedHeader`
- * is read where the header lock is taken — after the lines, before the claim —
- * and every field diff on every path is measured against THAT row. The one
- * thing `existing` still answers is the 404.
+ * LOCK ORDER, uniform with every other writer in the lane: lines (ascending)
+ * then the header. `lockLinesForUpdate` is the FD2-1 idiom — ascending no-op
+ * claims for the order, then ONE `ORDER BY id FOR UPDATE` read that every
+ * decision, every named id and the audit rollup derive from. It can genuinely
+ * deadlock, which is why the whole transaction runs inside `withDeadlockRetry`;
+ * the retry is only safe because nothing here is decided outside it.
  */
 export const PATCH = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   const { user } = await requireApproved();
@@ -286,14 +164,18 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
   await requireCSRF(request);
 
   const id = params.id;
-  const body = PatchInboundShipmentSchema.parse(await request.json());
-  assertShipmentPatchNotEmpty(body);
+  const body = PatchSupplyOrderSchema.parse(await request.json());
+  assertPatchNotEmpty(body);
+  if (body.orderedAt !== undefined) assertRealCalendarDate(body.orderedAt, 'orderedAt');
 
-  // A true partial update: only keys explicitly present in the body are written.
-  // These ride ALONG with a status transition when both are requested — both are
-  // legal from OPEN, and one claim commits them together.
+  // A true partial update: only keys explicitly present in the body are written,
+  // and they ride ALONG with a transition when both are asked for.
   const fields: Prisma.InboundShipmentUncheckedUpdateInput = {};
   const after: Record<string, unknown> = {};
+  if (body.supplier !== undefined) {
+    fields.supplier = body.supplier;
+    after.supplier = body.supplier;
+  }
   if (body.supplierRef !== undefined) {
     fields.supplierRef = body.supplierRef;
     after.supplierRef = body.supplierRef;
@@ -302,247 +184,201 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
     fields.notes = body.notes;
     after.notes = body.notes;
   }
+  if (body.feesCents !== undefined) {
+    fields.feesCents = body.feesCents;
+    after.feesCents = body.feesCents;
+  }
+  if (body.feesNote !== undefined) {
+    fields.feesNote = body.feesNote;
+    after.feesNote = body.feesNote;
+  }
+  if (body.orderedAt !== undefined) {
+    const orderedAt = new Date(`${body.orderedAt}T00:00:00.000Z`);
+    fields.orderedAt = orderedAt;
+    after.orderedAt = orderedAt;
+  }
+
+  const batchId = newBatchId();
 
   try {
-    // The settle paths take a line lock and then a header lock while the linker
-    // takes them the other way round, and FD2-1's `FOR UPDATE` read deliberately
-    // touches rows this transaction does NOT hold — so a genuine deadlock stays
-    // possible however carefully this route orders its own claims. The house
-    // retry re-runs the WHOLE transaction, which re-reads the snapshot and
-    // re-derives the membership — the retry is only safe because of that.
     await withDeadlockRetry(() =>
       prisma.$transaction(async (tx): Promise<void> => {
         const existing = await tx.inboundShipment.findUnique({ where: { id } });
-        if (!existing) refuse({ reason: 'NOT_FOUND' });
+        if (!existing) {
+          throw new AppError('Inbound shipment not found', 'NOT_FOUND', 404);
+        }
+        if (modelOf(existing) === 'legacy') {
+          throw new AppError(
+            `Inbound shipment ${id} is a legacy receipt (pre-staging history) and is read-only`,
+            'LEGACY_READ_ONLY',
+            409,
+          );
+        }
 
-        // --- OPEN -> CLOSED ---------------------------------------------------
-        if (body.status === InboundShipmentStatus.CLOSED) {
-          // LOCK ORDER: the lines this close settles, ascending, before the
-          // header. Only lines still in receiving are locked — a GRADUATED line
-          // is already real stock and a DISCARDED one is a decision, neither of
-          // which this transition touches. This read's ONLY job is that order
-          // (FD2-1): it is a snapshot, so it decides nothing.
-          const snapshot = await tx.stagingItem.findMany({
-            where: { shipmentId: id, status: StagingItemStatus.RECEIVED },
-            select: { id: true },
-            orderBy: { id: 'asc' },
-          });
-          let missedFirstPass = false;
-          for (const line of snapshot) {
-            if (!(await lockLine(tx, id, line.id))) missedFirstPass = true;
-          }
+        // --- action: close ---------------------------------------------------
+        if (body.action === 'close') {
+          const lines = await lockLinesForUpdate(tx, id);
 
-          // The header lock, and with it the CURRENT values any field diff below
-          // is measured against (FD4-2).
+          const unverified = lines
+            .filter((line) => line.status === StagingItemStatus.ORDERED)
+            .map((line) => line.id);
+          if (unverified.length > 0) throw new UnverifiedRefusal(unverified);
+
           const before = await lockedHeader(tx, id);
-
-          const claim = await tx.inboundShipment.updateMany({
-            where: { id, status: InboundShipmentStatus.OPEN },
-            data: {
-              ...fields,
-              status: InboundShipmentStatus.CLOSED,
-              closedBy: user.id,
-              closedAt: new Date(),
-            },
-          });
-          if (claim.count === 0) refuse({ reason: 'NOT_OPEN' });
-
-          // With the header held, ONE current read answers everything below.
-          const current = await currentLines(tx, id);
-          heldMembers(
-            snapshot.map((l) => l.id),
-            current,
-            missedFirstPass,
-          );
-
-          // THE CLOSE GUARD, over the CURRENT rows — and so is the list it
-          // names. A line counted since the snapshot no longer blocks the close;
-          // a line whose count was undone since does, BY NAME. (The old list was
-          // a snapshot approximation that could be empty while the guard fired.)
-          const uncounted = current.filter(
-            (line) =>
-              line.status === StagingItemStatus.RECEIVED && line.countedQuantity === null,
-          );
-          if (uncounted.length > 0) {
-            refuse({ reason: 'UNCOUNTED', itemIds: uncounted.map((line) => line.id) });
+          if (before === null) {
+            throw new AppError('Inbound shipment not found', 'NOT_FOUND', 404);
+          }
+          if (before.status === InboundShipmentStatus.ORDERED) {
+            throw new AppError(
+              `Supply order ${id} has nothing verified — cancel it instead of closing it`,
+              'CONFLICT',
+              409,
+            );
+          }
+          if (!(await claimHeaderTransition(
+            tx,
+            id,
+            [InboundShipmentStatus.RECEIVING],
+            InboundShipmentStatus.CLOSED,
+          ))) {
+            throw new AppError(
+              `Supply order ${id} is ${before.status.toLowerCase()} and cannot be closed`,
+              'CONFLICT',
+              409,
+            );
           }
 
-          // The audit rollup, from the same current rows: a close records the
-          // receipt as it IS, never as this transaction first saw it.
-          const rollup = rollupDiscrepancies(current);
+          // The claim already holds the header; this stamps WHO closed it and
+          // WHEN, plus any field edit riding the same request.
+          await tx.inboundShipment.update({
+            where: { id },
+            data: { ...fields, closedBy: user.id, closedAt: new Date() },
+          });
+
           await recordChange(tx, {
             actor: { userId: user.id },
             actionType: 'SHIPMENT_CLOSE',
             entityType: 'SHIPMENT',
             entityId: id,
-            action: `Closed inbound shipment ${id}`,
-            // QA-14: fields edited on the way out ride this record's diff.
-            // FD4-2: measured against the LOCKED row, not the snapshot.
+            action: `Closed supply order ${id}`,
+            batchId,
             ...changesFragment(fieldChanges(before, after)),
             details: {
-              itemCount: rollup.itemCount,
-              countedItemCount: rollup.countedItemCount,
-              discrepancyItemCount: rollup.discrepancyItemCount,
-              totalOver: rollup.totalOver,
-              totalUnder: rollup.totalUnder,
+              // The rollup is read off the LOCKED rows: a close records the order
+              // as it IS, never as this transaction first saw it.
+              discrepancy: rollupDiscrepancies(lines, { model: 'supply-order' }),
+              lineStatusCounts: lineStatusCounts(lines),
+              lineCount: lines.length,
             },
           });
 
           return;
         }
 
-        // --- OPEN -> CANCELLED ------------------------------------------------
-        if (body.status === InboundShipmentStatus.CANCELLED) {
-          // LOCK ORDER: the lines this cancel would unlink, ascending, BEFORE the
-          // header. Taking the header first was an ABBA against every writer that
-          // takes a staging row and then its shipment — including the graduation
-          // this transition races with by definition. As on the close path, this
-          // read only ORDERS the locks (FD2-1); it decides nothing.
-          const snapshot = await tx.stagingItem.findMany({
-            where: { shipmentId: id, status: StagingItemStatus.RECEIVED },
-            select: { id: true },
-            orderBy: { id: 'asc' },
-          });
-          let missedFirstPass = false;
-          for (const line of snapshot) {
-            if (!(await lockLine(tx, id, line.id))) missedFirstPass = true;
-          }
+        // --- action: cancel --------------------------------------------------
+        if (body.action === 'cancel') {
+          const lines = await lockLinesForUpdate(tx, id);
 
-          // Now the header: the serialization point against a concurrent
-          // cancel/close, and against the graduation guard's own shipment claim.
-          // The locking read is that lock's first statement, and carries the
-          // CURRENT values any field diff below is measured against (FD4-2).
           const before = await lockedHeader(tx, id);
-
-          const claim = await tx.inboundShipment.updateMany({
-            where: { id, status: InboundShipmentStatus.OPEN },
-            data: { ...fields, status: InboundShipmentStatus.CANCELLED },
-          });
-          if (claim.count === 0) refuse({ reason: 'NOT_OPEN' });
-
-          // With the header held, ONE current read answers everything below.
-          const current = await currentLines(tx, id);
-
-          // THE GUARD, from the CURRENT statuses: cancelling a shipment that
-          // already produced real stock would be a lie, and the snapshot this
-          // transaction started from cannot see a line that graduated while we
-          // waited for these locks.
-          const graduated = current.filter(
-            (line) => line.status === StagingItemStatus.GRADUATED,
-          );
-          if (graduated.length > 0) {
-            refuse({ reason: 'GRADUATED', itemIds: graduated.map((line) => line.id) });
+          if (before === null) {
+            throw new AppError('Inbound shipment not found', 'NOT_FOUND', 404);
+          }
+          if (before.status !== InboundShipmentStatus.ORDERED) {
+            throw new AppError(
+              `Supply order ${id} is ${before.status.toLowerCase()} — a delivery has already been verified against it, so it closes rather than cancels`,
+              'CONFLICT',
+              409,
+            );
           }
 
-          // The set this cancel is about to unlink. It runs AFTER the graduation
-          // gate on purpose — a line that graduated mid-flight (and therefore
-          // also failed its first-pass claim) deserves the refusal that NAMES it,
-          // not the generic "membership changed".
-          const unlinked = heldMembers(
-            snapshot.map((i) => i.id),
-            current,
-            missedFirstPass,
-          );
+          const discardedLineIds = lines
+            .filter((line) => line.status === StagingItemStatus.ORDERED)
+            .map((line) => line.id);
 
-          // Auto-unlink: the lines lose their header but STAY in staging, so a
-          // cancelled shipment never destroys received work.
+          // The lines are DISCARDED, not unlinked: a cancelled order still says
+          // what it ordered, and the products it minted are kept (OCs-6).
           await tx.stagingItem.updateMany({
-            where: { shipmentId: id, status: StagingItemStatus.RECEIVED },
-            data: { shipmentId: null },
+            where: { shipmentId: id, status: StagingItemStatus.ORDERED },
+            data: { status: StagingItemStatus.DISCARDED },
           });
+
+          if (!(await claimHeaderTransition(
+            tx,
+            id,
+            [InboundShipmentStatus.ORDERED],
+            InboundShipmentStatus.CANCELLED,
+          ))) {
+            throw new AppError(
+              `Supply order ${id} changed state while it was being cancelled; reload and retry`,
+              'CONFLICT',
+              409,
+            );
+          }
+
+          if (Object.keys(fields).length > 0) {
+            await tx.inboundShipment.update({ where: { id }, data: fields });
+          }
 
           await recordChange(tx, {
             actor: { userId: user.id },
             actionType: 'SHIPMENT_CANCEL',
             entityType: 'SHIPMENT',
             entityId: id,
-            action: `Cancelled inbound shipment ${id}`,
-            // QA-14: fields edited on the way out ride this record's diff.
-            // FD4-2: measured against the LOCKED row, not the snapshot.
+            action: `Cancelled supply order ${id}`,
+            batchId,
             ...changesFragment(fieldChanges(before, after)),
             // cancelledBy rides this audit line — T1 deliberately gives the table
-            // no cancelledBy column. The ids are the CURRENT membership (FD2-1),
-            // not the snapshot: the record names the boxes that actually left.
-            details: { unlinkedItemIds: unlinked },
+            // no cancelledBy column. The ids are the LOCKED membership (FD2-1).
+            details: { discardedLineIds, lineCount: lines.length },
           });
 
           return;
         }
 
-        // --- field edit while OPEN --------------------------------------------
-        // This path locks nothing but the header, and its claim is where that
-        // lock is taken — so the locking read goes immediately before it, and
-        // the staleness FD4-2 found on the settle paths is closed here on the
-        // same terms. Two field edits racing is the ORDINARY case for this
-        // route, not the exotic one.
+        // --- field edit ------------------------------------------------------
+        // This path locks only the header, and its claim is where that lock is
+        // taken — so the locking read goes immediately before it.
         const before = await lockedHeader(tx, id);
+        if (before === null) {
+          throw new AppError('Inbound shipment not found', 'NOT_FOUND', 404);
+        }
 
         const claim = await tx.inboundShipment.updateMany({
-          where: { id, status: InboundShipmentStatus.OPEN },
+          where: {
+            id,
+            status: { in: [InboundShipmentStatus.ORDERED, InboundShipmentStatus.RECEIVING] },
+          },
           data: fields,
         });
-        if (claim.count === 0) refuse({ reason: 'NOT_OPEN' });
+        if (claim.count === 0) {
+          throw new AppError(
+            `Supply order ${id} is ${before.status.toLowerCase()} and can no longer be edited`,
+            'CONFLICT',
+            409,
+          );
+        }
 
-        // Diff over EXACTLY the provided fields (ER-B9: from===to entries drop; an
-        // empty diff writes no event). On THIS path the diff is the whole event,
-        // so an empty one records nothing at all rather than an empty record.
         const changes = fieldChanges(before, after);
-
         if (Object.keys(changes).length > 0) {
           await recordChange(tx, {
             actor: { userId: user.id },
             actionType: 'SHIPMENT_UPDATE',
             entityType: 'SHIPMENT',
             entityId: id,
-            action: `Updated inbound shipment ${id}`,
+            action: `Updated supply order ${id}`,
+            batchId,
             changes,
           });
         }
       }),
     );
   } catch (error) {
-    // Every refusal arrives here, which is also how every refusal rolls back.
-    if (error instanceof PatchRefusedError) {
-      const { refusal } = error;
-      if (refusal.reason === 'NOT_FOUND') {
-        return NextResponse.json({ error: 'Inbound shipment not found' }, { status: 404 });
-      }
-      if (refusal.reason === 'UNCOUNTED') {
-        return NextResponse.json(
-          {
-            error: 'Inbound shipment has uncounted received items and cannot be closed',
-            code: 'CONFLICT',
-            uncountedItemIds: refusal.itemIds,
-          },
-          { status: 409 },
-        );
-      }
-      if (refusal.reason === 'MEMBERSHIP_CHANGED') {
-        // A legal request that raced, not a rejected one: the client may send it
-        // again unchanged, and the next attempt sees the line that arrived.
-        return NextResponse.json(
-          {
-            error:
-              'Inbound shipment membership changed while it was being settled — retry',
-            code: 'CONFLICT',
-            retriable: true,
-          },
-          { status: 409 },
-        );
-      }
-      if (refusal.reason === 'GRADUATED') {
-        return NextResponse.json(
-          {
-            error:
-              'Inbound shipment has graduated lines and cannot be cancelled; unlink or reverse them first',
-            code: 'CONFLICT',
-            graduatedItemIds: refusal.itemIds,
-          },
-          { status: 409 },
-        );
-      }
+    // The STRUCTURED refusal, mapped AFTER the retry wrapper (pack C3a.0): an
+    // `AppError` renders as `{ error, code }` only, and a close that refuses has
+    // to NAME the lines still owed. Everything else travels through apiHandler.
+    if (error instanceof UnverifiedRefusal) {
       return NextResponse.json(
-        { error: 'Inbound shipment is not open and cannot be changed', code: 'CONFLICT' },
+        { error: error.message, code: error.code, lineIds: error.lineIds },
         { status: 409 },
       );
     }
@@ -551,7 +387,7 @@ export const PATCH = apiHandler(async (request: NextRequest, { params }: RoutePa
 
   // Respond with the SAME shape GET serves, so a mutating client never has to
   // reconcile two dialects.
-  const detail = await getInboundShipmentDetail(id);
+  const detail = await getSupplyOrderDetail(id);
   const response = NextResponse.json(detail);
   return applyRateLimitHeaders(response, rateLimitHeaders);
 });

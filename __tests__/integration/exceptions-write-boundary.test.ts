@@ -121,6 +121,15 @@ const ALLOWED_WRITER_CALLERS: WriterCaller[] = [
       'W1-3b: declining reverses the stock, so pending-with-stock is resolved inside ' +
       "declineProduct's transaction — the register never outlives the units it names",
   },
+  {
+    path: 'app/api/inbound-shipments/[id]/lines/route.ts',
+    reason:
+      'M3a (Receiving/Labeling overhaul, pack C3a.0/PK2-9): adding a line to a RECEIVING ' +
+      'or CLOSED order is an UNORDERED ARRIVAL — something turned up that was never ' +
+      'ordered — and that IS the discrepancy. The recv-discrepancy row is written with ' +
+      "the line, in the line's own transaction, so a rolled-back arrival can never " +
+      'strand one. The ORDERED-line branch of the same route writes no exception at all',
+  },
 ];
 
 const MUTATING_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'] as const;
