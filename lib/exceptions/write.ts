@@ -39,6 +39,7 @@
 import { Prisma } from '@prisma/client';
 import type { InventoryException } from '@prisma/client';
 import type { ExceptionKind, Resolution } from '@/lib/exceptions/kinds';
+import { AppError } from '@/lib/error-handling';
 
 /** `inventory_exceptions.key` is VarChar(191) and UNIQUE. */
 export const EXCEPTION_KEY_MAX_LENGTH = 191;
@@ -144,6 +145,47 @@ async function lockedException(
 }
 
 /**
+ * WRITE the row `lockedException` just read, and hand back its new state.
+ *
+ * WHY `updateMany` AND NOT `update` (M7B-D1 — found by the concurrency gate,
+ * scenario 5): Prisma's `update({ where: { key } })` first runs a PLAIN
+ * `SELECT` to find the row, and a plain read answers from the transaction's
+ * REPEATABLE READ snapshot — the one established at the transaction's FIRST
+ * consistent read (a booking's idempotency read, an approval's product read),
+ * which is long before this writer runs. `lockedException` bypasses that snapshot
+ * (a locking read returns the latest committed row), so a row that a racing
+ * winner INSERTED and committed while this transaction was waiting on a lock is
+ * visible to the lock and invisible to the update: P2025 "record not found",
+ * un-retried, a 500 for the whole business write. DML has no such snapshot:
+ * `UPDATE ... WHERE key = ?` acts on the latest committed row — the row this
+ * transaction already holds the lock on — so exactly one row moves. The return
+ * value is then read back under the same lock, again from the latest state.
+ *
+ * `count !== 1` is unreachable in a correctly locked flow (the row was just read
+ * FOR UPDATE and nobody can delete it under us) and is therefore an INVARIANT,
+ * never silently `null`.
+ */
+async function writeLocked(
+  tx: Prisma.TransactionClient,
+  key: string,
+  data: Prisma.InventoryExceptionUpdateManyMutationInput,
+): Promise<InventoryException> {
+  const { count } = await tx.inventoryException.updateMany({ where: { key }, data });
+  if (count !== 1) {
+    throw new AppError(
+      `exception row ${key} vanished under its own lock (updated ${count} rows)`,
+      'INVARIANT',
+      500,
+    );
+  }
+  const row = await lockedException(tx, key);
+  if (!row) {
+    throw new AppError(`exception row ${key} unreadable after its write`, 'INVARIANT', 500);
+  }
+  return row;
+}
+
+/**
  * The stored subject as an object to merge onto.
  *
  * `subject` is a JSON column, and a raw read can hand it back as the parsed
@@ -201,7 +243,7 @@ export async function upsertException(
   }
 
   // `kind` is fixed by the key (asserted above), so it is never rewritten.
-  const data: Prisma.InventoryExceptionUpdateInput = {
+  const data: Prisma.InventoryExceptionUpdateManyMutationInput = {
     subject: subject as Prisma.InputJsonObject,
     lastSeenAt: now,
   };
@@ -224,7 +266,7 @@ export async function upsertException(
     data.note = nextNote;
   }
 
-  return tx.inventoryException.update({ where: { key }, data });
+  return writeLocked(tx, key, data);
 }
 
 /** "resolution relabeled: accepted-loss -> supplier-credited". */
@@ -283,7 +325,7 @@ export async function resolveException(
       return existing;
     }
 
-    const data: Prisma.InventoryExceptionUpdateInput = {};
+    const data: Prisma.InventoryExceptionUpdateManyMutationInput = {};
     if (mergedSubject !== null) data.subject = mergedSubject;
     if (relabelling) {
       data.resolution = resolution;
@@ -292,10 +334,10 @@ export async function resolveException(
       data.note = nextNote;
     }
 
-    return tx.inventoryException.update({ where: { key }, data });
+    return writeLocked(tx, key, data);
   }
 
-  const data: Prisma.InventoryExceptionUpdateInput = {
+  const data: Prisma.InventoryExceptionUpdateManyMutationInput = {
     resolvedAt: now,
     resolvedBy: args.resolvedBy ?? null,
     resolution: resolution ?? null,
@@ -307,5 +349,5 @@ export async function resolveException(
     data.note = nextNote;
   }
 
-  return tx.inventoryException.update({ where: { key }, data });
+  return writeLocked(tx, key, data);
 }

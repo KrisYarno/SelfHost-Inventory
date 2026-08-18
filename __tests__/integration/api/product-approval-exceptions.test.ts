@@ -32,6 +32,14 @@ jest.mock('@/lib/prisma', () => {
       findUnique: jest.fn(),
       update: jest.fn(),
       create: jest.fn(),
+      // M7B-D1: the writer's WRITE is now `updateMany` (DML on the latest
+      // committed row) followed by a locking re-read. The stub delegates to the
+      // `update` mock these cases already assert on, so the args pins hold, and
+      // reports the one row MySQL would.
+      updateMany: jest.fn(async (args: any) => {
+        await tx.inventoryException.update(args);
+        return { count: 1 };
+      }),
     },
     // Receiving/Labeling overhaul (pack C2b.3 / PK-11): the writer's read is now a
     // LOCKING `SELECT ... FOR UPDATE` rather than a `findUnique`. The stub answers
@@ -249,16 +257,18 @@ describe('POST /api/admin/products/[id]/decline — resolves pending-with-stock'
     declineTx = {
       inventoryException: {
         findUnique: jest.fn(async () => openRow()),
-        update: jest.fn(async ({ data }: any) => ({ ...openRow(), ...data })),
+        // M7B-D1: the writer's write is `updateMany` (DML), then a locking re-read.
+        updateMany: jest.fn(async () => ({ count: 1 })),
       },
-      // PK-11: this stand-in tx answers the writer's LOCKING read.
+      // PK-11: this stand-in tx answers the writer's LOCKING read (twice: decide, re-read).
       $queryRaw: jest.fn(async () => [openRow()]),
     };
 
     await declinePOST(mkReq('decline'), { params: { id: '101' } });
 
     // The route wrote through the callback's tx, NOT through a fresh client.
-    expect(declineTx.inventoryException.update).toHaveBeenCalledTimes(1);
+    expect(declineTx.inventoryException.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.inventoryException.updateMany).not.toHaveBeenCalled();
     expect(db.inventoryException.update).not.toHaveBeenCalled();
   });
 

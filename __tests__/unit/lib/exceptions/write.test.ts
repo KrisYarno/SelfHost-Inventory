@@ -62,7 +62,19 @@ function mkTx() {
       // transaction's snapshot rather than from the row it is about to write.
       findUnique: jest.fn(),
       create: jest.fn(async ({ data }: any) => ({ id: 1, ...data })),
-      update: jest.fn(async ({ data }: any) => ({ id: 1, ...data })),
+      // Kept ONLY so the pins below can prove the writer no longer uses it
+      // either (M7B-D1): `update({ where: { key } })` runs a PLAIN pre-SELECT
+      // from the transaction's snapshot and cannot see a row a racing winner
+      // committed while this transaction waited on a lock -> P2025.
+      update: jest.fn(),
+      // The write the writer DOES make: DML on the latest committed row. The
+      // mock applies the data to the locked row so the writer's follow-up
+      // locking read (the return value) hands back the new state, as MySQL does.
+      updateMany: jest.fn(async ({ data }: any) => {
+        if (!tx.__existing) return { count: 0 };
+        tx.__existing = { ...tx.__existing, ...data };
+        return { count: 1 };
+      }),
     },
   };
   return tx;
@@ -98,7 +110,7 @@ const SUBJECT = {
 };
 
 const createData = (tx: any) => tx.inventoryException.create.mock.calls[0][0].data;
-const updateArgs = (tx: any) => tx.inventoryException.update.mock.calls[0][0];
+const updateArgs = (tx: any) => tx.inventoryException.updateMany.mock.calls[0][0];
 
 describe('upsertException — first sighting INSERTS', () => {
   it('creates the row with kind/key/subject and both timestamps at the caller instant', async () => {
@@ -112,7 +124,7 @@ describe('upsertException — first sighting INSERTS', () => {
       now: NOW,
     });
 
-    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+    expect(tx.inventoryException.updateMany).not.toHaveBeenCalled();
     expect(createData(tx)).toEqual({
       key: KEY,
       kind: 'recv-discrepancy',
@@ -316,7 +328,7 @@ describe('upsertException — the guards that keep the register coherent', () =>
 
     expect(tx.$queryRaw).not.toHaveBeenCalled();
     expect(tx.inventoryException.create).not.toHaveBeenCalled();
-    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+    expect(tx.inventoryException.updateMany).not.toHaveBeenCalled();
   });
 
   it('REFUSES a key longer than the column, writing nothing (silent truncation would collide keys)', async () => {
@@ -349,7 +361,7 @@ describe('resolveException', () => {
 
     await expect(resolveException(tx, { key: KEY, note: 'auto: recount matched' })).resolves.toBeNull();
 
-    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+    expect(tx.inventoryException.updateMany).not.toHaveBeenCalled();
     expect(tx.inventoryException.create).not.toHaveBeenCalled();
   });
 
@@ -402,7 +414,7 @@ describe('resolveException', () => {
       resolveException(tx, { key: KEY, note: 'auto: recount matched', now: LATER }),
     ).resolves.toBe(resolved);
 
-    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+    expect(tx.inventoryException.updateMany).not.toHaveBeenCalled();
   });
 });
 
@@ -553,9 +565,43 @@ describe('the LOCKING read (PK-11)', () => {
 
     await resolveException(tx, { key: KEY, resolvedBy: 7, now: LATER });
 
-    expect(tx.__raw).toHaveLength(1);
+    // Two locking reads: the one that decides, and the one that hands the
+    // written row back (M7B-D1 — the return value is re-read under the lock,
+    // never assembled from the update's own pre-select).
+    expect(tx.__raw).toHaveLength(2);
     expect(tx.__raw[0].sql).toMatch(LOCKING_READ);
     expect(tx.__raw[0].values).toEqual([KEY]);
+    expect(tx.__raw[1].sql).toMatch(LOCKING_READ);
+  });
+
+  it('M7B-D1: every write is DML on the latest committed row (updateMany), never `update` with its snapshot pre-select', async () => {
+    const tx = mkTx();
+    setExisting(tx, row());
+
+    await upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT, now: LATER });
+    await resolveException(tx, { key: KEY, resolvedBy: 7, now: LATER });
+    await resolveException(tx, { key: KEY, resolvedBy: 7, resolution: 'reshipped', now: LATER });
+
+    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+    expect(tx.inventoryException.updateMany).toHaveBeenCalledTimes(3);
+    for (const call of tx.inventoryException.updateMany.mock.calls) {
+      expect(call[0].where).toEqual({ key: KEY });
+    }
+  });
+
+  it('M7B-D1: the returned row is the RE-READ state, and a vanished row is an INVARIANT', async () => {
+    const tx = mkTx();
+    setExisting(tx, row({ note: 'first' }));
+
+    const written = await resolveException(tx, { key: KEY, resolvedBy: 7, note: 'settled', now: LATER });
+    expect(written?.resolvedAt).toEqual(LATER);
+    expect(written?.note).toContain('settled');
+
+    // Simulate the impossible: the row disappears between the read and the write.
+    tx.inventoryException.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(
+      upsertException(tx, { kind: 'recv-discrepancy', key: KEY, subject: SUBJECT, now: LATER }),
+    ).rejects.toMatchObject({ code: 'INVARIANT', statusCode: 500 });
   });
 
   it('NEITHER writer takes a plain snapshot read any more', async () => {
@@ -663,7 +709,7 @@ describe('resolveException — the RESOLUTION classification (spec §6 / D5)', (
       resolveException(tx, { key: KEY, resolvedBy: 9, resolution: 'accepted-loss', now: LATER }),
     ).resolves.toBe(resolved);
 
-    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+    expect(tx.inventoryException.updateMany).not.toHaveBeenCalled();
   });
 
   it('never ERASES a classification when a later call supplies none', async () => {
@@ -673,7 +719,7 @@ describe('resolveException — the RESOLUTION classification (spec §6 / D5)', (
 
     await resolveException(tx, { key: KEY, resolvedBy: 9, now: LATER });
 
-    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+    expect(tx.inventoryException.updateMany).not.toHaveBeenCalled();
   });
 
   it('RE-LABELS a differing resolution, keeping the ORIGINAL settlement instant and actor', async () => {
@@ -763,7 +809,7 @@ describe('resolveException — the RESOLUTION classification (spec §6 / D5)', (
       resolveException(tx, { key: KEY, resolution: 'accepted-loss', subjectPatch: { lossCents: 1 } }),
     ).resolves.toBeNull();
 
-    expect(tx.inventoryException.update).not.toHaveBeenCalled();
+    expect(tx.inventoryException.updateMany).not.toHaveBeenCalled();
     expect(tx.inventoryException.create).not.toHaveBeenCalled();
   });
 });

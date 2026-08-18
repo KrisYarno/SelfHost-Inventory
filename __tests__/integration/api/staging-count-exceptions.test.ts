@@ -47,6 +47,14 @@ jest.mock('@/lib/prisma', () => {
       findUnique: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
+      // M7B-D1: the writer's WRITE is now `updateMany` (DML on the latest
+      // committed row) followed by a locking re-read. The stub delegates to the
+      // `update` mock these cases already assert on, so the args pins hold, and
+      // reports the one row MySQL would.
+      updateMany: jest.fn(async (args: any) => {
+        await tx.inventoryException.update(args);
+        return { count: 1 };
+      }),
     },
     // Receiving/Labeling overhaul (pack C2b.3 / PK-11): the writer's read is now a
     // LOCKING `SELECT ... FOR UPDATE` rather than a `findUnique`. The stub answers
