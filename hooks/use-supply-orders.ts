@@ -6,6 +6,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
+import { v4 as uuidv4 } from "uuid";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import { labelingKeys } from "@/hooks/use-labeling-keys";
@@ -90,6 +91,18 @@ export function invalidateSupplyOrderCaches(queryClient: QueryClient) {
 
 /** The Orders list filter — multi-status plus the model discriminator. */
 export type SupplyOrdersFilter = ShipmentListFilter;
+
+/**
+ * The server's page bound, MIRRORED (`SUPPLY_ORDER_LIST_LIMIT` in
+ * `lib/supply-orders/queries.ts`).
+ *
+ * Hand-declared for the same reason the request bodies below are: that module
+ * holds Prisma at runtime and the UI reads only its shapes. The screen needs the
+ * number because the list response carries no count — a page of exactly this
+ * many rows is a page that was CUT, and a list that does not say so reads as
+ * "this is everything" (QA-3).
+ */
+export const SUPPLY_ORDER_LIST_LIMIT = 100;
 
 function listUrl(filter: SupplyOrdersFilter): string {
   const params = new URLSearchParams();
@@ -230,8 +243,13 @@ export type VerifyLineResult = VerifyResult & { line: SupplyOrderLineView | null
  */
 export type StockInResult = BookingResult & { line: SupplyOrderLineView | null };
 
-/** M3b's discard-remaining response. */
-export type DiscardRemainingResult = DiscardResult;
+/**
+ * M3b's discard-remaining response: the primitive's result PLUS the refreshed
+ * line view, on the same terms as stock-in — the route re-reads the line after
+ * the transaction, so `line` is NULLABLE when that second read finds no supply
+ * order.
+ */
+export type DiscardRemainingResult = DiscardResult & { line: SupplyOrderLineView | null };
 
 // ---------------------------------------------------------------------------
 // The mutation plumbing
@@ -326,7 +344,12 @@ function mintAttempt(lineId: number): BookingAttempt {
   const prior = readAttempt(lineId);
   const next: BookingAttempt = {
     attempt: (prior?.attempt ?? 0) + 1,
-    key: crypto.randomUUID(),
+    // `crypto.randomUUID` is SECURE-CONTEXT ONLY and missing from a long tail of
+    // embedded webviews, where calling it threw before the request was ever
+    // sent — a bench that cannot book stock at all. `uuid` is the house
+    // dependency (`lib/change-tracking.ts`, `lib/inventory.ts`) and the server
+    // asserts nothing more than `z.string().uuid()`.
+    key: globalThis.crypto?.randomUUID?.() ?? uuidv4(),
   };
   writeAttempt(lineId, next);
   return next;

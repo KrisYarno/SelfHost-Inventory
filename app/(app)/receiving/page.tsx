@@ -6,11 +6,11 @@ import { AlertTriangle, Inbox, Loader2 } from "lucide-react";
 import {
   DEFAULT_ORDERS_FILTER,
   ShipmentList,
-  supplyOrdersQuery,
+  supplyOrdersRequests,
   type OrdersFilter,
 } from "@/components/receiving/shipment-list";
 import { SupplyOrderDialog } from "@/components/receiving/supply-order-dialog";
-import { useSupplyOrders } from "@/hooks/use-supply-orders";
+import { SUPPLY_ORDER_LIST_LIMIT, useSupplyOrders } from "@/hooks/use-supply-orders";
 
 /**
  * /receiving — THE ORDERS SURFACE (spec §9, contract pack C4a.4).
@@ -24,18 +24,50 @@ import { useSupplyOrders } from "@/hooks/use-supply-orders";
  * ("the list could not be loaded") is not the list's to give — its empty state
  * says "no supply orders yet", and showing that after a failed request tells the
  * operator to enter an order that may already exist (W25-3).
+ *
+ * TWO READS, ONE LIST (QA-3). `?model=` is single-valued, so the two families
+ * are two requests and this page merges them. New-flow rows first: the server
+ * orders by `orderedAt DESC` and a legacy header has no `orderedAt`, so it sorts
+ * last there too — the merge is the same order the database would have given.
+ *
+ * EITHER failure is THE failure. A partial list under a chip whose half did not
+ * land would say "no legacy receipts" about a request that never came back,
+ * which is the W25-3 lie in a smaller box.
  */
 export default function ReceivingPage() {
   const [filter, setFilter] = useState<OrdersFilter>(DEFAULT_ORDERS_FILTER);
   const [createOpen, setCreateOpen] = useState(false);
 
-  const { statuses, model } = supplyOrdersQuery(filter);
-  const {
-    data: orders = [],
-    isPending,
-    isError,
-    error,
-  } = useSupplyOrders({ statuses, model });
+  const requests = supplyOrdersRequests(filter);
+  // Both hooks are always mounted (hook order is not negotiable) and each is
+  // ENABLED only when its family was asked for — a disabled query issues no
+  // request, so an unticked family costs nothing.
+  const newFlowOrders = useSupplyOrders(
+    requests.newFlow ?? { statuses: [] },
+    requests.newFlow !== null,
+  );
+  const legacyOrders = useSupplyOrders(
+    requests.legacy ?? { statuses: [] },
+    requests.legacy !== null,
+  );
+
+  const live = [
+    requests.newFlow ? newFlowOrders : null,
+    requests.legacy ? legacyOrders : null,
+  ].filter((query) => query !== null);
+
+  const isPending = live.some((query) => query.isPending);
+  const isError = live.some((query) => query.isError);
+  const error = live.find((query) => query.isError)?.error;
+  // A disabled query keeps whatever its key last cached; reading it here would
+  // render rows for a family the operator has since switched off.
+  const orders = [
+    ...(requests.newFlow ? (newFlowOrders.data ?? []) : []),
+    ...(requests.legacy ? (legacyOrders.data ?? []) : []),
+  ];
+  // A FULL page is a CUT page: the list response carries no count, so an exactly
+  // bounded answer is the only signal that more exist.
+  const truncated = live.some((query) => (query.data?.length ?? 0) >= SUPPLY_ORDER_LIST_LIMIT);
 
   return (
     <div className="flex flex-col h-full overflow-x-hidden">
@@ -84,6 +116,7 @@ export default function ReceivingPage() {
           <ShipmentList
             orders={orders}
             filter={filter}
+            truncated={truncated}
             onFilterChange={setFilter}
             onNew={() => setCreateOpen(true)}
           />

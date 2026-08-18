@@ -24,6 +24,8 @@
  *      is exactly the stale-tab bug the envelopes were designed to surface.
  */
 
+import fs from "fs";
+import path from "path";
 import React, { type ReactNode } from "react";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -45,6 +47,7 @@ import { shipmentKeys, ShipmentApiError, readShipmentError } from "@/hooks/use-i
 import { labelingKeys } from "@/hooks/use-labeling-keys";
 import {
   BOOKING_ATTEMPT_STORAGE_PREFIX,
+  SUPPLY_ORDER_LIST_LIMIT,
   invalidateSupplyOrderCaches,
   useAddLine,
   useCreateSupplyOrder,
@@ -57,6 +60,7 @@ import {
   useSupplyOrder,
   useSupplyOrders,
   useVerifyLine,
+  type DiscardRemainingResult,
   type ResolveExceptionResult,
   type StockInResult,
 } from "@/hooks/use-supply-orders";
@@ -171,6 +175,21 @@ describe("the shared base — shipmentKeys.list(filter) / ShipmentApiError / rea
     ]);
     // An absent status set is the server's default set — a stable empty tail.
     expect(shipmentKeys.list({})).toEqual(["inbound-shipments", "list", "", "all"]);
+  });
+
+  it("the client's page bound MIRRORS the server's, and cannot drift from it", () => {
+    // The UI cannot IMPORT `SUPPLY_ORDER_LIST_LIMIT` — `lib/supply-orders/queries`
+    // holds Prisma at runtime — so the constant is hand-declared and the two are
+    // pinned to each other by reading the source, the same way the locations
+    // key-ownership pin does. A list that thinks the bound is 100 while the
+    // server sends 200 stops saying it was cut.
+    const server = fs.readFileSync(
+      path.join(process.cwd(), "lib", "supply-orders", "queries.ts"),
+      "utf8",
+    );
+    const declared = /export const SUPPLY_ORDER_LIST_LIMIT = (\d+);/.exec(server);
+    expect(declared).not.toBeNull();
+    expect(SUPPLY_ORDER_LIST_LIMIT).toBe(Number((declared as RegExpExecArray)[1]));
   });
 
   it("keeps the WHOLE parsed body on the error as `details`, with the W1 compatibility getters", () => {
@@ -422,9 +441,19 @@ describe("mutations", () => {
     // A verified count of ZERO is a fact about the dock and must survive JSON.
     expect(JSON.parse(mockFetch.mock.calls[0][1].body).verifiedQuantity).toBe(0);
 
-    mockFetch.mockResolvedValue(jsonResponse(200, { lineId: LINE_ID, status: "COMPLETE" }));
+    mockFetch.mockResolvedValue(
+      jsonResponse(200, { lineId: LINE_ID, status: "COMPLETE", line: { id: LINE_ID } }),
+    );
     const discard = renderHook(() => useDiscardRemaining(ORDER_ID), { wrapper: wrapper() });
-    await discard.result.current.mutateAsync({ lineId: LINE_ID, reason: "dropped" });
+    // THE ROUTE'S ANSWER, WHOLE (QA-7). Discard-remaining re-reads the line and
+    // returns it beside the booking result exactly as stock-in and resolve do;
+    // a hook typed as the primitive's result alone is a bench that cannot see
+    // the row it just finished.
+    const written: DiscardRemainingResult = await discard.result.current.mutateAsync({
+      lineId: LINE_ID,
+      reason: "dropped",
+    });
+    expect(written.line).toEqual({ id: LINE_ID });
     expect(String(mockFetch.mock.calls[1][0])).toBe(
       `/api/inbound-shipments/${ORDER_ID}/lines/${LINE_ID}/discard-remaining`,
     );
@@ -517,6 +546,34 @@ describe("useStockIn — the bookingKey discipline", () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body).toEqual({ bookingKey: "booking-key-1", quantity: 4, locationId: 1 });
     expect(mintedUuids).toBe(1);
+  });
+
+  it("MINTS A V4 KEY where `crypto.randomUUID` does not exist (QA-2)", async () => {
+    // Every non-secure-context page and a long tail of embedded webviews expose
+    // a Web Crypto object WITHOUT `randomUUID`. The old mint called it
+    // unconditionally, so on those clients the first stock-in threw before it
+    // ever reached the network — a bench that cannot book stock at all. The
+    // server asserts `z.string().uuid()`, so the fallback has to produce one.
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: {
+        getRandomValues: (bytes: Uint8Array) => {
+          for (let i = 0; i < bytes.length; i += 1) bytes[i] = (i * 37 + 11) % 256;
+          return bytes;
+        },
+      },
+    });
+
+    mockFetch.mockResolvedValueOnce(jsonResponse(200, BOOKED));
+    const { result } = stockIn();
+    await result.current.mutateAsync({ lineId: lineId, quantity: 4, locationId: 1 });
+
+    const sent = JSON.parse(mockFetch.mock.calls[0][1].body).bookingKey;
+    expect(sent).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    // The booking landed, and the settled key was retired like any other.
+    expect(attemptRecord(lineId)).toBeNull();
   });
 
   it("KEEPS the key across a 5xx, a network failure, a 409 CEILING and a 409 CONFLICT", async () => {

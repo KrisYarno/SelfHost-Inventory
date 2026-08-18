@@ -256,6 +256,15 @@ function rollupSupplyOrder(
   };
 
   for (const line of lines) {
+    if (line.status === 'DISCARDED') {
+      // A line REMOVED from the order (spec REV-10 clause 3) is settled work,
+      // not outstanding work — the same reasoning rule 2 applies to the legacy
+      // half's uncounted census. A VERIFIED zero-counter line may leave, and a
+      // removed line that kept flagging its header left a discrepancy nobody
+      // could ever clear: the line it is about is no longer on the order. The
+      // CENSUS still sees it (`lineCounts.discarded`); the totals do not.
+      continue;
+    }
     if (line.orderedQuantity === null) {
       rollup.unorderedLines += 1;
       continue;

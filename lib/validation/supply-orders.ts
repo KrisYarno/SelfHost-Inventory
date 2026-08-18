@@ -378,13 +378,18 @@ export function assertPatchNotEmpty(body: PatchSupplyOrderInput): void {
  *
  * `expectPrevious` deliberately does NOT count as asking for something: it is
  * an assertion ABOUT a request, not a request.
+ *
+ * Neither does a BLANK `note` (QA-6). It is the only field whose mere presence
+ * IS the request, so `note: ""` — an untouched textarea a form submitted — read
+ * as a flag/note-only verify and produced exactly the audit row saying nothing
+ * that this guard exists to refuse.
  */
 export function assertVerifyBodyNotEmpty(body: VerifyLineInput): void {
   const asked =
     body.verifiedQuantity !== undefined ||
     body.labelingRequired !== undefined ||
     body.deliveredProduct !== undefined ||
-    body.note !== undefined;
+    (body.note !== undefined && body.note.trim() !== '');
   if (!asked) {
     refuse(
       [],

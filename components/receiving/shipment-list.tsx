@@ -4,7 +4,10 @@ import Link from "next/link";
 import { Plus } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { SupplyOrderSummary } from "@/hooks/use-supply-orders";
+import {
+  SUPPLY_ORDER_LIST_LIMIT,
+  type SupplyOrderSummary,
+} from "@/hooks/use-supply-orders";
 
 /**
  * THE ORDERS LIST — one list over one dataset (contract pack C4a.2, spec §9).
@@ -69,33 +72,38 @@ const NEW_FLOW_CHIPS: OrdersFilterChip[] = ["ORDERED", "RECEIVING", "CLOSED", "C
  */
 const LEGACY_STATUSES = ["OPEN", "CLOSED", "CANCELLED"];
 
+/** One server request: a status set, and the family it belongs to. */
+export interface OrdersRequest {
+  statuses: string[];
+  model: "legacy" | "supply-order";
+}
+
 /**
- * The REQUEST the chips ask for.
+ * The requests the chips ask for — ONE PER FAMILY (QA-3).
  *
  * `?model=` is single-valued, so a selection spanning both families cannot be
- * expressed server-side: the query then asks for the UNION of the statuses and
- * `matchesOrdersFilter` narrows on the client. The server request is always a
- * SUPERSET of what is rendered — never the other way round, which would hide
- * rows the operator asked for.
+ * expressed in one request. The first reading of that asked for the UNION of the
+ * statuses with NO model and narrowed on the client, which is a superset of what
+ * is rendered — but a superset the server BOUNDS at 100 rows ordered by
+ * `orderedAt DESC`, and a legacy header has no `orderedAt`, so it sorts last.
+ * Past a hundred matching supply orders the legacy receipts the operator ticked
+ * were simply not in the answer, and the screen said "no orders" about an
+ * archive that was never queried.
+ *
+ * Two requests, merged on the client. Either half may be `null` — a family with
+ * no chip is a question nobody asked.
  */
-export function supplyOrdersQuery(filter: OrdersFilter): {
-  statuses: string[];
-  model: "legacy" | "supply-order" | undefined;
+export function supplyOrdersRequests(filter: OrdersFilter): {
+  newFlow: OrdersRequest | null;
+  legacy: OrdersRequest | null;
 } {
   const newFlow = NEW_FLOW_CHIPS.filter((chip) => filter.chips.includes(chip));
-  const legacy = filter.chips.includes("LEGACY");
-  // A status asked for by BOTH families is asked for once: the two `CLOSED`s
-  // are the same string on the wire.
-  const statuses = [
-    ...newFlow,
-    ...(legacy ? LEGACY_STATUSES.filter((status) => !newFlow.includes(status as OrdersFilterChip)) : []),
-  ];
-
-  let model: "legacy" | "supply-order" | undefined;
-  if (legacy && newFlow.length === 0) model = "legacy";
-  else if (!legacy) model = "supply-order";
-
-  return { statuses, model };
+  return {
+    newFlow: newFlow.length > 0 ? { statuses: [...newFlow], model: "supply-order" } : null,
+    legacy: filter.chips.includes("LEGACY")
+      ? { statuses: [...LEGACY_STATUSES], model: "legacy" }
+      : null,
+  };
 }
 
 /**
@@ -291,11 +299,23 @@ function OrderRow({ order }: { order: SupplyOrderSummary }) {
 export interface ShipmentListProps {
   orders: SupplyOrderSummary[];
   filter: OrdersFilter;
+  /**
+   * A request came back FULL, so the server cut the page (QA-3). The page owns
+   * this because it owns the reads: after the client narrowing below, the number
+   * of rows here says nothing about what the bound left out.
+   */
+  truncated?: boolean;
   onFilterChange: (filter: OrdersFilter) => void;
   onNew: () => void;
 }
 
-export function ShipmentList({ orders, filter, onFilterChange, onNew }: ShipmentListProps) {
+export function ShipmentList({
+  orders,
+  filter,
+  truncated = false,
+  onFilterChange,
+  onNew,
+}: ShipmentListProps) {
   const visible = orders.filter((order) => matchesOrdersFilter(order, filter));
 
   return (
@@ -338,6 +358,12 @@ export function ShipmentList({ orders, filter, onFilterChange, onNew }: Shipment
             New supply order
           </Button>
         </div>
+      )}
+
+      {truncated && (
+        <p data-testid="shipment-list-truncated" className="text-xs text-muted-foreground">
+          {`Showing the newest ${SUPPLY_ORDER_LIST_LIMIT} — refine the chips.`}
+        </p>
       )}
 
       {visible.length > 0 && (

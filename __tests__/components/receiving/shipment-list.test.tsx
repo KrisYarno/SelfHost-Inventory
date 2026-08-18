@@ -24,7 +24,7 @@ import {
   ShipmentList,
   DEFAULT_ORDERS_FILTER,
   matchesOrdersFilter,
-  supplyOrdersQuery,
+  supplyOrdersRequests,
   type OrdersFilter,
 } from "@/components/receiving/shipment-list";
 import type { SupplyOrderSummary } from "@/hooks/use-supply-orders";
@@ -96,7 +96,7 @@ function legacy(over: Record<string, unknown> = {}): SupplyOrderSummary {
 function renderList(
   orders: SupplyOrderSummary[],
   filter: OrdersFilter = DEFAULT_ORDERS_FILTER,
-  handlers: { onFilterChange?: jest.Mock; onNew?: jest.Mock } = {},
+  handlers: { onFilterChange?: jest.Mock; onNew?: jest.Mock; truncated?: boolean } = {},
 ) {
   const onFilterChange = handlers.onFilterChange ?? jest.fn();
   const onNew = handlers.onNew ?? jest.fn();
@@ -104,6 +104,7 @@ function renderList(
     <ShipmentList
       orders={orders}
       filter={filter}
+      truncated={handlers.truncated ?? false}
       onFilterChange={onFilterChange}
       onNew={onNew}
     />,
@@ -281,23 +282,41 @@ describe("status chips", () => {
     expect(onFilterChange).toHaveBeenLastCalledWith({ chips: ["RECEIVING"] });
   });
 
-  it("the query the chips ask for: statuses + the model discriminator", () => {
-    expect(supplyOrdersQuery({ chips: ["ORDERED", "RECEIVING"] })).toEqual({
-      statuses: ["ORDERED", "RECEIVING"],
-      model: "supply-order",
+  it("the requests the chips ask for: ONE PER FAMILY, each with its own model", () => {
+    expect(supplyOrdersRequests({ chips: ["ORDERED", "RECEIVING"] })).toEqual({
+      newFlow: { statuses: ["ORDERED", "RECEIVING"], model: "supply-order" },
+      legacy: null,
     });
     // REV-10 clause 6: "Legacy receipts" is the WHOLE legacy family — the
     // OPEN-only chip was dead the moment the drain finished.
-    expect(supplyOrdersQuery({ chips: ["LEGACY"] })).toEqual({
-      statuses: ["OPEN", "CLOSED", "CANCELLED"],
-      model: "legacy",
+    expect(supplyOrdersRequests({ chips: ["LEGACY"] })).toEqual({
+      newFlow: null,
+      legacy: { statuses: ["OPEN", "CLOSED", "CANCELLED"], model: "legacy" },
     });
-    // Both families at once: the server cannot express it, so no model is sent
-    // and the CLIENT narrows (the filter below).
-    expect(supplyOrdersQuery({ chips: ["CLOSED", "LEGACY"] })).toEqual({
-      statuses: ["CLOSED", "OPEN", "CANCELLED"],
-      model: undefined,
+    // QA-3: both families at once is TWO requests, not one unioned request with
+    // no model. `?model=` is single-valued, so the union asked the server for
+    // every status in BOTH families and let the 100-row bound decide what came
+    // back — and because legacy headers have no `orderedAt` they sort last under
+    // `orderedAt DESC`, so the archive the operator ticked vanished entirely the
+    // moment 100 new-flow orders matched.
+    expect(supplyOrdersRequests({ chips: ["CLOSED", "LEGACY"] })).toEqual({
+      newFlow: { statuses: ["CLOSED"], model: "supply-order" },
+      legacy: { statuses: ["OPEN", "CLOSED", "CANCELLED"], model: "legacy" },
     });
+    // No chip is no question — and therefore no request.
+    expect(supplyOrdersRequests({ chips: [] })).toEqual({ newFlow: null, legacy: null });
+  });
+
+  it("QA-3: says the page is BOUNDED rather than implying it is the whole list", () => {
+    renderList([supplyOrder()], DEFAULT_ORDERS_FILTER, { truncated: true });
+    expect(screen.getByTestId("shipment-list-truncated")).toHaveTextContent(
+      "Showing the newest 100 — refine the chips.",
+    );
+  });
+
+  it("says nothing about the bound when the page did not reach it", () => {
+    renderList([supplyOrder()]);
+    expect(screen.queryByTestId("shipment-list-truncated")).not.toBeInTheDocument();
   });
 
   it("Legacy receipts means model 'legacy', ANY status (REV-10 clause 6)", () => {

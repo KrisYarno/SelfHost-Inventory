@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { BatchRow } from "@/components/labeling/batch-row";
-import { useLabelingQueue } from "@/hooks/use-labeling";
+import { labelingScope, useLabelingQueue } from "@/hooks/use-labeling";
 import { useLocations, type Location } from "@/hooks/use-locations";
 import {
   useDiscardRemaining,
@@ -45,7 +45,7 @@ import {
  */
 
 export interface LabelingQueueProps {
-  /** The `?orderId=` deep link, already normalized by the server page. */
+  /** The `?orderId=` deep link. An empty value is no filter at all (QA-9). */
   orderId?: string;
 }
 
@@ -243,7 +243,11 @@ function QueueLine({ orderId, line, locations }: QueueLineProps) {
 // ---------------------------------------------------------------------------
 
 export function LabelingQueue({ orderId }: LabelingQueueProps) {
-  const { data, isPending, isError, error } = useLabelingQueue(orderId);
+  // ONE reading of "is this a deep link" (QA-9): the hook keys its cache off the
+  // same normalization, so the banner can never claim one order while the read
+  // asked for all of them.
+  const scope = labelingScope(orderId);
+  const { data, isPending, isError, error } = useLabelingQueue(scope);
   const { data: locations = [] } = useLocations();
 
   const groups = data?.groups ?? [];
@@ -251,7 +255,7 @@ export function LabelingQueue({ orderId }: LabelingQueueProps) {
 
   return (
     <div className="space-y-4">
-      {orderId && (
+      {scope && (
         <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
           <span>Showing one order.</span>
           <Link href="/labeling" className="font-medium text-foreground hover:underline">

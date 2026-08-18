@@ -193,6 +193,10 @@ describe('listSupplyOrders', () => {
       line({ id: 13, status: StagingItemStatus.COMPLETE, verifiedQuantity: 10, stockedQuantity: 9, disposedQuantity: 1 }),
       line({ id: 14, status: StagingItemStatus.DISCARDED, verifiedQuantity: null }),
       line({ id: 15, status: StagingItemStatus.VERIFIED, orderedQuantity: null, verifiedQuantity: 2 }),
+      // QA-1: a line REMOVED from the order after it was verified (REV-10 clause
+      // 3). It is CENSUSED and nothing else — its 6 units never reach `units`,
+      // and its missing order never reaches `unorderedLines`.
+      line({ id: 16, status: StagingItemStatus.DISCARDED, orderedQuantity: null, verifiedQuantity: 6 }),
     ]);
 
     const [summary] = (await listSupplyOrders({})) as SupplyOrderSummaryNewFlow[];
@@ -203,7 +207,7 @@ describe('listSupplyOrders', () => {
       verified: 1,
       labeling: 1,
       complete: 1,
-      discarded: 1,
+      discarded: 2,
     });
     expect(summary.units).toEqual({ verified: 19, stocked: 12, disposed: 1 });
     expect(summary.discrepancy.shortUnits).toBe(3);

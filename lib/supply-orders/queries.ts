@@ -304,6 +304,14 @@ function toSupplyOrderSummary(
         // censusing it under a new-flow name would invent a fact.
         break;
     }
+    if (line.status === StagingItemStatus.DISCARDED) {
+      // CENSUSED AND NOTHING ELSE (QA-1). A line removed from the order (spec
+      // REV-10 clause 3) is settled work — a VERIFIED zero-counter line may
+      // leave, and carrying its count into the header's units left the order
+      // claiming units it no longer has any line for. Same scoping the legacy
+      // half applies to its uncounted census (`lib/shipments/rollup.ts`).
+      continue;
+    }
     units.verified += line.verifiedQuantity ?? 0;
     units.stocked += line.stockedQuantity;
     units.disposed += line.disposedQuantity;

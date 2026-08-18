@@ -4,6 +4,7 @@ import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
 import { Prisma, StagingItemStatus } from '@prisma/client';
 import { recordChange, newBatchId } from '@/lib/change-tracking';
+import { claimShipmentForVerify } from '@/lib/supply-orders/claims';
 import { DiscardLineSchema } from '@/lib/validation/supply-orders';
 import { recvDiscrepancyKey } from '@/lib/exceptions/kinds';
 import { resolveException } from '@/lib/exceptions/write';
@@ -49,6 +50,13 @@ interface RouteParams {
  * The line is taken `FOR UPDATE` first so the audit can state the status it
  * actually removed, and the claim's WHERE still carries the whole precondition:
  * a verify or a booking that commits first simply wins.
+ *
+ * The HEADER is then claimed (`claimShipmentForVerify`) — line -> header, the
+ * lane's uniform lock order — which is what makes the legacy discriminator and
+ * the CANCELLED refusal STRUCTURAL (QA-4). Both used to hold only by accident:
+ * a legacy receipt's lines and a cancelled order's lines happen to sit in
+ * statuses this route does not consider removable, and an accident of another
+ * route's bookkeeping is not a precondition.
  */
 export const POST = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   const { user } = await requireApproved();
@@ -82,6 +90,14 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
       if (!prior) {
         throw new AppError('Supply-order line not found', 'NOT_FOUND', 404);
       }
+
+      // THE HEADER, CLAIMED — line -> header, the lane's uniform lock order.
+      // This carries the two refusals that were previously accidents of which
+      // statuses the lines happened to be in: a LEGACY receipt is read-only
+      // (409 LEGACY_READ_ONLY), and a CANCELLED order asserts nothing arrived,
+      // so nothing may be removed from it either. A guard that only holds
+      // because of how another route left its rows is not a guard.
+      await claimShipmentForVerify(tx, id);
 
       if (!REMOVABLE.includes(prior.status)) {
         throw new AppError(

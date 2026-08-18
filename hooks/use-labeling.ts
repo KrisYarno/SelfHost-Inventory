@@ -49,12 +49,29 @@ function queueUrl(orderId?: string): string {
     : "/api/labeling/queue";
 }
 
+/**
+ * The deep link's SCOPE, normalized (QA-9).
+ *
+ * `""` is not a filter on the order whose id is the empty string — it is the
+ * absence of a filter, which is what a bare `?orderId=` and an untouched form
+ * field both mean. Left as-is it produced a SECOND cache entry
+ * (`["labeling","queue",""]`) for a request identical to the unfiltered one:
+ * one list held twice, refetched separately, free to disagree.
+ *
+ * Exported because the screen reads the same value to decide whether it is
+ * showing one order, and a second reading of the rule is a second answer.
+ */
+export function labelingScope(orderId?: string): string | undefined {
+  return orderId && orderId.trim() !== "" ? orderId : undefined;
+}
+
 /** The whole queue, or the one order a "Label now" link deep-linked to. */
 export function useLabelingQueue(orderId?: string) {
+  const scope = labelingScope(orderId);
   return useQuery<LabelingQueueResult, ShipmentApiError>({
-    queryKey: labelingKeys.queue(orderId),
+    queryKey: labelingKeys.queue(scope),
     queryFn: async ({ signal }) => {
-      const res = await fetch(queueUrl(orderId), { signal });
+      const res = await fetch(queueUrl(scope), { signal });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw readShipmentError(res, json, "Failed to load the labeling queue");
       return json as LabelingQueueResult;

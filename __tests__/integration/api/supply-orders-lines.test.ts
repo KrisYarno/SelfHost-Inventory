@@ -707,6 +707,47 @@ describe('POST /api/inbound-shipments/[id]/lines/[lineId]/discard', () => {
     expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
   });
 
+  it('QA-4: takes the LINE, then CLAIMS the header — the lane lock order, by construction', async () => {
+    await discardPOST(mkReq(`/lines/${LINE_ID}/discard`, {}), lineParams);
+
+    // line FOR UPDATE -> header claim -> the guarded line write. The removal was
+    // the one writer in this lane that took no header lock at all: its refusals
+    // on a legacy or a cancelled order were accidents of which STATUSES its
+    // lines happen to be in, and an accident is not a guard.
+    const lineLock = db.$queryRaw.mock.invocationCallOrder[0];
+    const headerClaim = db.inboundShipment.updateMany.mock.invocationCallOrder[0];
+    const guardedWrite = db.stagingItem.updateMany.mock.invocationCallOrder[0];
+    expect(lineLock).toBeLessThan(headerClaim);
+    expect(headerClaim).toBeLessThan(guardedWrite);
+  });
+
+  it('QA-4: 409 LEGACY_READ_ONLY on a legacy header, writing nothing', async () => {
+    headerOrderedAt = null;
+    headerStatus = 'CLOSED';
+
+    const res = await discardPOST(mkReq(`/lines/${LINE_ID}/discard`, {}), lineParams);
+    const json = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(json.code).toBe('LEGACY_READ_ONLY');
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(mockRecordChange).not.toHaveBeenCalled();
+  });
+
+  it('QA-4: 409s a CANCELLED order even when the line is still removable', async () => {
+    // A cancel DISCARDS the lines it finds, so an ORDERED line on a cancelled
+    // header is a lost race — and removing it would have written to an order
+    // that asserts nothing arrived.
+    headerStatus = 'CANCELLED';
+
+    const res = await discardPOST(mkReq(`/lines/${LINE_ID}/discard`, {}), lineParams);
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('CONFLICT');
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(mockRecordChange).not.toHaveBeenCalled();
+  });
+
   it('409s a line that is no longer ORDERED, and 404s one this order does not own', async () => {
     db.stagingItem.updateMany.mockResolvedValue({ count: 0 });
 

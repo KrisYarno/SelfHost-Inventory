@@ -41,6 +41,7 @@ import {
   assertAnalyticsWindow,
   assertPatchNotEmpty,
   assertLinePatchNotEmpty,
+  assertVerifyBodyNotEmpty,
 } from '@/lib/validation/supply-orders';
 import { RESOLUTIONS } from '@/lib/exceptions/kinds';
 
@@ -332,6 +333,30 @@ describe('VerifyLineSchema', () => {
     expect(() =>
       VerifyLineSchema.parse({ verifiedQuantity: 1, note: 'x'.repeat(501) }),
     ).toThrow(z.ZodError);
+  });
+
+  it('QA-6: a BLANK note asks for nothing — the verify is refused', () => {
+    // `note` is the only field whose PRESENCE was the whole request. An empty
+    // (or whitespace) string is a form that was submitted, not a fact somebody
+    // recorded: accepting it wrote a VERIFY audit row saying nothing, on a line
+    // whose count nobody touched.
+    expect(() => assertVerifyBodyNotEmpty(VerifyLineSchema.parse({ note: '' }))).toThrow(
+      z.ZodError,
+    );
+    expect(() => assertVerifyBodyNotEmpty(VerifyLineSchema.parse({ note: '   ' }))).toThrow(
+      z.ZodError,
+    );
+    expect(() => assertVerifyBodyNotEmpty(VerifyLineSchema.parse({}))).toThrow(z.ZodError);
+    // A real note still asks for something, and so does every other field.
+    expect(() =>
+      assertVerifyBodyNotEmpty(VerifyLineSchema.parse({ note: 'box was crushed' })),
+    ).not.toThrow();
+    expect(() =>
+      assertVerifyBodyNotEmpty(VerifyLineSchema.parse({ verifiedQuantity: 0 })),
+    ).not.toThrow();
+    expect(() =>
+      assertVerifyBodyNotEmpty(VerifyLineSchema.parse({ labelingRequired: false })),
+    ).not.toThrow();
   });
 
   it('optionally re-points the line at the product that ACTUALLY arrived', () => {

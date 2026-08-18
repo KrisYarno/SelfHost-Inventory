@@ -300,6 +300,29 @@ describe('rollupDiscrepancies({ model: "supply-order" })', () => {
     });
   });
 
+  it('QA-1: a REMOVED (DISCARDED) line contributes NOTHING — the census keeps it, the fold does not', () => {
+    // REV-10 clause 3 lets a VERIFIED zero-counter line LEAVE the order. Folding
+    // its count on afterwards left the header flagged for a discrepancy on a line
+    // that is no longer part of the order — a debt nobody could ever pay, exactly
+    // the QA-5 failure the legacy half already refuses (rollupLegacy, rule 2).
+    const rollup = rollupDiscrepancies(
+      [
+        so({ status: 'DISCARDED', verifiedQuantity: 4 }),
+        so({ status: 'DISCARDED', orderedQuantity: null, verifiedQuantity: 6 }),
+        so({ verifiedQuantity: 8 }),
+      ],
+      { model: 'supply-order' },
+    );
+    expect(rollup).toEqual({
+      linesWithDiscrepancy: 1,
+      shortUnits: 2,
+      overUnits: 0,
+      lossCents: 2000,
+      surplusValueCents: 0,
+      unorderedLines: 0,
+    });
+  });
+
   it('a line still ORDERED contributes nothing (the "still owed" status)', () => {
     const rollup = rollupDiscrepancies(
       [so({ status: 'ORDERED', verifiedQuantity: null }), so({ verifiedQuantity: 8 })],
