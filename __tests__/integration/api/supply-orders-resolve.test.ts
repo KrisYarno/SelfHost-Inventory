@@ -330,6 +330,7 @@ describe('POST .../resolve — recv-discrepancy', () => {
     // discard settled the row and zeroed it. Recomputing from the counters the
     // line still carries would put a shortage back on a line that is no longer
     // on the order — so the refusal comes BEFORE the recompute, not after it.
+    // REV-11 clause 2: the sentence is now the ONE both kinds share.
     lockedLineRow = lineRow({ status: StagingItemStatus.DISCARDED });
 
     const res = await resolvePOST(
@@ -338,7 +339,9 @@ describe('POST .../resolve — recv-discrepancy', () => {
     );
 
     expect(res.status).toBe(409);
-    expect((await res.json()).code).toBe('CONFLICT');
+    const json = await res.json();
+    expect(json.code).toBe('CONFLICT');
+    expect(json.error).toBe('A line removed from the order has no money to settle');
     expect(mockResolveException).not.toHaveBeenCalled();
     expect(recorded('EXCEPTION_RESOLVE')).toHaveLength(0);
   });
@@ -386,11 +389,14 @@ describe('POST .../resolve — labeling-loss', () => {
     expect(Object.keys(args.subjectPatch)).not.toContain('reason');
   });
 
-  it('FD3-1: still settles on a REMOVED line — a bench loss really happened', async () => {
-    // The removal refusal is about SUPPLIER money (short/over), which a removed
-    // line cannot have. Units the bench lost are a different fact: they were
-    // counted, they were destroyed, and the line leaving the order later does
-    // not un-lose them.
+  it('REV-11 clause 2 (OC-1): 409s a REMOVED line — the bench loss is refused too', async () => {
+    // CONTRACT CHANGE (Kris's pre-deploy decision, spec REV-11 clause 2). This
+    // pin previously demanded a 200: a bench loss was held to be a different
+    // fact from supplier money, so it stayed settleable on a removed line. The
+    // decision is that a REMOVED LINE REPORTS NO MONEY OF ANY KIND — one
+    // doctrine for both kinds, so the read side (the analytics exclusion) and
+    // the write side cannot drift apart. Unreachable today (removal requires
+    // disposed = 0), which is exactly why it is written down.
     lockedLineRow = lineRow({
       status: StagingItemStatus.DISCARDED,
       verifiedQuantity: 100,
@@ -403,11 +409,12 @@ describe('POST .../resolve — labeling-loss', () => {
       lineParams,
     );
 
-    expect(res.status).toBe(200);
-    expect(mockResolveException.mock.calls[0][1].subjectPatch).toMatchObject({
-      units: 40,
-      lossCents: 40_000,
-    });
+    expect(res.status).toBe(409);
+    const json = await res.json();
+    expect(json.code).toBe('CONFLICT');
+    expect(json.error).toBe('A line removed from the order has no money to settle');
+    expect(mockResolveException).not.toHaveBeenCalled();
+    expect(recorded('EXCEPTION_RESOLVE')).toHaveLength(0);
   });
 
   it('carries lossCents NULL when the line was never priced (REV-10 clause 8)', async () => {

@@ -432,13 +432,12 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
   const discrepancyCell = (): string => {
     // A LINE THAT LEFT THE ORDER CARRIES NO MONEY — fix-delta 2 FD2-1
     // (removed-line money), FD3-2 — and that is the FIRST thing this cell
-    // decides. The rollup still COMPUTES a per-line discrepancy from the
-    // counters the line was holding when it went (only the header total skips
-    // it, lib/shipments/rollup.ts), so rendering that would report a supplier
-    // shortage on a line nobody is owed anything for. "Not verified yet" is
-    // wrong for the same reason: the line is gone, and what it was still
-    // waiting for is no longer the fact about it.
-    if (line.status === "DISCARDED") return "Removed from the order";
+    // decides. The read side now says so itself (REV-11 clause 3): `discrepancy`
+    // arrives NULL for a removed line, and `lineRemoved` is the wire's own
+    // answer rather than a status this screen re-interprets. "Not verified yet"
+    // would be wrong for the same reason: the line is gone, and what it was
+    // still waiting for is no longer the fact about it.
+    if (line.lineRemoved) return "Removed from the order";
     if (line.verifiedQuantity === null) return "Not verified yet";
     const discrepancy = line.discrepancy;
     if (discrepancy === null) return "Matches the order";
@@ -488,28 +487,38 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
         </div>
       </div>
 
-      <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-5">
-        <div>
-          <dt className="text-xs text-muted-foreground">Ordered</dt>
-          <dd className="tabular-nums">{line.orderedQuantity ?? "—"}</dd>
-        </div>
-        <div>
-          <dt className="text-xs text-muted-foreground">Verified</dt>
-          <dd className="tabular-nums">{line.verifiedQuantity ?? "—"}</dd>
-        </div>
-        <div>
-          <dt className="text-xs text-muted-foreground">Stocked</dt>
-          <dd className="tabular-nums">{line.stockedQuantity}</dd>
-        </div>
-        <div>
-          <dt className="text-xs text-muted-foreground">Disposed</dt>
-          <dd className="tabular-nums">{line.disposedQuantity}</dd>
-        </div>
-        <div>
-          <dt className="text-xs text-muted-foreground">Remaining</dt>
-          <dd className="tabular-nums">{line.remaining}</dd>
-        </div>
-      </dl>
+      {/* THE COUNTERS ARE NOT FACTS ABOUT A REMOVED LINE (REV-11 clause 3,
+          OC-2). It keeps the numbers it was holding when it went, and printing
+          "Verified 4 · Remaining 4" reads as work still waiting at the bench for
+          a line nobody is going to label. The removal itself is the fact. */}
+      {line.lineRemoved ? (
+        <p data-testid={`line-facts-${line.id}`} className="text-sm text-muted-foreground">
+          Removed from the order — its counts no longer apply
+        </p>
+      ) : (
+        <dl className="grid grid-cols-2 gap-2 text-sm sm:grid-cols-5">
+          <div>
+            <dt className="text-xs text-muted-foreground">Ordered</dt>
+            <dd className="tabular-nums">{line.orderedQuantity ?? "—"}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Verified</dt>
+            <dd className="tabular-nums">{line.verifiedQuantity ?? "—"}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Stocked</dt>
+            <dd className="tabular-nums">{line.stockedQuantity}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Disposed</dt>
+            <dd className="tabular-nums">{line.disposedQuantity}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Remaining</dt>
+            <dd className="tabular-nums">{line.remaining}</dd>
+          </div>
+        </dl>
+      )}
 
       <p data-testid={`line-discrepancy-${line.id}`} className="text-xs font-medium">
         {discrepancyCell()}
@@ -818,9 +827,10 @@ function LineEditPanel({ line, busy, onCancel, onSubmit }: LineEditPanelProps) {
 interface ExceptionRowProps {
   orderId: string;
   exception: SupplyOrderExceptionView;
-  /** The line this row belongs to was REMOVED from the order (fix-delta 3 FD3-1/FD3-2 follow-up):
-   *  its recv-discrepancy money is zero by construction and the resolve route refuses to settle
-   *  it — so the panel offers no Resolve control (no dead controls) and says why. */
+  /** The line this row belongs to was REMOVED from the order — read off the WIRE
+   *  (`SupplyOrderLineView.lineRemoved`, REV-11 clause 3). A removed line reports NO money of
+   *  any kind (REV-11 clause 2), so the resolve route refuses BOTH kinds and the panel offers
+   *  no Resolve control for either (no dead controls) and says why. */
   lineRemoved?: boolean;
 }
 
@@ -881,8 +891,8 @@ function ExceptionRow({ orderId, exception, lineRemoved = false }: ExceptionRowP
             )}
           </div>
           <p className="text-sm">
-            {lineRemoved && exception.kind === "recv-discrepancy"
-              ? "Removed from the order — no shortage or surplus to settle"
+            {lineRemoved
+              ? "Removed from the order — nothing to settle"
               : [
               units !== null ? `${units} unit(s)` : null,
               lossCents !== null ? `${formatCents(lossCents)} loss` : null,
@@ -905,7 +915,7 @@ function ExceptionRow({ orderId, exception, lineRemoved = false }: ExceptionRowP
             </p>
           )}
         </div>
-        {lineRemoved && exception.kind === "recv-discrepancy" ? null : (
+        {lineRemoved ? null : (
           <Button size="sm" variant="outline" onClick={() => setOpen((prev) => !prev)}>
             Resolve
           </Button>
@@ -1348,9 +1358,14 @@ export function SupplyOrderDetail({ detail }: SupplyOrderDetailProps) {
                 key={exception.key}
                 orderId={detail.id}
                 exception={exception}
-                lineRemoved={detail.lines.some(
-                  (line) => line.id === exception.lineId && line.status === "DISCARDED",
-                )}
+                // THE WIRE'S ANSWER (REV-11 clause 3). The join stays exact —
+                // the row's OWN line — but whether that line is gone is the
+                // server's fact, not a status this panel re-interprets. A line
+                // the detail did not return leaves the flag false, which is the
+                // truthful "this read cannot say".
+                lineRemoved={
+                  detail.lines.find((line) => line.id === exception.lineId)?.lineRemoved ?? false
+                }
               />
             ))}
           </ul>

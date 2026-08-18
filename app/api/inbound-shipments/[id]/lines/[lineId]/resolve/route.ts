@@ -121,6 +121,23 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
         throw new AppError('Supply-order line not found', 'NOT_FOUND', 404);
       }
 
+      // A LINE THAT LEFT THE ORDER REPORTS NO MONEY OF ANY KIND — fix-delta 2
+      // FD2-1 (removed-line money), FD3-1, and REV-11 clause 2 (OC-1), which
+      // widened this from the discrepancy alone to BOTH kinds. The removal
+      // already settled the row and zeroed it, and the counters the line still
+      // carries are the ones it was holding when it went; recomputing from them
+      // would write money back onto a line that is no longer on the order. ONE
+      // doctrine for both kinds, so the write side and the read side (the
+      // analytics exclusion of removed lines) cannot drift apart. The refusal
+      // comes BEFORE the recompute rather than after it.
+      if (line.status === StagingItemStatus.DISCARDED) {
+        throw new AppError(
+          'A line removed from the order has no money to settle',
+          'CONFLICT',
+          409,
+        );
+      }
+
       const money = lineMoney({
         lineTotalCents: line.lineTotalCents,
         orderedQuantity: line.orderedQuantity,
@@ -129,21 +146,6 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
 
       let subjectPatch: ExceptionSubject;
       if (isDiscrepancy) {
-        if (line.status === StagingItemStatus.DISCARDED) {
-          // A LINE THAT LEFT THE ORDER HAS NO SUPPLIER MONEY — fix-delta 2
-          // FD2-1 (removed-line money), FD3-1. The removal already settled this
-          // row and ZEROED it, and the counters the line still carries are the
-          // ones it was holding when it went. Recomputing from them here would
-          // write the shortage back onto a line that is no longer on the order,
-          // so the refusal comes BEFORE the recompute rather than after it. A
-          // labeling loss on the same line is a different fact and stays
-          // settleable: those units really were counted, and really were lost.
-          throw new AppError(
-            'A line removed from the order has no shortage or surplus to settle',
-            'CONFLICT',
-            409,
-          );
-        }
         if (line.verifiedQuantity === null) {
           // A discrepancy subject states a COUNTED quantity. There is none yet,
           // and inventing a 0 would report a whole-line shortage nobody counted.

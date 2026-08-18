@@ -140,6 +140,11 @@ export type DiscardArgs = {
   shipmentId: string;
   reason: string;
   actor: { id: number; isAdmin: boolean };
+  /**
+   * What the caller BELIEVED was left when it decided to write the remainder off
+   * (REV-11 clause 1). Absent = no belief stated = nothing to contradict.
+   */
+  expectRemaining?: number;
 };
 
 /** What the discard-remaining route needs to write its row and its audit line. */
@@ -592,16 +597,29 @@ export async function discardRemaining(
     batchId: string;
   },
 ): Promise<DiscardResult> {
-  const { lineId, shipmentId, reason } = args;
+  const { lineId, shipmentId, reason, expectRemaining } = args;
   const { onRecord, batchId } = opts;
 
   const line = await lockLine(tx, lineId, shipmentId);
   assertBookableStatus(line);
   const verified = assertVerified(line);
 
+  // THE CLIENT'S BELIEF, CHECKED AGAINST THE LOCKED ROW (REV-11 clause 1).
+  // "Write off the remainder" names a quantity the operator read off a card, and
+  // a colleague who stocked or disposed since makes that card older than the
+  // line. Refusing here — BEFORE the header claim and before every write — costs
+  // the raced operator a reload; not refusing costs them units they never saw.
+  const remaining = remainingOf(line, verified);
+  if (expectRemaining !== undefined && expectRemaining !== remaining) {
+    throw new AppError(
+      `The remainder changed since you loaded this line — it is now ${remaining} (verified ${verified}, stocked ${line.stockedQuantity}, disposed ${line.disposedQuantity}). Reload and try again.`,
+      'CONFLICT',
+      409,
+    );
+  }
+
   await claimShipmentForBooking(tx, shipmentId);
 
-  const remaining = remainingOf(line, verified);
   if (remaining <= 0) {
     throw new AppError(
       `Supply-order line ${lineId} has nothing left to discard (${line.stockedQuantity} stocked, ${line.disposedQuantity} disposed of ${verified} verified)`,

@@ -333,6 +333,31 @@ describe('getSupplyOrderDetail', () => {
     ]);
   });
 
+  it('REV-11 clause 3: the WIRE says a line is removed, and carries NO discrepancy for it', async () => {
+    mockPrisma.inboundShipment.findUnique.mockResolvedValue(header());
+    mockPrisma.stagingItem.findMany.mockResolvedValue([
+      // 4 of 10 counted and then removed from the order. The rollup would still
+      // COMPUTE a 6-unit shortage from the counters the line was carrying when
+      // it went (only the header total skips it), so the shape stops carrying
+      // it: a removed line is owed nothing, and every screen reading this view
+      // gets that answer without re-deriving it from the status.
+      line({ id: 11, status: StagingItemStatus.DISCARDED, verifiedQuantity: 4 }),
+      line({ id: 12, verifiedQuantity: 4 }),
+    ]);
+    mockPrisma.inventoryException.findMany.mockResolvedValue([]);
+
+    const detail = await getSupplyOrderDetail('ord_1');
+    if (!detail || detail.model !== 'supply-order') throw new Error('expected a supply order');
+
+    expect(detail.lines[0]).toMatchObject({ id: 11, lineRemoved: true, discrepancy: null });
+    // A LIVE line is unchanged: the flag is false and the shortage still lands.
+    expect(detail.lines[1]).toMatchObject({
+      id: 12,
+      lineRemoved: false,
+      discrepancy: { shortUnits: 6, overUnits: 0, unordered: false },
+    });
+  });
+
   it('names the ORDERED product from its OWN relation, and says so when there is none', async () => {
     mockPrisma.inboundShipment.findUnique.mockResolvedValue(header());
     mockPrisma.stagingItem.findMany.mockResolvedValue([

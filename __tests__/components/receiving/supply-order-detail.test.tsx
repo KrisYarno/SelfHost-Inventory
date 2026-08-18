@@ -80,7 +80,7 @@ function jsonResponse(status: number, body: unknown) {
 }
 
 function line(over: Record<string, unknown> = {}) {
-  return {
+  const row = {
     id: 11,
     orderedProductId: 55,
     orderedProductName: "BPC-157 5mg",
@@ -103,6 +103,11 @@ function line(over: Record<string, unknown> = {}) {
     exceptionKeys: [],
     ...over,
   };
+  // THE WIRE FLAG (REV-11 clause 3). The server derives it from the status, so
+  // a fixture derives it too — otherwise these tests would be asserting against
+  // a payload the API cannot produce. An explicit override still wins: that is
+  // how the panel's "reads the flag, not the status" pin discriminates.
+  return { lineRemoved: row.status === "DISCARDED", ...row };
 }
 
 function detail(over: Record<string, unknown> = {}, lines = [line()]) {
@@ -295,6 +300,36 @@ describe("the controls follow the line's status", () => {
     expect(screen.getByTestId("line-discrepancy-11")).toHaveTextContent(
       "Removed from the order",
     );
+  });
+
+  it("OC-2: a REMOVED line's facts row states the removal instead of counting units", () => {
+    renderDetail(
+      detail({ status: "RECEIVING" }, [
+        line({ status: "DISCARDED", verifiedQuantity: 4, remaining: 4, stockedQuantity: 0 }),
+      ]),
+    );
+
+    // The counters the line was holding when it left are not facts about it any
+    // more: "Verified 4 / Remaining 4" reads as work still waiting at the bench.
+    const card = lineCard(11);
+    expect(within(card).getByTestId("line-facts-11")).toHaveTextContent(
+      "Removed from the order — its counts no longer apply",
+    );
+    expect(within(card).queryByText("Verified")).toBeNull();
+    expect(within(card).queryByText("Remaining")).toBeNull();
+  });
+
+  it("OC-2: a LIVE line still shows every counter", () => {
+    renderDetail(
+      detail({ status: "RECEIVING" }, [
+        line({ status: "VERIFIED", verifiedQuantity: 4, remaining: 4 }),
+      ]),
+    );
+
+    const card = lineCard(11);
+    expect(within(card).queryByTestId("line-facts-11")).toBeNull();
+    expect(within(card).getByText("Verified")).toBeInTheDocument();
+    expect(within(card).getByText("Remaining")).toBeInTheDocument();
   });
 
   it("a COMPLETE line offers no batch row — there is nothing left to book", () => {
@@ -653,18 +688,38 @@ describe("the follow-up panel", () => {
       detail({ status: "RECEIVING", exceptions: [zeroed] }, [line({ status: "DISCARDED" })]),
     );
     const row = screen.getByTestId("exception-recv-discrepancy:11");
-    expect(within(row).getByText(/Removed from the order — no shortage or surplus to settle/)).toBeInTheDocument();
+    expect(within(row).getByText("Removed from the order — nothing to settle")).toBeInTheDocument();
     expect(within(row).queryByRole("button", { name: /resolve/i })).toBeNull();
     expect(within(row).queryByText(/\$0\.00 loss/)).toBeNull();
   });
 
-  it("a REMOVED line's labeling-loss row keeps its Resolve control (a bench loss is real)", () => {
+  it("REV-11 clause 2 (OC-1): a REMOVED line's labeling-loss row loses its Resolve control too", () => {
+    // CONTRACT CHANGE (Kris's pre-deploy decision). The M4b / round-4 pin here
+    // asserted the opposite — a bench loss stayed settleable on a removed line.
+    // A REMOVED LINE NOW REPORTS NO MONEY OF ANY KIND, the route refuses both
+    // kinds, and a control the server will refuse is a dead control.
     const loss = { ...shortage, key: "labeling-loss:11", kind: "labeling-loss", subject: { lineId: 11, units: 2, lossCents: 200, reason: "broke" } };
     renderDetail(
       detail({ status: "RECEIVING", exceptions: [loss] }, [line({ status: "DISCARDED" })]),
     );
     const row = screen.getByTestId("exception-labeling-loss:11");
-    expect(within(row).getByRole("button", { name: /resolve/i })).toBeInTheDocument();
+    expect(within(row).getByText("Removed from the order — nothing to settle")).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: /resolve/i })).toBeNull();
+    expect(within(row).queryByText(/\$2\.00 loss/)).toBeNull();
+  });
+
+  it("OC-3: the panel reads the WIRE's lineRemoved, not the rendered status", () => {
+    // The join stays exact (the row's own line), but the ANSWER now comes from
+    // the server: a payload whose flag and status disagree proves which one the
+    // panel is actually reading.
+    renderDetail(
+      detail({ status: "RECEIVING", exceptions: [shortage] }, [
+        line({ status: "COMPLETE", lineRemoved: true }),
+      ]),
+    );
+    const row = screen.getByTestId("exception-recv-discrepancy:11");
+    expect(within(row).getByText("Removed from the order — nothing to settle")).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: /resolve/i })).toBeNull();
   });
 
   it("lists the order's exceptions with their money", () => {

@@ -299,6 +299,45 @@ describe('POST .../discard-remaining — refusals', () => {
     expect(mockRecordChange).not.toHaveBeenCalled();
   });
 
+  it('REV-11 clause 1: passes expectRemaining through — a STALE card is a 409, nothing written', async () => {
+    // The locked line has 4 left (10 verified, 6 stocked); the card said 5.
+    const res = await discardRemainingPOST(
+      mkReq({ reason: 'stale card', expectRemaining: 5 }),
+      lineParams,
+    );
+
+    expect(res.status).toBe(409);
+    const json = await res.json();
+    expect(json.code).toBe('CONFLICT');
+    expect(json.error).toBe(
+      'The remainder changed since you loaded this line — it is now 4 (verified 10, stocked 6, disposed 0). Reload and try again.',
+    );
+    expect(db.$executeRaw).not.toHaveBeenCalled();
+    expect(mockUpsert).not.toHaveBeenCalled();
+    expect(mockRecordChange).not.toHaveBeenCalled();
+  });
+
+  it('REV-11 clause 1: a MATCHING expectRemaining writes the remainder off as normal', async () => {
+    const res = await discardRemainingPOST(
+      mkReq({ reason: 'dropped the tray', expectRemaining: 4 }),
+      lineParams,
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockUpsert).toHaveBeenCalledTimes(1);
+    expect(mockUpsert.mock.calls[0][1].subject).toMatchObject({ units: 4, lossCents: 4000 });
+  });
+
+  it('REV-11 clause 1: 400s a negative expectRemaining before anything is read', async () => {
+    const res = await discardRemainingPOST(
+      mkReq({ reason: 'nope', expectRemaining: -1 }),
+      lineParams,
+    );
+
+    expect(res.status).toBe(400);
+    expect(db.$executeRaw).not.toHaveBeenCalled();
+  });
+
   it('409 CONFLICT when the guarded write loses its row', async () => {
     discardWriteCount = 0;
 

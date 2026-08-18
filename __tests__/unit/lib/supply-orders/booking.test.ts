@@ -1118,6 +1118,60 @@ describe('discardRemaining — the same prologue, the labeling-loss half (§4.3.
     expect(stmt(tx, 'line-lock')!.values).toEqual([LINE_ID, SHIPMENT]);
   });
 
+  it('REV-11 clause 1: a STALE expectRemaining is a 409 CONFLICT naming the locked counters', async () => {
+    // 10 verified, 4 stocked, 1 disposed -> 5 left. The card said 6, so the card
+    // is older than the line: writing off "the remainder" here would dispose a
+    // number the operator never saw.
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.LABELING, stockedQuantity: 4, disposedQuantity: 1 }),
+    });
+    const rec = discardRecorder();
+
+    await expect(
+      discardRemaining(tx, discardArgs({ expectRemaining: 6 }), {
+        onRecord: rec.onRecord,
+        batchId: BATCH,
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CONFLICT',
+      message:
+        'The remainder changed since you loaded this line — it is now 5 (verified 10, stocked 4, disposed 1). Reload and try again.',
+    });
+    // BEFORE the claim and before every write: the lock is the ONLY statement.
+    expect(kinds(tx)).toEqual(['line-lock']);
+    expect(tx.$executeRaw).not.toHaveBeenCalled();
+    expect(rec.calls()).toBe(0);
+  });
+
+  it('REV-11 clause 1: an expectRemaining that MATCHES the locked remainder proceeds', async () => {
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.LABELING, stockedQuantity: 4, disposedQuantity: 1 }),
+    });
+    const rec = discardRecorder();
+
+    const result = await discardRemaining(tx, discardArgs({ expectRemaining: 5 }), {
+      onRecord: rec.onRecord,
+      batchId: BATCH,
+    });
+
+    expect(result).toMatchObject({ disposedQuantity: 6, remaining: 0 });
+    expect(rec.calls()).toBe(1);
+  });
+
+  it('REV-11 clause 1: an ABSENT expectRemaining asserts NOTHING (the gate drives it that way)', async () => {
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.LABELING, stockedQuantity: 4, disposedQuantity: 1 }),
+    });
+    const rec = discardRecorder();
+
+    // No belief was stated, so there is nothing to contradict — the primitive
+    // stays callable by a caller that never rendered a card.
+    await expect(
+      discardRemaining(tx, discardArgs(), { onRecord: rec.onRecord, batchId: BATCH }),
+    ).resolves.toMatchObject({ disposedQuantity: 6 });
+  });
+
   it('refuses a line with NOTHING remaining — 409 NOT_BOOKABLE, idempotent by construction', async () => {
     const tx = mkTx({
       line: lockedLine({ status: StagingItemStatus.LABELING, stockedQuantity: 6, disposedQuantity: 4 }),

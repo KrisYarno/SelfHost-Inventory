@@ -39,6 +39,11 @@ interface RouteParams {
  * Idempotent by construction: a second call finds nothing remaining and refuses
  * 409 `NOT_BOOKABLE` rather than writing a second, invented loss.
  *
+ * THE CARD'S NUMBER TRAVELS (REV-11 clause 1). `expectRemaining` is what the
+ * screen printed; when the locked row says something else the write-off is
+ * refused 409 `CONFLICT` and nothing is written. It stays OPTIONAL on the wire
+ * so a caller with no card in front of it can still finish a line.
+ *
  * This route IS an exception writer — allow-listed in
  * `__tests__/integration/exceptions-write-boundary.test.ts`.
  */
@@ -69,6 +74,10 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
           lineId,
           shipmentId: id,
           reason: body.reason,
+          // The card's own number, checked against the LOCKED row (REV-11
+          // clause 1). Passed through as given — including absent, which is a
+          // caller stating no belief rather than a caller claiming zero.
+          expectRemaining: body.expectRemaining,
           actor: { id: user.id, isAdmin: user.isAdmin },
         },
         {

@@ -226,9 +226,17 @@ export const StockInSchema = z.object({
  * Writing off the remainder of a line. The reason is REQUIRED: this is the act
  * that turns unlabelled units into a recorded money loss, and an unexplained
  * write-off is exactly what the labeling-loss row exists to prevent.
+ *
+ * `expectRemaining` is THE CLIENT'S BELIEF about how many units are left
+ * (REV-11 clause 1). The house UI always sends the number its card printed, and
+ * the server refuses the write-off when the locked row disagrees — a stale card
+ * would otherwise dispose units nobody on that screen ever saw. OPTIONAL here
+ * on purpose: a caller with no card in front of it (the concurrency gate drives
+ * the primitive directly) states no belief and gets no assertion.
  */
 export const DiscardRemainingSchema = z.object({
   reason: z.string().min(1).max(500),
+  expectRemaining: z.number().int().min(0).max(MAX_UNITS).optional(),
 });
 
 /** Discarding a whole line (nothing verified yet) — the reason is optional. */

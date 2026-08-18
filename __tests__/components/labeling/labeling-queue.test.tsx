@@ -283,7 +283,7 @@ it("mounts the shared batch row for every line with the line's own props", async
 // Discard remaining
 // ---------------------------------------------------------------------------
 
-it("shows the boundary sentence, requires a reason, and posts { reason }", async () => {
+it("shows the boundary sentence, requires a reason, and posts { reason, expectRemaining }", async () => {
   const user = userEvent.setup();
   respondWith(queuePayload([group({}, [line({ id: 501, remaining: 96 })])]));
 
@@ -319,8 +319,13 @@ it("shows the boundary sentence, requires a reason, and posts { reason }", async
     expect(String(call![0])).toBe(
       `/api/inbound-shipments/${ORDER_A}/lines/501/discard-remaining`,
     );
+    // THE REMAINDER THE CARD SHOWED travels with the reason (REV-11 clause 1).
+    // The button still carries no number — the server writes off what the
+    // LOCKED row has — but a card drawn against an older count now gets a 409
+    // instead of silently disposing units nobody on this screen ever saw.
     expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
       reason: "vial broke on the bench",
+      expectRemaining: 96,
     });
   });
 });

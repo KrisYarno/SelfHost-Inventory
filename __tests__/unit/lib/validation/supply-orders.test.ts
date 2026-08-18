@@ -408,6 +408,26 @@ describe('DiscardRemainingSchema / DiscardLineSchema', () => {
     expect(() => DiscardRemainingSchema.parse({ reason: 'x'.repeat(501) })).toThrow(z.ZodError);
   });
 
+  it("carries the client's BELIEF about the remainder — optional, a whole count (REV-11 clause 1)", () => {
+    // OPTIONAL on the wire and REQUIRED from the house UI: the schema stays
+    // compatible with a caller that has no card in front of it (the concurrency
+    // gate drives the primitive directly), while the queue always sends the
+    // number it printed so a stale card cannot write off units it never showed.
+    expect(DiscardRemainingSchema.parse({ reason: 'x' }).expectRemaining).toBeUndefined();
+    expect(DiscardRemainingSchema.parse({ reason: 'x', expectRemaining: 0 }).expectRemaining).toBe(
+      0,
+    );
+    expect(DiscardRemainingSchema.parse({ reason: 'x', expectRemaining: 7 }).expectRemaining).toBe(
+      7,
+    );
+    expect(() => DiscardRemainingSchema.parse({ reason: 'x', expectRemaining: -1 })).toThrow(
+      z.ZodError,
+    );
+    expect(() => DiscardRemainingSchema.parse({ reason: 'x', expectRemaining: 2.5 })).toThrow(
+      z.ZodError,
+    );
+  });
+
   it('discarding a whole LINE takes an optional reason', () => {
     expect(DiscardLineSchema.parse({}).reason).toBeUndefined();
     expect(DiscardLineSchema.parse({ reason: 'ordered by mistake' }).reason).toBe(

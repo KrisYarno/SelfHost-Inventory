@@ -385,7 +385,11 @@ describe("mutations", () => {
         ["discardLine", () => useDiscardLine(ORDER_ID), { lineId: LINE_ID }],
         ["verify", () => useVerifyLine(ORDER_ID), { lineId: LINE_ID, body: {} }],
         ["stockIn", () => useStockIn(ORDER_ID), { lineId: LINE_ID, quantity: 1, locationId: 1 }],
-        ["discardRemaining", () => useDiscardRemaining(ORDER_ID), { lineId: LINE_ID, reason: "x" }],
+        [
+          "discardRemaining",
+          () => useDiscardRemaining(ORDER_ID),
+          { lineId: LINE_ID, reason: "x", expectRemaining: 1 },
+        ],
         [
           "resolve",
           () => useResolveException(ORDER_ID),
@@ -452,11 +456,19 @@ describe("mutations", () => {
     const written: DiscardRemainingResult = await discard.result.current.mutateAsync({
       lineId: LINE_ID,
       reason: "dropped",
+      expectRemaining: 3,
     });
     expect(written.line).toEqual({ id: LINE_ID });
     expect(String(mockFetch.mock.calls[1][0])).toBe(
       `/api/inbound-shipments/${ORDER_ID}/lines/${LINE_ID}/discard-remaining`,
     );
+    // THE CLIENT'S BELIEF TRAVELS (REV-11 clause 1): the server refuses the
+    // write-off when the locked remainder is no longer the number the caller
+    // was looking at, and it can only do that if the number is sent.
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({
+      reason: "dropped",
+      expectRemaining: 3,
+    });
 
     mockFetch.mockResolvedValue(
       jsonResponse(200, {

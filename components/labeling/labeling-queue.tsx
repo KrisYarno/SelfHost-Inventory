@@ -105,6 +105,12 @@ function QueueLine({ orderId, line, locations }: QueueLineProps) {
       const result = await discardRemaining.mutateAsync({
         lineId: line.id,
         reason: trimmedReason,
+        // THE REMAINDER THIS CARD SHOWED (REV-11 clause 1). The server compares
+        // it with the locked row and refuses when they differ, so a card drawn
+        // before a colleague stocked or disposed cannot write off units the
+        // operator never saw. The success message still reports the SERVER's
+        // count — this number is a claim about the past, not the write.
+        expectRemaining: line.remaining,
       });
       // The count comes back from the LOCKED row — never from what was on
       // screen when the button was pressed.

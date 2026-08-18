@@ -583,21 +583,28 @@ export function useStockIn(id: string) {
   });
 }
 
+/**
+ * `expectRemaining` is REQUIRED HERE (REV-11 clause 1) even though the route's
+ * schema keeps it optional: every caller in this app has a card on screen, and
+ * the number that card printed is what makes a stale write-off a 409 instead of
+ * a silent disposal. The optional half of the contract exists for callers that
+ * rendered nothing, which is not a React hook.
+ */
 export function useDiscardRemaining(id: string) {
   const { csrfToken, onSettled } = useSupplyOrderMutationDefaults();
   return useMutation<
     DiscardRemainingResult,
     ShipmentApiError,
-    { lineId: number; reason: string }
+    { lineId: number; reason: string; expectRemaining: number }
   >({
     retry: false,
-    mutationFn: ({ lineId, reason }) =>
+    mutationFn: ({ lineId, reason, expectRemaining }) =>
       requestJson<DiscardRemainingResult>(
         `/api/inbound-shipments/${id}/lines/${lineId}/discard-remaining`,
         {
           method: "POST",
           headers: withCSRFHeaders({ ...JSON_HEADERS }, csrfToken),
-          body: JSON.stringify({ reason }),
+          body: JSON.stringify({ reason, expectRemaining }),
         },
         "Failed to write off the remainder",
       ),

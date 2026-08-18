@@ -115,7 +115,19 @@ export type SupplyOrderLineView = {
   locationId: number | null;
   verifiedAt: Date | null;
   verifiedBy: number | null;
+  /**
+   * NULL on a REMOVED line (REV-11 clause 3): the rollup still COMPUTES a
+   * per-line discrepancy from the counters the line was carrying when it left
+   * the order, and reporting that would claim a supplier owes something on a
+   * line that is no longer on the order.
+   */
   discrepancy: SupplyOrderLineDiscrepancy | null;
+  /**
+   * The line was REMOVED from the order (`status === DISCARDED`). Stated on the
+   * wire rather than re-derived per screen, so "this line is gone" has ONE
+   * answer and the money doctrine cannot drift between renderers.
+   */
+  lineRemoved: boolean;
   /** The exception rows that EXIST for this line — the join aid, not a guess. */
   exceptionKeys: string[];
 };
@@ -348,6 +360,11 @@ function toSupplyOrderLine(line: LineRow, exceptionKeys: string[] = []): SupplyO
     orderedQuantity: line.orderedQuantity,
     verifiedQuantity: line.verifiedQuantity,
   });
+  // REMOVED FROM THE ORDER (REV-11 clause 3). Computed once, here, and both
+  // stated on the wire and used to withhold the discrepancy: a removed line is
+  // owed nothing, so the shape stops carrying a figure every screen would then
+  // have to remember not to render.
+  const lineRemoved = line.status === StagingItemStatus.DISCARDED;
 
   return {
     id: line.id,
@@ -370,7 +387,8 @@ function toSupplyOrderLine(line: LineRow, exceptionKeys: string[] = []): SupplyO
     locationId: line.locationId,
     verifiedAt: line.verifiedAt,
     verifiedBy: line.verifiedBy,
-    discrepancy: supplyOrderLineDiscrepancy(line),
+    discrepancy: lineRemoved ? null : supplyOrderLineDiscrepancy(line),
+    lineRemoved,
     exceptionKeys,
   };
 }
