@@ -570,6 +570,39 @@ describe('deliveredProduct — the re-map (S10)', () => {
     expect(rec.ctx().productCreated).toBe(true);
   });
 
+  it('publishes the POST-REMAP productId, so the route never derives one', async () => {
+    // The route audits `PRODUCT_CREATE` against a product id. Deriving it from
+    // the remap or the discrepancy subject reads the id off facts that are
+    // allowed to be absent; the core knows it outright, so it says it.
+    const plain = mkTx();
+    const before = recorder();
+    await verifyLine(plain, args(), { onRecord: before.onRecord, batchId: BATCH });
+    expect(before.ctx().productId).toBe(PRODUCT);
+
+    const tx = mkTx();
+    const rec = recorder();
+    await verifyLine(tx, args({ deliveredProduct: { mode: 'existing', productId: 77 } }), {
+      onRecord: rec.onRecord,
+      batchId: BATCH,
+    });
+
+    expect(rec.ctx().productId).toBe(77);
+  });
+
+  it('refuses to publish a count it cannot attribute to a product (INVARIANT)', async () => {
+    // Unreachable on a supply-order line — order entry writes BOTH product ids
+    // — which is exactly why it is an invariant and not a refusal the operator
+    // can act on. The alternative is a `productId` the type calls a number and
+    // the row calls null.
+    const tx = mkTx({ line: lockedLine({ resolvedProductId: null }) });
+
+    await expect(
+      verifyLine(tx, args(), { onRecord: recorder().onRecord, batchId: BATCH }),
+    ).rejects.toMatchObject({ statusCode: 500, code: 'INVARIANT' });
+    // Nothing was written: the invariant is checked before the guarded write.
+    expect(kinds(tx)).not.toContain('line-update');
+  });
+
   it('refuses a re-map once anything is stocked or disposed', async () => {
     const tx = mkTx({
       line: lockedLine({
@@ -795,6 +828,7 @@ describe('money (seam S2) and the onRecord context', () => {
       unitCostCents: 1000,
       note: 'short',
       headerPromoted: true,
+      productId: PRODUCT,
       productRemapped: null,
       productCreated: false,
       recvDiscrepancy: expect.objectContaining({ action: 'upsert' }),

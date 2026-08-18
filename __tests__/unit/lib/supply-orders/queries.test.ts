@@ -127,6 +127,7 @@ function legacyLine(overrides: Record<string, unknown> = {}) {
     verifiedBy: null,
     location: { id: 1, name: 'Main' },
     resolvedProduct: { id: 42, name: 'Peptide X 10mg' },
+    receivedByUser: { id: 7, username: 'kris' },
     ...overrides,
   };
 }
@@ -328,6 +329,30 @@ describe('getSupplyOrderDetail', () => {
     ]);
   });
 
+  it('names the ORDERED product from its OWN relation, and says so when there is none', async () => {
+    mockPrisma.inboundShipment.findUnique.mockResolvedValue(header());
+    mockPrisma.stagingItem.findMany.mockResolvedValue([
+      line({ id: 11, orderedProduct: { name: 'Peptide X 10mg' } }),
+      line({ id: 12, orderedProductId: null, orderedProduct: null }),
+    ]);
+    mockPrisma.inventoryException.findMany.mockResolvedValue([]);
+
+    const detail = await getSupplyOrderDetail('ord_1');
+    if (!detail || detail.model !== 'supply-order') throw new Error('expected a supply order');
+
+    // SELECTED, not hydrated: the name is the only column "ordered as" needs,
+    // and the only one this read is allowed to carry.
+    expect(mockPrisma.stagingItem.findMany.mock.calls[0][0].include).toEqual({
+      orderedProduct: { select: { name: true } },
+    });
+    // The ORDERED product's CURRENT name — not `description`, which is the
+    // snapshot of what actually arrived.
+    expect(detail.lines[0].orderedProductName).toBe('Peptide X 10mg');
+    // An unordered arrival was never ordered as anything: null, never the
+    // delivered product's name standing in for one.
+    expect(detail.lines[1].orderedProductName).toBeNull();
+  });
+
   it('carries the header rollup onto the detail (the summary shape is shared)', async () => {
     mockPrisma.inboundShipment.findUnique.mockResolvedValue(header());
     mockPrisma.stagingItem.findMany.mockResolvedValue([line({ verifiedQuantity: 12 })]);
@@ -451,6 +476,25 @@ describe('listLabelingQueue (PK2-5)', () => {
     expect(queue.groups[1].order.id).toBe('ord_2');
   });
 
+  it('LEFT JOINs the ordered product so a queue line can name what was ordered', async () => {
+    const issued = queueTx({
+      count: 2,
+      rows: [
+        queueRow({ id: 11, orderedProductName: 'Peptide X 10mg' }),
+        queueRow({ id: 12, orderedProductId: null, orderedProductName: null }),
+      ],
+    });
+
+    const queue = await listLabelingQueue({});
+
+    expect(issued[1].sql).toContain('LEFT JOIN products op ON op.id = s.orderedProductId');
+    expect(issued[1].sql).toContain('op.name AS orderedProductName');
+    expect(queue.groups[0].lines[0].orderedProductName).toBe('Peptide X 10mg');
+    // LEFT, not INNER: a line whose ordered product is gone stays in the queue
+    // — work does not disappear because a catalogue row did.
+    expect(queue.groups[0].lines[1].orderedProductName).toBeNull();
+  });
+
   it('converts the COUNT BigInt safely and never reports a negative remainder', async () => {
     queueTx({ count: 2, rows: [queueRow()] });
 
@@ -484,6 +528,30 @@ describe('listLegacyLines', () => {
       receivedBy: 7,
       productName: 'Peptide X 10mg',
     });
+  });
+
+  it('names the RECEIVER, projected to { id, username } and nothing more', async () => {
+    mockPrisma.stagingItem.findMany.mockResolvedValue([legacyLine()]);
+
+    const rows = await listLegacyLines({});
+
+    // PII DISCIPLINE (S26): a user reaches a wire shape as an id and a
+    // username, never as a row with a hash on it.
+    expect(mockPrisma.stagingItem.findMany.mock.calls[0][0].include.receivedByUser).toEqual({
+      select: { id: true, username: true },
+    });
+    expect(rows[0].receivedByName).toBe('kris');
+  });
+
+  it('says the receiver has no name rather than inventing one', async () => {
+    mockPrisma.stagingItem.findMany.mockResolvedValue([legacyLine({ receivedByUser: null })]);
+
+    const rows = await listLegacyLines({});
+
+    // The id stays (it is a real fact); the NAME is null, and the archive says
+    // so — a blank byline reads as "nobody received this".
+    expect(rows[0].receivedBy).toBe(7);
+    expect(rows[0].receivedByName).toBeNull();
   });
 
   it('honours an explicit bound', async () => {

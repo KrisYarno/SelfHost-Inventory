@@ -354,6 +354,40 @@ describe('POST .../verify — the count lands', () => {
     });
   });
 
+  it('audits PRODUCT_CREATE from the CORE\'s productId, not from a derivation', async () => {
+    // The case the derivation could not name: a count that MATCHES the order
+    // (so there is no discrepancy subject to read a product id off) on a line
+    // that had no resolved product to be re-mapped FROM. The core publishes the
+    // id it resolved, so the audit points at the product that was created.
+    lockedLineRow = lineRow({ resolvedProductId: null });
+    mockResolveProduct.mockResolvedValue({
+      productId: 88,
+      productName: 'Vial Green',
+      approvalStatus: 'PENDING_REVIEW',
+      created: true,
+      locationId: 1,
+    });
+
+    const res = await verifyPOST(
+      mkReq({
+        verifiedQuantity: 100,
+        deliveredProduct: { mode: 'new', productFields: { baseName: 'Vial', variant: 'Green' } },
+      }),
+      orderParams,
+    );
+
+    expect(res.status).toBe(200);
+    expect(recorded('PRODUCT_CREATE')[0]).toMatchObject({
+      entityType: 'PRODUCT',
+      entityId: 88,
+      batchId: 'batch-verify-0001',
+    });
+    // No remap is reported (there was nothing to re-map from) and no
+    // discrepancy row was raised — the two facts the old derivation read.
+    expect(recorded('STAGING_VERIFY')[0].details.productRemapped).toBeNull();
+    expect(mockUpsert).not.toHaveBeenCalled();
+  });
+
   it('400s a delivered product carrying costPrice (premise 1) before anything is written', async () => {
     const res = await verifyPOST(
       mkReq({

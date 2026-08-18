@@ -77,6 +77,13 @@ export type VerifyRecordContext = {
   note: string | null;
   /** TRUE only for the transaction that actually moved ORDERED -> RECEIVING. */
   headerPromoted: boolean;
+  /**
+   * The line's RESOLVED product AFTER any re-map — the product this count is
+   * attributed to. Published outright so the ROUTE never has to derive it from
+   * facts that are allowed to be absent (a re-map that did not happen, a
+   * discrepancy that was not raised).
+   */
+  productId: number;
   productRemapped: { from: number; to: number; productName: string } | null;
   productCreated: boolean;
   /**
@@ -339,6 +346,20 @@ export async function verifyLine(
     resolvedProductId = resolved.productId;
   }
 
+  // THE PRODUCT THIS COUNT BELONGS TO, settled here so `onRecord` can state it.
+  // A supply-order line is given BOTH product ids at order entry and a re-map
+  // only ever swaps one id for another, so a null at this point is a broken row
+  // rather than a state the flow can reach — an invariant, not a refusal the
+  // operator could act on.
+  if (resolvedProductId === null) {
+    throw new AppError(
+      `Supply-order line ${lineId} has no resolved product to attribute the count to`,
+      'INVARIANT',
+      500,
+    );
+  }
+  const productId = resolvedProductId;
+
   // MONEY (D4/S2). ONE function owns it — verify's loss and stock-in's batch
   // share are the same arithmetic on the same line. The basis is
   // `orderedQuantity ?? verified`, and `orderedQuantity` is NEVER written.
@@ -437,6 +458,7 @@ export async function verifyLine(
     unitCostCents: money.unitCostCents,
     note,
     headerPromoted,
+    productId,
     productRemapped,
     productCreated,
     recvDiscrepancy,

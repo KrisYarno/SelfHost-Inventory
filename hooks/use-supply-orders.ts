@@ -211,8 +211,13 @@ export interface DiscardLineResult {
 /** M3b's verify response: the core's result plus the refreshed line view. */
 export type VerifyLineResult = VerifyResult & { line: SupplyOrderLineView };
 
-/** M3b's stock-in response: the booking primitive's result, verbatim. */
-export type StockInResult = BookingResult;
+/**
+ * M3b's stock-in response: the booking primitive's result PLUS the refreshed
+ * line view. `line` is NULLABLE because the route's refresh read is a second
+ * read — an order closed or re-shaped between the booking and the refresh
+ * answers with no line, and saying so beats claiming a stale one.
+ */
+export type StockInResult = BookingResult & { line: SupplyOrderLineView | null };
 
 /** M3b's discard-remaining response. */
 export type DiscardRemainingResult = DiscardResult;
@@ -575,12 +580,26 @@ export interface ResolveExceptionBody {
   creditRef?: string;
 }
 
+/**
+ * M3b's resolve response. The settlement is a fact about the EXCEPTION and a
+ * fact about the LINE (spec §6: every resolution refreshes the row's money), so
+ * the route answers with both and the hook hands both on. Either may be null:
+ * the refresh read runs after the transaction, not inside it.
+ */
+export type ResolveExceptionResult = {
+  key: string;
+  resolution: Resolution;
+  lineId: number;
+  exception: SupplyOrderExceptionView | null;
+  line: SupplyOrderLineView | null;
+};
+
 export function useResolveException(id: string) {
   const { csrfToken, onSettled } = useSupplyOrderMutationDefaults();
-  return useMutation<SupplyOrderExceptionView, ShipmentApiError, ResolveExceptionBody>({
+  return useMutation<ResolveExceptionResult, ShipmentApiError, ResolveExceptionBody>({
     retry: false,
     mutationFn: ({ lineId, ...body }) =>
-      requestJson<SupplyOrderExceptionView>(
+      requestJson<ResolveExceptionResult>(
         `/api/inbound-shipments/${id}/lines/${lineId}/resolve`,
         {
           method: "POST",

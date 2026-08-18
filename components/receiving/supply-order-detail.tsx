@@ -431,7 +431,9 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
             line.productId !== null &&
             line.orderedProductId !== line.productId && (
               <p className="text-xs text-muted-foreground">
-                {`ordered as product #${line.orderedProductId} — re-mapped to what arrived`}
+                {`ordered as: ${
+                  line.orderedProductName ?? `product #${line.orderedProductId}`
+                } — re-mapped to what arrived`}
               </p>
             )}
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">

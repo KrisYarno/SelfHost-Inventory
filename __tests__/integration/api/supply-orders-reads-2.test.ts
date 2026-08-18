@@ -296,17 +296,22 @@ describe('GET /api/receiving/legacy-lines', () => {
       locationId: 1,
       locationName: 'Main',
       receivedBy: 7,
+      receivedByName: 'kris',
     });
     expect(db.stagingItem.findMany.mock.calls[0][0].take).toBe(LEGACY_LINE_LIMIT);
   });
 
-  it('fetches NO user shape at all — the receiver stays an id (S26)', async () => {
+  it('fetches the receiver as { id, username } and NOTHING else (S26)', async () => {
     await legacyGET(mkReq('http://t/api/receiving/legacy-lines'), {} as never);
 
     const spec = db.stagingItem.findMany.mock.calls[0][0].include;
-    expect(Object.keys(spec).sort()).toEqual(['location', 'resolvedProduct']);
+    expect(Object.keys(spec).sort()).toEqual(['location', 'receivedByUser', 'resolvedProduct']);
     expect(spec.location).toEqual({ select: { id: true, name: true } });
     expect(spec.resolvedProduct).toEqual({ select: { id: true, name: true } });
+    // The ONLY user this read may carry, and only these two columns of it: the
+    // mocked delegate hydrates any user relation from the FULL row, so a
+    // `receivedByUser: true` here leaks a hash into the deep scan below.
+    expect(spec.receivedByUser).toEqual({ select: { id: true, username: true } });
   });
 
   it('carries no password/hash/token/secret/email key at any depth (S26)', async () => {

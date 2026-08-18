@@ -57,6 +57,8 @@ import {
   useSupplyOrder,
   useSupplyOrders,
   useVerifyLine,
+  type ResolveExceptionResult,
+  type StockInResult,
 } from "@/hooks/use-supply-orders";
 
 // ---------------------------------------------------------------------------
@@ -427,12 +429,30 @@ describe("mutations", () => {
       `/api/inbound-shipments/${ORDER_ID}/lines/${LINE_ID}/discard-remaining`,
     );
 
-    mockFetch.mockResolvedValue(jsonResponse(200, { key: `recv-discrepancy:${LINE_ID}` }));
+    mockFetch.mockResolvedValue(
+      jsonResponse(200, {
+        key: `recv-discrepancy:${LINE_ID}`,
+        resolution: "accepted-loss",
+        lineId: LINE_ID,
+        exception: null,
+        line: { id: LINE_ID },
+      }),
+    );
     const resolve = renderHook(() => useResolveException(ORDER_ID), { wrapper: wrapper() });
-    await resolve.result.current.mutateAsync({
+    // THE ROUTE'S ANSWER, WHOLE (seam S-B). A settlement hands back the
+    // refreshed line beside the exception row, and a hook typed as the row
+    // alone is a screen that cannot see what it just changed.
+    const settled: ResolveExceptionResult = await resolve.result.current.mutateAsync({
       lineId: LINE_ID,
       exceptionKey: `recv-discrepancy:${LINE_ID}`,
       resolution: "accepted-loss",
+    });
+    expect(settled).toEqual({
+      key: `recv-discrepancy:${LINE_ID}`,
+      resolution: "accepted-loss",
+      lineId: LINE_ID,
+      exception: null,
+      line: { id: LINE_ID },
     });
     expect(String(mockFetch.mock.calls[2][0])).toBe(
       `/api/inbound-shipments/${ORDER_ID}/lines/${LINE_ID}/resolve`,
@@ -482,10 +502,17 @@ describe("useStockIn — the bookingKey discipline", () => {
   };
 
   it("MINTS ONCE and sends the key it minted", async () => {
-    mockFetch.mockResolvedValue(jsonResponse(200, BOOKED));
+    mockFetch.mockResolvedValue(jsonResponse(200, { ...BOOKED, line: { id: lineId } }));
 
     const { result } = stockIn();
-    await result.current.mutateAsync({ lineId: lineId, quantity: 4, locationId: 1 });
+    // M3b's stock-in answers the booking PLUS the refreshed line (seam S-B);
+    // `line` is nullable because the refresh read can find no supply order.
+    const booked: StockInResult = await result.current.mutateAsync({
+      lineId: lineId,
+      quantity: 4,
+      locationId: 1,
+    });
+    expect(booked.line).toEqual({ id: lineId });
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body).toEqual({ bookingKey: "booking-key-1", quantity: 4, locationId: 1 });

@@ -98,7 +98,9 @@ export function LegacyLinesList() {
                 data-testid={`legacy-received-${line.id}`}
                 className="text-xs text-muted-foreground"
               >
-                {`Received ${formatInstant(line.receivedAt)} by user ${line.receivedBy}`}
+                {`Received ${formatInstant(line.receivedAt)} by ${
+                  line.receivedByName ?? `user #${line.receivedBy}`
+                }`}
               </p>
 
               {/* The receipt link exists only when the box was attributed to

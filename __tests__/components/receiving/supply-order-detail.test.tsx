@@ -83,6 +83,7 @@ function line(over: Record<string, unknown> = {}) {
   return {
     id: 11,
     orderedProductId: 55,
+    orderedProductName: "BPC-157 5mg",
     productId: 55,
     productName: "BPC-157 5mg",
     status: "ORDERED",
@@ -260,6 +261,34 @@ describe("the controls follow the line's status", () => {
 // ---------------------------------------------------------------------------
 // Verification
 // ---------------------------------------------------------------------------
+
+describe("a re-mapped line says what was ORDERED", () => {
+  it("names the ordered product, and falls back to its id when the name is missing", () => {
+    renderDetail(
+      detail({ status: "RECEIVING" }, [
+        line({ id: 11, status: "VERIFIED", productId: 66, productName: "Vial Green 5mg" }),
+        line({
+          id: 12,
+          status: "VERIFIED",
+          productId: 66,
+          productName: "Vial Green 5mg",
+          orderedProductName: null,
+        }),
+      ]),
+    );
+
+    // The NAME, not the id: "ordered as product #55" is a fact about the
+    // database, and the operator is looking at a shelf.
+    expect(within(lineCard(11)).getByText(/ordered as: BPC-157 5mg/)).toBeInTheDocument();
+    // No name came back — the id is said out loud rather than left blank.
+    expect(within(lineCard(12)).getByText(/ordered as: product #55/)).toBeInTheDocument();
+  });
+
+  it("says nothing at all when the line still points at what was ordered", () => {
+    renderDetail(detail({ status: "RECEIVING" }));
+    expect(within(lineCard(11)).queryByText(/ordered as/)).toBeNull();
+  });
+});
 
 describe("verifying a line", () => {
   it("'Counted N — matches order' posts the ORDERED quantity", async () => {

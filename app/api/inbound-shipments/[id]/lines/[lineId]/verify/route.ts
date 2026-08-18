@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, apiHandler, requireCSRF } from '@/lib/api-utils';
-import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
 import { recordChange, newBatchId } from '@/lib/change-tracking';
 import {
@@ -9,7 +8,7 @@ import {
   assertProductSizePair,
 } from '@/lib/validation/supply-orders';
 import { getSupplyOrderDetail } from '@/lib/supply-orders/queries';
-import { verifyLine, type VerifyRecordContext } from '@/lib/supply-orders/verify';
+import { verifyLine } from '@/lib/supply-orders/verify';
 import { VerifiedLockedRefusal } from '@/lib/supply-orders/refusals';
 import { recvDiscrepancyKey } from '@/lib/exceptions/kinds';
 import { upsertException, resolveException } from '@/lib/exceptions/write';
@@ -23,35 +22,6 @@ interface RouteParams {
     id: string;
     lineId: string;
   };
-}
-
-/**
- * The product a re-map landed on, for the `PRODUCT_CREATE` audit line.
- *
- * `VerifyRecordContext` carries `productCreated` but no product id of its own
- * (pack C2c.1), so the id is taken from the two places the core DOES publish it:
- * the remap (`productRemapped.to`) and the discrepancy subject's `productId`,
- * which is the resolved product by construction. A creation the route cannot
- * NAME is an invariant break, not something to audit vaguely — the throw aborts
- * the verify rather than writing a product event pointing at nothing.
- */
-function createdProductId(ctx: VerifyRecordContext): number {
-  const fromRemap = ctx.productRemapped?.to ?? null;
-  const fromSubject =
-    ctx.recvDiscrepancy === null
-      ? null
-      : ctx.recvDiscrepancy.action === 'upsert'
-        ? ctx.recvDiscrepancy.subject.productId
-        : ctx.recvDiscrepancy.subjectPatch.productId;
-  const productId = fromRemap ?? fromSubject;
-  if (productId === null || productId === undefined) {
-    throw new AppError(
-      `Supply-order line ${ctx.lineId} created a product the verify context does not name`,
-      'INVARIANT',
-      500,
-    );
-  }
-  return productId;
 }
 
 /**
@@ -126,7 +96,10 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
             batchId,
             onRecord: async (txn, ctx) => {
               if (ctx.productCreated) {
-                const productId = createdProductId(ctx);
+                // The CORE names the product (seam S-A). The route never
+                // derives it: a creation it could not name would either audit a
+                // product event pointing at nothing or abort a landed count.
+                const productId = ctx.productId;
                 await recordChange(txn, {
                   actor: { userId: user.id },
                   actionType: 'PRODUCT_CREATE',

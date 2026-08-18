@@ -91,6 +91,12 @@ export type SupplyOrderSummary =
 export type SupplyOrderLineView = {
   id: number;
   orderedProductId: number | null;
+  /**
+   * The ORDERED product's CURRENT name — NULL when nothing was ordered (an
+   * unordered arrival). Deliberately not `productName`, which is the snapshot
+   * of what ARRIVED: "ordered as X, re-mapped to Y" needs both halves named.
+   */
+  orderedProductName: string | null;
   /** The RESOLVED (delivered) product — what a batch actually books into. */
   productId: number | null;
   /** The `description` snapshot: the product's name at the last write. */
@@ -156,6 +162,12 @@ export type LegacyLineView = {
   locationName: string | null;
   receivedAt: Date;
   receivedBy: number;
+  /**
+   * The receiver's username — NULL when the user row did not come back. PII
+   * DISCIPLINE (S26): a user reaches this shape as `{ id, username }` and never
+   * as a row, so the archive can name a person without carrying one.
+   */
+  receivedByName: string | null;
   shipmentId: string | null;
 };
 
@@ -223,6 +235,10 @@ type LineRow = {
   /** The legacy columns the legacy mappers read off the same rows. */
   expectedQuantity: number | null;
   countedQuantity: number | null;
+  /** The ordered product, as the DETAIL read's relation `select` returns it… */
+  orderedProduct?: { name: string } | null;
+  /** …and as the QUEUE's SQL returns the same name, flat off its LEFT JOIN. */
+  orderedProductName?: string | null;
 };
 
 /** The columns both models' mappers read off a line. */
@@ -328,6 +344,9 @@ function toSupplyOrderLine(line: LineRow, exceptionKeys: string[] = []): SupplyO
   return {
     id: line.id,
     orderedProductId: line.orderedProductId,
+    // ONE name, TWO shapes of the same join: the detail reads it through the
+    // relation, the queue through its own SELECT alias.
+    orderedProductName: line.orderedProduct?.name ?? line.orderedProductName ?? null,
     productId: line.resolvedProductId,
     productName: line.description,
     status: line.status,
@@ -433,6 +452,9 @@ export async function getSupplyOrderDetail(id: string): Promise<SupplyOrderDetai
 
   const rows = (await prisma.stagingItem.findMany({
     where: { shipmentId: id },
+    // The ordered product's NAME and nothing else: the "ordered as" line needs
+    // one column, and a hydrating `true` would ship the whole catalogue row.
+    include: { orderedProduct: { select: { name: true } } },
     orderBy: { id: 'asc' },
   })) as LineRow[];
 
@@ -520,7 +542,10 @@ export async function listLabelingQueue(opts: {
       Prisma.sql`SELECT COUNT(*) AS count FROM staging_items s JOIN inbound_shipments h ON h.id = s.shipmentId WHERE ${filters} ${orderFilter}`,
     ),
     prisma.$queryRaw<LabelingQueueRow[]>(
-      Prisma.sql`SELECT s.id, s.description, s.status, s.shipmentId, s.orderedProductId, s.resolvedProductId, s.orderedQuantity, s.verifiedQuantity, s.stockedQuantity, s.disposedQuantity, s.lineTotalCents, s.labelingRequired, s.locationId, s.verifiedAt, s.verifiedBy, s.expectedQuantity, s.countedQuantity, h.id AS orderId, h.status AS orderStatus, h.supplier, h.supplierRef, h.orderedAt FROM staging_items s JOIN inbound_shipments h ON h.id = s.shipmentId WHERE ${filters} ${orderFilter} ORDER BY s.verifiedAt ASC, s.id ASC LIMIT ${limit}`,
+      // The ordered product joins LEFT, and only on the SELECT: a line whose
+      // ordered product row is gone is still work in the queue, and the COUNT
+      // beside it must not pay for a name nobody counts.
+      Prisma.sql`SELECT s.id, s.description, s.status, s.shipmentId, s.orderedProductId, s.resolvedProductId, s.orderedQuantity, s.verifiedQuantity, s.stockedQuantity, s.disposedQuantity, s.lineTotalCents, s.labelingRequired, s.locationId, s.verifiedAt, s.verifiedBy, s.expectedQuantity, s.countedQuantity, op.name AS orderedProductName, h.id AS orderId, h.status AS orderStatus, h.supplier, h.supplierRef, h.orderedAt FROM staging_items s JOIN inbound_shipments h ON h.id = s.shipmentId LEFT JOIN products op ON op.id = s.orderedProductId WHERE ${filters} ${orderFilter} ORDER BY s.verifiedAt ASC, s.id ASC LIMIT ${limit}`,
     ),
   ]);
 
@@ -573,6 +598,7 @@ export async function listLegacyLines(opts: { limit?: number }): Promise<LegacyL
     include: {
       location: { select: { id: true, name: true } },
       resolvedProduct: { select: { id: true, name: true } },
+      receivedByUser: { select: { id: true, username: true } },
     },
     orderBy: { receivedAt: 'desc' },
     take: opts.limit ?? LEGACY_LINE_LIMIT,
@@ -596,6 +622,7 @@ export async function listLegacyLines(opts: { limit?: number }): Promise<LegacyL
       locationName: row.location?.name ?? null,
       receivedAt: row.receivedAt,
       receivedBy: row.receivedBy,
+      receivedByName: row.receivedByUser?.username ?? null,
       shipmentId: row.shipmentId,
     };
   });

@@ -49,6 +49,7 @@ function legacyLine(over: Record<string, unknown> = {}) {
     locationName: "Main",
     receivedAt: "2026-07-02T15:30:00.000Z",
     receivedBy: 7,
+    receivedByName: "kris",
     shipmentId: "cklegacy00000000000000001",
     ...over,
   };
@@ -81,8 +82,18 @@ it("renders the box, its product, its location, its status and who received it",
   expect(within(row).getByText(/Peptide A 5mg/)).toBeInTheDocument();
   expect(within(row).getByText(/Main/)).toBeInTheDocument();
   expect(within(row).getByText("GRADUATED")).toBeInTheDocument();
-  // The archive carries the receiver's ID and no username — it says the ID.
-  expect(within(row).getByTestId("legacy-received-900")).toHaveTextContent("user 7");
+  // The archive NAMES the receiver: "user 7" is a fact about the database, and
+  // the person asking about this box next year knows people by name.
+  expect(within(row).getByTestId("legacy-received-900")).toHaveTextContent("by kris");
+});
+
+it("falls back to the receiver's id when the name did not come back", async () => {
+  respondWith([legacyLine({ id: 903, receivedByName: null })]);
+
+  renderList();
+
+  const row = await screen.findByTestId("legacy-line-903");
+  expect(within(row).getByTestId("legacy-received-903")).toHaveTextContent("by user #7");
 });
 
 it("links a linked box to its receipt and leaves an unlinked one unlinked", async () => {
