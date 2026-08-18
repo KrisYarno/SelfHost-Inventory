@@ -19,10 +19,10 @@ import {
   NotebookPen,
   Package,
   PackageCheck,
-  PackageOpen,
   Settings,
   ShoppingCart,
   Sparkles,
+  Tag,
   Tags,
   Truck,
   Warehouse,
@@ -96,12 +96,13 @@ export const navConfig: readonly NavItem[] = [
     icon: Boxes,
     children: [
       { kind: "link", name: "Stocker", href: "/stocker", icon: Truck, label: "Stocker" },
-      // W1-4b: the SHIPMENT-grain receiving surface, adjacent to Pre-Staging —
-      // the ITEM-grain queue it deliberately does NOT replace (plan REV-2). A
-      // box is logged in Pre-Staging and attributed to a receipt here; both
-      // stay reachable, and both are ungated (receiving is dock work).
+      // The two halves of one delivery: RECEIVING is the orders surface (what
+      // was ordered, and verifying each line as it lands) and LABELING is the
+      // queue of verified units still to be stocked. Adjacent because they are
+      // one workflow, and both ungated — this is dock work. Pre-Staging is
+      // retired; `/pre-staging` redirects to `/labeling`.
       { kind: "link", name: "Receiving", href: "/receiving", icon: Inbox, label: "Receiving" },
-      { kind: "link", name: "Pre-Staging", href: "/pre-staging", icon: PackageOpen, label: "Pre-Staging" },
+      { kind: "link", name: "Labeling", href: "/labeling", icon: Tag, label: "Labeling" },
       { kind: "link", name: "Journal", href: "/journal", icon: ClipboardList, label: "Journal" },
     ],
   },

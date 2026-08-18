@@ -112,42 +112,44 @@ describe("group membership", () => {
     ]);
   });
 
-  it("Stock Ops = { Stocker, Receiving, Pre-Staging, Journal }", () => {
+  it("Stock Ops = { Stocker, Receiving, Labeling, Journal }", () => {
     const stockOps = groupByKey("stock-ops");
     expect(stockOps.children.map((c) => c.name)).toEqual([
       "Stocker",
       "Receiving",
-      "Pre-Staging",
+      "Labeling",
       "Journal",
     ]);
     expect(stockOps.children.map((c) => c.href)).toEqual([
       "/stocker",
       "/receiving",
-      "/pre-staging",
+      "/labeling",
       "/journal",
     ]);
   });
 
-  // W1-4b: /receiving is the SHIPMENT-grain surface and /pre-staging stays the
-  // ITEM-grain queue (plan REV-2) — the two are adjacent so the group reads as
-  // one receiving workflow, and neither replaces the other.
-  it("Receiving sits adjacent to Pre-Staging inside Stock Ops (both kept)", () => {
+  // The Pre-Staging CHILD is GONE (contract pack C5.3): /receiving is orders +
+  // verification and /labeling is the queue that finishes them, so the two sit
+  // adjacent as one workflow. `/pre-staging` survives only as a redirect.
+  it("Receiving sits adjacent to Labeling inside Stock Ops", () => {
     const names = groupByKey("stock-ops").children.map((c) => c.name);
     const receiving = names.indexOf("Receiving");
-    const preStaging = names.indexOf("Pre-Staging");
+    const labeling = names.indexOf("Labeling");
     expect(receiving).toBeGreaterThanOrEqual(0);
-    expect(preStaging).toBeGreaterThanOrEqual(0);
-    expect(Math.abs(receiving - preStaging)).toBe(1);
+    expect(labeling).toBeGreaterThanOrEqual(0);
+    expect(Math.abs(receiving - labeling)).toBe(1);
+    expect(names).not.toContain("Pre-Staging");
   });
 
-  it("Receiving is visible to a non-admin (NOT adminOnly)", () => {
-    const receiving = groupByKey("stock-ops").children.find(
-      (c) => c.name === "Receiving"
-    );
+  it("Receiving and Labeling are visible to a non-admin (NOT adminOnly)", () => {
+    const stockOps = groupByKey("stock-ops");
+    const receiving = stockOps.children.find((c) => c.name === "Receiving");
+    const labeling = stockOps.children.find((c) => c.name === "Labeling");
     expect(receiving?.adminOnly).toBeFalsy();
-    expect(flattenNav(navConfig, false).map((l) => l.name)).toContain(
-      "Receiving"
-    );
+    expect(labeling?.adminOnly).toBeFalsy();
+    const flat = flattenNav(navConfig, false).map((l) => l.name);
+    expect(flat).toContain("Receiving");
+    expect(flat).toContain("Labeling");
   });
 
   it("Catalog = { Products, Price Board } with full 'Price Board' label", () => {
@@ -190,7 +192,7 @@ describe("flattenNav", () => {
       "Inventory",
       "Stocker",
       "Receiving",
-      "Pre-Staging",
+      "Labeling",
       "Journal",
       "Products",
       "Price Board",

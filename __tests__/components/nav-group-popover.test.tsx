@@ -4,7 +4,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { NavGroupPopover } from "@/components/layout/nav-group-popover";
 import type { NavGroup } from "@/lib/nav-config";
-import { Boxes, Truck, PackageOpen, ClipboardList } from "lucide-react";
+import { Boxes, Truck, Tag, ClipboardList } from "lucide-react";
 
 // usePathname drives the active-route treatment; default to a route that does
 // NOT match any child so the group reads inactive unless a test overrides it.
@@ -32,7 +32,7 @@ const group: NavGroup = {
   icon: Boxes,
   children: [
     { kind: "link", name: "Stocker", href: "/stocker", icon: Truck, label: "Stocker" },
-    { kind: "link", name: "Pre-Staging", href: "/pre-staging", icon: PackageOpen, label: "Pre-Staging" },
+    { kind: "link", name: "Labeling", href: "/labeling", icon: Tag, label: "Labeling" },
     { kind: "link", name: "Journal", href: "/journal", icon: ClipboardList, label: "Journal" },
   ],
 };
@@ -89,7 +89,7 @@ test("when open, children render as links with their labels and aria-expanded=tr
   renderPopover({ isOpen: true });
   expect(screen.getByRole("button", { name: /stock ops/i })).toHaveAttribute("aria-expanded", "true");
   expect(screen.getByRole("link", { name: /stocker/i })).toHaveAttribute("href", "/stocker");
-  expect(screen.getByRole("link", { name: /pre-staging/i })).toHaveAttribute("href", "/pre-staging");
+  expect(screen.getByRole("link", { name: /labeling/i })).toHaveAttribute("href", "/labeling");
   expect(screen.getByRole("link", { name: /journal/i })).toHaveAttribute("href", "/journal");
 });
 

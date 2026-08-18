@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { AlertTriangle, Inbox, Loader2 } from "lucide-react";
 import {
   DEFAULT_ORDERS_FILTER,
@@ -48,6 +49,13 @@ export default function ReceivingPage() {
             Enter a supply order when you place it, verify each line as the delivery
             lands, and the labeling queue picks up what still has to be labeled.
           </p>
+          {/* The retired flow's boxes still have to be findable (D8). */}
+          <Link
+            href="/receiving/legacy"
+            className="inline-block text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          >
+            Pre-staging history (read-only)
+          </Link>
         </div>
 
         {isPending && (
