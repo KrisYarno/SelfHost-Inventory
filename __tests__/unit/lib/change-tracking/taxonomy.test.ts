@@ -57,9 +57,13 @@ describe('taxonomy completeness (writer-exhaustive)', () => {
     // W1-2a added the six SHIPMENT_* verbs (58) and W1-2b added STAGING_RECOUNT
     // (59). The next four are the Lane 4 members the pre-fix parser truncated
     // away — they were in the union all along (63). W1-3a added
-    // GRADUATE_OVERRIDE (64).
-    expect(unionMembers.length).toBe(64);
+    // GRADUATE_OVERRIDE (64). The Receiving/Labeling overhaul adds the verify,
+    // the batch stock-in and the exception resolution (67).
+    expect(unionMembers.length).toBe(67);
     expect(unionMembers).toContain('GRADUATE_OVERRIDE');
+    expect(unionMembers).toContain('STAGING_VERIFY');
+    expect(unionMembers).toContain('STAGING_STOCK_IN');
+    expect(unionMembers).toContain('EXCEPTION_RESOLVE');
     expect(unionMembers).toContain('ANALYTICS_REBUILD_TRIGGER');
     expect(unionMembers).toContain('USER_APPROVAL_REMINDER_SENT');
     expect(unionMembers).toContain('PLATFORM_WRITE_ATTEMPT');
@@ -132,6 +136,38 @@ describe('actionMeta group / verb derivation', () => {
     expect(actionMeta('STAGING_RECOUNT').group).toBe('STAGING');
     expect(actionMeta('STAGING_RECOUNT').verb).toBe('RECOUNT');
     expect(actionMeta('STAGING_RECOUNT').label).toBe('Item counted');
+    // Receiving/Labeling overhaul: EXCEPTION_* has no group of its own — a
+    // discrepancy is settled inside the receiving flow, so it FOLDS into
+    // STAGING the way SHIPMENT and GRADUATE already do.
+    expect(actionMeta('EXCEPTION_RESOLVE').group).toBe('STAGING');
+  });
+
+  it('Receiving/Labeling overhaul: the three new members carry full meta (PK-7)', () => {
+    expect(actionMeta('EXCEPTION_RESOLVE')).toEqual({
+      group: 'STAGING',
+      verb: 'RESOLVE',
+      tone: 'positive',
+      label: 'Exception resolved',
+    });
+    expect(actionMeta('STAGING_VERIFY')).toEqual({
+      group: 'STAGING',
+      verb: 'VERIFY',
+      tone: 'neutral',
+      label: 'Line verified',
+    });
+    expect(actionMeta('STAGING_STOCK_IN')).toEqual({
+      group: 'STAGING',
+      verb: 'STOCK_IN',
+      tone: 'positive',
+      label: 'Labeled units stocked',
+    });
+  });
+
+  it('the STAGING group is DISPLAYED as the flow it now is', () => {
+    // The group holds pre-staging history AND the supply-order/labeling flow
+    // that replaces it; "Pre-staging" would name a page that is being retired.
+    const staging = ACTION_GROUPS.find((g) => g.key === 'STAGING');
+    expect(staging?.label).toBe('Receiving & Labeling');
   });
 
   it('parses the MOST SPECIFIC trailing verb (BULK_UPDATE over UPDATE, AUTO_ADD)', () => {
@@ -176,6 +212,12 @@ describe('verb -> tone table (spec §11 D-L5 verbatim)', () => {
     ['SHIPMENT_UNLINK', 'info'],
     // W1-2b: a count is evidence-gathering, not a judgement about the stock.
     ['STAGING_RECOUNT', 'info'],
+    // Receiving/Labeling overhaul: booking labeled units is stock arriving
+    // (positive); settling an exception closes a problem (positive); a verify
+    // reports what turned up and passes no judgement (neutral).
+    ['STAGING_STOCK_IN', 'positive'],
+    ['EXCEPTION_RESOLVE', 'positive'],
+    ['STAGING_VERIFY', 'neutral'],
     // neutral
     ['PRODUCT_UPDATE', 'neutral'],
     ['USER_ROLE_CHANGE', 'neutral'],
@@ -229,6 +271,13 @@ describe('expandActionGroup', () => {
 
   it('STAGING expands to the count verb alongside the rest of the queue', () => {
     expect(expandActionGroup('STAGING')).toContain('STAGING_RECOUNT');
+  });
+
+  it('STAGING also expands to the overhaul members (the admin filter reaches them)', () => {
+    const members = expandActionGroup('STAGING');
+    expect(members).toContain('STAGING_VERIFY');
+    expect(members).toContain('STAGING_STOCK_IN');
+    expect(members).toContain('EXCEPTION_RESOLVE');
   });
 
   it('returns null for an unknown group (caller answers 400)', () => {

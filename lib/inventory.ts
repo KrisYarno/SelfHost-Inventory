@@ -38,6 +38,16 @@ export async function createInventoryLog(
     // (the fulfill/unfulfill path's own order, or resolveSelectedExternalOrderId's
     // return). A client-supplied id written here is a forged attribution.
     orderRecordId?: string | null;
+    // Receiving/Labeling overhaul (spec §2, pack C2a.5): the SOFT ref naming the
+    // supply-order LINE this batch was booked against, the EXACT dollars that
+    // batch carried (`batchShareCents`, never a per-unit figure multiplied out),
+    // and the client-generated idempotency key. All three are pure passthroughs
+    // like the four above — the booking primitive decides, this function stores.
+    // `bookingKey` is UNIQUE with `stagingItemId`, which is what makes a retried
+    // request book exactly once.
+    stagingItemId?: number | null;
+    receiptCostCents?: number | null;
+    bookingKey?: string | null;
   },
   tx?: Prisma.TransactionClient
 ) {
@@ -58,6 +68,9 @@ export async function createInventoryLog(
       batchId: data.batchId ?? null,
       inboundShipmentId: data.inboundShipmentId ?? null,
       orderRecordId: data.orderRecordId ?? null,
+      stagingItemId: data.stagingItemId ?? null,
+      receiptCostCents: data.receiptCostCents ?? null,
+      bookingKey: data.bookingKey ?? null,
     },
     // SECURITY: never `users: true` here — these rows are returned verbatim by
     // adjust/stock-in/transfer/batch-adjust responses, so a full User include
@@ -220,6 +233,11 @@ export async function applyStockDelta(
     inboundShipmentId?: string | null;
     // Inventory-accuracy lane (W2-1): the same, for the order attribution.
     orderRecordId?: string | null;
+    // Receiving/Labeling overhaul (pack C2a.5): the same again, for the
+    // supply-order line, its exact batch dollars and its idempotency key.
+    stagingItemId?: number | null;
+    receiptCostCents?: number | null;
+    bookingKey?: string | null;
   }
 ): Promise<{
   log: Awaited<ReturnType<typeof createInventoryLog>>;
@@ -236,6 +254,9 @@ export async function applyStockDelta(
     batchId,
     inboundShipmentId,
     orderRecordId,
+    stagingItemId,
+    receiptCostCents,
+    bookingKey,
   } = args;
 
   // Create the log entry
@@ -251,6 +272,9 @@ export async function applyStockDelta(
       batchId,
       inboundShipmentId,
       orderRecordId,
+      stagingItemId,
+      receiptCostCents,
+      bookingKey,
     },
     tx
   );

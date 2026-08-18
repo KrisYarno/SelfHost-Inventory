@@ -59,6 +59,9 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   STOCK_IN: 'positive',
   // Inventory-accuracy lane (T4): closing a shipment is a completed receipt.
   CLOSE: 'positive',
+  // Receiving/Labeling overhaul: settling an exception CLOSES a problem — the
+  // one act on the register that means something got better.
+  RESOLVE: 'positive',
   // negative
   DELETE: 'negative',
   DELETION: 'negative',
@@ -97,6 +100,10 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   TRIGGER: 'info',
   // neutral
   UPDATE: 'neutral',
+  // Receiving/Labeling overhaul: a verify REPORTS what turned up on the dock.
+  // The judgement about a shortage belongs to the exception row it raises, not
+  // to the act of counting — the same reasoning that made RECOUNT informational.
+  VERIFY: 'neutral',
   CHANGE: 'neutral',
   MAINTENANCE: 'neutral',
   UNKNOWN: 'neutral',
@@ -127,6 +134,9 @@ const KNOWN_VERBS: readonly string[] = [
   'DECLINE',
   'GRADUATE',
   'RESTORE',
+  // Receiving/Labeling overhaul: EXCEPTION_RESOLVE. No shorter verb is a suffix
+  // of it, so its position among the same-length verbs is immaterial.
+  'RESOLVE',
   'DISCARD',
   // W1-2b: STAGING_RECOUNT. No shorter 'COUNT' verb exists, so there is no
   // longest-first ambiguity to resolve here.
@@ -146,6 +156,9 @@ const KNOWN_VERBS: readonly string[] = [
   'CREATE',
   'DELETE',
   'UPDATE',
+  // Receiving/Labeling overhaul: STAGING_VERIFY. Nothing shorter is a suffix of
+  // it either; it sits with the other six-letter verbs.
+  'VERIFY',
   'CLOSE',
   'LINK',
   'SYNC',
@@ -173,6 +186,11 @@ const PREFIX_GROUP: Readonly<Record<string, ActionGroup>> = {
   // fixed the member's NAME, so the fold table absorbs it the same way SHIPMENT
   // and BUNDLE are absorbed. Graduation is pre-staging work, hence STAGING.
   GRADUATE: 'STAGING',
+  // Receiving/Labeling overhaul (G1p-7): EXCEPTION_RESOLVE's leading token names
+  // the register, not a domain. Every exception this lane settles is raised and
+  // resolved inside the receiving/labeling flow, so it folds into STAGING the
+  // same way SHIPMENT and GRADUATE do rather than minting a group of its own.
+  EXCEPTION: 'STAGING',
   COMPANY: 'COMPANY',
   INTEGRATION: 'INTEGRATION',
   MAPPING: 'MAPPING',
@@ -224,6 +242,12 @@ const LABEL_OVERRIDES: Readonly<Record<string, string>> = {
   // Names the divergence outright — "override" alone would read as a permission
   // grant rather than "the ledger was booked away from the count".
   GRADUATE_OVERRIDE: 'Graduated with a quantity override',
+  // Receiving/Labeling overhaul. Title Case of the tokens would read "Staging
+  // Verify" / "Staging Stock In" / "Exception Resolve" — the acts named in
+  // schema terms rather than in the operator's.
+  STAGING_VERIFY: 'Line verified',
+  STAGING_STOCK_IN: 'Labeled units stocked',
+  EXCEPTION_RESOLVE: 'Exception resolved',
 };
 
 function titleCase(actionType: string): string {
@@ -354,6 +378,11 @@ export const ALL_ACTION_TYPES: readonly AuditActionType[] = [
   'AI_PROVIDER_UPDATE',
   'API_TOKEN_CREATE',
   'API_TOKEN_REVOKE',
+  // Receiving/Labeling overhaul (spec §11): the verify, the labeled-batch
+  // booking and the exception settlement.
+  'STAGING_VERIFY',
+  'STAGING_STOCK_IN',
+  'EXCEPTION_RESOLVE',
 ];
 
 // Display order + labels for the non-UNKNOWN groups.
@@ -361,7 +390,10 @@ const GROUP_LABELS: readonly { key: Exclude<ActionGroup, 'UNKNOWN'>; label: stri
   { key: 'PRODUCT', label: 'Products' },
   { key: 'INVENTORY', label: 'Inventory' },
   { key: 'ORDER', label: 'Orders' },
-  { key: 'STAGING', label: 'Pre-staging' },
+  // Receiving/Labeling overhaul: the group holds pre-staging history AND the
+  // supply-order / labeling flow that replaces it, so it is named for the work
+  // rather than for a page being retired.
+  { key: 'STAGING', label: 'Receiving & Labeling' },
   { key: 'SCRATCHPAD', label: 'Scratchpad' },
   { key: 'USER', label: 'Users' },
   { key: 'ACCOUNT', label: 'Account' },

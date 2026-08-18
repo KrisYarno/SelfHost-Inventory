@@ -106,6 +106,64 @@ describe('applyStockDelta', () => {
     expect(mockTx.product.update).not.toHaveBeenCalled();
   });
 
+  it('passes the Receiving/Labeling refs straight through to the log row', async () => {
+    // C2a.5: stagingItemId / receiptCostCents / bookingKey are PURE passthroughs.
+    // applyStockDelta adds no semantics of its own — the booking primitive
+    // decides the values, this hot path only stores them. bookingKey is what
+    // makes a retried request book once (UNIQUE with stagingItemId), so a hop
+    // that quietly dropped it would turn a retry into a double booking.
+    await applyStockDelta(mockTx, {
+      userId: 4,
+      productId: 11,
+      locationId: 2,
+      delta: 6,
+      logType: inventory_logs_logType.STOCK_IN,
+      stagingItemId: 88,
+      receiptCostCents: 3334,
+      bookingKey: '3f1d5b0e-9d1c-4a6b-8f2e-7c1a0b5d9e42',
+    });
+
+    const logArg = mockTx.inventory_logs.create.mock.calls[0][0] as any;
+    expect(logArg.data.stagingItemId).toBe(88);
+    expect(logArg.data.receiptCostCents).toBe(3334);
+    expect(logArg.data.bookingKey).toBe('3f1d5b0e-9d1c-4a6b-8f2e-7c1a0b5d9e42');
+  });
+
+  it('defaults the three new refs to NULL for every existing caller', async () => {
+    // Existing callers are UNCHANGED by this milestone: omitting the fields must
+    // write explicit NULLs, never undefined (which Prisma would treat as "leave
+    // the column out" and which a later reader cannot distinguish from a miss).
+    await applyStockDelta(mockTx, {
+      userId: 1,
+      productId: 7,
+      locationId: 1,
+      delta: 5,
+    });
+
+    const logArg = mockTx.inventory_logs.create.mock.calls[0][0] as any;
+    expect(logArg.data.stagingItemId).toBeNull();
+    expect(logArg.data.receiptCostCents).toBeNull();
+    expect(logArg.data.bookingKey).toBeNull();
+  });
+
+  it('a receiptCostCents of NULL is preserved (an unpriced batch is not a free one)', async () => {
+    // Truthful data: a line with no total cannot say what a batch cost, and 0
+    // would read as "this batch was free".
+    await applyStockDelta(mockTx, {
+      userId: 4,
+      productId: 11,
+      locationId: 2,
+      delta: 6,
+      stagingItemId: 88,
+      receiptCostCents: null,
+      bookingKey: 'b0b0b0b0-0000-4000-8000-000000000001',
+    });
+
+    const logArg = mockTx.inventory_logs.create.mock.calls[0][0] as any;
+    expect(logArg.data.stagingItemId).toBe(88);
+    expect(logArg.data.receiptCostCents).toBeNull();
+  });
+
   it('passes through an explicit logType and negative deltas unchanged', async () => {
     await applyStockDelta(mockTx, {
       userId: 9,

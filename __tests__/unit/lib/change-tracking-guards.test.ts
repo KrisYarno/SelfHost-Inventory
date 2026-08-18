@@ -219,6 +219,12 @@ const KNOWN_VERBS: readonly string[] = [
   // W1-3a: GRADUATE_OVERRIDE -- a graduation that booked a quantity other than
   // the row's count.
   'OVERRIDE',
+  // Receiving/Labeling overhaul: STAGING_VERIFY (the delivery count that turns
+  // an ordered line into a verified one) and EXCEPTION_RESOLVE (a discrepancy
+  // settled against the supplier or written off). STAGING_STOCK_IN reuses the
+  // existing STOCK_IN verb.
+  'VERIFY',
+  'RESOLVE',
 ];
 
 /**

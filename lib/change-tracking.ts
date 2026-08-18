@@ -122,7 +122,18 @@ export type AuditActionType =
   | 'AI_PROVIDER_CREATE'
   | 'AI_PROVIDER_UPDATE'
   | 'API_TOKEN_CREATE'
-  | 'API_TOKEN_REVOKE';
+  | 'API_TOKEN_REVOKE'
+  // --- Receiving/Labeling overhaul (spec §11): the three acts of the supply-order
+  // flow that the pre-staging verbs cannot express. STAGING_VERIFY is the delivery
+  // count (one actionType for the first verify and every later raise/lower -- the
+  // diff carries old -> new, like STAGING_RECOUNT). STAGING_STOCK_IN is ONE labeled
+  // batch booking into a location, addressed to the LINE, and reuses the existing
+  // STOCK_IN verb. EXCEPTION_RESOLVE settles an inventory_exceptions row; it is
+  // addressed to the STAGING line with the exception key in details, deliberately
+  // WITHOUT a new EntityType.
+  | 'STAGING_VERIFY'
+  | 'STAGING_STOCK_IN'
+  | 'EXCEPTION_RESOLVE';
 
 export type EntityType =
   | 'USER'

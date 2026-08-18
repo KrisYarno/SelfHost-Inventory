@@ -32,9 +32,15 @@ import {
   EXCEPTION_KINDS,
   EXCEPTION_KIND_MAX_LENGTH,
   W1_EXCEPTION_KINDS,
+  LABELING_LOSS_SEVERITY,
+  RESOLUTIONS,
   recvDiscrepancyKey,
   pendingWithStockKey,
   costDiffersKey,
+  labelingLossKey,
+  type LabelingLossSubject,
+  type RecvDiscrepancySubject,
+  type Resolution,
 } from '@/lib/exceptions/kinds';
 
 const NOW = new Date('2026-08-13T12:00:00.000Z');
@@ -385,7 +391,7 @@ describe('resolveException', () => {
 });
 
 describe('the kind vocabulary + key encodings (pack REV-3 T1)', () => {
-  it('is the CLOSED six — W1 writes three, W3 adds three', () => {
+  it('is the CLOSED seven — W1 writes three, W3 declares three, the overhaul adds one', () => {
     expect([...EXCEPTION_KINDS]).toEqual([
       'recv-discrepancy',
       'pending-with-stock',
@@ -393,12 +399,19 @@ describe('the kind vocabulary + key encodings (pack REV-3 T1)', () => {
       'unattributed-outstock',
       'unmapped-lines',
       'gap-order',
+      // Receiving/Labeling overhaul (spec §6): units discarded at the labeling
+      // bench. APPENDED, so no stored kind string changes meaning.
+      'labeling-loss',
     ]);
     expect([...W1_EXCEPTION_KINDS]).toEqual([
       'recv-discrepancy',
       'pending-with-stock',
       'cost-differs',
     ]);
+  });
+
+  it('labeling-loss is NOT a W1 kind (no W1 path may raise it)', () => {
+    expect([...W1_EXCEPTION_KINDS]).not.toContain('labeling-loss');
   });
 
   it('every kind fits the VarChar(32) column', () => {
@@ -411,5 +424,75 @@ describe('the kind vocabulary + key encodings (pack REV-3 T1)', () => {
     expect(recvDiscrepancyKey(5)).toBe('recv-discrepancy:5');
     expect(pendingWithStockKey(42)).toBe('pending-with-stock:42');
     expect(costDiffersKey(5)).toBe('cost-differs:5');
+    // Receiving/Labeling overhaul: one labeling loss per LINE, cumulative —
+    // the same grain a discard settles.
+    expect(labelingLossKey(5)).toBe('labeling-loss:5');
+  });
+
+  it('declares a severity for labeling-loss ONLY (the rest stay unfrozen)', () => {
+    // PK-6: no exhaustive Record<ExceptionKind, Severity> exists yet and the six
+    // W3 priorities are not frozen — inventing them here would freeze a
+    // reconciliation-lane decision this lane has no business making.
+    expect(LABELING_LOSS_SEVERITY).toBe('medium');
+  });
+
+  it('carries the CLOSED resolution vocabulary (spec §6 / D5)', () => {
+    expect([...RESOLUTIONS]).toEqual([
+      'supplier-credited',
+      'reshipped',
+      'accepted-loss',
+      'recount-corrected',
+      'surplus-kept',
+      'surplus-returned',
+      'additional-delivery',
+    ]);
+    // `Resolution` is the union of exactly those members.
+    const resolution: Resolution = 'accepted-loss';
+    expect(RESOLUTIONS).toContain(resolution);
+  });
+
+  it('types the labeling-loss subject at the LINE grain, money included', () => {
+    // A type-level pin: the subject must carry the cumulative money, not just
+    // ids, so the register can answer "how much did the bench lose" from the
+    // row alone (the W1 rationale for values-ride-along).
+    const subject: LabelingLossSubject = {
+      stagingItemId: 5,
+      shipmentId: 'ship_1',
+      productId: 7,
+      units: 3,
+      unitCostCents: 3334,
+      lossCents: 10001,
+      reason: 'damaged in the labeler',
+    };
+    expect(subject.units).toBe(3);
+    expect(subject.lossCents).toBe(10001);
+  });
+
+  it('widens recv-discrepancy into a SUPERSET (W1 readers unaffected)', () => {
+    // The W1 five stay REQUIRED; everything the overhaul adds is optional, so a
+    // row written before this lane still satisfies the type.
+    const w1Only: RecvDiscrepancySubject = {
+      stagingItemId: 5,
+      shipmentId: null,
+      productId: null,
+      expectedQty: 10,
+      countedQty: 12,
+    };
+    const overhaul: RecvDiscrepancySubject = {
+      ...w1Only,
+      orderedProductId: 7,
+      orderedQuantity: 10,
+      verifiedQuantity: 12,
+      shortUnits: 0,
+      overUnits: 2,
+      unitCostCents: 1250,
+      lossCents: 0,
+      surplusValueCents: 2500,
+      note: 'two extra arrived',
+      relatedShipmentId: 'ship_2',
+      creditRef: 'CR-9',
+    };
+    expect(w1Only.countedQty).toBe(12);
+    expect(overhaul.overUnits).toBe(2);
   });
 });

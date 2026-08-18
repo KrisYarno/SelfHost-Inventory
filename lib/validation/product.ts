@@ -25,8 +25,17 @@ export type ReorderConfigInput = z.infer<typeof ReorderConfigInputSchema>;
 const allowedUnits = ['mg', 'ml', 'mcg', 'iu'] as const;
 type AllowedUnit = (typeof allowedUnits)[number];
 
-// Stricter schema for UI-driven product creation
-export const ProductCreateUISchema = z.object({
+/**
+ * The FIELD SHAPE behind `ProductCreateUISchema`, exported so a caller can build
+ * a variant of it (Receiving/Labeling overhaul, pack PK-8).
+ *
+ * `ProductCreateUISchema` is a ZodEffects (it carries a `.superRefine`), so
+ * `.omit()` is unavailable on it and re-declaring the fields by hand somewhere
+ * else would let the two copies drift. The shape is the single source; the
+ * schema below is still built from it verbatim, so nothing about the existing
+ * create path changes.
+ */
+export const ProductCreateUIShape = {
   baseName: z.string().trim().min(1, 'Base name is required').max(150),
   variant: z.string().trim().min(1, 'Variant is required').max(100),
   unit: z
@@ -62,7 +71,10 @@ export const ProductCreateUISchema = z.object({
   locationId: z.number().int().positive().optional(),
   // Per-product reorder config (allowlisted; codex #13).
   reorderConfig: ReorderConfigInputSchema.optional(),
-}).superRefine((data, ctx) => {
+};
+
+// Stricter schema for UI-driven product creation
+export const ProductCreateUISchema = z.object(ProductCreateUIShape).superRefine((data, ctx) => {
   const hasNumeric = data.numericValue !== undefined && data.numericValue !== null;
   const hasUnit = !!data.unit;
 
