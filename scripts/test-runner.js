@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const { spawn } = require('child_process');
-// `fs`/`os` back the launch gate's per-run state file (below). Disabled per line so
+// `fs`/`os` back the DB-backed gates' per-run state files (below). Disabled per line so
 // this CJS script's existing lint profile is unchanged by the addition.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const fs = require('fs');
@@ -68,12 +68,16 @@ const testSuites = {
   'launch:dev': {
     name: 'Launch Gate (dev profile)',
     config: 'launch-gate/jest.config.mjs',
+    stateEnv: 'LAUNCH_GATE_STATE_FILE',
+    statePrefix: 'launch-gate-',
     profile: 'dev',
     description: 'launch gate against `next dev` (the W1/W2 path)',
   },
   'launch:start': {
     name: 'Launch Gate (start profile)',
     config: 'launch-gate/jest.config.mjs',
+    stateEnv: 'LAUNCH_GATE_STATE_FILE',
+    statePrefix: 'launch-gate-',
     profile: 'start',
     description: 'launch gate against the built artifact (`next build` + `next start`)',
   },
@@ -85,6 +89,19 @@ const testSuites = {
     // production artifact fails the same way `next dev` did, not just that something did.
     aggregates: ['launch:dev', 'launch:start'],
     description: 'DB-backed launch gate — dev profile then start profile (both must pass)',
+  },
+  // The real-DB CONCURRENCY gate (overhaul plan P-2): its own jest project, its own
+  // globalSetup/globalTeardown, NO positional pattern — that config's testMatch decides
+  // what runs. Boots a throwaway mysql:8.4 container and drives the lib cores directly
+  // over two independent PrismaClient sessions; no app, no ports, no checksum bracket
+  // (business writes are the POINT here, which is exactly why it is not the launch gate).
+  concurrency: {
+    name: 'Concurrency Gate',
+    config: 'concurrency-gate/jest.config.mjs',
+    stateEnv: 'CONCURRENCY_GATE_STATE_FILE',
+    statePrefix: 'concurrency-gate-',
+    description:
+      'real-DB concurrency proofs for the supply-order primitive (throwaway mysql:8.4; lib cores driven directly)',
   },
   all: {
     name: 'All Tests',
@@ -116,22 +133,26 @@ const additionalArgs = args.filter(arg =>
   !['--watch', '-w', '--coverage', '-c', '--verbose', '-v'].includes(arg)
 );
 
-// The launch gate's cross-process state file (multiuser contract pack CP-7): jest's
-// globalSetup state never reaches a test suite's module registry, so the harness and
-// its suites share a mode-0600 JSON document instead. The path must exist BEFORE jest
-// starts and must be unique per run — two concurrent runs (or two aggregated profile
-// legs) sharing one path would corrupt each other's pids and session cookies.
-const launchGateFiles = [];
-function createLaunchGateStateFile() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'launch-gate-'));
+// A GATE's cross-process state file (multiuser contract pack CP-7; overhaul pack
+// C7a.1): jest's globalSetup state never reaches a test suite's module registry, so a
+// DB-backed harness and its suites share a mode-0600 JSON document instead. The path
+// must exist BEFORE jest starts and must be unique per run — two concurrent runs (or
+// two aggregated profile legs) sharing one path would corrupt each other's state.
+//
+// GENERALIZED over the prefix (overhaul pack C7a.1): the launch gate and the
+// concurrency gate each mint their own file under their own env var, and the runner
+// owns the recursive cleanup of both.
+const gateStateDirs = [];
+function createGateStateFile(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const file = path.join(dir, 'state.json');
   fs.writeFileSync(file, '', { mode: 0o600 });
-  launchGateFiles.push(dir);
+  gateStateDirs.push(dir);
   return file;
 }
 
-function cleanupLaunchGateFiles() {
-  for (const target of launchGateFiles) {
+function cleanupGateStateFiles() {
+  for (const target of gateStateDirs) {
     try {
       fs.rmSync(target, { recursive: true, force: true });
     } catch {
@@ -183,8 +204,12 @@ function runLeg(key) {
   console.log(`${colors.blue}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${colors.reset}\n`);
 
   const jestEnv = { ...process.env, NODE_ENV: 'test' };
+  // A state file is minted for EVERY config-bearing leg that declares one; the run
+  // profile is the launch gate's alone and controls only LAUNCH_GATE_PROFILE.
+  if (def.stateEnv) {
+    jestEnv[def.stateEnv] = createGateStateFile(def.statePrefix);
+  }
   if (def.profile) {
-    jestEnv.LAUNCH_GATE_STATE_FILE = createLaunchGateStateFile();
     jestEnv.LAUNCH_GATE_PROFILE = def.profile;
   }
 
@@ -212,7 +237,7 @@ const legs = testSuites[suite].aggregates ?? [suite];
   for (const key of legs) {
     results.push({ key, code: await runLeg(key) });
   }
-  cleanupLaunchGateFiles();
+  cleanupGateStateFiles();
 
   const failed = results.filter((result) => result.code !== 0);
   if (results.length > 1) {

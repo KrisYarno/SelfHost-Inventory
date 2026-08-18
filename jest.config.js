@@ -29,6 +29,10 @@ const customJestConfig = {
     // (launch-gate/jest.config.mjs, run via `npm run test:launch`). Same reason as
     // mcp/: the root run must never boot its container (multiuser plan Task 1.4).
     "<rootDir>/launch-gate/",
+    // The concurrency gate (concurrency-gate/) is a DB-backed jest project with its
+    // own config (concurrency-gate/jest.config.mjs, run via `npm run test:concurrency`).
+    // Same reason again: the root run must never boot its container (overhaul plan P-2).
+    "<rootDir>/concurrency-gate/",
     // Lane 6: support harness + bypass fixtures are imported BY tests, they are
     // not test suites themselves (jest would otherwise fail them as "no tests").
     "<rootDir>/__tests__/support/",
