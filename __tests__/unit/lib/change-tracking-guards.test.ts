@@ -76,6 +76,12 @@ export const SAFE_FIELDS: readonly string[] = [
   'inputTokens',
   'outputTokens',
   'totalTokens',
+  // Receiving/Labeling overhaul (spec §2): inventory_logs.bookingKey is the
+  // CLIENT-GENERATED idempotency key for one labeling batch (`VarChar(36)`, a
+  // uuid), unique with stagingItemId so a retried request books once. "key" =
+  // request identity, not credential material — and it must stay readable in
+  // audit payloads, since it is how a replayed booking is explained.
+  'bookingKey',
 ];
 
 interface SchemaField {

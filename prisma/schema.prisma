@@ -30,6 +30,7 @@ model User {
   stagingReceived        StagingItem[]            @relation("StagingReceivedBy")
   stagingGraduated       StagingItem[]            @relation("StagingGraduatedBy")
   stagingCounted         StagingItem[]            @relation("StagingCountedBy")
+  stagingVerified        StagingItem[]            @relation("StagingVerifiedBy")
   shipmentsCreated       InboundShipment[]        @relation("shipmentCreator")
   createdProducts        Product[]                @relation("ProductCreatedBy")
   reviewedProducts       Product[]                @relation("ProductReviewedBy")
@@ -78,6 +79,7 @@ model Product {
   createdByUser     User?                 @relation("ProductCreatedBy", fields: [createdBy], references: [id])
   reviewedByUser    User?                 @relation("ProductReviewedBy", fields: [reviewedBy], references: [id])
   stagingResolved   StagingItem[]         @relation("StagingResolvedProduct")
+  stagingOrdered    StagingItem[]         @relation("StagingOrderedProduct")
 
   // Retail Price Sync: points at the ONE ProductLink whose WC regular_price
   // should be pulled into retailPrice on manual sync. NULL = manual pricing.
@@ -170,16 +172,16 @@ model ProductReorderConfig {
 model StagingItem {
   id                Int               @id @default(autoincrement())
   description       String            @db.VarChar(255)
-  status            StagingItemStatus @default(RECEIVED)
+  status            StagingItemStatus @default(ORDERED) // default FLIPS (was RECEIVED); the legacy box-create writes RECEIVED explicitly until M6
   expectedQuantity  Int?
   countedQuantity   Int?
   resolvedProductId Int?
   vendor            String?           @db.VarChar(255)
   reference         String?           @db.VarChar(255)
   notes             String?           @db.Text
-  locationId        Int
-  receivedBy        Int
-  receivedAt        DateTime          @default(now()) @db.DateTime(0)
+  locationId        Int? // NULL-widened: a labeling decision, not an order decision
+  receivedBy        Int? // NULL-widened: the receipt act = verifiedBy/At in the new flow
+  receivedAt        DateTime?         @db.DateTime(0) // NULL-widened; DEFAULT DROPPED; precision unchanged
   graduatedBy       Int?
   graduatedAt       DateTime?         @db.DateTime(0)
   createdAt         DateTime          @default(now()) @db.DateTime(0)
@@ -192,12 +194,28 @@ model StagingItem {
   unitCostCents     Int?
   countedBy         Int?
   countedAt         DateTime?
+  // Receiving/Labeling overhaul (spec REV-6 §2): the line IS the supply-order line; table name kept.
+  orderedProductId  Int? // the product AS ORDERED (= resolvedProductId at order entry; resolvedProductId may be re-mapped at verify)
+  orderedQuantity   Int? // NULL = an unordered arrival (only inside model:'supply-order')
+  lineTotalCents    Int? // the TOTAL paid for the line — the truthful source; unit cost is derived
+  verifiedQuantity  Int?
+  verifiedBy        Int?
+  verifiedAt        DateTime?
+  labelingRequired  Boolean           @default(true)
+  stockedQuantity   Int               @default(0) // written with the ledger row under the line's FOR UPDATE; ledger SUM = oracle
+  disposedQuantity  Int               @default(0) // units verified but lost before stocking (labeling-loss)
 
-  receivedByUser  User     @relation("StagingReceivedBy", fields: [receivedBy], references: [id])
-  graduatedByUser User?    @relation("StagingGraduatedBy", fields: [graduatedBy], references: [id])
-  countedByUser   User?    @relation("StagingCountedBy", fields: [countedBy], references: [id])
-  resolvedProduct Product? @relation("StagingResolvedProduct", fields: [resolvedProductId], references: [id])
-  location        Location @relation(fields: [locationId], references: [id])
+  // The two WIDENED relations keep their CURRENT FK actions EXPLICITLY (PK-1): an
+  // optional relation would otherwise default to SET NULL and Prisma would drop and
+  // recreate both constraints. The two NEW optional relations follow the optional
+  // precedent staging_items_countedBy_fkey (SET NULL / CASCADE).
+  receivedByUser  User?     @relation("StagingReceivedBy", fields: [receivedBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  graduatedByUser User?     @relation("StagingGraduatedBy", fields: [graduatedBy], references: [id])
+  countedByUser   User?     @relation("StagingCountedBy", fields: [countedBy], references: [id])
+  resolvedProduct Product?  @relation("StagingResolvedProduct", fields: [resolvedProductId], references: [id])
+  location        Location? @relation(fields: [locationId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  verifiedByUser  User?     @relation("StagingVerifiedBy", fields: [verifiedBy], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  orderedProduct  Product?  @relation("StagingOrderedProduct", fields: [orderedProductId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
   @@index([status, locationId, receivedAt], map: "idx_staging_status_loc_time")
   @@index([receivedBy], map: "idx_staging_received_by")
@@ -239,6 +257,10 @@ model inventory_logs {
   // INT with an FK to a legacy-preserve table and can never be adopted.
   orderRecordId     String?            @db.VarChar(191)
   inboundShipmentId String?            @db.VarChar(30)
+  // Receiving/Labeling overhaul (spec REV-6 §2): soft ref to the supply-order LINE (no FK), the exact batch dollars, and the client idempotency key.
+  stagingItemId     Int?
+  receiptCostCents  Int?
+  bookingKey        String?            @db.VarChar(36)
   locations     Location?              @relation(fields: [locationId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_log_location")
   users         User?                  @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_1")
   products      Product                @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "inventory_logs_ibfk_2")
@@ -255,6 +277,11 @@ model inventory_logs {
   @@index([changeTime, productId, userId], map: "idx_inventory_logs_recent_changes")
   @@index([orderRecordId])
   @@index([inboundShipmentId])
+  // Receiving/Labeling overhaul (plan P-6): per-line ledger reads + the
+  // stockedQuantity oracle SUM; the UNIQUE pair is request idempotency (NULLs
+  // are unconstrained, so every pre-overhaul row stays legal).
+  @@index([stagingItemId])
+  @@unique([stagingItemId, bookingKey])
 }
 
 model product_locations {
@@ -349,6 +376,12 @@ enum StagingItemStatus {
   RECEIVED
   GRADUATED
   DISCARDED
+  // Receiving/Labeling overhaul (spec REV-6 §2): APPENDED so the SQL order — and
+  // therefore every legacy row's stored value — is untouched.
+  ORDERED
+  VERIFIED
+  LABELING
+  COMPLETE
 }
 
 // Organizational Layer
@@ -1024,11 +1057,19 @@ model InboundShipment {
   createdBy   Int
   closedBy    Int?
   notes       String?               @db.Text
+  // Receiving/Labeling overhaul (spec REV-6 §2). The header IS the supply order; table name kept.
+  orderedAt   DateTime? // the supplier order date; NON-NULL on every new-flow create = the `model` discriminator
+  supplier    String?               @db.VarChar(255)
+  feesCents   Int? // separate shipping/other fees (PREMISE 1); form default 0 = none charged; NULL = not recorded (legacy)
+  feesNote    String?               @db.VarChar(255)
   createdAt   DateTime              @default(now())
   updatedAt   DateTime              @updatedAt
   closedAt    DateTime?
   creator     User                  @relation("shipmentCreator", fields: [createdBy], references: [id], onDelete: NoAction, onUpdate: NoAction)
 
+  // Receiving/Labeling overhaul (plan P-6): the Orders list + the fees window —
+  // `status IN (...) [AND orderedAt range] ORDER BY orderedAt DESC`.
+  @@index([status, orderedAt])
   @@map("inbound_shipments")
 }
 
@@ -1036,6 +1077,10 @@ enum InboundShipmentStatus {
   OPEN
   CLOSED
   CANCELLED
+  // Receiving/Labeling overhaul (spec REV-6 §2): APPENDED; the SQL default stays
+  // OPEN through the drain and every new-flow create writes its status explicitly.
+  ORDERED
+  RECEIVING
 }
 
 // One row per accuracy exception, upserted on `key`. `kind` is a CLOSED
@@ -1055,6 +1100,10 @@ model InventoryException {
   resolvedAt  DateTime?
   resolvedBy  Int?
   note        String?   @db.Text
+  // Receiving/Labeling overhaul (spec REV-6 §2): the follow-up CLASSIFICATION,
+  // lifecycle state beside resolvedAt/resolvedBy — deliberately NOT in `subject`,
+  // which upsertException replaces wholesale. Cleared on reopen.
+  resolution  String?   @db.VarChar(32)
 
   @@map("inventory_exceptions")
 }

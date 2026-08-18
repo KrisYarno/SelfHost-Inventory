@@ -6,6 +6,7 @@ import {
   type DiscrepancyRollup,
   type LineDiscrepancy,
 } from '@/lib/shipments/rollup';
+import { assertLegacyLine } from '@/lib/staging/legacy-line';
 
 /**
  * Read helpers for the receiving header (contract pack REV-2 T4, W1-2a).
@@ -205,24 +206,30 @@ export async function getInboundShipmentDetail(id: string): Promise<ShipmentDeta
 
   return {
     ...toShipmentSummary(shipment, items),
-    items: items.map((item) => ({
-      id: item.id,
-      description: item.description,
-      status: item.status,
-      expectedQuantity: item.expectedQuantity,
-      countedQuantity: item.countedQuantity,
-      unitCostCents: item.unitCostCents,
-      resolvedProductId: item.resolvedProductId,
-      locationId: item.locationId,
-      vendor: item.vendor,
-      reference: item.reference,
-      notes: item.notes,
-      receivedAt: item.receivedAt,
-      countedAt: item.countedAt,
-      countedBy: item.countedBy,
-      location: item.location ?? null,
-      resolvedProduct: item.resolvedProduct ?? null,
-      flags: lineDiscrepancy(item),
-    })),
+    items: items.map((item) => {
+      // The three receipt columns are NULL-widened on the table but non-null on
+      // every legacy row, and this detail only ever reads legacy shipments
+      // (P-7 / C1.5). Assert the data invariant instead of casting it away.
+      assertLegacyLine(item);
+      return {
+        id: item.id,
+        description: item.description,
+        status: item.status,
+        expectedQuantity: item.expectedQuantity,
+        countedQuantity: item.countedQuantity,
+        unitCostCents: item.unitCostCents,
+        resolvedProductId: item.resolvedProductId,
+        locationId: item.locationId,
+        vendor: item.vendor,
+        reference: item.reference,
+        notes: item.notes,
+        receivedAt: item.receivedAt,
+        countedAt: item.countedAt,
+        countedBy: item.countedBy,
+        location: item.location ?? null,
+        resolvedProduct: item.resolvedProduct ?? null,
+        flags: lineDiscrepancy(item),
+      };
+    }),
   };
 }

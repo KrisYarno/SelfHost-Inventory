@@ -1,5 +1,6 @@
 import prisma from '@/lib/prisma';
 import type { StagingItemStatus } from '@prisma/client';
+import { assertLegacyLine } from '@/lib/staging/legacy-line';
 
 /**
  * Read helpers for the pre-staging intake queue.
@@ -26,22 +27,30 @@ const stagingInclude = {
 
 /**
  * List staging items filtered by status, newest-received first.
+ *
+ * Every returned row is asserted legacy (C1.5): the pre-staging queue reads only
+ * the W1 statuses, whose rows carry locationId/receivedBy/receivedAt by data
+ * invariant even though the columns are now NULL-widened for supply-order lines.
  */
 export async function listStagingItems(status: StagingItemStatus) {
-  return prisma.stagingItem.findMany({
+  const rows = await prisma.stagingItem.findMany({
     where: { status },
     include: stagingInclude,
     orderBy: { receivedAt: 'desc' },
   });
+  for (const row of rows) assertLegacyLine(row);
+  return rows;
 }
 
 /**
  * Fetch a single staging item by id with the same hydrated relations, or null
- * if it does not exist.
+ * if it does not exist. Asserted legacy on the same rule as the list.
  */
 export async function getStagingItem(id: number) {
-  return prisma.stagingItem.findUnique({
+  const row = await prisma.stagingItem.findUnique({
     where: { id },
     include: stagingInclude,
   });
+  if (row) assertLegacyLine(row);
+  return row;
 }

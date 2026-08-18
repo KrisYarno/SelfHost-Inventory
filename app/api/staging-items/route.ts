@@ -51,6 +51,12 @@ export const POST = apiHandler(async (request: NextRequest) => {
         notes: body.notes ?? null,
         locationId: body.locationId,
         receivedBy: user.id,
+        // Both are now DB-defaultless / default-flipped by the overhaul migration
+        // (C1.5): status must say RECEIVED explicitly or the row would be born an
+        // ORDERED supply-order line, and receivedAt must be written explicitly
+        // because the CURRENT_TIMESTAMP default is gone. This route dies with the
+        // rest of pre-staging; until then it states both.
+        receivedAt: new Date(),
         status: StagingItemStatus.RECEIVED,
       },
     });

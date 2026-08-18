@@ -70,6 +70,26 @@ assert_eq "P1 idx companyId,externalCreatedAt" "SELECT $SIG FROM information_sch
 assert_eq "P1 idx externalCreatedAt" "SELECT $SIG FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='external_orders' AND INDEX_NAME='external_orders_externalCreatedAt_idx';" "1|1|BTREE|YES|0|externalCreatedAt:A"
 assert_eq "P1 idx actionType,createdAt" "SELECT $SIG FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='audit_logs' AND INDEX_NAME='audit_logs_actionType_createdAt_idx';" "2|1|BTREE|YES|0|actionType:A,createdAt:A"
 
+# Receiving/Labeling overhaul (pack C1.4): the wave's END STATE on a fresh chain. The 38-table
+# tripwire above is deliberately UNCHANGED — this migration adds no table.
+# Both status enums are APPENDS: the legacy members keep their positions, so no stored value moves.
+assert_eq "OVERHAUL staging_items.status enum" "SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME='status';" "enum('RECEIVED','GRADUATED','DISCARDED','ORDERED','VERIFIED','LABELING','COMPLETE')"
+assert_eq "OVERHAUL inbound_shipments.status enum" "SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inbound_shipments' AND COLUMN_NAME='status';" "enum('OPEN','CLOSED','CANCELLED','ORDERED','RECEIVING')"
+# The default FLIP: a line that falls back to the DB default is ORDERED (a supply-order line),
+# never RECEIVED (the legacy pre-staging queue). The header default stays OPEN.
+assert_eq "OVERHAUL staging default ORDERED" "SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME='status';" "ORDERED"
+assert_eq "OVERHAUL header default OPEN" "SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inbound_shipments' AND COLUMN_NAME='status';" "OPEN"
+# receivedAt: the CURRENT_TIMESTAMP default is GONE (P-1 — the legacy creator now writes it
+# explicitly, in this same deploy), the column is nullable, and DATETIME(0) precision is unchanged.
+assert_eq "OVERHAUL receivedAt default dropped" "SELECT CONCAT(COALESCE(COLUMN_DEFAULT,'<null>'),'|',IS_NULLABLE,'|',COLUMN_TYPE,'|',EXTRA) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME='receivedAt';" "<null>|YES|datetime|"
+assert_eq "OVERHAUL three widenings nullable" "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME IN ('locationId','receivedBy','receivedAt') AND IS_NULLABLE='YES';" "3"
+# The exception follow-up classification lives in its own column, not in the subject JSON.
+assert_eq "OVERHAUL inventory_exceptions.resolution" "SELECT CONCAT(COLUMN_TYPE,'|',IS_NULLABLE) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inventory_exceptions' AND COLUMN_NAME='resolution';" "varchar(32)|YES"
+# The THREE frozen indexes (plan P-6) by EXACT signature — same SIG string as P1 above.
+assert_eq "OVERHAUL idx status,orderedAt" "SELECT $SIG FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inbound_shipments' AND INDEX_NAME='inbound_shipments_status_orderedAt_idx';" "2|1|BTREE|YES|0|status:A,orderedAt:A"
+assert_eq "OVERHAUL idx stagingItemId" "SELECT $SIG FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inventory_logs' AND INDEX_NAME='inventory_logs_stagingItemId_idx';" "1|1|BTREE|YES|0|stagingItemId:A"
+assert_eq "OVERHAUL unique stagingItemId,bookingKey" "SELECT $SIG FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inventory_logs' AND INDEX_NAME='inventory_logs_stagingItemId_bookingKey_key';" "2|0|BTREE|YES|0|stagingItemId:A,bookingKey:A"
+
 # P1: the string FK on a converted table and the auth unique key survive the chain.
 assert_eq "P1 fk_price_source_link" "SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='products' AND CONSTRAINT_NAME='fk_price_source_link' AND COLUMN_NAME='priceSourceLinkId' AND REFERENCED_TABLE_NAME='product_links' AND REFERENCED_COLUMN_NAME='id';" "1"
 assert_eq "P1 users.email unique" "SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='users' AND CONSTRAINT_NAME='email' AND CONSTRAINT_TYPE='UNIQUE';" "1"
