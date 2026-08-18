@@ -3,11 +3,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
-export interface AccountLocation {
-  id: number;
-  name: string;
-}
-
 export interface UserPreferences {
   emailAlerts?: boolean;
   minLocationEmailAlerts?: boolean;
@@ -18,18 +13,10 @@ export interface UserPreferences {
 
 // --- reads -----------------------------------------------------------------
 
-// Locations for the default-location selector. Own key so it can be shared/refetched
-// independently of the location-context's (non-query) copy.
-export function useLocations() {
-  return useQuery<AccountLocation[]>({
-    queryKey: ["locations"],
-    queryFn: async ({ signal }) => {
-      const res = await fetch("/api/locations", { signal });
-      if (!res.ok) throw new Error("Failed to fetch locations");
-      return res.json();
-    },
-  });
-}
+// Locations for the default-location selector. RE-EXPORTED from the one home
+// (plan P-9): this file used to carry its own copy under the SAME query key,
+// with a different parser — see hooks/use-locations.ts for why that was a bug.
+export { useLocations, type Location } from "@/hooks/use-locations";
 
 // Account preferences (notification switches, hasPassword, username). Mutations below
 // invalidate ["user-preferences"] so a later mount reflects the saved values.

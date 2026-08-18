@@ -28,10 +28,10 @@ import {
 } from "@/hooks/use-inbound-shipments";
 import {
   useCountStagingItem,
-  useLocations,
   useStagingItems,
   type GraduateResponse,
 } from "@/hooks/use-staging";
+import { useLocations } from "@/hooks/use-locations";
 import {
   GraduateDialog,
   type GraduateStagingItem,

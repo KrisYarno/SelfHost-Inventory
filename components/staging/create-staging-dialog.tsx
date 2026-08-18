@@ -6,7 +6,8 @@ import { useSession } from "next-auth/react";
 import { AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { useCSRF } from "@/hooks/use-csrf";
-import { useCreateStagingItem, useLocations } from "@/hooks/use-staging";
+import { useCreateStagingItem } from "@/hooks/use-staging";
+import { useLocations } from "@/hooks/use-locations";
 import { useUpdateStagingLine } from "@/hooks/use-inbound-shipments";
 import {
   ShipmentPicker,

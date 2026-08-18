@@ -33,6 +33,7 @@
  */
 
 import type { StagingItemStatus } from '@prisma/client';
+import { lineMoney } from '@/lib/supply-orders/money';
 
 /** The only two columns the per-line arithmetic reads. Callers pass whole rows. */
 export type DiscrepancyLine = {
@@ -100,7 +101,25 @@ export function lineDiscrepancy(line: DiscrepancyLine): LineDiscrepancy {
  * the totals, over/under never cancel, and only a RECEIVED line can be
  * UNCOUNTED (rule 2).
  */
-export function rollupDiscrepancies(lines: readonly RollupLine[]): DiscrepancyRollup {
+export function rollupDiscrepancies(
+  lines: readonly RollupLine[],
+  opts?: { model?: 'legacy' },
+): DiscrepancyRollup;
+export function rollupDiscrepancies(
+  lines: readonly SupplyOrderRollupLine[],
+  opts: { model: 'supply-order' },
+): SupplyOrderDiscrepancyRollup;
+export function rollupDiscrepancies(
+  lines: readonly (RollupLine | SupplyOrderRollupLine)[],
+  opts: { model?: RollupModel } = {},
+): DiscrepancyRollup | SupplyOrderDiscrepancyRollup {
+  if (opts.model === 'supply-order') {
+    return rollupSupplyOrder(lines as readonly SupplyOrderRollupLine[]);
+  }
+  return rollupLegacy(lines as readonly RollupLine[]);
+}
+
+function rollupLegacy(lines: readonly RollupLine[]): DiscrepancyRollup {
   const rollup: DiscrepancyRollup = {
     itemCount: lines.length,
     countedItemCount: 0,
@@ -127,6 +146,128 @@ export function rollupDiscrepancies(lines: readonly RollupLine[]): DiscrepancyRo
       rollup.totalUnder += -delta;
       rollup.discrepancyItemCount += 1;
     }
+  }
+
+  return rollup;
+}
+
+// ---------------------------------------------------------------------------
+// The SUPPLY-ORDER half (Receiving/Labeling overhaul, contract pack C2c.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which data model a set of lines belongs to. The two models share this file
+ * because they share the ARITHMETIC — the three rules in the module header were
+ * never about the column names — and having two rollup functions is how a "no
+ * discrepancies" banner ends up meaning different things on two screens.
+ */
+export type RollupModel = 'legacy' | 'supply-order';
+
+/**
+ * What the supply-order rollup reads: the model's OWN column family. `status` is
+ * carried for symmetry with the legacy line — the "still owed" status here is
+ * ORDERED, and an ORDERED line has no verified count to contribute anyway.
+ */
+export type SupplyOrderRollupLine = {
+  status: StagingItemStatus;
+  orderedQuantity: number | null;
+  verifiedQuantity: number | null;
+  lineTotalCents: number | null;
+};
+
+/** Per-line discrepancy on a supply-order line; `null` = nothing to report. */
+export type SupplyOrderLineDiscrepancy = {
+  shortUnits: number;
+  overUnits: number;
+  lossCents: number;
+  surplusValueCents: number;
+  /** An arrival nobody ordered — excluded from over/surplus by construction. */
+  unordered: boolean;
+};
+
+export type SupplyOrderDiscrepancyRollup = {
+  linesWithDiscrepancy: number;
+  shortUnits: number;
+  overUnits: number;
+  lossCents: number;
+  surplusValueCents: number;
+  /** Unordered arrivals, counted ONLY here (OCs2-20). */
+  unorderedLines: number;
+};
+
+/**
+ * One supply-order line's discrepancy, money included.
+ *
+ * `null` in two cases, and they are different kinds of nothing:
+ *   - the line is not verified yet — UNKNOWN, and unknown is not zero (rule 2);
+ *   - the count matched the order — genuinely nothing to report.
+ *
+ * An UNORDERED arrival is always reported, flagged, with zero short/over: "the
+ * supplier sent 6 of something we never ordered" is not the line being over, it
+ * is a line that has no order to be over (OCs2-20). Its money is zero for the
+ * same reason — its own arrival IS the basis (D4), so it can be neither short
+ * nor surplus.
+ */
+export function supplyOrderLineDiscrepancy(
+  line: SupplyOrderRollupLine,
+): SupplyOrderLineDiscrepancy | null {
+  if (line.verifiedQuantity === null) return null;
+
+  if (line.orderedQuantity === null) {
+    return {
+      shortUnits: 0,
+      overUnits: 0,
+      lossCents: 0,
+      surplusValueCents: 0,
+      unordered: true,
+    };
+  }
+
+  const shortUnits = Math.max(line.orderedQuantity - line.verifiedQuantity, 0);
+  const overUnits = Math.max(line.verifiedQuantity - line.orderedQuantity, 0);
+  if (shortUnits === 0 && overUnits === 0) return null;
+
+  const money = lineMoney({
+    lineTotalCents: line.lineTotalCents,
+    orderedQuantity: line.orderedQuantity,
+    verifiedQuantity: line.verifiedQuantity,
+  });
+
+  return {
+    shortUnits,
+    overUnits,
+    lossCents: money.lossCents,
+    surplusValueCents: money.surplusValueCents,
+    unordered: false,
+  };
+}
+
+/** The supply-order header rollup — the same three rules, the new columns. */
+function rollupSupplyOrder(
+  lines: readonly SupplyOrderRollupLine[],
+): SupplyOrderDiscrepancyRollup {
+  const rollup: SupplyOrderDiscrepancyRollup = {
+    linesWithDiscrepancy: 0,
+    shortUnits: 0,
+    overUnits: 0,
+    lossCents: 0,
+    surplusValueCents: 0,
+    unorderedLines: 0,
+  };
+
+  for (const line of lines) {
+    if (line.orderedQuantity === null) {
+      rollup.unorderedLines += 1;
+      continue;
+    }
+    const flags = supplyOrderLineDiscrepancy(line);
+    if (!flags) continue;
+
+    rollup.linesWithDiscrepancy += 1;
+    rollup.shortUnits += flags.shortUnits;
+    rollup.overUnits += flags.overUnits;
+    rollup.lossCents += flags.lossCents;
+    rollup.surplusValueCents += flags.surplusValueCents;
   }
 
   return rollup;

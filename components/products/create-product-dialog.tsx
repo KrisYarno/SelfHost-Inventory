@@ -13,7 +13,7 @@ import {
 import { ProductForm } from "./product-form";
 import { toast } from "sonner";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
-import { useLocations } from "@/hooks/use-staging";
+import { useLocations } from "@/hooks/use-locations";
 import { useQueryClient } from "@tanstack/react-query";
 
 interface CreateProductDialogProps {

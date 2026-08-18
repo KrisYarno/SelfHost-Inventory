@@ -9,19 +9,10 @@ import type {
   StagingStatus,
 } from "@/components/staging/staging-queue";
 
-export interface Location {
-  id: number;
-  name: string;
-}
-
 /** Stable query keys. Staging list is keyed by status; invalidating the bare
  *  ["staging-items"] prefix refreshes every status view at once. */
 export const stagingKeys = {
   items: (status: StagingStatus) => ["staging-items", status] as const,
-};
-
-export const locationKeys = {
-  all: ["locations"] as const,
 };
 
 interface StatusError extends Error {
@@ -31,24 +22,6 @@ interface StatusError extends Error {
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
-
-/** Locations catalog. GET needs no CSRF; shared cache across every dialog. */
-export function useLocations(enabled = true) {
-  return useQuery<Location[]>({
-    queryKey: locationKeys.all,
-    queryFn: async () => {
-      const res = await fetch("/api/locations");
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to fetch locations");
-      }
-      const data = await res.json();
-      // /api/locations returns a bare array; tolerate { locations } too.
-      return (data?.locations ?? data ?? []) as Location[];
-    },
-    enabled,
-  });
-}
 
 /** Pre-staging queue for a given status. A 401 surfaces as error.status so the
  *  caller can redirect to sign-in (matching the pre-migration guard). */

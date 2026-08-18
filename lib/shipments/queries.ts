@@ -1,5 +1,5 @@
 import prisma from '@/lib/prisma';
-import type { InboundShipmentStatus, StagingItemStatus } from '@prisma/client';
+import type { InboundShipmentStatus, Prisma, StagingItemStatus } from '@prisma/client';
 import {
   lineDiscrepancy,
   rollupDiscrepancies,
@@ -184,28 +184,50 @@ export async function listInboundShipments(
   return shipments.map((s) => toShipmentSummary(s, byShipment.get(s.id) ?? []));
 }
 
+/** The line columns the legacy DETAIL mapper reads (Prisma rows satisfy it). */
+export type ShipmentDetailRow = {
+  id: number;
+  description: string;
+  status: StagingItemStatus;
+  expectedQuantity: number | null;
+  countedQuantity: number | null;
+  unitCostCents: number | null;
+  resolvedProductId: number | null;
+  locationId: number | null;
+  vendor: string | null;
+  reference: string | null;
+  notes: string | null;
+  receivedAt: Date | null;
+  receivedBy: number | null;
+  countedAt: Date | null;
+  countedBy: number | null;
+  location?: { id: number; name: string } | null;
+  resolvedProduct?: { id: number; name: string } | null;
+};
+
+/** The line read the legacy detail issues — its shape IS part of the mapping. */
+export const shipmentDetailLineQuery = {
+  include: {
+    location: { select: { id: true, name: true } },
+    resolvedProduct: { select: { id: true, name: true } },
+  },
+  orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
+} satisfies Omit<Prisma.StagingItemFindManyArgs, 'where'>;
+
 /**
- * A single shipment with its linked staging lines, per-line discrepancy flags,
- * and the same header rollup the list carries. `null` when the id is unknown.
+ * Fold a header row and its linked lines into the DETAIL wire shape.
+ *
+ * EXPORTED for the Receiving/Labeling overhaul (seam S16): the polymorphic
+ * detail in `lib/supply-orders/queries.ts` renders a LEGACY header by handing
+ * its rows straight to this mapper, so legacy history keeps today's shape
+ * verbatim instead of acquiring a second, subtly-different implementation.
  */
-export async function getInboundShipmentDetail(id: string): Promise<ShipmentDetail | null> {
-  const shipment = await prisma.inboundShipment.findUnique({
-    where: { id },
-    include: shipmentInclude,
-  });
-  if (!shipment) return null;
-
-  const items = await prisma.stagingItem.findMany({
-    where: { shipmentId: id },
-    include: {
-      location: { select: { id: true, name: true } },
-      resolvedProduct: { select: { id: true, name: true } },
-    },
-    orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
-  });
-
+export function toShipmentDetail(
+  row: ShipmentRow,
+  items: readonly ShipmentDetailRow[],
+): ShipmentDetail {
   return {
-    ...toShipmentSummary(shipment, items),
+    ...toShipmentSummary(row, items),
     items: items.map((item) => {
       // The three receipt columns are NULL-widened on the table but non-null on
       // every legacy row, and this detail only ever reads legacy shipments
@@ -232,4 +254,23 @@ export async function getInboundShipmentDetail(id: string): Promise<ShipmentDeta
       };
     }),
   };
+}
+
+/**
+ * A single shipment with its linked staging lines, per-line discrepancy flags,
+ * and the same header rollup the list carries. `null` when the id is unknown.
+ */
+export async function getInboundShipmentDetail(id: string): Promise<ShipmentDetail | null> {
+  const shipment = await prisma.inboundShipment.findUnique({
+    where: { id },
+    include: shipmentInclude,
+  });
+  if (!shipment) return null;
+
+  const items = await prisma.stagingItem.findMany({
+    where: { shipmentId: id },
+    ...shipmentDetailLineQuery,
+  });
+
+  return toShipmentDetail(shipment, items);
 }

@@ -23,9 +23,9 @@ import {
 } from "@/components/staging/graduate-dialog";
 import {
   useDiscardStagingItem,
-  useLocations,
   useStagingItems,
 } from "@/hooks/use-staging";
+import { useLocations } from "@/hooks/use-locations";
 
 const STATUS_TABS: { value: StagingStatus; label: string }[] = [
   { value: "RECEIVED", label: "Received" },

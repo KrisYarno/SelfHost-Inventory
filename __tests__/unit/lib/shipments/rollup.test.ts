@@ -18,7 +18,12 @@
  * uncounted" on the list and suppressed "No discrepancies" forever.
  */
 
-import { lineDiscrepancy, rollupDiscrepancies } from '@/lib/shipments/rollup';
+import {
+  lineDiscrepancy,
+  rollupDiscrepancies,
+  supplyOrderLineDiscrepancy,
+  type SupplyOrderRollupLine,
+} from '@/lib/shipments/rollup';
 
 describe('lineDiscrepancy (per-item flags)', () => {
   it('counts an unexpected arrival IN FULL (expected NULL -> COALESCE 0)', () => {
@@ -180,5 +185,153 @@ describe('rollupDiscrepancies (header totals)', () => {
       totalOver: 0,
       totalUnder: 0,
     });
+  });
+});
+
+/**
+ * THE SUPPLY-ORDER HALF (Receiving/Labeling overhaul, contract pack C2c.3;
+ * plan OCp2-7).
+ *
+ * ONE function, parameterized by model. The three rules above survive verbatim
+ * — they were never about the column NAMES:
+ *
+ *   - the quantities come from the model's OWN column family (legacy:
+ *     expected/counted; supply order: ordered/verified);
+ *   - "still owed" is the model's own status (legacy RECEIVED, supply order
+ *     ORDERED), and a line that is still owed contributes NOTHING (unknown is
+ *     not zero);
+ *   - over and under never cancel.
+ *
+ * The one NEW rule is the unordered arrival (OCs2-20): a line nobody ordered is
+ * counted ONLY in `unorderedLines`, never in `overUnits` or
+ * `surplusValueCents`. The W1 model folded an unexpected arrival into the over
+ * total; the supply-order model cannot, because "over" there means "the
+ * supplier sent more of THIS line than we paid for", and an unordered line has
+ * no order to be over.
+ */
+
+const so = (line: Partial<SupplyOrderRollupLine>): SupplyOrderRollupLine => ({
+  status: 'VERIFIED',
+  orderedQuantity: 10,
+  verifiedQuantity: 10,
+  lineTotalCents: 10000,
+  ...line,
+});
+
+describe('supplyOrderLineDiscrepancy (per-line, new model)', () => {
+  it('reports a SHORT line with its money', () => {
+    expect(supplyOrderLineDiscrepancy(so({ verifiedQuantity: 7 }))).toEqual({
+      shortUnits: 3,
+      overUnits: 0,
+      lossCents: 3000,
+      surplusValueCents: 0,
+      unordered: false,
+    });
+  });
+
+  it('reports an OVER line with its surplus value', () => {
+    expect(supplyOrderLineDiscrepancy(so({ verifiedQuantity: 12 }))).toEqual({
+      shortUnits: 0,
+      overUnits: 2,
+      lossCents: 0,
+      surplusValueCents: 2000,
+      unordered: false,
+    });
+  });
+
+  it('a matched line has NOTHING to report', () => {
+    expect(supplyOrderLineDiscrepancy(so({}))).toBeNull();
+  });
+
+  it('an UNVERIFIED line is unknown, not zero', () => {
+    expect(
+      supplyOrderLineDiscrepancy(so({ status: 'ORDERED', verifiedQuantity: null })),
+    ).toBeNull();
+  });
+
+  it('an UNORDERED arrival is flagged, with no short/over and no money', () => {
+    expect(
+      supplyOrderLineDiscrepancy(so({ orderedQuantity: null, verifiedQuantity: 6 })),
+    ).toEqual({
+      shortUnits: 0,
+      overUnits: 0,
+      lossCents: 0,
+      surplusValueCents: 0,
+      unordered: true,
+    });
+  });
+});
+
+describe('rollupDiscrepancies({ model: "supply-order" })', () => {
+  it('a shortage NEVER renders as "no discrepancies"', () => {
+    const rollup = rollupDiscrepancies([so({ verifiedQuantity: 7 })], { model: 'supply-order' });
+    expect(rollup.linesWithDiscrepancy).toBe(1);
+    expect(rollup.shortUnits).toBe(3);
+    expect(rollup.lossCents).toBe(3000);
+  });
+
+  it('does NOT cancel short against over, and sums the money separately', () => {
+    const rollup = rollupDiscrepancies(
+      [so({ verifiedQuantity: 7 }), so({ verifiedQuantity: 13 })],
+      { model: 'supply-order' },
+    );
+    expect(rollup).toEqual({
+      linesWithDiscrepancy: 2,
+      shortUnits: 3,
+      overUnits: 3,
+      lossCents: 3000,
+      surplusValueCents: 3000,
+      unorderedLines: 0,
+    });
+  });
+
+  it('counts an UNORDERED line ONLY in unorderedLines (OCs2-20)', () => {
+    const rollup = rollupDiscrepancies(
+      [so({ orderedQuantity: null, verifiedQuantity: 6, lineTotalCents: 600 })],
+      { model: 'supply-order' },
+    );
+    expect(rollup).toEqual({
+      linesWithDiscrepancy: 0,
+      shortUnits: 0,
+      overUnits: 0,
+      lossCents: 0,
+      surplusValueCents: 0,
+      unorderedLines: 1,
+    });
+  });
+
+  it('a line still ORDERED contributes nothing (the "still owed" status)', () => {
+    const rollup = rollupDiscrepancies(
+      [so({ status: 'ORDERED', verifiedQuantity: null }), so({ verifiedQuantity: 8 })],
+      { model: 'supply-order' },
+    );
+    expect(rollup.shortUnits).toBe(2);
+    expect(rollup.linesWithDiscrepancy).toBe(1);
+  });
+
+  it('an unpriced line still reports its UNITS, and 0 money truthfully', () => {
+    const rollup = rollupDiscrepancies(
+      [so({ verifiedQuantity: 7, lineTotalCents: null })],
+      { model: 'supply-order' },
+    );
+    expect(rollup.shortUnits).toBe(3);
+    expect(rollup.lossCents).toBe(0);
+  });
+
+  it('an empty order rolls up to all zeros', () => {
+    expect(rollupDiscrepancies([], { model: 'supply-order' })).toEqual({
+      linesWithDiscrepancy: 0,
+      shortUnits: 0,
+      overUnits: 0,
+      lossCents: 0,
+      surplusValueCents: 0,
+      unorderedLines: 0,
+    });
+  });
+
+  it('the LEGACY half is unchanged, with or without an explicit model', () => {
+    const lines = [rl({ expectedQuantity: 10, countedQuantity: 12 })];
+    expect(rollupDiscrepancies(lines)).toEqual(rollupDiscrepancies(lines, { model: 'legacy' }));
+    expect(rollupDiscrepancies(lines).totalOver).toBe(2);
   });
 });
