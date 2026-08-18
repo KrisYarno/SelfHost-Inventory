@@ -190,7 +190,7 @@ SELECT COUNT(*) INTO @okSource
  WHERE id = @source
    AND status = 'RECEIVED'
    AND countedQuantity IS NOT NULL                -- the count is the whole point
-   AND receivedAt IS NOT NULL                     -- the receipt instant is preserved, not invented
+   AND receivedAt IS NOT NULL                     -- a real receipt instant (it stays on THIS row; the new line gets NULL)
    FOR UPDATE;
 
 SELECT COUNT(*) INTO @okOrder
@@ -211,8 +211,13 @@ SELECT @okSource AS ok_source, @okOrder AS ok_order, @okProduct AS ok_product;
 
 -- 2. THE NEW SUPPLY-ORDER LINE, built FROM the straggler and gated on all three
 --    flags. It is an UNORDERED arrival: nothing was ordered, so orderedProductId
---    and orderedQuantity stay NULL and the money basis is the verified count. The
---    receipt facts (locationId, receivedBy, receivedAt) are PRESERVED, not re-stamped.
+--    and orderedQuantity stay NULL and the money basis is the verified count.
+--    receivedAt / receivedBy are NULL — a NEW-FLOW line NEVER carries the receipt
+--    act (that is verifiedBy/verifiedAt), and `receivedAt IS NOT NULL` is THE legacy
+--    discriminator: copying it would misfile this line as a legacy receipt the moment
+--    it is discarded. The receipt facts live on in the SOURCE row (kept, DISCARDED,
+--    naming this line) and in the audit details; only the location survives as the
+--    line's next-batch default.
 INSERT INTO staging_items
   (description, status, shipmentId,
    orderedProductId, resolvedProductId, orderedQuantity, lineTotalCents,
@@ -223,7 +228,7 @@ SELECT p.name, 'VERIFIED', @targetOrder,
        NULL, @product, NULL, @lineTotal,
        s.countedQuantity, @actor, UTC_TIMESTAMP(3), @choice,
        0, 0,
-       s.locationId, s.receivedBy, s.receivedAt, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3)
+       s.locationId, NULL, NULL, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3)
   FROM staging_items s
   JOIN products p ON p.id = @product
  WHERE s.id = @source
@@ -304,6 +309,8 @@ SELECT @actor, 'USER', 'STAGING_CREATE', 'STAGING', CAST(@newLine AS CHAR), @bat
        CONCAT('Hand-linked cutover straggler ', @source, ' as supply-order line ', @newLine),
        JSON_OBJECT('source', 'cutover-runbook', 'shipmentId', @targetOrder, 'productId', @product,
                    'fromStagingItemId', @source, 'lineTotalCents', @lineTotal,
+               'sourceReceivedAt', (SELECT DATE_FORMAT(receivedAt, '%Y-%m-%dT%H:%i:%sZ') FROM staging_items WHERE id = @source),
+               'sourceReceivedBy', (SELECT receivedBy FROM staging_items WHERE id = @source),
                    'labelingRequired', @choice),
        1, UTC_TIMESTAMP(3)
   FROM DUAL

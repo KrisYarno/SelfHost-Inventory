@@ -28,7 +28,7 @@ export const legacyLineKeys = {
  * ones the bound left off (spec REV-10 clause 6). The counts travel with the
  * rows because the cue that renders them must never be able to contradict them.
  */
-export type LegacyLinesPage = {
+type LegacyLinesPage = {
   lines: LegacyLineView[];
   count: number;
   moreCount: number;

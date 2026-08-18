@@ -28,6 +28,7 @@
  */
 
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
 const REPO_ROOT = process.cwd();
@@ -82,10 +83,34 @@ describe('the legacy discriminator survives the kept receivedAt default', () => 
   });
 
   it('every staging-line create writes receivedAt: null EXPLICITLY', () => {
-    const offenders = sources
-      .filter((s) => STAGING_CREATE.test(s.text))
-      .filter((s) => !/receivedAt:\s*null/.test(s.text))
-      .map((s) => `  ${s.path}`);
+    // PER CREATE EXPRESSION (codex FD-1): a file with two creates where only one says
+    // `receivedAt: null` must fail — the whole-file test would let the other slip.
+    // The create's argument object is scanned from the call up to its balanced close.
+    const offenders: string[] = [];
+    for (const s of sources) {
+      const re = /\bstagingItem\s*\.\s*(create|createMany)\s*\(/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(s.text)) !== null) {
+        let depth = 1;
+        let i = m.index + m[0].length;
+        while (i < s.text.length && depth > 0) {
+          const ch = s.text[i];
+          if (ch === '(') depth++;
+          else if (ch === ')') depth--;
+          i++;
+        }
+        const call = s.text.slice(m.index, i);
+        // A literal data object/array must say it INSIDE the call; data passed by
+        // identifier (the concurrency seed's SEED_LINES) is checked at file level —
+        // its literal lives in the same module and the file-level pin covers it.
+        const literalData = /data\s*:\s*(\{|\[\s*\{)/.test(call);
+        const ok = literalData ? /receivedAt:\s*null/.test(call) : /receivedAt:\s*null/.test(s.text);
+        if (!ok) {
+          const line = s.text.slice(0, m.index).split('\n').length;
+          offenders.push(`  ${s.path}:${line}`);
+        }
+      }
+    }
 
     expect(
       offenders.length === 0
@@ -95,6 +120,21 @@ describe('the legacy discriminator survives the kept receivedAt default', () => 
             `and receivedAt IS NOT NULL is the legacy discriminator. Say it out loud:\n` +
             offenders.join('\n'),
     ).toBe('');
+  });
+
+  it('the straggler runbook hand-links a NEW-flow line with receivedAt/receivedBy = NULL (codex FD-1)', () => {
+    // The runbook is SQL printed by a shell script; it is the one staging_items INSERT
+    // outside TypeScript. A copied source receivedAt would misfile the line as legacy
+    // the moment it is discarded (the archive selects DISCARDED AND receivedAt IS NOT NULL).
+    const runbook = execFileSync('bash', ['scripts/preflight-overhaul-cutover.sh', '--print-runbook'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    });
+    const insertBlock = runbook.match(/INSERT INTO staging_items[\s\S]*?;/g) ?? [];
+    expect(insertBlock.length).toBe(1);
+    expect(insertBlock[0]).toContain('locationId, receivedBy, receivedAt, createdAt, updatedAt)');
+    expect(insertBlock[0]).toContain('s.locationId, NULL, NULL, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3)');
+    expect(insertBlock[0]).not.toContain('s.receivedAt');
   });
 
   it('the concurrency gate seeds its lines the same way', () => {

@@ -116,6 +116,21 @@ assert_contains "runbook (b) gates both audit rows" "$RUNBOOK_OUT" " WHERE @rc1 
 # Three gated INSERT ... SELECT writes in all: (a)'s audit row, (b)'s two.
 DUAL_GATES=$(printf '%s\n' "$RUNBOOK_OUT" | grep -c "FROM DUAL")
 [ "$DUAL_GATES" -ge 3 ] || fail "runbook gated inserts" "expected at least 3 FROM DUAL gates, found $DUAL_GATES"
+# FD-2: PER-INSERT gating. Every `INSERT INTO audit_logs` block (up to its ';') must carry
+# its own guard: (a)'s one block `WHERE @rc1 = 1`; (b)'s two blocks the full three-flag guard.
+AUDIT_BLOCKS=$(printf '%s\n' "$RUNBOOK_OUT" | awk '/^INSERT INTO audit_logs/{inblk=1; blk=""} inblk{blk=blk $0 "\n"} inblk && /;[[:space:]]*$/{inblk=0; print blk "@@END@@"}')
+AUDIT_COUNT=$(printf '%s' "$AUDIT_BLOCKS" | grep -c "@@END@@" || true)
+[ "$AUDIT_COUNT" -eq 3 ] || fail "runbook audit inserts" "expected exactly 3 INSERT INTO audit_logs blocks, found $AUDIT_COUNT"
+UNGATED=$(printf '%s' "$AUDIT_BLOCKS" | awk 'BEGIN{RS="@@END@@"} NF && !/FROM DUAL[[:space:]]+WHERE @rc1 = 1( AND @rc2 = 1 AND @rc3 = 1)?;/{print "UNGATED"}' | grep -c UNGATED || true)
+[ "$UNGATED" -eq 0 ] || fail "runbook per-insert audit guards" "$UNGATED audit insert block(s) lack their own FROM DUAL WHERE @rc guard"
+FULL_GUARDS=$(printf '%s' "$AUDIT_BLOCKS" | grep -c "WHERE @rc1 = 1 AND @rc2 = 1 AND @rc3 = 1;" || true)
+[ "$FULL_GUARDS" -eq 2 ] || fail "runbook (b) audit guards" "expected exactly 2 three-flag audit guards, found $FULL_GUARDS"
+# FD-1: the hand-linked NEW-FLOW line must NOT carry the legacy discriminator: in the
+# `INSERT INTO staging_items ... SELECT` block, receivedAt/receivedBy are the literal NULLs.
+HL_BLOCK=$(printf '%s\n' "$RUNBOOK_OUT" | awk '/^INSERT INTO staging_items/{inblk=1; blk=""} inblk{blk=blk $0 "\n"} inblk && /;[[:space:]]*$/{inblk=0; print blk}')
+printf '%s' "$HL_BLOCK" | grep -q "locationId, receivedBy, receivedAt, createdAt, updatedAt)" || fail "hand-link column list" "the staging_items INSERT column list changed shape"
+printf '%s' "$HL_BLOCK" | grep -q "s.locationId, NULL, NULL, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3)" || fail "hand-link receivedAt is NULL" "the hand-linked line must write receivedBy/receivedAt as NULL (legacy discriminator)"
+if printf '%s' "$HL_BLOCK" | grep -q "s.receivedAt"; then fail "hand-link copies receivedAt" "the hand-linked line copies the source receivedAt (misfiles it as legacy)"; fi
 # NO human-only checkpoint may come back: this is the exact regression the
 # rehearsal found, and prose is where it would reappear.
 assert_not_contains "runbook has no human-read row-count checkpoint" "$RUNBOOK_OUT" "MUST be 1"
