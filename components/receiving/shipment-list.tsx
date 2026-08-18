@@ -1,70 +1,192 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Loader2, Plus } from "lucide-react";
+import { Plus } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
-import {
-  useInboundShipments,
-  type ShipmentStatusFilter,
-  type ShipmentSummary,
-} from "@/hooks/use-inbound-shipments";
-import { CreateShipmentDialog } from "@/components/receiving/create-shipment-dialog";
+import type { SupplyOrderSummary } from "@/hooks/use-supply-orders";
 
 /**
- * The receiving list (seam S10 — it renders W1-2a's T4 shapes and computes
- * nothing).
+ * THE ORDERS LIST — one list over one dataset (contract pack C4a.2, spec §9).
  *
- * Two rules carry the whole surface:
+ * A supply order and a legacy W1 receipt are two shapes of the same row family,
+ * discriminated by `model`, and this component renders each in its own terms
+ * rather than flattening them into a lowest common denominator that is true of
+ * neither.
  *
- *   1. OVER AND UNDER NEVER CANCEL. The server reports them as separate
- *      magnitudes, and so does this list. A shipment 5 over on one line and 3
- *      under on another is NOT "+2" — netting them is precisely how a big
- *      shortage hides behind a big surplus.
- *   2. UNCOUNTED IS UNKNOWN. A line nobody counted contributes nothing to the
- *      totals; it is reported on its own, because it is the only thing that can
- *      block the close.
+ * The DISCREPANCY CELL is the part that lies most easily, so it carries four
+ * rules (PK3-7):
  *
- * Plus the aging cue: an OPEN receipt is unfinished work, so it wears its age.
+ *   1. A SHORT LINE IS SHORT WHETHER OR NOT IT IS PRICED. "3 short · $0.00 loss"
+ *      is the honest reading of an unpriced shortage; hiding the row because the
+ *      money came out zero is exactly how a shortage disappears (OCs-6).
+ *   2. AN UNORDERED ARRIVAL IS NEITHER OVER NOR SHORT. It is a line with no
+ *      order to be measured against, so it is counted on its own.
+ *   3. "MATCHES" IS SAYABLE ONLY when short, over and unordered are all zero.
+ *   4. NEVER INFER A DISCREPANCY FROM MONEY. The units are the fact; the money
+ *      is derived from them, and a $0 loss is not the absence of a shortage.
+ *
+ * The component computes NO rollups: `lib/shipments/rollup.ts` is the one
+ * implementation of that arithmetic, and a second one on the client is how a UI
+ * starts disagreeing with its own database.
+ *
+ * It also owns no server state. The page fetches (so a failed read renders as a
+ * failure and never as "no orders exist" — W25-3) and hands the rows down.
  */
 
-const STATUS_TABS: { value: ShipmentStatusFilter; label: string }[] = [
-  { value: "ALL", label: "All" },
-  { value: "OPEN", label: "Open" },
-  { value: "CLOSED", label: "Closed" },
-  { value: "CANCELLED", label: "Cancelled" },
-];
+// ---------------------------------------------------------------------------
+// The filter
+// ---------------------------------------------------------------------------
 
-/** Past this many days an OPEN receipt is stale enough to call out. */
-const STALE_OPEN_DAYS = 7;
+export type OrdersFilterChip =
+  | "ORDERED"
+  | "RECEIVING"
+  | "CLOSED"
+  | "CANCELLED"
+  | "LEGACY_OPEN";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-function daysOpen(createdAt: string): number {
-  const opened = new Date(createdAt).getTime();
-  if (!Number.isFinite(opened)) return 0;
-  return Math.max(0, Math.floor((Date.now() - opened) / DAY_MS));
+export interface OrdersFilter {
+  chips: OrdersFilterChip[];
 }
 
-function statusVariant(
-  status: ShipmentSummary["status"],
-): "default" | "secondary" | "outline" {
-  if (status === "OPEN") return "default";
+/** The working surface opens on the orders that still need something done. */
+export const DEFAULT_ORDERS_FILTER: OrdersFilter = { chips: ["ORDERED", "RECEIVING"] };
+
+const CHIPS: { value: OrdersFilterChip; label: string }[] = [
+  { value: "ORDERED", label: "Ordered" },
+  { value: "RECEIVING", label: "Receiving" },
+  { value: "CLOSED", label: "Closed" },
+  { value: "CANCELLED", label: "Cancelled" },
+  { value: "LEGACY_OPEN", label: "Legacy-open" },
+];
+
+const NEW_FLOW_CHIPS: OrdersFilterChip[] = ["ORDERED", "RECEIVING", "CLOSED", "CANCELLED"];
+
+/**
+ * The REQUEST the chips ask for.
+ *
+ * `?model=` is single-valued, so a selection spanning both families cannot be
+ * expressed server-side: the query then asks for the UNION of the statuses and
+ * `matchesOrdersFilter` narrows on the client. The server request is always a
+ * SUPERSET of what is rendered — never the other way round, which would hide
+ * rows the operator asked for.
+ */
+export function supplyOrdersQuery(filter: OrdersFilter): {
+  statuses: string[];
+  model: "legacy" | "supply-order" | undefined;
+} {
+  const newFlow = NEW_FLOW_CHIPS.filter((chip) => filter.chips.includes(chip));
+  const legacyOpen = filter.chips.includes("LEGACY_OPEN");
+  const statuses = [...newFlow, ...(legacyOpen ? ["OPEN"] : [])];
+
+  let model: "legacy" | "supply-order" | undefined;
+  if (legacyOpen && newFlow.length === 0) model = "legacy";
+  else if (!legacyOpen) model = "supply-order";
+
+  return { statuses, model };
+}
+
+/**
+ * "Legacy-open" means `model: 'legacy'` AND the legacy header is `OPEN` — a
+ * legacy CLOSED receipt is history, not something the Closed chip is about.
+ */
+export function matchesOrdersFilter(order: SupplyOrderSummary, filter: OrdersFilter): boolean {
+  if (order.model === "legacy") {
+    return filter.chips.includes("LEGACY_OPEN") && order.legacy.status === "OPEN";
+  }
+  return filter.chips.includes(order.status as OrdersFilterChip);
+}
+
+function toggleChip(filter: OrdersFilter, chip: OrdersFilterChip): OrdersFilter {
+  const next = filter.chips.includes(chip)
+    ? filter.chips.filter((value) => value !== chip)
+    : [...filter.chips, chip];
+  // Canonical order, so two paths to the same selection produce the same value.
+  return { chips: CHIPS.map((entry) => entry.value).filter((value) => next.includes(value)) };
+}
+
+// ---------------------------------------------------------------------------
+// Presentation helpers
+// ---------------------------------------------------------------------------
+
+/** "$1,250.00" — display only; every derived figure arrives pre-computed. */
+function formatCents(cents: number): string {
+  const negative = cents < 0;
+  const absolute = Math.abs(cents);
+  const dollars = Math.floor(absolute / 100);
+  const remainder = absolute % 100;
+  const grouped = String(dollars).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${negative ? "-" : ""}$${grouped}.${String(remainder).padStart(2, "0")}`;
+}
+
+/**
+ * The ORDERED DAY, read back in UTC.
+ *
+ * `orderedAt` is the UTC midnight of a calendar day somebody typed; formatting
+ * it with local getters would show the previous day to anybody west of
+ * Greenwich, which is a different order date than the one on the record.
+ */
+function formatOrderedDay(value: Date | string): string {
+  const parsed = new Date(value as string);
+  return Number.isNaN(parsed.getTime()) ? "—" : parsed.toISOString().slice(0, 10);
+}
+
+/** A legacy receipt's creation INSTANT — a real moment, shown in local time. */
+function formatInstant(value: Date | string): string {
+  const parsed = new Date(value as string);
+  return Number.isNaN(parsed.getTime()) ? "—" : parsed.toLocaleDateString();
+}
+
+function statusVariant(status: string): "default" | "secondary" | "outline" {
+  if (status === "ORDERED" || status === "RECEIVING" || status === "OPEN") return "default";
   if (status === "CLOSED") return "secondary";
   return "outline";
 }
 
-/**
- * The discrepancy cell. Uncounted lines are reported FIRST and separately —
- * "nothing missed" is only sayable once everything has been counted.
- */
-function DiscrepancyCell({ shipment }: { shipment: ShipmentSummary }) {
-  const { totalOver, totalUnder, uncountedItemCount } = shipment.discrepancy;
+function orderId(order: SupplyOrderSummary): string {
+  return order.model === "legacy" ? order.legacy.id : order.id;
+}
+
+// ---------------------------------------------------------------------------
+// The discrepancy cell
+// ---------------------------------------------------------------------------
+
+function DiscrepancyCell({ order }: { order: SupplyOrderSummary }) {
+  if (order.model === "legacy") {
+    // The W1 cell, verbatim: over and under NEVER cancel, and an uncounted line
+    // is UNKNOWN — reported on its own, never folded into the totals.
+    const { totalOver, totalUnder, uncountedItemCount, itemCount } = order.legacy.discrepancy;
+    const parts: string[] = [];
+    if (totalOver > 0) parts.push(`${totalOver} over`);
+    if (totalUnder > 0) parts.push(`${totalUnder} under`);
+
+    return (
+      <div data-testid="discrepancy-cell" className="text-sm">
+        {parts.length > 0 ? (
+          <span className="font-medium text-amber-700 dark:text-amber-400">
+            {parts.join(" · ")}
+          </span>
+        ) : uncountedItemCount === 0 && itemCount > 0 ? (
+          <span className="text-muted-foreground">No discrepancies</span>
+        ) : itemCount === 0 ? (
+          <span className="text-muted-foreground">No lines yet</span>
+        ) : null}
+        {uncountedItemCount > 0 && (
+          <span className="block text-xs text-muted-foreground">
+            {`${uncountedItemCount} uncounted`}
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  const { shortUnits, overUnits, lossCents, surplusValueCents, unorderedLines } =
+    order.discrepancy;
   const parts: string[] = [];
-  if (totalOver > 0) parts.push(`${totalOver} over`);
-  if (totalUnder > 0) parts.push(`${totalUnder} under`);
+  // The UNITS decide what is said; the money only rides along with it.
+  if (shortUnits > 0) parts.push(`${shortUnits} short · ${formatCents(lossCents)} loss`);
+  if (overUnits > 0) parts.push(`${overUnits} over · ${formatCents(surplusValueCents)} surplus`);
+  if (unorderedLines > 0) parts.push(`${unorderedLines} unordered`);
 
   return (
     <div data-testid="discrepancy-cell" className="text-sm">
@@ -72,141 +194,145 @@ function DiscrepancyCell({ shipment }: { shipment: ShipmentSummary }) {
         <span className="font-medium text-amber-700 dark:text-amber-400">
           {parts.join(" · ")}
         </span>
-      ) : uncountedItemCount === 0 && shipment.itemCount > 0 ? (
-        <span className="text-muted-foreground">No discrepancies</span>
-      ) : shipment.itemCount === 0 ? (
-        <span className="text-muted-foreground">No lines yet</span>
-      ) : null}
-      {uncountedItemCount > 0 && (
-        <span className="block text-xs text-muted-foreground">
-          {`${uncountedItemCount} uncounted`}
-        </span>
+      ) : (
+        <span className="text-muted-foreground">Matches</span>
       )}
     </div>
   );
 }
 
-export function ShipmentList() {
-  // QA-6: the list opens on OPEN. Receiving is a working surface — the receipts
-  // that still need counting are what somebody came here for — and defaulting to
-  // ALL asked the server for every shipment ever recorded on the first paint of
-  // every visit. Every other status stays one tap away.
-  const [status, setStatus] = useState<ShipmentStatusFilter>("OPEN");
-  const [createOpen, setCreateOpen] = useState(false);
+// ---------------------------------------------------------------------------
+// Rows
+// ---------------------------------------------------------------------------
 
-  const { data: shipments = [], isPending, isError, error } = useInboundShipments(status);
+/** The shared row chrome — the two models differ in their FACTS, not their box. */
+function RowShell({
+  id,
+  title,
+  order,
+  children,
+}: {
+  id: string;
+  title: string;
+  order: SupplyOrderSummary;
+  children: React.ReactNode;
+}) {
+  return (
+    <li
+      data-testid={`shipment-row-${id}`}
+      className="rounded-lg border border-border bg-surface p-3"
+    >
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0 space-y-1">
+          <Link href={`/receiving/${id}`} className="block truncate font-medium hover:underline">
+            {title}
+          </Link>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            {children}
+          </div>
+        </div>
+        <DiscrepancyCell order={order} />
+      </div>
+    </li>
+  );
+}
+
+function OrderRow({ order }: { order: SupplyOrderSummary }) {
+  if (order.model === "legacy") {
+    const legacy = order.legacy;
+    return (
+      <RowShell id={legacy.id} title={legacy.supplierRef ?? legacy.id} order={order}>
+        <Badge variant={statusVariant(legacy.status)}>{legacy.status}</Badge>
+        {/* No ordered date exists for a W1 receipt — it is named, not invented. */}
+        <span>{`Legacy receipt · logged ${formatInstant(legacy.createdAt)}`}</span>
+        <span>{`${legacy.itemCount} line(s)`}</span>
+        {legacy.creator && <span>by {legacy.creator.username}</span>}
+      </RowShell>
+    );
+  }
+
+  const lineCount =
+    order.lineCounts.ordered +
+    order.lineCounts.verified +
+    order.lineCounts.labeling +
+    order.lineCounts.complete +
+    order.lineCounts.discarded;
+
+  return (
+    <RowShell id={order.id} title={order.supplierRef ?? order.id} order={order}>
+      <Badge variant={statusVariant(order.status)}>{order.status}</Badge>
+      {order.supplier && <span className="truncate">{order.supplier}</span>}
+      <span>{`Ordered ${formatOrderedDay(order.orderedAt)}`}</span>
+      <span>{`${lineCount} line(s)`}</span>
+      {order.units.stocked > 0 && <span>{`${order.units.stocked} stocked`}</span>}
+      {order.creator && <span>by {order.creator.username}</span>}
+    </RowShell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The list
+// ---------------------------------------------------------------------------
+
+export interface ShipmentListProps {
+  orders: SupplyOrderSummary[];
+  filter: OrdersFilter;
+  onFilterChange: (filter: OrdersFilter) => void;
+  onNew: () => void;
+}
+
+export function ShipmentList({ orders, filter, onFilterChange, onNew }: ShipmentListProps) {
+  const visible = orders.filter((order) => matchesOrdersFilter(order, filter));
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-2">
-          {STATUS_TABS.map((tab) => (
-            <Button
-              key={tab.value}
-              size="sm"
-              variant={status === tab.value ? "default" : "outline"}
-              aria-pressed={status === tab.value}
-              onClick={() => setStatus(tab.value)}
-            >
-              {tab.label}
-            </Button>
-          ))}
+          {CHIPS.map((chip) => {
+            const selected = filter.chips.includes(chip.value);
+            return (
+              <Button
+                key={chip.value}
+                size="sm"
+                variant={selected ? "default" : "outline"}
+                aria-pressed={selected}
+                onClick={() => onFilterChange(toggleChip(filter, chip.value))}
+              >
+                {chip.label}
+              </Button>
+            );
+          })}
         </div>
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
+        <Button size="sm" onClick={onNew}>
           <Plus className="mr-2 h-4 w-4" />
-          New shipment
+          New supply order
         </Button>
       </div>
 
-      {isPending && (
-        <div className="flex items-center justify-center py-12 text-muted-foreground">
-          <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-          Loading shipments…
-        </div>
-      )}
-
-      {isError && (
-        <div
-          data-testid="shipment-list-error"
-          className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm"
-        >
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
-          <div>
-            <p className="font-medium">The shipment list could not be loaded.</p>
-            <p className="text-muted-foreground">
-              {error?.message ?? "Reload the page to try again."}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {!isPending && !isError && shipments.length === 0 && (
+      {visible.length === 0 && (
         <div
           data-testid="shipment-list-empty"
-          className="rounded-lg border border-border bg-surface p-8 text-center space-y-3"
+          className="space-y-3 rounded-lg border border-border bg-surface p-8 text-center"
         >
           <p className="text-sm text-muted-foreground">
-            {status === "ALL"
-              ? "No shipments yet. Open one when a delivery arrives — then link each box you log to it."
-              : `No ${status.toLowerCase()} shipments.`}
+            {filter.chips.length === 0
+              ? "No status selected — pick at least one chip to see orders."
+              : "No supply orders yet — the queue fills when an order is placed with a supplier."}
           </p>
-          <Button size="sm" onClick={() => setCreateOpen(true)}>
+          <Button size="sm" onClick={onNew}>
             <Plus className="mr-2 h-4 w-4" />
-            New shipment
+            New supply order
           </Button>
         </div>
       )}
 
-      {!isError && shipments.length > 0 && (
+      {visible.length > 0 && (
         <ul className="space-y-2">
-          {shipments.map((shipment) => {
-            const age = daysOpen(shipment.createdAt);
-            const stale = shipment.status === "OPEN" && age >= STALE_OPEN_DAYS;
-            return (
-              <li
-                key={shipment.id}
-                data-testid={`shipment-row-${shipment.id}`}
-                className="rounded-lg border border-border bg-surface p-3"
-              >
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0 space-y-1">
-                    <Link
-                      href={`/receiving/${shipment.id}`}
-                      className="block truncate font-medium hover:underline"
-                    >
-                      {shipment.supplierRef ?? shipment.id}
-                    </Link>
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <Badge variant={statusVariant(shipment.status)}>
-                        {shipment.status}
-                      </Badge>
-                      <span>{`${shipment.itemCount} line(s)`}</span>
-                      {shipment.graduatedItemCount > 0 && (
-                        <span>{`${shipment.graduatedItemCount} stocked`}</span>
-                      )}
-                      {shipment.creator && <span>by {shipment.creator.username}</span>}
-                      {shipment.status === "OPEN" && (
-                        <span
-                          data-testid="aging-cue"
-                          data-stale={stale ? "true" : "false"}
-                          className={cn(
-                            stale && "font-medium text-amber-700 dark:text-amber-400",
-                          )}
-                        >
-                          {age === 1 ? "Open 1 day" : `Open ${age} days`}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <DiscrepancyCell shipment={shipment} />
-                </div>
-              </li>
-            );
-          })}
+          {visible.map((order) => (
+            <OrderRow key={orderId(order)} order={order} />
+          ))}
         </ul>
       )}
-
-      <CreateShipmentDialog open={createOpen} onOpenChange={setCreateOpen} />
     </div>
   );
 }

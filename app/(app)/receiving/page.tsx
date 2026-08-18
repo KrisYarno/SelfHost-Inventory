@@ -1,18 +1,41 @@
 "use client";
 
-import { Inbox } from "lucide-react";
-import { ShipmentList } from "@/components/receiving/shipment-list";
+import { useState } from "react";
+import { AlertTriangle, Inbox, Loader2 } from "lucide-react";
+import {
+  DEFAULT_ORDERS_FILTER,
+  ShipmentList,
+  supplyOrdersQuery,
+  type OrdersFilter,
+} from "@/components/receiving/shipment-list";
+import { SupplyOrderDialog } from "@/components/receiving/supply-order-dialog";
+import { useSupplyOrders } from "@/hooks/use-supply-orders";
 
 /**
- * /receiving — the SHIPMENT-grain surface (plan REV-2, W1-4b).
+ * /receiving — THE ORDERS SURFACE (spec §9, contract pack C4a.4).
  *
- * Pre-Staging stays the ITEM-grain queue: it is where a box gets logged. This
- * page is where boxes become a RECEIPT — expected against counted, a
- * discrepancy that survives the shift, and a freight bill that lands on the
- * lines instead of evaporating. Neither page replaces the other, and both are
- * in Stock Ops for everyone (receiving is dock work, not admin work).
+ * A supply order is entered when it is PLACED, and this is the queue it lands
+ * in: what was ordered, what has been verified against it, and what did not add
+ * up. Verification happens in the order detail; labeling happens in /labeling.
+ *
+ * The page owns the server state deliberately. A LIST that fetched for itself
+ * would have to decide what to render when the read fails, and the honest answer
+ * ("the list could not be loaded") is not the list's to give — its empty state
+ * says "no supply orders yet", and showing that after a failed request tells the
+ * operator to enter an order that may already exist (W25-3).
  */
 export default function ReceivingPage() {
+  const [filter, setFilter] = useState<OrdersFilter>(DEFAULT_ORDERS_FILTER);
+  const [createOpen, setCreateOpen] = useState(false);
+
+  const { statuses, model } = supplyOrdersQuery(filter);
+  const {
+    data: orders = [],
+    isPending,
+    isError,
+    error,
+  } = useSupplyOrders({ statuses, model });
+
   return (
     <div className="flex flex-col h-full overflow-x-hidden">
       <div className="container mx-auto p-4 sm:p-6 space-y-6 min-w-0">
@@ -22,12 +45,43 @@ export default function ReceivingPage() {
             Receiving
           </h1>
           <p className="text-sm text-muted-foreground">
-            Open a shipment when a delivery arrives, link the boxes you log to
-            it, count them, and price them. What you counted stays on the record.
+            Enter a supply order when you place it, verify each line as the delivery
+            lands, and the labeling queue picks up what still has to be labeled.
           </p>
         </div>
 
-        <ShipmentList />
+        {isPending && (
+          <div className="flex items-center justify-center py-12 text-muted-foreground">
+            <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+            Loading orders…
+          </div>
+        )}
+
+        {isError && (
+          <div
+            data-testid="shipment-list-error"
+            className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm"
+          >
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+            <div>
+              <p className="font-medium">The orders list could not be loaded.</p>
+              <p className="text-muted-foreground">
+                {error?.message ?? "Reload the page to try again."}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {!isPending && !isError && (
+          <ShipmentList
+            orders={orders}
+            filter={filter}
+            onFilterChange={setFilter}
+            onNew={() => setCreateOpen(true)}
+          />
+        )}
+
+        <SupplyOrderDialog open={createOpen} onOpenChange={setCreateOpen} />
       </div>
     </div>
   );
