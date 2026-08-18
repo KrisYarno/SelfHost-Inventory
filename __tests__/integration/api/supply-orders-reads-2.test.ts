@@ -56,7 +56,7 @@ jest.mock('@/lib/api-utils', () => {
 
 jest.mock('@/lib/prisma', () => {
   const client: Record<string, unknown> = {
-    stagingItem: { findMany: jest.fn() },
+    stagingItem: { findMany: jest.fn(), count: jest.fn() },
     $queryRaw: jest.fn(),
   };
   client.$transaction = jest.fn(async (arg: unknown) =>
@@ -159,6 +159,7 @@ function legacyRow(include: unknown, overrides: Record<string, unknown> = {}) {
 let queueRows: Record<string, unknown>[] = [];
 let queueCount = 0;
 let legacyCount = 1;
+let legacyTotal = 1;
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -168,6 +169,7 @@ beforeEach(() => {
   queueRows = [queueRow()];
   queueCount = 1;
   legacyCount = 1;
+  legacyTotal = 1;
 
   db.$transaction.mockImplementation(async (arg: unknown) =>
     Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => unknown)(db),
@@ -180,6 +182,7 @@ beforeEach(() => {
   db.stagingItem.findMany.mockImplementation(async ({ include }: any) =>
     Array.from({ length: legacyCount }, (_, i) => legacyRow(include, { id: 91 + i })),
   );
+  db.stagingItem.count.mockImplementation(async () => legacyTotal);
 });
 
 // ---------------------------------------------------------------------------
@@ -281,12 +284,14 @@ describe('GET /api/receiving/legacy-lines', () => {
     expect(res.status).toBe(401);
   });
 
-  it('answers { lines } of read-only pre-staging history, bounded', async () => {
+  it('answers { lines, count, moreCount } of read-only pre-staging history, bounded', async () => {
     const res = await legacyGET(mkReq('http://t/api/receiving/legacy-lines'), {} as never);
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.lines).toHaveLength(1);
+    // REV-10 clause 6: the archive says how much of itself it is not showing.
+    expect(json).toMatchObject({ count: 1, moreCount: 0 });
     expect(json.lines[0]).toMatchObject({
       id: 91,
       description: 'Box of vials',
@@ -322,6 +327,17 @@ describe('GET /api/receiving/legacy-lines', () => {
     for (const key of deepKeys(json)) {
       expect(key).not.toMatch(SENSITIVE_KEY);
     }
+  });
+
+  it('reports the older lines the bound left off', async () => {
+    legacyTotal = 947;
+
+    const json = await (
+      await legacyGET(mkReq('http://t/api/receiving/legacy-lines'), {} as never)
+    ).json();
+
+    expect(json.count).toBe(947);
+    expect(json.moreCount).toBe(947 - LEGACY_LINE_LIMIT);
   });
 
   it('the deep scan itself works (it finds a hash that IS present)', () => {

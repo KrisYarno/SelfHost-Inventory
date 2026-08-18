@@ -25,14 +25,22 @@
 -- legacy value changes; the composite index (status, locationId, receivedAt)
 -- stays valid; receivedAt keeps DATETIME(0) precision.
 --
--- receivedAt LOSES ITS DB DEFAULT: `MODIFY ... DATETIME(0) NULL` carries no
--- DEFAULT clause, so MySQL drops today's CURRENT_TIMESTAMP. That is WHY this
--- migration ships in the SAME deploy as the code wave (plan P-1, spec D8): the
--- legacy box-create omitted receivedAt from its insert and leaned on that
--- default. Shipping the schema early would silently write receivedAt NULL for
--- every box logged during the drain. Bundled, the drop is unobservable — the
--- legacy creator writes receivedAt explicitly in this same deploy and then dies
--- with the route.
+-- receivedAt KEEPS ITS DB DEFAULT (spec REV-10 clause 4, codex CR-4). The MODIFY
+-- carries `DEFAULT CURRENT_TIMESTAMP(0)` — the Prisma-emitted text for
+-- `receivedAt DateTime? @default(now()) @db.DateTime(0)` — so the widening is
+-- nullability ALONE. An earlier draft dropped the default, which would have
+-- closed the code-rollback window at the MIGRATION rather than at the first
+-- supply order: the pre-overhaul box-create (fc195ad) omits receivedAt from its
+-- insert and leans on CURRENT_TIMESTAMP, so a rollback onto a defaultless column
+-- would have written receivedAt NULL for every box logged afterwards — and
+-- `receivedAt IS NOT NULL` is the LEGACY DISCRIMINATOR, so those boxes would
+-- have stopped being legacy rows. Keeping the default makes this migration
+-- rollback-compatible with the code it replaces.
+--
+-- The discriminator is protected from the other side instead: every new-flow
+-- create writes `receivedAt: null` EXPLICITLY (order create, ordered-line add,
+-- unordered arrival, the M7a seed), each pinned by a query-shape test, so a
+-- supply-order line can never be stamped by the default and read back as legacy.
 --
 -- THREE INDEXES, frozen by query site (plan P-6):
 --   inbound_shipments (status, orderedAt)          — the supply-orders list and
@@ -85,7 +93,7 @@ ALTER TABLE `staging_items` ADD COLUMN `disposedQuantity` INTEGER NOT NULL DEFAU
     MODIFY `status` ENUM('RECEIVED', 'GRADUATED', 'DISCARDED', 'ORDERED', 'VERIFIED', 'LABELING', 'COMPLETE') NOT NULL DEFAULT 'ORDERED',
     MODIFY `locationId` INTEGER NULL,
     MODIFY `receivedBy` INTEGER NULL,
-    MODIFY `receivedAt` DATETIME(0) NULL;
+    MODIFY `receivedAt` DATETIME(0) NULL DEFAULT CURRENT_TIMESTAMP(0);
 
 -- CreateIndex
 CREATE INDEX `inbound_shipments_status_orderedAt_idx` ON `inbound_shipments`(`status`, `orderedAt`);

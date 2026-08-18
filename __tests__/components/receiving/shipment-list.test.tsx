@@ -221,7 +221,7 @@ describe("legacy rows", () => {
           },
         }),
       ],
-      { chips: ["LEGACY_OPEN"] },
+      { chips: ["LEGACY"] },
     );
 
     const cell = screen.getByTestId("discrepancy-cell");
@@ -231,13 +231,13 @@ describe("legacy rows", () => {
   });
 
   it("marks the row as a legacy receipt rather than inventing an ordered date", () => {
-    renderList([legacy()], { chips: ["LEGACY_OPEN"] });
+    renderList([legacy()], { chips: ["LEGACY"] });
     const row = screen.getByTestId("shipment-row-cklegacy00000000000000001");
     expect(within(row).getByText(/legacy receipt/i)).toBeInTheDocument();
   });
 
   it("links to the same detail route as a supply order", () => {
-    renderList([legacy()], { chips: ["LEGACY_OPEN"] });
+    renderList([legacy()], { chips: ["LEGACY"] });
     expect(screen.getByRole("link", { name: /LEG-77/ })).toHaveAttribute(
       "href",
       "/receiving/cklegacy00000000000000001",
@@ -260,7 +260,7 @@ describe("status chips", () => {
       "aria-pressed",
       "true",
     );
-    for (const label of ["Closed", "Cancelled", "Legacy-open"]) {
+    for (const label of ["Closed", "Cancelled", "Legacy receipts"]) {
       expect(screen.getByRole("button", { name: label })).toHaveAttribute(
         "aria-pressed",
         "false",
@@ -286,24 +286,29 @@ describe("status chips", () => {
       statuses: ["ORDERED", "RECEIVING"],
       model: "supply-order",
     });
-    expect(supplyOrdersQuery({ chips: ["LEGACY_OPEN"] })).toEqual({
-      statuses: ["OPEN"],
+    // REV-10 clause 6: "Legacy receipts" is the WHOLE legacy family — the
+    // OPEN-only chip was dead the moment the drain finished.
+    expect(supplyOrdersQuery({ chips: ["LEGACY"] })).toEqual({
+      statuses: ["OPEN", "CLOSED", "CANCELLED"],
       model: "legacy",
     });
     // Both families at once: the server cannot express it, so no model is sent
     // and the CLIENT narrows (the filter below).
-    expect(supplyOrdersQuery({ chips: ["CLOSED", "LEGACY_OPEN"] })).toEqual({
-      statuses: ["CLOSED", "OPEN"],
+    expect(supplyOrdersQuery({ chips: ["CLOSED", "LEGACY"] })).toEqual({
+      statuses: ["CLOSED", "OPEN", "CANCELLED"],
       model: undefined,
     });
   });
 
-  it("Legacy-open means model 'legacy' AND legacy status OPEN — nothing else", () => {
+  it("Legacy receipts means model 'legacy', ANY status (REV-10 clause 6)", () => {
     const openLegacy = legacy();
     const closedLegacy = legacy({ status: "CLOSED" });
+    const cancelledLegacy = legacy({ status: "CANCELLED" });
 
-    expect(matchesOrdersFilter(openLegacy, { chips: ["LEGACY_OPEN"] })).toBe(true);
-    expect(matchesOrdersFilter(closedLegacy, { chips: ["LEGACY_OPEN"] })).toBe(false);
+    expect(matchesOrdersFilter(openLegacy, { chips: ["LEGACY"] })).toBe(true);
+    expect(matchesOrdersFilter(closedLegacy, { chips: ["LEGACY"] })).toBe(true);
+    expect(matchesOrdersFilter(cancelledLegacy, { chips: ["LEGACY"] })).toBe(true);
+    expect(matchesOrdersFilter(closedLegacy, { chips: ["ORDERED"] })).toBe(false);
     // A legacy CLOSED receipt is NOT what the "Closed" chip is about.
     expect(matchesOrdersFilter(closedLegacy, { chips: ["CLOSED"] })).toBe(false);
     expect(

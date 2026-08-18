@@ -27,7 +27,8 @@ function formatInstant(value: Date | string): string {
 }
 
 export function LegacyLinesList() {
-  const { data: lines = [], isPending, isError, error } = useLegacyLines();
+  const { data, isPending, isError, error } = useLegacyLines();
+  const lines = data?.lines ?? [];
 
   return (
     <div className="space-y-4">
@@ -116,6 +117,14 @@ export function LegacyLinesList() {
             </li>
           ))}
         </ul>
+      )}
+
+      {/* The bound is silent, so the archive says what it left off (REV-10
+          clause 6) — the labeling queue's idiom, for the same reason. */}
+      {!isPending && !isError && data && data.moreCount > 0 && (
+        <p data-testid="legacy-lines-more" className="text-xs text-muted-foreground">
+          {`Showing the newest ${lines.length} of ${data.count} lines — ${data.moreCount} older lines not shown.`}
+        </p>
       )}
     </div>
   );

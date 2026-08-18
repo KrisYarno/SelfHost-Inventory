@@ -98,13 +98,25 @@ function centsOf(subject: Record<string, unknown>, field: string): number | null
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-/** Assemble one metric from a fold, applying the null-only-when-empty rule. */
+/**
+ * Assemble one metric from a fold, applying the null-only-when-empty rule.
+ *
+ * The `reason` is DENOMINATOR-AWARE (spec REV-10 clause 8 / codex CR-6): "no row
+ * was seen" and "rows were seen, none of them priced" are DIFFERENT facts, and
+ * only the second one is a coverage hole worth chasing. Reporting them with the
+ * same sentence sends the reader looking for missing rows that are right there.
+ */
 function metric(args: {
   valueCents: number;
   contributingRows: number;
+  /** Rows of this KIND in the window — the denominator the reason speaks about. */
+  kindRows: number;
   definition: string;
   coverage: string;
-  reason: string;
+  /** "labeling-loss row", "recv-discrepancy rows", "non-cancelled supply orders". */
+  emptyReason: string;
+  /** "N <rows> were seen ...; none carries a <figure> figure". */
+  unpricedReason: (kindRows: number) => string;
 }): SupplyOrderAnalyticsMetric {
   const empty = args.contributingRows === 0;
   return {
@@ -112,7 +124,11 @@ function metric(args: {
     definition: args.definition,
     coverage: args.coverage,
     contributingRows: args.contributingRows,
-    reason: empty ? args.reason : null,
+    reason: empty
+      ? args.kindRows === 0
+        ? args.emptyReason
+        : args.unpricedReason(args.kindRows)
+      : null,
   };
 }
 
@@ -218,7 +234,10 @@ export async function getSupplyOrdersAnalytics(opts: {
         coverage:
           `${feeRows} of ${headers.length} non-cancelled supply orders ordered in this window ` +
           `record a fee amount; the rest carry no figure at all (not a zero). ${legacy}`,
-        reason: 'no non-cancelled supply order in this window records a fee amount',
+        kindRows: headers.length,
+        emptyReason: 'no non-cancelled supply order was ordered in this window',
+        unpricedReason: (rows) =>
+          `${rows} non-cancelled supply orders were ordered in this window; none records a fee amount`,
       }),
       supplierShortageCost: metric({
         valueCents: shortageCents,
@@ -231,7 +250,10 @@ export async function getSupplyOrdersAnalytics(opts: {
           `${shortageRows} of ${discrepancyRows} recv-discrepancy rows whose lastSeenAt falls ` +
           'in this window carry a loss figure (open and resolved rows both count; rows raised ' +
           `before this lane carry no money fields). ${legacy}`,
-        reason: 'no receiving-discrepancy row was seen in this window',
+        kindRows: discrepancyRows,
+        emptyReason: 'no receiving-discrepancy row was seen in this window',
+        unpricedReason: (rows) =>
+          `${rows} recv-discrepancy rows were seen in this window; none carries a loss figure`,
       }),
       labelingLossCost: metric({
         valueCents: lossCents,
@@ -244,7 +266,10 @@ export async function getSupplyOrdersAnalytics(opts: {
           `${lossRows} of ${labelingRows} labeling-loss rows whose lastSeenAt falls in this ` +
           'window carry a loss figure (each row is cumulative for its line; open and resolved ' +
           `rows both count). ${legacy}`,
-        reason: 'no labeling-loss row was seen in this window',
+        kindRows: labelingRows,
+        emptyReason: 'no labeling-loss row was seen in this window',
+        unpricedReason: (rows) =>
+          `${rows} labeling-loss rows were seen in this window; none carries a loss figure`,
       }),
       surplusValue: metric({
         valueCents: surplusCents,
@@ -257,7 +282,10 @@ export async function getSupplyOrdersAnalytics(opts: {
           `${surplusRows} of ${discrepancyRows} recv-discrepancy rows whose lastSeenAt falls ` +
           'in this window carry a surplus figure (open and resolved rows both count; rows ' +
           `raised before this lane carry no money fields). ${legacy}`,
-        reason: 'no receiving-discrepancy row was seen in this window',
+        kindRows: discrepancyRows,
+        emptyReason: 'no receiving-discrepancy row was seen in this window',
+        unpricedReason: (rows) =>
+          `${rows} recv-discrepancy rows were seen in this window; none carries a surplus figure`,
       }),
     },
   };

@@ -157,6 +157,12 @@ async function createSecondOrder(client: PrismaClient): Promise<void> {
       labelingRequired: true,
       stockedQuantity: 0,
       disposedQuantity: 0,
+      // EXPLICIT, not omitted (spec REV-10 clause 4): `receivedAt` keeps its
+      // DEFAULT CURRENT_TIMESTAMP, and `receivedAt IS NOT NULL` is the legacy
+      // discriminator — an omitted field here would seed a "legacy" line.
+      receivedAt: null,
+      receivedBy: null,
+      locationId: null,
     },
   });
 }

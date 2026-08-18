@@ -2,13 +2,21 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, apiHandler, requireCSRF } from '@/lib/api-utils';
 import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
-import { StagingItemStatus } from '@prisma/client';
+import { Prisma, StagingItemStatus } from '@prisma/client';
 import { recordChange, newBatchId } from '@/lib/change-tracking';
 import { DiscardLineSchema } from '@/lib/validation/supply-orders';
+import { recvDiscrepancyKey } from '@/lib/exceptions/kinds';
+import { resolveException } from '@/lib/exceptions/write';
 import { withDeadlockRetry } from '@/lib/inventory';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
 
 export const dynamic = 'force-dynamic';
+
+/** The two statuses a line may still LEAVE the order from (spec REV-10 c3). */
+const REMOVABLE: readonly StagingItemStatus[] = [
+  StagingItemStatus.ORDERED,
+  StagingItemStatus.VERIFIED,
+];
 
 interface RouteParams {
   params: {
@@ -22,14 +30,25 @@ interface RouteParams {
  * LINE (spec §4.0, OCs2-10).
  *
  * A mistyped or duplicated line has to be able to LEAVE the order, or a close is
- * blocked forever by a line nobody will ever verify. It is legal only while the
- * line is `ORDERED`: nothing has been delivered against it, so no money, no
- * exception and no ledger movement is involved — this is not the labeling
+ * blocked forever by a line nobody will ever verify. This is not the labeling
  * bench's `discard-remaining`, which writes off units that really arrived.
  *
- * The whole precondition lives in the claim's WHERE (`id` + `shipmentId` +
- * `ORDERED`), so a verify that commits first simply wins and this request is a
- * 409 rather than a discard of a line somebody just counted.
+ * TWO STATUSES ARE REMOVABLE (spec REV-10 clause 3):
+ *
+ *   ORDERED    nothing was ever delivered against it;
+ *   VERIFIED   with `stockedQuantity = 0 AND disposedQuantity = 0` — the
+ *              UNORDERED-ARRIVAL case. Such a line is BORN verified, so an
+ *              ORDERED-only rule left a duplicate arrival on the order forever.
+ *
+ * The counters are the real line: once anything is stocked or disposed the units
+ * exist in the ledger and the line is history, not a typo. A VERIFIED line also
+ * carries a `recv-discrepancy` row (an unordered arrival IS a discrepancy), and
+ * removing the line settles it `recount-corrected` in the SAME transaction —
+ * which is why this route is on the exceptions write-boundary allow-list.
+ *
+ * The line is taken `FOR UPDATE` first so the audit can state the status it
+ * actually removed, and the claim's WHERE still carries the whole precondition:
+ * a verify or a booking that commits first simply wins.
  */
 export const POST = apiHandler(async (request: NextRequest, { params }: RouteParams) => {
   const { user } = await requireApproved();
@@ -52,26 +71,64 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
 
   await withDeadlockRetry(() =>
     prisma.$transaction(async (tx): Promise<void> => {
+      // THE LINE, LOCKED — the transaction's first statement, exactly as the
+      // verify core takes it. The status it returns is what the audit reports.
+      const rows = await tx.$queryRaw<
+        { status: StagingItemStatus; stockedQuantity: number; disposedQuantity: number }[]
+      >(
+        Prisma.sql`SELECT status, stockedQuantity, disposedQuantity FROM staging_items WHERE id = ${lineId} AND shipmentId = ${id} FOR UPDATE`,
+      );
+      const prior = rows[0];
+      if (!prior) {
+        throw new AppError('Supply-order line not found', 'NOT_FOUND', 404);
+      }
+
+      if (!REMOVABLE.includes(prior.status)) {
+        throw new AppError(
+          `Supply-order line ${lineId} is ${prior.status.toLowerCase()} and can no longer be removed from the order`,
+          'CONFLICT',
+          409,
+        );
+      }
+      if (prior.stockedQuantity > 0 || prior.disposedQuantity > 0) {
+        throw new AppError(
+          `Supply-order line ${lineId} already has ${prior.stockedQuantity} stocked and ${prior.disposedQuantity} disposed unit(s) — a line the ledger has moved cannot be removed from the order`,
+          'CONFLICT',
+          409,
+        );
+      }
+
       const claim = await tx.stagingItem.updateMany({
-        where: { id: lineId, shipmentId: id, status: StagingItemStatus.ORDERED },
+        where: {
+          id: lineId,
+          shipmentId: id,
+          status: prior.status,
+          stockedQuantity: 0,
+          disposedQuantity: 0,
+        },
         data: { status: StagingItemStatus.DISCARDED },
       });
 
       if (claim.count !== 1) {
-        // The claim answers "did I win?", never "why not" — that read runs only
-        // AFTER it failed, when nothing has been written.
-        const existing = await tx.stagingItem.findUnique({
-          where: { id: lineId },
-          select: { id: true, status: true, shipmentId: true },
-        });
-        if (!existing || existing.shipmentId !== id) {
-          throw new AppError('Supply-order line not found', 'NOT_FOUND', 404);
-        }
+        // The row is already locked, so a lost claim means the lock went with a
+        // future refactor — refusing is still the only safe answer.
         throw new AppError(
-          `Supply-order line ${lineId} is ${existing.status.toLowerCase()} and can no longer be removed from the order`,
+          `Supply-order line ${lineId} changed while it was being removed; reload and retry`,
           'CONFLICT',
           409,
         );
+      }
+
+      if (prior.status === StagingItemStatus.VERIFIED) {
+        // The line is gone, so its discrepancy is no longer true. `recount-corrected`
+        // is the honest classification: the count that raised the row was a
+        // mistake. A no-op when the line never had a row (spec REV-10 clause 3).
+        await resolveException(tx, {
+          key: recvDiscrepancyKey(lineId),
+          resolvedBy: user.id,
+          resolution: 'recount-corrected',
+          note: 'line removed',
+        });
       }
 
       await recordChange(tx, {
@@ -87,6 +144,7 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
           // replacing the classification.
           reason: 'order-line-removed',
           shipmentId: id,
+          priorStatus: prior.status,
           note: body.reason ?? null,
         },
       });

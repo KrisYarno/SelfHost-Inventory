@@ -16,13 +16,18 @@ export const dynamic = 'force-dynamic';
  * (`LEGACY_LINE_LIMIT`, ordered by `receivedAt` descending), and an archive that
  * only grows backwards does not need a filter to stay useful.
  *
+ * It DOES have to say how much it is not showing (spec REV-10 clause 6): the
+ * bound is silent, and a truncated archive that looks complete is a worse
+ * answer than a short one that admits it. `{ lines, count, moreCount }`, the
+ * queue's shape, read in one transaction.
+ *
  * A PURE READ, like the queue: no CSRF, no rate limiter, no audit, and no
  * `GET_SIDE_EFFECT_REGISTRY` entry, because nothing here causes one.
  */
 export const GET = apiHandler(async () => {
   await requireApproved();
 
-  const lines = await listLegacyLines({});
+  const { lines, count, moreCount } = await listLegacyLines({});
 
-  return NextResponse.json({ lines });
+  return NextResponse.json({ lines, count, moreCount });
 });

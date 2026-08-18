@@ -481,3 +481,105 @@ describe('POST .../verify — refusals', () => {
     expect(recorded('STAGING_VERIFY')).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// REV-10 clause 1 — the client's belief travels with the request
+// ---------------------------------------------------------------------------
+
+describe('POST .../verify — expectPrevious (the stale-client guard)', () => {
+  it('409 CONFLICT, naming the CURRENT counters, when the locked count moved under the client', async () => {
+    headerStatus = InboundShipmentStatus.RECEIVING;
+    lockedLineRow = lineRow({
+      status: StagingItemStatus.VERIFIED,
+      verifiedQuantity: 46,
+      stockedQuantity: 3,
+      disposedQuantity: 1,
+    });
+
+    const res = await verifyPOST(
+      mkReq({ verifiedQuantity: 100, expectPrevious: null }),
+      orderParams,
+    );
+
+    expect(res.status).toBe(409);
+    const payload = await res.json();
+    expect(payload.code).toBe('CONFLICT');
+    expect(payload.error).toBe(
+      'The count changed since you loaded this line — verified is now 46 (stocked 3, disposed 1). Reload and try again.',
+    );
+    // NOTHING was written: no line update, no exception, no audit.
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(mockUpsert).not.toHaveBeenCalled();
+    expect(mockResolveException).not.toHaveBeenCalled();
+    expect(mockRecordChange).not.toHaveBeenCalled();
+  });
+
+  it('passes a MATCHING assertion through to the count', async () => {
+    headerStatus = InboundShipmentStatus.RECEIVING;
+    lockedLineRow = lineRow({ status: StagingItemStatus.VERIFIED, verifiedQuantity: 90 });
+
+    const res = await verifyPOST(
+      mkReq({ verifiedQuantity: 100, expectPrevious: 90 }),
+      orderParams,
+    );
+
+    expect(res.status).toBe(200);
+    expect(recorded('STAGING_VERIFY')[0].details).toMatchObject({ previous: 90, verified: 100 });
+  });
+
+  it('400s an expectPrevious that is not an integer count', async () => {
+    const res = await verifyPOST(
+      mkReq({ verifiedQuantity: 100, expectPrevious: 'nine' }),
+      orderParams,
+    );
+
+    expect(res.status).toBe(400);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REV-10 clause 2 — the flag-only verify
+// ---------------------------------------------------------------------------
+
+describe('POST .../verify — a body with no count (flag only)', () => {
+  it('moves the flag, leaves the count, and audits STAGING_UPDATE — not STAGING_VERIFY', async () => {
+    headerStatus = InboundShipmentStatus.RECEIVING;
+    lockedLineRow = lineRow({
+      status: StagingItemStatus.VERIFIED,
+      verifiedQuantity: 90,
+      labelingRequired: true,
+    });
+
+    const res = await verifyPOST(
+      mkReq({ labelingRequired: false, expectPrevious: 90 }),
+      orderParams,
+    );
+
+    expect(res.status).toBe(200);
+    expect(db.stagingItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { labelingRequired: false } }),
+    );
+    // The register is untouched: no shortage raised, none settled.
+    expect(mockUpsert).not.toHaveBeenCalled();
+    expect(mockResolveException).not.toHaveBeenCalled();
+    expect(recorded('STAGING_VERIFY')).toHaveLength(0);
+    const update = recorded('STAGING_UPDATE');
+    expect(update).toHaveLength(1);
+    expect(update[0].details).toMatchObject({ flagOnly: true, delta: 0, verified: 90 });
+  });
+
+  it('409 CONFLICT on an ORDERED line — the count comes first', async () => {
+    const res = await verifyPOST(mkReq({ labelingRequired: false }), orderParams);
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('CONFLICT');
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('400s a body that asks for nothing at all', async () => {
+    const res = await verifyPOST(mkReq({ expectPrevious: 90 }), orderParams);
+
+    expect(res.status).toBe(400);
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+  });
+});

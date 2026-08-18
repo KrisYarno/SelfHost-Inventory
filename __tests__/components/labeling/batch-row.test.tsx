@@ -112,7 +112,10 @@ function renderRow(props: Record<string, unknown> = {}) {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   const onStocked = jest.fn();
-  render(
+  // A FRESH element every time: React bails out of a re-render when the element
+  // is referentially identical, and these tests re-render precisely to let an
+  // asynchronous session land.
+  const tree = () => (
     <QueryClientProvider client={queryClient}>
       <BatchRow
         orderId={ORDER_ID}
@@ -123,9 +126,10 @@ function renderRow(props: Record<string, unknown> = {}) {
         onStocked={onStocked}
         {...props}
       />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
-  return { onStocked, queryClient };
+  const { rerender } = render(tree());
+  return { onStocked, queryClient, rerender: () => rerender(tree()) };
 }
 
 const quantityField = () => screen.getByLabelText(/quantity/i) as HTMLInputElement;
@@ -176,6 +180,34 @@ describe("the default location", () => {
     sessionUser = { id: 7, defaultLocationId: 1 };
     renderRow({ priorLocationId: null });
     expect(screen.getByRole("combobox", { name: /location/i })).toHaveTextContent("Main");
+  });
+
+  it("ADOPTS the default once the session resolves (REV-10 clause 10)", () => {
+    // The session is asynchronous; the row mounts before it lands. Reading the
+    // default only at mount left the operator with an empty select and a
+    // disabled button for no reason they could see.
+    sessionUser = null;
+    const { rerender } = renderRow({ priorLocationId: null });
+    expect(screen.getByRole("combobox", { name: /location/i })).not.toHaveTextContent("Main");
+
+    sessionUser = { id: 7, defaultLocationId: 1 };
+    rerender();
+
+    expect(screen.getByRole("combobox", { name: /location/i })).toHaveTextContent("Main");
+  });
+
+  it("NEVER overwrites a location the operator picked", async () => {
+    const user = userEvent.setup();
+    sessionUser = null;
+    const { rerender } = renderRow({ priorLocationId: null });
+
+    await user.click(screen.getByRole("combobox", { name: /location/i }));
+    await user.click(await screen.findByRole("option", { name: "Cold room" }));
+
+    sessionUser = { id: 7, defaultLocationId: 1 };
+    rerender();
+
+    expect(screen.getByRole("combobox", { name: /location/i })).toHaveTextContent("Cold room");
   });
 
   it("stays UNSELECTED when there is neither, and refuses to book", async () => {

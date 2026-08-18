@@ -193,8 +193,19 @@ export interface PatchLineBody {
   notes?: string;
 }
 
+/**
+ * The verify body (spec REV-10 clauses 1-2).
+ *
+ * `verifiedQuantity` is OPTIONAL: absent is a FLAG/NOTE-ONLY act, not a count of
+ * 0. `expectPrevious` is what the CARD WAS SHOWING when the operator pressed the
+ * button — `null` for "nothing has been counted", a number for the count on
+ * screen — and the server refuses the write rather than silently reclassifying a
+ * colleague's count. At least one of quantity / flag / product / note must be
+ * present; the server answers 400 otherwise.
+ */
 export interface VerifyLineBody {
-  verifiedQuantity: number;
+  verifiedQuantity?: number;
+  expectPrevious?: number | null;
   note?: string;
   labelingRequired?: boolean;
   deliveredProduct?: ProductSelector;

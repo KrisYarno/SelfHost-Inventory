@@ -583,28 +583,46 @@ export async function listLabelingQueue(opts: {
 /**
  * The legacy (pre-staging) history list — read-only, for the archive page.
  *
+ * Returns `{ lines, count, moreCount }`: the newest `limit` rows PLUS how many
+ * older ones the bound left off, so the archive can say so out loud.
+ *
  * `receivedAt IS NOT NULL` is the DURABLE discriminator: it is a column on the
  * LINE, so an orphan legacy row whose `shipmentId` was never set (or was
  * unlinked) is still history rather than disappearing from its own archive. The
  * status filter alone would not do it — GRADUATED and DISCARDED are legacy-only
  * today, but the rule that keeps them legacy-only is exactly this column.
  */
-export async function listLegacyLines(opts: { limit?: number }): Promise<LegacyLineView[]> {
-  const rows = await prisma.stagingItem.findMany({
-    where: {
-      status: { in: [StagingItemStatus.GRADUATED, StagingItemStatus.DISCARDED] },
-      receivedAt: { not: null },
-    },
-    include: {
-      location: { select: { id: true, name: true } },
-      resolvedProduct: { select: { id: true, name: true } },
-      receivedByUser: { select: { id: true, username: true } },
-    },
-    orderBy: { receivedAt: 'desc' },
-    take: opts.limit ?? LEGACY_LINE_LIMIT,
-  });
+export async function listLegacyLines(opts: { limit?: number }): Promise<{
+  lines: LegacyLineView[];
+  count: number;
+  moreCount: number;
+}> {
+  const limit = opts.limit ?? LEGACY_LINE_LIMIT;
+  // ONE filter object, so the COUNT and the SELECT can never disagree about
+  // what "legacy history" means, and ONE batch transaction so the "N older
+  // lines not shown" cue is read from the same view as the rows above it (the
+  // queue's idiom, PK2-5 / REV-10 clause 6). Without the count the archive
+  // truncated at the bound in silence, which reads as "this is all of it".
+  const where = {
+    status: { in: [StagingItemStatus.GRADUATED, StagingItemStatus.DISCARDED] },
+    receivedAt: { not: null },
+  };
 
-  return rows.map((row) => {
+  const [count, rows] = await prisma.$transaction([
+    prisma.stagingItem.count({ where }),
+    prisma.stagingItem.findMany({
+      where,
+      include: {
+        location: { select: { id: true, name: true } },
+        resolvedProduct: { select: { id: true, name: true } },
+        receivedByUser: { select: { id: true, username: true } },
+      },
+      orderBy: { receivedAt: 'desc' },
+      take: limit,
+    }),
+  ]);
+
+  const lines = rows.map((row) => {
     // The three receipt columns are NULL-widened on the table but non-null on
     // every legacy row (P-7 / C1.5). Assert the data invariant rather than
     // casting it away: a new-flow line reaching this mapper is a 500 naming the
@@ -626,4 +644,6 @@ export async function listLegacyLines(opts: { limit?: number }): Promise<LegacyL
       shipmentId: row.shipmentId,
     };
   });
+
+  return { lines, count, moreCount: Math.max(count - limit, 0) };
 }

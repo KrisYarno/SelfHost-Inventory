@@ -117,7 +117,7 @@ test("needs-attention list renders actionable items with their system label + me
 // (M6 redirects it).
 // ---------------------------------------------------------------------------
 
-test("open new-flow lines render their own row, linked to /receiving", () => {
+test("open new-flow lines render an INFORMATIONAL row, linked to /receiving (REV-10 clause 7)", () => {
   setData(
     makeData({
       pendingReviews: {
@@ -134,6 +134,28 @@ test("open new-flow lines render their own row, linked to /receiving", () => {
   const link = screen.getAllByRole("link").find((a) => a.getAttribute("href") === "/receiving");
   expect(link).toBeDefined();
   expect(screen.queryByText(/awaiting graduation/i)).toBeNull();
+  // The TONE is the finding: work in progress is NOT a warning. The residual
+  // straggler row (below) still is.
+  const badge = screen.getByText("5");
+  expect(badge.className).toContain("bg-info-muted");
+  expect(badge.className).not.toContain("bg-warning-muted");
+});
+
+test("live receiving work alone does NOT keep the section out of Clear (REV-10 clause 7)", () => {
+  setData(
+    makeData({
+      pendingReviews: {
+        status: "ok",
+        data: { pendingUsers: 0, pendingProducts: 0, stagingOpenNewFlow: 5, stagingResidualReceived: 0 },
+      },
+    }),
+  );
+  render(<OpsHealthSection />);
+
+  // Nothing is AWAITING REVIEW — somebody is simply working. Both statements
+  // are true at once, and the panel makes both.
+  expect(screen.getByText(/No items awaiting review/i)).toBeInTheDocument();
+  expect(screen.getByText(/Receiving lines in progress/i)).toBeInTheDocument();
 });
 
 test("a residual RECEIVED row says legacy straggler + runbook, and links nowhere near /pre-staging", () => {

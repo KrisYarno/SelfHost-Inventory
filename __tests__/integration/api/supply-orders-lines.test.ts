@@ -80,7 +80,7 @@ import { requireApproved } from '@/lib/api-utils';
 import { validateCSRFToken } from '@/lib/csrf';
 import { recordChange, newBatchId } from '@/lib/change-tracking';
 import { resolveSupplyOrderProduct } from '@/lib/supply-orders/product-resolve';
-import { upsertException } from '@/lib/exceptions/write';
+import { upsertException, resolveException } from '@/lib/exceptions/write';
 import prisma from '@/lib/prisma';
 
 const db = prisma as unknown as Record<string, any>;
@@ -88,6 +88,7 @@ const mockRecordChange = recordChange as jest.Mock;
 const mockNewBatchId = newBatchId as jest.Mock;
 const mockResolve = resolveSupplyOrderProduct as jest.Mock;
 const mockUpsert = upsertException as jest.Mock;
+const mockResolveExc = resolveException as jest.Mock;
 
 const APPROVED_USER = { id: 7, isAdmin: false, isApproved: true };
 const ORDER_ID = 'cksupplyorder00000000001';
@@ -575,6 +576,43 @@ describe('PATCH /api/inbound-shipments/[id]/lines/[lineId]', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The legacy discriminator (REV-10 clause 4)
+// ---------------------------------------------------------------------------
+
+describe('POST .../lines — receivedAt is written NULL, never left to the default', () => {
+  const orderedLineBody = {
+    product: { mode: 'existing', productId: 31 },
+    orderedQuantity: 100,
+    lineTotalCents: 100_000,
+  };
+  const arrivedLineBody = {
+    product: { mode: 'existing', productId: 31 },
+    verifiedQuantity: 6,
+  };
+
+  it('an ORDERED line create says receivedAt: null explicitly', async () => {
+    await addLinePOST(mkReq('/lines', orderedLineBody), orderParams);
+
+    const [args] = db.stagingItem.create.mock.calls[0];
+    expect(args.data).toHaveProperty('receivedAt', null);
+    expect(args.data).toHaveProperty('receivedBy', null);
+  });
+
+  it('an UNORDERED ARRIVAL create says receivedAt: null explicitly', async () => {
+    headerStatus = 'RECEIVING';
+
+    await addLinePOST(mkReq('/lines', arrivedLineBody), orderParams);
+
+    const [args] = db.stagingItem.create.mock.calls[0];
+    // The column's DB default is CURRENT_TIMESTAMP (kept for rollback
+    // compatibility), so an omitted field would stamp a timestamp — and
+    // `receivedAt IS NOT NULL` is what makes a row LEGACY.
+    expect(args.data).toHaveProperty('receivedAt', null);
+    expect(args.data).toHaveProperty('receivedBy', null);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST .../lines/[lineId]/discard
 // ---------------------------------------------------------------------------
 
@@ -583,8 +621,16 @@ describe('POST /api/inbound-shipments/[id]/lines/[lineId]/discard', () => {
     const res = await discardPOST(mkReq(`/lines/${LINE_ID}/discard`, {}), lineParams);
 
     expect(res.status).toBe(200);
+    // REV-10 clause 3: the guard gained the two counters, because VERIFIED is
+    // now removable too and only a line with NOTHING booked may go.
     expect(db.stagingItem.updateMany).toHaveBeenCalledWith({
-      where: { id: LINE_ID, shipmentId: ORDER_ID, status: 'ORDERED' },
+      where: {
+        id: LINE_ID,
+        shipmentId: ORDER_ID,
+        status: 'ORDERED',
+        stockedQuantity: 0,
+        disposedQuantity: 0,
+      },
       data: { status: 'DISCARDED' },
     });
 
@@ -598,15 +644,73 @@ describe('POST /api/inbound-shipments/[id]/lines/[lineId]/discard', () => {
     expect(discards[0].details).toMatchObject({
       reason: 'order-line-removed',
       shipmentId: ORDER_ID,
+      priorStatus: 'ORDERED',
     });
     // A line removed before anything arrived is not a money loss.
     expect(mockUpsert).not.toHaveBeenCalled();
+    // An ORDERED line never had a discrepancy row to close.
+    expect(mockResolveExc).not.toHaveBeenCalled();
+  });
+
+  it('removes a VERIFIED line with NOTHING booked, closing its discrepancy in the same tx', async () => {
+    headerStatus = 'RECEIVING';
+    lockedLineRow = lineRow({ status: 'VERIFIED', verifiedQuantity: 0 });
+
+    const res = await discardPOST(mkReq(`/lines/${LINE_ID}/discard`, {}), lineParams);
+
+    expect(res.status).toBe(200);
+    expect(db.stagingItem.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: LINE_ID,
+        shipmentId: ORDER_ID,
+        status: 'VERIFIED',
+        stockedQuantity: 0,
+        disposedQuantity: 0,
+      },
+      data: { status: 'DISCARDED' },
+    });
+    expect(mockResolveExc).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        key: `recv-discrepancy:${LINE_ID}`,
+        resolvedBy: APPROVED_USER.id,
+        resolution: 'recount-corrected',
+        note: 'line removed',
+      }),
+    );
+    expect(recorded('STAGING_DISCARD')[0].details).toMatchObject({
+      reason: 'order-line-removed',
+      priorStatus: 'VERIFIED',
+    });
+  });
+
+  it('409s a VERIFIED line that already has booked units, writing nothing', async () => {
+    headerStatus = 'RECEIVING';
+    lockedLineRow = lineRow({ status: 'VERIFIED', verifiedQuantity: 90, stockedQuantity: 10 });
+
+    const res = await discardPOST(mkReq(`/lines/${LINE_ID}/discard`, {}), lineParams);
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('CONFLICT');
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
+    expect(mockResolveExc).not.toHaveBeenCalled();
+    expect(mockRecordChange).not.toHaveBeenCalled();
+  });
+
+  it('409s a LABELING line — removal stops once the bench has the units', async () => {
+    headerStatus = 'RECEIVING';
+    lockedLineRow = lineRow({ status: 'LABELING', verifiedQuantity: 90 });
+
+    const res = await discardPOST(mkReq(`/lines/${LINE_ID}/discard`, {}), lineParams);
+
+    expect(res.status).toBe(409);
+    expect(db.stagingItem.updateMany).not.toHaveBeenCalled();
   });
 
   it('409s a line that is no longer ORDERED, and 404s one this order does not own', async () => {
     db.stagingItem.updateMany.mockResolvedValue({ count: 0 });
 
-    lockedLineRow = lineRow({ status: 'VERIFIED', verifiedQuantity: 90 });
+    lockedLineRow = lineRow({ status: 'COMPLETE', verifiedQuantity: 90 });
     const conflict = await discardPOST(mkReq(`/lines/${LINE_ID}/discard`, {}), lineParams);
     expect(conflict.status).toBe(409);
     expect((await conflict.json()).code).toBe('CONFLICT');

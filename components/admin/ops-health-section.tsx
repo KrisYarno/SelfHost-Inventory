@@ -270,21 +270,27 @@ export function OpsHealthSection() {
               // Every counter at zero, checked as four questions rather than as
               // one total: the two staging numbers mean different things (spec
               // §11) and this section must never present them as one figure.
+              // `stagingOpenNewFlow` is deliberately absent (REV-10 clause 7):
+              // live receiving work is a workload figure, not an item awaiting
+              // review, and counting it here would keep this panel out of
+              // "Clear" for as long as the business is receiving anything.
               const clear =
                 p.pendingUsers === 0 &&
                 p.pendingProducts === 0 &&
-                p.stagingOpenNewFlow === 0 &&
                 p.stagingResidualReceived === 0;
-              if (clear) {
-                return <HealthRow tone="positive" Icon={CheckCircle2} status="Clear" title="No items awaiting review." />;
-              }
               return (
                 <div className="divide-y divide-border">
+                  {clear && (
+                    <HealthRow tone="positive" Icon={CheckCircle2} status="Clear" title="No items awaiting review." />
+                  )}
                   {p.pendingProducts > 0 && (
                     <HealthRow tone="warning" Icon={AlertTriangle} status={String(p.pendingProducts)} title="Products awaiting review" action={<LinkAction href="/admin/product-review" label="Review" />} />
                   )}
                   {p.stagingOpenNewFlow > 0 && (
-                    <HealthRow tone="warning" Icon={AlertTriangle} status={String(p.stagingOpenNewFlow)} title="Receiving lines in progress" detail="Ordered, verified or labeling — the operator path" action={<LinkAction href="/receiving" label="Open" />} />
+                    // INFORMATIONAL, not a warning, and it rides ALONGSIDE the
+                    // all-clear row rather than displacing it: work in progress
+                    // is what a working dock looks like (REV-10 clause 7).
+                    <HealthRow tone="info" Icon={ClipboardList} status={String(p.stagingOpenNewFlow)} title="Receiving lines in progress" detail="Ordered, verified or labeling — the operator path" action={<LinkAction href="/receiving" label="Open" />} />
                   )}
                   {p.stagingResidualReceived > 0 && (
                     // Deliberately NOT linked to /pre-staging (M6 redirects it):

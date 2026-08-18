@@ -236,6 +236,30 @@ describe("the controls follow the line's status", () => {
     expect(within(card).queryByRole("button", { name: /counted 10 — matches order/i })).toBeNull();
   });
 
+  it("offers Remove line on a VERIFIED line with NOTHING booked, with the arrival copy", async () => {
+    const user = userEvent.setup();
+    renderDetail(
+      detail({ status: "RECEIVING" }, [
+        line({ status: "VERIFIED", verifiedQuantity: 4, remaining: 4, orderedQuantity: null }),
+      ]),
+    );
+    const card = lineCard(11);
+    await user.click(within(card).getByRole("button", { name: /remove line/i }));
+
+    expect(
+      within(card).getByText(/removes this arrived line and closes its discrepancy/i),
+    ).toBeInTheDocument();
+  });
+
+  it("hides Remove line once anything is stocked or disposed", () => {
+    renderDetail(
+      detail({ status: "RECEIVING" }, [
+        line({ status: "VERIFIED", verifiedQuantity: 4, stockedQuantity: 1, remaining: 3 }),
+      ]),
+    );
+    expect(screen.queryByRole("button", { name: /remove line/i })).not.toBeInTheDocument();
+  });
+
   it("a COMPLETE line offers no batch row — there is nothing left to book", () => {
     renderDetail(
       detail({ status: "RECEIVING" }, [
@@ -298,7 +322,8 @@ describe("verifying a line", () => {
     await user.click(screen.getByRole("button", { name: /counted 10 — matches order/i }));
 
     await waitFor(() => expect(bodyOf("/verify")).not.toBeNull());
-    expect(bodyOf("/verify")).toEqual({ verifiedQuantity: 10 });
+    // REV-10 clause 1: this button asserts "nothing has been counted".
+    expect(bodyOf("/verify")).toEqual({ verifiedQuantity: 10, expectPrevious: null });
   });
 
   it("a typed discrepancy posts the typed count and the note", async () => {
@@ -311,7 +336,11 @@ describe("verifying a line", () => {
     await user.click(screen.getByRole("button", { name: /^record count$/i }));
 
     await waitFor(() => expect(bodyOf("/verify")).not.toBeNull());
-    expect(bodyOf("/verify")).toEqual({ verifiedQuantity: 7, note: "one box short" });
+    expect(bodyOf("/verify")).toEqual({
+      verifiedQuantity: 7,
+      expectPrevious: null,
+      note: "one box short",
+    });
   });
 
   it("a typed 0 ASKS FIRST — and records the fact once confirmed", async () => {
@@ -326,7 +355,9 @@ describe("verifying a line", () => {
     expect(confirmSpy).toHaveBeenCalledWith(
       expect.stringContaining("Nothing arrived for this line"),
     );
-    await waitFor(() => expect(bodyOf("/verify")).toEqual({ verifiedQuantity: 0 }));
+    await waitFor(() =>
+      expect(bodyOf("/verify")).toEqual({ verifiedQuantity: 0, expectPrevious: null }),
+    );
     confirmSpy.mockRestore();
   });
 
@@ -342,6 +373,22 @@ describe("verifying a line", () => {
     expect(confirmSpy).toHaveBeenCalled();
     expect(writes().filter(([url]) => String(url).includes("/verify"))).toHaveLength(0);
     confirmSpy.mockRestore();
+  });
+
+  it("an ADJUST on a verified line sends the count the card is showing", async () => {
+    const user = userEvent.setup();
+    renderDetail(
+      detail({ status: "RECEIVING" }, [
+        line({ status: "VERIFIED", verifiedQuantity: 10, remaining: 10 }),
+      ]),
+    );
+
+    await user.click(screen.getByRole("button", { name: /adjust count/i }));
+    await user.type(screen.getByLabelText(/counted units/i), "12");
+    await user.click(screen.getByRole("button", { name: /^record count$/i }));
+
+    await waitFor(() => expect(bodyOf("/verify")).not.toBeNull());
+    expect(bodyOf("/verify")).toEqual({ verifiedQuantity: 12, expectPrevious: 10 });
   });
 
   it("moves the labeling flag by PATCH while the line is ORDERED", async () => {
@@ -367,7 +414,9 @@ describe("verifying a line", () => {
     await user.click(screen.getByRole("button", { name: /skip labeling/i }));
 
     await waitFor(() => expect(bodyOf("/verify")).not.toBeNull());
-    expect(bodyOf("/verify")).toEqual({ verifiedQuantity: 10, labelingRequired: false });
+    // REV-10 clause 2: FLAG ONLY — the count is not re-sent, so a colleague's
+    // intervening raise cannot be silently undone by this button.
+    expect(bodyOf("/verify")).toEqual({ labelingRequired: false, expectPrevious: 10 });
   });
 
   it("offers no labeling re-tag on a COMPLETE line — a lower would always refuse", () => {
@@ -406,6 +455,7 @@ describe("verifying a line", () => {
     await waitFor(() => expect(bodyOf("/verify")).not.toBeNull());
     expect(bodyOf("/verify")).toEqual({
       verifiedQuantity: 10,
+      expectPrevious: null,
       deliveredProduct: { mode: "existing", productId: 99 },
     });
   });
@@ -630,6 +680,44 @@ describe("the follow-up panel", () => {
         /before stock-in a loss is a labeling loss; after stock-in it is an inventory adjustment \(DAMAGE\) on the product/i,
       ),
     ).toBeInTheDocument();
+  });
+
+  it("says 'Not priced' for an UNPRICED labeling loss, never $0.00 (REV-10 clause 8)", () => {
+    renderDetail(
+      detail({
+        status: "RECEIVING",
+        exceptions: [
+          {
+            ...shortage,
+            key: "labeling-loss:11",
+            kind: "labeling-loss",
+            subject: { lineId: 11, units: 2, unitCostCents: null, lossCents: null, reason: "dropped" },
+          },
+        ],
+      }),
+    );
+    const card = screen.getByTestId("exception-labeling-loss:11");
+    expect(within(card).getByText(/not priced/i)).toBeInTheDocument();
+    expect(within(card).queryByText(/\$0\.00/)).toBeNull();
+  });
+
+  it("a row that simply predates the money fields says so differently", () => {
+    renderDetail(
+      detail({
+        status: "RECEIVING",
+        exceptions: [
+          {
+            ...shortage,
+            key: "labeling-loss:12",
+            kind: "labeling-loss",
+            subject: { lineId: 12 },
+          },
+        ],
+      }),
+    );
+    const card = screen.getByTestId("exception-labeling-loss:12");
+    expect(within(card).getByText(/no money recorded on this row/i)).toBeInTheDocument();
+    expect(within(card).queryByText(/not priced/i)).toBeNull();
   });
 
   it("says so when there is nothing to follow up", () => {

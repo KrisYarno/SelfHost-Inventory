@@ -6,6 +6,7 @@ import {
   VerifyLineSchema,
   assertProductCreateOmitsCostPrice,
   assertProductSizePair,
+  assertVerifyBodyNotEmpty,
 } from '@/lib/validation/supply-orders';
 import { getSupplyOrderDetail } from '@/lib/supply-orders/queries';
 import { verifyLine } from '@/lib/supply-orders/verify';
@@ -71,6 +72,7 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
   );
 
   const body = VerifyLineSchema.parse(raw);
+  assertVerifyBodyNotEmpty(body);
   if (body.deliveredProduct?.mode === 'new') {
     assertProductSizePair(body.deliveredProduct.productFields);
   }
@@ -87,6 +89,7 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
             lineId,
             shipmentId: id,
             verifiedQuantity: body.verifiedQuantity,
+            expectPrevious: body.expectPrevious,
             note: body.note ?? null,
             labelingRequired: body.labelingRequired,
             deliveredProduct: body.deliveredProduct,
@@ -135,16 +138,23 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
                 });
               }
 
+              // THE TRUTHFUL VERB (spec REV-10 clause 2). A flag-only act moved
+              // no count, and auditing it as a VERIFY of the unchanged number
+              // would put a second "verified N" in the feed for something
+              // nobody counted.
               await recordChange(txn, {
                 actor: { userId: user.id },
-                actionType: 'STAGING_VERIFY',
+                actionType: ctx.flagOnly ? 'STAGING_UPDATE' : 'STAGING_VERIFY',
                 entityType: 'STAGING',
                 entityId: lineId,
-                action: `Verified ${ctx.verified} unit(s) on supply-order line ${lineId}`,
+                action: ctx.flagOnly
+                  ? `Updated supply-order line ${lineId} without changing the count`
+                  : `Verified ${ctx.verified} unit(s) on supply-order line ${lineId}`,
                 batchId,
                 details: {
                   shipmentId: id,
                   kind: ctx.kind,
+                  flagOnly: ctx.flagOnly,
                   previous: ctx.previousVerified,
                   ordered: ctx.ordered,
                   verified: ctx.verified,

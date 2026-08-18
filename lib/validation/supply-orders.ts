@@ -188,9 +188,19 @@ export const PatchLineSchema = z.object({
  * `deliveredProduct` re-points the line at what ACTUALLY arrived (a substitute,
  * or a product created on the spot); the server refuses it once anything has
  * been stocked or disposed.
+ *
+ * `verifiedQuantity` is OPTIONAL (spec REV-10 clause 2): absent means a
+ * FLAG/NOTE-ONLY act — the labeling flag moved, the count did not. Absent is
+ * NOT 0, which is a real count of an empty box.
+ *
+ * `expectPrevious` is the client's statement of the count it was LOOKING AT
+ * (clause 1): `null` = "nothing has been counted", a number = the count on the
+ * card, absent = no assertion (an older client). A mismatch against the locked
+ * row is a 409 rather than a silent re-classification of somebody else's count.
  */
 export const VerifyLineSchema = z.object({
-  verifiedQuantity: z.number().int().min(0).max(MAX_UNITS),
+  verifiedQuantity: z.number().int().min(0).max(MAX_UNITS).optional(),
+  expectPrevious: z.number().int().min(0).max(MAX_UNITS).nullable().optional(),
   note: noteText.optional(),
   labelingRequired: z.boolean().optional(),
   deliveredProduct: ProductSelectorSchema.optional(),
@@ -357,6 +367,28 @@ export function assertPatchNotEmpty(body: PatchSupplyOrderInput): void {
     refuse(
       [],
       'provide at least one of supplier, supplierRef, orderedAt, notes, feesCents, feesNote or action',
+    );
+  }
+}
+
+/**
+ * And for a VERIFY (spec REV-10 clause 2). With the count now optional, an
+ * empty body would otherwise be a no-op that still claimed the header, took the
+ * locks and wrote an audit row saying nothing happened.
+ *
+ * `expectPrevious` deliberately does NOT count as asking for something: it is
+ * an assertion ABOUT a request, not a request.
+ */
+export function assertVerifyBodyNotEmpty(body: VerifyLineInput): void {
+  const asked =
+    body.verifiedQuantity !== undefined ||
+    body.labelingRequired !== undefined ||
+    body.deliveredProduct !== undefined ||
+    body.note !== undefined;
+  if (!asked) {
+    refuse(
+      [],
+      'provide at least one of verifiedQuantity, labelingRequired, deliveredProduct or note',
     );
   }
 }

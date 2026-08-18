@@ -168,13 +168,15 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
           // of the line total, taken after the stocked ones (spec §4.3.5).
           units: line.disposedQuantity,
           unitCostCents: money.unitCostCents,
-          lossCents:
-            batchShareCents(
-              line.lineTotalCents,
-              money.basisQuantity,
-              line.stockedQuantity,
-              line.disposedQuantity,
-            ) ?? 0,
+          // NULL PRESERVED (REV-10 clause 8): an unbilled unordered arrival has
+          // no line total, so its bench loss is UNKNOWN — never a $0.00 the
+          // register would then report as a settled figure.
+          lossCents: batchShareCents(
+            line.lineTotalCents,
+            money.basisQuantity,
+            line.stockedQuantity,
+            line.disposedQuantity,
+          ),
         };
       }
 

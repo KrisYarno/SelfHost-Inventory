@@ -335,3 +335,78 @@ describe('getSupplyOrdersAnalytics — definitions and coverage', () => {
     expect(metrics.surplusValue.coverage).toMatch(/lastSeenAt/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// REV-10 clause 8 — an UNPRICED labeling loss is unknown, not $0.00
+// ---------------------------------------------------------------------------
+
+describe('nullable labeling-loss money (CR-5/CR-6)', () => {
+  it('a null lossCents is EXCLUDED from the numerator and COUNTED in coverage', async () => {
+    setup({ exceptions: [loss({ lossCents: null }), loss({ lossCents: 3_000 })] });
+
+    const result = await getSupplyOrdersAnalytics(WINDOW);
+
+    // 3000, not 3000 + 0: the unpriced row's money is unknown, and adding a 0
+    // for it would understate the bench's real loss while looking precise.
+    expect(result.metrics.labelingLossCost.valueCents).toBe(3_000);
+    expect(result.metrics.labelingLossCost.contributingRows).toBe(1);
+    expect(result.metrics.labelingLossCost.coverage).toContain('1 of 2 labeling-loss rows');
+  });
+
+  it('a real zero still contributes (a known 0 is not an absence)', async () => {
+    setup({ exceptions: [loss({ lossCents: 0 })] });
+
+    const result = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(result.metrics.labelingLossCost.valueCents).toBe(0);
+    expect(result.metrics.labelingLossCost.contributingRows).toBe(1);
+    expect(result.metrics.labelingLossCost.reason).toBeNull();
+  });
+
+  it('the reason is DENOMINATOR-AWARE: rows seen but none priced', async () => {
+    setup({ exceptions: [loss({ lossCents: null }), loss({ lossCents: null })] });
+
+    const result = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(result.metrics.labelingLossCost.valueCents).toBeNull();
+    expect(result.metrics.labelingLossCost.reason).toBe(
+      '2 labeling-loss rows were seen in this window; none carries a loss figure',
+    );
+  });
+
+  it('the reason is DENOMINATOR-AWARE: no rows at all', async () => {
+    setup({});
+
+    const result = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(result.metrics.labelingLossCost.reason).toBe(
+      'no labeling-loss row was seen in this window',
+    );
+    expect(result.metrics.supplierShortageCost.reason).toBe(
+      'no receiving-discrepancy row was seen in this window',
+    );
+  });
+
+  it('the shortage reason distinguishes the two emptinesses too', async () => {
+    setup({ exceptions: [recv({ stagingItemId: 1, expectedQty: 10, countedQty: 8 })] });
+
+    const result = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(result.metrics.supplierShortageCost.reason).toBe(
+      '1 recv-discrepancy rows were seen in this window; none carries a loss figure',
+    );
+    expect(result.metrics.surplusValue.reason).toBe(
+      '1 recv-discrepancy rows were seen in this window; none carries a surplus figure',
+    );
+  });
+
+  it('the FEES reason distinguishes them as well', async () => {
+    setup({ headers: [{ status: 'CLOSED', feesCents: null }] });
+
+    const result = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(result.metrics.fees.reason).toBe(
+      '1 non-cancelled supply orders were ordered in this window; none records a fee amount',
+    );
+  });
+});

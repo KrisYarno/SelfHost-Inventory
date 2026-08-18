@@ -209,7 +209,13 @@ export const POST = apiHandler(async (request: NextRequest) => {
       });
 
       return header.id;
-    }),
+    },
+    // THE BUDGET (spec REV-10 clause 9). Up to 50 lines, each resolving (or
+    // creating) a product before the header exists: Prisma's 5s default is a
+    // realistic loss for an order somebody typed by hand. 20s to finish, 5s to
+    // get a connection.
+    { timeout: 20_000, maxWait: 5_000 },
+    ),
   );
 
   // The SAME shape GET serves, so a creating client never has to reconcile two

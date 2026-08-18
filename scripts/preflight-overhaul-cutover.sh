@@ -5,8 +5,16 @@
 # The Receiving/Labeling overhaul deletes the pre-staging flow outright. That is only
 # safe while nothing is still IN it, and "nothing" is TWO persisted predicates:
 #
-#   open   = W1 receipts still open   (inbound_shipments OPEN with orderedAt IS NULL)
+#   open   = inbound_shipments still OPEN
 #   received = pre-staging boxes still queued (staging_items RECEIVED)
+#
+# WHY `status='OPEN'` ALONE, with no model discriminator (codex CR-3, spec REV-10
+# clause 5): this script runs BEFORE `migrate deploy`, against the schema LIVE has
+# right now — and `orderedAt` is a column this lane ADDS. Naming it here would fail
+# "Unknown column 'orderedAt'" at exactly the moment the check matters. The bare
+# predicate is not a weakening: PRE-cutover every OPEN header is a legacy W1 receipt
+# (nothing else creates one), and POST-cutover the new flow never writes OPEN at all,
+# so the same predicate is also the residual check afterwards.
 #
 # Kris runs this against PROD after the write fence (plan P-5 step 1) and immediately
 # before the flow deploy, and pastes the output into the deploy ledger. Both counts
@@ -39,7 +47,7 @@ RUNBOOK_PATH="docs/superpowers/plans/2026-08-18-receiving-labeling-overhaul.md"
 # ONE statement, two columns. One round trip, one transaction-free read, and the two
 # numbers are read at the SAME instant — two separate queries could straddle a write
 # and report a state that never existed.
-SQL="SELECT (SELECT COUNT(*) FROM inbound_shipments WHERE status='OPEN' AND orderedAt IS NULL), (SELECT COUNT(*) FROM staging_items WHERE status='RECEIVED');"
+SQL="SELECT (SELECT COUNT(*) FROM inbound_shipments WHERE status='OPEN'), (SELECT COUNT(*) FROM staging_items WHERE status='RECEIVED');"
 
 usage() {
   cat <<'USAGE'

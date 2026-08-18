@@ -354,6 +354,27 @@ describe('POST .../resolve — labeling-loss', () => {
     // operator's own words survive the settlement (spec §6 "reason (latest)").
     expect(Object.keys(args.subjectPatch)).not.toContain('reason');
   });
+
+  it('carries lossCents NULL when the line was never priced (REV-10 clause 8)', async () => {
+    lockedLineRow = lineRow({
+      status: StagingItemStatus.COMPLETE,
+      verifiedQuantity: 100,
+      stockedQuantity: 60,
+      disposedQuantity: 40,
+      // An unbilled unordered arrival: no line total, so no share to compute.
+      lineTotalCents: null,
+      orderedQuantity: null,
+    });
+
+    const res = await resolvePOST(
+      mkReq({ exceptionKey: `labeling-loss:${LINE_ID}`, resolution: 'accepted-loss' }),
+      lineParams,
+    );
+
+    expect(res.status).toBe(200);
+    const [, args] = mockResolveException.mock.calls[0];
+    expect(args.subjectPatch).toMatchObject({ unitCostCents: null, lossCents: null });
+  });
 });
 
 describe('POST .../resolve — the audit', () => {

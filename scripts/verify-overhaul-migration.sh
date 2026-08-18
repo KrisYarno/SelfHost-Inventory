@@ -2,7 +2,8 @@
 # Receiving/Labeling overhaul (contract pack REV-2 C1.3) — the permanent red->green proof of THE
 # migration on prod's W1 shape: legacy staging lines and receiving headers, seeded on the
 # chain-built schema, must survive two enum APPENDS, a default FLIP, three NULL-widenings and the
-# receivedAt default drop with every stored byte intact.
+# receivedAt widening with every stored byte intact — and with receivedAt's CURRENT_TIMESTAMP
+# default KEPT (spec REV-10 clause 4): the widening is nullability alone.
 #
 # It also proves the UNGUARDED class's ONLY clean recovery (PK-3). MySQL DDL autocommits, so a
 # MID-FILE failure leaves earlier statements applied and `resolve --rolled-back` + re-run would
@@ -123,8 +124,9 @@ assert_eq "GREEN seeded header statuses unchanged" "SELECT GROUP_CONCAT(status O
 # 5b) the defaults: the line default FLIPS, the header default does NOT
 assert_eq "GREEN staging default ORDERED" "SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME='status';" "ORDERED"
 assert_eq "GREEN header default OPEN" "SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inbound_shipments' AND COLUMN_NAME='status';" "OPEN"
-# 5c) receivedAt: default GONE, nullable, DATETIME(0) precision unchanged, no ON UPDATE snuck in
-assert_eq "GREEN receivedAt default dropped" "SELECT CONCAT(COALESCE(COLUMN_DEFAULT,'<null>'),'|',IS_NULLABLE,'|',COLUMN_TYPE,'|',EXTRA) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME='receivedAt';" "<null>|YES|datetime|"
+# 5c) receivedAt: default KEPT (REV-10 c4 — a code rollback to fc195ad relies on it), now
+#     NULLABLE, DATETIME(0) precision unchanged, and no ON UPDATE snuck in
+assert_eq "GREEN receivedAt default KEPT, column widened" "SELECT CONCAT(COALESCE(COLUMN_DEFAULT,'<null>'),'|',IS_NULLABLE,'|',COLUMN_TYPE,'|',EXTRA) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME='receivedAt';" "CURRENT_TIMESTAMP|YES|datetime|DEFAULT_GENERATED"
 assert_eq "GREEN locationId/receivedBy nullable" "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME IN ('locationId','receivedBy') AND IS_NULLABLE='YES' AND DATA_TYPE='int';" "2"
 # 5d) the new columns exist with the shapes the cores rely on
 assert_eq "GREEN staging wave columns" "SELECT GROUP_CONCAT(CONCAT(COLUMN_NAME,':',COLUMN_TYPE,':',IS_NULLABLE,':',COALESCE(COLUMN_DEFAULT,'<null>')) ORDER BY COLUMN_NAME) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME IN ('orderedProductId','orderedQuantity','lineTotalCents','verifiedQuantity','verifiedBy','verifiedAt','labelingRequired','stockedQuantity','disposedQuantity');" "disposedQuantity:int:NO:0,labelingRequired:tinyint(1):NO:1,lineTotalCents:int:YES:<null>,orderedProductId:int:YES:<null>,orderedQuantity:int:YES:<null>,stockedQuantity:int:NO:0,verifiedAt:datetime(3):YES:<null>,verifiedBy:int:YES:<null>,verifiedQuantity:int:YES:<null>"
@@ -154,7 +156,15 @@ assert_eq "GREEN stockedQuantity oracle runs and holds" "SELECT COUNT(*) FROM st
 #     supply-order line with NO receipt act recorded — never a RECEIVED box in the legacy queue
 q "INSERT INTO staging_items (id, description, createdAt, updatedAt) VALUES (503, 'new-flow line, defaults only', '2026-08-18 09:00:00', '2026-08-18 09:00:00');"
 assert_eq "GREEN status omitted -> ORDERED" "SELECT status FROM staging_items WHERE id=503;" "ORDERED"
-assert_eq "GREEN receipt columns omitted -> NULL" "SELECT CONCAT(COALESCE(receivedAt,'<null>'),'|',COALESCE(locationId,'<null>'),'|',COALESCE(receivedBy,'<null>')) FROM staging_items WHERE id=503;" "<null>|<null>|<null>"
+# The two halves of REV-10 clause 4, proved on real DDL:
+#   (a) an OMITTED receivedAt is still STAMPED by the default — which is exactly why every
+#       new-flow create writes `receivedAt: null` explicitly (`receivedAt IS NOT NULL` is the
+#       legacy discriminator, and a defaulted timestamp would forge one);
+#   (b) an EXPLICIT NULL is stored as NULL, so the new flow's rows stay non-legacy.
+assert_eq "GREEN receivedAt omitted -> STAMPED by the surviving default" "SELECT IF(receivedAt IS NULL,'<null>','stamped') FROM staging_items WHERE id=503;" "stamped"
+assert_eq "GREEN location/receiver omitted -> NULL" "SELECT CONCAT(COALESCE(locationId,'<null>'),'|',COALESCE(receivedBy,'<null>')) FROM staging_items WHERE id=503;" "<null>|<null>"
+q "INSERT INTO staging_items (id, description, receivedAt, createdAt, updatedAt) VALUES (504, 'new-flow line, explicit NULL receipt', NULL, '2026-08-18 09:00:00', '2026-08-18 09:00:00');"
+assert_eq "GREEN receivedAt explicit NULL -> NULL (the discriminator holds)" "SELECT IF(receivedAt IS NULL,'<null>','stamped') FROM staging_items WHERE id=504;" "<null>"
 assert_eq "GREEN counters default to 0/true" "SELECT CONCAT(stockedQuantity,'|',disposedQuantity,'|',labelingRequired) FROM staging_items WHERE id=503;" "0|0|1"
 
 echo "OVERHAUL MIGRATION: PASS"

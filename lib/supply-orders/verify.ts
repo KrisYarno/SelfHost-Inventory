@@ -28,6 +28,8 @@ import type { RecvDiscrepancySubject } from '@/lib/exceptions/kinds';
  *
  *   1  line `FOR UPDATE`   the transaction's FIRST statement (`AND shipmentId`
  *                          — the nested route ids must be pinned to each other)
+ *   1b `expectPrevious`    the client's belief about the count, checked against
+ *                          the LOCKED row before anything is claimed or written
  *   2  header claim        `claimShipmentForVerify`; the LEGACY discriminator
  *                          lives inside it, so a W1 receipt refuses here
  *   3  CLASSIFY + refuse   first / raise / lower, decided from the LOCKED row
@@ -43,6 +45,14 @@ import type { RecvDiscrepancySubject } from '@/lib/exceptions/kinds';
  * `description` snapshot would mislabel every later screen, and two writes can
  * always end up half-applied under a future refactor.
  *
+ * TWO SHAPES (spec REV-10 clauses 1-2). A COUNTED verify carries
+ * `verifiedQuantity` and does everything above. A FLAG-ONLY verify carries none
+ * — the operator flipped `labelingRequired`, named the substitute that actually
+ * arrived, or left a note — and it touches NOTHING about the count: no status,
+ * no `verifiedQuantity`, no `verifiedBy/At`, no discrepancy row. Both shapes
+ * honour `expectPrevious`, the client's statement of the count it was looking at
+ * when the operator pressed the button.
+ *
  * WHAT VERIFY NEVER DOES: it never writes `orderedQuantity` (an unordered line
  * stays unordered for every later query — PK-5), never stamps `verifiedAt/By`
  * more than once (the RECEIPT act is the first count; later corrections are
@@ -53,7 +63,19 @@ import type { RecvDiscrepancySubject } from '@/lib/exceptions/kinds';
 export type VerifyArgs = {
   lineId: number;
   shipmentId: string;
-  verifiedQuantity: number;
+  /**
+   * THE COUNT — absent for a FLAG-ONLY act (spec REV-10 clause 2): the operator
+   * flipped `labelingRequired`, re-pointed the product or left a note without
+   * re-counting anything. Absent is NOT "0": nothing about the count moves.
+   */
+  verifiedQuantity?: number;
+  /**
+   * WHAT THE CLIENT BELIEVED THE COUNT WAS (spec REV-10 clause 1). `null` = "I
+   * believe nothing has been counted"; a number = the count the card showed;
+   * ABSENT = no assertion at all (an older client). Checked against the LOCKED
+   * row before anything is claimed or written.
+   */
+  expectPrevious?: number | null;
   note?: string | null;
   labelingRequired?: boolean;
   /** The product that ACTUALLY arrived, when it is not the one ordered. */
@@ -66,6 +88,12 @@ export type VerifyRecordContext = {
   lineId: number;
   shipmentId: string;
   kind: VerifyKind;
+  /**
+   * TRUE when no count was sent at all (REV-10 clause 2): the flags moved, the
+   * count did not. The ROUTE reads this to audit the truthful verb —
+   * `STAGING_UPDATE` for a flag change, `STAGING_VERIFY` for a count.
+   */
+  flagOnly: boolean;
   /** NULL on a first verify — nothing had been counted yet. */
   previousVerified: number | null;
   ordered: number | null;
@@ -174,7 +202,10 @@ async function lockLine(
  * has already booked units" rules a real reduction does — there is no third
  * kind to reason about.
  */
-function classify(line: LockedVerifyLine, requested: number): VerifyKind {
+function classify(line: LockedVerifyLine, requested: number | undefined): VerifyKind {
+  // A FLAG-ONLY act moves no count, so it is a `lower` of delta 0 — the same
+  // kind an equal re-stamp already carried, and for the same reason.
+  if (requested === undefined) return 'lower';
   if (line.status === StagingItemStatus.ORDERED) return 'first';
   return requested > (line.verifiedQuantity ?? 0) ? 'raise' : 'lower';
 }
@@ -218,7 +249,7 @@ function nextStatusFor(
 function assertLegal(
   line: LockedVerifyLine,
   kind: VerifyKind,
-  requested: number,
+  requested: number | undefined,
   hasDeliveredProduct: boolean,
 ): void {
   if (!VERIFIABLE.includes(line.status)) {
@@ -231,16 +262,29 @@ function assertLegal(
 
   const booked = line.stockedQuantity + line.disposedQuantity;
 
-  if (kind === 'lower') {
-    if (!LOWERABLE.includes(line.status) || requested < booked) {
-      throw new VerifiedLockedRefusal(line.stockedQuantity, line.disposedQuantity);
+  if (requested === undefined) {
+    // A FLAG-ONLY act needs a count to hang off: an ORDERED line has none yet,
+    // and its flag moves by line PATCH instead (REV-10 clause 2). The
+    // count rules below have nothing to judge, so they are skipped outright.
+    if (line.status === StagingItemStatus.ORDERED) {
+      throw new AppError(
+        `Supply-order line ${line.id} has not been counted yet — record the delivered count first`,
+        'CONFLICT',
+        409,
+      );
     }
-  }
+  } else {
+    if (kind === 'lower') {
+      if (!LOWERABLE.includes(line.status) || requested < booked) {
+        throw new VerifiedLockedRefusal(line.stockedQuantity, line.disposedQuantity);
+      }
+    }
 
-  if (line.orderedQuantity === null && kind !== 'first') {
-    const changesCount = requested !== (line.verifiedQuantity ?? 0);
-    if (changesCount && booked > 0) {
-      throw new VerifiedLockedRefusal(line.stockedQuantity, line.disposedQuantity);
+    if (line.orderedQuantity === null && kind !== 'first') {
+      const changesCount = requested !== (line.verifiedQuantity ?? 0);
+      if (changesCount && booked > 0) {
+        throw new VerifiedLockedRefusal(line.stockedQuantity, line.disposedQuantity);
+      }
     }
   }
 
@@ -302,9 +346,26 @@ export async function verifyLine(
   const { lineId, shipmentId, verifiedQuantity, actor } = args;
   const note = args.note ?? null;
   const { onRecord, batchId } = opts;
+  /** No count sent at all — the flags move, the count does not (REV-10 c2). */
+  const flagOnly = verifiedQuantity === undefined;
 
   // 1. THE LINE, LOCKED — the transaction's first statement.
   const line = await lockLine(tx, lineId, shipmentId);
+
+  // 1b. THE CLIENT'S BELIEF, CHECKED (REV-10 clause 1). A tab that loaded the
+  //     line before a colleague counted it would otherwise submit its cached
+  //     numbers as fact — reclassifying their count and auto-settling their
+  //     discrepancy. The assertion is optional, so an older client keeps
+  //     working; when it IS made, a mismatch stops here, before the header is
+  //     claimed and before anything at all is written.
+  if (args.expectPrevious !== undefined && args.expectPrevious !== line.verifiedQuantity) {
+    const current = line.verifiedQuantity === null ? 'not counted' : line.verifiedQuantity;
+    throw new AppError(
+      `The count changed since you loaded this line — verified is now ${current} (stocked ${line.stockedQuantity}, disposed ${line.disposedQuantity}). Reload and try again.`,
+      'CONFLICT',
+      409,
+    );
+  }
 
   // 2. THE HEADER, CLAIMED (and proven to be a supply order, not a W1 receipt:
   //    a legacy header refuses here with 409 LEGACY_READ_ONLY).
@@ -363,14 +424,18 @@ export async function verifyLine(
   // MONEY (D4/S2). ONE function owns it — verify's loss and stock-in's batch
   // share are the same arithmetic on the same line. The basis is
   // `orderedQuantity ?? verified`, and `orderedQuantity` is NEVER written.
+  // THE COUNT THIS CALL LEAVES BEHIND. A flag-only act leaves the locked one
+  // exactly where it was — every figure below is stated about THAT number.
+  const verified = flagOnly ? (line.verifiedQuantity ?? 0) : verifiedQuantity!;
+
   const money = lineMoney({
     lineTotalCents: line.lineTotalCents,
     orderedQuantity: line.orderedQuantity,
-    verifiedQuantity,
+    verifiedQuantity: verified,
   });
 
-  const remaining = verifiedQuantity - line.stockedQuantity - line.disposedQuantity;
-  const nextStatus = nextStatusFor(kind, line, remaining);
+  const remaining = verified - line.stockedQuantity - line.disposedQuantity;
+  const nextStatus = flagOnly ? line.status : nextStatusFor(kind, line, remaining);
 
   // 6. THE ONE GUARDED WRITE. The WHERE is the entire precondition — the row is
   //    already locked, so `count !== 1` means a future refactor lost the lock
@@ -379,10 +444,12 @@ export async function verifyLine(
   // `Unchecked` because the re-map writes the FOREIGN KEY column directly — the
   // checked variant only accepts a nested relation connect, which an updateMany
   // cannot carry.
-  const data: Prisma.StagingItemUncheckedUpdateManyInput = {
-    status: nextStatus,
-    verifiedQuantity,
-  };
+  // A FLAG-ONLY act writes NEITHER the status nor the count — putting them in
+  // the SET clause "unchanged" would still stamp them, and a future refactor
+  // reading this write would learn the wrong rule.
+  const data: Prisma.StagingItemUncheckedUpdateManyInput = flagOnly
+    ? {}
+    : { status: nextStatus, verifiedQuantity: verified };
   if (kind === 'first') {
     // THE RECEIPT ACT. Stamped once: a later raise or correction is audited,
     // but the moment the delivery was received does not move.
@@ -407,13 +474,19 @@ export async function verifyLine(
         }
       : { id: lineId, shipmentId, status: line.status, verifiedQuantity: line.verifiedQuantity };
 
-  const claim = await tx.stagingItem.updateMany({ where, data });
-  if (claim.count !== 1) {
-    throw new AppError(
-      `Supply-order line ${lineId} changed while it was being verified; reload and retry`,
-      'CONFLICT',
-      409,
-    );
+  // A note-only act has nothing to SET: the note lives in the audit event, not
+  // on the line. Skipping the statement is the honest thing — an `UPDATE` with
+  // an empty SET is not a valid statement, and the row is already locked, so
+  // there is no race left for a guarded write to catch.
+  if (Object.keys(data).length > 0) {
+    const claim = await tx.stagingItem.updateMany({ where, data });
+    if (claim.count !== 1) {
+      throw new AppError(
+        `Supply-order line ${lineId} changed while it was being verified; reload and retry`,
+        'CONFLICT',
+        409,
+      );
+    }
   }
 
   // THE DISCREPANCY INTENT (PK2-2). A count that misses the order (or an
@@ -422,15 +495,20 @@ export async function verifyLine(
   // previously differed — `additional-delivery` when a RAISE closed a shortage
   // (box 2 really did turn up), `recount-corrected` otherwise (the first count
   // was wrong). A first verify that matches writes nothing at all.
+  //
+  // A FLAG-ONLY act is not a count at all, so it settles nothing and raises
+  // nothing: the register keeps whatever the last real count said.
   const ordered = line.orderedQuantity;
   const subject = discrepancySubject(
     line,
-    { lineId, shipmentId, verified: verifiedQuantity, note },
+    { lineId, shipmentId, verified, note },
     resolvedProductId,
     money,
   );
   let recvDiscrepancy: VerifyRecordContext['recvDiscrepancy'] = null;
-  if (ordered === null || verifiedQuantity !== ordered) {
+  if (flagOnly) {
+    recvDiscrepancy = null;
+  } else if (ordered === null || verified !== ordered) {
     recvDiscrepancy = { action: 'upsert', subject };
   } else if (kind !== 'first' && line.verifiedQuantity !== ordered) {
     recvDiscrepancy = {
@@ -449,10 +527,11 @@ export async function verifyLine(
     lineId,
     shipmentId,
     kind,
+    flagOnly,
     previousVerified: line.verifiedQuantity,
     ordered,
-    verified: verifiedQuantity,
-    delta: verifiedQuantity - (line.verifiedQuantity ?? 0),
+    verified,
+    delta: verified - (line.verifiedQuantity ?? 0),
     lossCents: money.lossCents,
     surplusValueCents: money.surplusValueCents,
     unitCostCents: money.unitCostCents,
@@ -468,7 +547,7 @@ export async function verifyLine(
   return {
     lineId,
     status: nextStatus,
-    verifiedQuantity,
+    verifiedQuantity: verified,
     stockedQuantity: line.stockedQuantity,
     disposedQuantity: line.disposedQuantity,
     remaining,

@@ -258,7 +258,7 @@ describe('upsertException — a known key UPDATES', () => {
 describe('upsertException — recurrence REOPENS a resolved key', () => {
   it('clears resolvedAt AND resolvedBy', async () => {
     const tx = mkTx();
-    setExisting(tx, 
+    setExisting(tx,
       row({ resolvedAt: NOW, resolvedBy: 7 }),
     );
 
@@ -272,7 +272,7 @@ describe('upsertException — recurrence REOPENS a resolved key', () => {
 
   it('preserves the prior note and appends an audit-visible reopen line carrying the instant', async () => {
     const tx = mkTx();
-    setExisting(tx, 
+    setExisting(tx,
       row({ resolvedAt: NOW, resolvedBy: 7, note: 'auto: recount matched' }),
     );
 
@@ -299,7 +299,7 @@ describe('upsertException — recurrence REOPENS a resolved key', () => {
 
   it('orders reopen line BEFORE a caller note (what happened, then what was said)', async () => {
     const tx = mkTx();
-    setExisting(tx, 
+    setExisting(tx,
       row({ resolvedAt: NOW, resolvedBy: 7, note: 'closed out by Kris' }),
     );
 

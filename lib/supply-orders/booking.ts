@@ -156,7 +156,7 @@ export type DiscardRecordContext = {
   verified: number;
   remaining: 0;
   unitCostCents: number | null;
-  lossCents: number;
+  lossCents: number | null;
   labelingLoss: LabelingLossSubject;
   batchId: string;
 };
@@ -275,8 +275,12 @@ export async function bookSupplyOrderBatch(
   const prior = priorRows[0] ?? null;
   if (prior) {
     if (prior.delta !== quantity || prior.locationId !== locationId) {
+      // THE OPERATOR'S FRAME (spec REV-10 clause 10). The person reading this
+      // is at a bench with a printed label; the booking key is the CLIENT's
+      // bookkeeping and means nothing to them. Say what was recorded, what was
+      // just asked for, and what to do next.
       throw new AppError(
-        `Booking key ${bookingKey} already booked ${prior.delta} unit(s) into location ${prior.locationId} on this line; ${quantity} into location ${locationId} is a different batch — use a new booking key`,
+        `Already recorded ${prior.delta} unit(s) for this attempt into location ${prior.locationId}; ${quantity} unit(s) into location ${locationId} is a different batch — reload to see the current count, then record it again.`,
         'IDEMPOTENCY_MISMATCH',
         409,
       );
@@ -425,13 +429,14 @@ export async function bookSupplyOrderBatch(
           productId,
           units: line.disposedQuantity,
           unitCostCents: money.unitCostCents,
-          lossCents:
-            batchShareCents(
-              line.lineTotalCents,
-              money.basisQuantity,
-              stockedAfter,
-              line.disposedQuantity,
-            ) ?? 0,
+          // NULL PRESERVED (REV-10 clause 8): an unpriced line's loss is
+          // unknown, not zero. `batchShareCents` already says so.
+          lossCents: batchShareCents(
+            line.lineTotalCents,
+            money.basisQuantity,
+            stockedAfter,
+            line.disposedQuantity,
+          ),
           reason: LABELING_LOSS_REFRESH_REASON,
         }
       : null;
@@ -612,11 +617,17 @@ export async function discardRemaining(
     verifiedQuantity: verified,
   });
   // CUMULATIVE and exact: the loss slice is the disposed units' own share of the
-  // line total, taken after the stocked ones (spec §4.3.5). An unpriced line
-  // loses 0 money truthfully — never a fabricated figure.
-  const lossCents =
-    batchShareCents(line.lineTotalCents, money.basisQuantity, line.stockedQuantity, disposedAfter) ??
-    0;
+  // line total, taken after the stocked ones (spec §4.3.5). An UNPRICED line
+  // (no lineTotalCents — an unbilled unordered arrival) loses an UNKNOWN amount,
+  // and says NULL: a 0 there would be a fabricated figure the register would
+  // then report as a settled cost (REV-10 clause 8). A real total of 0 is a
+  // known zero and stays 0.
+  const lossCents = batchShareCents(
+    line.lineTotalCents,
+    money.basisQuantity,
+    line.stockedQuantity,
+    disposedAfter,
+  );
 
   // The guarded write. Raw because the guard is on the value being incremented:
   // `WHERE disposedQuantity = <the locked value>` refuses a second discard that

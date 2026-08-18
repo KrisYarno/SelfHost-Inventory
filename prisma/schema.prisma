@@ -181,7 +181,7 @@ model StagingItem {
   notes             String?           @db.Text
   locationId        Int? // NULL-widened: a labeling decision, not an order decision
   receivedBy        Int? // NULL-widened: the receipt act = verifiedBy/At in the new flow
-  receivedAt        DateTime?         @db.DateTime(0) // NULL-widened; DEFAULT DROPPED; precision unchanged
+  receivedAt        DateTime?         @default(now()) @db.DateTime(0) // NULL-widened; DEFAULT KEPT (REV-10 c4); precision unchanged
   graduatedBy       Int?
   graduatedAt       DateTime?         @db.DateTime(0)
   createdAt         DateTime          @default(now()) @db.DateTime(0)

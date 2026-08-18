@@ -131,6 +131,19 @@ function subjectNumber(subject: unknown, field: string): number | null {
   return typeof value === "number" ? value : null;
 }
 
+/**
+ * The subject said the field is NULL — a different statement from not having the
+ * field at all. A labeling-loss row on an unbilled arrival carries
+ * `lossCents: null` on purpose (REV-10 clause 8): the units were lost, what they
+ * cost is unknown. A row raised before this lane simply has no such key, and
+ * "no money recorded" is the truthful sentence there.
+ */
+function subjectSaysUnknown(subject: unknown, field: string): boolean {
+  if (subject === null || typeof subject !== "object") return false;
+  const record = subject as Record<string, unknown>;
+  return Object.prototype.hasOwnProperty.call(record, field) && record[field] === null;
+}
+
 function subjectText(subject: unknown, field: string): string | null {
   if (subject === null || typeof subject !== "object") return null;
   const value = (subject as Record<string, unknown>)[field];
@@ -316,12 +329,19 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
   const isOrdered = line.status === "ORDERED";
   const isVerified = VERIFIED_STATUSES.includes(line.status);
   const canBook = isVerified && line.remaining > 0;
-  // The labeling flag travels by PATCH while the line is ORDERED and by VERIFY
-  // afterwards (C4b.1). A COMPLETE line is not lowerable, so a re-stamp there
-  // would 409 every time — the flag is read-only once the line is finished.
+  // The labeling flag travels by PATCH while the line is ORDERED and by a
+  // FLAG-ONLY verify afterwards (C4b.1 / REV-10 clause 2). The flag stops
+  // moving once the line is COMPLETE: the bench has finished with it, and
+  // re-tagging something already stocked says nothing about the work.
   const canRetagLabeling =
     (line.status === "VERIFIED" || line.status === "LABELING") &&
     line.verifiedQuantity !== null;
+  // REMOVING THE LINE (REV-10 clause 3). An ORDERED line never arrived; a
+  // VERIFIED line with both counters at 0 is the unordered-arrival duplicate —
+  // born verified, so an ORDERED-only rule left it on the order forever.
+  const canRemoveLine =
+    isOrdered ||
+    (line.status === "VERIFIED" && line.stockedQuantity === 0 && line.disposedQuantity === 0);
 
   const closePanel = () => {
     setPanel(null);
@@ -362,6 +382,10 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
     await runVerify(
       {
         verifiedQuantity: typed,
+        // THE COUNT THIS CARD IS SHOWING (REV-10 clause 1). An adjustment is an
+        // opinion about a specific previous number; if that number has moved,
+        // the server refuses rather than re-classifying somebody else's count.
+        expectPrevious: line.verifiedQuantity,
         ...(note.trim() ? { note: note.trim() } : {}),
         ...(panel === "substitute" && substitute ? { deliveredProduct: substitute } : {}),
       },
@@ -371,7 +395,13 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
 
   const submitMatches = async () => {
     if (line.orderedQuantity === null) return;
-    await runVerify({ verifiedQuantity: line.orderedQuantity }, `Counted ${line.orderedQuantity}`);
+    await runVerify(
+      // NULL is the assertion this button actually makes: "nothing has been
+      // counted on this line". A colleague who counted while the tab sat open
+      // makes it false, and the server says so.
+      { verifiedQuantity: line.orderedQuantity, expectPrevious: null },
+      `Counted ${line.orderedQuantity}`,
+    );
   };
 
   const submitEdit = async (patch: Record<string, unknown>) => {
@@ -508,9 +538,12 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
             disabled={verifyLine.isPending}
             onClick={() =>
               runVerify(
+                // FLAG ONLY (REV-10 clause 2) — no count is sent, so nothing
+                // about the count can move. `expectPrevious` still travels: the
+                // flag belongs to the line the operator was looking at.
                 {
-                  verifiedQuantity: line.verifiedQuantity,
                   labelingRequired: !line.labelingRequired,
+                  expectPrevious: line.verifiedQuantity,
                 },
                 line.labelingRequired
                   ? "This line is ready to stock"
@@ -531,7 +564,7 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
             Edit line
           </Button>
         )}
-        {isOrdered && (
+        {canRemoveLine && (
           <Button
             size="sm"
             variant="ghost"
@@ -629,6 +662,12 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
 
       {panel === "discard" && (
         <div className="space-y-2 rounded-md border border-border p-3">
+          {!isOrdered && (
+            <p className="text-xs text-muted-foreground">
+              This removes this arrived line and closes its discrepancy — only for a line
+              added by mistake.
+            </p>
+          )}
           <Label htmlFor={`line-${line.id}-reason`} className="text-xs">
             Why is the line coming off the order?
           </Label>
@@ -782,6 +821,7 @@ function ExceptionRow({ orderId, exception }: ExceptionRowProps) {
   const [refusal, setRefusal] = useState<string | null>(null);
 
   const lossCents = subjectNumber(exception.subject, "lossCents");
+  const lossUnpriced = subjectSaysUnknown(exception.subject, "lossCents");
   const surplusCents = subjectNumber(exception.subject, "surplusValueCents");
   const units = subjectNumber(exception.subject, "units");
   const reason = subjectText(exception.subject, "reason");
@@ -831,6 +871,9 @@ function ExceptionRow({ orderId, exception }: ExceptionRowProps) {
             {[
               units !== null ? `${units} unit(s)` : null,
               lossCents !== null ? `${formatCents(lossCents)} loss` : null,
+              // NOT $0.00 (REV-10 clause 8): an unbilled arrival's loss is a
+              // real loss of an unknown amount, and the row says so.
+              lossUnpriced ? "Not priced" : null,
               surplusCents !== null && surplusCents > 0
                 ? `${formatCents(surplusCents)} surplus`
                 : null,

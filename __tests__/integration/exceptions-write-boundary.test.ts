@@ -85,11 +85,14 @@ const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx']);
  * added without consciously re-opening this rule. Each lands with its own entry,
  * in its own wave.
  *
- * M6 (Receiving/Labeling overhaul) leaves SEVEN: the two admin product acts that
- * settle pending-with-stock, and the five supply-order routes that raise and
- * settle the lane's rows. The W1 count and graduate entries went with their
- * routes — the register's births moved to add-line / verify / stock-in, which is
- * why the allow-list shrank without the boundary widening.
+ * M6 (Receiving/Labeling overhaul) + the REV-10 fix round leave EIGHT: the two
+ * admin product acts that settle pending-with-stock, and the six supply-order
+ * routes that raise and settle the lane's rows. The W1 count and graduate
+ * entries went with their routes — the register's births moved to add-line /
+ * verify / stock-in, which is why the allow-list shrank without the boundary
+ * widening. The eighth is LINE DISCARD (spec REV-10 clause 3): removing a
+ * VERIFIED unordered arrival must close the discrepancy that arrival raised, in
+ * the same transaction, or the register outlives the line it names.
  */
 interface WriterCaller {
   path: string;
@@ -143,6 +146,14 @@ const ALLOWED_WRITER_CALLERS: WriterCaller[] = [
       'verified at the dock and lost before they became stock. The row is written with the ' +
       "operator's own reason in the same transaction as the disposal counter, so an aborted " +
       'write-off can never leave a loss on the register',
+  },
+  {
+    path: 'app/api/inbound-shipments/[id]/lines/[lineId]/discard/route.ts',
+    reason:
+      'REV-10 clause 3 (challenger CH-3): an UNORDERED ARRIVAL is born VERIFIED and raises its ' +
+      'recv-discrepancy row at create time, so removing a duplicate arrival has to settle that ' +
+      "row — `recount-corrected`, note 'line removed' — inside the discard's own transaction. A " +
+      'no-op for an ORDERED line, which never had a row',
   },
   {
     path: 'app/api/inbound-shipments/[id]/lines/[lineId]/resolve/route.ts',
@@ -245,6 +256,13 @@ describe('exceptions write boundary — NAMED callers only', () => {
 
   it('the files importing the writer are exactly the allow list', () => {
     expect(importers().sort()).toEqual(ALLOWED_WRITER_CALLERS.map((c) => c.path).sort());
+  });
+
+  it('the allow list is EXACTLY eight entries (REV-10 clause 3)', () => {
+    // A COUNT, not just a set comparison: the number is quoted in the spec, the
+    // pack and this file's header, and a silent drift in either direction is
+    // exactly what a boundary gate exists to catch.
+    expect(ALLOWED_WRITER_CALLERS).toHaveLength(8);
   });
 
   it('allow-list hygiene: unique, existing, reasoned — and each really imports the writer', () => {

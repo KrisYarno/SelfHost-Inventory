@@ -74,7 +74,7 @@ run_preflight() {
   printf '%s|%s' "$rc" "$output"
 }
 
-EXPECTED_SQL="SELECT (SELECT COUNT(*) FROM inbound_shipments WHERE status='OPEN' AND orderedAt IS NULL), (SELECT COUNT(*) FROM staging_items WHERE status='RECEIVED');"
+EXPECTED_SQL="SELECT (SELECT COUNT(*) FROM inbound_shipments WHERE status='OPEN'), (SELECT COUNT(*) FROM staging_items WHERE status='RECEIVED');"
 
 # --------------------------------------------------------------------------
 # 1. --print-sql prints the counting statement and NOTHING else.
@@ -221,9 +221,23 @@ if [ "$ADJ_COUNT" -lt 4 ]; then
   fail "ROW_COUNT captures present" "expected >= 4 captures, found $ADJ_COUNT"
 fi
 
+# --------------------------------------------------------------------------
+# 8. THE PREDICATE MUST RUN ON *LIVE* (codex CR-3, spec REV-10 clause 5). The mandated
+#    order is fence -> preflight -> `migrate deploy`, so the counting SQL runs against
+#    the PRE-migration schema: naming a column this lane ADDS would fail "Unknown
+#    column" exactly when the check matters most. A NEGATIVE pin, because that failure
+#    mode reads perfectly well in review — the column exists everywhere the author looks.
+# --------------------------------------------------------------------------
+for COLUMN in orderedAt supplier feesCents feesNote resolution bookingKey \
+    receiptCostCents stagingItemId disposedQuantity labelingRequired lineTotalCents \
+    orderedProductId orderedQuantity stockedQuantity verifiedAt verifiedBy \
+    verifiedQuantity; do
+  assert_not_contains "runtime SQL is pre-migration safe" "$SQL_OUT" "$COLUMN"
+done
+
 if [ "$FAILURES" -ne 0 ]; then
   echo "PREFLIGHT SELF-TEST: $FAILURES check(s) FAILED" >&2
   exit 1
 fi
 
-echo "PREFLIGHT SELF-TEST: PASS (print-sql, print-runbook + mechanical guards + ROW_COUNT adjacency, compose argv, GO/NO-GO parse, fail-closed, secret hygiene)"
+echo "PREFLIGHT SELF-TEST: PASS (print-sql, pre-migration-safe predicate, print-runbook + mechanical guards + ROW_COUNT adjacency, compose argv, GO/NO-GO parse, fail-closed, secret hygiene)"

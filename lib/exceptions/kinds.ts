@@ -177,7 +177,14 @@ export type LabelingLossSubject = {
   productId: number | null;
   units: number;
   unitCostCents: number | null;
-  lossCents: number;
+  /**
+   * NULL when the line carries no `lineTotalCents` at all — an unbilled
+   * unordered arrival (spec REV-10 clause 8 / codex CR-5). The units really
+   * were lost; what they cost is UNKNOWN, and a 0 there would report "this
+   * write-off cost nothing" about money nobody has recorded yet. A real
+   * `lineTotalCents` of 0 still yields a KNOWN 0.
+   */
+  lossCents: number | null;
   reason: string;
 };
 

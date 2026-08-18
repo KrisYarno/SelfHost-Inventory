@@ -37,7 +37,7 @@
     "test:watch": "node scripts/test-runner.js all --watch",
     "test:coverage": "node scripts/test-runner.js all --coverage",
     "test:mcp": "jest -c mcp/jest.config.mjs",
-    "test:ci": "node scripts/test-runner.js all --coverage --ci && npm run test:mcp && npm run test:launch"
+    "test:ci": "node scripts/test-runner.js all --coverage --ci && npm run test:mcp && npm run test:launch && npm run test:concurrency"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.15",

@@ -57,7 +57,7 @@ function legacyLine(over: Record<string, unknown> = {}) {
 
 function respondWith(lines: unknown[], status = 200, body?: unknown) {
   mockFetch.mockImplementation(async () =>
-    jsonResponse(status, body ?? { lines }),
+    jsonResponse(status, body ?? { lines, count: lines.length, moreCount: 0 }),
   );
 }
 
@@ -150,4 +150,27 @@ it("renders the error INSTEAD OF the empty state when the read fails", async () 
     "Failed to load the pre-staging history",
   );
   expect(screen.queryByTestId("legacy-lines-empty")).not.toBeInTheDocument();
+});
+
+describe("the bound is said out loud (REV-10 clause 6)", () => {
+  it("names the older lines the page is not showing", async () => {
+    respondWith([legacyLine()], 200, {
+      lines: [legacyLine()],
+      count: 947,
+      moreCount: 747,
+    });
+    renderList();
+
+    expect(await screen.findByTestId("legacy-lines-more")).toHaveTextContent(
+      "Showing the newest 1 of 947 lines — 747 older lines not shown.",
+    );
+  });
+
+  it("says nothing when the page IS the archive", async () => {
+    respondWith([legacyLine()]);
+    renderList();
+
+    await screen.findByTestId("legacy-line-900");
+    expect(screen.queryByTestId("legacy-lines-more")).not.toBeInTheDocument();
+  });
 });

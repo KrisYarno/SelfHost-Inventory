@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -109,6 +109,17 @@ export function BatchRow({
   const [locationId, setLocationId] = useState<number | null>(
     priorLocationId ?? session?.user?.defaultLocationId ?? null,
   );
+  // WHOSE CHOICE IS THIS (spec REV-10 clause 10). The session resolves
+  // asynchronously and `priorLocationId` arrives with the line's next refetch,
+  // both of them AFTER this row first renders — so the default is re-applied
+  // until the operator touches the select, and never afterwards. A ref, not
+  // state: touching the select must not re-render anything by itself.
+  const locationTouched = useRef(false);
+  const sessionDefaultLocationId = session?.user?.defaultLocationId ?? null;
+  useEffect(() => {
+    if (locationTouched.current) return;
+    setLocationId(priorLocationId ?? sessionDefaultLocationId ?? null);
+  }, [priorLocationId, sessionDefaultLocationId]);
   // The refusal stays ON SCREEN (C4b.4): the server's sentence names the
   // counters this attempt collided with, and a toast that scrolls away takes the
   // one piece of information the operator needs to decide what to type next.
@@ -203,7 +214,10 @@ export function BatchRow({
           </Label>
           <Select
             value={locationId === null ? undefined : String(locationId)}
-            onValueChange={(value) => setLocationId(Number(value))}
+            onValueChange={(value) => {
+              locationTouched.current = true;
+              setLocationId(Number(value));
+            }}
             disabled={disabled}
           >
             <SelectTrigger

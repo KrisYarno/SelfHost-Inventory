@@ -467,3 +467,32 @@ describe('POST /api/inbound-shipments — refusals', () => {
     expect(db.inboundShipment.create).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /api/inbound-shipments — the legacy discriminator (REV-10 clause 4)', () => {
+  it('writes receivedAt NULL explicitly on every line it creates', async () => {
+    await POST(mkReq(body()), {} as never);
+
+    // `receivedAt` KEEPS its DB default (CURRENT_TIMESTAMP) so a code rollback
+    // stays schema-compatible — which means an OMITTED field would be stamped
+    // with a timestamp, and `receivedAt IS NOT NULL` is the LEGACY
+    // DISCRIMINATOR. A supply-order line stamped that way would read back as a
+    // pre-staging box.
+    const creates = db.stagingItem.create.mock.calls;
+    expect(creates.length).toBeGreaterThan(0);
+    for (const [args] of creates) {
+      expect(args.data).toHaveProperty('receivedAt', null);
+      expect(args.data).toHaveProperty('receivedBy', null);
+    }
+  });
+});
+
+describe('POST /api/inbound-shipments — the transaction budget (REV-10 clause 9)', () => {
+  it('runs the create with an explicit timeout and maxWait', async () => {
+    await POST(mkReq(body()), {} as never);
+
+    const options = db.$transaction.mock.calls[0][1];
+    // Fifty lines of product resolution can outrun Prisma's 5s default, and a
+    // timeout mid-create is an order the operator typed and lost.
+    expect(options).toEqual({ timeout: 20_000, maxWait: 5_000 });
+  });
+});

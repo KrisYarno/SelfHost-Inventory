@@ -819,6 +819,8 @@ describe('money (seam S2) and the onRecord context', () => {
       lineId: LINE_ID,
       shipmentId: SHIPMENT,
       kind: 'first',
+      // REV-10 clause 2: the route needs to know which verb it is auditing.
+      flagOnly: false,
       previousVerified: null,
       ordered: 10,
       verified: 7,
@@ -862,5 +864,242 @@ describe('the raw SQL is parameterized', () => {
     expect(lock.sql).not.toContain(String(LINE_ID));
     expect(lock.sql).not.toContain(SHIPMENT);
     expect(Prisma.sql`SELECT 1`.values).toEqual([]);
+  });
+});
+
+describe('expectPrevious — the client states what it believed (CH-1, spec REV-10 clause 1)', () => {
+  it('refuses with 409 CONFLICT when the locked count is not what the client saw', async () => {
+    const tx = mkTx({
+      line: lockedLine({
+        status: StagingItemStatus.VERIFIED,
+        verifiedQuantity: 46,
+        stockedQuantity: 2,
+        disposedQuantity: 1,
+      }),
+    });
+    const rec = recorder();
+
+    await expect(
+      verifyLine(tx, args({ verifiedQuantity: 50, expectPrevious: 50 }), {
+        onRecord: rec.onRecord,
+        batchId: BATCH,
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CONFLICT',
+      message:
+        'The count changed since you loaded this line — verified is now 46 (stocked 2, disposed 1). Reload and try again.',
+    });
+
+    // NOTHING was claimed, promoted, written or recorded — the refusal lands on
+    // the line lock alone.
+    expect(kinds(tx)).toEqual(['line-lock']);
+    expect(rec.calls()).toBe(0);
+  });
+
+  it('null asserts "nothing has been counted" — a line already counted refuses', async () => {
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.VERIFIED, verifiedQuantity: 8 }),
+    });
+    const rec = recorder();
+
+    await expect(
+      verifyLine(tx, args({ verifiedQuantity: 10, expectPrevious: null }), {
+        onRecord: rec.onRecord,
+        batchId: BATCH,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+    expect(kinds(tx)).toEqual(['line-lock']);
+  });
+
+  it('null on a never-counted line MATCHES and the verify proceeds', async () => {
+    const tx = mkTx();
+    const rec = recorder();
+
+    const result = await verifyLine(tx, args({ verifiedQuantity: 10, expectPrevious: null }), {
+      onRecord: rec.onRecord,
+      batchId: BATCH,
+    });
+
+    expect(result.status).toBe(StagingItemStatus.VERIFIED);
+    expect(kinds(tx)).toContain('line-update');
+  });
+
+  it('a matching number proceeds exactly as an unguarded call does', async () => {
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.VERIFIED, verifiedQuantity: 8 }),
+    });
+    const rec = recorder();
+
+    await verifyLine(tx, args({ verifiedQuantity: 12, expectPrevious: 8 }), {
+      onRecord: rec.onRecord,
+      batchId: BATCH,
+    });
+
+    expect(rec.ctx()).toMatchObject({ kind: 'raise', previousVerified: 8, verified: 12 });
+  });
+
+  it('ABSENT asserts nothing (an older client keeps working)', async () => {
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.VERIFIED, verifiedQuantity: 8 }),
+    });
+    const rec = recorder();
+
+    await verifyLine(tx, args({ verifiedQuantity: 12 }), {
+      onRecord: rec.onRecord,
+      batchId: BATCH,
+    });
+
+    expect(rec.ctx()).toMatchObject({ kind: 'raise', previousVerified: 8 });
+  });
+});
+
+describe('the FLAG-ONLY verify — no count sent, no count moved (CH-2, REV-10 clause 2)', () => {
+  it('updates labelingRequired ALONE, leaving the count, the stamps and the status put', async () => {
+    const tx = mkTx({
+      line: lockedLine({
+        status: StagingItemStatus.LABELING,
+        verifiedQuantity: 9,
+        stockedQuantity: 2,
+      }),
+    });
+    const rec = recorder();
+
+    const result = await verifyLine(
+      tx,
+      args({ verifiedQuantity: undefined, labelingRequired: false, expectPrevious: 9 }),
+      { onRecord: rec.onRecord, batchId: BATCH },
+    );
+
+    const write = stmt(tx, 'line-update')!;
+    expect(write.data).toEqual({ labelingRequired: false });
+    expect(write.where).toMatchObject({
+      id: LINE_ID,
+      shipmentId: SHIPMENT,
+      status: StagingItemStatus.LABELING,
+      verifiedQuantity: 9,
+    });
+    expect(result).toMatchObject({ status: StagingItemStatus.LABELING, verifiedQuantity: 9 });
+  });
+
+  it('reports itself as a flag-only act: kind lower, delta 0, verified = previous, no discrepancy', async () => {
+    const tx = mkTx({
+      line: lockedLine({
+        status: StagingItemStatus.VERIFIED,
+        verifiedQuantity: 7,
+        orderedQuantity: 10,
+      }),
+    });
+    const rec = recorder();
+
+    await verifyLine(tx, args({ verifiedQuantity: undefined, labelingRequired: true }), {
+      onRecord: rec.onRecord,
+      batchId: BATCH,
+    });
+
+    expect(rec.ctx()).toMatchObject({
+      kind: 'lower',
+      flagOnly: true,
+      previousVerified: 7,
+      verified: 7,
+      delta: 0,
+      recvDiscrepancy: null,
+    });
+  });
+
+  it('refuses on an ORDERED line — count first (409 CONFLICT)', async () => {
+    const tx = mkTx();
+    const rec = recorder();
+
+    await expect(
+      verifyLine(tx, args({ verifiedQuantity: undefined, labelingRequired: false }), {
+        onRecord: rec.onRecord,
+        batchId: BATCH,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+    expect(kinds(tx)).not.toContain('line-update');
+  });
+
+  it('still honours expectPrevious', async () => {
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.VERIFIED, verifiedQuantity: 9 }),
+    });
+    const rec = recorder();
+
+    await expect(
+      verifyLine(
+        tx,
+        args({ verifiedQuantity: undefined, labelingRequired: false, expectPrevious: 4 }),
+        { onRecord: rec.onRecord, batchId: BATCH },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CONFLICT' });
+  });
+
+  it('still honours the deliveredProduct rules (a booked line refuses the re-map)', async () => {
+    const tx = mkTx({
+      line: lockedLine({
+        status: StagingItemStatus.VERIFIED,
+        verifiedQuantity: 9,
+        stockedQuantity: 1,
+      }),
+    });
+    const rec = recorder();
+
+    await expect(
+      verifyLine(
+        tx,
+        args({
+          verifiedQuantity: undefined,
+          deliveredProduct: { mode: 'existing', productId: 77 },
+        }),
+        { onRecord: rec.onRecord, batchId: BATCH },
+      ),
+    ).rejects.toBeInstanceOf(VerifiedLockedRefusal);
+  });
+
+  it('re-maps the delivered product without moving the count', async () => {
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.VERIFIED, verifiedQuantity: 9 }),
+    });
+    const rec = recorder();
+
+    await verifyLine(
+      tx,
+      args({
+        verifiedQuantity: undefined,
+        deliveredProduct: { mode: 'existing', productId: 77 },
+      }),
+      { onRecord: rec.onRecord, batchId: BATCH },
+    );
+
+    expect(stmt(tx, 'line-update')!.data).toEqual({
+      resolvedProductId: 77,
+      description: 'Substitute Y 5mg',
+    });
+    expect(rec.ctx()).toMatchObject({ flagOnly: true, verified: 9 });
+  });
+
+  it('a NOTE-only verify writes nothing to the line and still records', async () => {
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.VERIFIED, verifiedQuantity: 9 }),
+    });
+    const rec = recorder();
+
+    await verifyLine(tx, args({ verifiedQuantity: undefined, note: 'box looked wet' }), {
+      onRecord: rec.onRecord,
+      batchId: BATCH,
+    });
+
+    expect(kinds(tx)).not.toContain('line-update');
+    expect(rec.ctx()).toMatchObject({ flagOnly: true, note: 'box looked wet', delta: 0 });
+  });
+
+  it('a counted verify is NOT flag-only', async () => {
+    const tx = mkTx();
+    const rec = recorder();
+
+    await verifyLine(tx, args(), { onRecord: rec.onRecord, batchId: BATCH });
+
+    expect(rec.ctx()).toMatchObject({ kind: 'first', flagOnly: false });
   });
 });

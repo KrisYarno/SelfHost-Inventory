@@ -301,6 +301,11 @@ it("shows the boundary sentence, requires a reason, and posts { reason }", async
   // A reason is REQUIRED — the confirm is inert until one is typed.
   const confirm = within(panel).getByTestId("discard-remaining-confirm-501");
   expect(confirm).toBeDisabled();
+  // REV-10 clause 10: the label carries NO cached number. The remainder the
+  // server writes off is the one on the locked row, which may have moved since
+  // this card was drawn.
+  expect(confirm).toHaveTextContent("Write off the remainder");
+  expect(confirm.textContent).not.toMatch(/\d/);
 
   await user.type(within(panel).getByTestId("discard-remaining-reason-501"), "vial broke on the bench");
   expect(confirm).toBeEnabled();

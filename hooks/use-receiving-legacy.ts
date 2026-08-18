@@ -23,9 +23,20 @@ export const legacyLineKeys = {
   all: ["receiving", "legacy-lines"] as const,
 };
 
+/**
+ * The archive page: the newest `LEGACY_LINE_LIMIT` rows PLUS how many older
+ * ones the bound left off (spec REV-10 clause 6). The counts travel with the
+ * rows because the cue that renders them must never be able to contradict them.
+ */
+export type LegacyLinesPage = {
+  lines: LegacyLineView[];
+  count: number;
+  moreCount: number;
+};
+
 /** The newest page of GRADUATED/DISCARDED boxes (`LEGACY_LINE_LIMIT`). */
 export function useLegacyLines() {
-  return useQuery<LegacyLineView[], ShipmentApiError>({
+  return useQuery<LegacyLinesPage, ShipmentApiError>({
     queryKey: legacyLineKeys.all,
     queryFn: async ({ signal }) => {
       const res = await fetch("/api/receiving/legacy-lines", { signal });
@@ -33,7 +44,13 @@ export function useLegacyLines() {
       if (!res.ok) {
         throw readShipmentError(res, json, "Failed to load the pre-staging history");
       }
-      return ((json as { lines?: LegacyLineView[] })?.lines ?? []) as LegacyLineView[];
+      const page = json as Partial<LegacyLinesPage>;
+      const lines = page?.lines ?? [];
+      return {
+        lines,
+        count: page?.count ?? lines.length,
+        moreCount: page?.moreCount ?? 0,
+      };
     },
   });
 }

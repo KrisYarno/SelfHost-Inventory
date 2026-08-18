@@ -24,7 +24,7 @@ jest.mock('@/lib/prisma', () => ({
   __esModule: true,
   default: {
     inboundShipment: { findMany: jest.fn(), findUnique: jest.fn() },
-    stagingItem: { findMany: jest.fn() },
+    stagingItem: { findMany: jest.fn(), count: jest.fn() },
     inventoryException: { findMany: jest.fn() },
     $queryRaw: jest.fn(),
     $transaction: jest.fn(),
@@ -46,7 +46,7 @@ import { toShipmentDetail, toShipmentSummary } from '@/lib/shipments/queries';
 /** The mocked client, typed as what these tests actually drive. */
 const mockPrisma = prismaClient as unknown as {
   inboundShipment: { findMany: jest.Mock; findUnique: jest.Mock };
-  stagingItem: { findMany: jest.Mock };
+  stagingItem: { findMany: jest.Mock; count: jest.Mock };
   inventoryException: { findMany: jest.Mock };
   $queryRaw: jest.Mock;
   $transaction: jest.Mock;
@@ -507,10 +507,26 @@ describe('listLabelingQueue (PK2-5)', () => {
 });
 
 describe('listLegacyLines', () => {
-  it('discriminates on `receivedAt IS NOT NULL` (orphan legacy rows survive)', async () => {
-    mockPrisma.stagingItem.findMany.mockResolvedValue([legacyLine({ shipmentId: null })]);
+  /**
+   * The archive reads like the queue now (REV-10 clause 6): a COUNT and a
+   * BOUNDED SELECT, issued as ONE batch transaction so the "N older lines not
+   * shown" cue cannot contradict the rows above it.
+   */
+  function legacyTx(options: { count?: number; rows?: Record<string, unknown>[] } = {}) {
+    const { count = 1, rows = [] } = options;
+    mockPrisma.stagingItem.count.mockReturnValue({ __statement: 'count' });
+    mockPrisma.stagingItem.findMany.mockReturnValue({ __statement: 'select' });
+    mockPrisma.$transaction.mockImplementation(async (batch: unknown[]) => {
+      expect(Array.isArray(batch)).toBe(true);
+      expect(batch).toHaveLength(2);
+      return [count, rows];
+    });
+  }
 
-    const rows = await listLegacyLines({});
+  it('discriminates on `receivedAt IS NOT NULL` (orphan legacy rows survive)', async () => {
+    legacyTx({ count: 1, rows: [legacyLine({ shipmentId: null })] });
+
+    const { lines: rows } = await listLegacyLines({});
 
     const args = mockPrisma.stagingItem.findMany.mock.calls[0][0];
     expect(args.where).toEqual({
@@ -519,6 +535,9 @@ describe('listLegacyLines', () => {
     });
     expect(args.orderBy).toEqual({ receivedAt: 'desc' });
     expect(args.take).toBe(200);
+    // The COUNT is the SAME filter, spelled once — a cue that disagreed with
+    // the list would be worse than no cue.
+    expect(mockPrisma.stagingItem.count.mock.calls[0][0].where).toEqual(args.where);
     expect(rows[0]).toMatchObject({
       id: 3,
       description: 'Box of vials',
@@ -531,9 +550,9 @@ describe('listLegacyLines', () => {
   });
 
   it('names the RECEIVER, projected to { id, username } and nothing more', async () => {
-    mockPrisma.stagingItem.findMany.mockResolvedValue([legacyLine()]);
+    legacyTx({ rows: [legacyLine()] });
 
-    const rows = await listLegacyLines({});
+    const { lines: rows } = await listLegacyLines({});
 
     // PII DISCIPLINE (S26): a user reaches a wire shape as an id and a
     // username, never as a row with a hash on it.
@@ -544,9 +563,9 @@ describe('listLegacyLines', () => {
   });
 
   it('says the receiver has no name rather than inventing one', async () => {
-    mockPrisma.stagingItem.findMany.mockResolvedValue([legacyLine({ receivedByUser: null })]);
+    legacyTx({ rows: [legacyLine({ receivedByUser: null })] });
 
-    const rows = await listLegacyLines({});
+    const { lines: rows } = await listLegacyLines({});
 
     // The id stays (it is a real fact); the NAME is null, and the archive says
     // so — a blank byline reads as "nobody received this".
@@ -555,7 +574,7 @@ describe('listLegacyLines', () => {
   });
 
   it('honours an explicit bound', async () => {
-    mockPrisma.stagingItem.findMany.mockResolvedValue([]);
+    legacyTx({ count: 0, rows: [] });
 
     await listLegacyLines({ limit: 25 });
 
@@ -563,8 +582,27 @@ describe('listLegacyLines', () => {
   });
 
   it('refuses a NEW-FLOW row that somehow reaches the legacy mapper (INVARIANT)', async () => {
-    mockPrisma.stagingItem.findMany.mockResolvedValue([legacyLine({ receivedBy: null })]);
+    legacyTx({ rows: [legacyLine({ receivedBy: null })] });
 
     await expect(listLegacyLines({})).rejects.toMatchObject({ statusCode: 500 });
+  });
+
+  it('reports how many older lines the bound left off (REV-10 clause 6)', async () => {
+    legacyTx({ count: 947, rows: [legacyLine()] });
+
+    const result = await listLegacyLines({ limit: 200 });
+
+    expect(result.count).toBe(947);
+    expect(result.moreCount).toBe(747);
+    expect(result.lines).toHaveLength(1);
+  });
+
+  it('never reports a negative remainder', async () => {
+    legacyTx({ count: 3, rows: [legacyLine()] });
+
+    const result = await listLegacyLines({ limit: 200 });
+
+    expect(result.count).toBe(3);
+    expect(result.moreCount).toBe(0);
   });
 });

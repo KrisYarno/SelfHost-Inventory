@@ -204,17 +204,18 @@ describe("GET /api/admin/ops-health", () => {
     });
   });
 
-  test("open new-flow lines warn and point at /receiving (which can act on all three statuses)", async () => {
+  test("open new-flow lines are REPORTED, never an attention item (REV-10 clause 7)", async () => {
     m.stagingItem.count.mockImplementation(({ where }: any) =>
       Promise.resolve(where.status?.in ? 5 : 0),
     );
 
     const body = await (await opsHealthGET(opsReq())).json();
 
-    const item = body.attention.find((a: any) => /5 receiving/i.test(a.message));
-    expect(item).toBeDefined();
-    expect(item.severity).toBe("warning");
-    expect(item.href).toBe("/receiving");
+    // The number is still published — it is the workload figure.
+    expect(body.pendingReviews.data.stagingOpenNewFlow).toBe(5);
+    // But a busy dock is not a health problem: an ops-health that is amber
+    // whenever anybody is receiving something teaches people to ignore amber.
+    expect(body.attention.some((a: any) => /receiving lines/i.test(a.message))).toBe(false);
   });
 
   test("a RESIDUAL received row is a cutover straggler pointing at the runbook, never at /pre-staging", async () => {
@@ -234,6 +235,17 @@ describe("GET /api/admin/ops-health", () => {
 
   test("both staging counters at zero raise no staging attention at all", async () => {
     m.stagingItem.count.mockResolvedValue(0);
+
+    const body = await (await opsHealthGET(opsReq())).json();
+
+    expect(body.attention).toEqual([]);
+    expect(body.verdict).toBe("ok");
+  });
+
+  test("live receiving work alone leaves the verdict OK (REV-10 clause 7)", async () => {
+    m.stagingItem.count.mockImplementation(({ where }: any) =>
+      Promise.resolve(where.status?.in ? 12 : 0),
+    );
 
     const body = await (await opsHealthGET(opsReq())).json();
 

@@ -79,9 +79,11 @@ assert_eq "OVERHAUL inbound_shipments.status enum" "SELECT COLUMN_TYPE FROM info
 # never RECEIVED (the legacy pre-staging queue). The header default stays OPEN.
 assert_eq "OVERHAUL staging default ORDERED" "SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME='status';" "ORDERED"
 assert_eq "OVERHAUL header default OPEN" "SELECT COLUMN_DEFAULT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inbound_shipments' AND COLUMN_NAME='status';" "OPEN"
-# receivedAt: the CURRENT_TIMESTAMP default is GONE (P-1 — the legacy creator now writes it
-# explicitly, in this same deploy), the column is nullable, and DATETIME(0) precision is unchanged.
-assert_eq "OVERHAUL receivedAt default dropped" "SELECT CONCAT(COALESCE(COLUMN_DEFAULT,'<null>'),'|',IS_NULLABLE,'|',COLUMN_TYPE,'|',EXTRA) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME='receivedAt';" "<null>|YES|datetime|"
+# receivedAt: the CURRENT_TIMESTAMP default is KEPT (spec REV-10 clause 4 — a code rollback to
+# fc195ad relies on it, and its box-create omits the column), the column is now NULLABLE, and
+# DATETIME(0) precision is unchanged. The new flow protects `receivedAt IS NOT NULL` as the legacy
+# discriminator from the CODE side: every new-flow create writes receivedAt: null explicitly.
+assert_eq "OVERHAUL receivedAt default KEPT" "SELECT CONCAT(COALESCE(COLUMN_DEFAULT,'<null>'),'|',IS_NULLABLE,'|',COLUMN_TYPE,'|',EXTRA) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME='receivedAt';" "CURRENT_TIMESTAMP|YES|datetime|DEFAULT_GENERATED"
 assert_eq "OVERHAUL three widenings nullable" "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='staging_items' AND COLUMN_NAME IN ('locationId','receivedBy','receivedAt') AND IS_NULLABLE='YES';" "3"
 # The exception follow-up classification lives in its own column, not in the subject JSON.
 assert_eq "OVERHAUL inventory_exceptions.resolution" "SELECT CONCAT(COLUMN_TYPE,'|',IS_NULLABLE) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='fresh' AND TABLE_NAME='inventory_exceptions' AND COLUMN_NAME='resolution';" "varchar(32)|YES"

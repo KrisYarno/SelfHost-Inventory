@@ -43,7 +43,7 @@ export type OrdersFilterChip =
   | "RECEIVING"
   | "CLOSED"
   | "CANCELLED"
-  | "LEGACY_OPEN";
+  | "LEGACY";
 
 export interface OrdersFilter {
   chips: OrdersFilterChip[];
@@ -57,10 +57,17 @@ const CHIPS: { value: OrdersFilterChip; label: string }[] = [
   { value: "RECEIVING", label: "Receiving" },
   { value: "CLOSED", label: "Closed" },
   { value: "CANCELLED", label: "Cancelled" },
-  { value: "LEGACY_OPEN", label: "Legacy-open" },
+  { value: "LEGACY", label: "Legacy receipts" },
 ];
 
 const NEW_FLOW_CHIPS: OrdersFilterChip[] = ["ORDERED", "RECEIVING", "CLOSED", "CANCELLED"];
+
+/**
+ * Every status a LEGACY (W1) header can be in. All three, not just OPEN: after
+ * the drain there is no open legacy receipt left, so an OPEN-only chip is a
+ * control that can only ever come back empty (spec REV-10 clause 6).
+ */
+const LEGACY_STATUSES = ["OPEN", "CLOSED", "CANCELLED"];
 
 /**
  * The REQUEST the chips ask for.
@@ -76,23 +83,30 @@ export function supplyOrdersQuery(filter: OrdersFilter): {
   model: "legacy" | "supply-order" | undefined;
 } {
   const newFlow = NEW_FLOW_CHIPS.filter((chip) => filter.chips.includes(chip));
-  const legacyOpen = filter.chips.includes("LEGACY_OPEN");
-  const statuses = [...newFlow, ...(legacyOpen ? ["OPEN"] : [])];
+  const legacy = filter.chips.includes("LEGACY");
+  // A status asked for by BOTH families is asked for once: the two `CLOSED`s
+  // are the same string on the wire.
+  const statuses = [
+    ...newFlow,
+    ...(legacy ? LEGACY_STATUSES.filter((status) => !newFlow.includes(status as OrdersFilterChip)) : []),
+  ];
 
   let model: "legacy" | "supply-order" | undefined;
-  if (legacyOpen && newFlow.length === 0) model = "legacy";
-  else if (!legacyOpen) model = "supply-order";
+  if (legacy && newFlow.length === 0) model = "legacy";
+  else if (!legacy) model = "supply-order";
 
   return { statuses, model };
 }
 
 /**
- * "Legacy-open" means `model: 'legacy'` AND the legacy header is `OPEN` — a
- * legacy CLOSED receipt is history, not something the Closed chip is about.
+ * "Legacy receipts" means `model: 'legacy'`, ANY status (REV-10 clause 6): the
+ * pre-overhaul receipts are one archive, and a closed one is exactly the kind
+ * somebody comes back to ask about. The new-flow chips still say nothing about
+ * them — a legacy CLOSED receipt is not what the Closed chip is about.
  */
 export function matchesOrdersFilter(order: SupplyOrderSummary, filter: OrdersFilter): boolean {
   if (order.model === "legacy") {
-    return filter.chips.includes("LEGACY_OPEN") && order.legacy.status === "OPEN";
+    return filter.chips.includes("LEGACY");
   }
   return filter.chips.includes(order.status as OrdersFilterChip);
 }

@@ -188,6 +188,12 @@ function QueueLine({ orderId, line, locations }: QueueLineProps) {
             stock movement; a disposal recorded in error is corrected by re-raising the
             verified count in Receiving and stocking the units
           </p>
+          <p
+            data-testid={`discard-remaining-asof-${line.id}`}
+            className="text-xs text-muted-foreground"
+          >
+            {`As of the last refresh: ${line.remaining} unit(s) remaining.`}
+          </p>
           <Label htmlFor={`discard-remaining-reason-${line.id}`} className="text-xs">
             What happened to them?
           </Label>
@@ -207,9 +213,11 @@ function QueueLine({ orderId, line, locations }: QueueLineProps) {
               onClick={submitDiscard}
               disabled={trimmedReason === "" || discardRemaining.isPending}
             >
-              {discardRemaining.isPending
-                ? "Writing it off…"
-                : `Write off ${line.remaining} unit(s)`}
+              {/* NO CACHED NUMBER (REV-10 clause 10): the server writes off
+                  what the LOCKED row still has, which may not be the figure
+                  this card was drawn with. The success toast reports the
+                  server's count. */}
+              {discardRemaining.isPending ? "Writing it off…" : "Write off the remainder"}
             </Button>
             <Button size="sm" variant="ghost" onClick={closePanel}>
               Keep them

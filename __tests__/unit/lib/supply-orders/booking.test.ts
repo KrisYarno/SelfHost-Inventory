@@ -525,6 +525,24 @@ describe('idempotency — replay and mismatch (G2s-6 / G2s2-4)', () => {
     expect(mockApplyStockDelta).not.toHaveBeenCalled();
   });
 
+  it('says it in the OPERATOR\'s frame — no booking keys (REV-10 clause 10)', async () => {
+    const tx = mkTx({ prior });
+    const rec = recorder();
+
+    const error = await bookSupplyOrderBatch(tx, args({ quantity: 5, locationId: 2 }), {
+      onRecord: rec.onRecord,
+      batchId: BATCH,
+    }).catch((err: Error) => err);
+
+    expect(error).toBeInstanceOf(Error);
+    // The person reading this is standing at a bench with a printed label; a
+    // sentence about idempotency keys tells them nothing they can act on.
+    expect((error as Error).message).not.toMatch(/booking key/i);
+    expect((error as Error).message).toBe(
+      'Already recorded 4 unit(s) for this attempt into location 2; 5 unit(s) into location 2 is a different batch — reload to see the current count, then record it again.',
+    );
+  });
+
   it('a DIFFERENT location under the same key is 409 IDEMPOTENCY_MISMATCH', async () => {
     const tx = mkTx({ prior });
     const rec = recorder();
@@ -827,6 +845,26 @@ describe('D-COST (step 7) and the subjects the ROUTE writes', () => {
       unitCostCents: 1000,
       lossCents: 3000,
       reason: expect.any(String),
+    });
+  });
+
+  it('the refresh KEEPS null on an unpriced line (REV-10 clause 8)', async () => {
+    const tx = mkTx({
+      line: lockedLine({
+        status: StagingItemStatus.LABELING,
+        stockedQuantity: 2,
+        disposedQuantity: 3,
+        lineTotalCents: null,
+      }),
+    });
+    const rec = recorder();
+
+    await bookSupplyOrderBatch(tx, args({ quantity: 2 }), { onRecord: rec.onRecord, batchId: BATCH });
+
+    expect(rec.ctx().labelingLossRefresh).toMatchObject({
+      units: 3,
+      unitCostCents: null,
+      lossCents: null,
     });
   });
 
@@ -1176,7 +1214,11 @@ describe('discardRemaining — the same prologue, the labeling-loss half (§4.3.
     expect(mockApplyReceiptCost).not.toHaveBeenCalled();
   });
 
-  it('an UNPRICED line loses 0 money truthfully (never a fabricated figure)', async () => {
+  it("an UNPRICED line's loss is UNKNOWN — null, never a fabricated 0 (REV-10 clause 8)", async () => {
+    // CONTRACT CHANGE (codex CR-5): this pin previously demanded 0. An unbilled
+    // unordered arrival has no lineTotalCents at all, so what its lost units
+    // cost is not zero — it is not recorded. $0.00 on the register would read as
+    // a settled, costless write-off.
     const tx = mkTx({
       line: lockedLine({ status: StagingItemStatus.LABELING, lineTotalCents: null }),
     });
@@ -1184,8 +1226,21 @@ describe('discardRemaining — the same prologue, the labeling-loss half (§4.3.
 
     await discardRemaining(tx, discardArgs(), { onRecord: rec.onRecord, batchId: BATCH });
 
-    expect(rec.ctx().lossCents).toBe(0);
+    expect(rec.ctx().lossCents).toBeNull();
+    expect(rec.ctx().labelingLoss.lossCents).toBeNull();
     expect(rec.ctx().labelingLoss.unitCostCents).toBeNull();
+  });
+
+  it('a REAL lineTotalCents of 0 is a KNOWN zero and stays 0', async () => {
+    const tx = mkTx({
+      line: lockedLine({ status: StagingItemStatus.LABELING, lineTotalCents: 0 }),
+    });
+    const rec = discardRecorder();
+
+    await discardRemaining(tx, discardArgs(), { onRecord: rec.onRecord, batchId: BATCH });
+
+    expect(rec.ctx().lossCents).toBe(0);
+    expect(rec.ctx().labelingLoss.lossCents).toBe(0);
   });
 
   it('refuses a line that was never verified (422) and a legacy header (409)', async () => {

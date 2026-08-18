@@ -307,11 +307,13 @@ export const GET = apiHandler(async () => {
     if (p.pendingProducts > 0) {
       attention.push({ severity: "warning", system: "Reviews", message: `${p.pendingProducts} products awaiting review`, href: "/admin/product-review" });
     }
-    if (p.stagingOpenNewFlow > 0) {
-      // /receiving, not /labeling: the labeling queue cannot act on an ORDERED
-      // line, and this count includes them (plan P-5's link, corrected).
-      attention.push({ severity: "warning", system: "Reviews", message: `${p.stagingOpenNewFlow} receiving lines in progress`, href: "/receiving" });
-    }
+    // `stagingOpenNewFlow` is deliberately NOT an attention item (spec REV-10
+    // clause 7): lines in ORDERED/VERIFIED/LABELING are the operator path
+    // WORKING, and a health panel that goes amber whenever somebody is
+    // receiving something is amber forever — which teaches people to ignore it.
+    // The number is still reported in `pendingReviews.data`, as a workload
+    // figure. `stagingResidualReceived` stays a warning: a straggler is a
+    // cutover event nobody is working on.
     if (p.stagingResidualReceived > 0) {
       attention.push({ severity: "warning", system: "Reviews", message: `${p.stagingResidualReceived} legacy straggler row(s) still RECEIVED — follow the receiving cutover runbook`, href: "/admin" });
     }
