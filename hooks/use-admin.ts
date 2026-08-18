@@ -128,7 +128,19 @@ export interface BackupsHealth {
 export interface PendingReviewsHealth {
   pendingUsers: number;
   pendingProducts: number;
-  stagingReceived: number;
+  /**
+   * Receiving/Labeling overhaul (spec §11, PK2-12): live work on the NEW flow —
+   * supply-order lines that are ORDERED, VERIFIED or LABELING. A queue somebody
+   * is meant to be working.
+   */
+  stagingOpenNewFlow: number;
+  /**
+   * The RENAMED legacy counter (was `stagingReceived`): pre-staging rows still
+   * sitting at `RECEIVED` after the cutover. Not a queue — a straggler, settled
+   * through the receiving cutover runbook. Reported BESIDE the new-flow count,
+   * never summed with it: they mean different things and are fixed differently.
+   */
+  stagingResidualReceived: number;
 }
 
 export interface RebuildJobHealth {

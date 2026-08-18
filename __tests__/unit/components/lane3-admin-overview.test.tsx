@@ -42,7 +42,7 @@ function makeData(overrides: Partial<OpsHealthResponse> = {}): OpsHealthResponse
     attention: [],
     integrations: { status: "ok", data: [] },
     backups: { status: "ok", data: { newest: { name: "b.sql", mtimeMs: Date.now(), ageHours: 1 }, count: 1, volume: "ok" } },
-    pendingReviews: { status: "ok", data: { pendingUsers: 0, pendingProducts: 0, stagingReceived: 0 } },
+    pendingReviews: { status: "ok", data: { pendingUsers: 0, pendingProducts: 0, stagingOpenNewFlow: 0, stagingResidualReceived: 0 } },
     rebuild: {
       status: "ok",
       data: {
@@ -107,6 +107,74 @@ test("needs-attention list renders actionable items with their system label + me
   expect(screen.getByText(/Action needed/i)).toBeInTheDocument();
   expect(screen.getByText("Backup volume unreadable")).toBeInTheDocument();
   expect(screen.getByText("3 products awaiting review")).toBeInTheDocument();
+});
+
+// ---------------------------------------------------------------------------
+// Receiving/Labeling overhaul (PK2-12, spec §11): the pending-reviews card shows
+// the staging work as TWO ROWS — live work on the new flow, and any residual
+// legacy RECEIVED row, which is a cutover straggler rather than a queue. The two
+// are NEVER added together, and the residual row never points at /pre-staging
+// (M6 redirects it).
+// ---------------------------------------------------------------------------
+
+test("open new-flow lines render their own row, linked to /receiving", () => {
+  setData(
+    makeData({
+      pendingReviews: {
+        status: "ok",
+        data: { pendingUsers: 0, pendingProducts: 0, stagingOpenNewFlow: 5, stagingResidualReceived: 0 },
+      },
+    }),
+  );
+  render(<OpsHealthSection />);
+
+  const row = screen.getByText(/Receiving lines in progress/i).closest("div")!;
+  expect(row).toBeInTheDocument();
+  expect(screen.getByText("5")).toBeInTheDocument();
+  const link = screen.getAllByRole("link").find((a) => a.getAttribute("href") === "/receiving");
+  expect(link).toBeDefined();
+  expect(screen.queryByText(/awaiting graduation/i)).toBeNull();
+});
+
+test("a residual RECEIVED row says legacy straggler + runbook, and links nowhere near /pre-staging", () => {
+  setData(
+    makeData({
+      pendingReviews: {
+        status: "ok",
+        data: { pendingUsers: 0, pendingProducts: 0, stagingOpenNewFlow: 0, stagingResidualReceived: 2 },
+      },
+    }),
+  );
+  render(<OpsHealthSection />);
+
+  expect(screen.getByText(/legacy straggler/i)).toBeInTheDocument();
+  expect(screen.getByText(/receiving cutover runbook/i)).toBeInTheDocument();
+  expect(
+    screen.queryAllByRole("link").some((a) => a.getAttribute("href") === "/pre-staging"),
+  ).toBe(false);
+});
+
+test("both staging counters render as TWO rows, never as one sum", () => {
+  setData(
+    makeData({
+      pendingReviews: {
+        status: "ok",
+        data: { pendingUsers: 0, pendingProducts: 0, stagingOpenNewFlow: 5, stagingResidualReceived: 2 },
+      },
+    }),
+  );
+  render(<OpsHealthSection />);
+
+  expect(screen.getByText("5")).toBeInTheDocument();
+  expect(screen.getByText("2")).toBeInTheDocument();
+  // 7 would be the sum — it must appear nowhere.
+  expect(screen.queryByText("7")).toBeNull();
+});
+
+test("all four counters at zero => the all-clear row", () => {
+  setData(makeData());
+  render(<OpsHealthSection />);
+  expect(screen.getByText(/No items awaiting review/i)).toBeInTheDocument();
 });
 
 test("backup volume unreadable is a distinct labeled state (not 'none')", () => {

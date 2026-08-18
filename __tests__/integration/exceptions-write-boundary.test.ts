@@ -130,6 +130,40 @@ const ALLOWED_WRITER_CALLERS: WriterCaller[] = [
       "the line, in the line's own transaction, so a rolled-back arrival can never " +
       'strand one. The ORDERED-line branch of the same route writes no exception at all',
   },
+  {
+    path: 'app/api/inbound-shipments/[id]/lines/[lineId]/verify/route.ts',
+    reason:
+      'M3b (pack C3b): verifying a delivery is where a receiving discrepancy becomes known ' +
+      'and where it stops being true. The verify core assembles the INTENT — upsert while ' +
+      'the count misses the order, resolve when it lands back on it — and this route ' +
+      "executes it inside the core's transaction, so the count and the register row commit " +
+      'together or not at all',
+  },
+  {
+    path: 'app/api/inbound-shipments/[id]/lines/[lineId]/stock-in/route.ts',
+    reason:
+      'M3b (pack C3b): booking labeled units is where cost-differs and pending-with-stock ' +
+      'are BORN (the receipt disagreed with the catalog cost; real units now sit against an ' +
+      'unapproved product) and where an existing labeling-loss row is RE-PRICED, because its ' +
+      "cumulative money moves when a batch lands. All three ride the primitive's own " +
+      'transaction via its onRecord hook',
+  },
+  {
+    path: 'app/api/inbound-shipments/[id]/lines/[lineId]/discard-remaining/route.ts',
+    reason:
+      'M3b (pack C3b): writing off the remainder of a line IS the labeling-loss event — units ' +
+      'verified at the dock and lost before they became stock. The row is written with the ' +
+      "operator's own reason in the same transaction as the disposal counter, so an aborted " +
+      'write-off can never leave a loss on the register',
+  },
+  {
+    path: 'app/api/inbound-shipments/[id]/lines/[lineId]/resolve/route.ts',
+    reason:
+      'M3b (pack C3b, spec §4.2.7): the order detail follow-up control. It SETTLES one of the ' +
+      "line's two exception rows — classifying how (credited, reshipped, accepted) and " +
+      'refreshing the subject money from the locked counters first — under the same ' +
+      'transaction as its EXCEPTION_RESOLVE audit line',
+  },
 ];
 
 const MUTATING_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'] as const;

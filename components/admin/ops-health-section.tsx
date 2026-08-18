@@ -267,8 +267,15 @@ export function OpsHealthSection() {
           ) : (
             (() => {
               const p = data.pendingReviews.data;
-              const total = p.pendingUsers + p.pendingProducts + p.stagingReceived;
-              if (total === 0) {
+              // Every counter at zero, checked as four questions rather than as
+              // one total: the two staging numbers mean different things (spec
+              // §11) and this section must never present them as one figure.
+              const clear =
+                p.pendingUsers === 0 &&
+                p.pendingProducts === 0 &&
+                p.stagingOpenNewFlow === 0 &&
+                p.stagingResidualReceived === 0;
+              if (clear) {
                 return <HealthRow tone="positive" Icon={CheckCircle2} status="Clear" title="No items awaiting review." />;
               }
               return (
@@ -276,8 +283,14 @@ export function OpsHealthSection() {
                   {p.pendingProducts > 0 && (
                     <HealthRow tone="warning" Icon={AlertTriangle} status={String(p.pendingProducts)} title="Products awaiting review" action={<LinkAction href="/admin/product-review" label="Review" />} />
                   )}
-                  {p.stagingReceived > 0 && (
-                    <HealthRow tone="warning" Icon={AlertTriangle} status={String(p.stagingReceived)} title="Received items awaiting graduation" action={<LinkAction href="/pre-staging" label="Open" />} />
+                  {p.stagingOpenNewFlow > 0 && (
+                    <HealthRow tone="warning" Icon={AlertTriangle} status={String(p.stagingOpenNewFlow)} title="Receiving lines in progress" detail="Ordered, verified or labeling — the operator path" action={<LinkAction href="/receiving" label="Open" />} />
+                  )}
+                  {p.stagingResidualReceived > 0 && (
+                    // Deliberately NOT linked to /pre-staging (M6 redirects it):
+                    // a straggler is settled through the runbook, not by opening
+                    // a page that no longer books anything.
+                    <HealthRow tone="warning" Icon={AlertTriangle} status={String(p.stagingResidualReceived)} title="Pre-staging rows still RECEIVED" detail="Legacy straggler — follow the receiving cutover runbook" />
                   )}
                   {p.pendingUsers > 0 && (
                     <HealthRow tone="warning" Icon={AlertTriangle} status={String(p.pendingUsers)} title="Users awaiting approval" action={<LinkAction href="/admin/users" label="Review" />} />

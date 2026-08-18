@@ -178,6 +178,69 @@ describe("GET /api/admin/ops-health", () => {
     expect(body.rebuild.data.heartbeatStale).toBe(true);
   });
 
+  // -------------------------------------------------------------------------
+  // Receiving/Labeling overhaul (PK2-12, spec §11): the staging counter SPLITS.
+  // `stagingOpenNewFlow` is live work on the new flow; `stagingResidualReceived`
+  // is the renamed legacy counter, and a straggler there is a cutover event, not
+  // a queue. TWO numbers, TWO rows, NEVER a sum.
+  // -------------------------------------------------------------------------
+
+  test("loadPendingReviews counts FOUR things, and the two staging counters use their own predicates", async () => {
+    m.stagingItem.count.mockImplementation(({ where }: any) =>
+      Promise.resolve(where.status?.in ? 3 : 1),
+    );
+
+    const body = await (await opsHealthGET(opsReq())).json();
+
+    expect(m.stagingItem.count).toHaveBeenCalledTimes(2);
+    const predicates = m.stagingItem.count.mock.calls.map((c: any[]) => c[0].where);
+    expect(predicates).toContainEqual({ status: { in: ["ORDERED", "VERIFIED", "LABELING"] } });
+    expect(predicates).toContainEqual({ status: "RECEIVED" });
+    expect(body.pendingReviews.data).toEqual({
+      pendingUsers: 0,
+      pendingProducts: 0,
+      stagingOpenNewFlow: 3,
+      stagingResidualReceived: 1,
+    });
+  });
+
+  test("open new-flow lines warn and point at /receiving (which can act on all three statuses)", async () => {
+    m.stagingItem.count.mockImplementation(({ where }: any) =>
+      Promise.resolve(where.status?.in ? 5 : 0),
+    );
+
+    const body = await (await opsHealthGET(opsReq())).json();
+
+    const item = body.attention.find((a: any) => /5 receiving/i.test(a.message));
+    expect(item).toBeDefined();
+    expect(item.severity).toBe("warning");
+    expect(item.href).toBe("/receiving");
+  });
+
+  test("a RESIDUAL received row is a cutover straggler pointing at the runbook, never at /pre-staging", async () => {
+    m.stagingItem.count.mockImplementation(({ where }: any) =>
+      Promise.resolve(where.status?.in ? 0 : 2),
+    );
+
+    const body = await (await opsHealthGET(opsReq())).json();
+
+    const item = body.attention.find((a: any) => /straggler/i.test(a.message));
+    expect(item).toBeDefined();
+    expect(item.message).toMatch(/runbook/i);
+    expect(item.href).not.toBe("/pre-staging");
+    // The two counters are never added together into one message.
+    expect(body.attention.some((a: any) => /2 receiving/i.test(a.message))).toBe(false);
+  });
+
+  test("both staging counters at zero raise no staging attention at all", async () => {
+    m.stagingItem.count.mockResolvedValue(0);
+
+    const body = await (await opsHealthGET(opsReq())).json();
+
+    expect(body.attention).toEqual([]);
+    expect(body.verdict).toBe("ok");
+  });
+
   test("a failing subsystem degrades to unavailable and NEVER 500s the route", async () => {
     m.user.count.mockRejectedValue(new Error("db down")); // sinks loadPendingReviews only
 

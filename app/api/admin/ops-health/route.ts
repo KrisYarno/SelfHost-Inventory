@@ -117,13 +117,23 @@ async function loadBackups(now: number): Promise<BackupsHealth> {
   return { newest, count: listing.files.length, volume: listing.status };
 }
 
+// Receiving/Labeling overhaul (spec §11, PK2-12): the staging counter SPLITS in
+// two, because after the cutover the two numbers mean different things. Open
+// new-flow lines are work in progress on the current flow; a residual RECEIVED
+// row is a pre-staging straggler that appeared between the drain check and the
+// deploy, and it is settled through the runbook, not by working a queue. They
+// are reported as two counts and rendered as two rows — never added together.
+const STAGING_OPEN_NEW_FLOW = ["ORDERED", "VERIFIED", "LABELING"] as const;
+
 async function loadPendingReviews(): Promise<PendingReviewsHealth> {
-  const [pendingUsers, pendingProducts, stagingReceived] = await Promise.all([
-    prisma.user.count({ where: { isApproved: false, deletedAt: null } }),
-    prisma.product.count({ where: { approvalStatus: "PENDING_REVIEW", deletedAt: null } }),
-    prisma.stagingItem.count({ where: { status: "RECEIVED" } }),
-  ]);
-  return { pendingUsers, pendingProducts, stagingReceived };
+  const [pendingUsers, pendingProducts, stagingOpenNewFlow, stagingResidualReceived] =
+    await Promise.all([
+      prisma.user.count({ where: { isApproved: false, deletedAt: null } }),
+      prisma.product.count({ where: { approvalStatus: "PENDING_REVIEW", deletedAt: null } }),
+      prisma.stagingItem.count({ where: { status: { in: [...STAGING_OPEN_NEW_FLOW] } } }),
+      prisma.stagingItem.count({ where: { status: "RECEIVED" } }),
+    ]);
+  return { pendingUsers, pendingProducts, stagingOpenNewFlow, stagingResidualReceived };
 }
 
 async function loadRebuild(now: number): Promise<RebuildHealth> {
@@ -297,8 +307,13 @@ export const GET = apiHandler(async () => {
     if (p.pendingProducts > 0) {
       attention.push({ severity: "warning", system: "Reviews", message: `${p.pendingProducts} products awaiting review`, href: "/admin/product-review" });
     }
-    if (p.stagingReceived > 0) {
-      attention.push({ severity: "warning", system: "Reviews", message: `${p.stagingReceived} received items awaiting graduation`, href: "/pre-staging" });
+    if (p.stagingOpenNewFlow > 0) {
+      // /receiving, not /labeling: the labeling queue cannot act on an ORDERED
+      // line, and this count includes them (plan P-5's link, corrected).
+      attention.push({ severity: "warning", system: "Reviews", message: `${p.stagingOpenNewFlow} receiving lines in progress`, href: "/receiving" });
+    }
+    if (p.stagingResidualReceived > 0) {
+      attention.push({ severity: "warning", system: "Reviews", message: `${p.stagingResidualReceived} legacy straggler row(s) still RECEIVED — follow the receiving cutover runbook`, href: "/admin" });
     }
     if (p.pendingUsers > 0) {
       attention.push({ severity: "warning", system: "Reviews", message: `${p.pendingUsers} users awaiting approval`, href: "/admin/users" });
