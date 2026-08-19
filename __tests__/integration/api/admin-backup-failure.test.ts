@@ -29,6 +29,7 @@ jest.mock("next/headers", () => ({
   headers: jest.fn(async () => ({ get: () => null })),
 }));
 
+let stderrForRun = "";
 const STDERR =
   "mysqldump: Deprecated program name. It will be removed in a future release, use '/usr/bin/mariadb-dump' instead\n" +
   "WARNING: option --ssl-verify-server-cert is disabled, because of an insecure passwordless login.\n" +
@@ -45,7 +46,7 @@ jest.mock("node:child_process", () => {
       proc.stdout = new EventEmitter();
       proc.stderr = new EventEmitter();
       setImmediate(() => {
-        proc.stderr.emit("data", Buffer.from(STDERR));
+        proc.stderr.emit("data", Buffer.from(stderrForRun));
         proc.emit("close", 2);
       });
       return proc;
@@ -76,6 +77,20 @@ const ADMIN = { id: 7, email: "a@e.com", isAdmin: true, isApproved: true };
 describe("admin/backup POST — a failing mysqldump names its cause", () => {
   beforeEach(() => {
     (requireAdmin as jest.Mock).mockResolvedValue({ user: ADMIN });
+    (spawn as jest.Mock).mockClear();
+    stderrForRun = STDERR;
+  });
+
+  it("all-noise stderr falls back to the bare code message (never an empty suffix)", async () => {
+    stderrForRun = STDERR.split("\n").slice(0, 2).join("\n") + "\n";
+    const req = new NextRequest("http://t/api/admin/backup", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-csrf-token": "x" },
+    });
+    const res = await backupPOST(req);
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("mysqldump failed (code 2)");
   });
 
   it("500 with error = code + the first meaningful stderr line; details = full stderr; no audit row", async () => {
@@ -87,7 +102,7 @@ describe("admin/backup POST — a failing mysqldump names its cause", () => {
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toBe(
-      'mysqldump failed (code 2): mysqldump: Got error: 1045: "Plugin caching_sha2_password could not be loaded: Error loading shared library /usr/lib/mariadb/plugin/caching_sha2_password.so: No such file or directory" when trying to connect',
+      'mysqldump failed (code 2): Got error: 1045: "Plugin caching_sha2_password could not be loaded: Error loading shared library /usr/lib/mariadb/plugin/caching_sha2_password.so: No such file or directory" when trying to connect',
     );
     expect(body.details).toBe(STDERR);
     // The route retries once without --routines/--events before giving up.

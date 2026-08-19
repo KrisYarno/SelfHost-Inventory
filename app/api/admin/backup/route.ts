@@ -23,7 +23,9 @@ function summarizeDumpError(stderr: Buffer): string | null {
     const line = raw.trim();
     if (!line) continue;
     if (noise.some((re) => re.test(line))) continue;
-    return line.length > 300 ? `${line.slice(0, 300)}…` : line;
+    // The program name is already in the message the GUI shows ("mysqldump failed ...").
+    const bare = line.replace(/^(mysqldump|mariadb-dump):\s*/i, "");
+    return bare.length > 300 ? `${bare.slice(0, 300)}…` : bare;
   }
   return null;
 }

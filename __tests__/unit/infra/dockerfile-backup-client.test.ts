@@ -14,7 +14,10 @@ import path from 'node:path';
 const DOCKERFILE = path.join(process.cwd(), 'Dockerfile');
 
 describe('Dockerfile — the backup client carries the caching_sha2_password plugin', () => {
-  const src = fs.readFileSync(DOCKERFILE, 'utf8');
+  // Backslash continuations are joined first, so a future multi-line `RUN apk add \\`
+  // block is matched as the one logical line it is (a false red would otherwise
+  // follow a harmless reformat).
+  const src = fs.readFileSync(DOCKERFILE, 'utf8').replace(/\\\r?\n\s*/g, ' ');
   const apkLines = src
     .split('\n')
     .filter((l) => /^\s*RUN\s+apk\s+add\b/.test(l) && /mariadb-client/.test(l));
