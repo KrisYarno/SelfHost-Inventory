@@ -8,6 +8,26 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
+/**
+ * The first line of mysqldump's stderr that actually explains a failure. The
+ * MariaDB client prefixes every run with a deprecation notice and (when the
+ * password rides MYSQL_PWD) a TLS-verification warning, neither of which is the
+ * error — so they are skipped, and the real line (e.g. `Got error: 1045: ...`)
+ * rides the `error` string the admin GUI alerts. The full stderr stays in
+ * `details`. An exit code alone sent an operator to the container to find out
+ * that the client was missing an auth plugin.
+ */
+function summarizeDumpError(stderr: Buffer): string | null {
+  const noise = [/Deprecated program name/i, /--ssl-verify-server-cert is disabled/i];
+  for (const raw of stderr.toString().split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (noise.some((re) => re.test(line))) continue;
+    return line.length > 300 ? `${line.slice(0, 300)}…` : line;
+  }
+  return null;
+}
+
 function parseDatabaseUrl(url: string) {
   try {
     const u = new URL(url);
@@ -120,9 +140,10 @@ export const POST = apiHandler(async (req: NextRequest) => {
   if (res.code !== 0) {
     res = await runDump(buildArgs(false));
     if (res.code !== 0) {
+      const summary = summarizeDumpError(res.err);
       return new Response(
         JSON.stringify({
-          error: `mysqldump failed (code ${res.code})`,
+          error: `mysqldump failed (code ${res.code})${summary ? `: ${summary}` : ""}`,
           details: res.err.toString(),
         }),
         { status: 500 }

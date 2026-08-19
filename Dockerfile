@@ -31,8 +31,13 @@ ENV PORT=3000
 # change can never silently shift report day boundaries.
 ENV TZ=UTC
 
-# Install curl for healthcheck and mariadb-client for on-demand backups
-RUN apk add --no-cache curl mariadb-client
+# Install curl for the healthcheck and the MariaDB client for on-demand backups
+# (/api/admin/backup shells out to `mysqldump`). mariadb-connector-c is NOT optional:
+# it ships /usr/lib/mariadb/plugin/caching_sha2_password.so, and MySQL 8.4 creates
+# every user with caching_sha2_password — without the plugin the MariaDB mysqldump
+# exits 2 ("Plugin caching_sha2_password could not be loaded") before it ever
+# authenticates, and the admin GUI reports "mysqldump failed (code 2)".
+RUN apk add --no-cache curl mariadb-client mariadb-connector-c
 
 # Create non-root user
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
