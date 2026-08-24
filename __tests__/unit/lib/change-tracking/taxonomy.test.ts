@@ -58,8 +58,10 @@ describe('taxonomy completeness (writer-exhaustive)', () => {
     // (59). The next four are the Lane 4 members the pre-fix parser truncated
     // away — they were in the union all along (63). W1-3a added
     // GRADUATE_OVERRIDE (64). The Receiving/Labeling overhaul adds the verify,
-    // the batch stock-in and the exception resolution (67).
-    expect(unionMembers.length).toBe(67);
+    // the batch stock-in and the exception resolution (67). The reconciliation
+    // lane adds INVENTORY_ATTRIBUTE (68).
+    expect(unionMembers.length).toBe(68);
+    expect(unionMembers).toContain('INVENTORY_ATTRIBUTE');
     expect(unionMembers).toContain('GRADUATE_OVERRIDE');
     expect(unionMembers).toContain('STAGING_VERIFY');
     expect(unionMembers).toContain('STAGING_STOCK_IN');
@@ -160,6 +162,17 @@ describe('actionMeta group / verb derivation', () => {
       verb: 'STOCK_IN',
       tone: 'positive',
       label: 'Labeled units stocked',
+    });
+  });
+
+  it('reconciliation lane: INVENTORY_ATTRIBUTE carries full meta', () => {
+    // A classification, not a movement: NEUTRAL tone, and a label that says the
+    // act out loud so the feed never reads it as stock or order-state moving.
+    expect(actionMeta('INVENTORY_ATTRIBUTE')).toEqual({
+      group: 'INVENTORY',
+      verb: 'ATTRIBUTE',
+      tone: 'neutral',
+      label: 'Batch attributed to order',
     });
   });
 

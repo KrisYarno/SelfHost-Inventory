@@ -135,7 +135,13 @@ export type AuditActionType =
   // WITHOUT a new EntityType.
   | 'STAGING_VERIFY'
   | 'STAGING_STOCK_IN'
-  | 'EXCEPTION_RESOLVE';
+  | 'EXCEPTION_RESOLVE'
+  // --- Reconciliation lane (spec REV-7 D4): an admin attributed (or
+  // re-attributed) an outbound batch to an order — attribution ONLY, no stock
+  // or order-state movement. Addressed to the INVENTORY entity with the LEDGER
+  // batchId as entityId; the event's own batchId is a freshly minted one, per
+  // the house rule that every request mints its own.
+  | 'INVENTORY_ATTRIBUTE';
 
 export type EntityType =
   | 'USER'

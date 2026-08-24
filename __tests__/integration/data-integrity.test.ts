@@ -207,6 +207,10 @@ describe('Data Integrity Tests', () => {
               return Promise.resolve(log)
             }),
           },
+          // Reconciliation lane R-A: a batch with a negative delta now records
+          // one attribution attempt on the same tx (pinned exactly in
+          // batch-adjust-api.test.ts); the stand-in just has to exist.
+          orderAttributionAttempt: { create: jest.fn().mockResolvedValue({ id: 1 }) },
         }
         return callback(tx)
       })
@@ -265,6 +269,8 @@ describe('Data Integrity Tests', () => {
               Promise.resolve({ id: 1, ...data.data })
             ),
           },
+          // Reconciliation lane R-A: see above.
+          orderAttributionAttempt: { create: jest.fn().mockResolvedValue({ id: 1 }) },
         }
         return callback(tx)
       })

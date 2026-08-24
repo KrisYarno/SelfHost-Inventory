@@ -225,6 +225,9 @@ const KNOWN_VERBS: readonly string[] = [
   // existing STOCK_IN verb.
   'VERIFY',
   'RESOLVE',
+  // Reconciliation lane: INVENTORY_ATTRIBUTE -- an admin attributed (or
+  // re-attributed) an outbound batch to an order.
+  'ATTRIBUTE',
 ];
 
 /**

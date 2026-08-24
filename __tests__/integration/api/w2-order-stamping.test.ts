@@ -220,6 +220,105 @@ describe("unfulfill — the CORRECTION row names the same order", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Reconciliation lane R-A (spec REV-7 D1/D2, pack C1b.3): the ATTEMPT ROW.
+//
+// These are the pins that make an UNWIRED writer fail. `mockDeep()` fabricates
+// every delegate lazily, so `tx.orderAttributionAttempt.create` exists whether
+// or not the route ever calls it — a route that silently stopped recording
+// would keep this suite green without them. Each asserts the EXACT row, because
+// the columns are the contract: a wrong `evidence` is a report that lies about
+// how a batch got attributed.
+// ---------------------------------------------------------------------------
+
+/** The one attempt row the route wrote, or a failure naming the miss. */
+function soleAttempt(tx: ReturnType<typeof makeTx>) {
+  expect(tx.orderAttributionAttempt.create).toHaveBeenCalledTimes(1);
+  return (tx.orderAttributionAttempt.create.mock.calls[0][0] as any).data;
+}
+
+describe("fulfill — the ATTEMPT row says fulfillment attributed it", () => {
+  it("records attributed/fulfillment against the first ledger row", async () => {
+    const tx = makeTx();
+    tx.externalOrder.findUnique.mockResolvedValue({
+      id: ORDER_CUID,
+      externalId: "ext-1",
+      integrationId: "int-1",
+      internalStatus: "pending",
+      fulfilledAt: null,
+      fulfilledBy: null,
+      integration: { id: "int-1", platform: "WOOCOMMERCE", fulfillmentPushEnabled: false },
+      items: [singleLine()],
+    } as any);
+    driveTxWith(tx);
+
+    const res = await FULFILL(
+      post(`http://x/api/orders/${ORDER_CUID}/fulfill`, {
+        locationId: 5,
+        items: [{ itemId: "item-1", quantity: 2 }],
+      }),
+      { params: { orderId: ORDER_CUID } } as any
+    );
+    expect(res.status).toBe(200);
+
+    expect(soleAttempt(tx)).toEqual({
+      batchId: expect.any(String),
+      ledgerRowId: 777,
+      outcome: "attributed",
+      evidence: "fulfillment",
+      reason: null,
+      orderRecordId: ORDER_CUID,
+      previousOrderRecordId: null,
+      source: "fulfillment",
+      actorUserId: 7,
+    });
+  });
+
+  it("a BUNDLE-ONLY fulfillment records ledgerRowId NULL, never the -1 sentinel", async () => {
+    // Bundle lines expand into component deductions and carry the sentinel log
+    // id; a -1 in ledgerRowId would be a soft ref to a row that does not exist.
+    const tx = makeTx();
+    tx.externalOrder.findUnique.mockResolvedValue({
+      id: ORDER_CUID,
+      externalId: "ext-1",
+      integrationId: "int-1",
+      internalStatus: "pending",
+      fulfilledAt: null,
+      fulfilledBy: null,
+      integration: { id: "int-1", platform: "WOOCOMMERCE", fulfillmentPushEnabled: false },
+      items: [
+        singleLine({
+          id: "item-bundle",
+          bundleComponentSnapshot: null,
+          productLink: {
+            internalProductId: 10,
+            internalProduct: { id: 10, name: "Bundle" },
+            isBundle: true,
+            bundleComponents: [
+              { internalProductId: 21, quantity: 1, sortOrder: 0 },
+              { internalProductId: 22, quantity: 2, sortOrder: 1 },
+            ],
+          },
+        }),
+      ],
+    } as any);
+    driveTxWith(tx);
+
+    const res = await FULFILL(
+      post(`http://x/api/orders/${ORDER_CUID}/fulfill`, {
+        locationId: 5,
+        items: [{ itemId: "item-bundle", quantity: 1 }],
+      }),
+      { params: { orderId: ORDER_CUID } } as any
+    );
+    expect(res.status).toBe(200);
+
+    const row = soleAttempt(tx);
+    expect(row.ledgerRowId).toBeNull();
+    expect(row.evidence).toBe("fulfillment");
+  });
+});
+
 describe("deduct-simple — only the RESOLVED id is ever stamped", () => {
   it("stamps nothing when the resolver was never reached", async () => {
     const tx = makeTx();
@@ -243,5 +342,83 @@ describe("deduct-simple — only the RESOLVED id is ever stamped", () => {
     const row = tx.inventory_logs.create.mock.calls[0][0].data as any;
     expect(row.orderRecordId ?? null).toBeNull();
     expect(db.externalOrder.findUnique).not.toHaveBeenCalled();
+  });
+});
+
+describe("deduct-simple — the ATTEMPT row records WHICH evidence, or why none", () => {
+  /** Drive one manual deduction; hand back the attempt row it wrote. */
+  async function deductAttempt(body: Record<string, unknown>) {
+    const tx = makeTx();
+    tx.inventory_logs.create.mockResolvedValue({
+      id: 4242,
+      productId: 5,
+      delta: -3,
+      products: { name: "Widget" },
+    } as any);
+    driveTxWith(tx);
+
+    const res = await DEDUCT(
+      post("http://x/api/inventory/deduct-simple", {
+        locationId: 2,
+        items: [{ productId: 5, quantity: 3 }],
+        ...body,
+      })
+    );
+    expect(res.status).toBe(200);
+    return soleAttempt(tx);
+  }
+
+  it("a SELECTED order -> attributed/selected, carrying the chip in details", async () => {
+    db.externalOrder.findUnique.mockResolvedValue({ companyId: COMPANY_ID } as any);
+
+    expect(
+      await deductAttempt({ intent: "order", selectedExternalOrderId: ORDER_CUID })
+    ).toEqual({
+      batchId: expect.any(String),
+      ledgerRowId: 4242,
+      outcome: "attributed",
+      evidence: "selected",
+      reason: null,
+      orderRecordId: ORDER_CUID,
+      previousOrderRecordId: null,
+      source: "live-deduct",
+      actorUserId: 7,
+      details: { intent: "order" },
+    });
+  });
+
+  it("a TYPED reference that resolved -> attributed/reference-resolved", async () => {
+    // The reference round, not the selection: the two do not carry the same
+    // confidence, and a report that reads them as one thing is reading a number
+    // it cannot stand behind.
+    db.externalOrder.findMany.mockResolvedValue([
+      { id: ORDER_CUID, orderNumber: "12345", companyId: COMPANY_ID },
+    ] as any);
+
+    expect(await deductAttempt({ orderReference: "12345" })).toEqual({
+      batchId: expect.any(String),
+      ledgerRowId: 4242,
+      outcome: "attributed",
+      evidence: "reference-resolved",
+      reason: null,
+      orderRecordId: ORDER_CUID,
+      previousOrderRecordId: null,
+      source: "live-deduct",
+      actorUserId: 7,
+    });
+  });
+
+  it("NOTHING typed and no id -> none/no-reference-typed, not a decline", async () => {
+    expect(await deductAttempt({})).toEqual({
+      batchId: expect.any(String),
+      ledgerRowId: 4242,
+      outcome: "none",
+      evidence: null,
+      reason: "no-reference-typed",
+      orderRecordId: null,
+      previousOrderRecordId: null,
+      source: "live-deduct",
+      actorUserId: 7,
+    });
   });
 });

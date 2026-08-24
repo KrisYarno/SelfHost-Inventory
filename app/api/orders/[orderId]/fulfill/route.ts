@@ -7,10 +7,14 @@ import {
   enforceRateLimit,
 } from '@/lib/rateLimit';
 import { recordChange, newBatchId } from '@/lib/change-tracking';
+import { recordAttributionAttempt } from '@/lib/attribution/attempts';
 import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
 import { pushStockForProducts } from '@/lib/external-orders/stock-sync';
 import prisma from '@/lib/prisma';
-import { BUNDLE_SENTINEL_PRODUCT_ID } from '@/lib/external-orders/constants';
+import {
+  BUNDLE_SENTINEL_INVENTORY_LOG_ID,
+  BUNDLE_SENTINEL_PRODUCT_ID,
+} from '@/lib/external-orders/constants';
 
 export const dynamic = 'force-dynamic';
 
@@ -97,6 +101,24 @@ export const POST = apiHandler(async (
         },
         affectedCount: r.fulfilled.length,
         batchId,
+      });
+
+      // Reconciliation lane R-A (spec REV-7 D1/D2, pack C1b.3): fulfilling an
+      // order IS the attribution — the order came from the PATH, was
+      // membership-checked, and stamped every SALE row this closure describes.
+      // The attempt row names the first REAL ledger row; a bundle line carries
+      // the sentinel log id, so a bundle-only fulfillment records NULL rather
+      // than a soft ref to a row that does not exist.
+      await recordAttributionAttempt(tx, {
+        outcome: 'attributed',
+        evidence: 'fulfillment',
+        batchId,
+        ledgerRowId:
+          r.fulfilled.find((f) => f.inventoryLogId !== BUNDLE_SENTINEL_INVENTORY_LOG_ID)
+            ?.inventoryLogId ?? null,
+        source: 'fulfillment',
+        actorUserId: user.id,
+        orderRecordId: params.orderId,
       });
     },
     // Phase C (P-C1): thread the event batchId into the deduction tx so every

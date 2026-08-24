@@ -12,6 +12,8 @@ import { mapDeductionIntent } from "@/lib/inventory/intent";
 import { resolveSelectedExternalOrderId } from "@/lib/orders/resolve-selected-order";
 import { AppError } from "@/lib/error-handling";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
+import { recordAttributionAttempt } from "@/lib/attribution/attempts";
+import { classifyAdjust } from "@/lib/attribution/classify";
 
 export const dynamic = "force-dynamic";
 
@@ -114,7 +116,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
       reasonCode: intentMapping.reasonCode,
       orderRecordId,
       batchId,
-      record: async (tx) => {
+      // Reconciliation lane R-A: the closure now takes the LOG the primitive
+      // just wrote, so the attempt row can name the ledger row it describes.
+      // createInventoryAdjustment has always passed `{ log, newVersion }` — this
+      // is a call-site widening, not a lib change.
+      record: async (tx, { log }) => {
         await recordChange(tx, {
           actor: { userId: user.id },
           actionType: autoAddForTransfer
@@ -149,6 +155,27 @@ export const POST = apiHandler(async (request: NextRequest) => {
           },
           batchId,
         });
+
+        // Reconciliation lane R-A (spec REV-7 D1/D2, pack C1b.3): an attempt row
+        // ONLY for stock that left the building. A positive adjust restocks and
+        // a transfer auto-add completes a move; neither had an attribution
+        // question to answer, and recording "we could not attribute it" for them
+        // would populate the report with movements that never asked.
+        if (body.delta < 0 && !autoAddForTransfer) {
+          await recordAttributionAttempt(tx, {
+            ...classifyAdjust({
+              stamped: orderRecordId !== null,
+              idSupplied: body.selectedExternalOrderId !== undefined,
+              intent: body.intent,
+            }),
+            batchId,
+            ledgerRowId: log.id,
+            source: "live-adjust",
+            actorUserId: user.id,
+            orderRecordId,
+            ...(body.intent ? { details: { intent: body.intent } } : {}),
+          });
+        }
       },
     }
   );

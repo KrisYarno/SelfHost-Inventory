@@ -104,6 +104,10 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   // The judgement about a shortage belongs to the exception row it raises, not
   // to the act of counting — the same reasoning that made RECOUNT informational.
   VERIFY: 'neutral',
+  // Reconciliation lane: attributing a batch to an order is a CLASSIFICATION.
+  // Nothing moved — not stock, not the order's state — so any tone with a
+  // direction in it would read as an act the event did not perform.
+  ATTRIBUTE: 'neutral',
   CHANGE: 'neutral',
   MAINTENANCE: 'neutral',
   UNKNOWN: 'neutral',
@@ -156,6 +160,10 @@ const KNOWN_VERBS: readonly string[] = [
   'CREATE',
   'DELETE',
   'UPDATE',
+  // Reconciliation lane: INVENTORY_ATTRIBUTE. No shorter verb is a suffix of it
+  // and it is a suffix of no member, so its position is immaterial — it sits
+  // ahead of the six-letter verbs to keep the list roughly longest-first.
+  'ATTRIBUTE',
   // Receiving/Labeling overhaul: STAGING_VERIFY. Nothing shorter is a suffix of
   // it either; it sits with the other six-letter verbs.
   'VERIFY',
@@ -248,6 +256,9 @@ const LABEL_OVERRIDES: Readonly<Record<string, string>> = {
   STAGING_VERIFY: 'Line verified',
   STAGING_STOCK_IN: 'Labeled units stocked',
   EXCEPTION_RESOLVE: 'Exception resolved',
+  // Reconciliation lane: Title Case would read "Inventory Attribute", which
+  // names a column rather than the act. This says what the admin did.
+  INVENTORY_ATTRIBUTE: 'Batch attributed to order',
 };
 
 function titleCase(actionType: string): string {
@@ -383,6 +394,8 @@ export const ALL_ACTION_TYPES: readonly AuditActionType[] = [
   'STAGING_VERIFY',
   'STAGING_STOCK_IN',
   'EXCEPTION_RESOLVE',
+  // Reconciliation lane (spec REV-7 D4): the manual batch attribution.
+  'INVENTORY_ATTRIBUTE',
 ];
 
 // Display order + labels for the non-UNKNOWN groups.

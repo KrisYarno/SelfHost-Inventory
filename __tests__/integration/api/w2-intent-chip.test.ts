@@ -193,6 +193,82 @@ describe("adjust route — T7 mapping table, row by row", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Reconciliation lane R-A (spec REV-7 D1/D2, pack C1b.3): the ATTEMPT ROW.
+//
+// `mockDeep()` fabricates `tx.orderAttributionAttempt.create` lazily, so a route
+// that never calls it looks identical to one that does — these pins are what
+// make an unwired writer fail. The NEGATIVE pins matter just as much: a positive
+// adjust and a transfer auto-add move nothing out of the building, so recording
+// "we could not attribute it" would put rows in the report for movements that
+// never had an attribution question.
+// ---------------------------------------------------------------------------
+
+describe("adjust route — the ATTEMPT row, and the two cases that write none", () => {
+  async function adjustAttempt(body: Record<string, unknown>) {
+    const tx = makeTx();
+    driveTxWith(tx);
+    const res = await ADJUST(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: -3,
+        ...body,
+      })
+    );
+    expect(res.status).toBe(200);
+    return tx;
+  }
+
+  it("a negative adjust naming an order -> attributed/selected on the LOG's row id", async () => {
+    db.externalOrder.findUnique.mockResolvedValue({ companyId: COMPANY_ID } as any);
+
+    const tx = await adjustAttempt({ intent: "order", selectedExternalOrderId: ORDER_CUID });
+
+    expect(tx.orderAttributionAttempt.create).toHaveBeenCalledTimes(1);
+    expect((tx.orderAttributionAttempt.create.mock.calls[0][0] as any).data).toEqual({
+      batchId: expect.any(String),
+      ledgerRowId: 555,
+      outcome: "attributed",
+      evidence: "selected",
+      reason: null,
+      orderRecordId: ORDER_CUID,
+      previousOrderRecordId: null,
+      source: "live-adjust",
+      actorUserId: 7,
+      details: { intent: "order" },
+    });
+  });
+
+  it("a negative adjust with NO chip -> none/no-order-context (nothing was stated)", async () => {
+    const tx = await adjustAttempt({});
+
+    expect((tx.orderAttributionAttempt.create.mock.calls[0][0] as any).data).toEqual({
+      batchId: expect.any(String),
+      ledgerRowId: 555,
+      outcome: "none",
+      evidence: null,
+      reason: "no-order-context",
+      orderRecordId: null,
+      previousOrderRecordId: null,
+      source: "live-adjust",
+      actorUserId: 7,
+    });
+  });
+
+  it("a POSITIVE adjust writes NO attempt row at all", async () => {
+    const tx = await adjustAttempt({ delta: 3, intent: "order" });
+
+    expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
+  });
+
+  it("a transfer AUTO-ADD writes no attempt row either, even on a negative delta", async () => {
+    const tx = await adjustAttempt({ autoAddForTransfer: true });
+
+    expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
+  });
+});
+
 describe("adjust route — the chip NEVER blocks (design friction ceiling)", () => {
   it("submits legally with no chip interaction at all, landing as other/nothing", async () => {
     const { row, details } = await adjustRow({});

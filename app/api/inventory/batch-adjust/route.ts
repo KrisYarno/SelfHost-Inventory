@@ -3,6 +3,7 @@ import { Prisma, type inventory_logs } from "@prisma/client";
 import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
+import { recordAttributionAttempt } from "@/lib/attribution/attempts";
 import { applyStockDelta, OptimisticLockError } from "@/lib/inventory";
 import { BatchInventoryAdjustmentSchema } from "@/lib/validation/inventory";
 import { enforceRateLimit, applyRateLimitHeaders } from "@/lib/rateLimit";
@@ -126,6 +127,25 @@ export const POST = apiHandler(async (request: NextRequest) => {
         details: { updates: auditUpdates, locationId: adjustments[0]?.locationId },
         affectedCount: auditUpdates.length,
         batchId,
+      });
+    }
+
+    // Reconciliation lane R-A (spec REV-7 D1/D2, pack C1b.3): ONE attempt row
+    // per batch, and only when the batch actually took stock OUT. The journal
+    // offers no order context of any kind — no chip, no order id, no reference —
+    // so the class is the constant none/no-order-context, recorded rather than
+    // omitted so the report can tell "we asked and there was nothing to go on"
+    // from "this batch is older than the lane". An all-positive batch writes no
+    // attempt row even though the bulk-update event above still fires.
+    const firstDeduction = logs.find((l) => l.delta < 0);
+    if (firstDeduction) {
+      await recordAttributionAttempt(tx, {
+        outcome: "none",
+        reason: "no-order-context",
+        batchId,
+        ledgerRowId: firstDeduction.id,
+        source: "live-batch-adjust",
+        actorUserId: user.id,
       });
     }
 

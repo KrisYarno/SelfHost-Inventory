@@ -478,5 +478,104 @@ describe('/api/inventory/batch-adjust', () => {
       expect(response.status).toBe(200)
       expect(transactionCalls).toBe(1) // All adjustments in single transaction
     })
+
+    // -----------------------------------------------------------------------
+    // Reconciliation lane R-A (spec REV-7 D1/D2, pack C1b.3): the ATTEMPT ROW.
+    //
+    // The journal offers no order context of any kind, so its class is the
+    // constant none/no-order-context — ONE row per batch, and only when the
+    // batch actually took stock out. An all-positive batch still records its
+    // bulk-update audit event; recording an attempt for it would put a "we could
+    // not attribute this" row in the report for a restock.
+    // -----------------------------------------------------------------------
+
+    /** A tx whose ledger rows echo the requested deltas, with distinct ids. */
+    function txEchoingDeltas() {
+      let nextId = 900
+      return {
+        product_locations: {
+          findFirst: jest.fn().mockResolvedValue({ id: 1, quantity: 100, version: 1 }),
+          update: jest.fn(),
+          create: jest.fn(),
+          upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 100, version: 2 }),
+        },
+        product: { update: jest.fn() },
+        inventory_logs: {
+          create: jest.fn().mockImplementation(async ({ data }: any) => ({
+            id: nextId++,
+            productId: data.productId,
+            locationId: data.locationId,
+            userId: data.userId,
+            delta: data.delta,
+            changeTime: new Date(),
+            logType: data.logType,
+          })),
+        },
+        orderAttributionAttempt: { create: jest.fn().mockResolvedValue({ id: 1 }) },
+      }
+    }
+
+    it('a MIXED-SIGN batch records ONE attempt against the FIRST negative row', async () => {
+      const tx = txEchoingDeltas()
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue([
+        { id: 1, name: 'Product 1' },
+        { id: 2, name: 'Product 2' },
+        { id: 3, name: 'Product 3' },
+      ])
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => callback(tx))
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [
+            { productId: 1, locationId: 1, delta: 10 },
+            { productId: 2, locationId: 1, delta: -5 },
+            { productId: 3, locationId: 1, delta: -7 },
+          ],
+        }),
+      })
+
+      const response = await POST(request)
+      expect(response.status).toBe(200)
+
+      expect(tx.orderAttributionAttempt.create).toHaveBeenCalledTimes(1)
+      expect((tx.orderAttributionAttempt.create.mock.calls[0][0] as any).data).toEqual({
+        batchId: 'batch-test',
+        // The SECOND log written (id 901) — the first one with delta < 0, not
+        // simply the first row of the batch.
+        ledgerRowId: 901,
+        outcome: 'none',
+        evidence: null,
+        reason: 'no-order-context',
+        orderRecordId: null,
+        previousOrderRecordId: null,
+        source: 'live-batch-adjust',
+        actorUserId: 1,
+      })
+    })
+
+    it('an ALL-POSITIVE batch records NO attempt, though recordChange still fires', async () => {
+      const tx = txEchoingDeltas()
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue([
+        { id: 1, name: 'Product 1' },
+        { id: 2, name: 'Product 2' },
+      ])
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => callback(tx))
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [
+            { productId: 1, locationId: 1, delta: 10 },
+            { productId: 2, locationId: 1, delta: 4 },
+          ],
+        }),
+      })
+
+      const response = await POST(request)
+      expect(response.status).toBe(200)
+
+      expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled()
+    })
   })
 })

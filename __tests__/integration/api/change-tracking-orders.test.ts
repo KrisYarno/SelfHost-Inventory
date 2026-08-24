@@ -149,6 +149,11 @@ function makeFulfillTx() {
     // actually models them.
     $executeRawUnsafe: jest.fn().mockResolvedValue(0),
     auditLog: { create: jest.fn().mockResolvedValue({ id: 1 }) },
+    // Reconciliation lane R-A: the fulfill closure now writes its attribution
+    // attempt on this same tx, right after the audit event. The EXACT row is
+    // pinned in w2-order-stamping.test.ts; this stand-in only has to exist, or
+    // the closure would fault on a delegate the hand-built tx never had.
+    orderAttributionAttempt: { create: jest.fn().mockResolvedValue({ id: 1 }) },
   };
 }
 

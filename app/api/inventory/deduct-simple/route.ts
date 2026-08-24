@@ -11,6 +11,8 @@ import {
 import { SimpleDeductSchema } from "@/lib/validation/workbench";
 import { applyRateLimitHeaders, enforceRateLimit } from "@/lib/rateLimit";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
+import { recordAttributionAttempt } from "@/lib/attribution/attempts";
+import { classifyDeductSimple, type DeductSimpleLocals } from "@/lib/attribution/classify";
 import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
@@ -78,6 +80,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // where customer names arrive — and proceed unstamped exactly as if the
   // reference had not matched.
   let referenceResolution = null;
+  // Reconciliation lane (spec REV-7 D2): a swallowed infrastructure failure and
+  // a resolver that never ran are the same `null` here, and they are NOT the
+  // same fact about this deduction. The flag keeps them apart for the attempt
+  // record below — `declined/resolver-error` versus a skip.
+  let resolverThrew = false;
   if (body.selectedExternalOrderId === undefined && isReferenceResolutionEligible(body.intent)) {
     try {
       referenceResolution = await resolveOrderReference(body.orderReference, user);
@@ -86,8 +93,18 @@ export const POST = apiHandler(async (request: NextRequest) => {
         "[deduct-simple] reference resolution failed (infrastructure); deduction proceeds unattributed"
       );
       referenceResolution = null;
+      resolverThrew = true;
     }
   }
+
+  // What the resolution round did, in the vocabulary the D2 classifier reads.
+  const resolver: DeductSimpleLocals["resolver"] = resolverThrew
+    ? { kind: "threw" }
+    : referenceResolution === null
+      ? { kind: "skipped" }
+      : referenceResolution.outcome === "resolved"
+        ? { kind: "resolved" }
+        : { kind: "declined", outcome: referenceResolution.outcome };
 
   const orderRecordId =
     selectedStamp ??
@@ -162,6 +179,29 @@ export const POST = apiHandler(async (request: NextRequest) => {
         },
         affectedCount: logs.length,
         batchId,
+      });
+
+      // Reconciliation lane R-A (spec REV-7 D1/D2, pack C1b.3): what this
+      // deduction's attribution attempt actually was — attributed, declined, or
+      // nothing to attribute. Written beside the audit event, on the SAME `tx`,
+      // so the record and the stock movement commit together. A deduction always
+      // writes at least one SALE row, so there is always an attempt to record.
+      await recordAttributionAttempt(tx, {
+        ...classifyDeductSimple({
+          stamped: selectedStamp !== null && orderRecordId !== null,
+          idSupplied: body.selectedExternalOrderId !== undefined,
+          intent: body.intent,
+          referenceTyped: (body.orderReference ?? "").trim().length > 0,
+          resolver,
+        }),
+        batchId,
+        ledgerRowId: logs[0].id,
+        source: "live-deduct",
+        actorUserId: user.id,
+        orderRecordId,
+        // The chip, only when the packer actually tapped it — an absent key, not
+        // a null one, for the same reason the audit accrual above omits it.
+        ...(body.intent ? { details: { intent: body.intent } } : {}),
       });
     },
     // ER-C3: thread the event batchId so every DEDUCTION->SALE ledger row joins
