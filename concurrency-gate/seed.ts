@@ -323,12 +323,13 @@ const exceptionKeysFor = (scope: GateScope): string[] => [
 /**
  * Put the scoped fixture back exactly as the seed left it, in ONE transaction.
  *
- * Deletes the gate-owned ledger rows, exception rows and audit rows for the
- * scope; deletes every NON-SEED header and line (a scenario that creates its own
- * second order recreates it AFTER this call — pack C7b.2 scenario 5); then
- * restores the complete seed snapshot of every scoped line, the header, every
- * scoped product (approval / deletion / review / costPrice / quantity — a first
- * batch's D-COST fill moves costPrice) and the scoped `product_locations` rows.
+ * Deletes the gate-owned ledger rows, exception rows, attribution attempts and
+ * audit rows for the scope; deletes every NON-SEED header and line (a scenario
+ * that creates its own second order recreates it AFTER this call — pack C7b.2
+ * scenario 5); then restores the complete seed snapshot of every scoped line,
+ * the header, every scoped product (approval / deletion / review / costPrice /
+ * quantity — a first batch's D-COST fill moves costPrice) and the scoped
+ * `product_locations` rows.
  */
 export async function resetGateFixtures(scope: GateScope): Promise<void> {
   const prisma = new PrismaClient({ datasources: { db: { url: gateDatabaseUrl() } } });
@@ -346,6 +347,11 @@ export async function resetGateFixtures(scope: GateScope): Promise<void> {
         },
       });
       await tx.inventoryException.deleteMany({ where: { key: { in: exceptionKeysFor(scope) } } });
+      // Reconciliation lane (pack C1a.4): attempt rows are append-only in app/ lib/
+      // scripts/ — the static gate scans THOSE roots, and `concurrency-gate/` is
+      // outside them, so a fixture reset may legally delete them. Unscoped for now;
+      // M6 narrows it to the scenario's batch when the recon fixture lands.
+      await tx.orderAttributionAttempt.deleteMany({});
       await tx.auditLog.deleteMany({
         where: {
           OR: [

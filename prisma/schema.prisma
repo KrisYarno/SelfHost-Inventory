@@ -685,6 +685,9 @@ model ExternalOrderItem {
   @@unique([orderId, externalItemId], map: "idx_order_item_unique")
   @@index([orderId])
   @@index([externalVariantId])
+  // Reconciliation lane (spec REV-7 §2.1): the unmapped-lines scan reads the
+  // unmapped half of an order window and groups it by order.
+  @@index([isMapped, orderId])
   @@map("external_order_items")
 }
 
@@ -1105,5 +1108,31 @@ model InventoryException {
   // which upsertException replaces wholesale. Cleared on reopen.
   resolution  String?   @db.VarChar(32)
 
+  // Reconciliation lane (spec REV-7 §2.1): the exceptions finder pages by kind
+  // with an open/resolved filter — `resolvedAt IS NULL` is the hot half.
+  @@index([kind, resolvedAt])
   @@map("inventory_exceptions")
+}
+
+// Reconciliation lane (spec REV-7 §2.1): every LIVE attribution attempt at batch grain —
+// successes AND declines — written at the ROUTE seams inside the business transaction.
+// Append-only (no update/delete verb anywhere in app/ lib/ scripts/ — a static gate).
+// SOFT refs only (orderRecordId/previousOrderRecordId -> external_orders.id; batchId ->
+// inventory_logs.batchId; ledgerRowId -> inventory_logs.id): the cross-aggregate rule, no FK.
+model OrderAttributionAttempt {
+  id                    Int       @id @default(autoincrement())
+  batchId               String    @db.VarChar(36)
+  ledgerRowId           Int?
+  outcome               String    @db.VarChar(16)
+  evidence              String?   @db.VarChar(32)
+  reason                String?   @db.VarChar(32)
+  orderRecordId         String?   @db.VarChar(191)
+  previousOrderRecordId String?   @db.VarChar(191)
+  source                String    @db.VarChar(32)
+  actorUserId           Int?
+  details               Json?
+  attemptedAt           DateTime  @default(now()) @db.DateTime(3)
+
+  @@index([batchId, attemptedAt, id])
+  @@map("order_attribution_attempts")
 }

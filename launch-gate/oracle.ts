@@ -56,6 +56,7 @@ export const CHECKSUM_MANIFEST: string[] = [
   "inventory_logs",
   "locations",
   "notification_history",
+  "order_attribution_attempts",
   "platform_write_attempts",
   "product_links",
   "product_locations",
