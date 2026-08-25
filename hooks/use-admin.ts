@@ -3,6 +3,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import type { User } from "@/components/admin/user-table";
+import type {
+  AttributionClassKey,
+  AttributionReport,
+  BatchDetail,
+} from "@/lib/reconciliation/attribution";
 
 // ---------------------------------------------------------------------------
 // Shared TanStack Query hooks for the /admin surface.
@@ -725,6 +730,153 @@ export function useCreateBackup() {
       URL.revokeObjectURL(url);
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin", "backups"] }),
+  });
+}
+
+// ===========================================================================
+// Reconciliation  (app/(app)/admin/reconciliation — pack C4a.1, spec REV-7 §4.2)
+//
+// The wire types are the PRODUCER's (`lib/reconciliation/attribution.ts`),
+// imported type-only so no client bundle pulls in Prisma. Everything lives
+// under ["admin","reconciliation",…] so one prefix invalidates the report, the
+// drill-down and the picker together — which is what a write on this surface
+// has to do (a stale row here is a stale `expectPreviousOrderRecordId`).
+// ===========================================================================
+
+export interface AttributionReportInput {
+  /** ISO day keys; `to` is INCLUSIVE end-of-day UTC (the route's contract). */
+  from: string;
+  to: string;
+  classKey?: AttributionClassKey;
+  orderNumber?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export function useAttributionReport(input: AttributionReportInput) {
+  return useQuery<AttributionReport, ApiError>({
+    queryKey: ["admin", "reconciliation", "attribution", input],
+    queryFn: ({ signal }) => {
+      const params = new URLSearchParams({ from: input.from, to: input.to });
+      if (input.classKey) params.set("class", input.classKey);
+      if (input.orderNumber) params.set("orderNumber", input.orderNumber);
+      if (input.limit !== undefined) params.set("limit", String(input.limit));
+      if (input.cursor) params.set("cursor", input.cursor);
+      return getJSON<AttributionReport>(`/api/reconciliation/attribution?${params}`, { signal });
+    },
+  });
+}
+
+/** The drill-down. `null` = nothing is open, so nothing is asked for. */
+export function useBatchDetail(batchId: string | null) {
+  return useQuery<BatchDetail, ApiError>({
+    queryKey: ["admin", "reconciliation", "batch", batchId],
+    queryFn: ({ signal }) =>
+      getJSON<BatchDetail>(
+        `/api/reconciliation/attribution/${encodeURIComponent(batchId as string)}`,
+        { signal },
+      ),
+    enabled: batchId !== null,
+  });
+}
+
+export interface OrderSearchResult {
+  id: string;
+  orderNumber: string;
+  platform: string;
+  internalStatus: string;
+  externalCreatedAt: string | null;
+  itemCount: number;
+}
+
+export interface OrderSearchResponse {
+  orders: OrderSearchResult[];
+  /** What the twenty-row ceiling left off — said out loud by the picker. */
+  moreCount: number;
+}
+
+/**
+ * The Attribute… picker's search. DISABLED on an empty query: an empty search
+ * is not a request for every order (the route answers the same way). The 250ms
+ * debounce lives in the component, which owns the keystrokes.
+ */
+export function useOrderSearch(q: string) {
+  return useQuery<OrderSearchResponse, ApiError>({
+    queryKey: ["admin", "reconciliation", "orders", q],
+    queryFn: ({ signal }) =>
+      getJSON<OrderSearchResponse>(
+        `/api/reconciliation/orders/search?q=${encodeURIComponent(q)}`,
+        { signal },
+      ),
+    enabled: q.length >= 1,
+  });
+}
+
+export interface AttributeBatchInput {
+  orderRecordId: string;
+  /** The id the ROW DISPLAYED — `null` states "I saw it unattributed" (D4). */
+  expectPreviousOrderRecordId: string | null;
+  reason?: string;
+}
+
+export interface AttributeBatchResult {
+  changed: boolean;
+  orderRecordId: string;
+  previousOrderRecordId: string | null;
+  rowCount: number;
+  completedFulfillment: boolean;
+}
+
+/**
+ * A structured refusal, as the confirm panel needs it: the server's sentence
+ * VERBATIM plus the two fields the UI acts on. `mutateJSON`'s plain Error would
+ * throw `code` away, and `BATCH_MOVED` would be indistinguishable from any
+ * other conflict.
+ */
+export interface ReconciliationError extends Error {
+  status?: number;
+  code: string;
+  currentOrderRecordId?: string | null;
+}
+
+function readReconciliationError(
+  res: Response,
+  json: Record<string, unknown>,
+): ReconciliationError {
+  const message =
+    typeof json.error === "string" ? json.error : `Request failed (${res.status})`;
+  const err = new Error(message) as ReconciliationError;
+  err.status = res.status;
+  err.code = typeof json.code === "string" ? json.code : "UNKNOWN";
+  if ("currentOrderRecordId" in json) {
+    err.currentOrderRecordId = (json.currentOrderRecordId as string | null) ?? null;
+  }
+  return err;
+}
+
+/**
+ * Manual attribution (D4). `onSettled` — not `onSuccess`: a REFUSED write is
+ * exactly when the client's picture is known to be wrong, so the surface
+ * refreshes on the way out either way.
+ */
+export function useAttributeBatch(batchId: string) {
+  const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
+  return useMutation<AttributeBatchResult, ReconciliationError, AttributeBatchInput>({
+    mutationFn: async (input) => {
+      const res = await fetch(`/api/reconciliation/attribution/${encodeURIComponent(batchId)}`, {
+        method: "POST",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+        body: JSON.stringify(input),
+      });
+      const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok) {
+        throw readReconciliationError(res, json);
+      }
+      return json as unknown as AttributeBatchResult;
+    },
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: ["admin", "reconciliation"] }),
   });
 }
 

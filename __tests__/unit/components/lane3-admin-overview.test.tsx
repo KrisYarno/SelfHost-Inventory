@@ -252,3 +252,47 @@ test("Run-now confirm can be cancelled without firing a rebuild", async () => {
   expect(screen.getByRole("button", { name: /Run rebuild/i })).toBeInTheDocument();
   expect(mutateAsync).not.toHaveBeenCalled();
 });
+
+// ---------------------------------------------------------------------------
+// Reconciliation lane (pack C4a.1, plan P-10): the workload line. A REPORT, not
+// an alarm — a permanently non-zero backlog styled as attention would teach
+// people to ignore this panel, so the line is neutral in BOTH states and the
+// route contributes no attention row from these counts.
+// ---------------------------------------------------------------------------
+
+test("the reconciliation line states both figures and links to the page", () => {
+  setData(
+    makeData({
+      reconciliation: {
+        status: "ok",
+        data: { openExceptions: 4, unmatchedIntended14d: 6, asOf: new Date().toISOString() },
+      },
+    }),
+  );
+  render(<OpsHealthSection />);
+
+  expect(
+    screen.getByText(
+      "4 open exceptions · 6 deductions that named an order but did not match (14d)",
+    ),
+  ).toBeInTheDocument();
+  const link = screen
+    .getAllByRole("link")
+    .find((a) => a.getAttribute("href") === "/admin/reconciliation");
+  expect(link).toBeDefined();
+});
+
+test("an unavailable reconciliation read is MUTED, never attention styling", () => {
+  setData(
+    makeData({ reconciliation: { status: "unavailable", errorCode: "RECONCILIATION_UNAVAILABLE" } }),
+  );
+  render(<OpsHealthSection />);
+
+  expect(screen.getByText("Reconciliation counts unavailable")).toBeInTheDocument();
+  const badge = screen.getByTestId("reconciliation-status");
+  expect(badge.className).toContain("bg-muted");
+  expect(badge.className).not.toContain("bg-warning-muted");
+  expect(badge.className).not.toContain("bg-negative-muted");
+  // The verdict strip is untouched: this is a workload figure, not a fault.
+  expect(screen.getByText(/All systems healthy/i)).toBeInTheDocument();
+});

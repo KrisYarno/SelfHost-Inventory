@@ -14,6 +14,7 @@ import {
   ClipboardList,
   DatabaseZap,
   ArrowRight,
+  Scale,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -66,6 +67,7 @@ function HealthRow({
   title,
   detail,
   action,
+  statusTestId,
 }: {
   tone: StatusTone;
   Icon: typeof CheckCircle2;
@@ -73,11 +75,17 @@ function HealthRow({
   title: string;
   detail?: string;
   action?: React.ReactNode;
+  /** For rows whose TONE is the contract (the reconciliation line, pack C4a.1). */
+  statusTestId?: string;
 }) {
   return (
     <div className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex items-start gap-3">
-        <StatusBadge tone={tone} className="mt-0.5 inline-flex shrink-0 items-center gap-1">
+        <StatusBadge
+          tone={tone}
+          data-testid={statusTestId}
+          className="mt-0.5 inline-flex shrink-0 items-center gap-1"
+        >
           <Icon className="h-3 w-3" aria-hidden />
           {status}
         </StatusBadge>
@@ -304,6 +312,32 @@ export function OpsHealthSection() {
                 </div>
               );
             })()
+          )}
+
+          {/* Reconciliation — a WORKLOAD figure, never an alarm (pack C4a.1,
+              plan P-10). The counts contribute NO attention row and the
+              unavailable state is muted rather than styled as a fault: a
+              permanently non-zero backlog wearing warning colours is how a
+              panel teaches people to stop reading it. */}
+          <SectionHeading Icon={Scale}>Reconciliation</SectionHeading>
+          {data.reconciliation.status === "unavailable" ? (
+            <HealthRow
+              tone="neutral"
+              Icon={Scale}
+              status="Unavailable"
+              statusTestId="reconciliation-status"
+              title="Reconciliation counts unavailable"
+            />
+          ) : (
+            <HealthRow
+              tone="neutral"
+              Icon={Scale}
+              status="Workload"
+              statusTestId="reconciliation-status"
+              title={`${data.reconciliation.data.openExceptions} open exceptions · ${data.reconciliation.data.unmatchedIntended14d} deductions that named an order but did not match (14d)`}
+              detail={`Counted ${relative(data.reconciliation.data.asOf)}`}
+              action={<LinkAction href="/admin/reconciliation" label="Open" />}
+            />
           )}
 
           {/* Platform writes — posture tile + the emergency stop (R-E9) */}

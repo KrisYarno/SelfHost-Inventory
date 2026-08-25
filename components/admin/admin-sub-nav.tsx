@@ -13,7 +13,8 @@ import {
   Building2,
   Plug,
   Link2,
-  ClipboardCheck
+  ClipboardCheck,
+  Scale
 } from "lucide-react";
 
 const adminNavItems = [
@@ -36,6 +37,13 @@ const adminNavItems = [
     title: "Reports",
     href: "/admin/reports",
     icon: BarChart3,
+  },
+  {
+    // Reconciliation lane (pack C4a.1): which outbound batches belong to which
+    // orders, and what the report cannot see.
+    title: "Reconciliation",
+    href: "/admin/reconciliation",
+    icon: Scale,
   },
   {
     title: "Change Logs",
