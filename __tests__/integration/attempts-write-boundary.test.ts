@@ -63,11 +63,11 @@ const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js']);
 /**
  * Every file allowed to import the attempt writer.
  *
- * FOUR at M1b — the four live route seams of the D2 table. M2b adds the fifth,
- * `app/api/reconciliation/attribution/[batchId]/route.ts` (the manual
- * attribution POST), IN THE SAME COMMIT as that route. Entries are ROUTE files
- * by contract: the boundary is stated at the HTTP verb, so a shared lib or a
- * server component cannot be added without consciously re-opening this rule.
+ * FIVE at M2b — the four live route seams of the D2 table, plus the manual
+ * attribution POST (the fifth, landed in the same commit as that route; D2's
+ * last row). Entries are ROUTE files by contract: the boundary is stated at the
+ * HTTP verb, so a shared lib or a server component cannot be added without
+ * consciously re-opening this rule.
  */
 interface AttemptsImporter {
   path: string;
@@ -103,6 +103,12 @@ const ALLOWED_ATTEMPTS_IMPORTERS: AttemptsImporter[] = [
       'D2 fulfillment family: fulfilling an external order IS the attribution — the order came ' +
       'from the path, was membership-checked, and stamped every SALE row. The attempt records ' +
       'attributed/fulfillment with the first non-sentinel ledger row (NULL for a bundle-only fulfillment)',
+  },
+  {
+    path: 'app/api/reconciliation/attribution/[batchId]/route.ts',
+    reason:
+      'M2b: the manual attribution writes its attempt row (evidence manual) in the same tx as ' +
+      'the guarded ledger UPDATE and the INVENTORY_ATTRIBUTE audit event',
   },
 ];
 
@@ -174,11 +180,11 @@ describe('attempts write boundary — NAMED importers only', () => {
     expect(importers.sort()).toEqual(ALLOWED_ATTEMPTS_IMPORTERS.map((c) => c.path).sort());
   });
 
-  it('the allow list is EXACTLY four entries at M1b (five when M2b lands the POST route)', () => {
+  it('the allow list is EXACTLY five entries at M2b (the four live seams + the manual POST)', () => {
     // A COUNT, not just a set comparison: the number is quoted in the spec, the
     // pack and this file's header, and a silent drift in either direction is
     // exactly what a boundary gate exists to catch.
-    expect(ALLOWED_ATTEMPTS_IMPORTERS).toHaveLength(4);
+    expect(ALLOWED_ATTEMPTS_IMPORTERS).toHaveLength(5);
   });
 
   it('allow-list hygiene: unique, existing, reasoned — and each really imports the writer', () => {

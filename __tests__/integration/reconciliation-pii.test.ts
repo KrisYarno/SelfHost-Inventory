@@ -22,7 +22,14 @@ jest.mock('@/lib/api-utils', () => ({
   __esModule: true,
   ...jest.requireActual('@/lib/api-utils'),
   requireAdmin: jest.fn(() => Promise.resolve({ user: { id: 1, isAdmin: true } })),
+  // M2b: the table gained a WRITER, whose guards are pinned in its own suite.
+  requireCSRF: jest.fn(() => Promise.resolve()),
 }));
+
+jest.mock('@/lib/rateLimit', () => {
+  const actual = jest.requireActual('@/lib/rateLimit');
+  return { __esModule: true, ...actual, enforceRateLimit: jest.fn(() => ({})) };
+});
 
 jest.mock('@/lib/prisma', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -31,8 +38,8 @@ jest.mock('@/lib/prisma', () => {
 });
 
 import { NextRequest } from 'next/server';
-import { mockReset, type DeepMockProxy } from 'jest-mock-extended';
-import type { PrismaClient } from '@prisma/client';
+import { mockDeep, mockReset, type DeepMockProxy } from 'jest-mock-extended';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import {
   RECONCILIATION_PII_FIELD_NAMES,
@@ -40,7 +47,10 @@ import {
 } from '@/lib/reconciliation/pii';
 import { __resetForTests } from '@/lib/reconciliation/attribution';
 import { GET as reportGET } from '@/app/api/reconciliation/attribution/route';
-import { GET as detailGET } from '@/app/api/reconciliation/attribution/[batchId]/route';
+import {
+  GET as detailGET,
+  POST as attributePOST,
+} from '@/app/api/reconciliation/attribution/[batchId]/route';
 import { GET as searchGET } from '@/app/api/reconciliation/orders/search/route';
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
@@ -150,9 +160,34 @@ beforeEach(() => {
   db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
   db.externalOrder.findMany.mockResolvedValue([LEAKY_ORDER] as never);
   db.externalOrder.count.mockResolvedValue(1 as never);
-  db.$transaction.mockImplementation(((ops: unknown) =>
-    Promise.all(ops as Promise<unknown>[])) as never);
+  // The producers batch their reads as an ARRAY; the manual attribution runs a
+  // CALLBACK. One implementation serves both so the table stays one table.
+  db.$transaction.mockImplementation(((arg: unknown) =>
+    typeof arg === 'function'
+      ? (arg as (tx: Prisma.TransactionClient) => Promise<unknown>)(attributionTx())
+      : Promise.all(arg as Promise<unknown>[])) as never);
 });
+
+/**
+ * The transaction the manual attribution runs in. Its order lock returns the
+ * LEAKY row on purpose: the writer reads `external_orders` through a two-column
+ * projection (D6's write-path exception), and if any of it ever reached the
+ * response this harness is what would say so.
+ */
+function attributionTx(): Prisma.TransactionClient {
+  const tx = mockDeep<Prisma.TransactionClient>();
+  (tx.$queryRaw as unknown as jest.Mock).mockImplementation(async (query: Prisma.Sql) =>
+    query.sql.includes('external_orders')
+      ? [LEAKY_ORDER]
+      : [{ id: 501, productId: 9, logType: 'SALE', orderRecordId: null }],
+  );
+  (tx.auditLog.findMany as unknown as jest.Mock).mockResolvedValue([]);
+  (tx.orderAttributionAttempt.findFirst as unknown as jest.Mock).mockResolvedValue(null);
+  (tx.inventory_logs.updateMany as unknown as jest.Mock).mockResolvedValue({ count: 1 });
+  (tx.orderAttributionAttempt.create as unknown as jest.Mock).mockResolvedValue({ id: 1 });
+  (tx.auditLog.create as unknown as jest.Mock).mockResolvedValue({ id: 1 });
+  return tx;
+}
 
 /** The lane's route table. Append a row per route as each milestone lands. */
 const ROUTES: Array<{ name: string; call: () => Promise<Response> }> = [
@@ -177,6 +212,18 @@ const ROUTES: Array<{ name: string; call: () => Promise<Response> }> = [
     call: () =>
       searchGET(
         new NextRequest('http://localhost/api/reconciliation/orders/search?q=100'),
+      ) as Promise<Response>,
+  },
+  {
+    name: 'POST /api/reconciliation/attribution/[batchId]',
+    call: () =>
+      attributePOST(
+        new NextRequest('http://localhost/api/reconciliation/attribution/batch-1', {
+          method: 'POST',
+          body: JSON.stringify({ orderRecordId: 'ord-1', expectPreviousOrderRecordId: null }),
+          headers: { 'content-type': 'application/json', 'x-csrf-token': 'x' },
+        }),
+        { params: { batchId: 'batch-1' } },
       ) as Promise<Response>,
   },
 ];

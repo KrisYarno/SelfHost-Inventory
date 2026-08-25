@@ -250,9 +250,13 @@ describe('GET /api/reconciliation/attribution/[batchId]', () => {
     expect(await res.json()).toEqual({ error: 'unknown batch', code: 'NOT_FOUND' });
   });
 
-  it('exports no mutating verb yet (the POST lands with the manual attribution)', async () => {
+  it('exports the drill-down GET and the manual-attribution POST, and nothing else', async () => {
+    // M2a pinned this segment as read-only; M2b landed the POST beside it (pack
+    // C2b.3). The pin stays a WHITELIST, so a third verb appearing on the
+    // lane's only write surface is still caught here. Its behaviour lives in
+    // `reconciliation-attribute.test.ts`.
     const mod = await import('@/app/api/reconciliation/attribution/[batchId]/route');
-    expect(Object.keys(mod).sort()).toEqual(['GET', 'dynamic']);
+    expect(Object.keys(mod).sort()).toEqual(['GET', 'POST', 'dynamic']);
   });
 });
 
