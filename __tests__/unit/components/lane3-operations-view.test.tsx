@@ -93,9 +93,21 @@ function supplyOrdersPayload() {
   return {
     window: { from: "2026-08-01", to: "2026-08-31" },
     orders: { count: 0, byStatus: {} },
+    // The receipts roll-up and the NET shortage (reconciliation C5.4/D10): the
+    // card treats a body without them as a broken read, so the stub carries a
+    // whole one.
+    receipts: {
+      orders: 0,
+      linesVerified: 0,
+      batches: 0,
+      unitsStocked: 0,
+      receiptCostCents: supplyOrdersMetric(),
+      definition: "definition",
+    },
     metrics: {
       fees: supplyOrdersMetric(),
       supplierShortageCost: supplyOrdersMetric(),
+      supplierShortageCostNet: supplyOrdersMetric(),
       labelingLossCost: supplyOrdersMetric(),
       surplusValue: supplyOrdersMetric(),
     },

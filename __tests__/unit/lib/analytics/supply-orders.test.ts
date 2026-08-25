@@ -24,16 +24,22 @@ jest.mock('@/lib/prisma', () => ({
     inboundShipment: { findMany: jest.fn(), count: jest.fn() },
     inventoryException: { findMany: jest.fn() },
     stagingItem: { findMany: jest.fn() },
+    inventory_logs: { findMany: jest.fn() },
   },
 }));
 
 import prisma from '@/lib/prisma';
 import { getSupplyOrdersAnalytics } from '@/lib/analytics/supply-orders';
+// The seam S18 pin (reconciliation pack C5.4): the receipts grain has ONE
+// definition home, and this suite proves the roll-up ships that exact string
+// rather than a second copy that can drift away from it.
+import { RECEIPT_EVENT_DEFINITION } from '@/lib/reports/movement';
 
 const m = prisma as unknown as {
   inboundShipment: { findMany: jest.Mock; count: jest.Mock };
   inventoryException: { findMany: jest.Mock };
   stagingItem: { findMany: jest.Mock };
+  inventory_logs: { findMany: jest.Mock };
 };
 
 const WINDOW = { from: '2026-08-01', to: '2026-08-31' };
@@ -41,17 +47,55 @@ const WINDOW = { from: '2026-08-01', to: '2026-08-31' };
 function setup(fixture: {
   headers?: Array<{ status: string; feesCents: number | null }>;
   legacyCount?: number;
-  exceptions?: Array<{ kind: string; subject: unknown }>;
+  /** `resolvedAt` is never SELECTED — it rides in the fixture only to prove the
+   *  producer ignores the settlement instant (the net is as of now). */
+  exceptions?: Array<{
+    kind: string;
+    subject: unknown;
+    resolution?: string | null;
+    resolvedAt?: Date;
+  }>;
   lines?: Array<{ id: number; status: string }>;
+  receipts?: Array<{
+    delta: number;
+    stagingItemId: number | null;
+    inboundShipmentId: string | null;
+    receiptCostCents: number | null;
+  }>;
 }) {
   m.inboundShipment.findMany.mockResolvedValue(fixture.headers ?? []);
   m.inboundShipment.count.mockResolvedValue(fixture.legacyCount ?? 0);
   m.inventoryException.findMany.mockResolvedValue(fixture.exceptions ?? []);
   m.stagingItem.findMany.mockResolvedValue(fixture.lines ?? []);
+  m.inventory_logs.findMany.mockResolvedValue(fixture.receipts ?? []);
 }
 
-const recv = (subject: Record<string, unknown>) => ({ kind: 'recv-discrepancy', subject });
-const loss = (subject: Record<string, unknown>) => ({ kind: 'labeling-loss', subject });
+const recv = (subject: Record<string, unknown>, resolution: string | null = null) => ({
+  kind: 'recv-discrepancy',
+  subject,
+  resolution,
+});
+const loss = (subject: Record<string, unknown>, resolution: string | null = null) => ({
+  kind: 'labeling-loss',
+  subject,
+  resolution,
+});
+
+/** One stocked batch as the producer selects it (D10's ledger time basis). */
+const stocked = (
+  over: Partial<{
+    delta: number;
+    stagingItemId: number | null;
+    inboundShipmentId: string | null;
+    receiptCostCents: number | null;
+  }> = {},
+) => ({
+  delta: 10,
+  stagingItemId: 501,
+  inboundShipmentId: 'ship-1',
+  receiptCostCents: 1_000,
+  ...over,
+});
 
 beforeEach(() => jest.clearAllMocks());
 
@@ -603,5 +647,294 @@ describe('rows naming a line that left the order (FD2-1)', () => {
 
     expect(result.metrics.supplierShortageCost.valueCents).toBe(4_000);
     expect(result.metrics.supplierShortageCost.contributingRows).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D10 — the RECEIPTS roll-up, on the LEDGER time basis (reconciliation pack C5.4)
+// ---------------------------------------------------------------------------
+
+describe('the receipts roll-up (D10)', () => {
+  it('reads STOCK_IN rows that NAME a supply-order line, by changeTime', async () => {
+    setup({});
+
+    await getSupplyOrdersAnalytics(WINDOW);
+
+    const call = m.inventory_logs.findMany.mock.calls[0][0];
+    expect(call.where.logType).toBe('STOCK_IN');
+    // A stock-in with no line is not a receipt against an order — it is a manual
+    // correction or a pre-overhaul receipt, and folding it in would credit the
+    // receiving bench with work no supply order asked for.
+    expect(call.where.stagingItemId).toEqual({ not: null });
+    // The LEDGER time basis (D10): when the units were STOCKED, never the order
+    // date the fee population uses.
+    expect(call.where.changeTime.gte).toEqual(new Date('2026-08-01T00:00:00.000Z'));
+    expect(call.where.changeTime.lt).toEqual(new Date('2026-09-01T00:00:00.000Z'));
+  });
+
+  it('counts ONE receipt event per stock-in batch (D12), with distinct lines and orders', async () => {
+    setup({
+      receipts: [
+        // Two batches of the SAME line, on the same order: two events, one line.
+        stocked({ delta: 4, stagingItemId: 501, inboundShipmentId: 'ship-1', receiptCostCents: 400 }),
+        stocked({ delta: 6, stagingItemId: 501, inboundShipmentId: 'ship-1', receiptCostCents: 600 }),
+        // A second line on a second order.
+        stocked({ delta: 5, stagingItemId: 502, inboundShipmentId: 'ship-2', receiptCostCents: 500 }),
+      ],
+    });
+
+    const { receipts } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(receipts.batches).toBe(3);
+    expect(receipts.linesVerified).toBe(2);
+    expect(receipts.orders).toBe(2);
+    expect(receipts.unitsStocked).toBe(15);
+    expect(receipts.receiptCostCents.valueCents).toBe(1_500);
+    expect(receipts.receiptCostCents.contributingRows).toBe(3);
+    expect(receipts.receiptCostCents.reason).toBeNull();
+  });
+
+  it('a batch stocked outside any order counts as an event but not as an order', async () => {
+    setup({
+      receipts: [
+        stocked({ inboundShipmentId: null }),
+        stocked({ stagingItemId: 502, inboundShipmentId: 'ship-1' }),
+      ],
+    });
+
+    const { receipts } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(receipts.batches).toBe(2);
+    expect(receipts.orders).toBe(1);
+    expect(receipts.linesVerified).toBe(2);
+  });
+
+  it('a batch with NO receipt cost contributes nothing — it is not a zero', async () => {
+    setup({
+      receipts: [
+        stocked({ receiptCostCents: null }),
+        stocked({ stagingItemId: 502, receiptCostCents: 2_500 }),
+      ],
+    });
+
+    const { receipts } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(receipts.receiptCostCents.valueCents).toBe(2_500);
+    expect(receipts.receiptCostCents.contributingRows).toBe(1);
+    expect(receipts.receiptCostCents.coverage).toContain('1 of 2 receipt events');
+    // The unpriced count, said out loud (R-2): a reader must be able to see the
+    // hole without subtracting two numbers in their head.
+    expect(receipts.receiptCostCents.coverage).toContain('1 record no figure at all');
+  });
+
+  it('batches that ALL booked a zero cost produce a KNOWN ZERO, never null', async () => {
+    setup({ receipts: [stocked({ receiptCostCents: 0 })] });
+
+    const { receipts } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(receipts.receiptCostCents.valueCents).toBe(0);
+    expect(receipts.receiptCostCents.contributingRows).toBe(1);
+    expect(receipts.receiptCostCents.reason).toBeNull();
+  });
+
+  it('NO receipt at all is null + a reason, never $0.00 (the counts stay honest zeros)', async () => {
+    setup({});
+
+    const { receipts } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(receipts.batches).toBe(0);
+    expect(receipts.orders).toBe(0);
+    expect(receipts.linesVerified).toBe(0);
+    expect(receipts.unitsStocked).toBe(0);
+    expect(receipts.receiptCostCents.valueCents).toBeNull();
+    expect(receipts.receiptCostCents.reason).toBe(
+      'no stock-in batch against a supply-order line was seen in this window',
+    );
+  });
+
+  it('rows seen but none priced reads DIFFERENTLY from no rows at all', async () => {
+    setup({ receipts: [stocked({ receiptCostCents: null }), stocked({ receiptCostCents: null })] });
+
+    const { receipts } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(receipts.receiptCostCents.valueCents).toBeNull();
+    expect(receipts.receiptCostCents.reason).toBe(
+      '2 stock-in batches were stocked in this window; none records a receipt cost',
+    );
+  });
+
+  it('the coverage names the LEDGER basis and the stock-ins deliberately left out', async () => {
+    setup({});
+
+    const { receipts } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(receipts.receiptCostCents.coverage).toContain('changeTime');
+    expect(receipts.receiptCostCents.coverage).toContain(
+      'Stock-in rows that name no supply-order line (pre-overhaul receipts and manual ' +
+        'stock-ins) are outside this population.',
+    );
+  });
+
+  it('the receipts definition IS movement.ts\'s RECEIPT_EVENT_DEFINITION (seam S18)', async () => {
+    setup({});
+
+    const { receipts } = await getSupplyOrdersAnalytics(WINDOW);
+
+    // ONE definition home for the grain: the roll-up imports the string, so the
+    // two surfaces cannot end up meaning different things by "a receipt".
+    expect(receipts.definition).toBe(RECEIPT_EVENT_DEFINITION);
+    expect(receipts.definition).toBe(
+      'a receipt event = one stock-in batch; a five-batch delivery is five events (D12)',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D10 — supplierShortageCostNet: gross MINUS what the supplier made good
+// ---------------------------------------------------------------------------
+
+describe('supplierShortageCostNet (D10)', () => {
+  it('reads the resolution alongside the subject, in the SAME read', async () => {
+    setup({});
+
+    await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(m.inventoryException.findMany.mock.calls[0][0].select).toEqual({
+      kind: true,
+      subject: true,
+      resolution: true,
+    });
+  });
+
+  it('subtracts the loss of every row settled supplier-credited or reshipped', async () => {
+    setup({
+      exceptions: [
+        recv({ lossCents: 10_000 }, 'supplier-credited'),
+        recv({ lossCents: 2_500 }, 'reshipped'),
+        recv({ lossCents: 4_000 }, null),
+      ],
+    });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(metrics.supplierShortageCost.valueCents).toBe(16_500);
+    expect(metrics.supplierShortageCostNet.valueCents).toBe(4_000);
+    // The net speaks about the SAME priced rows the gross does.
+    expect(metrics.supplierShortageCostNet.contributingRows).toBe(3);
+    expect(metrics.supplierShortageCostNet.reason).toBeNull();
+  });
+
+  it('every OTHER resolution is left in the net — only the two make-goods come off', async () => {
+    setup({
+      exceptions: [
+        recv({ lossCents: 1_000 }, 'accepted-loss'),
+        recv({ lossCents: 2_000 }, 'recount-corrected'),
+        recv({ lossCents: 4_000 }, 'additional-delivery'),
+      ],
+    });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(metrics.supplierShortageCostNet.valueCents).toBe(7_000);
+    expect(metrics.supplierShortageCostNet.valueCents).toBe(
+      metrics.supplierShortageCost.valueCents,
+    );
+  });
+
+  it('AS OF NOW: a settlement that happened long after the window still nets', async () => {
+    setup({
+      exceptions: [
+        // The row was last seen in the window; the credit note landed in
+        // September. Settling does not move lastSeenAt, so the window still
+        // holds this row — and TODAY's answer is that it was made good.
+        { ...recv({ lossCents: 9_000 }, 'supplier-credited'), resolvedAt: new Date('2026-09-14') },
+      ],
+    });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(metrics.supplierShortageCost.valueCents).toBe(9_000);
+    expect(metrics.supplierShortageCostNet.valueCents).toBe(0);
+    // Nothing about resolution narrows the READ — the whole point of "as of now"
+    // is that August's net changes when September settles it.
+    const where = m.inventoryException.findMany.mock.calls[0][0].where;
+    expect(where.resolution).toBeUndefined();
+    expect(where.resolvedAt).toBeUndefined();
+  });
+
+  it('a settled row carrying NO loss figure subtracts nothing (there is nothing to subtract)', async () => {
+    setup({
+      exceptions: [
+        recv({ lossCents: 5_000 }, null),
+        recv({ stagingItemId: 7, expectedQty: 4, countedQty: 4 }, 'supplier-credited'),
+      ],
+    });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(metrics.supplierShortageCostNet.valueCents).toBe(5_000);
+    expect(metrics.supplierShortageCostNet.contributingRows).toBe(1);
+  });
+
+  it('the removed-line exclusion applies IDENTICALLY to the net', async () => {
+    setup({
+      exceptions: [
+        // A credited shortage on a line that later left the order: neither the
+        // gross nor the net may speak about it.
+        recv({ stagingItemId: 11, lossCents: 6_000 }, 'supplier-credited'),
+        recv({ stagingItemId: 12, lossCents: 2_000 }, null),
+      ],
+      lines: [
+        { id: 11, status: 'DISCARDED' },
+        { id: 12, status: 'VERIFIED' },
+      ],
+    });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(metrics.supplierShortageCost.valueCents).toBe(2_000);
+    expect(metrics.supplierShortageCostNet.valueCents).toBe(2_000);
+    expect(metrics.supplierShortageCostNet.contributingRows).toBe(1);
+    expect(metrics.supplierShortageCostNet.coverage).toContain(
+      '1 further recv-discrepancy row(s) belong to removed lines and are excluded.',
+    );
+  });
+
+  it('a labeling-loss row is never netted — the supplier settled nothing there', async () => {
+    setup({ exceptions: [loss({ lossCents: 3_000 }, 'supplier-credited')] });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(metrics.labelingLossCost.valueCents).toBe(3_000);
+    expect(metrics.supplierShortageCostNet.valueCents).toBeNull();
+  });
+
+  it('null-not-0: no priced discrepancy row means the net is unknown, with the gross reason', async () => {
+    setup({ exceptions: [recv({ stagingItemId: 7, expectedQty: 10, countedQty: 8 }, null)] });
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(metrics.supplierShortageCost.valueCents).toBeNull();
+    expect(metrics.supplierShortageCostNet.valueCents).toBeNull();
+    expect(metrics.supplierShortageCostNet.reason).toBe(
+      metrics.supplierShortageCost.reason,
+    );
+  });
+
+  it('the definition says AS OF NOW, verbatim', async () => {
+    setup({});
+
+    const { metrics } = await getSupplyOrdersAnalytics(WINDOW);
+
+    expect(metrics.supplierShortageCostNet.definition).toContain(
+      'net is AS OF NOW (a settlement in September changes August\'s net) — settlements do ' +
+        'not move lastSeenAt',
+    );
+    expect(metrics.supplierShortageCostNet.definition).toBe(
+      'GROSS supplier shortage MINUS the loss of every recv-discrepancy row resolved ' +
+        'supplier-credited or reshipped — what the shortages in this window have cost ' +
+        'after the supplier made good. net is AS OF NOW (a settlement in September ' +
+        'changes August\'s net) — settlements do not move lastSeenAt.',
+    );
   });
 });

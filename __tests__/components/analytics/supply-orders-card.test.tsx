@@ -1,10 +1,12 @@
 /** @jest-environment jsdom */
 /**
- * THE "SUPPLY ORDERS" CARD (contract pack C4b.5, spec §8, seam S18).
+ * THE "SUPPLY ORDERS" CARD (contract pack C4b.5 + C5.4, spec §8 + D10, seam S18).
  *
- * Four numbers about money that left the building: fees, what suppliers failed
- * to deliver, what the labeling bench lost, and what arrived above the order.
- * The whole reason this card is pinned is the difference between two zeros:
+ * The money that left the building: fees, what suppliers failed to deliver
+ * (gross AND net of what they made good), what the labeling bench lost, what
+ * arrived above the order — and, on the ledger's own clock, what the dock
+ * actually stocked. The whole reason this card is pinned is the difference
+ * between two zeros:
  *
  *   - "nobody lost anything in this window" is a KNOWN ZERO and renders $0.00;
  *   - "no rows contributed" is UNKNOWN and renders "—" with the server's reason.
@@ -38,16 +40,42 @@ function metric(over: Record<string, unknown> = {}) {
   };
 }
 
+/** The receipts roll-up (D10): the LEDGER-basis block beside the money tiles. */
+function receipts(over: Record<string, unknown> = {}) {
+  return {
+    orders: 2,
+    linesVerified: 3,
+    batches: 5,
+    unitsStocked: 120,
+    receiptCostCents: metric({
+      valueCents: 250000,
+      definition: "The dollars booked with each stock-in batch.",
+      coverage: "5 of 5 receipt events record a receipt cost.",
+      contributingRows: 5,
+    }),
+    definition:
+      "a receipt event = one stock-in batch; a five-batch delivery is five events (D12)",
+    ...over,
+  };
+}
+
 function payload(over: Record<string, unknown> = {}) {
   return {
     window: { from: "2026-08-01", to: "2026-08-31" },
     orders: { count: 4, byStatus: { RECEIVING: 3, CLOSED: 1 } },
+    receipts: receipts(),
     metrics: {
       fees: metric(),
       supplierShortageCost: metric({
         valueCents: 0,
         definition: "Gross supplier shortage; credits and reshipments are NOT subtracted.",
         coverage: "2 of 2 shortage rows carry money.",
+        contributingRows: 2,
+      }),
+      supplierShortageCostNet: metric({
+        valueCents: 7500,
+        definition: "Gross minus what the supplier made good; AS OF NOW.",
+        coverage: "2 of 2 shortage rows carry money, 1 of them settled.",
         contributingRows: 2,
       }),
       labelingLossCost: metric({
@@ -86,7 +114,7 @@ function renderCard(body: unknown = payload(), ok = true) {
 
 const tile = async (name: string) => screen.findByTestId(`supply-orders-tile-${name}`);
 
-describe("the four tiles", () => {
+describe("the metric tiles", () => {
   it("renders a known value as money, with its coverage and row count", async () => {
     renderCard();
     const fees = await tile("fees");
@@ -129,6 +157,111 @@ describe("the four tiles", () => {
       const card = await tile(name);
       expect(within(card).getByText(definition)).toBeInTheDocument();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D10 — the NET shortage tile and the RECEIPTS row
+// ---------------------------------------------------------------------------
+
+describe("the net shortage tile (D10)", () => {
+  it("renders beside the gross one, labelled as of now", async () => {
+    renderCard();
+    const net = await tile("supplierShortageCostNet");
+    expect(within(net).getByTestId("tile-value")).toHaveTextContent("$75.00");
+    // Two numbers about the same rows: the label must say WHICH one this is, or
+    // a reader takes the smaller figure for the whole shortage.
+    expect(screen.getByText("Supplier shortage (net, as of now)")).toBeInTheDocument();
+    expect(screen.getByText("Supplier shortage (gross)")).toBeInTheDocument();
+    expect(
+      within(net).getByText("Gross minus what the supplier made good; AS OF NOW."),
+    ).toBeInTheDocument();
+  });
+
+  it("renders an unknown net as an em dash plus the reason, never $0.00", async () => {
+    renderCard(
+      payload({
+        metrics: {
+          ...payload().metrics,
+          supplierShortageCostNet: metric({
+            valueCents: null,
+            contributingRows: 0,
+            reason: "no receiving-discrepancy row was seen in this window",
+          }),
+        },
+      }),
+    );
+    const net = await tile("supplierShortageCostNet");
+    expect(within(net).getByTestId("tile-value")).toHaveTextContent("—");
+    expect(
+      within(net).getByText("no receiving-discrepancy row was seen in this window"),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("the receipts row (D10)", () => {
+  it("states orders, lines, batches, units and the receipt cost", async () => {
+    renderCard();
+    const row = await screen.findByTestId("supply-orders-receipts");
+    expect(within(row).getByText("2 orders")).toBeInTheDocument();
+    expect(within(row).getByText("3 lines")).toBeInTheDocument();
+    expect(within(row).getByText("5 batches")).toBeInTheDocument();
+    expect(within(row).getByText("120 units")).toBeInTheDocument();
+    expect(within(row).getByText("receipt cost $2,500.00")).toBeInTheDocument();
+    expect(
+      within(row).getByText("5 of 5 receipt events record a receipt cost."),
+    ).toBeInTheDocument();
+  });
+
+  it("carries the receipt-event definition as its title", async () => {
+    renderCard();
+    const row = await screen.findByTestId("supply-orders-receipts");
+    // The grain rides with the figures: five batches off one delivery is five
+    // events, and a reader who does not know that reads "5 batches" as 5
+    // deliveries.
+    expect(row).toHaveAttribute(
+      "title",
+      "a receipt event = one stock-in batch; a five-batch delivery is five events (D12)",
+    );
+  });
+
+  it("renders an unpriced receipt cost as an em dash plus the reason", async () => {
+    renderCard(
+      payload({
+        receipts: receipts({
+          receiptCostCents: metric({
+            valueCents: null,
+            contributingRows: 0,
+            coverage: "0 of 5 receipt events record a receipt cost.",
+            reason: "5 stock-in batches were stocked in this window; none records a receipt cost",
+          }),
+        }),
+      }),
+    );
+    const row = await screen.findByTestId("supply-orders-receipts");
+    expect(within(row).getByText("receipt cost —")).toBeInTheDocument();
+    expect(
+      within(row).getByText(
+        "5 stock-in batches were stocked in this window; none records a receipt cost",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says ONE order and ONE batch in the singular", async () => {
+    renderCard(payload({ receipts: receipts({ orders: 1, linesVerified: 1, batches: 1, unitsStocked: 1 }) }));
+    const row = await screen.findByTestId("supply-orders-receipts");
+    expect(within(row).getByText("1 order")).toBeInTheDocument();
+    expect(within(row).getByText("1 line")).toBeInTheDocument();
+    expect(within(row).getByText("1 batch")).toBeInTheDocument();
+    expect(within(row).getByText("1 unit")).toBeInTheDocument();
+  });
+
+  it("a body carrying NO receipts block is not data — the card says so", async () => {
+    // The same rule the metric set has lived under since C4b.5: rendering a row
+    // off a body that never sent one would invent receiving work.
+    renderCard(payload({ receipts: undefined }));
+    expect(await screen.findByTestId("supply-orders-error")).toBeInTheDocument();
+    expect(screen.queryByTestId("supply-orders-receipts")).not.toBeInTheDocument();
   });
 });
 

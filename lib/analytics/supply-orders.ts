@@ -1,12 +1,15 @@
 import prisma from '@/lib/prisma';
-import { InboundShipmentStatus, StagingItemStatus } from '@prisma/client';
+import { InboundShipmentStatus, StagingItemStatus, inventory_logs_logType } from '@prisma/client';
+import { RECEIPT_EVENT_DEFINITION } from '@/lib/reports/movement';
+import type { Resolution } from '@/lib/exceptions/kinds';
 
 /**
  * SUPPLY-ORDER ANALYTICS (spec §8, contract pack C3b/PK2-13, seam S18).
  *
- * Four numbers for the analytics hub's "Supply orders" card: what the fees cost,
- * what suppliers failed to deliver, what the labeling bench lost, and what
- * arrived above the order. Next-free (the route is the Next half) and read-only.
+ * The numbers behind the analytics hub's "Supply orders" card: what the fees
+ * cost, what suppliers failed to deliver (GROSS and NET of what they made good),
+ * what the labeling bench lost, what arrived above the order, and what the dock
+ * actually stocked. Next-free (the route is the Next half) and read-only.
  *
  * THE TRUTHFUL-DATA RULE, which decides every field here: `valueCents` is NULL
  * **only** when nothing contributed — `contributingRows === 0` — and then it
@@ -15,7 +18,7 @@ import { InboundShipmentStatus, StagingItemStatus } from '@prisma/client';
  * lost" are different answers, and a card that renders both as $0.00 tells the
  * reader the second is the first.
  *
- * TWO POPULATIONS, deliberately not mixed:
+ * THREE POPULATIONS, deliberately not mixed:
  *
  *   ORDERS + FEES are the non-cancelled headers whose `orderedAt` falls in the
  *   window. A legacy pre-staging receipt has no `orderedAt` at all, so it is not
@@ -28,6 +31,21 @@ import { InboundShipmentStatus, StagingItemStatus } from '@prisma/client';
  *   this lane — the subject's cumulative money IS the current truth — so
  *   `lastSeenAt` is the only honest window basis, and a settled shortage still
  *   cost what it cost, which is why resolution is not a filter.
+ *
+ *   THE RECEIPTS ROLL-UP is the LEDGER (spec D10): stock-in rows that name a
+ *   supply-order line, keyed by `changeTime` — when the units were stocked. An
+ *   order placed in July and stocked in August is August's receiving work and
+ *   July's fee, so this population has its own clock and never borrows the
+ *   ordered-date one.
+ *
+ * GROSS AND NET ARE BOTH REPORTED, and neither replaces the other (spec D10).
+ * The gross shortage is what the window's shortages cost; the net subtracts what
+ * the supplier made good (`supplier-credited` / `reshipped`). The net is AS OF
+ * NOW — settling a row does not move its `lastSeenAt`, so a credit note issued
+ * in September changes August's net the moment it is recorded. That is the
+ * intended behavior of a "what has this cost us" figure, and the definition
+ * string says so out loud rather than letting a reader assume the number is
+ * frozen.
  *
  * ROWS WHOSE LINE LEFT THE ORDER ARE NOT MONEY — fix-delta 2 FD2-1
  * (removed-line money). Resolution is not a filter, but REMOVAL is: a line the
@@ -54,9 +72,26 @@ export type SupplyOrderAnalyticsMetric = {
 export type SupplyOrdersAnalytics = {
   window: { from: string; to: string };
   orders: { count: number; byStatus: Record<string, number> };
+  /**
+   * What actually ARRIVED in the window, on the LEDGER time basis (spec D10):
+   * the stock-in batches whose `changeTime` falls in it, not the orders whose
+   * `orderedAt` does. An order placed in July and stocked in August is August's
+   * receiving work and July's fee — two different questions, two different
+   * clocks, and mixing them would misreport both.
+   */
+  receipts: {
+    orders: number;
+    linesVerified: number;
+    batches: number;
+    unitsStocked: number;
+    receiptCostCents: SupplyOrderAnalyticsMetric;
+    /** The GRAIN, stated: `RECEIPT_EVENT_DEFINITION` (seam S18). */
+    definition: string;
+  };
   metrics: {
     fees: SupplyOrderAnalyticsMetric;
     supplierShortageCost: SupplyOrderAnalyticsMetric;
+    supplierShortageCostNet: SupplyOrderAnalyticsMetric;
     labelingLossCost: SupplyOrderAnalyticsMetric;
     surplusValue: SupplyOrderAnalyticsMetric;
   };
@@ -64,6 +99,19 @@ export type SupplyOrdersAnalytics = {
 
 /** The two register kinds this lane's money lives in. */
 const MONEY_KINDS = ['recv-discrepancy', 'labeling-loss'] as const;
+
+/**
+ * The follow-up classes that mean THE SUPPLIER MADE IT GOOD (spec D10).
+ *
+ * Typed against the closed `Resolution` vocabulary so a renamed class breaks the
+ * build here instead of quietly dropping out of the net. Every OTHER resolution
+ * — `accepted-loss` above all — leaves the money exactly where the gross put it:
+ * the units never arrived and nobody paid us back for them.
+ */
+const MADE_GOOD_RESOLUTIONS: ReadonlySet<string> = new Set<Resolution>([
+  'supplier-credited',
+  'reshipped',
+]);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -175,6 +223,20 @@ function removedNote(kind: string, removed: number): string {
 }
 
 /**
+ * What the RECEIPTS population deliberately leaves out (spec D10).
+ *
+ * The roll-up counts only stock-in batches that name a supply-order line, so a
+ * pre-overhaul receipt or a manual stock-in is outside it — and a reader who
+ * cannot see that would take these figures for the whole of the window's
+ * stock-in ledger. Said in words rather than counted: counting the excluded rows
+ * would take a second read of the same table to answer a question about a
+ * population this card does not report.
+ */
+const RECEIPTS_POPULATION_NOTE =
+  'Stock-in rows that name no supply-order line (pre-overhaul receipts and manual ' +
+  'stock-ins) are outside this population.';
+
+/**
  * The EMPTY reason for an exception metric, aware of the exclusion above.
  *
  * "No row was seen in this window" is false about a window whose only rows name
@@ -215,7 +277,7 @@ export async function getSupplyOrdersAnalytics(opts: {
 }): Promise<SupplyOrdersAnalytics> {
   const { start, end } = windowBounds(opts.from, opts.to);
 
-  const [headers, legacyHeaders, exceptions] = await Promise.all([
+  const [headers, legacyHeaders, exceptions, stockedBatches] = await Promise.all([
     prisma.inboundShipment.findMany({
       where: {
         orderedAt: { gte: start, lt: end },
@@ -230,7 +292,26 @@ export async function getSupplyOrdersAnalytics(opts: {
     }),
     prisma.inventoryException.findMany({
       where: { kind: { in: [...MONEY_KINDS] }, lastSeenAt: { gte: start, lt: end } },
-      select: { kind: true, subject: true },
+      // `resolution` rides along for the NET (spec D10): the settlement CLASS is
+      // a column, not a subject field, so the net costs no second read.
+      select: { kind: true, subject: true, resolution: true },
+    }),
+    // The receipts population (spec D10): one row per stock-in BATCH, and only
+    // the batches that name a supply-order line — a stock-in with no line is a
+    // manual correction or a pre-overhaul receipt, and counting it as receiving
+    // work would credit the dock with something no order asked for.
+    prisma.inventory_logs.findMany({
+      where: {
+        logType: inventory_logs_logType.STOCK_IN,
+        stagingItemId: { not: null },
+        changeTime: { gte: start, lt: end },
+      },
+      select: {
+        delta: true,
+        stagingItemId: true,
+        inboundShipmentId: true,
+        receiptCostCents: true,
+      },
     }),
   ]);
 
@@ -255,7 +336,11 @@ export async function getSupplyOrdersAnalytics(opts: {
   // judged against the SAME line state — two reads could put the same line on
   // both sides of the exclusion within one card.
 
-  const rows = exceptions.map((row) => ({ kind: row.kind, subject: subjectObject(row.subject) }));
+  const rows = exceptions.map((row) => ({
+    kind: row.kind,
+    subject: subjectObject(row.subject),
+    resolution: row.resolution,
+  }));
   const stagingItemIds = Array.from(
     new Set(
       rows.map((row) => stagingItemIdOf(row.subject)).filter((id): id is number => id !== null),
@@ -275,6 +360,8 @@ export async function getSupplyOrdersAnalytics(opts: {
 
   let shortageCents = 0;
   let shortageRows = 0;
+  let settledCents = 0;
+  let settledRows = 0;
   let lossCents = 0;
   let lossRows = 0;
   let surplusCents = 0;
@@ -298,6 +385,14 @@ export async function getSupplyOrdersAnalytics(opts: {
       if (short !== null) {
         shortageCents += short;
         shortageRows += 1;
+        // The NET's subtrahend (spec D10). Only a PRICED row can be subtracted:
+        // a credited shortage that never recorded what it lost tells us nothing
+        // about how much came back, and inventing a 0 for it would understate
+        // the gross and the net by the same unknown amount.
+        if (MADE_GOOD_RESOLUTIONS.has(row.resolution ?? '')) {
+          settledCents += short;
+          settledRows += 1;
+        }
       }
       const surplus = centsOf(subject, 'surplusValueCents');
       if (surplus !== null) {
@@ -318,6 +413,38 @@ export async function getSupplyOrdersAnalytics(opts: {
     }
   }
 
+  // --- the receipts roll-up (spec D10, the LEDGER time basis) -------------
+  //
+  // COUNT(*) is the batch count because the overhaul writes exactly one stock-in
+  // row per batch (D12) — the grain the definition string names. The two DISTINCT
+  // counts answer different questions off the same rows: how many LINES the dock
+  // verified, and how many ORDERS those lines came off.
+
+  const receiptLines = new Set<number>();
+  const receiptOrders = new Set<string>();
+  let unitsStocked = 0;
+  let receiptCostCents = 0;
+  let pricedReceiptRows = 0;
+
+  for (const batch of stockedBatches) {
+    unitsStocked += batch.delta;
+    if (batch.stagingItemId !== null) {
+      receiptLines.add(batch.stagingItemId);
+    }
+    // A batch stocked outside any supply order is still receiving work; it is
+    // simply not an ORDER, and counting a null as one would invent a delivery.
+    if (batch.inboundShipmentId !== null) {
+      receiptOrders.add(batch.inboundShipmentId);
+    }
+    // NULL means "no figure was booked with this batch" — never a free receipt.
+    if (batch.receiptCostCents !== null) {
+      receiptCostCents += batch.receiptCostCents;
+      pricedReceiptRows += 1;
+    }
+  }
+
+  const receiptBatches = stockedBatches.length;
+
   const legacy = legacyNote(legacyHeaders);
   const removedDiscrepancy = removedNote('recv-discrepancy', removedDiscrepancyRows);
   const removedLabeling = removedNote('labeling-loss', removedLabelingRows);
@@ -325,6 +452,30 @@ export async function getSupplyOrdersAnalytics(opts: {
   return {
     window: { from: opts.from, to: opts.to },
     orders: { count: headers.length, byStatus },
+    receipts: {
+      orders: receiptOrders.size,
+      linesVerified: receiptLines.size,
+      batches: receiptBatches,
+      unitsStocked,
+      receiptCostCents: metric({
+        valueCents: receiptCostCents,
+        contributingRows: pricedReceiptRows,
+        definition:
+          'The exact dollars booked with each stock-in batch (receiptCostCents), summed over ' +
+          'the receipt events in this window. Frozen at the moment of stocking, so a later ' +
+          'cost change never rewrites what a receipt cost.',
+        coverage:
+          `${pricedReceiptRows} of ${receiptBatches} receipt events whose changeTime falls in ` +
+          `this window record a receipt cost; ${receiptBatches - pricedReceiptRows} record no ` +
+          'figure at all (not a zero). ' +
+          RECEIPTS_POPULATION_NOTE,
+        kindRows: receiptBatches,
+        emptyReason: 'no stock-in batch against a supply-order line was seen in this window',
+        unpricedReason: (batches) =>
+          `${batches} stock-in batches were stocked in this window; none records a receipt cost`,
+      }),
+      definition: RECEIPT_EVENT_DEFINITION,
+    },
     metrics: {
       fees: metric({
         valueCents: feesCents,
@@ -352,6 +503,34 @@ export async function getSupplyOrdersAnalytics(opts: {
           `${shortageRows} of ${discrepancyRows} recv-discrepancy rows whose lastSeenAt falls ` +
           'in this window carry a loss figure (open and resolved rows both count; rows raised ' +
           `before this lane carry no money fields). ${removedDiscrepancy} ${legacy}`,
+        kindRows: discrepancyRows,
+        emptyReason: emptyExceptionReason(
+          'receiving-discrepancy',
+          'recv-discrepancy',
+          removedDiscrepancyRows,
+        ),
+        unpricedReason: unpricedExceptionReason(
+          'recv-discrepancy',
+          removedDiscrepancyRows,
+          'loss',
+        ),
+      }),
+      // The SAME population, the SAME priced rows, the SAME removed-line
+      // exclusion as the gross above — the only difference is the subtraction,
+      // which is why this metric's emptiness tracks the gross exactly.
+      supplierShortageCostNet: metric({
+        valueCents: shortageCents - settledCents,
+        contributingRows: shortageRows,
+        definition:
+          'GROSS supplier shortage MINUS the loss of every recv-discrepancy row resolved ' +
+          'supplier-credited or reshipped — what the shortages in this window have cost ' +
+          "after the supplier made good. net is AS OF NOW (a settlement in September " +
+          "changes August's net) — settlements do not move lastSeenAt.",
+        coverage:
+          `${shortageRows} of ${discrepancyRows} recv-discrepancy rows whose lastSeenAt falls ` +
+          `in this window carry a loss figure, and ${settledRows} of those are settled ` +
+          'supplier-credited or reshipped (their loss is subtracted here and NOT from the ' +
+          `gross). ${removedDiscrepancy} ${legacy}`,
         kindRows: discrepancyRows,
         emptyReason: emptyExceptionReason(
           'receiving-discrepancy',

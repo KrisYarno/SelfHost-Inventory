@@ -54,6 +54,19 @@ import { pageFromDb, type DbPage } from "@/lib/assistant/tools";
 /** getReceipts default page size when the caller omits `limit` (spec §5 T-RCPT). */
 const RECEIPTS_DEFAULT_LIMIT = 50;
 
+/**
+ * WHAT ONE RECEIPT EVENT IS — the definition HOME for the receipts grain
+ * (reconciliation lane spec D10/D12, seam S18).
+ *
+ * Stocking a delivery writes ONE ledger row per stock-in batch, so a line split
+ * across five batches is five events, not one delivery. Anything that counts
+ * "receipts" and means deliveries reports a different number off the same rows,
+ * which is why this string lives in ONE place and the supply-order analytics
+ * roll-up imports it rather than re-spelling it.
+ */
+export const RECEIPT_EVENT_DEFINITION =
+  "a receipt event = one stock-in batch; a five-batch delivery is five events (D12)";
+
 export interface MovementBuckets {
   stockIn: number;
   correctionIn: number;
@@ -354,7 +367,13 @@ export async function getReceipts(opts: {
   /** The G5 approved universe (spec C13). REQUIRED (G2-3) — no web callers, so the
    *  trust-boundary filter is never optional here. */
   approvedIds: number[];
-}): Promise<DbPage<ReceiptRow> & { disclosure: ApprovalDisclosure }> {
+}): Promise<
+  DbPage<ReceiptRow> & {
+    disclosure: ApprovalDisclosure;
+    /** The receipts-mode definitions — what the GRAIN of this listing is (D10/D12). */
+    definitions: { receiptEvent: string };
+  }
+> {
   const { window, productId, locationId, byteBudget, approvedIds } = opts;
   const limit = opts.limit ?? RECEIPTS_DEFAULT_LIMIT;
   const offset = opts.offset ?? 0;
@@ -424,7 +443,7 @@ export async function getReceipts(opts: {
     limit,
     byteBudget,
   });
-  return { ...page, disclosure };
+  return { ...page, disclosure, definitions: { receiptEvent: RECEIPT_EVENT_DEFINITION } };
 }
 
 // ---------------------------------------------------------------------------

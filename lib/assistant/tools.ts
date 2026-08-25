@@ -2320,6 +2320,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             returned: page.returned,
             totalRows: page.totalRows,
             nextOffset: page.nextOffset,
+            // M5b seam: the producer now states the receipt-event GRAIN (one event = one
+            // labeled batch, D12) — relay it so the tool's reader gets the definition the
+            // analytics card carries, from the same source string.
+            definitions: page.definitions,
             coverage: {
               mode: "receipts",
               note:
