@@ -330,4 +330,23 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     emptyCopy: "No snapshot data available yet.",
     summarizeArgs: () => "",
   },
+  get_order_reconciliation: {
+    pendingLabel: "Reading order reconciliation…",
+    successLabel: "Read order reconciliation",
+    failureNoun: "order reconciliation",
+    emptyCopy: "No attributable outbound batches in this range.",
+    // OC-5: both filters change WHICH BATCHES the answer covers — the class chip narrows
+    // to one evidence class, the order number to the batches of one order — so both are
+    // rendered. The order number is the caller's own argument, not tool output.
+    summarizeArgs: (input) => {
+      const klass = str(input, "class");
+      const orderNumber = str(input, "orderNumber");
+      const parts = [
+        dateRangePhrase(input, DEFAULT_RELATIVE_WINDOW_PHRASE),
+        klass ? `class ${klass}` : "",
+        orderNumber ? `order ${orderNumber}` : "",
+      ].filter(Boolean);
+      return parts.join(", ");
+    },
+  },
 };

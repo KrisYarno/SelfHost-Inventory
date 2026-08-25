@@ -81,6 +81,17 @@ export type GateSeedManifest = {
      *  in ANY payload and must never move a total or a data-start (row 2k). */
     unapprovedLedgerUnits: number;
     unapprovedSalesQty: number;
+    // --- ADDITIVE (reconciliation lane M5a, declared — pack C5.3) ---
+    /** The two SALE batches the R-C ride-along reads: `a` is stamped with company A's
+     *  order, `b` with company B's. Neither has an audit row, so both DERIVE
+     *  `attributed·derived` (R3) rather than depending on a recorded attempt. */
+    reconciliationBatchIds: { a: string; b: string };
+    /** DEDICATED products for those batches (never 9108 — that is
+     *  `lowStockInheritProductId`, a reorder-cohort fixture with a deliberate no-demand
+     *  shape [CX-10]). Approved + active, one ZERO-quantity location row each, no reorder
+     *  config, and no ledger row beyond the two batches — so rows 2f/2g ("the seeded
+     *  fixtures move EXACTLY their buckets") cannot move [OCk-21]. */
+    reconciliationProductIds: readonly number[];
   };
   sentinels: { companyA: readonly string[]; companyB: readonly string[] };
 };
@@ -164,6 +175,9 @@ export const GATE_SEED: GateSeedManifest = {
     // UUID toolCallId in a trial run.
     unapprovedLedgerUnits: 8_414_141,
     unapprovedSalesQty: 8_474_747,
+    // ADDITIVE (reconciliation lane M5a) — see the manifest type above.
+    reconciliationBatchIds: { a: "gate-recon-a", b: "gate-recon-b" },
+    reconciliationProductIds: [9107, 9110],
   },
   sentinels: {
     // A: product_sales_facts.orderedQty · external_order_items.quantity ·
@@ -372,6 +386,30 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           costPrice: "7.00",
           approvalStatus: "APPROVED",
         },
+        // ADDITIVE (reconciliation lane M5a, declared): the two DEDICATED products the
+        // R-C ride-along's SALE batches sit on. Approved + active (so the tool's global
+        // batch population really is the physical pool), zero on hand, NO reorder config
+        // and no threshold override — everything a reorder/demand row could read is
+        // absent, which is what keeps rows 2b/2f/2g measuring exactly what they measured
+        // before [OCk-21].
+        {
+          id: GATE_SEED.fixtures.reconciliationProductIds[0],
+          name: "Gate Recon Alpha 1 mg",
+          baseName: "Gate Recon Alpha",
+          variant: "1 mg",
+          quantity: 0,
+          location: 1,
+          approvalStatus: "APPROVED",
+        },
+        {
+          id: GATE_SEED.fixtures.reconciliationProductIds[1],
+          name: "Gate Recon Beta 2 mg",
+          baseName: "Gate Recon Beta",
+          variant: "2 mg",
+          quantity: 0,
+          location: 1,
+          approvalStatus: "APPROVED",
+        },
       ],
     });
     await prisma.product_locations.createMany({
@@ -384,6 +422,19 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
         // ADDITIVE (Task 1.7) — the two C8 threshold products.
         { productId: 9108, locationId: 1, quantity: 3, minQuantity: 0 },
         { productId: 9109, locationId: 1, quantity: 3, minQuantity: 0 },
+        // ADDITIVE (reconciliation lane M5a) — ONE zero-quantity row each.
+        {
+          productId: GATE_SEED.fixtures.reconciliationProductIds[0],
+          locationId: 1,
+          quantity: 0,
+          minQuantity: 0,
+        },
+        {
+          productId: GATE_SEED.fixtures.reconciliationProductIds[1],
+          locationId: 1,
+          quantity: 0,
+          minQuantity: 0,
+        },
       ],
     });
 
@@ -476,6 +527,63 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           changeTime: daysAgo(7),
           locationId: 1,
           actorKind: "USER",
+        },
+      ],
+    });
+
+    // --- ADDITIVE (reconciliation lane M5a, declared) — THE TWO SALE BATCHES ---
+    //
+    // WHY: the R-C ride-along's whole claim is that the BATCH population is global while
+    // the ORDER fields inside it are member-scoped, and that claim is unobservable
+    // without two batches stamped with orders belonging to DIFFERENT companies. `a` is
+    // company A's, `b` is company B's; every A-scoped caller must see BOTH batches and
+    // exactly ONE order.
+    //
+    // NO AUDIT ROW for either, deliberately: with no attempt row and no audit event, both
+    // batches take the derivation's R3 branch — outcome `attributed`, evidence `derived`,
+    // sentence "stamped by an unrecorded path". That is the honest historical shape (the
+    // gate database has never had a live attribution write), and it exercises the exact
+    // path the dev prod-dump will take for years of pre-lane history.
+    //
+    // The magnitudes here are the INTENT, not the assertion: the matrix recomputes units,
+    // productCount and the stamps from these rows with raw SQL.
+    await prisma.inventory_logs.createMany({
+      data: [
+        {
+          id: 9240,
+          productId: GATE_SEED.fixtures.reconciliationProductIds[0],
+          userId: GATE_SEED.actors.admin.userId,
+          delta: -2,
+          logType: "SALE",
+          changeTime: daysAgo(3),
+          locationId: 1,
+          actorKind: "USER",
+          batchId: GATE_SEED.fixtures.reconciliationBatchIds.a,
+          orderRecordId: "gateorder-companya",
+        },
+        {
+          id: 9241,
+          productId: GATE_SEED.fixtures.reconciliationProductIds[1],
+          userId: GATE_SEED.actors.admin.userId,
+          delta: -3,
+          logType: "SALE",
+          changeTime: daysAgo(3),
+          locationId: 1,
+          actorKind: "USER",
+          batchId: GATE_SEED.fixtures.reconciliationBatchIds.a,
+          orderRecordId: "gateorder-companya",
+        },
+        {
+          id: 9242,
+          productId: GATE_SEED.fixtures.reconciliationProductIds[0],
+          userId: GATE_SEED.actors.admin.userId,
+          delta: -4,
+          logType: "SALE",
+          changeTime: daysAgo(4),
+          locationId: 1,
+          actorKind: "USER",
+          batchId: GATE_SEED.fixtures.reconciliationBatchIds.b,
+          orderRecordId: "gateorder-companyb",
         },
       ],
     });

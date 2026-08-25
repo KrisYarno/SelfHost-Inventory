@@ -14,7 +14,10 @@
  *   - userCompany.findMany — resolveToolContext memberships (none).
  *   - assistantRun.create  — telemetry (best-effort).
  *   - product / product_locations / systemSetting — find_product's read graph.
- *   - $queryRaw            — the /healthz SELECT 1 probe.
+ *   - orderAttributionAttempt / auditLog — the reconciliation lane's recording boundary
+ *     and drill-down (pack C5.1).
+ *   - $queryRaw            — the /healthz SELECT 1 probe AND the reconciliation totals
+ *     read, told apart by the statement text (see the dispatcher below).
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -101,7 +104,33 @@ const prismaMock: any = {
   // / productStockSnapshot / globalReorderSettings / systemSetting / location), so the
   // mock build serves both composites end-to-end with the benign shapes above — no new
   // delegate is required.
-  $queryRaw: async () => [{ ok: 1 }],
+  //
+  // Reconciliation lane (pack C5.1): get_order_reconciliation reads the recording
+  // boundary (`ATTEMPTS_RECORDING_SINCE` — the first attempt row) through this delegate,
+  // and the drill-down reads the audit event that wrote a batch.
+  orderAttributionAttempt: {
+    findFirst: async () => null,
+    findMany: async () => [],
+  },
+  auditLog: {
+    findMany: async () => [],
+  },
+  // A DISPATCHER on the statement text, because two unrelated reads now arrive here.
+  // The /healthz probe wants its scalar row; the reconciliation batch-summary read wants
+  // a ROW SET, and handing it `[{ ok: 1 }]` would produce a "batch" with no id and no
+  // time. Every reconciliation raw read uses the OBJECT call form
+  // `prisma.$queryRaw<T>(Prisma.sql\`…\`)` (C2a.4), so the tag object's `.sql` is what to
+  // read — `String(first)` on a Prisma.Sql yields "[object Object]" and would match
+  // nothing.
+  /* eslint-disable-next-line @typescript-eslint/no-explicit-any */
+  $queryRaw: async (first: any) => {
+    const sql =
+      typeof first === "object" && first !== null && "sql" in first ? first.sql : String(first);
+    const isReconciliationRead =
+      (sql.includes("inventory_logs") || sql.includes("external_order_items")) &&
+      sql.includes("GROUP BY");
+    return isReconciliationRead ? [] : [{ ok: 1 }];
+  },
 };
 
 export default prismaMock;

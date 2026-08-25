@@ -100,6 +100,11 @@ import { getOrderPipeline, type OrderPipelineGroupBy } from "@/lib/reports/order
 // TOOL_SCOPES stays "global"; each result carries meta.scope "mixed" (its sales/order
 // sections are company-scoped, its physical sections global — spec §6).
 import { getProductOverview, getBusinessSnapshot } from "@/lib/assistant/composites";
+// Reconciliation lane (spec D9; pack C5.1): the attribution report producer. The class
+// vocabulary is value-imported from its OWN prisma-free module — never from the producer,
+// for the same reason the admin UI does it that way (amendment 3h).
+import { getAttributionReport, type AttributionRow } from "@/lib/reconciliation/attribution";
+import { ATTRIBUTION_CLASS_KEYS } from "@/lib/reconciliation/class-keys";
 
 // ---------------------------------------------------------------------------
 // Result contract (spec D4 / §3 E1). Discriminated union so consumers branch on
@@ -207,6 +212,10 @@ export const TOOL_SCOPES: Record<string, "company" | "global"> = {
   // your companies, physical sections = global). "mixed" is NEVER a TOOL_SCOPES value.
   get_product_overview: "global",
   get_business_snapshot: "global",
+  // Reconciliation lane (spec D9): batches are the physical pool; the ORDER fields inside
+  // are member-scoped — the result carries meta.scope 'mixed'; 'mixed' is NEVER a
+  // TOOL_SCOPES value.
+  get_order_reconciliation: "global",
 };
 
 // ---------------------------------------------------------------------------
@@ -265,6 +274,13 @@ const MOVEMENT_BATCH_MAX = 20;
 const MOVEMENT_BREAKDOWN_MAX = 100;
 // reorder_report named-product sizing (spec C11) — bounded like the movement batch.
 const REORDER_BATCH_MAX = 20;
+// get_order_reconciliation (reconciliation lane pack C5.1): the batch page and the
+// opaque keyset cursor's byte bound. The tool's page is a QUARTER of the producer's own
+// 200-row ceiling — a batch row is wide (log types, sentence, the order projection), and
+// the honest bound is `coverage.moreCount` rather than a bigger page.
+const RECONCILIATION_MAX = 50;
+const RECONCILIATION_DEFAULT_LIMIT = 25;
+const RECONCILIATION_CURSOR_MAX = 200;
 // DB-level `take` for the snapshot series rows. Reconciled with the budget (D-T7): a
 // point serializes to ~52 bytes, so 1000 points ≈ 51 KiB < the reserved row-page budget
 // (per-tool cap − envelope reserve ≈ 56 KiB) < the per-tool cap (64 KiB) < the turn
@@ -1414,6 +1430,21 @@ const getProductOverviewSchema = z.object({
 // get_business_snapshot (spec §5 T-SNAP): no args — companies come from the run ctx.
 const getBusinessSnapshotSchema = z.object({});
 
+// get_order_reconciliation (reconciliation lane spec D9 / §4.5; pack C5.1): which
+// outbound batches in a window were tied to an order, and why the rest were not. Plain
+// z.object like every other schema here (the MCP adapter reads its raw `.shape`); the
+// window rule is the shared post-parse `assertWindow`, never a `.refine`.
+const getOrderReconciliationSchema = z.object({
+  from: isoDay.optional(),
+  to: isoDay.optional(),
+  relativeDays: z.number().int().min(1).max(MAX_WINDOW_DAYS).optional(),
+  // The CLOSED chip vocabulary, value-imported from the prisma-free class-keys module.
+  class: z.enum([...ATTRIBUTION_CLASS_KEYS]).optional(),
+  orderNumber: z.string().trim().min(1).max(64).optional(),
+  limit: z.number().int().positive().max(RECONCILIATION_MAX).optional(),
+  cursor: z.string().max(RECONCILIATION_CURSOR_MAX).optional(),
+});
+
 const lowStockSchema = z.object({
   limit: z.number().int().positive().max(LOW_STOCK_MAX).optional(),
   offset: nonNegInt.optional(),
@@ -1489,6 +1520,30 @@ function findProductByteSkip(
       `response byte budget, and nextOffset (which must stay page-aligned) skips past ` +
       `them. To read them, call again with offset ${offset} and limit ${retryLimit} — a ` +
       `smaller page re-covers this same range and loses nothing.`,
+  };
+}
+
+/**
+ * One attribution batch, as the ASSISTANT sees it (reconciliation lane spec §4.5 / D9).
+ *
+ * Deliberately NARROWER than the producer's row: no `actor` (a member viewer never learns
+ * WHO moved the stock — the batch pool is global, the operator is not) and no free text
+ * beyond the rule's own sentence. `canAttribute` / `attributeLock` / `fulfilledAgainst`
+ * are admin-UI affordances for a WRITE this surface cannot perform, so they stay off the
+ * wire too. `ruleId` is OMITTED for a recorded class, never emitted as null.
+ */
+function toolRow(row: AttributionRow): Record<string, unknown> {
+  return {
+    batchId: row.batchId,
+    at: row.at,
+    source: row.source,
+    logTypes: row.logTypes,
+    units: row.units,
+    productCount: row.productCount,
+    class: row.how.classKey,
+    ...(row.how.ruleId === undefined ? {} : { ruleId: row.how.ruleId }),
+    sentence: row.how.sentence,
+    order: row.order,
   };
 }
 
@@ -2842,6 +2897,77 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         byteBudget: Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
       });
       return ok(snapshot, { scope: "mixed" });
+    },
+  },
+
+  get_order_reconciliation: {
+    description:
+      `Which outbound stock deductions were tied to which ORDERS in a window, and why ` +
+      `the rest were not. Attribution truth = the LEDGER STAMP on the batch's rows; the ` +
+      `WHY is either the attempt the platform recorded live or a labelled DERIVED class ` +
+      `carrying the rule that fired (class 'attributed·derived' means stamped by a path ` +
+      `that recorded nothing — never present a derived class as a recorded one). Rows ` +
+      `are BATCHES: batchId, when, source, logTypes, units, productCount, class, ` +
+      `sentence, and the order. Filters: class (the chip vocabulary) and orderNumber. ` +
+      `This is a MIXED-scope tool: the BATCH population is GLOBAL (the physical pool, ` +
+      `with no actor identity and no free text), while the ORDER fields inside are ` +
+      `returned only for YOUR companies — another company's order comes back as ` +
+      `{orderRedacted:true} with a reason, and a stamped order that was deleted as ` +
+      `{orderMissing:true}. The orderNumber filter searches your companies only: a ` +
+      `number outside them matches zero orders and coverage says 'no order matching ` +
+      `that number in your companies' — it never returns redacted rows. Read ` +
+      `coverage.moreCount (rows beyond this page), coverage.derivedShare, ` +
+      `coverage.ledgerUnstamped, coverage.needsALook and coverage.exclusionsNote before ` +
+      `summarizing, and relay them. Omitting dates uses relativeDays (default 30). ` +
+      `${DATA_POSTURE}`,
+    inputSchema: getOrderReconciliationSchema,
+    run: async (input, ctx) => {
+      const args = getOrderReconciliationSchema.parse(input);
+      const window = resolveWindow(
+        { from: args.from, to: args.to, relativeDays: args.relativeDays },
+        new Date(),
+        DEFAULT_RELATIVE_DAYS,
+      );
+      assertWindow(window.from, window.to);
+      // The two day-keys are passed EXPLICITLY (OCk-5): spreading `ResolvedWindow` would
+      // hand the producer `days`/`source` as well, and an input type that silently
+      // tolerates them is how a window echo turns into a window filter.
+      const report = await getAttributionReport(
+        {
+          from: window.from,
+          to: window.to,
+          classKey: args.class,
+          orderNumber: args.orderNumber,
+          limit: args.limit ?? RECONCILIATION_DEFAULT_LIMIT,
+          cursor: args.cursor,
+        },
+        // D9: the tool ALWAYS asks as a member, admin or not — the order fields it may
+        // show are the caller's memberships, never the platform's whole order book.
+        { kind: "member", companyIds: ctx.companyIds },
+      );
+      const { nonAttributable, historicalMassUpdate, noBatchRows } = report.totals.exclusions;
+      return ok(
+        {
+          window,
+          totals: report.totals,
+          rows: report.rows.map(toolRow),
+          coverage: {
+            ...report.coverage,
+            batchScope: "global — the physical pool, no actor identity",
+            orderFieldScope: "your companies only",
+            // Every exclusion, said out loud beside the figures that carry them: the
+            // three counts are the batches this report is NOT allowed to speak about.
+            exclusionsNote:
+              `excluded from this window: ${nonAttributable} batches with no population ` +
+              `row (transfers, counts, corrections, positive-only adjusts), ` +
+              `${historicalMassUpdate} pre-lane mass-update batches, and ${noBatchRows} ` +
+              `outbound rows carrying no batch id`,
+            moreCount: report.moreCount,
+          },
+          definitions: report.definitions,
+        },
+        { scope: "mixed" },
+      );
     },
   },
 };

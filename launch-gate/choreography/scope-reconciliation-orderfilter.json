@@ -1,0 +1,18 @@
+{
+  "id": "scope-reconciliation-orderfilter",
+  "steps": [
+    {
+      "toolCalls": [
+        {
+          "name": "get_order_reconciliation",
+          "input": { "relativeDays": 30, "orderNumber": "9100303" }
+        }
+      ],
+      "usage": { "prompt_eval_count": 1495, "eval_count": 34 }
+    },
+    {
+      "text": "Reconciliation order filter read.",
+      "usage": { "prompt_eval_count": 1722, "eval_count": 10 }
+    }
+  ]
+}

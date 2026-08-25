@@ -119,6 +119,8 @@ export function buildSystemPrompt(now: Date): string {
     "- \"What do you track? / How fresh is the data?\" -> get_data_freshness.",
     "- Alert thresholds / reorder lead times -> get_inventory_policy.",
     "- Orders pending vs. completed -> get_order_pipeline.",
+    "- Which deductions were tied to which orders / why a deduction was not",
+    "  attributed -> get_order_reconciliation.",
     "",
     "STYLE:",
     "- Be concise and specific. Cite the numbers the tools returned and the scope they",

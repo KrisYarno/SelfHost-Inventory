@@ -74,6 +74,13 @@ jest.mock("@/lib/prisma", () => {
         if (p.startsWith("$")) {
           return (...args: unknown[]) => {
             calls.push({ model: "$root", method: p, args: args[0] });
+            // Root client functions honour `__overrides` under a `$root.` key, exactly as
+            // delegates do (pack C5.2): a read whose whole result set arrives through a
+            // TAGGED `$queryRaw` — the reconciliation batch-summary statement — cannot be
+            // seeded any other way, and an un-seedable branch is a branch whose PII
+            // projection the gate would assert vacuously.
+            const key = `$root.${p}`;
+            if (key in overrides) return Promise.resolve(overrides[key]);
             return Promise.resolve(p.toLowerCase().includes("query") ? [] : 0);
           };
         }
@@ -107,6 +114,13 @@ import { TOOL_PRESENTATION } from "@/lib/assistant/tool-presentation";
 import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
 import { STATIC_WRITE_ALLOWLIST } from "./static-write-allowlist";
 import { ORDER_PIPELINE_SELECT, ORDER_ITEM_UNITS_SELECT } from "@/lib/reports/order-pipeline";
+// Reconciliation lane (pack C5.2): the lane's own frozen order projection + its
+// forbidden-name set. The gate keeps its OWN literals below and pins the relationship
+// between the two sets, so neither can be narrowed without failing here.
+import {
+  RECONCILIATION_ORDER_SELECT,
+  RECONCILIATION_PII_FIELD_NAMES,
+} from "@/lib/reconciliation/pii";
 // Task 1.4: the C2 envelope pins read the SHARED schema (contract pack T0) — never a
 // local re-declaration, which would pin a copy instead of the contract.
 import { requestSchema } from "@/lib/assistant/thread-contracts";
@@ -242,6 +256,19 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
     { groupBy: "day" },
     { relativeDays: 7 },
   ],
+  // Reconciliation lane (pack C5.2): ONE fixture per read branch of
+  // get_order_reconciliation — the default window, a relative window, the class chip,
+  // the member-scoped orderNumber filter, and the keyset page. The last one carries a
+  // FROZEN cursor literal (base64url of {"t":1787184000000,"b":"gate-recon-a","c":0},
+  // CX-13) rather than a placeholder: the producer REJECTS an undecodable cursor with a
+  // 400, so a hand-waved string would exercise the error path and call the branch covered.
+  get_order_reconciliation: [
+    {},
+    { relativeDays: 7 },
+    { class: "attributed·fulfillment" },
+    { orderNumber: "12345" },
+    { limit: 5, cursor: "eyJ0IjoxNzg3MTg0MDAwMDAwLCJiIjoiZ2F0ZS1yZWNvbi1hIiwiYyI6MH0" },
+  ],
   // Wave-3 composites. fixture[0] is the HAPPY path (coverage/definition gates): a valid
   // productId that resolves via the coverage-gate's product.findFirst override to an OK
   // overview; the pending-review productId case is a LATER fixture (read-only gate only),
@@ -368,6 +395,14 @@ describe("registration", () => {
       ["reorder_report", {}, { includeOkay: false }],
       ["reorder_report", {}, { includeHealthy: true }],
       ["reorder_report", {}, { productIds: [7] }],
+      // Reconciliation lane: the chip narrows to ONE evidence class and the order number
+      // to the batches of ONE order — both change which batches the answer covers.
+      [
+        "get_order_reconciliation",
+        { relativeDays: 7 },
+        { relativeDays: 7, class: "attributed·manual" },
+      ],
+      ["get_order_reconciliation", { relativeDays: 7 }, { relativeDays: 7, orderNumber: "1301" }],
     ];
     for (const [name, plain, widened] of cases) {
       const p = TOOL_PRESENTATION[name];
@@ -611,6 +646,29 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(reorder).toContain("outboundMix30");
   });
 
+  // Reconciliation lane D9: this tool's scope claim is a SPLIT one, and a model that
+  // reads only half of it will either under-report the batches or over-report the orders.
+  // Both halves, the derived-class caveat, and the filter's scope are pinned where the
+  // model actually reads them.
+  it("get_order_reconciliation discloses the GLOBAL/member split, the derived caveat, and the filter's scope", () => {
+    const d = desc("get_order_reconciliation");
+    expect(d).toMatch(/mixed/i);
+    expect(d).toMatch(/BATCH population is GLOBAL/);
+    expect(d).toMatch(/only for YOUR companies/);
+    expect(d).toContain("orderRedacted");
+    expect(d).toContain("orderMissing");
+    // The truth source, and the one thing a derived class must never be relayed as.
+    expect(d).toMatch(/LEDGER STAMP/);
+    expect(d).toMatch(/never present a derived class as a recorded one/);
+    // The filter is member-scoped, and its empty answer is a coverage sentence — NOT a
+    // page of redacted rows.
+    expect(d).toMatch(/filter searches your companies only/);
+    expect(d).toContain("no order matching that number in your companies");
+    expect(d).toMatch(/never returns redacted rows/);
+    // No actor identity, ever.
+    expect(d).toMatch(/no actor identity/);
+  });
+
   it("get_business_snapshot frames itself as one-call, names the section tools, and discloses mixed scope + independent degradation", () => {
     const d = desc("get_business_snapshot");
     expect(d).toMatch(/one call/i);
@@ -787,6 +845,22 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
     // reorder-config.ts is the read-path config dependency (reorder.ts imports it) and
     // is where the R2-B1 write lives — scanned so the allowlist can name it.
     "lib/reorder-config.ts",
+    // Reconciliation lane (pack C5.2 + R-4): get_order_reconciliation pulls the report
+    // producer into the read path, and the producer pulls three more modules plus the
+    // attempt-contract types with it. The meta-test below only enforces tools.ts's DIRECT
+    // imports (attribution + class-keys), so the transitive four are registered BY HAND
+    // here — which is the only reason R-4's "no write token, comments included" rule is
+    // enforced on them at all.
+    "lib/reconciliation/attribution.ts",
+    "lib/reconciliation/population.ts",
+    "lib/reconciliation/derive.ts",
+    "lib/reconciliation/pii.ts",
+    // The class-key vocabulary is its OWN prisma-free module (pack amendment 3h): the
+    // tool's z.enum value-imports THIS, never the producer.
+    "lib/reconciliation/class-keys.ts",
+    // CX-3: the types the producer needs from the attempts writer live here instead, so
+    // the read path never imports `lib/attribution/attempts.ts`.
+    "lib/attribution/contracts.ts",
   ];
   const WRITE_TOKEN_SRC =
     "\\.\\s*(create|createMany|update|updateMany|upsert|delete|deleteMany)\\s*\\(|" +
@@ -1100,6 +1174,151 @@ describe("PII PROJECTION gate (spec §7 — get_order_pipeline)", () => {
       expect(piiKeys).toEqual([]);
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// PII PROJECTION GATE — get_order_reconciliation (reconciliation lane spec D6/D9;
+// pack C5.2). The tool reads ORDERS on behalf of a member, so it gets its own gate
+// with its OWN frozen literal: the lane's select is a DIFFERENT projection from the
+// pipeline's (it carries companyId for the membership math and reaches `platform`
+// through a nested relation select), and asserting it against the exported const
+// would only prove the const equals itself.
+// ---------------------------------------------------------------------------
+
+describe("PII PROJECTION gate (reconciliation lane D6 — get_order_reconciliation)", () => {
+  // INDEPENDENT literal, never the imported object. A nested `select` is legal — it is
+  // still an allowlist; an `include` is not, because it hands back the whole relation.
+  const EXPECTED_RECONCILIATION_ORDER_SELECT = {
+    id: true,
+    orderNumber: true,
+    internalStatus: true,
+    externalCreatedAt: true,
+    companyId: true,
+    integration: { select: { platform: true } },
+  };
+
+  /**
+   * ONE batch-summary row, in the shape the tagged `$queryRaw` returns (C2a.4). Without
+   * it the window is empty, the producer never projects an order, and every assertion
+   * below would pass over a payload that touched no PII at all.
+   *
+   * It carries a FULFILLMENT audit event on purpose, so the batch derives
+   * `attributed·fulfillment` — the class the chip fixture asks for. A batch that
+   * classified as anything else would make that one fixture select zero rows and assert
+   * the projection over an empty page.
+   */
+  const SUMMARY_ROW = {
+    nonAttributableBatches: 0,
+    noBatchRows: 0,
+    orderNumberMatches: 1,
+    batchId: "gate-recon-a",
+    minChangeTime: new Date("2026-08-01T00:00:00.000Z"),
+    rowCount: 2,
+    units: 3,
+    productCount: 2,
+    logTypes: "SALE",
+    distinctStamps: 1,
+    firstStamp: "gateorder-companya",
+    lastStamp: "gateorder-companya",
+    unstampedRows: 0,
+    auditId: 4242,
+    auditActionType: "EXTERNAL_ORDER_FULFILLMENT",
+    auditEntityId: "gateorder-companya",
+    auditOrderAttributionSource: null,
+    auditIntent: null,
+    auditSelectedExternalOrderId: null,
+    auditOrderId: null,
+    auditHasOrderReference: 0,
+    auditHasRows: 0,
+    auditHasRowsOmitted: 0,
+    attemptId: null,
+    attemptOutcome: null,
+    attemptEvidence: null,
+    attemptReason: null,
+    attemptSource: null,
+    attemptActorUserId: null,
+    attemptOrderRecordId: null,
+  };
+
+  /** The order the stamp points at, as the frozen select would return it. */
+  const ORDER_ROW = {
+    id: "gateorder-companya",
+    orderNumber: "1301",
+    internalStatus: "pending",
+    externalCreatedAt: new Date("2026-07-30T00:00:00.000Z"),
+    companyId: "c1",
+    integration: { platform: "WOOCOMMERCE" },
+  };
+
+  const RECONCILIATION_FIXTURES = TOOL_GATE_FIXTURES.get_order_reconciliation;
+
+  async function runSeeded(args: Record<string, unknown>): Promise<ToolResult> {
+    prismaCtl.__reset();
+    prismaCtl.__overrides["$root.$queryRaw"] = [SUMMARY_ROW];
+    prismaCtl.__overrides["externalOrder.findMany"] = [ORDER_ROW];
+    return assistantTools.get_order_reconciliation.run(args, CTX);
+  }
+
+  it("the exported allowlist select is deep-frozen and matches the independent snapshot", () => {
+    expect(Object.isFrozen(RECONCILIATION_ORDER_SELECT)).toBe(true);
+    expect(Object.isFrozen(RECONCILIATION_ORDER_SELECT.integration)).toBe(true);
+    expect(RECONCILIATION_ORDER_SELECT).toEqual(EXPECTED_RECONCILIATION_ORDER_SELECT);
+  });
+
+  // CX-6: the lane's set had to drop `note`/`customerName`-adjacent fields the Exceptions
+  // finder legitimately returns, and a narrowing there must never quietly weaken THIS
+  // gate. The direction is pinned: the lane's set is a SUPERSET of the gate's literal.
+  it("RECONCILIATION_PII_FIELD_NAMES is a SUPERSET of this gate's own PII literal", () => {
+    // `Array.from`, not a spread: the ROOT tsconfig (which is what `npx tsc --noEmit`
+    // checks this file with) targets below ES2015, where spreading a Set needs
+    // --downlevelIteration. Same set, same predicate.
+    expect(Array.from(PII_FIELD_NAMES).every((k) => RECONCILIATION_PII_FIELD_NAMES.has(k))).toBe(
+      true,
+    );
+  });
+
+  it.each(RECONCILIATION_FIXTURES.map((f, i) => [i, f as Record<string, unknown>]))(
+    "fixture[%#] every ExternalOrder read uses the allowlist select (vs an INDEPENDENT literal) and NO include",
+    async (_i, fixture) => {
+      await runSeeded(fixture);
+      const calls = prismaCtl.__calls.filter((c) => c.model === "externalOrder");
+      expect(calls.length).toBeGreaterThan(0);
+      for (const c of calls) {
+        const a = c.args as { select?: unknown; include?: unknown };
+        expect(a.include).toBeUndefined(); // fail-closed: an include is REJECTED
+        expect(a.select).toBeDefined(); // fail-closed: an absent select is REJECTED
+        expect(a.select).toEqual(EXPECTED_RECONCILIATION_ORDER_SELECT);
+      }
+    },
+  );
+
+  it.each(RECONCILIATION_FIXTURES.map((f, i) => [i, f as Record<string, unknown>]))(
+    "fixture[%#] serialized result key set carries NONE of the non-selectable PII columns",
+    async (_i, fixture) => {
+      const result = await runSeeded(fixture);
+      expect(result.status).toBe("ok");
+      if (result.status !== "ok") return;
+      const piiKeys = collectKeys(result.data, (k) => RECONCILIATION_PII_FIELD_NAMES.has(k));
+      expect(piiKeys).toEqual([]);
+    },
+  );
+
+  // D9: a member viewer never learns WHO — the batch pool is global, the operator is not.
+  it("no row carries an actor, and the seeded order's fields reach a member of its company", async () => {
+    const result = await runSeeded({});
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as { rows: Array<Record<string, unknown>> };
+    expect(data.rows).toHaveLength(1);
+    expect(data.rows[0]).not.toHaveProperty("actor");
+    expect(data.rows[0].order).toEqual({
+      id: "gateorder-companya",
+      orderNumber: "1301",
+      internalStatus: "pending",
+      platform: "WOOCOMMERCE",
+      externalCreatedAt: "2026-07-30T00:00:00.000Z",
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

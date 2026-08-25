@@ -1,0 +1,15 @@
+{
+  "id": "scope-reconciliation",
+  "steps": [
+    {
+      "toolCalls": [
+        { "name": "get_order_reconciliation", "input": { "relativeDays": 30 } }
+      ],
+      "usage": { "prompt_eval_count": 1488, "eval_count": 29 }
+    },
+    {
+      "text": "Reconciliation surfaces read.",
+      "usage": { "prompt_eval_count": 1710, "eval_count": 9 }
+    }
+  ]
+}

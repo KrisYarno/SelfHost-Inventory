@@ -83,6 +83,23 @@ describe("C10 routing (Task 2.4): the movement half of the set question", () => 
   });
 });
 
+describe("Reconciliation routing (lane pack C5.1): the attribution question has a home", () => {
+  it("routes deduction-to-order questions to get_order_reconciliation, verbatim", () => {
+    expect(p).toContain(
+      "- Which deductions were tied to which orders / why a deduction was not " +
+        "attributed -> get_order_reconciliation.",
+    );
+  });
+
+  it("the routing affordance it names is a LANDED capability (the W0 seam-fix rule)", () => {
+    const shape = (assistantTools.get_order_reconciliation.inputSchema as unknown as {
+      shape: Record<string, unknown>;
+    }).shape;
+    expect(shape).toHaveProperty("class");
+    expect(shape).toHaveProperty("orderNumber");
+  });
+});
+
 describe("C9 routing (Task 2.3): the started/stopped-moving question has a home", () => {
   it("routes it to compare_periods groupBy:'product', with the unranked caveat", () => {
     expect(p).toContain("started/stopped moving");

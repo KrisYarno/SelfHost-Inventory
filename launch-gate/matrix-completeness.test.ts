@@ -231,6 +231,32 @@ const RIDE_ALONG_COVERAGE: RowCoverage[] = [
       "pack REV-17: the C8 groupBy's COUNT(*)-vs-COUNT(col) SQL was MySQL-unproven — 3.3 drives a turn and asserts the rollup against the oracle",
     describes: ["C8 USAGE — the ONE groupBy, adjudicated by REAL MySQL (pack REV-17)"],
   },
+  // Reconciliation lane R-C (its own spec + pack; the multiuser spec is NOT amended).
+  // Registered here rather than as C7 rows for exactly the reason this family exists:
+  // they are real, claimed coverage that the C7 matrix never promised.
+  {
+    row: "R1-tool-member",
+    claim: "reconciliation lane spec D9: batches global, order fields member-only",
+    describes: [
+      "RIDE-ALONG R1 — get_order_reconciliation: member-only order fields over GLOBAL batches",
+    ],
+  },
+  {
+    row: "R1-tool-orderfilter",
+    claim:
+      "reconciliation lane spec D9: the orderNumber filter resolves ONLY within the caller's companies — zero rows plus a coverage sentence, never a redacted row",
+    describes: [
+      "RIDE-ALONG R1 — get_order_reconciliation: the orderNumber filter is member-scoped",
+    ],
+  },
+  {
+    row: "R1-tool-zerouser",
+    claim:
+      "reconciliation lane spec D9: a caller with NO company access still sees the whole physical batch pool, with every order redacted",
+    describes: [
+      "RIDE-ALONG R1 — get_order_reconciliation: zeroUser sees every batch and no order",
+    ],
+  },
 ];
 
 /**

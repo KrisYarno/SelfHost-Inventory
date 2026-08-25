@@ -66,6 +66,16 @@ jest.mock("@/lib/prisma", () => ({
     externalOrderItem: { findMany: jest.fn(async () => []) },
     globalReorderSettings: { findUnique: jest.fn(async () => null) },
     location: { findMany: jest.fn(async () => []) },
+    // Reconciliation lane (pack C5.1): get_order_reconciliation reads the recording
+    // boundary through orderAttributionAttempt and the drill-down reads audit_logs.
+    // Mirrored EXACTLY in mcp/src/prisma-mock.ts — the parity test at the bottom of this
+    // file compares the two method sets, which is the only thing that keeps the SHIPPED
+    // bundle from 500ing on a tool every suite here says is green.
+    orderAttributionAttempt: {
+      findFirst: jest.fn(async () => null),
+      findMany: jest.fn(async () => []),
+    },
+    auditLog: { findMany: jest.fn(async () => []) },
     $queryRaw: jest.fn(async () => [{ ok: 1 }]),
   },
 }));
@@ -1679,6 +1689,93 @@ describe("POST /mcp — quality+reach W3 round-trips (approval + lifecycle over 
   });
 });
 
+describe("POST /mcp — reconciliation lane round-trip (pack C5.1 / seam S17)", () => {
+  // The batch-summary read is a TAGGED `$queryRaw`, so the mock has to answer it with a
+  // row SET rather than the /healthz probe's `[{ ok: 1 }]` — a single scalar row would
+  // reach `summaryToFacts` as a batch with no id and no time. Both mock layers therefore
+  // DISPATCH on the statement text; this describe binds the inline mock to the same rule
+  // the built bundle's stand-in implements, and the parity describe below asserts that
+  // stand-in's dispatch directly.
+  beforeEach(() => {
+    p.$queryRaw.mockReset();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    p.$queryRaw.mockImplementation(async (first: any) => {
+      const sql =
+        typeof first === "object" && first !== null && "sql" in first ? first.sql : String(first);
+      return /inventory_logs|external_order_items/.test(sql) && /GROUP BY/.test(sql)
+        ? []
+        : [{ ok: 1 }];
+    });
+    p.externalOrder.findMany.mockReset();
+    p.externalOrder.findMany.mockResolvedValue([]);
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async function roundTrip(name: string, args: Record<string, unknown>): Promise<any> {
+    const server = createMcpHttpServer();
+    const port = await listen(server);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: MCP_HEADERS,
+        body: toolCall(1, name, args),
+      });
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rpc = (await res.json()) as any;
+      expect(rpc.result).toBeDefined();
+      return JSON.parse(rpc.result.content[0].text as string);
+    } finally {
+      await close(server);
+    }
+  }
+
+  it("get_order_reconciliation: an empty window answers with BOTH scoping sentences and mixed scope", async () => {
+    const toolResult = await roundTrip("get_order_reconciliation", { relativeDays: 7 });
+    expect(toolResult.status).toBe("ok");
+    // D9: the STATIC scope is global, the RESULT is mixed — batches global, orders member.
+    expect(toolResult.meta.scope).toBe("mixed");
+    const data = toolResult.data;
+    expect(data.window).toMatchObject({ days: 7, source: "relative" });
+    expect(data.rows).toEqual([]);
+    expect(data.totals.attributable).toBe(0);
+    expect(data.coverage.batchScope).toBe("global — the physical pool, no actor identity");
+    expect(data.coverage.orderFieldScope).toBe("your companies only");
+    expect(data.coverage.orderFilterScope).toBe("your companies only");
+    expect(data.coverage.moreCount).toBe(0);
+    // R-2: an empty window still says what it excluded and why the share has no
+    // denominator — never a bare 0 with no reason.
+    expect(data.coverage.exclusionsNote).toContain("excluded from this window");
+    expect(data.coverage.derivedShare).toBeNull();
+    expect(data.coverage.notes).toContain(
+      "no attributable batch in this window, so the derived share has no denominator",
+    );
+    expect(typeof data.definitions.population).toBe("string");
+    // The recording boundary really was read through the delegate the mock provides.
+    expect(p.orderAttributionAttempt.findFirst).toHaveBeenCalled();
+  });
+
+  it("the tool is registered with a member-scoped context and no `actor` KEY on the wire", async () => {
+    const toolResult = await roundTrip("get_order_reconciliation", {});
+    // A KEY scan, not a substring one: `coverage.batchScope` says the words "no actor
+    // identity" out loud, which is the disclosure — the thing that must never appear is
+    // an actor FIELD (D9: a member viewer never learns who moved the stock).
+    const keys: string[] = [];
+    const visit = (v: unknown): void => {
+      if (Array.isArray(v)) v.forEach(visit);
+      else if (v !== null && typeof v === "object") {
+        for (const [k, child] of Object.entries(v)) {
+          keys.push(k);
+          visit(child);
+        }
+      }
+    };
+    visit(toolResult);
+    expect(keys).not.toContain("actor");
+    expect(p.userCompany.findMany).toHaveBeenCalled();
+  });
+});
+
 describe("MCP mock-layer parity (Task 2.6 consolidation — seam S12/CP-7)", () => {
   // WHY THIS IS STRUCTURAL, not another round-trip: the jest round-trips above run
   // against the INLINE mock, so they physically cannot detect a method missing from
@@ -1708,5 +1805,23 @@ describe("MCP mock-layer parity (Task 2.6 consolidation — seam S12/CP-7)", () 
     expect(rootFunctions(prismaMock as Record<string, unknown>)).toEqual(
       rootFunctions(p as Record<string, unknown>),
     );
+  });
+
+  // Pack C5.1 [OCk-14]: the built bundle's `$queryRaw` is now a DISPATCHER, and the
+  // method-set comparison above cannot see behaviour. Both branches are asserted here,
+  // through the OBJECT call form the reconciliation reads actually use
+  // (`prisma.$queryRaw<T>(Prisma.sql\`…\`)`), because reading `.sql` off a template-tag
+  // object is the part a string-only mock got wrong.
+  it("the built-bundle mock DISPATCHES $queryRaw: a batch-summary statement answers with rows, the probe with [{ok:1}]", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mock = prismaMock as any;
+    const summary = {
+      sql: "WITH t AS (SELECT 1) SELECT l.batchId FROM inventory_logs l GROUP BY l.batchId",
+      values: [],
+    };
+    await expect(mock.$queryRaw(summary)).resolves.toEqual([]);
+    await expect(mock.$queryRaw({ sql: "SELECT i.id FROM external_order_items i GROUP BY i.orderId", values: [] })).resolves.toEqual([]);
+    // The legacy /healthz probe is unchanged — it is neither of those statements.
+    await expect(mock.$queryRaw`SELECT 1`).resolves.toEqual([{ ok: 1 }]);
   });
 });

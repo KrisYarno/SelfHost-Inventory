@@ -117,6 +117,8 @@ describe("buildSystemPrompt: what-we-track + routing map (W3-PROMPT, spec §5 T-
       "get_data_freshness",
       "get_inventory_policy",
       "get_order_pipeline",
+      // Reconciliation lane (pack C5.1): the deduction-to-order routing line.
+      "get_order_reconciliation",
     ]) {
       expect(PROMPT).toContain(tool);
     }

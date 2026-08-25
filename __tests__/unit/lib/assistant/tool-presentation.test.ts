@@ -264,6 +264,28 @@ describe("OC-5 — scope-changing arguments are disclosed", () => {
   });
 });
 
+describe("get_order_reconciliation disclosure row (reconciliation lane pack C5.1)", () => {
+  // Both of this tool's filters change WHICH BATCHES the answer covers — the class chip
+  // narrows to one evidence class, the order number to the batches of one order — so the
+  // OC-5 rule applies: a row that reads the same either way misdescribes the question.
+  it("renders the window, the class chip and the order filter", () => {
+    expect(summarize("get_order_reconciliation", { relativeDays: 7 })).toBe("last 7 days");
+    expect(summarize("get_order_reconciliation", {})).toBe("last 30 days (default)");
+    expect(
+      summarize("get_order_reconciliation", { relativeDays: 7, class: "attributed·manual" }),
+    ).toBe("last 7 days, class attributed·manual");
+    expect(summarize("get_order_reconciliation", { orderNumber: "1301" })).toBe(
+      "last 30 days (default), order 1301",
+    );
+  });
+
+  it("stays inert for junk / partial streamed args", () => {
+    expect(summarize("get_order_reconciliation", { class: 7, orderNumber: [] })).toBe(
+      "last 30 days (default)",
+    );
+  });
+});
+
 describe("every registered presentation entry stays inert + total", () => {
   it("summarizeArgs never throws for an empty / null / junk input", () => {
     for (const [name, p] of Object.entries(TOOL_PRESENTATION)) {

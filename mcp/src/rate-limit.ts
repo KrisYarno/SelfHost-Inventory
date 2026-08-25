@@ -7,7 +7,8 @@
  * A handful of expensive tools count more than 1x (weighted): `get_operations` /
  * `get_product_overview` / `get_business_snapshot` 5x (the composites fan out to many
  * module reads in one call); `reorder_report` / `get_movement_series` /
- * `get_inventory_summary` / `get_order_pipeline` 3x; `get_valuation` / `compare_periods`
+ * `get_inventory_summary` / `get_order_pipeline` / `get_order_reconciliation` 3x;
+ * `get_valuation` / `compare_periods`
  * / `get_stock_asof` 2x. Weights are keyed by tool NAME only —
  * no argument inspection. When either window is exceeded the request is denied
  * with a Retry-After (seconds until the blocking window rolls over). Only
@@ -40,6 +41,10 @@ const TOOL_WEIGHTS: Record<string, number> = {
   // are the heaviest tools on the surface — weighted 5x, level with get_operations.
   get_product_overview: 5,
   get_business_snapshot: 5,
+  // Reconciliation lane (spec D9): one tagged batch-summary statement over the whole
+  // outbound population plus the order/actor projections — the same class of read as the
+  // other 3x list tools.
+  get_order_reconciliation: 3,
 };
 
 export function toolWeight(toolName: string): number {
