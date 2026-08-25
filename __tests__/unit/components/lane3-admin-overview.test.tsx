@@ -64,6 +64,13 @@ function makeData(overrides: Partial<OpsHealthResponse> = {}): OpsHealthResponse
         label: "Platform writes: OFF",
       },
     },
+    // Reconciliation lane (pack C2c.4): the response gained a workload Sub. The
+    // SECTION renders it in M4a; the fixture carries it now so this suite keeps
+    // building a complete response.
+    reconciliation: {
+      status: "ok",
+      data: { openExceptions: 0, unmatchedIntended14d: 0, asOf: nowIso },
+    },
     ...overrides,
   };
 }

@@ -87,17 +87,50 @@ export function labelingLossKey(stagingItemId: number): string {
  * Severity for the ONE kind this lane adds (contract pack PK-6).
  *
  * Deliberately a single constant and NOT a `Record<ExceptionKind, Severity>`:
- * no exhaustive severity map exists in the code today (severity is derived from
- * kind at read time), and the six W3 priorities are not frozen. Inventing the
- * other values here would freeze a reconciliation-lane decision at a checkpoint
- * that has not happened. That lane defines the full map when it builds the
- * register.
+ * no exhaustive severity map existed in the code at the time (severity is
+ * derived from kind at read time), and the six W3 priorities were not frozen.
+ * Inventing the other values here would have frozen a reconciliation-lane
+ * decision at a checkpoint that had not happened. That lane has since made the
+ * call — `EXCEPTION_SEVERITY` below — and READS this constant rather than
+ * re-stating it, so the two can never drift apart.
  *
  * MEDIUM because a bench loss is real money already spent, but — unlike a
  * supplier shortage — there is no counterparty to chase and nothing arrives
  * later: it is a write-off to account for, not an escalation.
  */
 export const LABELING_LOSS_SEVERITY = 'medium' as const;
+
+/** How loud a kind is. Three levels, because a fourth is a false precision. */
+export type ExceptionSeverity = 'low' | 'medium' | 'high';
+
+/**
+ * THE severity map (reconciliation lane, spec REV-7 §2.5) — CLOSED and total.
+ *
+ * Severity stays DERIVED FROM KIND at read time and has no column: a
+ * re-prioritisation is a code change, not a migration and not a backfill of
+ * rows that were raised under the old opinion.
+ *
+ * The reasoning, once: `pending-with-stock` and `gap-order` are HIGH because
+ * real units (or a real order) are sitting somewhere they cannot be accounted
+ * for, and nothing else moves until a human looks. `recv-discrepancy`,
+ * `labeling-loss` and `unmapped-lines` are MEDIUM — money or mapping that must
+ * be settled, on somebody's week rather than somebody's hour. `cost-differs`
+ * and `unattributed-outstock` are LOW: the numbers are all present and correct,
+ * and what is missing is an interpretation.
+ *
+ * `labeling-loss` reads `LABELING_LOSS_SEVERITY` rather than repeating it (the
+ * overhaul froze that one value at its own checkpoint; a second literal here
+ * would be a second opinion).
+ */
+export const EXCEPTION_SEVERITY: Readonly<Record<ExceptionKind, ExceptionSeverity>> = Object.freeze({
+  'recv-discrepancy': 'medium',
+  'labeling-loss': LABELING_LOSS_SEVERITY,
+  'cost-differs': 'low',
+  'pending-with-stock': 'high',
+  'unattributed-outstock': 'low',
+  'unmapped-lines': 'medium',
+  'gap-order': 'high',
+});
 
 /**
  * The CLOSED follow-up vocabulary (spec §6 / D5). Stored in the NEW column

@@ -3,6 +3,10 @@ import { requireAdmin, apiHandler } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { listBackups } from "@/lib/backup/list";
 import { getPostureView } from "@/lib/platforms/egress";
+import {
+  getReconciliationOverview,
+  type ReconciliationOverview,
+} from "@/lib/reconciliation/overview";
 import type {
   Sub,
   IntegrationHealth,
@@ -221,6 +225,16 @@ function toSub<T>(r: PromiseSettledResult<T>, code: string): Sub<T> {
     : { status: "unavailable", errorCode: code };
 }
 
+/**
+ * Reconciliation lane (spec REV-7 D11, plan P-10): two COUNTS for the workload
+ * area. The producer owns both statements — and the Prisma delegate behind the
+ * first one, which this GET segment may not so much as name (the exceptions
+ * write boundary scans for it).
+ */
+async function loadReconciliation(now: number): Promise<ReconciliationOverview> {
+  return getReconciliationOverview(new Date(now));
+}
+
 /** Lane 6: the effective platform-write posture for the ops dashboard tile. */
 async function loadPlatformWrites(): Promise<PlatformWritesHealth> {
   const view = await getPostureView();
@@ -238,13 +252,14 @@ export const GET = apiHandler(async () => {
   await requireAdmin();
   const now = Date.now();
 
-  const [integrationsR, backupsR, pendingR, rebuildR, platformWritesR] =
+  const [integrationsR, backupsR, pendingR, rebuildR, platformWritesR, reconciliationR] =
     await Promise.allSettled([
       loadIntegrations(now),
       loadBackups(now),
       loadPendingReviews(),
       loadRebuild(now),
       loadPlatformWrites(),
+      loadReconciliation(now),
     ]);
 
   const integrations = toSub(integrationsR, "INTEGRATIONS_UNAVAILABLE");
@@ -252,6 +267,7 @@ export const GET = apiHandler(async () => {
   const pendingReviews = toSub(pendingR, "PENDING_REVIEWS_UNAVAILABLE");
   const rebuild = toSub(rebuildR, "REBUILD_UNAVAILABLE");
   const platformWrites = toSub(platformWritesR, "PLATFORM_WRITES_UNAVAILABLE");
+  const reconciliation = toSub(reconciliationR, "RECONCILIATION_UNAVAILABLE");
 
   const attention: AttentionItem[] = [];
 
@@ -377,6 +393,13 @@ export const GET = apiHandler(async () => {
     });
   }
 
+  // Reconciliation: NO attention row — not from the counts, and not from an
+  // `unavailable` Sub either (plan P-10, decided with OCp-15). It is a report,
+  // not an alarm: open exceptions and unmatched intended deductions are a
+  // permanently non-zero WORKLOAD figure, and a panel that goes amber every day
+  // because there is work to do teaches people to ignore the panel. The section
+  // renders the numbers, or renders that it could not read them, in place.
+
   // Severity-then-insertion order (negative before warning); insertion is already recency-ish per system.
   attention.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "negative" ? -1 : 1));
 
@@ -394,5 +417,6 @@ export const GET = apiHandler(async () => {
     pendingReviews,
     rebuild,
     platformWrites,
+    reconciliation,
   } satisfies OpsHealthResponse);
 });

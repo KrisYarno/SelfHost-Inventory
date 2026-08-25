@@ -25,6 +25,10 @@ jest.mock("@/lib/prisma", () => {
     systemSetting: { findUnique: jest.fn() },
     analyticsRebuildRun: { findFirst: jest.fn(), findMany: jest.fn() },
     auditLog: { create: jest.fn() },
+    // Reconciliation lane (pack C2c.4): the `reconciliation` Sub reads the
+    // producers, which read these two. The route never names either itself.
+    inventoryException: { count: jest.fn() },
+    $queryRaw: jest.fn(),
   };
   db.$transaction = jest.fn(async (cb: (t: typeof db) => unknown) => cb(db));
   return { __esModule: true, default: db };
@@ -52,6 +56,8 @@ const m = prisma as unknown as {
   systemSetting: { findUnique: jest.Mock };
   analyticsRebuildRun: { findFirst: jest.Mock; findMany: jest.Mock };
   auditLog: { create: jest.Mock };
+  inventoryException: { count: jest.Mock };
+  $queryRaw: jest.Mock;
 };
 const listBackupsMock = listBackups as jest.Mock;
 const salesMock = rebuildSalesFacts as jest.Mock;
@@ -79,6 +85,8 @@ function setHealthy() {
   m.analyticsRebuildRun.findFirst.mockResolvedValue(null);
   m.analyticsRebuildRun.findMany.mockResolvedValue([]);
   listBackupsMock.mockResolvedValue({ status: "ok", files: [{ name: "b.sql", mtimeMs: Date.now() }] });
+  m.inventoryException.count.mockResolvedValue(0);
+  m.$queryRaw.mockResolvedValue([{ n: 0 }]);
 }
 
 /** Enable the rebuild + a fresh heartbeat + a recent successful run (the "all green rebuild" baseline). */
@@ -114,6 +122,7 @@ describe("GET /api/admin/ops-health", () => {
     expect(body.backups.status).toBe("ok");
     expect(body.pendingReviews.status).toBe("ok");
     expect(body.rebuild.status).toBe("ok");
+    expect(body.reconciliation.status).toBe("ok");
   });
 
   test("lock-stale derivation: a held lock with a stale heartbeat flags lockStale + a warning", async () => {
@@ -283,6 +292,42 @@ describe("GET /api/admin/ops-health", () => {
     expect(body.attention.some((a: any) => a.severity === "warning" && /No database backups/i.test(a.message))).toBe(true);
     expect(body.attention.some((a: any) => a.severity === "negative")).toBe(false);
     expect(body.verdict).toBe("degraded");
+  });
+
+  // -------------------------------------------------------------------------
+  // Reconciliation lane (plan P-10): the `reconciliation` Sub is a WORKLOAD
+  // figure, not an alarm. A permanently non-zero backlog that goes amber every
+  // day teaches people to ignore the panel, so neither the counts NOR their
+  // absence may raise an attention row.
+  // -------------------------------------------------------------------------
+
+  test("reconciliation counts are REPORTED and never raise an attention row", async () => {
+    m.inventoryException.count.mockResolvedValue(42);
+    m.$queryRaw.mockResolvedValue([{ n: 17 }]);
+
+    const body = await (await opsHealthGET(opsReq())).json();
+
+    expect(body.reconciliation.data.openExceptions).toBe(42);
+    expect(body.reconciliation.data.unmatchedIntended14d).toBe(17);
+    expect(typeof body.reconciliation.data.asOf).toBe("string");
+    expect(body.attention).toEqual([]);
+    expect(body.verdict).toBe("ok");
+  });
+
+  test("the reconciliation loader failing renders unavailable IN SECTION, attention unchanged", async () => {
+    m.inventoryException.count.mockRejectedValue(new Error("db down"));
+
+    const res = await opsHealthGET(opsReq());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.reconciliation.status).toBe("unavailable");
+    expect(body.reconciliation.errorCode).toBe("RECONCILIATION_UNAVAILABLE");
+    // The all-clear stays all-clear: no attention row, no verdict change.
+    expect(body.attention).toEqual([]);
+    expect(body.verdict).toBe("ok");
+    // The other subsystems are untouched.
+    expect(body.integrations.status).toBe("ok");
   });
 
   test("parses lastSyncError JSON + surfaces a durable order-sync failure as negative", async () => {

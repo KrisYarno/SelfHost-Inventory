@@ -207,6 +207,23 @@ export interface PlatformWritesHealth {
   label: string;
 }
 
+/**
+ * Reconciliation lane (spec REV-7 D11, plan P-10): a WORKLOAD figure for the
+ * ops-health workload area — open exception rows, and deductions in the last
+ * fortnight that named an order and did not match one. Deliberately spelled
+ * STRUCTURALLY here rather than imported from `lib/reconciliation/overview.ts`:
+ * this module is client-side, and importing the producer would drag Prisma into
+ * the bundle. The route's `satisfies OpsHealthResponse` is what keeps the two
+ * in step.
+ *
+ * It NEVER contributes an attention row — see the route.
+ */
+export interface ReconciliationHealth {
+  openExceptions: number;
+  unmatchedIntended14d: number;
+  asOf: string;
+}
+
 export interface OpsHealthResponse {
   verdict: "ok" | "degraded" | "failing";
   attention: AttentionItem[];
@@ -215,6 +232,7 @@ export interface OpsHealthResponse {
   pendingReviews: Sub<PendingReviewsHealth>;
   rebuild: Sub<RebuildHealth>;
   platformWrites: Sub<PlatformWritesHealth>;
+  reconciliation: Sub<ReconciliationHealth>;
 }
 
 /** Ops-health aggregate. 60s poll (slower than the 30s dashboard route). */

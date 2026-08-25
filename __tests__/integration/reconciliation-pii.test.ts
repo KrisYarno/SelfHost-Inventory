@@ -13,9 +13,16 @@
  * envelope pin in the route suite and fail here — which is the whole point of
  * seeding the mock with fields the real select would never have asked for.
  *
- * EXTENSIBLE BY CONSTRUCTION: the routes are a TABLE. M2b adds the POST envelope
- * and M2c adds exceptions/unmapped by appending a row, not by writing a second
+ * EXTENSIBLE BY CONSTRUCTION: the routes are a TABLE. M2b added the POST envelope
+ * and M2c added exceptions/unmapped by appending a row, not by writing a second
  * harness.
+ *
+ * The two M2c rows seed PII names where a careless producer would echo them: on
+ * the exception row's `subject` blob (rendered into sentences, never returned)
+ * and on the grouped unmapped row (rebuilt field by field, never spread). The
+ * exception's `note` rides through UNTOUCHED and must keep passing — CX-6: an
+ * admin's own free text on an admin-only surface is not order PII, and a
+ * forbidden-name set containing `note` would fail every row the finder makes.
  */
 
 jest.mock('@/lib/api-utils', () => ({
@@ -52,6 +59,8 @@ import {
   POST as attributePOST,
 } from '@/app/api/reconciliation/attribution/[batchId]/route';
 import { GET as searchGET } from '@/app/api/reconciliation/orders/search/route';
+import { GET as exceptionsGET } from '@/app/api/reconciliation/exceptions/route';
+import { GET as unmappedGET } from '@/app/api/reconciliation/unmapped/route';
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 
@@ -77,6 +86,55 @@ const LEAKY_ORDER = {
   platformStatusRaw: { status: 'processing' },
   externalOrderUrl: 'https://shop.example.com/wp-admin/post.php?post=4242',
   _count: { items: 2 },
+};
+
+/** An exception row whose SUBJECT is as leaky as the orders are. */
+const LEAKY_EXCEPTION_ROW = {
+  id: 11,
+  key: 'recv-discrepancy:501',
+  kind: 'recv-discrepancy',
+  subject: {
+    stagingItemId: 501,
+    shipmentId: 'ship-1',
+    countedQty: 8,
+    expectedQty: 10,
+    shortUnits: 2,
+    lossCents: 1200,
+    customerEmail: 'buyer@example.com',
+    customerName: 'A Buyer',
+    shippingAddress: { line1: '1 Test Street' },
+  },
+  firstSeenAt: new Date('2026-08-10T00:00:00.000Z'),
+  lastSeenAt: new Date('2026-08-18T00:00:00.000Z'),
+  resolvedAt: null,
+  resolvedBy: 7,
+  resolution: null,
+  // Admin free text: ALLOWED on this surface, and pinned by staying here.
+  note: 'chased the supplier on the 12th',
+};
+
+/** A grouped unmapped row, seeded the same way. */
+const LEAKY_UNMAPPED_ROW = {
+  integrationId: 'int-1',
+  externalProductId: 'P1',
+  externalVariantId: null,
+  integrationName: 'Acme Store',
+  platform: 'WOOCOMMERCE',
+  sku: 'SKU-1',
+  name: 'Widget',
+  itemCount: 4,
+  oldest: new Date('2026-08-01T00:00:00.000Z'),
+  customerEmail: 'buyer@example.com',
+  rawPayload: { id: 4242 },
+};
+
+const UNMAPPED_TOTALS = {
+  total: 1,
+  unknownGroups: 0,
+  bucket0: 0,
+  bucket1: 1,
+  bucket2: 0,
+  bucket3: 0,
 };
 
 const SUMMARY_ROW = {
@@ -129,7 +187,18 @@ const AUDIT_ROW = {
 beforeEach(() => {
   mockReset(db);
   __resetForTests();
-  db.$queryRaw.mockResolvedValue([SUMMARY_ROW] as never);
+  // ONE dispatcher, because three producers now share the raw channel.
+  db.$queryRaw.mockImplementation(((query: Prisma.Sql) =>
+    Promise.resolve(
+      query.sql.includes('AS total')
+        ? [UNMAPPED_TOTALS]
+        : query.sql.includes('FROM grouped')
+          ? [LEAKY_UNMAPPED_ROW]
+          : [SUMMARY_ROW],
+    )) as never);
+  db.inventoryException.count.mockResolvedValue(1 as never);
+  db.inventoryException.findMany.mockResolvedValue([LEAKY_EXCEPTION_ROW] as never);
+  db.stagingItem.findMany.mockResolvedValue([] as never);
   db.orderAttributionAttempt.findFirst.mockResolvedValue(null as never);
   db.orderAttributionAttempt.findMany.mockResolvedValue([
     {
@@ -215,6 +284,20 @@ const ROUTES: Array<{ name: string; call: () => Promise<Response> }> = [
       ) as Promise<Response>,
   },
   {
+    name: 'GET /api/reconciliation/exceptions',
+    call: () =>
+      exceptionsGET(
+        new NextRequest('http://localhost/api/reconciliation/exceptions'),
+      ) as Promise<Response>,
+  },
+  {
+    name: 'GET /api/reconciliation/unmapped',
+    call: () =>
+      unmappedGET(
+        new NextRequest('http://localhost/api/reconciliation/unmapped'),
+      ) as Promise<Response>,
+  },
+  {
     name: 'POST /api/reconciliation/attribution/[batchId]',
     call: () =>
       attributePOST(
@@ -243,6 +326,18 @@ describe('reconciliation routes never answer with order PII', () => {
       expect(Object.prototype.hasOwnProperty.call(LEAKY_ORDER, name)).toBe(true);
     }
     expect(() => assertNoPiiKeys(LEAKY_ORDER)).toThrow();
+  });
+
+  it("the finder's admin note rides through — `note` is not a forbidden name (CX-6)", async () => {
+    const res = await exceptionsGET(new NextRequest('http://localhost/api/reconciliation/exceptions'));
+    const body = await res.json();
+    expect(body.rows[0].note).toBe('chased the supplier on the 12th');
+    expect(() => assertNoPiiKeys(body)).not.toThrow();
+  });
+
+  it('the seeded exception subject really is leaky too (the new rows are not vacuous)', () => {
+    expect(() => assertNoPiiKeys(LEAKY_EXCEPTION_ROW)).toThrow('subject.customerEmail');
+    expect(() => assertNoPiiKeys(LEAKY_UNMAPPED_ROW)).toThrow('customerEmail');
   });
 
   it('the positive control: customerEmail three levels deep is caught, with its path', () => {
