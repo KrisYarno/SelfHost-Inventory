@@ -71,26 +71,14 @@ export type Viewer = { kind: 'admin' } | { kind: 'member'; companyIds: string[] 
  * classes plus the `unknown` the derivation must use for a decline nobody
  * recorded, and the four none-reasons plus its own `unknown`.
  */
-export const ATTRIBUTION_CLASS_KEYS = [
-  'attributed·fulfillment',
-  'attributed·selected',
-  'attributed·reference-resolved',
-  'attributed·manual',
-  'attributed·derived',
-  'declined·unusable',
-  'declined·unmatched',
-  'declined·ambiguous',
-  'declined·not-a-member',
-  'declined·resolver-error',
-  'declined·unknown',
-  'none·no-reference-typed',
-  'none·explicit-non-order-intent',
-  'none·order-intent-no-id',
-  'none·no-order-context',
-  'none·unknown',
-] as const;
+// The class-key vocabulary lives in ./class-keys (Next-free, prisma-free) so the
+// UI and the tool can value-import it without pulling this module's Prisma import
+// into a client chunk (M4b build audit). Re-exported here for server callers.
+export { ATTRIBUTION_CLASS_KEYS } from './class-keys';
+import { ATTRIBUTION_CLASS_KEYS } from './class-keys';
 
-export type AttributionClassKey = (typeof ATTRIBUTION_CLASS_KEYS)[number];
+export type { AttributionClassKey } from './class-keys';
+import type { AttributionClassKey } from './class-keys';
 
 const CLASS_KEY_SET: ReadonlySet<string> = new Set(ATTRIBUTION_CLASS_KEYS);
 

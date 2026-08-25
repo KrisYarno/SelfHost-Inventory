@@ -28,11 +28,11 @@ import { Table, TableBody, TableHead, TableHeader, TableRow } from "@/components
 import { cn } from "@/lib/utils";
 import { useDebounce } from "@/hooks/use-debounce";
 import { useAttributionReport, type AttributionReportInput } from "@/hooks/use-admin";
-import {
-  ATTRIBUTION_CLASS_KEYS,
-  type AttributionClassKey,
-  type AttributionReport,
-  type AttributionRow,
+import { ATTRIBUTION_CLASS_KEYS } from "@/lib/reconciliation/class-keys";
+import type {
+  AttributionClassKey,
+  AttributionReport,
+  AttributionRow,
 } from "@/lib/reconciliation/attribution";
 import { AttributionMobileCard, AttributionTableRow } from "./attribution-row";
 import { AttributionDrilldown } from "./attribution-drilldown";
