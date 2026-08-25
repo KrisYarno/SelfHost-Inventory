@@ -8,6 +8,9 @@ import type {
   AttributionReport,
   BatchDetail,
 } from "@/lib/reconciliation/attribution";
+import type { ExceptionsPage } from "@/lib/reconciliation/exceptions";
+import type { UnmappedPage } from "@/lib/reconciliation/unmapped";
+import type { ExceptionKind, ExceptionSeverity } from "@/lib/exceptions/kinds";
 
 // ---------------------------------------------------------------------------
 // Shared TanStack Query hooks for the /admin surface.
@@ -877,6 +880,60 @@ export function useAttributeBatch(batchId: string) {
     },
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: ["admin", "reconciliation"] }),
+  });
+}
+
+/**
+ * The FINDER (pack C4b.1). Every filter is the SERVER's — `count` and
+ * `moreCount` are computed over the whole filtered set, so a filter applied in
+ * the browser would leave the tab reporting a bound it no longer meets.
+ */
+export interface ExceptionsQueryInput {
+  kind?: ExceptionKind;
+  /** Defaults (server-side) to `open` — the tab sends it explicitly anyway. */
+  resolved?: "open" | "resolved" | "all";
+  severity?: ExceptionSeverity;
+  olderThanDays?: number;
+  limit?: number;
+  cursor?: string;
+}
+
+export function useExceptions(input: ExceptionsQueryInput) {
+  return useQuery<ExceptionsPage, ApiError>({
+    queryKey: ["admin", "reconciliation", "exceptions", input],
+    queryFn: ({ signal }) => {
+      const params = new URLSearchParams();
+      if (input.kind) params.set("kind", input.kind);
+      if (input.resolved) params.set("resolved", input.resolved);
+      if (input.severity) params.set("severity", input.severity);
+      if (input.olderThanDays !== undefined) {
+        params.set("olderThanDays", String(input.olderThanDays));
+      }
+      if (input.limit !== undefined) params.set("limit", String(input.limit));
+      if (input.cursor) params.set("cursor", input.cursor);
+      return getJSON<ExceptionsPage>(`/api/reconciliation/exceptions?${params}`, { signal });
+    },
+  });
+}
+
+export interface UnmappedQueryInput {
+  olderThanDays?: number;
+  limit?: number;
+  cursor?: string;
+}
+
+export function useUnmapped(input: UnmappedQueryInput) {
+  return useQuery<UnmappedPage, ApiError>({
+    queryKey: ["admin", "reconciliation", "unmapped", input],
+    queryFn: ({ signal }) => {
+      const params = new URLSearchParams();
+      if (input.olderThanDays !== undefined) {
+        params.set("olderThanDays", String(input.olderThanDays));
+      }
+      if (input.limit !== undefined) params.set("limit", String(input.limit));
+      if (input.cursor) params.set("cursor", input.cursor);
+      return getJSON<UnmappedPage>(`/api/reconciliation/unmapped?${params}`, { signal });
+    },
   });
 }
 

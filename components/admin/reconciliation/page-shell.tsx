@@ -4,12 +4,11 @@
  * components/admin/reconciliation/page-shell.tsx — the /admin/reconciliation
  * tab shell (pack C4a.1; spec REV-7 §7).
  *
- * Three tabs are named by the spec; ONE of them exists today. The other two are
- * DISABLED and say why, and nothing is mounted behind them: a tab that opens
- * onto an empty panel reads as "there is nothing to see here", which is a
- * different claim from "this ships next" — and on a reconciliation surface the
- * difference between "no exceptions" and "no exceptions tab yet" is exactly the
- * kind of thing this lane exists to stop happening.
+ * Three tabs are named by the spec and all three are live (M4b lands the
+ * finder and the unmapped queue). Each tab mounts ITS content and only its
+ * content: on a surface whose whole subject is what a read can and cannot see,
+ * mounting all three at once would fire three reads for a question nobody
+ * asked, and the two the admin is not looking at would go stale in place.
  *
  * The `?tab=` sync is the `/admin/logs` idiom (`router.replace`); admin-only is
  * enforced server-side by `app/(app)/admin/layout.tsx`, which also makes the
@@ -21,14 +20,13 @@ import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AttributionTab } from "./attribution-tab";
+import { ExceptionsTab } from "./exceptions-tab";
+import { UnmappedTab } from "./unmapped-tab";
 
 type TabKey = "attribution" | "exceptions" | "unmapped";
 
 /** The tabs this release can actually render. */
-const AVAILABLE_TABS: readonly TabKey[] = ["attribution"];
-
-/** Honest, minimal, and replaced by M4b. */
-export const TAB_COMING_TITLE = "coming in this release";
+const AVAILABLE_TABS: readonly TabKey[] = ["attribution", "exceptions", "unmapped"];
 
 export function ReconciliationPageShell() {
   const router = useRouter();
@@ -55,16 +53,20 @@ export function ReconciliationPageShell() {
       <Tabs value={tab} onValueChange={(value) => setTab(value as TabKey)}>
         <TabsList className="flex flex-wrap gap-2">
           <TabsTrigger value="attribution">Attribution</TabsTrigger>
-          <TabsTrigger value="exceptions" disabled title={TAB_COMING_TITLE}>
-            Exceptions
-          </TabsTrigger>
-          <TabsTrigger value="unmapped" disabled title={TAB_COMING_TITLE}>
-            Unmapped
-          </TabsTrigger>
+          <TabsTrigger value="exceptions">Exceptions</TabsTrigger>
+          <TabsTrigger value="unmapped">Unmapped</TabsTrigger>
         </TabsList>
 
         <TabsContent value="attribution" className="space-y-6">
           <AttributionTab />
+        </TabsContent>
+
+        <TabsContent value="exceptions" className="space-y-6">
+          <ExceptionsTab />
+        </TabsContent>
+
+        <TabsContent value="unmapped" className="space-y-6">
+          <UnmappedTab />
         </TabsContent>
       </Tabs>
     </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Check } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -15,6 +15,14 @@ interface Props {
   savingKey: string | null;
   errorKey: string | null;
   onRowSelect: (row: CatalogRow) => void;
+  /**
+   * A row to bring into view, by `rowKey` (pack C4b.2 — the reconciliation
+   * deep link). It has to go THROUGH the virtualizer: only
+   * `getVirtualItems()` is in the DOM, so a caller scrolling to an element it
+   * found by id would silently do nothing for any row outside the window,
+   * which on a real catalog is nearly all of them.
+   */
+  scrollToKey?: string | null;
 }
 
 interface VirtualItem {
@@ -30,6 +38,7 @@ export function ExternalProductList({
   savingKey,
   errorKey,
   onRowSelect,
+  scrollToKey = null,
 }: Props) {
   const items: VirtualItem[] = useMemo(() => {
     const grouped = new Map<string, CatalogRow[]>();
@@ -61,6 +70,18 @@ export function ExternalProductList({
     overscan: 8,
   });
 
+  // The index the virtualizer wants is the FLATTENED one — parent headers ride
+  // in the same list as the rows, so a row's position among `rows` is not its
+  // position here.
+  useEffect(() => {
+    if (!scrollToKey) return;
+    const index = items.findIndex(
+      (item) => item.kind === "row" && item.row !== undefined && rowKey(item.row) === scrollToKey,
+    );
+    if (index < 0) return;
+    virtualizer.scrollToIndex(index, { align: "center" });
+  }, [scrollToKey, items, virtualizer]);
+
   return (
     <div ref={parentRef} className="h-full overflow-auto">
       <div
@@ -89,6 +110,7 @@ export function ExternalProductList({
               ) : item.row ? (
                 <RowButton
                   row={item.row}
+                  rowKeyValue={rowKey(item.row)}
                   active={rowKey(item.row) === activeRowKey}
                   saving={rowKey(item.row) === savingKey}
                   hasError={rowKey(item.row) === errorKey}
@@ -105,12 +127,15 @@ export function ExternalProductList({
 
 function RowButton({
   row,
+  rowKeyValue,
   active,
   saving,
   hasError,
   onSelect,
 }: {
   row: CatalogRow;
+  /** On the element for the deep link's active-row assertion (OCk-2). */
+  rowKeyValue: string;
   active: boolean;
   saving: boolean;
   hasError: boolean;
@@ -126,6 +151,7 @@ function RowButton({
   return (
     <button
       onClick={onSelect}
+      data-row-key={rowKeyValue}
       className={cn(
         "w-full text-left flex items-center gap-3 px-3 py-2 border-b border-border/40 hover:bg-muted/40 transition-colors",
         active && "bg-primary/5 ring-1 ring-inset ring-primary/40",

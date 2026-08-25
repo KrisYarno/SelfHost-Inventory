@@ -358,6 +358,22 @@ function bucketOf(ageDays: number): UnmappedBucket {
   return AGE_BUCKETS[AGE_BUCKETS.length - 1].key;
 }
 
+/**
+ * The map page's deep link. All three values are STORE-SUPPLIED text — a `&` in
+ * a SKU would end its parameter early and hand the map page a truncated sku, a
+ * `#` would throw away everything after it — so each one is encoded (M2c dev-10,
+ * carried into M4b). The identity fields on the group itself stay raw: encoding
+ * is the link's business, and the tab renders the sku a person would recognise.
+ */
+function mapHref(row: GroupSqlRow): string {
+  const query = [
+    `externalProductId=${encodeURIComponent(row.externalProductId)}`,
+    `externalVariantId=${encodeURIComponent(row.externalVariantId ?? '')}`,
+    `sku=${encodeURIComponent(row.sku ?? '')}`,
+  ].join('&');
+  return `/admin/product-mappings/${encodeURIComponent(row.integrationId)}/map?${query}`;
+}
+
 function buildGroup(row: GroupSqlRow, now: Date): UnmappedGroup {
   const ageDays =
     row.oldest === null ? null : Math.floor((now.getTime() - row.oldest.getTime()) / DAY_MS);
@@ -378,7 +394,7 @@ function buildGroup(row: GroupSqlRow, now: Date): UnmappedGroup {
     ageReason: ageDays === null ? NO_AGE_REASON : null,
     bucket: ageDays === null ? 'unknown' : bucketOf(ageDays),
     link: {
-      href: `/admin/product-mappings/${row.integrationId}/map?externalProductId=${row.externalProductId}&externalVariantId=${row.externalVariantId ?? ''}&sku=${row.sku ?? ''}`,
+      href: mapHref(row),
       warning: CATALOG_WARNING,
     },
   };

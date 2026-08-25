@@ -320,6 +320,37 @@ describe('the group view', () => {
     );
   });
 
+  // M2c dev-10, carried into M4b: these three values are STORE-SUPPLIED text.
+  // A `&` in a SKU ends the query parameter early and the map page reads a
+  // truncated sku; a `#` throws away everything after it. Interpolating them
+  // raw made the deep link a function of what somebody typed into WooCommerce.
+  it('ENCODES the three deep-link values — a & or a # in a sku cannot break the query string', async () => {
+    serve([
+      group({
+        integrationId: 'int-3',
+        externalProductId: 'P&5',
+        externalVariantId: 'V#7 x',
+        sku: 'A&B#C D/E?F=G',
+      }),
+    ]);
+    const { groups } = await listUnmapped({ limit: 50 });
+
+    expect(groups[0].link.href).toBe(
+      '/admin/product-mappings/int-3/map?externalProductId=P%265&externalVariantId=V%237%20x&sku=A%26B%23C%20D%2FE%3FF%3DG',
+    );
+    // The identity fields themselves are untouched — encoding is the LINK's
+    // business, and the tab still renders the sku a person would recognise.
+    expect(groups[0].sku).toBe('A&B#C D/E?F=G');
+    expect(groups[0].externalVariantId).toBe('V#7 x');
+
+    // Round-tripping is the actual claim: what the map page parses back out of
+    // the query string is what the producer put in.
+    const query = new URLSearchParams(groups[0].link.href.split('?')[1]);
+    expect(query.get('externalProductId')).toBe('P&5');
+    expect(query.get('externalVariantId')).toBe('V#7 x');
+    expect(query.get('sku')).toBe('A&B#C D/E?F=G');
+  });
+
   it('buckets the ages at 7 / 30 / 90 days', async () => {
     // Oldest first, the order the statement returns them in.
     serve([

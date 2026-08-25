@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { toast } from "sonner";
@@ -66,6 +66,13 @@ type SupplyOrderDetailNewFlow = Extract<SupplyOrderDetailWire, { model: "supply-
 
 /** The statuses a line may still be verified from (spec §4.0). */
 const VERIFIED_STATUSES = ["VERIFIED", "LABELING", "COMPLETE"];
+
+/**
+ * How long the `?line=` anchor rings its card (C4b.3). Long enough to find the
+ * line the finder sent you to, short enough that the ring never becomes a
+ * property of the line itself.
+ */
+const FOCUS_HIGHLIGHT_MS = 2000;
 
 // ---------------------------------------------------------------------------
 // Presentation helpers (display only — every figure arrives pre-computed)
@@ -311,9 +318,11 @@ interface LineCardProps {
   line: SupplyOrderLineView;
   locations: { id: number; name: string }[];
   blocked: boolean;
+  /** The `?line=` anchor's transient ring (C4b.3) — two seconds, then gone. */
+  focused: boolean;
 }
 
-function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
+function LineCard({ orderId, line, locations, blocked, focused }: LineCardProps) {
   const verifyLine = useVerifyLine(orderId);
   const patchLine = usePatchLine(orderId);
   const discardLine = useDiscardLine(orderId);
@@ -456,11 +465,15 @@ function LineCard({ orderId, line, locations, blocked }: LineCardProps) {
 
   return (
     <li
+      // THE ANCHOR (C4b.3). The exceptions finder deep-links a discrepancy to
+      // the line that raised it, so every card is addressable by id; the
+      // existing test id stays exactly where it was.
+      id={`line-${line.id}`}
       data-testid={`supply-order-line-${line.id}`}
       data-blocked={blocked ? "true" : undefined}
       className={`space-y-3 rounded-lg border bg-surface p-3 ${
         blocked ? "border-destructive/60" : "border-border"
-      }`}
+      }${focused ? " ring-2 ring-primary" : ""}`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 space-y-1">
@@ -1032,9 +1045,14 @@ function ExceptionRow({ orderId, exception, lineRemoved = false }: ExceptionRowP
 
 export interface SupplyOrderDetailProps {
   detail: SupplyOrderDetailNewFlow;
+  /**
+   * The line `?line=` named (C4b.3). `null`/absent = the reader arrived by any
+   * other route, and nothing moves under them.
+   */
+  focusLineId?: number | null;
 }
 
-export function SupplyOrderDetail({ detail }: SupplyOrderDetailProps) {
+export function SupplyOrderDetail({ detail, focusLineId }: SupplyOrderDetailProps) {
   const patchOrder = usePatchSupplyOrder(detail.id);
   const addLine = useAddLine(detail.id);
   const { data: locations = [] } = useLocations();
@@ -1059,6 +1077,23 @@ export function SupplyOrderDetail({ detail }: SupplyOrderDetailProps) {
     () => detail.lines.reduce((sum, line) => sum + (line.lineRemoved ? 0 : line.remaining), 0),
     [detail.lines],
   );
+
+  // THE `?line=` ANCHOR (C4b.3). Once per (order, line): the finder's link is a
+  // one-time instruction about where to look, not a scroll position the page
+  // re-asserts every time a count lands. A line id this order does not carry
+  // moves nothing — a deep link can outlive the line it names, and yanking the
+  // page to the top would be a worse answer than leaving the reader where the
+  // order actually starts.
+  const [highlightLineId, setHighlightLineId] = useState<number | null>(null);
+  useEffect(() => {
+    if (focusLineId === undefined || focusLineId === null) return;
+    const card = document.getElementById(`line-${focusLineId}`);
+    if (card === null) return;
+    card.scrollIntoView({ block: "center" });
+    setHighlightLineId(focusLineId);
+    const timer = setTimeout(() => setHighlightLineId(null), FOCUS_HIGHLIGHT_MS);
+    return () => clearTimeout(timer);
+  }, [detail.id, focusLineId]);
 
   const isOrdered = detail.status === "ORDERED";
   const isReceiving = detail.status === "RECEIVING";
@@ -1351,6 +1386,7 @@ export function SupplyOrderDetail({ detail }: SupplyOrderDetailProps) {
                 line={line}
                 locations={locations}
                 blocked={blockedLineIds.includes(line.id)}
+                focused={highlightLineId === line.id}
               />
             ))}
           </ul>

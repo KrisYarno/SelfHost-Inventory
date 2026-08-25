@@ -1,6 +1,7 @@
 "use client";
 
 import { AlertTriangle, Loader2 } from "lucide-react";
+import { useSearchParams } from "next/navigation";
 import { ShipmentDetail } from "@/components/receiving/shipment-detail";
 import { SupplyOrderDetail } from "@/components/receiving/supply-order-detail";
 import { useSupplyOrder } from "@/hooks/use-supply-orders";
@@ -23,14 +24,27 @@ import { useSupplyOrder } from "@/hooks/use-supply-orders";
  *     to whoever performed the read. Neither renderer has an honest thing to say
  *     about a request it did not make — the legacy detail's own empty state
  *     ("no boxes were linked") after a failed read would be a lie about history.
+ *   - ONE PLACE THAT READS THE URL. `?line=` (the reconciliation finder's deep
+ *     link, pack C4b.3) is a fact about how the reader arrived, not about the
+ *     order, so it is read here and handed down. The LEGACY branch gets nothing:
+ *     a W1 receipt is read-only history whose items are not these lines.
  */
 
 export interface ReceivingDetailScreenProps {
   id: string;
 }
 
+/** `?line=` as a line id, or null for absent / anything that is not one. */
+function parseFocusLineId(raw: string | null | undefined): number | null {
+  if (raw === null || raw === undefined || !/^\d+$/.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
 export function ReceivingDetailScreen({ id }: ReceivingDetailScreenProps) {
   const { data: detail, isPending, isError, error } = useSupplyOrder(id);
+  const searchParams = useSearchParams();
+  const focusLineId = parseFocusLineId(searchParams?.get("line"));
 
   if (isPending) {
     return (
@@ -62,5 +76,5 @@ export function ReceivingDetailScreen({ id }: ReceivingDetailScreenProps) {
     return <ShipmentDetail shipment={detail.legacy} />;
   }
 
-  return <SupplyOrderDetail detail={detail} />;
+  return <SupplyOrderDetail detail={detail} focusLineId={focusLineId} />;
 }

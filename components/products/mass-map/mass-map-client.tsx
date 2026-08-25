@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, AlertCircle } from "lucide-react";
 import {
@@ -26,11 +26,27 @@ import { RefreshButton } from "./refresh-button";
 import { useIsDesktop } from "./use-viewport";
 import type { BundleBuilderComponent } from "./bundle-builder";
 
-interface Props {
-  integrationId: string;
+/**
+ * Where the reconciliation lane's unmapped tab sends people (pack C4b.2): the
+ * exact external product that has orders waiting on it, straight off the deep
+ * link's query string.
+ */
+export interface MassMapPrefill {
+  externalProductId: string;
+  externalVariantId: string | null;
+  sku: string | null;
 }
 
-export function MassMapClient({ integrationId }: Props) {
+/** VERBATIM (pack C4b.2 / spec §4.4). */
+export const PREFILL_NOT_IN_CATALOG =
+  "This external product is not in the store catalog — it may have been deleted; nothing to map here.";
+
+interface Props {
+  integrationId: string;
+  prefill?: MassMapPrefill;
+}
+
+export function MassMapClient({ integrationId, prefill }: Props) {
   const catalog = useCatalog(integrationId);
   const { index, isLoading: indexLoading } = useInternalProductIndex();
   const { confirm, confirmBundle, editBundle } = useRowActions();
@@ -53,6 +69,40 @@ export function MassMapClient({ integrationId }: Props) {
   const mapped = useMemo(() => rows.filter((r) => r.alreadyMapped), [rows]);
   const currentRows = tab === "unmapped" ? unmapped : mapped;
   const activeKey = activeRow ? rowKey(activeRow) : null;
+
+  // ---------------------------------------------------------------------
+  // The reconciliation deep link (pack C4b.2)
+  //
+  // The link names the EXACT pair a person was sent here to map, so the match
+  // is on `rowKey` — never on the sku, which stores reuse across variants.
+  // Three outcomes and no fourth: the catalog carries it (select it, and scroll
+  // the virtualizer to it), the catalog is loaded and does NOT carry it (say
+  // so — it may have been deleted since the order was placed), or the catalog
+  // has not answered yet, in which case there is nothing honest to claim.
+  // ---------------------------------------------------------------------
+  const prefillKey = prefill
+    ? rowKey({
+        externalProductId: prefill.externalProductId,
+        externalVariantId: prefill.externalVariantId,
+      })
+    : null;
+  // Not memoised on purpose: `rows` is the catalog query's own array, so the
+  // row this finds is the SAME object reference until the catalog itself
+  // changes — memoising it would only add `rows` (a `?? []` expression) to a
+  // dependency list for no stability the effect below does not already have.
+  const prefillRow =
+    prefillKey === null ? null : (rows.find((r) => rowKey(r) === prefillKey) ?? null);
+  const prefillApplied = useRef(false);
+
+  useEffect(() => {
+    if (prefillRow === null || prefillApplied.current) return;
+    prefillApplied.current = true;
+    // A row somebody was sent here to map is unmapped by definition.
+    setTab("unmapped");
+    setActiveRow(prefillRow);
+  }, [prefillRow]);
+
+  const prefillMissing = prefillKey !== null && catalog.data !== undefined && prefillRow === null;
 
   // Decorate the matcher index with hasAnyMapping derived from the catalog's
   // existing mappings, so suggestions for internal products already linked to
@@ -215,6 +265,21 @@ export function MassMapClient({ integrationId }: Props) {
           />
         </div>
 
+        {prefillRow && (
+          <p data-testid="mass-map-prefill-chip" className="text-xs text-muted-foreground">
+            {`pre-selected from the reconciliation page${prefill?.sku ? ` — sku ${prefill.sku}` : ""}`}
+          </p>
+        )}
+
+        {prefillMissing && (
+          <Card
+            data-testid="mass-map-prefill-missing"
+            className="border-yellow-500/40 bg-yellow-500/5 p-2 text-xs text-yellow-700 dark:text-yellow-300"
+          >
+            {PREFILL_NOT_IN_CATALOG}
+          </Card>
+        )}
+
         {catalog.data?.warnings.length ? (
           <Card className="bg-yellow-500/5 border-yellow-500/40 p-2 text-xs">
             <p className="font-semibold text-yellow-700 dark:text-yellow-300 mb-1">
@@ -258,6 +323,7 @@ export function MassMapClient({ integrationId }: Props) {
               savingKey={saving && activeRow ? rowKey(activeRow) : null}
               errorKey={error && activeRow ? rowKey(activeRow) : null}
               onRowSelect={handleSelectRow}
+              scrollToKey={prefillRow === null ? null : prefillKey}
             />
           </Card>
 
