@@ -18,10 +18,17 @@
  *       (every STOCK_IN share is NULL) and the approval-race product.
  *   L3  UNORDERED (orderedQuantity NULL), verified 5, total 500, P_APPROVED_2
  *       — the basis-freeze family.
+ *
+ * THE RECONCILIATION FIXTURE (pack C6.1) sits BESIDE that, never inside it: two
+ * DEDICATED products, their own ledger rows, an integration and two external
+ * orders. It is seeded once and OUTLIVES every reset, because scenario 8 races
+ * the same batch id over and over and a fixture the reset deleted would have to
+ * be rebuilt between sub-cases. See the block below `SEED_HEADER_IDS`.
  */
 
 import {
   InboundShipmentStatus,
+  inventory_logs_logType,
   PrismaClient,
   ProductApprovalStatus,
   StagingItemStatus,
@@ -54,6 +61,61 @@ export const LINE_L3 = 9203;
 export const SEED_LINE_IDS: readonly number[] = [LINE_L1, LINE_L2, LINE_L3];
 export const SEED_PRODUCT_IDS: readonly number[] = [P_APPROVED, P_PENDING, P_APPROVED_2];
 export const SEED_HEADER_IDS: readonly string[] = [GATE_ORDER_ID];
+
+// --------------------------------------------------------------------------
+// The reconciliation fixture (pack C6.1) — scenarios 8 and 8b
+// --------------------------------------------------------------------------
+
+export const GATE_INTEGRATION_ID = "concurrencygateinteg01";
+export const GATE_EXT_ORDER_ID = "concurrencygateext001";
+export const GATE_EXT_ORDER_2_ID = "concurrencygateext002";
+
+/**
+ * DEDICATED products, deliberately OUTSIDE `SEED_PRODUCT_IDS`.
+ *
+ * The reconciliation family carries −1 SALE rows and a +2 adjust that never
+ * moved `product_locations`, which is a perfectly good fixture for a report
+ * about batch IDENTITY and a fatal one for `productOracle` (it asserts on-hand
+ * == the sum of every ledger delta for the product, true only from this gate's
+ * zero baseline). Keeping these ids out of the seed list is what guarantees the
+ * three oracle-covered products never meet a foreign row.
+ */
+export const P_RECON_A = 9104;
+export const P_RECON_B = 9105;
+
+/** The batch scenario 8 races for: a LIVE deduct of one unit of each product. */
+export const RECON_BATCH_ID = "concurrency-gate-recon-batch-01";
+
+/** The 8b parity family's other batches — one per excluded/included class, so
+ *  that a renderer which lost a conjunct shows up as a MEMBERSHIP difference in
+ *  the distinct-batchId set rather than as nothing at all. */
+export const RECON_ADJUST_BATCH_ID = "concurrency-gate-recon-adjust-1";
+export const RECON_STOCK_IN_BATCH_ID = "concurrency-gate-recon-stockin";
+export const RECON_COUNT_BATCH_ID = "concurrency-gate-recon-count-01";
+export const RECON_POSITIVE_BATCH_ID = "concurrency-gate-recon-posadj-1";
+
+/**
+ * EVERY reconciliation/parity ledger row, by explicit id (pack C6.1). The reset
+ * EXCLUDES these ids from its deletion and re-stamps them instead — see
+ * `resetGateFixtures`.
+ */
+export const RECON_SALE_A_ID = 9301;
+export const RECON_SALE_B_ID = 9302;
+export const RECON_ADJUST_ID = 9303;
+export const RECON_STOCK_IN_ID = 9304;
+export const RECON_COUNT_ID = 9305;
+export const RECON_POSITIVE_ID = 9306;
+export const RECON_UNBATCHED_SALE_ID = 9307;
+
+export const RECON_LEDGER_IDS: readonly number[] = [
+  RECON_SALE_A_ID,
+  RECON_SALE_B_ID,
+  RECON_ADJUST_ID,
+  RECON_STOCK_IN_ID,
+  RECON_COUNT_ID,
+  RECON_POSITIVE_ID,
+  RECON_UNBATCHED_SALE_ID,
+];
 
 /** L1's line total. 10001 over a basis of 10 is deliberately indivisible: the
  *  money oracle is only worth running on a line whose shares cannot all be
@@ -236,6 +298,194 @@ function seedLocationRows(productIds: readonly number[]) {
 }
 
 // --------------------------------------------------------------------------
+// The reconciliation fixture's rows (pack C6.1)
+// --------------------------------------------------------------------------
+
+/** APPROVED, like a product a real sale would deduct from. One location row
+ *  each (C6.1) — nothing here reads their on-hand, and a second row would only
+ *  invite a future oracle to. */
+const RECON_PRODUCTS: readonly SeedProduct[] = [
+  {
+    id: P_RECON_A,
+    name: "Gate Product Recon A",
+    approvalStatus: ProductApprovalStatus.APPROVED,
+    createdBy: GATE_ADMIN_ID,
+  },
+  {
+    id: P_RECON_B,
+    name: "Gate Product Recon B",
+    approvalStatus: ProductApprovalStatus.APPROVED,
+    createdBy: GATE_ADMIN_ID,
+  },
+];
+
+const RECON_AT = new Date("2026-08-05T09:00:00.000Z");
+
+type ReconLedgerRow = {
+  id: number;
+  productId: number;
+  delta: number;
+  logType: inventory_logs_logType;
+  batchId: string | null;
+};
+
+/**
+ * THE SIX-CLASS PARITY FAMILY, frozen (pack C6.1). Two of these classes are IN
+ * the attributable population and four are out — one per conjunct of the
+ * predicate, so scenario 8b's two renderers disagree the moment either drops a
+ * clause:
+ *
+ *   SALE −1 with a batch          IN  (and the batch scenario 8 races for)
+ *   ADJUSTMENT −2 with a batch    IN
+ *   STOCK_IN −1 with a batch      out — the logType conjunct, and ONLY that one
+ *   COUNT −1 with a batch         out — the logType conjunct
+ *   ADJUSTMENT +2 with a batch    out — the delta conjunct
+ *   SALE −1 with NULL batchId     out — the batchId conjunct
+ *
+ * The STOCK_IN and COUNT rows carry a NEGATIVE delta on purpose: a positive one
+ * would be excluded twice over and would prove nothing about `logType IN (...)`.
+ * A wrong-signed STOCK_IN is a shape this ledger really holds (the M5b receipts
+ * roll-up filters `delta > 0` for exactly that reason), so the fixture is odd,
+ * not fictional.
+ */
+const RECON_LEDGER_ROWS: readonly ReconLedgerRow[] = [
+  {
+    id: RECON_SALE_A_ID,
+    productId: P_RECON_A,
+    delta: -1,
+    logType: inventory_logs_logType.SALE,
+    batchId: RECON_BATCH_ID,
+  },
+  {
+    id: RECON_SALE_B_ID,
+    productId: P_RECON_B,
+    delta: -1,
+    logType: inventory_logs_logType.SALE,
+    batchId: RECON_BATCH_ID,
+  },
+  {
+    id: RECON_ADJUST_ID,
+    productId: P_RECON_A,
+    delta: -2,
+    logType: inventory_logs_logType.ADJUSTMENT,
+    batchId: RECON_ADJUST_BATCH_ID,
+  },
+  {
+    id: RECON_STOCK_IN_ID,
+    productId: P_RECON_A,
+    delta: -1,
+    logType: inventory_logs_logType.STOCK_IN,
+    batchId: RECON_STOCK_IN_BATCH_ID,
+  },
+  {
+    id: RECON_COUNT_ID,
+    productId: P_RECON_B,
+    delta: -1,
+    logType: inventory_logs_logType.COUNT,
+    batchId: RECON_COUNT_BATCH_ID,
+  },
+  {
+    id: RECON_POSITIVE_ID,
+    productId: P_RECON_B,
+    delta: 2,
+    logType: inventory_logs_logType.ADJUSTMENT,
+    batchId: RECON_POSITIVE_BATCH_ID,
+  },
+  {
+    id: RECON_UNBATCHED_SALE_ID,
+    productId: P_RECON_A,
+    delta: -1,
+    logType: inventory_logs_logType.SALE,
+    batchId: null,
+  },
+];
+
+function reconLedgerData(row: ReconLedgerRow) {
+  return {
+    id: row.id,
+    userId: GATE_ADMIN_ID,
+    productId: row.productId,
+    delta: row.delta,
+    changeTime: RECON_AT,
+    locationId: LOCATION_MAIN,
+    logType: row.logType,
+    // UNSTAMPED at seed time, and put back that way by every reset: an
+    // attribution is what the scenarios are here to write.
+    orderRecordId: null,
+    batchId: row.batchId,
+  };
+}
+
+/** Both external orders, identical but for identity. NO customer fields: this
+ *  fixture is seeded by a lane whose whole discipline is that order PII never
+ *  reaches a reconciliation surface, and a fixture that carries none can never
+ *  be the thing that leaks one. */
+function reconOrderData(id: string, externalId: string, orderNumber: string) {
+  return {
+    id,
+    companyId: GATE_COMPANY_ID,
+    integrationId: GATE_INTEGRATION_ID,
+    externalId,
+    orderNumber,
+    nativeStatus: "processing",
+    total: 0,
+    rawPayload: {},
+  };
+}
+
+/**
+ * The batch's own audit event — the LIVE-DEDUCT shape (`details.updates`), which
+ * is what makes R0 a real question rather than a vacuous one: a batch carrying
+ * an `INVENTORY_BULK_UPDATE` summary AND a SALE row is attributable, and the
+ * route's step-2 `isAttributableBatch` has to say so.
+ *
+ * INSTALLED AND REMOVED BY THE SUITE THAT NEEDS IT, not by `seedGateDatabase` —
+ * `concurrency.test.ts` scenario 2 pins an ABSOLUTE, table-wide
+ * `auditLog.count()` of 1, so a permanently seeded audit row would fail a
+ * scenario that has nothing to do with this lane. (Deviation from C6.1, which
+ * puts the row in the seed; reported with the milestone.) Every reset leaves it
+ * alone: the reset only ever deletes `INVENTORY_ATTRIBUTE` rows for this batch.
+ */
+export async function installReconAuditEvent(): Promise<void> {
+  const prisma = new PrismaClient({ datasources: { db: { url: gateDatabaseUrl() } } });
+  try {
+    await prisma.auditLog.create({
+      data: {
+        userId: GATE_ADMIN_ID,
+        actionType: "INVENTORY_BULK_UPDATE",
+        entityType: "INVENTORY",
+        entityId: null,
+        batchId: RECON_BATCH_ID,
+        action: "Bulk updated inventory for 2 products",
+        details: {
+          updates: [
+            { productId: P_RECON_A, productName: "Gate Product Recon A", delta: -1 },
+            { productId: P_RECON_B, productName: "Gate Product Recon B", delta: -1 },
+          ],
+          locationId: LOCATION_MAIN,
+        },
+        affectedCount: 2,
+      },
+    });
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+/** The other half of the bracket: the table-wide audit count goes back to what
+ *  the seed left, whatever order jest ran the gate's files in. */
+export async function removeReconAuditEvent(): Promise<void> {
+  const prisma = new PrismaClient({ datasources: { db: { url: gateDatabaseUrl() } } });
+  try {
+    await prisma.auditLog.deleteMany({
+      where: { actionType: "INVENTORY_BULK_UPDATE", batchId: RECON_BATCH_ID },
+    });
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+// --------------------------------------------------------------------------
 // Seeding
 // --------------------------------------------------------------------------
 
@@ -292,6 +542,43 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
 
     await prisma.inboundShipment.create({ data: SEED_HEADER });
     await prisma.stagingItem.createMany({ data: SEED_LINE_IDS.map((id) => SEED_LINES[id]) });
+
+    // THE RECONCILIATION FIXTURE (pack C6.1), last and separately: its products
+    // are not in `SEED_PRODUCT_IDS`, so nothing above has touched them.
+    await prisma.product.createMany({
+      data: RECON_PRODUCTS.map((product) => ({ id: product.id, ...productRestoreData(product) })),
+    });
+    await prisma.product_locations.createMany({
+      data: RECON_PRODUCTS.map((product) => ({
+        productId: product.id,
+        locationId: LOCATION_MAIN,
+        quantity: 0,
+        minQuantity: 0,
+        version: 0,
+      })),
+    });
+
+    // The store the manual attribution points AT. An integration and two orders:
+    // scenario 8's two racers may name the same target (8.i) or different ones
+    // (8.ii), and the follow-up overwrite moves a batch from the first to the
+    // second.
+    await prisma.integration.create({
+      data: {
+        id: GATE_INTEGRATION_ID,
+        companyId: GATE_COMPANY_ID,
+        platform: "WOOCOMMERCE",
+        name: "Gate Store",
+        storeUrl: "https://concurrency-gate.invalid",
+      },
+    });
+    await prisma.externalOrder.createMany({
+      data: [
+        reconOrderData(GATE_EXT_ORDER_ID, "gate-ext-1", "1001"),
+        reconOrderData(GATE_EXT_ORDER_2_ID, "gate-ext-2", "1002"),
+      ],
+    });
+
+    await prisma.inventory_logs.createMany({ data: RECON_LEDGER_ROWS.map(reconLedgerData) });
   } finally {
     await prisma.$disconnect();
   }
@@ -330,6 +617,11 @@ const exceptionKeysFor = (scope: GateScope): string[] => [
  * the header, every scoped product (approval / deletion / review / costPrice /
  * quantity — a first batch's D-COST fill moves costPrice) and the scoped
  * `product_locations` rows.
+ *
+ * THE RECONCILIATION FIXTURE IS THE ONE EXCEPTION (pack C6.1). Its ledger rows
+ * are excluded from the deletion by id and RE-STAMPED instead; its attempt rows
+ * and its `INVENTORY_ATTRIBUTE` audit rows are deleted by batch. Everything
+ * scenario 8 writes is undone; nothing it needs is rebuilt.
  */
 export async function resetGateFixtures(scope: GateScope): Promise<void> {
   const prisma = new PrismaClient({ datasources: { db: { url: gateDatabaseUrl() } } });
@@ -337,6 +629,11 @@ export async function resetGateFixtures(scope: GateScope): Promise<void> {
     await prisma.$transaction(async (tx) => {
       await tx.inventory_logs.deleteMany({
         where: {
+          // THE RECONCILIATION FAMILY SURVIVES (pack C6.1). Its rows are the
+          // fixture scenarios 8/8b race on, they are seeded once, and they are
+          // put back by the re-stamp below rather than by a rebuild — a deletion
+          // here would take the batch itself away between two sub-cases.
+          id: { notIn: [...RECON_LEDGER_IDS] },
           OR: [
             { stagingItemId: { in: [...scope.lineIds] } },
             { productId: { in: [...scope.productIds] } },
@@ -346,18 +643,31 @@ export async function resetGateFixtures(scope: GateScope): Promise<void> {
           ],
         },
       });
+      // The ONE thing a scenario changes about those rows: put the stamp back.
+      await tx.inventory_logs.updateMany({
+        where: { id: { in: [...RECON_LEDGER_IDS] } },
+        data: { orderRecordId: null },
+      });
       await tx.inventoryException.deleteMany({ where: { key: { in: exceptionKeysFor(scope) } } });
-      // Reconciliation lane (pack C1a.4): attempt rows are append-only in app/ lib/
-      // scripts/ — the static gate scans THOSE roots, and `concurrency-gate/` is
-      // outside them, so a fixture reset may legally delete them. Unscoped for now;
-      // M6 narrows it to the scenario's batch when the recon fixture lands.
-      await tx.orderAttributionAttempt.deleteMany({});
+      // Reconciliation lane (pack C1a.4 / C6.1): attempt rows are append-only in
+      // app/ lib/ scripts/ — the static gate scans THOSE roots, and
+      // `concurrency-gate/` is outside them, so a fixture reset may legally
+      // delete them (the same licence covers the `updateMany` above). SCOPED to
+      // the scenario's own batch now that the recon fixture exists: nothing else
+      // in this gate writes an attempt row, and an unscoped delete would quietly
+      // cover for one that did.
+      await tx.orderAttributionAttempt.deleteMany({ where: { batchId: RECON_BATCH_ID } });
       await tx.auditLog.deleteMany({
         where: {
           OR: [
             { entityType: "STAGING", entityId: { in: scope.lineIds.map(String) } },
             { entityType: "PRODUCT", entityId: { in: scope.productIds.map(String) } },
             { entityType: "SHIPMENT", entityId: { in: [...SEED_HEADER_IDS] } },
+            // The manual attribution's own event: `entityId` is the LEDGER batch
+            // id and its own `batchId` is a freshly minted one, so BOTH halves of
+            // this clause are needed — and neither of them matches the fixture's
+            // INVENTORY_BULK_UPDATE summary, which stays put.
+            { actionType: "INVENTORY_ATTRIBUTE", entityId: RECON_BATCH_ID },
           ],
         },
       });
