@@ -37,6 +37,7 @@ import type {
 import { AttributionMobileCard, AttributionTableRow } from "./attribution-row";
 import { AttributionDrilldown } from "./attribution-drilldown";
 import { AttributePicker } from "./attribute-picker";
+import { ReconciliationErrorCard } from "./error-card";
 
 /** VERBATIM (pack C4a.2). */
 export const ATTRIBUTION_EMPTY_STATE = "No attributable outbound batches in this window.";
@@ -269,12 +270,11 @@ export function AttributionTab() {
       {query.isLoading && <Skeleton className="h-40 w-full" />}
 
       {query.isError && (
-        <div className="rounded-lg border border-negative-border bg-negative-muted p-4 text-negative-foreground">
-          <p className="text-body">Could not load the attribution report.</p>
-          <Button size="sm" variant="outline" className="mt-3" onClick={() => query.refetch()}>
-            Retry
-          </Button>
-        </div>
+        <ReconciliationErrorCard
+          error={query.error}
+          fallback="Could not load the attribution report."
+          onRetry={() => query.refetch()}
+        />
       )}
 
       {report && (

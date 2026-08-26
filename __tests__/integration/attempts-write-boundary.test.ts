@@ -225,6 +225,70 @@ describe('attempts write boundary — NAMED importers only', () => {
   });
 });
 
+/**
+ * QA-6 — ONE AUDIT EVENT PER LEDGER BATCH.
+ *
+ * The attribution report's LIST read joins each batch's audit rows by scalar
+ * subquery: the earliest one for the derivation's facts, and the batch's
+ * fulfillment event for R2/R2b. It never materialises the whole set, so what it
+ * can see depends on what the WRITERS filed under the ledger batchId — and the
+ * rule that makes that read complete is that each of the four D2 seams mints ONE
+ * batch id and records ONE change event under it.
+ *
+ * A second `recordChange` under the same batch id would file an audit row the
+ * list read reaches only if it happens to be the earliest or a fulfillment — so
+ * this is a SOURCE SCAN, in the file that already owns the writers' boundary,
+ * and it fails loudly rather than letting the report quietly go partial.
+ *
+ * The FIFTH importer (the manual-attribution POST) is deliberately not here: it
+ * mints a SEPARATE audit batch id for its INVENTORY_ATTRIBUTE event precisely so
+ * that event does NOT land under the ledger batch it describes (its ENTITY is
+ * the ledger batchId instead) — the same rule, stated the other way round.
+ */
+const BATCH_MINTING_WRITERS: readonly string[] = [
+  'app/api/inventory/deduct-simple/route.ts',
+  'app/api/inventory/adjust/route.ts',
+  'app/api/inventory/batch-adjust/route.ts',
+  'app/api/orders/[orderId]/fulfill/route.ts',
+];
+
+function occurrences(text: string, pattern: RegExp): number {
+  return text.match(pattern)?.length ?? 0;
+}
+
+describe('one ledger batch id, one audit event (QA-6)', () => {
+  it.each(BATCH_MINTING_WRITERS)('%s mints ONE batch id and records ONE change', (writer) => {
+    const full = path.join(REPO_ROOT, writer);
+    expect(fs.existsSync(full)).toBe(true);
+    const text = fs.readFileSync(full, 'utf8');
+
+    expect(occurrences(text, /\bnewBatchId\s*\(\s*\)/g)).toBe(1);
+    expect(occurrences(text, /\brecordChange\s*\(/g)).toBe(1);
+  });
+
+  it('the counter is not vacuous (positive control: a route that really records three)', () => {
+    // `app/api/admin/users/[userId]/route.ts` records three changes under one
+    // batch id. It is not a ledger writer, so it is not on the list above — it is
+    // here to prove the counter would SEE a second `recordChange` if one appeared.
+    const text = fs.readFileSync(
+      path.join(REPO_ROOT, 'app/api/admin/users/[userId]/route.ts'),
+      'utf8',
+    );
+    expect(occurrences(text, /\brecordChange\s*\(/g)).toBe(3);
+    expect(occurrences(text, /\bnewBatchId\s*\(\s*\)/g)).toBe(1);
+  });
+
+  it('the manual attribution files its event under its OWN batch id, not the ledger batch', () => {
+    const text = fs.readFileSync(
+      path.join(REPO_ROOT, 'app/api/reconciliation/attribution/[batchId]/route.ts'),
+      'utf8',
+    );
+    expect(occurrences(text, /\brecordChange\s*\(/g)).toBe(1);
+    // The audit event's batchId is the request's own, minted beside it.
+    expect(text).toMatch(/batchId:\s*auditBatchId/);
+  });
+});
+
 describe('attempts append-only — no mutating verb anywhere in app/ lib/ scripts/', () => {
   it('the delegate is never updated, upserted or deleted', () => {
     const offenders = appendOnlySources

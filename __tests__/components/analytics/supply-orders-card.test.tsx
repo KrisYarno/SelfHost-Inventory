@@ -213,16 +213,18 @@ describe("the receipts row (D10)", () => {
     ).toBeInTheDocument();
   });
 
-  it("carries the receipt-event definition as its title", async () => {
+  // QA-8: the grain rides with the figures — five batches off one delivery is
+  // five events, and a reader who does not know that reads "5 batches" as five
+  // deliveries. A `title=` is a tooltip nobody hovers and no touch device shows,
+  // so the definition is VISIBLE text under the row (the attribution tab's idiom).
+  it("renders the receipt-event definition as VISIBLE text under the row (QA-8)", async () => {
     renderCard();
     const row = await screen.findByTestId("supply-orders-receipts");
-    // The grain rides with the figures: five batches off one delivery is five
-    // events, and a reader who does not know that reads "5 batches" as 5
-    // deliveries.
-    expect(row).toHaveAttribute(
-      "title",
-      "a receipt event = one stock-in batch; a five-batch delivery is five events (D12)",
-    );
+    expect(
+      within(row).getByText(
+        "a receipt event = one stock-in batch; a five-batch delivery is five events (D12)",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("renders an unpriced receipt cost as an em dash plus the reason", async () => {

@@ -477,6 +477,23 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
     });
   });
 
+  // QA-7: the SAME refusal, on a batch whose fulfillment event names nothing at
+  // all. "fulfilled against another order (null)" told the admin the event named
+  // an order called null; the branch says what actually happened and where the
+  // repair lives.
+  it('7b. R2B_OTHER_TARGET — an event that names NO order says so, and names the repair (QA-7)', async () => {
+    makeTx({ locked: rows(), auditEvents: [fulfillmentEvent(null)] });
+    const res = await attribute(CLEAN_BODY);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error:
+        'This batch was fulfilled but the event does not name the order — repair via unfulfill/refulfill',
+      code: 'R2B_OTHER_TARGET',
+      fulfillmentOrderRecordId: null,
+    });
+  });
+
   it('8. REASON_REQUIRED — re-stamping an attributed batch needs one (400, bare AppError)', async () => {
     makeTx({ locked: rows({ orderRecordId: 'ord-1' }) });
     const res = await attribute({ orderRecordId: 'ord-9', expectPreviousOrderRecordId: 'ord-1' });

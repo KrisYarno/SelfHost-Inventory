@@ -151,12 +151,12 @@ export function SupplyOrdersCard({ from, to }: SupplyOrdersCardProps) {
           {/* The RECEIPTS roll-up (D10). Its own clock — the stock-in changeTime,
               not the ordered date the tiles above use — so it sits on its own row
               rather than pretending to be a fifth number about the same window
-              basis. The grain rides as the row's title: five batches off one
-              delivery is five events, and a reader who does not know that reads
-              "5 batches" as five deliveries. */}
+              basis. The grain rides as VISIBLE text under the figures (QA-8):
+              five batches off one delivery is five events, a reader who does not
+              know that reads "5 batches" as five deliveries, and a `title=` is a
+              tooltip nobody hovers and no touch device shows at all. */}
           <div
             data-testid="supply-orders-receipts"
-            title={data.receipts.definition}
             className="space-y-1 rounded-lg border border-border bg-surface p-4"
           >
             <div className="flex flex-wrap items-center gap-2 text-body-sm text-muted-foreground">
@@ -181,6 +181,7 @@ export function SupplyOrdersCard({ from, to }: SupplyOrdersCardProps) {
             <p className="text-body-sm text-muted-foreground">
               {data.receipts.receiptCostCents.coverage}
             </p>
+            <p className="text-body-sm text-muted-foreground">{data.receipts.definition}</p>
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">

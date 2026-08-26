@@ -83,6 +83,15 @@ export type UnmappedPage = {
   count: number;
   moreCount: number;
   nextCursor: string | null;
+  /**
+   * Unknown-age groups the ACTIVE age filter excluded (QA-4). `oldest <= cutoff`
+   * is UNKNOWN for a group with no date, so the filter drops every one of them
+   * and the `unknown` band then reads 0 — which says "there are none" rather
+   * than "this filter cannot see them". 0 when no filter is active.
+   */
+  unknownExcluded: number;
+  /** What the figures cannot say for themselves (R-2). Empty when there is nothing. */
+  notes: string[];
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -92,6 +101,12 @@ const NO_AGE_REASON = 'the order carries no external creation date';
 
 /** The link's honest warning: following it talks to the live store. */
 const CATALOG_WARNING = 'loads the live store catalog' as const;
+
+/** What an age filter cannot speak about, and how to see it anyway (QA-4). */
+function unknownExcludedNote(count: number): string {
+  const groups = count === 1 ? '1 unknown-age group is' : `${count} unknown-age groups are`;
+  return `${groups} outside this age filter — clear the filter to see them`;
+}
 
 // ---------------------------------------------------------------------------
 // The one grouping (both statements read it)
@@ -274,6 +289,8 @@ type GroupSqlRow = {
 type TotalsSqlRow = {
   total: unknown;
   unknownGroups: unknown;
+  /** Absent (and read as 0) when no age filter is active — see `listUnmapped`. */
+  unknownExcluded?: unknown;
   bucket0: unknown;
   bucket1: unknown;
   bucket2: unknown;
@@ -311,10 +328,23 @@ FROM grouped${whereSql([
 ORDER BY ${orderBySql()}
 LIMIT ${input.limit + 1}`);
 
+  // WHAT THE FILTER CANNOT SPEAK ABOUT (QA-4). The outer WHERE is `oldest <=
+  // cutoff`, which is UNKNOWN — and therefore false — for every group with no
+  // date: the age filter silently removes exactly the groups whose age nobody
+  // can assert anything about, and the `unknown` band then reads 0. The count of
+  // them rides in THIS statement, over the same CTE, so it costs no extra read
+  // and can never disagree with the totals beside it. Rendered only when a
+  // filter is active: with none, nothing is excluded and there is nothing to say.
+  const excludedCount =
+    olderThan.length === 0
+      ? Prisma.empty
+      : Prisma.sql`,
+  (SELECT COUNT(*) FROM grouped u WHERE u.oldest IS NULL) AS unknownExcluded`;
+
   const totalsRows = await prisma.$queryRaw<TotalsSqlRow[]>(Prisma.sql`${GROUPED_CTE}
 SELECT
   COUNT(*) AS total,
-  SUM(CASE WHEN oldest IS NULL THEN 1 ELSE 0 END) AS unknownGroups,
+  SUM(CASE WHEN oldest IS NULL THEN 1 ELSE 0 END) AS unknownGroups${excludedCount},
   ${bucketSumsSql(now)}
 FROM grouped${whereSql(olderThan)}`);
 
@@ -328,6 +358,7 @@ FROM grouped${whereSql(olderThan)}`);
   const count = toNumber(totals?.total);
   const consumed = cursor?.c ?? 0;
   const last = rows[rows.length - 1];
+  const unknownExcluded = toNumber(totals?.unknownExcluded);
 
   return {
     groups: rows.map((row) => buildGroup(row, now)),
@@ -342,6 +373,8 @@ FROM grouped${whereSql(olderThan)}`);
     moreCount: Math.max(count - consumed - rows.length, 0),
     nextCursor:
       hasMore && last !== undefined ? encodeCursor(cursorOf(last, consumed + rows.length)) : null,
+    unknownExcluded,
+    notes: unknownExcluded > 0 ? [unknownExcludedNote(unknownExcluded)] : [],
   };
 }
 

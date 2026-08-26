@@ -371,3 +371,31 @@ describe("mobile", () => {
     expect(screen.getByTestId("exceptions-table-wrap").className).toContain("hidden md:block");
   });
 });
+
+// ---------------------------------------------------------------------------
+// QA-5 — what the error card is allowed to say
+// ---------------------------------------------------------------------------
+
+describe("the error card (QA-5)", () => {
+  it("renders the server's 4xx sentence VERBATIM, and the generic copy for a 5xx", () => {
+    setPage(undefined, {
+      isError: true,
+      error: Object.assign(new Error("Request failed (400)"), {
+        status: 400,
+        serverMessage: "invalid cursor",
+      }),
+    });
+    const view = render(<ExceptionsTab />);
+    expect(screen.getByTestId("reconciliation-error")).toHaveTextContent("invalid cursor");
+    view.unmount();
+
+    setPage(undefined, {
+      isError: true,
+      error: Object.assign(new Error("Request failed (503)"), { status: 503 }),
+    });
+    render(<ExceptionsTab />);
+    expect(screen.getByTestId("reconciliation-error")).toHaveTextContent(
+      "Could not load the exceptions.",
+    );
+  });
+});

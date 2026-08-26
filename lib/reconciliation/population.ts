@@ -268,11 +268,18 @@ export type BatchEvidence = {
  * The two events that mean "a fulfillment moved this stock". Spelled HERE, once,
  * beside the population itself: the write path and the read path used to keep
  * private copies, which is exactly how they drifted.
+ *
+ * EXPORTED as an ARRAY because the attribution report's one statement needs the
+ * same two names in SQL (QA-6): the list read reaches for the batch's
+ * fulfillment event by scalar subquery, and a hand-typed `IN (…)` beside this
+ * set would be the third copy of the rule this module exists to prevent.
  */
-const FULFILLMENT_ACTION_TYPES: ReadonlySet<string> = new Set([
+export const FULFILLMENT_ACTION_TYPE_LIST: ReadonlyArray<string> = Object.freeze([
   'EXTERNAL_ORDER_FULFILLMENT',
   'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
 ]);
+
+const FULFILLMENT_ACTION_TYPES: ReadonlySet<string> = new Set(FULFILLMENT_ACTION_TYPE_LIST);
 
 /** A non-empty string, or nothing — the writers omit keys they cannot fill. */
 function text(value: unknown): string | undefined {

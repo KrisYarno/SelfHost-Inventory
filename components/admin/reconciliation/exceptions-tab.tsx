@@ -36,6 +36,7 @@ import {
   type ExceptionSeverity,
 } from "@/lib/exceptions/kinds";
 import type { ExceptionRowView } from "@/lib/reconciliation/exceptions";
+import { ReconciliationErrorCard } from "./error-card";
 
 /** VERBATIM (pack C4b.1 / spec §4.3) — DAY ONE only: see `emptyStateText`. */
 export const EXCEPTIONS_EMPTY_STATE =
@@ -325,12 +326,11 @@ export function ExceptionsTab() {
       {query.isLoading && <Skeleton className="h-40 w-full" />}
 
       {query.isError && (
-        <div className="rounded-lg border border-negative-border bg-negative-muted p-4 text-negative-foreground">
-          <p className="text-body">Could not load the exceptions.</p>
-          <Button size="sm" variant="outline" className="mt-3" onClick={() => query.refetch()}>
-            Retry
-          </Button>
-        </div>
+        <ReconciliationErrorCard
+          error={query.error}
+          fallback="Could not load the exceptions."
+          onRetry={() => query.refetch()}
+        />
       )}
 
       {page && (

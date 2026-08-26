@@ -61,21 +61,25 @@ const HAS_REFERENCE = Prisma.sql`(JSON_TYPE(JSON_EXTRACT(a.details, '$.orderRefe
  * earliest audit row by scalar subquery, so a batch with two audit rows cannot
  * be counted twice.
  *
- * THE ROW-LEVEL PRE-FILTER (`l.changeTime < end`) is what bounds the scan: the
- * HAVING alone made this poll group the WHOLE population and then throw away
- * every batch older than the fortnight (OC-3). It is EXACT here, and only here,
- * because this window's `end` is NOW — no ledger row exists after it, so no
- * batch can lose a row to the filter and mis-report its `MAX(orderRecordId IS
- * NOT NULL)` or its `MIN(changeTime)`. The REPORT's CTE deliberately stays
- * HAVING-only: its window is historical, and a batch straddling the far edge
- * must keep its full aggregates rather than the half that fell inside.
+ * THE BATCH PRE-SELECTION is what bounds the scan: the HAVING alone made this
+ * poll group the WHOLE population and then throw away every batch older than the
+ * fortnight (OC-3). The subquery names the batches with at least one population
+ * row at or after `start` — served by `(logType, changeTime)` — and a batch
+ * outside it cannot have `MIN(changeTime) >= start`, so it excludes nothing the
+ * HAVING would have kept. It WIDENS rather than filters: every row of a selected
+ * batch is still grouped, so no batch can lose a row and mis-report its
+ * `MAX(orderRecordId IS NOT NULL)` or its `MIN(changeTime)`. That is why the
+ * REPORT's CTE can adopt the same shape and why the row-level `changeTime < end`
+ * this replaced bounded nothing at all: no ledger row exists after NOW (QA-3).
  */
 function unmatchedIntendedSql(start: Date, end: Date): Prisma.Sql {
   return Prisma.sql`SELECT COUNT(*) AS n
 FROM (
   SELECT l.batchId AS batchId
   FROM inventory_logs l
-  WHERE ${rowWhereSql('l')} AND l.changeTime < ${end}
+  WHERE ${rowWhereSql('l')} AND l.batchId IN (SELECT DISTINCT l2.batchId FROM inventory_logs l2 WHERE ${rowWhereSql(
+    'l2'
+  )} AND l2.changeTime >= ${start})
   GROUP BY l.batchId
   HAVING MIN(l.changeTime) >= ${start} AND MIN(l.changeTime) < ${end} AND MAX(l.orderRecordId IS NOT NULL) = 0
 ) b

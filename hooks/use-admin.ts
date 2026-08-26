@@ -28,14 +28,34 @@ import type { ExceptionKind, ExceptionSeverity } from "@/lib/exceptions/kinds";
 
 export interface ApiError extends Error {
   status?: number;
+  /**
+   * The server's OWN `error` sentence, when the response carried one. A 4xx is
+   * the server telling the operator what is wrong with the request they made —
+   * a window over the span cap, a cursor from another filter — and that sentence
+   * is the whole repair, so the surfaces that can act on it render it verbatim
+   * (QA-5). `message` stays the generic status line, so nothing that toasts an
+   * ApiError today starts leaking server prose it never asked for.
+   */
+  serverMessage?: string;
+}
+
+/** The `{ error }` envelope, when there is one. A body-less failure is not an error here. */
+async function readErrorBody(res: Response): Promise<{ error?: unknown }> {
+  try {
+    return (await res.json()) as { error?: unknown };
+  } catch {
+    return {};
+  }
 }
 
 /** GET helper for queries: throws Error & { status } so callers can branch on 401. */
 async function getJSON<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (!res.ok) {
+    const body = await readErrorBody(res);
     const err = new Error(`Request failed (${res.status})`) as ApiError;
     err.status = res.status;
+    if (typeof body.error === "string" && body.error.length > 0) err.serverMessage = body.error;
     throw err;
   }
   return res.json() as Promise<T>;
@@ -756,9 +776,16 @@ export interface AttributionReportInput {
   cursor?: string;
 }
 
+/**
+ * The report. DISABLED while either end of the window is empty (QA-5): a date
+ * input the operator cleared holds `""`, the route answers that with a 400, and
+ * the tab would put an error card over a screen somebody is still filling in.
+ * The `useOrderSearch` rule, applied to the other input that can be half-typed.
+ */
 export function useAttributionReport(input: AttributionReportInput) {
   return useQuery<AttributionReport, ApiError>({
     queryKey: ["admin", "reconciliation", "attribution", input],
+    enabled: input.from !== "" && input.to !== "",
     queryFn: ({ signal }) => {
       const params = new URLSearchParams({ from: input.from, to: input.to });
       if (input.classKey) params.set("class", input.classKey);

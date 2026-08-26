@@ -28,6 +28,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useUnmapped, type UnmappedQueryInput } from "@/hooks/use-admin";
 import type { UnmappedGroup } from "@/lib/reconciliation/unmapped";
+import { ReconciliationErrorCard } from "./error-card";
 
 /**
  * The empty state. Bounded by the filter that produced it on purpose: "nothing
@@ -198,18 +199,30 @@ export function UnmappedTab() {
               <span className="tabular-nums">{page.buckets[chip.key]}</span>
             </span>
           ))}
+          {/* BESIDE THE UNKNOWN CHIP, because it is that chip the note is about
+              (QA-4): an age filter cannot assert anything about a group whose age
+              nobody can compute, so it drops them and the chip reads 0. The
+              producer counted what it excluded and wrote the sentence. */}
+          {page.notes.map((note) => (
+            <span
+              key={note}
+              data-testid="unmapped-note"
+              className="self-center text-body-sm text-muted-foreground"
+            >
+              {note}
+            </span>
+          ))}
         </div>
       )}
 
       {query.isLoading && <Skeleton className="h-40 w-full" />}
 
       {query.isError && (
-        <div className="rounded-lg border border-negative-border bg-negative-muted p-4 text-negative-foreground">
-          <p className="text-body">Could not load the unmapped lines.</p>
-          <Button size="sm" variant="outline" className="mt-3" onClick={() => query.refetch()}>
-            Retry
-          </Button>
-        </div>
+        <ReconciliationErrorCard
+          error={query.error}
+          fallback="Could not load the unmapped lines."
+          onRetry={() => query.refetch()}
+        />
       )}
 
       {page && (

@@ -277,6 +277,87 @@ describe('the grouped CTE (TEXT pins)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// QA-4 — the groups the age filter cannot speak about
+// ---------------------------------------------------------------------------
+
+/**
+ * `oldest <= cutoff` is UNKNOWN for a group whose oldest order carries no date,
+ * so the filter drops every unknown-age group — and the `unknown` chip then
+ * reads 0, which says "there are none" rather than "this filter cannot see
+ * them". The count of what was excluded rides in the same totals statement, and
+ * the note says how to get them back.
+ */
+describe('the age filter and the groups it excludes (QA-4)', () => {
+  function totalsSql(): string {
+    return (
+      (db.$queryRaw as unknown as jest.Mock).mock.calls
+        .map((c) => c[0] as Prisma.Sql)
+        .find((q) => q.sql.includes('AS total')) as Prisma.Sql
+    ).sql;
+  }
+
+  it('COUNTS the excluded unknown-age groups in the TOTALS statement', async () => {
+    await listUnmapped({ limit: 10, olderThanDays: 30 });
+    expect(totalsSql()).toContain(
+      '(SELECT COUNT(*) FROM grouped u WHERE u.oldest IS NULL) AS unknownExcluded',
+    );
+    // Still two statements: the count rides the read that was already going.
+    expect(db.$queryRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it('an UNFILTERED list excludes nothing, and buys no subquery to say so', async () => {
+    const page = await listUnmapped({ limit: 10 });
+    expect(totalsSql()).not.toContain('unknownExcluded');
+    expect(page.unknownExcluded).toBe(0);
+    expect(page.notes).toEqual([]);
+  });
+
+  it('names the number outside the filter, and how to see them', async () => {
+    (db.$queryRaw as unknown as jest.Mock).mockImplementation(async (query: Prisma.Sql) => {
+      if (!query.sql.includes('AS total')) return [];
+      return [
+        {
+          total: 2,
+          unknownGroups: 0,
+          unknownExcluded: 4,
+          bucket0: 0,
+          bucket1: 0,
+          bucket2: 0,
+          bucket3: 2,
+        },
+      ];
+    });
+
+    const page = await listUnmapped({ limit: 10, olderThanDays: 30 });
+
+    expect(page.unknownExcluded).toBe(4);
+    expect(page.notes).toEqual([
+      '4 unknown-age groups are outside this age filter — clear the filter to see them',
+    ]);
+  });
+
+  it('says nothing when the filter excluded nothing', async () => {
+    (db.$queryRaw as unknown as jest.Mock).mockImplementation(async (query: Prisma.Sql) => {
+      if (!query.sql.includes('AS total')) return [];
+      return [
+        {
+          total: 2,
+          unknownGroups: 0,
+          unknownExcluded: 0,
+          bucket0: 0,
+          bucket1: 0,
+          bucket2: 0,
+          bucket3: 2,
+        },
+      ];
+    });
+
+    const page = await listUnmapped({ limit: 10, olderThanDays: 30 });
+    expect(page.notes).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The group view
 // ---------------------------------------------------------------------------
 

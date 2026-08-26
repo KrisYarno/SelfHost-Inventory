@@ -208,7 +208,9 @@ describe('GET /api/reconciliation/unmapped', () => {
     expect(res.status).toBe(403);
   });
 
-  it('serves the five-key envelope with the buckets alongside the groups', async () => {
+  // SEVEN keys since QA-4: `unknownExcluded` counts the unknown-age groups an
+  // active age filter dropped, and `notes` carries the sentence that says so.
+  it('serves the seven-key envelope with the buckets alongside the groups', async () => {
     const res = await unmappedGET(req('http://localhost/api/reconciliation/unmapped'));
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -218,6 +220,8 @@ describe('GET /api/reconciliation/unmapped', () => {
       'groups',
       'moreCount',
       'nextCursor',
+      'notes',
+      'unknownExcluded',
     ]);
     expect(body.buckets).toEqual({ '0-7': 0, '8-30': 1, '31-90': 0, '90+': 0, unknown: 0 });
     expect(body.count).toBe(1);

@@ -139,13 +139,21 @@ export class FulfilledBatchRefusal extends Error {
  * completed, never redirected: the only manual attribution it accepts is the
  * order its own fulfillment event already names. Anything else would invent a
  * second answer to a question the fulfillment already answered.
+ *
+ * TWO SENTENCES, because there are two situations (QA-7). When the event names
+ * NO order, there is no id a completion could target and every order the picker
+ * could offer lands here — so the refusal says what actually happened and where
+ * the repair lives, rather than "fulfilled against another order (null)", which
+ * reads as an order called null and sends the admin looking for it.
  */
 export class R2bOtherTargetRefusal extends Error {
   readonly code = 'R2B_OTHER_TARGET';
 
   constructor(public readonly fulfillmentOrderRecordId: string | null) {
     super(
-      `This batch was fulfilled against another order (${fulfillmentOrderRecordId}); a manual attribution may only complete that stamp`,
+      fulfillmentOrderRecordId === null
+        ? 'This batch was fulfilled but the event does not name the order — repair via unfulfill/refulfill'
+        : `This batch was fulfilled against another order (${fulfillmentOrderRecordId}); a manual attribution may only complete that stamp`,
     );
     this.name = 'R2bOtherTargetRefusal';
   }

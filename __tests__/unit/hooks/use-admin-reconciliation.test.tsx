@@ -96,6 +96,57 @@ describe("useAttributionReport", () => {
     expect(url).not.toContain("orderNumber=");
     expect(url).not.toContain("cursor=");
   });
+
+  // QA-5: a date input the operator cleared holds "", which the route answers
+  // with a 400 — a request nobody made, and an error card over a screen the
+  // operator is still in the middle of filling in.
+  it("an EMPTY date asks nothing — a half-typed window is not a request (QA-5)", () => {
+    const { Wrapper } = harness();
+
+    renderHook(() => useAttributionReport({ from: "", to: "2026-08-24" }), { wrapper: Wrapper });
+    renderHook(() => useAttributionReport({ from: "2026-08-11", to: "" }), { wrapper: Wrapper });
+
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * QA-5 — WHAT A FAILED READ CARRIES. A 4xx is the server telling the operator
+ * what is wrong with the request they made; the tabs render that sentence
+ * verbatim, so the hook has to keep it. A 5xx says nothing an operator can act
+ * on and carries no sentence at all.
+ */
+describe("the read helper's error shape (QA-5)", () => {
+  it("keeps the server's 4xx sentence beside the status", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: "invalid cursor", code: "VALIDATION_ERROR" }),
+    });
+    const { Wrapper } = harness();
+
+    const { result } = renderHook(
+      () => useAttributionReport({ from: "2026-08-11", to: "2026-08-24" }),
+      { wrapper: Wrapper },
+    );
+
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.error).toMatchObject({ status: 400, serverMessage: "invalid cursor" });
+  });
+
+  it("a body-less failure carries a status and NO server sentence", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 500 });
+    const { Wrapper } = harness();
+
+    const { result } = renderHook(
+      () => useAttributionReport({ from: "2026-08-11", to: "2026-08-24" }),
+      { wrapper: Wrapper },
+    );
+
+    await waitFor(() => expect(result.current.error).not.toBeNull());
+    expect(result.current.error).toMatchObject({ status: 500 });
+    expect(result.current.error?.serverMessage).toBeUndefined();
+  });
 });
 
 describe("useBatchDetail / useOrderSearch", () => {

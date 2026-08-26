@@ -46,6 +46,7 @@ import {
   ATTRIBUTABLE_DEFINITION,
   ATTRIBUTABLE_PREDICATE,
   batchEvidence,
+  FULFILLMENT_ACTION_TYPE_LIST,
   renderRowWhereSql,
   rowWhere,
   rowWhereSql,
@@ -187,11 +188,15 @@ export type BatchDetail = {
     label: 'from the audit event (free text, admin-visible on /admin/logs)';
   } | null;
   /**
-   * The ledger read is BOUNDED at the manual-attribution limit + 1 (OC-8): a
-   * pre-lane mass update holds thousands of rows and used to send every one of
-   * them to the browser. TRUE means `ledgerRows` is the first page of the batch
-   * — and that `batch`'s row-derived figures (rowCount, units, productCount, the
-   * stamps) cover only the rows that were read. The REPORT row is the exact one.
+   * ABOUT THE ARRAY, and only the array. The ledger read is BOUNDED at the
+   * manual-attribution limit + 1 (OC-8): a pre-lane mass update holds thousands
+   * of rows and used to send every one of them to the browser. TRUE means
+   * `ledgerRows` is the first page of the batch.
+   *
+   * `batch` IS EXACT EITHER WAY (QA-1): over the bound it is computed from a
+   * batch-scoped aggregate over the FULL ledger, so its units, row count,
+   * product count, time axis, log types and stamps — and therefore its class,
+   * its order and `canAttribute` — describe the whole batch, not the page.
    */
   ledgerRowsTruncated: boolean;
   attempts: Array<{
@@ -285,7 +290,7 @@ const DEFINITIONS: Readonly<Record<string, string>> = Object.freeze({
   recordingSince:
     "the first attempt row's attemptedAt — batches before it were never recorded live and carry a derived class",
   canAttribute:
-    'whether the manual-attribution core would accept this batch: attributable, at most 50 rows, uniformly stamped (one id on every row, or none on any), and not a stamped fulfillment',
+    'whether the manual-attribution core would accept this batch: attributable, at most 50 rows, uniformly stamped (one id on every row, or none on any), not a stamped fulfillment, and not a fulfillment whose event names no order to complete',
 });
 
 // ---------------------------------------------------------------------------
@@ -387,10 +392,12 @@ function jsonPath(key: string): Prisma.Sql {
 }
 
 /** A JSON string field, or NULL. Guarded on JSON_TYPE so a JSON `null` does not
- *  arrive as the four-character string "null" and get read as a value. */
-function jsonText(key: string): Prisma.Sql {
+ *  arrive as the four-character string "null" and get read as a value. The alias
+ *  is a module constant (`ae`, the earliest row; `fe`, the fulfillment one). */
+function jsonText(key: string, alias = 'ae'): Prisma.Sql {
   const path = jsonPath(key);
-  return Prisma.sql`CASE WHEN JSON_TYPE(JSON_EXTRACT(ae.details, ${path})) = 'STRING' THEN JSON_UNQUOTE(JSON_EXTRACT(ae.details, ${path})) END`;
+  const a = Prisma.raw(alias);
+  return Prisma.sql`CASE WHEN JSON_TYPE(JSON_EXTRACT(${a}.details, ${path})) = 'STRING' THEN JSON_UNQUOTE(JSON_EXTRACT(${a}.details, ${path})) END`;
 }
 
 /** Does the details object CARRY this key at all (R0's `rows`/`rowsOmitted`)? */
@@ -436,6 +443,10 @@ type BatchSummarySqlRow = {
   auditHasOrderReference: unknown;
   auditHasRows: unknown;
   auditHasRowsOmitted: unknown;
+  fulfillmentAuditId: number | null;
+  fulfillmentActionType: string | null;
+  fulfillmentEntityId: string | null;
+  fulfillmentOrderId: string | null;
   attemptId: number | null;
   attemptOutcome: string | null;
   attemptEvidence: string | null;
@@ -446,13 +457,20 @@ type BatchSummarySqlRow = {
 };
 
 /**
- * ONE statement: the window's batch summaries, each batch's earliest audit row
- * and latest attempt, and the two exclusion figures.
+ * ONE statement: the window's batch summaries, each batch's earliest audit row,
+ * its FULFILLMENT event and its latest attempt, and the two exclusion figures.
  *
  * The exclusions ride along in a one-row CTE that the batches LEFT JOIN onto, so
  * an empty window still answers with its coverage instead of losing it with the
  * rows. The order-number filter is a subquery rather than an id list: the read
  * stays one statement, and nothing about a batch is ever enumerated into SQL.
+ *
+ * THE FULFILLMENT EVENT IS READ BATCH-WIDE (QA-6). It joins through its OWN
+ * id-scalar subquery rather than being read off `ae`: the earliest audit row is
+ * not necessarily the fulfillment one, and a batch whose fulfillment event came
+ * second used to arrive here with no fulfillment fact at all — so the Attribute…
+ * control lit on a batch the core refuses, which is the OC-1 class exactly. Both
+ * joins are 1:1 on `id`, so neither can multiply a batch's units.
  */
 function batchSummarySql(
   start: Date,
@@ -512,12 +530,18 @@ SELECT
   ${jsonHasText(AUDIT_REFERENCE_KEY)} AS auditHasOrderReference,
   ${jsonHasKey(AUDIT_ROWS_KEY)} AS auditHasRows,
   ${jsonHasKey(AUDIT_ROWS_OMITTED_KEY)} AS auditHasRowsOmitted,
+  fe.id AS fulfillmentAuditId, fe.actionType AS fulfillmentActionType,
+  fe.entityId AS fulfillmentEntityId,
+  ${jsonText(AUDIT_ORDER_KEY, 'fe')} AS fulfillmentOrderId,
   ap.id AS attemptId, ap.outcome AS attemptOutcome, ap.evidence AS attemptEvidence,
   ap.reason AS attemptReason, ap.source AS attemptSource, ap.actorUserId AS attemptActorUserId,
   ap.orderRecordId AS attemptOrderRecordId
 FROM t
 LEFT JOIN b ON 1 = 1
 LEFT JOIN audit_logs ae ON ae.id = (SELECT a2.id FROM audit_logs a2 WHERE a2.batchId = b.batchId ORDER BY a2.id ASC LIMIT 1)
+LEFT JOIN audit_logs fe ON fe.id = (SELECT f2.id FROM audit_logs f2 WHERE f2.batchId = b.batchId AND f2.actionType IN (${Prisma.join(
+    [...FULFILLMENT_ACTION_TYPE_LIST]
+  )}) ORDER BY f2.id ASC LIMIT 1)
 LEFT JOIN order_attribution_attempts ap ON ap.id = (SELECT p2.id FROM order_attribution_attempts p2 WHERE p2.batchId = b.batchId ORDER BY p2.attemptedAt DESC, p2.id DESC LIMIT 1)
 ORDER BY b.minChangeTime DESC, b.batchId DESC`;
 }
@@ -584,17 +608,40 @@ function classKeyOf(outcome: string, label: string | null): AttributionClassKey 
   return CLASS_KEY_SET.has(key) ? (key as AttributionClassKey) : null;
 }
 
+/** The stamp FACTS an aggregate carries, in the shape the rules read them. */
+type StampFacts = Pick<BatchFacts, 'stamps' | 'distinctStamps' | 'theStamp'>;
+
+/**
+ * `COUNT(DISTINCT orderRecordId)` ignores NULLs, so the aggregate says HOW MANY
+ * distinct ids there are, the MIN/MAX say which (for one or two of them), and
+ * the unstamped count says whether any row carries none. That is everything the
+ * rules ask — read once here, by the report's summary read and by the
+ * drill-down's batch-scoped aggregate alike (QA-1).
+ */
+function stampFactsOf(
+  distinctStamps: number,
+  firstStamp: string | null,
+  lastStamp: string | null,
+  unstampedRows: number
+): StampFacts {
+  const stamps: Array<string | null> = [];
+  if (distinctStamps >= 1 && firstStamp !== null) stamps.push(firstStamp);
+  if (distinctStamps >= 2 && lastStamp !== null && lastStamp !== firstStamp) {
+    stamps.push(lastStamp);
+  }
+  if (unstampedRows > 0) stamps.push(null);
+  return { stamps, distinctStamps, theStamp: distinctStamps === 1 ? firstStamp : null };
+}
+
 function summaryToFacts(row: BatchSummarySqlRow): BatchFacts | null {
   if (row.batchId === null || row.minChangeTime === null) return null;
 
-  const distinctStamps = toNumber(row.distinctStamps);
-  const unstampedRows = toNumber(row.unstampedRows);
-  const stamps: Array<string | null> = [];
-  if (distinctStamps >= 1 && row.firstStamp !== null) stamps.push(row.firstStamp);
-  if (distinctStamps >= 2 && row.lastStamp !== null && row.lastStamp !== row.firstStamp) {
-    stamps.push(row.lastStamp);
-  }
-  if (unstampedRows > 0) stamps.push(null);
+  const stampFacts = stampFactsOf(
+    toNumber(row.distinctStamps),
+    row.firstStamp,
+    row.lastStamp,
+    toNumber(row.unstampedRows)
+  );
 
   const details: Record<string, unknown> = {};
   if (row.auditOrderAttributionSource !== null) {
@@ -607,6 +654,34 @@ function summaryToFacts(row: BatchSummarySqlRow): BatchFacts | null {
   if (row.auditOrderId !== null) details[AUDIT_ORDER_KEY] = row.auditOrderId;
   if (toNumber(row.auditHasOrderReference) === 1) details[AUDIT_REFERENCE_KEY] = REFERENCE_PRESENT;
 
+  // The audit rows the batch-grain helper reads, ID-ASCENDING: the earliest one,
+  // and — when the batch's fulfillment event is a DIFFERENT row — that one after
+  // it (QA-6). `fe` is the lowest-id fulfillment row, so it can never sort before
+  // `ae`. Only the TYPED fact travels (D6): the order the event names, never the
+  // writer's blob, so R0's shape keys stay exactly what `ae` reported.
+  const auditRows: BatchAuditRow[] = [];
+  if (row.auditId !== null) {
+    auditRows.push({
+      actionType: row.auditActionType ?? '',
+      entityId: row.auditEntityId,
+      details: {
+        ...details,
+        // R0 reads the SHAPE of the summary event, so the PRESENCE of its two
+        // keys is the whole fact — the values never leave the audit row (D6).
+        ...(toNumber(row.auditHasRows) === 1 ? { [AUDIT_ROWS_KEY]: null } : {}),
+        ...(toNumber(row.auditHasRowsOmitted) === 1 ? { [AUDIT_ROWS_OMITTED_KEY]: null } : {}),
+      },
+    });
+  }
+  if (row.fulfillmentAuditId !== null && row.fulfillmentAuditId !== row.auditId) {
+    auditRows.push({
+      actionType: row.fulfillmentActionType ?? '',
+      entityId: row.fulfillmentEntityId,
+      details:
+        row.fulfillmentOrderId === null ? {} : { [AUDIT_ORDER_KEY]: row.fulfillmentOrderId },
+    });
+  }
+
   return {
     batchId: row.batchId,
     at: row.minChangeTime,
@@ -614,9 +689,7 @@ function summaryToFacts(row: BatchSummarySqlRow): BatchFacts | null {
     units: toNumber(row.units),
     productCount: toNumber(row.productCount),
     logTypes: (row.logTypes ?? '').split(',').filter((t) => t.length > 0),
-    stamps,
-    distinctStamps,
-    theStamp: distinctStamps === 1 ? row.firstStamp : null,
+    ...stampFacts,
     audit:
       row.auditId === null
         ? null
@@ -626,25 +699,7 @@ function summaryToFacts(row: BatchSummarySqlRow): BatchFacts | null {
             entityId: row.auditEntityId,
             details,
           },
-    auditRows:
-      row.auditId === null
-        ? []
-        : [
-            {
-              actionType: row.auditActionType ?? '',
-              entityId: row.auditEntityId,
-              details: {
-                ...details,
-                // R0 reads the SHAPE of the summary event, so the PRESENCE of
-                // its two keys is the whole fact — the values never leave the
-                // audit row (D6).
-                ...(toNumber(row.auditHasRows) === 1 ? { [AUDIT_ROWS_KEY]: null } : {}),
-                ...(toNumber(row.auditHasRowsOmitted) === 1
-                  ? { [AUDIT_ROWS_OMITTED_KEY]: null }
-                  : {}),
-              },
-            },
-          ],
+    auditRows,
     attempt:
       row.attemptId === null
         ? null
@@ -790,12 +845,20 @@ function buildRow(
   // and so does the predicate that decides whether to offer the control.
   const partiallyStamped = batch.distinctStamps === 1 && batch.stamps.includes(null);
 
+  // FULFILLED, AND THE EVENT NAMES NOTHING (QA-7). R2b lets an unstamped
+  // fulfillment batch COMPLETE the stamp its own event names — and when the event
+  // names no order at all, there is no id that completion could target: the core
+  // answers every order the picker could offer with `R2B_OTHER_TARGET`. Offering
+  // the control here is offering a button whose only outcome is a 409.
+  const unnamedFulfillment = batch.fulfillment && batch.fulfillmentOrderId === null;
+
   const canAttribute =
     batch.attributable &&
     batch.rowCount <= MANUAL_ATTRIBUTION_ROW_LIMIT &&
     batch.distinctStamps <= 1 &&
     !partiallyStamped &&
-    !stampedFulfillment;
+    !stampedFulfillment &&
+    !unnamedFulfillment;
 
   return {
     batchId: batch.batchId,
@@ -1018,6 +1081,101 @@ const ATTRIBUTION_ACTION_TYPE = 'INVENTORY_ATTRIBUTE';
 
 const AUDIT_EVENT_LABEL = 'from the audit event (free text, admin-visible on /admin/logs)' as const;
 
+/** What one batch's ledger sums to, over EVERY row (QA-1) — the `b` CTE's shape. */
+type BatchAggregateSqlRow = {
+  rowCount: unknown;
+  units: unknown;
+  productCount: unknown;
+  minChangeTime: Date | null;
+  logTypes: string | null;
+  distinctStamps: unknown;
+  firstStamp: string | null;
+  lastStamp: string | null;
+  unstampedRows: unknown;
+};
+
+/**
+ * The batch-summary shape, scoped to ONE batch id (QA-1).
+ *
+ * The drill-down's ledger array is bounded, and the row built off it was bounded
+ * with it: a five-hundred-row batch reported the units of its first fifty, and a
+ * batch stamped from row 100 reported itself unstamped — a class, an order and a
+ * `canAttribute` that were simply false on the wire. So over the bound the row
+ * comes from here instead: exact figures over the full ledger, and not one row
+ * materialised to get them.
+ *
+ * The batch id comes FIRST and the population predicate after it — the
+ * manual-attribution core's lock statement, mirrored.
+ */
+function batchAggregateSql(batchId: string): Prisma.Sql {
+  return Prisma.sql`SELECT
+  COUNT(*) AS rowCount,
+  CAST(SUM(-l.delta) AS SIGNED) AS units,
+  COUNT(DISTINCT l.productId) AS productCount,
+  MIN(l.changeTime) AS minChangeTime,
+  GROUP_CONCAT(DISTINCT l.logType ORDER BY l.logType SEPARATOR ',') AS logTypes,
+  COUNT(DISTINCT l.orderRecordId) AS distinctStamps,
+  MIN(l.orderRecordId) AS firstStamp,
+  MAX(l.orderRecordId) AS lastStamp,
+  SUM(CASE WHEN l.orderRecordId IS NULL THEN 1 ELSE 0 END) AS unstampedRows
+FROM inventory_logs l
+WHERE l.batchId = ${batchId} AND ${rowWhereSql('l')}`;
+}
+
+/** The ledger-derived half of `BatchFacts` — from rows, or from the aggregate. */
+type LedgerFacts = Pick<
+  BatchFacts,
+  | 'at'
+  | 'rowCount'
+  | 'units'
+  | 'productCount'
+  | 'logTypes'
+  | 'stamps'
+  | 'distinctStamps'
+  | 'theStamp'
+>;
+
+/** Every row of the batch is in hand, so the figures are read straight off them. */
+function ledgerFactsFromRows(
+  rows: ReadonlyArray<{
+    productId: number;
+    delta: number;
+    logType: unknown;
+    changeTime: Date;
+    orderRecordId: string | null;
+  }>
+): LedgerFacts {
+  const stampSet = Array.from(new Set(rows.map((row) => row.orderRecordId)));
+  const stampedIds = stampSet.filter((id): id is string => id !== null);
+  return {
+    at: rows.reduce((min, row) => (row.changeTime < min ? row.changeTime : min), rows[0].changeTime),
+    rowCount: rows.length,
+    units: rows.reduce((sum, row) => sum - row.delta, 0),
+    productCount: new Set(rows.map((row) => row.productId)).size,
+    logTypes: Array.from(new Set(rows.map((row) => String(row.logType)))),
+    stamps: stampSet,
+    distinctStamps: stampedIds.length,
+    theStamp: stampedIds.length === 1 ? stampedIds[0] : null,
+  };
+}
+
+/** The same facts, over the FULL ledger, without materialising a row (QA-1). */
+function ledgerFactsFromAggregate(row: BatchAggregateSqlRow, fallbackAt: Date): LedgerFacts {
+  return {
+    at: row.minChangeTime ?? fallbackAt,
+    rowCount: toNumber(row.rowCount),
+    units: toNumber(row.units),
+    productCount: toNumber(row.productCount),
+    logTypes: (row.logTypes ?? '').split(',').filter((t) => t.length > 0),
+    ...stampFactsOf(
+      toNumber(row.distinctStamps),
+      row.firstStamp,
+      row.lastStamp,
+      toNumber(row.unstampedRows)
+    ),
+  };
+}
+
 function attemptDetailsOf(value: unknown): AttemptDetails | null {
   if (!isObj(value)) return null;
   const out: AttemptDetails = {};
@@ -1036,6 +1194,12 @@ function attemptDetailsOf(value: unknown): AttemptDetails | null {
  * recorded against it, the manual attributions, and the derivation when that is
  * what classified it. `null` when the batch has no population row at all — the
  * route answers 404.
+ *
+ * THIS READ HAS NO STATEMENT BUDGET. D7's AT-MOST-FIVE is the REPORT's bound,
+ * because that one serves a whole window and a poll; this one serves a single
+ * batch a person opened deliberately. It spends five statements on a batch inside
+ * the row bound and six on one over it — the sixth being the exact aggregate that
+ * keeps `batch` true (QA-1).
  */
 export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<BatchDetail | null> {
   const ledger = await prisma.inventory_logs.findMany({
@@ -1067,7 +1231,7 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
     ? ledger.slice(0, MANUAL_ATTRIBUTION_ROW_LIMIT)
     : ledger;
 
-  const [auditEvents, attempts, attributionEvents, recordingSince] = await Promise.all([
+  const [auditEvents, attempts, attributionEvents, recordingSince, aggregate] = await Promise.all([
     prisma.auditLog.findMany({
       where: { batchId },
       orderBy: { id: 'asc' },
@@ -1095,27 +1259,30 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
       select: { id: true, createdAt: true, userId: true, details: true },
     }),
     getRecordingSince(),
+    // Only when the array was cut: inside the bound the rows in hand ARE the
+    // batch, and paying for an aggregate to re-derive them would be a statement
+    // spent to learn what we already read.
+    ledgerRowsTruncated
+      ? prisma.$queryRaw<BatchAggregateSqlRow[]>(batchAggregateSql(batchId))
+      : Promise.resolve<BatchAggregateSqlRow[]>([]),
   ]);
 
-  const stampSet = Array.from(new Set(ledger.map((row) => row.orderRecordId)));
-  const stampedIds = stampSet.filter((id): id is string => id !== null);
   const latest = attempts[attempts.length - 1];
   const earliest = auditEvents[0];
   const earliestDetails = isObj(earliest?.details) ? earliest.details : {};
 
+  // The row's figures are the WHOLE batch's (QA-1). An aggregate that came back
+  // empty is not a batch of zero rows — the ledger read just returned some — so
+  // the read rows stand in rather than reporting a batch that does not exist.
+  const aggregateRow = aggregate[0];
+  const ledgerFacts =
+    aggregateRow === undefined
+      ? ledgerFactsFromRows(ledger)
+      : ledgerFactsFromAggregate(aggregateRow, ledger[0].changeTime);
+
   const facts: BatchFacts = {
     batchId,
-    at: ledger.reduce(
-      (min, row) => (row.changeTime < min ? row.changeTime : min),
-      ledger[0].changeTime
-    ),
-    rowCount: ledger.length,
-    units: ledger.reduce((sum, row) => sum - row.delta, 0),
-    productCount: new Set(ledger.map((row) => row.productId)).size,
-    logTypes: Array.from(new Set(ledger.map((row) => String(row.logType)))),
-    stamps: stampSet,
-    distinctStamps: stampedIds.length,
-    theStamp: stampedIds.length === 1 ? stampedIds[0] : null,
+    ...ledgerFacts,
     audit:
       earliest === undefined
         ? null
@@ -1227,8 +1394,21 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
 // ---------------------------------------------------------------------------
 
 /**
+ * MySQL's LIKE metacharacters, escaped so a typed one matches ITSELF (QA-10).
+ *
+ * `startsWith` renders `LIKE '<q>%'`, so `%` and `_` in the operator's own text
+ * were wildcards: `q=%` matched every order in the book and handed the picker
+ * twenty of them, looking for all the world like a search result. The backslash
+ * goes first — escaping it after the others would escape the escapes.
+ */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+/**
  * The Attribute… picker's search: `orderNumber` STARTS WITH what was typed
- * (index-served), at most twenty rows, and an EXACT count of what the bound left
+ * (index-served, and the LIKE metacharacters escaped so the search is for the
+ * text itself), at most twenty rows, and an EXACT count of what the bound left
  * off — the count and the page come from one read view, so "N more" can never
  * contradict the rows above it (the labeling-queue idiom).
  */
@@ -1250,7 +1430,7 @@ export async function searchOrders(
   if (query.length === 0) return { orders: [], moreCount: 0 };
 
   const where = {
-    orderNumber: { startsWith: query },
+    orderNumber: { startsWith: escapeLike(query) },
     ...(viewer.kind === 'member' ? { companyId: { in: viewer.companyIds } } : {}),
   };
 

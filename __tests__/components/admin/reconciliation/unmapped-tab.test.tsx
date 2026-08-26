@@ -45,6 +45,8 @@ type Page = {
   count: number;
   moreCount: number;
   nextCursor: string | null;
+  unknownExcluded: number;
+  notes: string[];
 };
 
 function makeGroup(over: Partial<UnmappedGroup> = {}): UnmappedGroup {
@@ -76,6 +78,8 @@ function makePage(over: Partial<Page> = {}): Page {
     count: 10,
     moreCount: 0,
     nextCursor: null,
+    unknownExcluded: 0,
+    notes: [],
     ...over,
   };
 }
@@ -118,6 +122,31 @@ describe("the bucket chips", () => {
       "unknown age — the order carries no external creation date · 4",
     );
     expect(screen.getByTestId("bucket-chip-90+").textContent).not.toContain("5");
+  });
+
+  // QA-4: an age filter cannot say anything about a group whose age nobody can
+  // compute, so it drops them — and the unknown chip then reads 0, which a
+  // reader takes for "there are none". The producer's note rides beside it.
+  it("says how many unknown-age groups the filter is hiding (QA-4)", () => {
+    setPage(
+      makePage({
+        buckets: { "0-7": 0, "8-30": 0, "31-90": 0, "90+": 1, unknown: 0 },
+        unknownExcluded: 4,
+        notes: [
+          "4 unknown-age groups are outside this age filter — clear the filter to see them",
+        ],
+      }),
+    );
+    render(<UnmappedTab />);
+
+    expect(screen.getByTestId("unmapped-note")).toHaveTextContent(
+      "4 unknown-age groups are outside this age filter — clear the filter to see them",
+    );
+  });
+
+  it("says nothing when the filter is hiding nothing", () => {
+    render(<UnmappedTab />);
+    expect(screen.queryByTestId("unmapped-note")).not.toBeInTheDocument();
   });
 });
 
@@ -236,5 +265,33 @@ describe("mobile", () => {
     expect(within(cards).getByTestId("unmapped-card-int-1::P2::")).toBeInTheDocument();
     expect(cards.className).toContain("md:hidden");
     expect(screen.getByTestId("unmapped-table-wrap").className).toContain("hidden md:block");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QA-5 — what the error card is allowed to say
+// ---------------------------------------------------------------------------
+
+describe("the error card (QA-5)", () => {
+  it("renders the server's 4xx sentence VERBATIM, and the generic copy for a 5xx", () => {
+    setPage(undefined, {
+      isError: true,
+      error: Object.assign(new Error("Request failed (400)"), {
+        status: 400,
+        serverMessage: "invalid cursor",
+      }),
+    });
+    const view = render(<UnmappedTab />);
+    expect(screen.getByTestId("reconciliation-error")).toHaveTextContent("invalid cursor");
+    view.unmount();
+
+    setPage(undefined, {
+      isError: true,
+      error: Object.assign(new Error("Request failed (500)"), { status: 500 }),
+    });
+    render(<UnmappedTab />);
+    expect(screen.getByTestId("reconciliation-error")).toHaveTextContent(
+      "Could not load the unmapped lines.",
+    );
   });
 });

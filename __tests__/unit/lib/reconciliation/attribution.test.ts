@@ -72,6 +72,11 @@ type SqlRow = {
   auditHasOrderReference: number;
   auditHasRows: number;
   auditHasRowsOmitted: number;
+  /** The batch's fulfillment event, read batch-wide rather than off `ae` (QA-6). */
+  fulfillmentAuditId: number | null;
+  fulfillmentActionType: string | null;
+  fulfillmentEntityId: string | null;
+  fulfillmentOrderId: string | null;
   attemptId: number | null;
   attemptOutcome: string | null;
   attemptEvidence: string | null;
@@ -106,6 +111,10 @@ function summaryRow(over: Partial<SqlRow> = {}): SqlRow {
     auditHasOrderReference: 0,
     auditHasRows: 0,
     auditHasRowsOmitted: 0,
+    fulfillmentAuditId: null,
+    fulfillmentActionType: null,
+    fulfillmentEntityId: null,
+    fulfillmentOrderId: null,
     attemptId: null,
     attemptOutcome: null,
     attemptEvidence: null,
@@ -239,6 +248,23 @@ describe('the read shape', () => {
     expect(sql).toContain('LEFT JOIN order_attribution_attempts ap ON ap.id = (');
     expect(sql).not.toContain('LEFT JOIN audit_logs ae ON ae.batchId');
     expect(sql).not.toContain('LEFT JOIN order_attribution_attempts ap ON ap.batchId');
+  });
+
+  // QA-6 (the OC-1 class recurring): the EARLIEST audit row is not the batch's
+  // only audit row, so the fulfillment fact has to be read BATCH-WIDE — the way
+  // the drill-down and the manual-attribution core read it.
+  it('reads the fulfillment event BATCH-WIDE, by its own scalar subquery (QA-6)', async () => {
+    await getAttributionReport(INPUT, ADMIN);
+    const sql = rawSql();
+
+    expect(sql).toContain(
+      'SELECT f2.id FROM audit_logs f2 WHERE f2.batchId = b.batchId AND f2.actionType IN (?,?) ORDER BY f2.id ASC LIMIT 1',
+    );
+    const values = (db.$queryRaw.mock.calls[0][0] as unknown as { values: unknown[] }).values;
+    expect(values).toContainEqual('EXTERNAL_ORDER_FULFILLMENT');
+    expect(values).toContainEqual('EXTERNAL_ORDER_PARTIAL_FULFILLMENT');
+    // Still ONE statement: the fulfillment row rides the same read as the rest.
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
   });
 
   it('carries NO id list — the window is the bound, never an enumeration of batches', async () => {
@@ -845,6 +871,61 @@ describe('the manual-attribution predicate', () => {
     });
   });
 
+  // QA-6: TWO audit rows, and the fulfillment is the SECOND one. The list read
+  // joins the EARLIEST row, so this batch used to arrive with no fulfillment fact
+  // at all — the control lit, the core refused, exactly the OC-1 class again.
+  it('a batch whose fulfillment event is NOT its earliest audit row is still a fulfillment (QA-6)', async () => {
+    const report = await oneRow({
+      distinctStamps: 1,
+      firstStamp: 'ord-1',
+      lastStamp: 'ord-1',
+      unstampedRows: 0,
+      auditId: 6,
+      auditActionType: 'INVENTORY_DEDUCT',
+      fulfillmentAuditId: 7,
+      fulfillmentActionType: 'EXTERNAL_ORDER_FULFILLMENT',
+      fulfillmentEntityId: 'ord-1',
+      fulfillmentOrderId: 'ord-1',
+    });
+
+    expect(report.rows[0].canAttribute).toBe(false);
+    expect(report.rows[0].fulfilledAgainst).toEqual({
+      orderRecordId: 'ord-1',
+      orderNumber: '#1001',
+    });
+  });
+
+  it('the batch-wide read LOCKS an unstamped second-row fulfillment to its order (QA-6)', async () => {
+    const report = await oneRow({
+      auditId: 6,
+      auditActionType: 'INVENTORY_DEDUCT',
+      fulfillmentAuditId: 7,
+      fulfillmentActionType: 'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
+      fulfillmentEntityId: 'ord-7',
+      fulfillmentOrderId: null,
+    });
+
+    expect(report.rows[0].attributeLock).toEqual({
+      orderRecordId: 'ord-7',
+      reason: 'r2b-completion',
+    });
+  });
+
+  // QA-7: fulfilled, unstamped, and the event names NOTHING. The core answers
+  // every order the picker could offer with R2B_OTHER_TARGET, so the control that
+  // opens the picker is a button that can only 409.
+  it('a fulfillment event naming NO order cannot be attributed at all (QA-7)', async () => {
+    const report = await oneRow({
+      auditId: 6,
+      auditActionType: 'EXTERNAL_ORDER_FULFILLMENT',
+      auditEntityId: null,
+      auditOrderId: null,
+    });
+
+    expect(report.rows[0].attributeLock).toBeNull();
+    expect(report.rows[0].canAttribute).toBe(false);
+  });
+
   // OC-6: one id on some rows and none on the others. The guarded write names the
   // id it locked, so it can move half of this batch and no more.
   it('a PARTLY STAMPED batch cannot be attributed (a guarded update cannot move it uniformly)', async () => {
@@ -1091,6 +1172,93 @@ describe('getBatchDetail', () => {
 
     expect(detail!.ledgerRowsTruncated).toBe(false);
     expect(detail!.ledgerRows).toHaveLength(1);
+    // ...and it costs no aggregate statement: the array IS the whole ledger.
+    expect(db.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  // QA-1: the bound belongs to the ARRAY. `batch` is the report row, and one
+  // computed off the first fifty rows of a five-hundred-row batch reports a units
+  // figure, a class and an order that are simply false. Over the bound the row is
+  // computed from ONE batch-scoped aggregate over the FULL ledger.
+  function truncatedLedger() {
+    db.inventory_logs.findMany.mockResolvedValue(
+      Array.from({ length: 51 }, (_, i) => ({
+        ...ledgerRow,
+        id: 500 + i,
+        delta: -1,
+        orderRecordId: null,
+      })) as never,
+    );
+  }
+
+  it('over the bound, `batch` is EXACT — ONE batch-scoped aggregate over the whole ledger (QA-1)', async () => {
+    wireDetail({});
+    truncatedLedger();
+    db.$queryRaw.mockResolvedValue([
+      {
+        rowCount: 500,
+        units: 1200,
+        productCount: 37,
+        minChangeTime: new Date('2026-08-01T00:00:00.000Z'),
+        logTypes: 'ADJUSTMENT,SALE',
+        distinctStamps: 0,
+        firstStamp: null,
+        lastStamp: null,
+        unstampedRows: 500,
+      },
+    ] as never);
+
+    const detail = await getBatchDetail('batch-1', ADMIN);
+
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(detail!.ledgerRowsTruncated).toBe(true);
+    expect(detail!.ledgerRows).toHaveLength(50);
+    expect(detail!.batch.units).toBe(1200);
+    expect(detail!.batch.productCount).toBe(37);
+    expect(detail!.batch.at).toBe('2026-08-01T00:00:00.000Z');
+    expect(detail!.batch.logTypes).toEqual(['ADJUSTMENT', 'SALE']);
+    // 500 rows is over the manual limit, and the aggregate is what knows it.
+    expect(detail!.batch.canAttribute).toBe(false);
+  });
+
+  it('the aggregate reads the ONE population predicate, scoped to this batch id (QA-1)', async () => {
+    wireDetail({});
+    truncatedLedger();
+    await getBatchDetail('detail-batch-1', ADMIN);
+
+    const statement = db.$queryRaw.mock.calls[0][0] as unknown as {
+      sql: string;
+      values: unknown[];
+    };
+    expect(statement.sql).toContain('l.batchId = ?');
+    expect(statement.sql).toContain('l.logType IN (?,?)');
+    expect(statement.sql).toContain('l.delta < 0');
+    expect(statement.sql).toContain('GROUP_CONCAT(DISTINCT l.logType');
+    expect(statement.values).toContainEqual('detail-batch-1');
+  });
+
+  it("over the bound, the STAMPS are the whole ledger's — a batch stamped from row 100 says so (QA-1)", async () => {
+    wireDetail({});
+    truncatedLedger();
+    db.$queryRaw.mockResolvedValue([
+      {
+        rowCount: 500,
+        units: 500,
+        productCount: 2,
+        minChangeTime: new Date('2026-08-01T00:00:00.000Z'),
+        logTypes: 'SALE',
+        distinctStamps: 1,
+        firstStamp: 'ord-1',
+        lastStamp: 'ord-1',
+        unstampedRows: 0,
+      },
+    ] as never);
+
+    const detail = await getBatchDetail('batch-1', ADMIN);
+
+    // The fifty rows on screen carry no stamp; the ledger does, and the row says so.
+    expect(detail!.ledgerRows.every((row) => row.orderRecordId === null)).toBe(true);
+    expect(detail!.batch.order).toMatchObject({ id: 'ord-1', orderNumber: '#1001' });
   });
 
   it('a MEMBER sees no actor identity on the batch or its attempts', async () => {
@@ -1241,6 +1409,35 @@ describe('searchOrders', () => {
       },
     ]);
     expect(result.moreCount).toBe(22);
+  });
+
+  // QA-10: `startsWith` renders a LIKE, so a typed `%` was a wildcard and `q=%`
+  // matched EVERY order in the book — the picker's twenty-row page then looked
+  // like a search result. The wildcards are escaped, so they match themselves.
+  it('escapes the LIKE wildcards, so `%` searches for a literal per cent (QA-10)', async () => {
+    db.externalOrder.count.mockResolvedValue(0 as never);
+    db.externalOrder.findMany.mockResolvedValue([] as never);
+
+    await searchOrders('%', ADMIN);
+
+    expect(db.externalOrder.findMany.mock.calls[0][0]).toMatchObject({
+      where: { orderNumber: { startsWith: '\\%' } },
+    });
+    // The COUNT reads the SAME where — the bound and the page are one view.
+    expect(db.externalOrder.count.mock.calls[0][0]).toMatchObject({
+      where: { orderNumber: { startsWith: '\\%' } },
+    });
+  });
+
+  it('escapes `_` and the escape character itself (QA-10)', async () => {
+    db.externalOrder.count.mockResolvedValue(0 as never);
+    db.externalOrder.findMany.mockResolvedValue([] as never);
+
+    await searchOrders('a_b\\c', ADMIN);
+
+    expect(db.externalOrder.findMany.mock.calls[0][0]).toMatchObject({
+      where: { orderNumber: { startsWith: 'a\\_b\\\\c' } },
+    });
   });
 
   it('a member searches only inside the membership', async () => {

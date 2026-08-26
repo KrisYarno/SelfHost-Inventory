@@ -367,3 +367,54 @@ describe("bounds", () => {
     await waitFor(() => expect(lastInput().cursor).toBeUndefined());
   });
 });
+
+// ---------------------------------------------------------------------------
+// QA-5 — what the error card is allowed to say
+// ---------------------------------------------------------------------------
+
+/**
+ * A 4xx is the SERVER telling the operator what is wrong with the request they
+ * made — a window over the span cap, a cursor from another filter. That sentence
+ * is the whole repair, and "Could not load the attribution report." throws it
+ * away and leaves a Retry button that will fail identically. A 5xx says nothing
+ * an operator can act on, so it keeps the generic copy.
+ */
+describe("the error card (QA-5)", () => {
+  function fail(status: number, serverMessage?: string) {
+    const error = Object.assign(new Error(`Request failed (${status})`), {
+      status,
+      ...(serverMessage === undefined ? {} : { serverMessage }),
+    });
+    setReport(undefined, { isError: true, error });
+  }
+
+  it("renders the server's 4xx sentence VERBATIM", () => {
+    fail(400, "the window may span at most 366 days");
+    render(<AttributionTab />);
+
+    expect(screen.getByTestId("reconciliation-error")).toHaveTextContent(
+      "the window may span at most 366 days",
+    );
+  });
+
+  it("keeps the generic copy for a 5xx", () => {
+    fail(500);
+    render(<AttributionTab />);
+
+    expect(screen.getByTestId("reconciliation-error")).toHaveTextContent(
+      "Could not load the attribution report.",
+    );
+  });
+
+  it("keeps the generic copy when the network failed and there is no status at all", () => {
+    setReport(undefined, { isError: true, error: new Error("Failed to fetch") });
+    render(<AttributionTab />);
+
+    expect(screen.getByTestId("reconciliation-error")).toHaveTextContent(
+      "Could not load the attribution report.",
+    );
+    expect(screen.getByTestId("reconciliation-error").textContent).not.toContain(
+      "Failed to fetch",
+    );
+  });
+});
