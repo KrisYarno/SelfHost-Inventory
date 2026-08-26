@@ -233,11 +233,23 @@ describe('GET /api/reconciliation/attribution/[batchId]', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
 
+    // `ledgerRowsTruncated` joined the envelope with the bounded ledger read
+    // (OC-8): the drill-down list is now a PAGE of the batch, and the flag is
+    // what stops a short list being read as a complete one.
     expect(Object.keys(body).sort()).toEqual(
-      ['attempts', 'attributionEvents', 'auditEvent', 'batch', 'derived', 'ledgerRows'].sort(),
+      [
+        'attempts',
+        'attributionEvents',
+        'auditEvent',
+        'batch',
+        'derived',
+        'ledgerRows',
+        'ledgerRowsTruncated',
+      ].sort(),
     );
     expect(body.batch.batchId).toBe('batch-1');
     expect(body.ledgerRows[0].productName).toBe('Widget');
+    expect(body.ledgerRowsTruncated).toBe(false);
   });
 
   it('404s an unknown batch with the pack envelope', async () => {

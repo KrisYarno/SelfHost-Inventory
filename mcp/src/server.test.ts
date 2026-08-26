@@ -1743,6 +1743,10 @@ describe("POST /mcp — reconciliation lane round-trip (pack C5.1 / seam S17)", 
     expect(data.coverage.orderFieldScope).toBe("your companies only");
     expect(data.coverage.orderFilterScope).toBe("your companies only");
     expect(data.coverage.moreCount).toBe(0);
+    // OC-5: the keyset cursor rides beside the bound it qualifies, null included —
+    // "there is no next page" is a statement, not a missing key.
+    expect(Object.keys(data.coverage)).toContain("nextCursor");
+    expect(data.coverage.nextCursor).toBeNull();
     // R-2: an empty window still says what it excluded and why the share has no
     // denominator — never a bare 0 with no reason.
     expect(data.coverage.exclusionsNote).toContain("excluded from this window");

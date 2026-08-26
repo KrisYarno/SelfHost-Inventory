@@ -24,9 +24,21 @@
  *   BATCH_MOVED comes BEFORE the same-id and reason rules, so the loser of a
  *   race is told "someone attributed this while you were looking" — never
  *   "reason required" for a change it never saw (OCp-8).
+ *   PARTIALLY_STAMPED (step 5b) comes after that guard and before the same-id
+ *   short circuit: a batch half-carrying the id the client asked for is NOT
+ *   "already attributed", and it is not a race either — it is a ledger the
+ *   guarded write cannot move uniformly (OC-6).
  *   The FULFILLMENT rules come after the stale-client guard and before the
  *   write, because whether a batch may be re-stamped at all depends on how it
  *   was stamped, not on what the client wants.
+ *
+ * THE EVIDENCE IS READ ONCE, through `batchEvidence` in the population module —
+ * the SAME helper the report row reads. The write path used to keep its own
+ * copy of "which events mean a fulfillment" and its own R0 call, and the report
+ * drifted away from it: the control lit on batches this ladder refuses (OC-1),
+ * and the two read different sets of audit rows for R0 (OC-2). The helper is
+ * Prisma-free and Next-free, so importing it costs this module none of its
+ * TX-scoped isolation.
  *
  * THE WRITE IS GUARDED. The UPDATE names the id the rows were LOCKED carrying,
  * and its `count` must equal the number of rows locked. A partial match means
@@ -36,7 +48,7 @@
 
 import { Prisma } from '@prisma/client';
 
-import { isAttributableBatch, rowWhere, rowWhereSql } from '@/lib/reconciliation/population';
+import { batchEvidence, rowWhere, rowWhereSql } from '@/lib/reconciliation/population';
 import {
   BatchMovedRefusal,
   CountMismatch,
@@ -44,6 +56,7 @@ import {
   MANUAL_ATTRIBUTION_ROW_LIMIT,
   MixedStampsRefusal,
   NotAttributableRefusal,
+  PartiallyStampedRefusal,
   R2bOtherTargetRefusal,
   ReasonRequired,
   TooManyRowsRefusal,
@@ -89,34 +102,6 @@ type BatchAuditEvent = {
 };
 
 /**
- * The two events that mean "a fulfillment moved this stock". Spelled here rather
- * than imported from the derivation: this is the WRITE path's own reading of the
- * ledger and it must not start following a read module's refactor.
- */
-const FULFILLMENT_ACTION_TYPES: ReadonlySet<string> = new Set([
-  'EXTERNAL_ORDER_FULFILLMENT',
-  'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
-]);
-
-const isObj = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v);
-
-/** A non-empty string, or nothing — the writers omit keys they cannot fill. */
-function text(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-/**
- * The order a fulfillment event NAMES: `details.orderId` when the writer recorded
- * one, else the event's own entity. An event naming neither cannot be completed
- * against anything, and the R2b rule refuses rather than guessing.
- */
-function namedOrder(event: BatchAuditEvent): string | null {
-  const details = isObj(event.details) ? event.details : {};
-  return text(details.orderId) ?? text(event.entityId) ?? null;
-}
-
-/**
  * Attribute one outbound batch to one order, inside the caller's transaction.
  *
  * `onRecord` runs ONLY on a real change, after the guarded write and before the
@@ -153,7 +138,13 @@ export async function attributeBatch(
     select: { id: true, actionType: true, entityId: true, details: true },
   });
 
-  if (!isAttributableBatch(rows, auditEvents)) {
+  // ONE evidence assembly (OC-2): R0, whether a fulfillment moved this
+  // stock, and which order that event named — read through the SAME helper the
+  // report row reads, so the Attribute… control and this ladder can no longer
+  // disagree about the batch in front of them.
+  const evidence = batchEvidence(auditEvents, rows);
+
+  if (!evidence.attributable) {
     throw new NotAttributableRefusal(input.batchId);
   }
 
@@ -181,6 +172,21 @@ export async function attributeBatch(
     throw new BatchMovedRefusal(current, input.expectPreviousOrderRecordId);
   }
 
+  // 5b. PARTLY STAMPED (OC-6). One id on some rows and none on the others. The
+  //     guarded write in step 9 names the id it locked, so it can move the
+  //     stamped half OR the unstamped half — never the batch. Left to fall
+  //     through, that surfaced as the step-9 count mismatch, whose sentence
+  //     ("the batch moved") describes a RACE and sends the admin off to refresh
+  //     a page that will show them exactly the same thing.
+  //
+  //     AFTER the stale-client guard, so a racer is still told they raced
+  //     (OCp-8), and BEFORE the same-id short circuit, because "already
+  //     attributed to that order" is false while half the rows carry nothing.
+  const unstampedRows = rows.filter((r) => r.orderRecordId === null).length;
+  if (stamps.length === 1 && unstampedRows > 0) {
+    throw new PartiallyStampedRefusal(rows.length - unstampedRows, unstampedRows);
+  }
+
   // 6. ALREADY THERE. Not an error and not a write: the client's intent is
   //    already the ledger's state, so the transaction ends without a statement.
   //    Recording an attempt here would file a "manual attribution" that changed
@@ -203,8 +209,7 @@ export async function attributeBatch(
     where: { batchId: input.batchId },
     orderBy: [{ attemptedAt: 'desc' }, { id: 'desc' }],
   });
-  const fulfillmentEvent =
-    auditEvents.find((e) => FULFILLMENT_ACTION_TYPES.has(e.actionType)) ?? null;
+  const fulfillmentEvent = evidence.fulfillmentEvent;
 
   let completedFulfillment = false;
   if (current !== null && (latestAttempt?.evidence === 'fulfillment' || fulfillmentEvent !== null)) {
@@ -214,8 +219,10 @@ export async function attributeBatch(
   }
   if (current === null && fulfillmentEvent !== null) {
     // R2b: fulfilled, but the ledger was never stamped. The only manual
-    // attribution allowed is COMPLETING that stamp.
-    const eventOrder = namedOrder(fulfillmentEvent);
+    // attribution allowed is COMPLETING that stamp. An event naming neither an
+    // order id nor an entity cannot be completed against anything, and
+    // `fulfillmentOrderId` is null rather than a guess.
+    const eventOrder = evidence.fulfillmentOrderId;
     if (input.orderRecordId !== eventOrder) {
       throw new R2bOtherTargetRefusal(eventOrder);
     }

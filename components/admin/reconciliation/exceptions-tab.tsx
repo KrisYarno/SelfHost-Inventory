@@ -37,9 +37,30 @@ import {
 } from "@/lib/exceptions/kinds";
 import type { ExceptionRowView } from "@/lib/reconciliation/exceptions";
 
-/** VERBATIM (pack C4b.1 / spec §4.3). */
+/** VERBATIM (pack C4b.1 / spec §4.3) — DAY ONE only: see `emptyStateText`. */
 export const EXCEPTIONS_EMPTY_STATE =
   "No exceptions raised yet — receiving and labeling write them as they find them.";
+
+/** The filtered view's empty page (OC-4). */
+export const EXCEPTIONS_FILTERED_EMPTY_STATE = "No exceptions match these filters.";
+
+/**
+ * WHICH empty state this is (OC-4). The day-one sentence is a claim about the
+ * REGISTER — "nothing has ever been written" — and a filtered page with nothing
+ * on it is not evidence for it: a kind filter that matches nothing, or a page
+ * past the end of a cursor walk, would both have said the register was empty
+ * while rows sat behind them.
+ *
+ * So it is said only when BOTH halves hold: no filter is narrowing the view, and
+ * the server counted nothing. Otherwise the copy names the filters and the total
+ * they hold, which is the fact the reader needs to act on.
+ */
+function emptyStateText(filtered: boolean, count: number): string {
+  if (!filtered && count === 0) return EXCEPTIONS_EMPTY_STATE;
+  return count === 0
+    ? EXCEPTIONS_FILTERED_EMPTY_STATE
+    : `${EXCEPTIONS_FILTERED_EMPTY_STATE} ${count} match them in total — this page is past the end.`;
+}
 
 const PAGE_SIZE = 50;
 
@@ -218,6 +239,16 @@ export function ExceptionsTab() {
   const query = useExceptions(input);
   const page = query.data;
 
+  // Is anything narrowing the view? `resolved: "open"` is this tab's DEFAULT, so
+  // it only counts once the reader moves it; a cursor counts because page two is
+  // a bounded view of the same set (OC-4).
+  const filtered =
+    filters.kind !== "" ||
+    filters.severity !== "" ||
+    filters.olderThanDays !== "" ||
+    filters.resolved !== "open" ||
+    filters.cursor !== undefined;
+
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
@@ -320,7 +351,7 @@ export function ExceptionsTab() {
               className="rounded-lg border border-border bg-surface p-6 text-center text-body text-muted-foreground"
               data-testid="exceptions-empty"
             >
-              {EXCEPTIONS_EMPTY_STATE}
+              {emptyStateText(filtered, page.count)}
             </p>
           ) : (
             <>

@@ -364,6 +364,70 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
     ]);
   });
 
+  // OC-6: one id on some rows and none on the others. The guarded write names the
+  // id it locked, so it can move the stamped half or the unstamped half — never
+  // the batch. It used to reach step 9 and surface as the count mismatch, whose
+  // sentence ("the batch moved") describes a RACE and sends the admin to refresh
+  // a page that will show them exactly the same thing.
+  it('5b. PARTIALLY_STAMPED — some rows carry the id and some carry none', async () => {
+    const { tx, trace } = makeTx({
+      locked: [
+        { id: 501, productId: 9, logType: 'SALE', orderRecordId: 'ord-1' },
+        { id: 502, productId: 10, logType: 'SALE', orderRecordId: null },
+        { id: 503, productId: 11, logType: 'SALE', orderRecordId: null },
+      ],
+    });
+    const res = await attribute({
+      orderRecordId: 'ord-9',
+      expectPreviousOrderRecordId: 'ord-1',
+      reason: 'the packer picked the wrong order',
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error:
+        'This batch is only partly stamped (1 of 3 rows) — repair the ledger before attributing; a guarded update cannot move it uniformly',
+      code: 'PARTIALLY_STAMPED',
+      stamped: 1,
+      unstamped: 2,
+    });
+    // BEFORE the same-id short circuit and before the write: nothing beyond the
+    // two reads ran.
+    expect(trace).toEqual([
+      'lock order FOR SHARE',
+      'lock batch rows FOR UPDATE',
+      'auditLog.findMany',
+    ]);
+    expect(tx.inventory_logs.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('5b. the stale-client guard still comes FIRST on a partly stamped batch', async () => {
+    makeTx({
+      locked: [
+        { id: 501, productId: 9, logType: 'SALE', orderRecordId: 'ord-1' },
+        { id: 502, productId: 10, logType: 'SALE', orderRecordId: null },
+      ],
+    });
+    // The client saw it unattributed; it is not.
+    const res = await attribute(CLEAN_BODY);
+
+    expect((await res.json()).code).toBe('BATCH_MOVED');
+  });
+
+  it('5b. asking for the id the stamped half already carries is still a refusal', async () => {
+    makeTx({
+      locked: [
+        { id: 501, productId: 9, logType: 'SALE', orderRecordId: 'ord-9' },
+        { id: 502, productId: 10, logType: 'SALE', orderRecordId: null },
+      ],
+    });
+    const res = await attribute({ orderRecordId: 'ord-9', expectPreviousOrderRecordId: 'ord-9' });
+
+    // NOT `changed:false` — half this batch is still unattributed.
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('PARTIALLY_STAMPED');
+  });
+
   it('7. FULFILLED_BATCH — a STAMPED batch whose evidence is a fulfillment event', async () => {
     makeTx({
       locked: rows({ orderRecordId: 'ord-1' }),

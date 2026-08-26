@@ -78,7 +78,13 @@ function Definition({ text }: { text: string | undefined }) {
   return <p className="text-body-sm text-muted-foreground">{text}</p>;
 }
 
-function Coverage({ report }: { report: AttributionReport }) {
+function Coverage({
+  report,
+  classKey,
+}: {
+  report: AttributionReport;
+  classKey: AttributionClassKey | null;
+}) {
   const { coverage, totals, definitions } = report;
   const needsALook =
     coverage.needsALook.stampDisagreesWithLatestAttempt + coverage.needsALook.mixedStamps;
@@ -86,12 +92,21 @@ function Coverage({ report }: { report: AttributionReport }) {
   return (
     <div className="space-y-3 rounded-lg border border-border bg-surface p-4" data-testid="coverage">
       <div>
+        {/* The WINDOW's total, never the selected class's (OC-7). `report.count`
+            is the count AFTER the class filter, so reading it here made every
+            chip look like a window that had shrunk to fit the chip. */}
         <p className="text-body">
-          Showing {coverage.rowsReturned} of {report.count} attributable batches in this window (
-          {report.window.from} to {report.window.to}, inclusive UTC).
+          Showing {coverage.rowsReturned} of {totals.attributable} attributable batches in this
+          window ({report.window.from} to {report.window.to}, inclusive UTC).
         </p>
         <Definition text={definitions.attributable} />
       </div>
+
+      {classKey !== null && (
+        <p className="text-body" data-testid="class-count">
+          {report.count} in the selected class.
+        </p>
+      )}
 
       {report.moreCount > 0 && (
         <div>
@@ -264,7 +279,7 @@ export function AttributionTab() {
 
       {report && (
         <>
-          <Coverage report={report} />
+          <Coverage report={report} classKey={filters.classKey} />
 
           {report.rows.length === 0 ? (
             <p

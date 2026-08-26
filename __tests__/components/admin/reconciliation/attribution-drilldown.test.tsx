@@ -70,6 +70,7 @@ function makeDetail(over: Partial<BatchDetail> = {}): BatchDetail {
     attempts: [],
     attributionEvents: [],
     derived: null,
+    ledgerRowsTruncated: false,
     ...over,
   };
 }
@@ -138,6 +139,29 @@ it("renders the derived sentence WITH its rule id when the class was computed at
   expect(screen.getByTestId("drilldown-derived")).toHaveTextContent(
     "fulfillment (inferred — the ledger was never stamped) (R2b)",
   );
+});
+
+// OC-8: the producer bounds the ledger read, so the list this renders can be a
+// PAGE of the batch rather than the batch. Saying so is the difference between a
+// short list and a wrong one.
+it("says when the ledger list is only the first page of the batch's rows", () => {
+  setDetail(makeDetail({ ledgerRowsTruncated: true }));
+
+  render(
+    <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
+  );
+
+  expect(screen.getByTestId("drilldown-ledger-truncated")).toHaveTextContent(
+    "showing the first 1 of this batch's rows",
+  );
+});
+
+it("says nothing about truncation when the whole batch is on screen", () => {
+  render(
+    <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
+  );
+
+  expect(screen.queryByTestId("drilldown-ledger-truncated")).toBeNull();
 });
 
 it("offers the correction only where the server would accept it", async () => {

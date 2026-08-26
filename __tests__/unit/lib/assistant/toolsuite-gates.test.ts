@@ -667,6 +667,22 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d).toMatch(/never returns redacted rows/);
     // No actor identity, ever.
     expect(d).toMatch(/no actor identity/);
+    // OC-5: the keyset cursor is the ONLY way past page one, and a coverage block
+    // that reported `moreCount` without it told a model rows remained and gave it
+    // no way to read them.
+    expect(d).toContain("coverage.nextCursor");
+  });
+
+  // OC-5: the paging affordance rides in the coverage block beside the bound it
+  // qualifies — `null` included, so "no more pages" is stated rather than absent.
+  it("get_order_reconciliation's coverage carries the keyset cursor beside moreCount", async () => {
+    prismaCtl.__reset();
+    const result = await assistantTools.get_order_reconciliation.run({}, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const coverage = (result.data as { coverage: Record<string, unknown> }).coverage;
+    expect(Object.keys(coverage)).toContain("nextCursor");
+    expect(coverage.nextCursor).toBeNull();
   });
 
   it("get_business_snapshot frames itself as one-call, names the section tools, and discloses mixed scope + independent degradation", () => {

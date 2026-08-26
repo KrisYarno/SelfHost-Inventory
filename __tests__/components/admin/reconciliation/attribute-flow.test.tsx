@@ -100,6 +100,7 @@ function makeDetail(over: Partial<BatchDetail> = {}): BatchDetail {
     attempts: [],
     attributionEvents: [],
     derived: null,
+    ledgerRowsTruncated: false,
     ...over,
   };
 }

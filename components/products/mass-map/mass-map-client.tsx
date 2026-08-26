@@ -97,8 +97,12 @@ export function MassMapClient({ integrationId, prefill }: Props) {
   useEffect(() => {
     if (prefillRow === null || prefillApplied.current) return;
     prefillApplied.current = true;
-    // A row somebody was sent here to map is unmapped by definition.
-    setTab("unmapped");
+    // THE ROW'S OWN TAB (OC-9). Usually that is Unmapped — but the deep link can
+    // land on a row that is already mapped (somebody fixed it between the report
+    // read and the click, or the exception is about the mapping itself). Forcing
+    // Unmapped there selected a row on the list the other tab is showing: an
+    // empty screen with an invisible selection.
+    setTab(prefillRow.alreadyMapped ? "mapped" : "unmapped");
     setActiveRow(prefillRow);
   }, [prefillRow]);
 

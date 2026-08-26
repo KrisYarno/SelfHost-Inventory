@@ -82,6 +82,20 @@ describe('getReconciliationOverview', () => {
     expect(sql.values).toContainEqual(NOW);
   });
 
+  // OC-3: without a row-level upper bound the CTE groups the WHOLE population and
+  // throws away every batch older than the fortnight in the HAVING. The pre-filter
+  // is exact HERE because `end` is NOW — no ledger row exists after it — and it is
+  // the reason this 60-second poll does not scan years of ledger.
+  it('PRE-FILTERS the rows to the window end before grouping (OC-3)', async () => {
+    await getReconciliationOverview(NOW);
+    const sql = statement().sql;
+
+    const where = sql.slice(0, sql.indexOf('GROUP BY'));
+    expect(where).toContain('l.changeTime < ?');
+    // And the HAVING stays: the batch's axis is MIN(changeTime), not any row's.
+    expect(sql).toContain('HAVING MIN(l.changeTime) >= ? AND MIN(l.changeTime) < ?');
+  });
+
   it('reads the population through the ONE predicate renderer (R-3)', async () => {
     await getReconciliationOverview(NOW);
     const sql = statement();

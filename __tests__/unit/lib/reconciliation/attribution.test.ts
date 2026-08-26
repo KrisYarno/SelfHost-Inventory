@@ -17,8 +17,8 @@
  * lane's row sets is the concurrency gate's scenario 8b.
  */
 
-import { mockReset, type DeepMockProxy } from 'jest-mock-extended';
-import type { PrismaClient } from '@prisma/client';
+import { mockDeep, mockReset, type DeepMockProxy } from 'jest-mock-extended';
+import type { Prisma, PrismaClient } from '@prisma/client';
 
 jest.mock('@/lib/prisma', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -27,6 +27,7 @@ jest.mock('@/lib/prisma', () => {
 });
 
 import prisma from '@/lib/prisma';
+import { attributeBatch } from '@/lib/reconciliation/attribute-batch';
 import { ATTRIBUTABLE_DEFINITION } from '@/lib/reconciliation/population';
 import { DERIVED_SENTENCES } from '@/lib/reconciliation/derive';
 import {
@@ -790,6 +791,73 @@ describe('the manual-attribution predicate', () => {
     });
     expect(mixed.rows[0].canAttribute).toBe(false);
   });
+
+  // OC-1: the fulfillment FACT is the ledger's own event OR the latest attempt's
+  // evidence — the way the manual-attribution core reads it. Keying the row on
+  // the attempt alone re-opened the control on batches the core refuses.
+  it('a MANUAL attempt over a fulfillment event STILL cannot be re-attributed (the post-R2b re-read)', async () => {
+    const report = await oneRow({
+      distinctStamps: 1,
+      firstStamp: 'ord-1',
+      lastStamp: 'ord-1',
+      unstampedRows: 0,
+      auditId: 6,
+      auditActionType: 'EXTERNAL_ORDER_FULFILLMENT',
+      auditOrderId: 'ord-1',
+      attemptId: 21,
+      attemptOutcome: 'attributed',
+      attemptEvidence: 'manual',
+      attemptSource: 'manual',
+      attemptActorUserId: 7,
+      attemptOrderRecordId: 'ord-1',
+    });
+
+    // The RECORDED class still wins — this is about the affordance, not the chip.
+    expect(report.rows[0].how.classKey).toBe('attributed·manual');
+    expect(report.rows[0].canAttribute).toBe(false);
+    expect(report.rows[0].fulfilledAgainst).toEqual({
+      orderRecordId: 'ord-1',
+      orderNumber: '#1001',
+    });
+  });
+
+  it('an UNSTAMPED fulfillment batch is LOCKED to the event order even when an attempt was recorded', async () => {
+    const report = await oneRow({
+      auditId: 6,
+      auditActionType: 'EXTERNAL_ORDER_FULFILLMENT',
+      auditEntityId: 'ord-7',
+      attemptId: 22,
+      attemptOutcome: 'declined',
+      attemptReason: 'unmatched',
+      attemptSource: 'live-deduct',
+      attemptActorUserId: 7,
+    });
+
+    expect(report.rows[0].how.classKey).toBe('declined·unmatched');
+    expect(report.rows[0].how.ruleId).toBeUndefined();
+    // The core would accept ONLY ord-7 here (R2b completion), so the lock comes
+    // from the fact — never from `ruleId === 'R2b'`, which a recorded attempt
+    // erases.
+    expect(report.rows[0].canAttribute).toBe(true);
+    expect(report.rows[0].attributeLock).toEqual({
+      orderRecordId: 'ord-7',
+      reason: 'r2b-completion',
+    });
+  });
+
+  // OC-6: one id on some rows and none on the others. The guarded write names the
+  // id it locked, so it can move half of this batch and no more.
+  it('a PARTLY STAMPED batch cannot be attributed (a guarded update cannot move it uniformly)', async () => {
+    const report = await oneRow({
+      rowCount: 4,
+      distinctStamps: 1,
+      firstStamp: 'ord-1',
+      lastStamp: 'ord-1',
+      unstampedRows: 2,
+    });
+
+    expect(report.rows[0].canAttribute).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -969,6 +1037,62 @@ describe('getBatchDetail', () => {
     expect(detail!.derived).toBeNull();
   });
 
+  // OC-2: the drill-down's R0 used to read the action type off the EARLIEST audit
+  // row while reading the shape keys across all of them — so a batch whose bulk
+  // event is not its first one was "attributable" here and refused by the core.
+  it('R0 reads EVERY audit row filed under the batch id — the array the core reads (OC-2)', async () => {
+    wireDetail({
+      audits: [
+        {
+          id: 1,
+          actionType: 'INVENTORY_ADJUSTMENT',
+          entityId: null,
+          createdAt: new Date('2026-08-10T12:00:00.000Z'),
+          details: { rows: 40 },
+        },
+        {
+          id: 2,
+          actionType: 'INVENTORY_BULK_UPDATE',
+          entityId: null,
+          createdAt: new Date('2026-08-10T12:00:01.000Z'),
+          details: {},
+        },
+      ],
+    });
+    db.inventory_logs.findMany.mockResolvedValue([
+      { ...ledgerRow, logType: 'ADJUSTMENT', orderRecordId: null },
+    ] as never);
+
+    const detail = await getBatchDetail('batch-1', ADMIN);
+
+    expect(detail!.batch.canAttribute).toBe(false);
+  });
+
+  // OC-8: a mass update's whole ledger used to travel to the browser.
+  it('bounds the ledger read at the manual limit + 1, and SAYS when it cut', async () => {
+    wireDetail({});
+    db.inventory_logs.findMany.mockResolvedValue(
+      Array.from({ length: 51 }, (_, i) => ({ ...ledgerRow, id: 500 + i })) as never,
+    );
+
+    const detail = await getBatchDetail('batch-1', ADMIN);
+
+    const call = db.inventory_logs.findMany.mock.calls[0][0] as { take?: number };
+    expect(call.take).toBe(51);
+    expect(detail!.ledgerRowsTruncated).toBe(true);
+    expect(detail!.ledgerRows).toHaveLength(50);
+    // Over the bound, so the control stays off — which is what the core says too.
+    expect(detail!.batch.canAttribute).toBe(false);
+  });
+
+  it('a batch INSIDE the bound is not truncated and keeps every row', async () => {
+    wireDetail({});
+    const detail = await getBatchDetail('batch-1', ADMIN);
+
+    expect(detail!.ledgerRowsTruncated).toBe(false);
+    expect(detail!.ledgerRows).toHaveLength(1);
+  });
+
   it('a MEMBER sees no actor identity on the batch or its attempts', async () => {
     wireDetail({
       attempts: [
@@ -992,6 +1116,90 @@ describe('getBatchDetail', () => {
     expect(detail!.batch.actor).toBeNull();
     expect(detail!.attempts[0].actor).toBeNull();
     expect(db.user.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R0 parity across the THREE call sites (OC-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * ONE audit array, three readers: the report row, the drill-down and the
+ * manual-attribution core. They now share `batchEvidence`, and this is the pin
+ * that says so from the outside.
+ *
+ * The array is a SINGLE event on purpose: the list read carries the earliest
+ * audit row and no other (D7's one statement, D6's no-details rule), so a
+ * one-event batch is the only shape all three can literally be handed. The
+ * multi-event divergence the helper also closes is pinned on the drill-down
+ * above, against the core's own reading.
+ */
+describe('R0 parity across the three call sites', () => {
+  it('the list, the drill-down and the core all refuse the SAME pre-lane mass update', async () => {
+    // 1. THE LIST
+    db.$queryRaw.mockResolvedValue([
+      summaryRow({
+        logTypes: 'ADJUSTMENT',
+        auditId: 1,
+        auditActionType: 'INVENTORY_BULK_UPDATE',
+        auditHasRows: 1,
+      }),
+    ] as never);
+    const report = await getAttributionReport(INPUT, ADMIN);
+    expect(report.rows).toEqual([]);
+    expect(report.totals.exclusions.historicalMassUpdate).toBe(1);
+
+    // 2. THE DRILL-DOWN
+    db.inventory_logs.findMany.mockResolvedValue([
+      {
+        id: 501,
+        productId: 9,
+        delta: -3,
+        logType: 'ADJUSTMENT',
+        changeTime: new Date('2026-08-10T12:00:00.000Z'),
+        orderRecordId: null,
+        products: { name: 'Widget' },
+      },
+    ] as never);
+    db.auditLog.findMany.mockImplementation(((args: { where?: { actionType?: string } }) =>
+      Promise.resolve(
+        args?.where?.actionType === 'INVENTORY_ATTRIBUTE'
+          ? []
+          : [
+              {
+                id: 1,
+                actionType: 'INVENTORY_BULK_UPDATE',
+                entityId: null,
+                createdAt: new Date('2026-08-10T12:00:00.000Z'),
+                details: { rows: 40 },
+              },
+            ],
+      )) as never);
+    db.orderAttributionAttempt.findMany.mockResolvedValue([] as never);
+    const detail = await getBatchDetail('batch-1', ADMIN);
+    expect(detail!.batch.canAttribute).toBe(false);
+
+    // 3. THE CORE
+    const tx = mockDeep<Prisma.TransactionClient>();
+    (tx.$queryRaw as unknown as jest.Mock).mockResolvedValue([
+      { id: 501, productId: 9, logType: 'ADJUSTMENT', orderRecordId: null },
+    ]);
+    (tx.auditLog.findMany as unknown as jest.Mock).mockResolvedValue([
+      { id: 1, actionType: 'INVENTORY_BULK_UPDATE', entityId: null, details: { rows: 40 } },
+    ]);
+    await expect(
+      attributeBatch(
+        tx,
+        {
+          batchId: 'batch-1',
+          orderRecordId: 'ord-1',
+          expectPreviousOrderRecordId: null,
+          reason: null,
+          actorUserId: 1,
+        },
+        async () => {},
+      ),
+    ).rejects.toMatchObject({ code: 'NOT_ATTRIBUTABLE' });
   });
 });
 

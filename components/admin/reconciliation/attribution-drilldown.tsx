@@ -98,6 +98,17 @@ export function AttributionDrilldown({
                     </li>
                   ))}
                 </ul>
+                {/* The producer bounds this read (OC-8), so the list can be a
+                    PAGE of the batch rather than the batch. Saying so is the
+                    difference between a short list and a wrong one. */}
+                {data.ledgerRowsTruncated && (
+                  <p
+                    className="text-body-sm text-muted-foreground"
+                    data-testid="drilldown-ledger-truncated"
+                  >
+                    showing the first {data.ledgerRows.length} of this batch&apos;s rows
+                  </p>
+                )}
               </Section>
 
               <Section title="The audit event">

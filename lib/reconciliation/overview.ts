@@ -60,13 +60,22 @@ const HAS_REFERENCE = Prisma.sql`(JSON_TYPE(JSON_EXTRACT(a.details, '$.orderRefe
  * `MIN(changeTime)` — the batch's own time axis) and only then joined to the
  * earliest audit row by scalar subquery, so a batch with two audit rows cannot
  * be counted twice.
+ *
+ * THE ROW-LEVEL PRE-FILTER (`l.changeTime < end`) is what bounds the scan: the
+ * HAVING alone made this poll group the WHOLE population and then throw away
+ * every batch older than the fortnight (OC-3). It is EXACT here, and only here,
+ * because this window's `end` is NOW — no ledger row exists after it, so no
+ * batch can lose a row to the filter and mis-report its `MAX(orderRecordId IS
+ * NOT NULL)` or its `MIN(changeTime)`. The REPORT's CTE deliberately stays
+ * HAVING-only: its window is historical, and a batch straddling the far edge
+ * must keep its full aggregates rather than the half that fell inside.
  */
 function unmatchedIntendedSql(start: Date, end: Date): Prisma.Sql {
   return Prisma.sql`SELECT COUNT(*) AS n
 FROM (
   SELECT l.batchId AS batchId
   FROM inventory_logs l
-  WHERE ${rowWhereSql('l')}
+  WHERE ${rowWhereSql('l')} AND l.changeTime < ${end}
   GROUP BY l.batchId
   HAVING MIN(l.changeTime) >= ${start} AND MIN(l.changeTime) < ${end} AND MAX(l.orderRecordId IS NOT NULL) = 0
 ) b

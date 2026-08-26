@@ -2922,7 +2922,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `that number in your companies' — it never returns redacted rows. Read ` +
       `coverage.moreCount (rows beyond this page), coverage.derivedShare, ` +
       `coverage.ledgerUnstamped, coverage.needsALook and coverage.exclusionsNote before ` +
-      `summarizing, and relay them. Omitting dates uses relativeDays (default 30). ` +
+      `summarizing, and relay them. Paging is a KEYSET cursor: when ` +
+      `coverage.nextCursor is not null more batches remain, and the ONLY way to read ` +
+      `them is to call again with that exact string as \`cursor\` (it is null on the ` +
+      `last page). Omitting dates uses relativeDays (default 30). ` +
       `${DATA_POSTURE}`,
     inputSchema: getOrderReconciliationSchema,
     run: async (input, ctx) => {
@@ -2967,6 +2970,11 @@ export const assistantTools: Record<string, AssistantToolDef> = {
               `${historicalMassUpdate} pre-lane mass-update batches, and ${noBatchRows} ` +
               `outbound rows carrying no batch id`,
             moreCount: report.moreCount,
+            // The paging AFFORDANCE beside the bound it qualifies (OC-5). A
+            // coverage block that said "N more" without the cursor told the
+            // model rows remained and gave it no way to reach them; `null` rides
+            // too, because "there is no next page" is a statement.
+            nextCursor: report.nextCursor,
           },
           definitions: report.definitions,
         },

@@ -200,6 +200,35 @@ describe("a deep link the catalog carries", () => {
     );
   });
 
+  // OC-9: the deep link can land on a row that IS already mapped (the operator
+  // fixed it between the report read and the click, or the exception is about the
+  // mapping itself). Forcing the unmapped tab then selects a row on the list the
+  // other tab is showing — an empty screen with an invisible selection.
+  it("an alreadyMapped prefill lands on the MAPPED tab, with the row visible", async () => {
+    useCatalogMock.mockReturnValue({
+      data: catalog(
+        ROWS.map((r) => (r.externalProductId === "2" ? { ...r, alreadyMapped: true } : r)),
+      ),
+      isLoading: false,
+      isFetching: false,
+      error: null,
+      refetch: jest.fn(),
+    });
+
+    const { container } = renderClient({
+      externalProductId: "2",
+      externalVariantId: null,
+      sku: "MUG",
+    });
+
+    await waitFor(() => expect(scrollToIndex).toHaveBeenCalled());
+    expect(screen.getByRole("tab", { name: /^Mapped/, hidden: true })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(container.querySelector('[data-row-key="2::"]')).not.toBeNull();
+  });
+
   it("matches on the EXACT pair — a variant the link did not name is not the row", async () => {
     renderClient({ externalProductId: "1", externalVariantId: "12", sku: "CB5" });
 

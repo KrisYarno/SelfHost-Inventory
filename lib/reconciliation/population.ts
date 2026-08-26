@@ -8,6 +8,12 @@
  * second definition, and two definitions of the population produce two truthful
  * reports that disagree.
  *
+ * The same rule now covers the batch's own EVIDENCE (`batchEvidence`, below):
+ * R0, whether a fulfillment moved this stock, and which order that event named.
+ * Those three facts had three assemblies — the report row, the drill-down and
+ * the manual-attribution core — and the disagreement showed up as an
+ * Attribute… control the core refuses (OC-1/OC-2).
+ *
  * THE PREDICATE IS A DATA TABLE, NOT TWO STRINGS. The lane needs the same rule
  * in two dialects: a Prisma `where` for the ORM reads and a raw SQL fragment for
  * the totals CTE and the manual-attribution core's row lock. Writing them as two
@@ -221,4 +227,86 @@ export function isAttributableBatch(
     hasRowsOmitted: auditEvents.some((e) => isObj(e.details) && 'rowsOmitted' in e.details),
   });
   return !(c.isMassUpdate || c.isMassUpdateRowsOmitted);
+}
+
+// ---------------------------------------------------------------------------
+// THE BATCH'S OWN EVIDENCE — read ONCE, for every consumer (OC-1 / OC-2)
+// ---------------------------------------------------------------------------
+
+/**
+ * An `audit_logs` row filed under a LEDGER batchId, reduced to what a
+ * batch-grain rule reads: what happened, which entity it happened to, and the
+ * writer's blob.
+ */
+export type BatchAuditRow = {
+  actionType: string;
+  entityId?: string | null;
+  details?: unknown;
+};
+
+/**
+ * What a batch's audit rows say about it.
+ *
+ * ONE ASSEMBLY, because three call sites used to build their own — the report
+ * row, the drill-down and the manual-attribution core — and they disagreed. A
+ * UI that reads the fulfillment differently from the core is a button that 409s
+ * (OC-1), and an R0 read that walks a different set of audit rows than the core
+ * does is a batch the report offers and the core refuses (OC-2).
+ */
+export type BatchEvidence = {
+  /** R0: may the report speak about this batch at all? */
+  attributable: boolean;
+  /** The FIRST fulfillment event filed under this batch id, or null. */
+  fulfillmentEvent: BatchAuditRow | null;
+  /** The order that event NAMES — `details.orderId`, else its own entity. */
+  fulfillmentOrderId: string | null;
+  /** The deduction's own event: the first row of the array (G1p-8). */
+  earliest: BatchAuditRow | null;
+};
+
+/**
+ * The two events that mean "a fulfillment moved this stock". Spelled HERE, once,
+ * beside the population itself: the write path and the read path used to keep
+ * private copies, which is exactly how they drifted.
+ */
+const FULFILLMENT_ACTION_TYPES: ReadonlySet<string> = new Set([
+  'EXTERNAL_ORDER_FULFILLMENT',
+  'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
+]);
+
+/** A non-empty string, or nothing — the writers omit keys they cannot fill. */
+function text(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Read a batch's audit rows once, into the facts every consumer needs.
+ *
+ * An event naming NEITHER an order id nor an entity cannot be completed against
+ * anything, and `fulfillmentOrderId` is `null` rather than a guess.
+ *
+ * @param auditEvents the batch's audit rows, ID-ASCENDING (`earliest` is [0])
+ * @param rows the batch's POPULATION rows — R0 reads their log types
+ */
+export function batchEvidence(
+  auditEvents: ReadonlyArray<BatchAuditRow>,
+  rows: ReadonlyArray<{ logType: string }>
+): BatchEvidence {
+  const fulfillmentEvent =
+    auditEvents.find((e) => FULFILLMENT_ACTION_TYPES.has(e.actionType)) ?? null;
+  const details =
+    fulfillmentEvent !== null && isObj(fulfillmentEvent.details) ? fulfillmentEvent.details : {};
+
+  return {
+    attributable: isAttributableBatch(
+      rows,
+      auditEvents.map((e) => ({ actionType: e.actionType, details: e.details }))
+    ),
+    fulfillmentEvent,
+    fulfillmentOrderId:
+      fulfillmentEvent === null
+        ? null
+        : (text(details.orderId) ?? text(fulfillmentEvent.entityId) ?? null),
+    earliest: auditEvents[0] ?? null,
+  };
 }

@@ -15,6 +15,7 @@ import {
   FulfilledBatchRefusal,
   MixedStampsRefusal,
   NotAttributableRefusal,
+  PartiallyStampedRefusal,
   R2bOtherTargetRefusal,
   TooManyRowsRefusal,
 } from '@/lib/reconciliation/refusals';
@@ -107,6 +108,12 @@ function refusalResponse(err: unknown): NextResponse | null {
         currentOrderRecordId: err.currentOrderRecordId,
         expected: err.expected,
       },
+      { status: 409 },
+    );
+  }
+  if (err instanceof PartiallyStampedRefusal) {
+    return NextResponse.json(
+      { error: err.message, code: err.code, stamped: err.stamped, unstamped: err.unstamped },
       { status: 409 },
     );
   }

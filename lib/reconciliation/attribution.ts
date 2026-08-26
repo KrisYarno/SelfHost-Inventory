@@ -45,11 +45,13 @@ import type { AttemptDetails, AttemptSource } from '@/lib/attribution/contracts'
 import {
   ATTRIBUTABLE_DEFINITION,
   ATTRIBUTABLE_PREDICATE,
-  isAttributableBatch,
+  batchEvidence,
   renderRowWhereSql,
   rowWhere,
   rowWhereSql,
+  type BatchAuditRow,
 } from './population';
+import { MANUAL_ATTRIBUTION_ROW_LIMIT } from './refusals';
 import {
   deriveHistoricalAttempt,
   type DerivedClass,
@@ -79,6 +81,13 @@ import { ATTRIBUTION_CLASS_KEYS } from './class-keys';
 
 export type { AttributionClassKey } from './class-keys';
 import type { AttributionClassKey } from './class-keys';
+
+// The batch-grain evidence helper lives in ./population beside R0 itself, so the
+// WRITE path can read it without importing this module's Prisma client (the
+// class-keys precedent above). Re-exported here for the read-path callers that
+// already speak this module's vocabulary.
+export { batchEvidence } from './population';
+export type { BatchAuditRow, BatchEvidence } from './population';
 
 const CLASS_KEY_SET: ReadonlySet<string> = new Set(ATTRIBUTION_CLASS_KEYS);
 
@@ -177,6 +186,14 @@ export type BatchDetail = {
     selectedExternalOrderId?: string;
     label: 'from the audit event (free text, admin-visible on /admin/logs)';
   } | null;
+  /**
+   * The ledger read is BOUNDED at the manual-attribution limit + 1 (OC-8): a
+   * pre-lane mass update holds thousands of rows and used to send every one of
+   * them to the browser. TRUE means `ledgerRows` is the first page of the batch
+   * — and that `batch`'s row-derived figures (rowCount, units, productCount, the
+   * stamps) cover only the rows that were read. The REPORT row is the exact one.
+   */
+  ledgerRowsTruncated: boolean;
   attempts: Array<{
     id: number;
     attemptedAt: string;
@@ -268,7 +285,7 @@ const DEFINITIONS: Readonly<Record<string, string>> = Object.freeze({
   recordingSince:
     "the first attempt row's attemptedAt — batches before it were never recorded live and carry a derived class",
   canAttribute:
-    'whether the manual-attribution core would accept this batch: attributable, at most 50 rows, one stamp at most, and not a stamped fulfillment',
+    'whether the manual-attribution core would accept this batch: attributable, at most 50 rows, uniformly stamped (one id on every row, or none on any), and not a stamped fulfillment',
 });
 
 // ---------------------------------------------------------------------------
@@ -276,9 +293,6 @@ const DEFINITIONS: Readonly<Record<string, string>> = Object.freeze({
 // ---------------------------------------------------------------------------
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** The manual-attribution row bound (spec D4) — mirrored for the UI predicate. */
-const MANUAL_ROW_LIMIT = 50;
 
 /** The picker's bound, said out loud by `searchOrders`'s `moreCount`. */
 const ORDER_SEARCH_LIMIT = 20;
@@ -524,9 +538,15 @@ type BatchFacts = {
   distinctStamps: number;
   /** The batch's ONE stamp, or null when it is unstamped or mixed. */
   theStamp: string | null;
+  /** The EARLIEST audit row, in the shape the derivation reads. */
   audit: DeriveAuditEvent | null;
-  auditHasRows: boolean;
-  auditHasRowsOmitted: boolean;
+  /**
+   * The audit rows the batch-grain rules read (`batchEvidence`), id-ascending.
+   * The LIST read carries only the earliest one (D7's single statement, D6's
+   * no-details rule), so its array holds at most one; the drill-down and the
+   * manual-attribution core hand over every row filed under the batch id.
+   */
+  auditRows: ReadonlyArray<BatchAuditRow>;
   attempt: {
     id: number;
     outcome: string;
@@ -549,11 +569,6 @@ type ClassifiedBatch = BatchFacts & {
   /** The order the fulfillment event named (R2b's completion target). */
   fulfillmentOrderId: string | null;
 };
-
-const FULFILLMENT_ACTION_TYPES: ReadonlySet<string> = new Set([
-  'EXTERNAL_ORDER_FULFILLMENT',
-  'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
-]);
 
 const ATTEMPT_SOURCES: ReadonlySet<string> = new Set([
   'live-deduct',
@@ -611,8 +626,25 @@ function summaryToFacts(row: BatchSummarySqlRow): BatchFacts | null {
             entityId: row.auditEntityId,
             details,
           },
-    auditHasRows: toNumber(row.auditHasRows) === 1,
-    auditHasRowsOmitted: toNumber(row.auditHasRowsOmitted) === 1,
+    auditRows:
+      row.auditId === null
+        ? []
+        : [
+            {
+              actionType: row.auditActionType ?? '',
+              entityId: row.auditEntityId,
+              details: {
+                ...details,
+                // R0 reads the SHAPE of the summary event, so the PRESENCE of
+                // its two keys is the whole fact — the values never leave the
+                // audit row (D6).
+                ...(toNumber(row.auditHasRows) === 1 ? { [AUDIT_ROWS_KEY]: null } : {}),
+                ...(toNumber(row.auditHasRowsOmitted) === 1
+                  ? { [AUDIT_ROWS_OMITTED_KEY]: null }
+                  : {}),
+              },
+            },
+          ],
     attempt:
       row.attemptId === null
         ? null
@@ -636,26 +668,23 @@ function summaryToFacts(row: BatchSummarySqlRow): BatchFacts | null {
  */
 function classifyBatch(facts: BatchFacts, recordingSince: Date | null): ClassifiedBatch {
   const auditEvents = facts.audit === null ? [] : [facts.audit];
-  const attributable = isAttributableBatch(
-    facts.logTypes.map((logType) => ({ logType })),
-    // R0 reads the SHAPE of the summary event, so the presence of its two keys
-    // is the whole fact — the values never leave the audit row.
-    auditEvents.map((event) => ({
-      actionType: event.actionType,
-      details: {
-        ...(facts.auditHasRows ? { [AUDIT_ROWS_KEY]: null } : {}),
-        ...(facts.auditHasRowsOmitted ? { [AUDIT_ROWS_OMITTED_KEY]: null } : {}),
-      },
-    }))
-  );
 
-  const isFulfillmentEvent =
-    facts.audit !== null && FULFILLMENT_ACTION_TYPES.has(facts.audit.actionType);
-  const eventOrderId = isFulfillmentEvent
-    ? ((facts.audit?.details?.[AUDIT_ORDER_KEY] as string | undefined) ??
-      facts.audit?.entityId ??
-      null)
-    : null;
+  // ONE evidence assembly, shared with the drill-down and with the
+  // manual-attribution core (OC-2): R0, whether a fulfillment moved this stock,
+  // and which order that event named.
+  const evidence = batchEvidence(
+    facts.auditRows,
+    facts.logTypes.map((logType) => ({ logType }))
+  );
+  const attributable = evidence.attributable;
+
+  // THE FULFILLMENT FACT, read the way the core reads it (OC-1): the ledger's
+  // own event OR the latest attempt's evidence — in BOTH branches below. Keying
+  // it on the attempt alone let a MANUAL attempt recorded after an R2b
+  // completion re-open the Attribute… control on a batch the core refuses,
+  // because the manual row displaced the fulfillment one.
+  const fulfillment =
+    evidence.fulfillmentEvent !== null || facts.attempt?.evidence === 'fulfillment';
 
   const recordedKey =
     facts.attempt === null
@@ -674,8 +703,8 @@ function classifyBatch(facts: BatchFacts, recordingSince: Date | null): Classifi
       source,
       actorUserId: facts.attempt.actorUserId,
       derived: null,
-      fulfillment: facts.attempt.evidence === 'fulfillment',
-      fulfillmentOrderId: eventOrderId,
+      fulfillment,
+      fulfillmentOrderId: evidence.fulfillmentOrderId,
     };
   }
 
@@ -700,8 +729,8 @@ function classifyBatch(facts: BatchFacts, recordingSince: Date | null): Classifi
     source: 'derived',
     actorUserId: null,
     derived,
-    fulfillment: derived.ruleId === 'R2' || derived.ruleId === 'R2b',
-    fulfillmentOrderId: eventOrderId,
+    fulfillment,
+    fulfillmentOrderId: evidence.fulfillmentOrderId,
   };
 }
 
@@ -755,10 +784,17 @@ function buildRow(
   const orderNumber =
     batch.theStamp === null ? null : (orders.get(batch.theStamp)?.orderNumber ?? null);
 
+  // PARTLY STAMPED (OC-6): exactly one id, and rows beside it carrying none. The
+  // guarded write names the id it locked, so it can move the stamped half or the
+  // unstamped half and never the batch — the core refuses this shape outright,
+  // and so does the predicate that decides whether to offer the control.
+  const partiallyStamped = batch.distinctStamps === 1 && batch.stamps.includes(null);
+
   const canAttribute =
     batch.attributable &&
-    batch.rowCount <= MANUAL_ROW_LIMIT &&
+    batch.rowCount <= MANUAL_ATTRIBUTION_ROW_LIMIT &&
     batch.distinctStamps <= 1 &&
+    !partiallyStamped &&
     !stampedFulfillment;
 
   return {
@@ -772,8 +808,13 @@ function buildRow(
     productCount: batch.productCount,
     order,
     canAttribute,
+    // THE LOCK IS THE FACT, never the rule id (OC-1). An UNSTAMPED batch whose
+    // fulfillment event names an order may only COMPLETE that stamp — which is
+    // what the core enforces, whether or not the derivation is what classified
+    // it. Reading `ruleId === 'R2b'` lost the lock the moment any attempt row
+    // existed, and the picker then offered every order in the book.
     attributeLock:
-      batch.how.ruleId === 'R2b' && batch.fulfillmentOrderId !== null
+      batch.distinctStamps === 0 && batch.fulfillmentOrderId !== null
         ? { orderRecordId: batch.fulfillmentOrderId, reason: 'r2b-completion' }
         : null,
     fulfilledAgainst: stampedFulfillment
@@ -1004,6 +1045,11 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
     // R1b from foreign stamps).
     where: { ...rowWhere, batchId },
     orderBy: { id: 'asc' },
+    // BOUNDED at the manual-attribution limit + 1 (OC-8). The extra row is what
+    // makes the bound self-describing: it is enough to KNOW the batch is over the
+    // limit (so `canAttribute` stays false, exactly as the core would say)
+    // without handing the browser a pre-lane mass update's whole ledger.
+    take: MANUAL_ATTRIBUTION_ROW_LIMIT + 1,
     select: {
       id: true,
       productId: true,
@@ -1015,6 +1061,11 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
     },
   });
   if (ledger.length === 0) return null;
+
+  const ledgerRowsTruncated = ledger.length > MANUAL_ATTRIBUTION_ROW_LIMIT;
+  const shownRows = ledgerRowsTruncated
+    ? ledger.slice(0, MANUAL_ATTRIBUTION_ROW_LIMIT)
+    : ledger;
 
   const [auditEvents, attempts, attributionEvents, recordingSince] = await Promise.all([
     prisma.auditLog.findMany({
@@ -1074,10 +1125,15 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
             entityId: earliest.entityId,
             details: earliestDetails,
           },
-    auditHasRows: auditEvents.some((event) => isObj(event.details) && AUDIT_ROWS_KEY in event.details),
-    auditHasRowsOmitted: auditEvents.some(
-      (event) => isObj(event.details) && AUDIT_ROWS_OMITTED_KEY in event.details
-    ),
+    // EVERY audit row filed under this batch id, id-ascending — the same array
+    // the manual-attribution core reads (OC-2). Reading the action type off the
+    // earliest row while reading the R0 shape keys across all of them was how
+    // this surface came to offer a batch the core refuses.
+    auditRows: auditEvents.map((event) => ({
+      actionType: event.actionType,
+      entityId: event.entityId,
+      details: event.details,
+    })),
     attempt:
       latest === undefined
         ? null
@@ -1113,7 +1169,8 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
 
   return {
     batch: buildRow(batch, orders, actors, viewer),
-    ledgerRows: ledger.map((row) => ({
+    ledgerRowsTruncated,
+    ledgerRows: shownRows.map((row) => ({
       id: row.id,
       productId: row.productId,
       productName: row.products?.name ?? 'unknown product',

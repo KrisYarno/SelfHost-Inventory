@@ -3,7 +3,7 @@
  * D4 / §5).
  *
  * `apiHandler` renders an `AppError` as `{ error, code }` and nothing else, and
- * six of D4's eight refusals have to NAME something the admin then acts on:
+ * seven of D4's nine refusals have to NAME something the admin then acts on:
  * which ids the batch actually carries, how many rows it holds, who stamped it
  * while the page was open, which order a fulfillment already named. "Conflict"
  * would send an admin back to the report to guess; "now ord-1 — refresh and try
@@ -16,6 +16,7 @@
  *   TOO_MANY_ROWS      `{ error, code, rowCount, productCount, limit }`
  *   MIXED_STAMPS       `{ error, code, orderRecordIds }`
  *   BATCH_MOVED        `{ error, code, currentOrderRecordId, expected }`
+ *   PARTIALLY_STAMPED  `{ error, code, stamped, unstamped }`
  *   FULFILLED_BATCH    `{ error, code, orderRecordId, orderNumber }`
  *   R2B_OTHER_TARGET   `{ error, code, fulfillmentOrderRecordId }`
  *
@@ -151,6 +152,31 @@ export class R2bOtherTargetRefusal extends Error {
 }
 
 /**
+ * ONE id on some rows, none on the others (OC-6). The guarded write names the id
+ * it locked, so the statement that would move the stamped half leaves the
+ * unstamped half behind — and a batch attributed halfway is worse than one not
+ * attributed at all.
+ *
+ * It used to fall through to `CountMismatch`, whose sentence ("the batch moved")
+ * describes a RACE: an admin read it as "somebody beat me to it", refreshed, and
+ * found the same batch waiting. Both figures ride out so the repair is stated
+ * rather than hunted for.
+ */
+export class PartiallyStampedRefusal extends Error {
+  readonly code = 'PARTIALLY_STAMPED';
+
+  constructor(
+    public readonly stamped: number,
+    public readonly unstamped: number,
+  ) {
+    super(
+      `This batch is only partly stamped (${stamped} of ${stamped + unstamped} rows) — repair the ledger before attributing; a guarded update cannot move it uniformly`,
+    );
+    this.name = 'PartiallyStampedRefusal';
+  }
+}
+
+/**
  * Moving a batch off an existing stamp is a CORRECTION of somebody's earlier
  * decision, so it is recorded with its reason or not at all (400 — the client
  * can fix it by asking the operator, unlike the 409s above).
@@ -185,5 +211,6 @@ export type AttributionRefusal =
   | TooManyRowsRefusal
   | MixedStampsRefusal
   | BatchMovedRefusal
+  | PartiallyStampedRefusal
   | FulfilledBatchRefusal
   | R2bOtherTargetRefusal;

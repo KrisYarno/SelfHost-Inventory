@@ -173,6 +173,29 @@ describe("chips", () => {
 });
 
 describe("coverage", () => {
+  // OC-7: `count` is the SELECTED class's total, `totals.attributable` is the
+  // window's. Reading the first as the second made every class filter look like a
+  // window that had shrunk to fit it.
+  it("the Showing line bounds the WINDOW; the class total is its own line", async () => {
+    const user = userEvent.setup();
+    setReport(makeReport({ count: 1 }));
+    render(<AttributionTab />);
+
+    expect(screen.getByTestId("coverage")).toHaveTextContent(
+      "Showing 1 of 4 attributable batches in this window",
+    );
+    // No chip selected: there is no "selected class" to bound.
+    expect(screen.queryByTestId("class-count")).toBeNull();
+
+    await user.click(screen.getByTestId("class-chip-attributed·manual"));
+    await waitFor(() => expect(lastInput().classKey).toBe("attributed·manual"));
+
+    expect(screen.getByTestId("class-count")).toHaveTextContent("1 in the selected class.");
+    expect(screen.getByTestId("coverage")).toHaveTextContent(
+      "Showing 1 of 4 attributable batches in this window",
+    );
+  });
+
   it("names every exclusion, the derived share and the ledger-unstamped count", () => {
     render(<AttributionTab />);
 

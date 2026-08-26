@@ -46,7 +46,11 @@ jest.mock("next/link", () => ({
   ),
 }));
 
-import { ExceptionsTab, EXCEPTIONS_EMPTY_STATE } from "@/components/admin/reconciliation/exceptions-tab";
+import {
+  ExceptionsTab,
+  EXCEPTIONS_EMPTY_STATE,
+  EXCEPTIONS_FILTERED_EMPTY_STATE,
+} from "@/components/admin/reconciliation/exceptions-tab";
 
 type Page = {
   rows: ExceptionRowView[];
@@ -295,6 +299,35 @@ describe("bounds and the empty state", () => {
     expect(EXCEPTIONS_EMPTY_STATE).toBe(
       "No exceptions raised yet — receiving and labeling write them as they find them.",
     );
+  });
+
+  // OC-4: the day-one sentence is a claim about the REGISTER, and a filtered page
+  // with nothing on it is not evidence for it. Both halves of the condition —
+  // no filter AND nothing counted — have to hold before it may be said.
+  it("a FILTERED page with rows behind it never claims the register is empty", async () => {
+    const user = userEvent.setup();
+    setPage(makePage({ rows: [], count: 12, moreCount: 0 }));
+    render(<ExceptionsTab />);
+
+    await user.selectOptions(screen.getByLabelText("Severity"), "high");
+
+    const empty = screen.getByTestId("exceptions-empty");
+    expect(empty).toHaveTextContent(EXCEPTIONS_FILTERED_EMPTY_STATE);
+    expect(EXCEPTIONS_FILTERED_EMPTY_STATE).toBe("No exceptions match these filters.");
+    expect(empty.textContent).not.toContain("No exceptions raised yet");
+    expect(empty).toHaveTextContent("12");
+  });
+
+  it("a filter that matches nothing says the FILTER, not day one", async () => {
+    const user = userEvent.setup();
+    setPage(makePage({ rows: [], count: 0 }));
+    render(<ExceptionsTab />);
+
+    await user.selectOptions(screen.getByLabelText("Kind"), "labeling-loss");
+
+    const empty = screen.getByTestId("exceptions-empty");
+    expect(empty).toHaveTextContent("No exceptions match these filters.");
+    expect(empty.textContent).not.toContain("No exceptions raised yet");
   });
 });
 
