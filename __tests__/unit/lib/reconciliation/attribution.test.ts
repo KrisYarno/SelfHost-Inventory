@@ -290,6 +290,22 @@ describe('the read shape', () => {
     ]);
   });
 
+  it('FD-3: the MEMBER + orderNumber path binds only the vocabularies, the companies and the number — still never a row identity', async () => {
+    await getAttributionReport({ ...INPUT, orderNumber: '1009' }, MEMBER);
+    const statement = db.$queryRaw.mock.calls[0][0] as unknown as { sql: string; values: unknown[] };
+    expect(statement.sql).not.toContain('b.batchId IN (');
+    const bound = statement.values.filter((v): v is string => typeof v === 'string');
+    const allowed = new Set([
+      'ADJUSTMENT',
+      'EXTERNAL_ORDER_FULFILLMENT',
+      'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
+      'SALE',
+      '1009',
+      ...MEMBER.companyIds,
+    ]);
+    expect(bound.filter((v) => !allowed.has(v))).toEqual([]);
+  });
+
   // CR-5: the HAVING alone made this read GROUP THE WHOLE POPULATION and then
   // throw away every batch outside the window — a 14-day report paid for the
   // entire ledger's history. The overview's candidate preselection (OC-3, then
@@ -1112,6 +1128,15 @@ describe('getRecordingSince', () => {
 // ---------------------------------------------------------------------------
 
 describe('getBatchDetail', () => {
+
+  it('FD-1: a CASE-VARIANT stamp still finds its order — the map answers for the id ASKED (MySQL matched it ci; a JS-exact miss would assert orderMissing about an order that exists)', async () => {
+    wireDetail({});
+    db.inventory_logs.findMany.mockResolvedValue([{ ...ledgerRow, orderRecordId: 'ORD-1' }] as never);
+    db.externalOrder.findMany.mockResolvedValue([orderRow()] as never); // canonical id 'ord-1'
+    const detail = await getBatchDetail('detail-batch-1', ADMIN);
+    expect(detail?.batch.order).not.toBeNull();
+    expect((detail?.batch.order as { orderMissing?: boolean }).orderMissing).toBeUndefined();
+  });
 
   it('THE BATCH ID SURVIVES THE POPULATION SPREAD in the detail ledger read (the M2b step-9 class, read-path twin — found live: 489 foreign rows + a bogus R1b)', async () => {
     wireDetail({});

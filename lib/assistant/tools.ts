@@ -2976,7 +2976,14 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             // too, because "there is no next page" is a statement.
             nextCursor: report.nextCursor,
           },
-          definitions: report.definitions,
+          // FD-2: canAttribute / fulfillmentTargetMissing are admin-WRITE affordances
+          // toolRow deliberately strips — defining fields the rows never carry would
+          // invite the model to invent them.
+          definitions: Object.fromEntries(
+            Object.entries(report.definitions).filter(
+              ([k]) => k !== "canAttribute" && k !== "fulfillmentTargetMissing",
+            ),
+          ),
         },
         { scope: "mixed" },
       );

@@ -976,6 +976,18 @@ async function loadOrders(ids: string[]): Promise<Map<string, OrderProjection>> 
     select: RECONCILIATION_ORDER_SELECT,
   })) as unknown as OrderProjection[];
   for (const row of rows) map.set(row.id, row);
+  // FD-1: MySQL matched the ids CASE-INSENSITIVELY (utf8mb4_unicode_ci), so a
+  // variant-spelled soft ref (a hand-cased POST, an old audit event) still found
+  // its row — the map must answer for the id that was ASKED, or the report would
+  // confidently assert orderMissing / fulfillmentTargetMissing about an order
+  // that exists. Canonical spellings hit the first pass; nothing is overwritten.
+  const byLower = new Map<string, OrderProjection>();
+  for (const row of rows) byLower.set(row.id.toLowerCase(), row);
+  for (const asked of ids) {
+    if (map.has(asked)) continue;
+    const hit = byLower.get(asked.toLowerCase());
+    if (hit) map.set(asked, hit);
+  }
   return map;
 }
 
@@ -1291,7 +1303,9 @@ function attemptDetailsOf(value: unknown): AttemptDetails | null {
  *
  * THIS READ HAS NO STATEMENT BUDGET. D7's AT-MOST-FIVE is the REPORT's bound,
  * because that one serves a whole window and a poll; this one serves a single
- * batch a person opened deliberately. It spends five statements on a batch whose
+ * Cost: six statements warm on a stamped admin read (ledger, audit, attempts,
+ * attribution events, orders, actors; recordingSince adds one cold), plus one
+ * per bound actually crossed (FD-4 — the earlier 'five' undercounted).
  * arrays all fit, and buys one more for each bound it actually crossed: the
  * exact aggregate that keeps `batch` true (QA-1), and a count per truncated
  * history so "the newest twenty of N" is a fact rather than a guess.
