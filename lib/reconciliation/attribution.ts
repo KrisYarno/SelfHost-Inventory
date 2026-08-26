@@ -998,7 +998,11 @@ function attemptDetailsOf(value: unknown): AttemptDetails | null {
  */
 export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<BatchDetail | null> {
   const ledger = await prisma.inventory_logs.findMany({
-    where: { batchId, ...rowWhere },
+    // Spread ORDER matters: rowWhere carries its own `batchId: { not: null }`, so the
+    // scalar batch id must come AFTER the spread — the write path learned this at M2b
+    // (pack 3e); the live drive caught this read-path twin (489 foreign rows + a bogus
+    // R1b from foreign stamps).
+    where: { ...rowWhere, batchId },
     orderBy: { id: 'asc' },
     select: {
       id: true,

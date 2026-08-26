@@ -838,6 +838,13 @@ describe('getRecordingSince', () => {
 // ---------------------------------------------------------------------------
 
 describe('getBatchDetail', () => {
+
+  it('THE BATCH ID SURVIVES THE POPULATION SPREAD in the detail ledger read (the M2b step-9 class, read-path twin — found live: 489 foreign rows + a bogus R1b)', async () => {
+    wireDetail({});
+    await getBatchDetail('detail-batch-1', ADMIN);
+    const call = db.inventory_logs.findMany.mock.calls[0][0] as { where: Record<string, unknown> };
+    expect(call.where.batchId).toBe('detail-batch-1');
+  });
   const ledgerRow = {
     id: 501,
     productId: 9,
