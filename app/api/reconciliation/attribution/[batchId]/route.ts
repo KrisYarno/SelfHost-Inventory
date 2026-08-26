@@ -154,6 +154,8 @@ function refusalResponse(err: unknown): NextResponse | null {
  *      — and the batch would end up stamped with an order that no longer exists.
  *      The lock order is frozen: external_orders target, then inventory_logs
  *      batch (CX-5). The two-column projection is D6's writer-only exception.
+ *      The id it READS BACK is the canonical one, and it is what the rest of this
+ *      handler uses — never the caller's spelling (CR-2, below).
  *   2. RUN THE CORE, which owns the eligibility ladder and the guarded write.
  *   3. RECORD, inside `onRecord`: the attempt row (attributed / manual) and the
  *      `INVENTORY_ATTRIBUTE` audit event. The audit event carries a NEWLY MINTED
@@ -197,11 +199,22 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
           throw new AppError('unknown order', 'NOT_FOUND', 404);
         }
 
+        // THE CANONICAL ID IS THE ONE THE LOCK READ BACK (CR-2). `external_orders.id`
+        // is `utf8mb4_unicode_ci`, so the lookup above matches case-INSENSITIVELY:
+        // `ORD-A` finds the row stored as `ord-a`. Everything downstream of this
+        // point is JavaScript string identity — the report's order map, the core's
+        // stamp `Set`, the same-id short circuit, the R2b target comparison — so
+        // carrying the caller's spelling stamped the ledger with an id no later
+        // read could match, and the next report said "order missing" about an
+        // order that is right there. The lock is still ASKED with what the caller
+        // typed (the collation is what resolves it); it is the ANSWER that travels.
+        const orderRecordId = order.id;
+
         return attributeBatch(
           tx,
           {
             batchId,
-            orderRecordId: body.orderRecordId,
+            orderRecordId,
             expectPreviousOrderRecordId: body.expectPreviousOrderRecordId,
             reason,
             actorUserId: user.id,
@@ -214,7 +227,7 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
               evidence: 'manual',
               source: 'manual',
               actorUserId: user.id,
-              orderRecordId: body.orderRecordId,
+              orderRecordId,
               previousOrderRecordId: ctx.previousOrderRecordId,
               details: {
                 rowCount: ctx.rowCount,
@@ -230,7 +243,7 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
               entityId: batchId,
               action: `Attributed outbound batch ${batchId} to order ${order.orderNumber}`,
               details: {
-                orderRecordId: body.orderRecordId,
+                orderRecordId,
                 previousOrderRecordId: ctx.previousOrderRecordId,
                 reason,
                 rowCount: ctx.rowCount,

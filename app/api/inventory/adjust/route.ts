@@ -46,7 +46,23 @@ export const POST = apiHandler(async (request: NextRequest) => {
   }
 
   const body = AdjustWithIntentSchema.parse(rawBody);
-  const autoAddForTransfer = rawBody?.autoAddForTransfer === true;
+
+  // CR-3: the auto-add flag is PARSED now, not read off the raw body. It carries
+  // two consequences an approved caller must not be able to assert freely — the
+  // INVENTORY_TRANSFER_AUTO_ADD actionType, and the suppression of the live
+  // attribution attempt below — so it is a typed server contract with one
+  // cross-field rule: an auto-add ADDS the shortfall a transfer needs. A
+  // negative delta carrying it removed stock, filed a false "transfer auto-add"
+  // audit event, and recorded no attempt at all. Refused at the route (house
+  // rule 1 keeps `.refine` off the object schema), BEFORE any write.
+  const autoAddForTransfer = body.autoAddForTransfer === true;
+  if (autoAddForTransfer && body.delta < 0) {
+    throw new AppError(
+      "auto-add-for-transfer is an ADD — a negative delta cannot carry it",
+      "VALIDATION_ERROR",
+      400
+    );
+  }
 
   // T7 mapping table, applied once: `order` -> the resolved order id and NO
   // reason; `damage-loss` -> reasonCode DAMAGE and no order; `other` (also the

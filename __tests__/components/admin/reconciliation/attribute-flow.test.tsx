@@ -69,6 +69,7 @@ function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
     canAttribute: true,
     attributeLock: null,
     fulfilledAgainst: null,
+    fulfillmentTargetMissing: false,
     ...over,
   };
 }
@@ -98,7 +99,11 @@ function makeDetail(over: Partial<BatchDetail> = {}): BatchDetail {
     ],
     auditEvent: null,
     attempts: [],
+    attemptsTruncated: false,
+    attemptsCount: 0,
     attributionEvents: [],
+    attributionEventsTruncated: false,
+    attributionEventsCount: 0,
     derived: null,
     ledgerRowsTruncated: false,
     ...over,

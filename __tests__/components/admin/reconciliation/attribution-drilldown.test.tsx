@@ -48,6 +48,7 @@ function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
     canAttribute: true,
     attributeLock: null,
     fulfilledAgainst: null,
+    fulfillmentTargetMissing: false,
     ...over,
   };
 }
@@ -68,10 +69,38 @@ function makeDetail(over: Partial<BatchDetail> = {}): BatchDetail {
     ],
     auditEvent: null,
     attempts: [],
+    attemptsTruncated: false,
+    attemptsCount: 0,
     attributionEvents: [],
+    attributionEventsTruncated: false,
+    attributionEventsCount: 0,
     derived: null,
     ledgerRowsTruncated: false,
     ...over,
+  };
+}
+
+function attemptRow(id: number): BatchDetail["attempts"][number] {
+  return {
+    id,
+    attemptedAt: "2026-08-20T10:00:00.000Z",
+    outcome: "declined",
+    evidence: null,
+    reason: "unmatched",
+    source: "live-deduct",
+    actor: null,
+    orderRecordId: null,
+    previousOrderRecordId: null,
+    details: null,
+  };
+}
+
+function attributionRow(id: number): BatchDetail["attributionEvents"][number] {
+  return {
+    id,
+    createdAt: "2026-08-20T10:00:00.000Z",
+    actor: null,
+    details: { orderRecordId: "ord-1", previousOrderRecordId: null, reason: null, rowCount: 1 },
   };
 }
 
@@ -162,6 +191,65 @@ it("says nothing about truncation when the whole batch is on screen", () => {
   );
 
   expect(screen.queryByTestId("drilldown-ledger-truncated")).toBeNull();
+  expect(screen.queryByTestId("drilldown-attempts-truncated")).toBeNull();
+  expect(screen.queryByTestId("drilldown-attribution-events-truncated")).toBeNull();
+});
+
+// CR-4: attempts are append-only and manual attributions accumulate, so both
+// lists are now the NEWEST page of a history that can be longer. A short list
+// read as a complete one is the same class of untruth the ledger bound closed.
+it("says when the attempt list is only the newest page, and of how many", () => {
+  setDetail(
+    makeDetail({
+      attempts: [attemptRow(3), attemptRow(2)],
+      attemptsTruncated: true,
+      attemptsCount: 137,
+    }),
+  );
+
+  render(
+    <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
+  );
+
+  expect(screen.getByTestId("drilldown-attempts-truncated")).toHaveTextContent(
+    "showing the 2 most recent of 137 attempts",
+  );
+});
+
+it("says the same about the manual-attribution list", () => {
+  setDetail(
+    makeDetail({
+      attributionEvents: [attributionRow(9)],
+      attributionEventsTruncated: true,
+      attributionEventsCount: 44,
+    }),
+  );
+
+  render(
+    <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
+  );
+
+  expect(screen.getByTestId("drilldown-attribution-events-truncated")).toHaveTextContent(
+    "showing the 1 most recent of 44 manual attributions",
+  );
+});
+
+// CR-1: this sheet is what an admin reads BEFORE deciding, so a control that
+// vanished without a word is exactly the wrong place for the silence.
+it("says the fulfillment target is gone rather than dropping the control silently", () => {
+  render(
+    <AttributionDrilldown
+      row={makeRow({ canAttribute: false, fulfillmentTargetMissing: true })}
+      open
+      onOpenChange={jest.fn()}
+      onAttribute={jest.fn()}
+    />,
+  );
+
+  expect(screen.getByTestId("drilldown-target-missing")).toHaveTextContent(
+    "fulfillment target missing — the named order no longer exists",
+  );
+  expect(screen.queryByTestId("attribute-drilldown-batch-1")).toBeNull();
 });
 
 it("offers the correction only where the server would accept it", async () => {

@@ -64,10 +64,19 @@ export const InventoryAdjustmentSchema = z.object({
  * `reasonCode` is still INHERITED here and that is deliberate: the adjust route
  * REFUSES it explicitly (400) before parsing, so the refusal is a stated
  * outcome rather than zod's silent strip. Pinned at the route, per the pack.
+ *
+ * `autoAddForTransfer` is PARSED here (CR-3). It used to be read straight off
+ * the raw JSON, outside zod — an unvalidated, client-controlled flag on a
+ * stock-writing route whose effects are an alternate audit actionType AND the
+ * suppression of the live attribution attempt. The route enforces its one
+ * cross-field rule (an auto-add is an ADD, so `delta > 0`) as an ordinary 400,
+ * because a `.refine` at the object level would hide `.shape` from the MCP
+ * adapter (house rule 1).
  */
 export const AdjustWithIntentSchema = InventoryAdjustmentSchema.extend({
   intent: DeductionIntentSchema.optional(),
   selectedExternalOrderId: selectedExternalOrderId.optional(),
+  autoAddForTransfer: z.boolean().optional(),
 });
 
 export const BatchInventoryAdjustmentSchema = z.object({

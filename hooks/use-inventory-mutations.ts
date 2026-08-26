@@ -69,7 +69,10 @@ export interface AdjustInput {
   // W2-1: an order id for the `order` intent. Resolved and membership-checked
   // server-side — sending it is a claim, never a fact.
   selectedExternalOrderId?: string;
-  autoAddForTransfer?: boolean; // transfer auto-add audit flag (route reads it outside zod)
+  // CR-3: the transfer auto-add flag. PARSED server-side now (it was read off
+  // the raw body, outside zod), and the route refuses it on a negative delta
+  // with a 400 — an auto-add ADDS the shortfall a transfer needs.
+  autoAddForTransfer?: boolean;
 }
 // stock-in-dialog sends { productId, locationId, quantity, orderNumber, notes }.
 export interface StockInInput {

@@ -10,12 +10,17 @@
  *   - THE LEDGER ROWS: what actually moved, and which order id each row carries.
  *   - THE AUDIT EVENT: the operator's own free text, under the producer's own
  *     label — it is admin-visible input, not a fact the system derived.
- *   - THE ATTEMPTS: what was RECORDED live, in order.
+ *   - THE ATTEMPTS: what was RECORDED live, newest first.
  *   - THE ATTRIBUTION EVENTS: manual corrections, with their reasons.
  *
  * And when no attempt was ever recorded, the DERIVED sentence — labelled as
  * derived, with its rule id, so nobody reads a read-time computation as
  * something the pipeline said at the time.
+ *
+ * EVERY LIST HERE IS A PAGE, and every one of them says so when it is (OC-8 for
+ * the ledger, CR-4 for the two append-only histories). The producer decides the
+ * bound and hands over the total; this file only renders the sentence. A short
+ * list silently read as a complete record is the untruth these lines exist for.
  */
 
 import {
@@ -29,7 +34,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useBatchDetail } from "@/hooks/use-admin";
 import type { AttributionRow } from "@/lib/reconciliation/attribution";
-import { fulfilledAgainstCopy } from "./attribution-row";
+import { FULFILLMENT_TARGET_MISSING_COPY, fulfilledAgainstCopy } from "./attribution-row";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -66,6 +71,17 @@ export function AttributionDrilldown({
           {row.fulfilledAgainst !== null && (
             <p className="text-body-sm text-muted-foreground">
               {fulfilledAgainstCopy(row.fulfilledAgainst)}
+            </p>
+          )}
+
+          {/* CR-1: the R2b lock names an order a sync deleted, so the control
+              below cannot render. This is the sentence that says why. */}
+          {row.fulfillmentTargetMissing && (
+            <p
+              className="text-body-sm text-muted-foreground"
+              data-testid="drilldown-target-missing"
+            >
+              {FULFILLMENT_TARGET_MISSING_COPY}
             </p>
           )}
 
@@ -144,6 +160,18 @@ export function AttributionDrilldown({
                     ))}
                   </ul>
                 )}
+                {/* CR-4: attempts are APPEND-ONLY, so this list is the newest
+                    page of a history that can be longer. The producer bounds it
+                    and counts it; saying so is what stops a short list being
+                    read as the whole record. */}
+                {data.attemptsTruncated && (
+                  <p
+                    className="text-body-sm text-muted-foreground"
+                    data-testid="drilldown-attempts-truncated"
+                  >
+                    showing the {data.attempts.length} most recent of {data.attemptsCount} attempts
+                  </p>
+                )}
               </Section>
 
               <Section title="Manual attributions">
@@ -163,6 +191,15 @@ export function AttributionDrilldown({
                       </li>
                     ))}
                   </ul>
+                )}
+                {data.attributionEventsTruncated && (
+                  <p
+                    className="text-body-sm text-muted-foreground"
+                    data-testid="drilldown-attribution-events-truncated"
+                  >
+                    showing the {data.attributionEvents.length} most recent of{" "}
+                    {data.attributionEventsCount} manual attributions
+                  </p>
                 )}
               </Section>
 

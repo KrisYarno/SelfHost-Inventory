@@ -262,10 +262,59 @@ describe("adjust route — the ATTEMPT row, and the two cases that write none", 
     expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
   });
 
-  it("a transfer AUTO-ADD writes no attempt row either, even on a negative delta", async () => {
-    const tx = await adjustAttempt({ autoAddForTransfer: true });
+  it("a transfer AUTO-ADD writes no attempt row either (it is an ADD — a positive delta)", async () => {
+    const tx = await adjustAttempt({ delta: 4, autoAddForTransfer: true });
 
     expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
+  });
+
+  // CR-3: the flag used to be read off the RAW body, outside zod, and its only
+  // effect on a NEGATIVE delta was to suppress the attempt row. So an approved,
+  // CSRF-bearing caller could remove stock, file it as a "transfer auto-add",
+  // and leave the attribution report with no record that the question was ever
+  // asked. It is a parsed field now, and the combination is refused outright.
+  it("REFUSES a NEGATIVE delta carrying autoAddForTransfer (400) and writes nothing", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    await expect(
+      ADJUST(
+        post("http://x/api/inventory/adjust", {
+          productId: 5,
+          locationId: 2,
+          delta: -5,
+          autoAddForTransfer: true,
+        })
+      )
+    ).rejects.toMatchObject({
+      message: "auto-add-for-transfer is an ADD — a negative delta cannot carry it",
+      code: "VALIDATION_ERROR",
+      statusCode: 400,
+    });
+
+    // Refused BEFORE any write opens.
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(tx.inventory_logs.create).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+    expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES a non-boolean autoAddForTransfer at the parse (it is a server contract now)", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    await expect(
+      ADJUST(
+        post("http://x/api/inventory/adjust", {
+          productId: 5,
+          locationId: 2,
+          delta: 4,
+          autoAddForTransfer: "yes",
+        })
+      )
+    ).rejects.toThrow();
+
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 });
 
@@ -511,5 +560,29 @@ describe("AdjustWithIntentSchema — the chip is optional and closed-vocabulary"
     expect(
       AdjustWithIntentSchema.safeParse({ ...base, selectedExternalOrderId: "" }).success
     ).toBe(false);
+  });
+
+  // CR-3: the auto-add flag is a SEMANTIC server contract, not an unparsed hint
+  // read off the raw body. Zod strips unknown keys, so a schema that did not
+  // carry it left the field entirely unvalidated on a stock-writing route.
+  it("carries autoAddForTransfer as a parsed optional boolean", () => {
+    expect(AdjustWithIntentSchema.safeParse({ ...base, autoAddForTransfer: true }).success).toBe(
+      true
+    );
+    expect(AdjustWithIntentSchema.safeParse({ ...base, autoAddForTransfer: false }).success).toBe(
+      true
+    );
+    expect(AdjustWithIntentSchema.parse({ ...base }).autoAddForTransfer).toBeUndefined();
+    expect(AdjustWithIntentSchema.safeParse({ ...base, autoAddForTransfer: "yes" }).success).toBe(
+      false
+    );
+    expect(AdjustWithIntentSchema.safeParse({ ...base, autoAddForTransfer: 1 }).success).toBe(
+      false
+    );
+    // It survives the parse — a stripped field is exactly the silent no-op the
+    // truthful-data rule exists to prevent.
+    expect(
+      AdjustWithIntentSchema.parse({ ...base, autoAddForTransfer: true }).autoAddForTransfer
+    ).toBe(true);
   });
 });

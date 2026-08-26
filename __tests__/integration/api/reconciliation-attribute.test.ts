@@ -236,6 +236,28 @@ describe('POST /api/reconciliation/attribution/[batchId] — the route surface',
     expect(trace).toEqual(['lock order FOR SHARE']);
   });
 
+  // CR-1: the READ side now refuses to offer an R2b completion whose named order
+  // is gone (`fulfillmentTargetMissing`, no lock, no control), so this 404 stops
+  // being the thing an admin discovers by clicking. It stays EXACTLY as it is —
+  // it is the backstop for the window between the report read and the submit,
+  // and for any client that submits an id the UI never offered.
+  it('the 404 remains the BACKSTOP behind the suppressed control (CR-1)', async () => {
+    const { tx, trace } = makeTx({
+      order: null,
+      locked: rows(),
+      auditEvents: [fulfillmentEvent('ord-9')],
+    });
+    const res = await attribute(CLEAN_BODY);
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'unknown order', code: 'NOT_FOUND' });
+    // Nothing was locked, read or written beyond the target lookup itself.
+    expect(trace).toEqual(['lock order FOR SHARE']);
+    expect(tx.inventory_logs.updateMany).not.toHaveBeenCalled();
+    expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+  });
+
   it('carries the literal recordChange( in the handler (the coverage gate reads source)', () => {
     const source = fs.readFileSync(
       path.join(process.cwd(), 'app/api/reconciliation/attribution/[batchId]/route.ts'),
@@ -761,6 +783,60 @@ describe('the write path', () => {
     expect(
       (tx.orderAttributionAttempt.create as unknown as jest.Mock).mock.calls[0][0].data.details,
     ).toEqual({ rowCount: 2, completedFulfillment: true });
+  });
+
+  // CR-2: `external_orders.id` is `utf8mb4_unicode_ci`, so the FOR SHARE lock
+  // matches CASE-INSENSITIVELY — `ORD-9` finds the row stored as `ord-9`. The
+  // route used to lock through that comparison and then pass the CALLER'S
+  // SPELLING onward, so the ledger was stamped `ORD-9`, the attempt row recorded
+  // `ORD-9`, and the next report — whose order map and stamp set are JavaScript,
+  // where the two strings are simply different — said "order missing". The
+  // canonical value is the one the lock READ BACK, and it is what travels.
+  //
+  // (The identity contract itself — binary columns vs. an ASCII constraint, and
+  // repairing existing variant spellings — is REGISTERED, not this fix.)
+  it('CANONICALIZES the target to the id the FOR SHARE lock read back, never the caller spelling (CR-2)', async () => {
+    const { tx } = makeTx({});
+    const res = await attribute({
+      orderRecordId: 'ORD-9',
+      expectPreviousOrderRecordId: null,
+    });
+
+    expect(res.status).toBe(200);
+    // The lock is still asked with what the caller typed — the collation is what
+    // resolves it, and asking with a normalised guess would be inventing an id.
+    const orderLock = (tx.$queryRaw as unknown as jest.Mock).mock
+      .calls[0][0] as unknown as Prisma.Sql;
+    expect(orderLock.values).toEqual(['ORD-9']);
+
+    // Everything DOWNSTREAM of the lock carries the canonical id.
+    expect(await res.json()).toMatchObject({ orderRecordId: 'ord-9' });
+    expect(
+      (tx.inventory_logs.updateMany as unknown as jest.Mock).mock.calls[0][0].data,
+    ).toEqual({ orderRecordId: 'ord-9' });
+    expect(
+      (tx.orderAttributionAttempt.create as unknown as jest.Mock).mock.calls[0][0].data,
+    ).toMatchObject({ orderRecordId: 'ord-9' });
+    expect(
+      (tx.auditLog.create as unknown as jest.Mock).mock.calls[0][0].data.details,
+    ).toMatchObject({ orderRecordId: 'ord-9' });
+  });
+
+  it('a case-variant target still COMPLETES an R2b stamp, because both sides are canonical (CR-2)', async () => {
+    const { tx } = makeTx({ locked: rows(), auditEvents: [fulfillmentEvent('ord-9')] });
+    const res = await attribute({
+      orderRecordId: 'Ord-9',
+      expectPreviousOrderRecordId: null,
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      orderRecordId: 'ord-9',
+      completedFulfillment: true,
+    });
+    expect(
+      (tx.inventory_logs.updateMany as unknown as jest.Mock).mock.calls[0][0].data,
+    ).toEqual({ orderRecordId: 'ord-9' });
   });
 
   it('R2b completion reads the event ENTITY when details carry no orderId', async () => {

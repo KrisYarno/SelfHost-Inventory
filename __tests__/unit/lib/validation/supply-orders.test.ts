@@ -585,4 +585,31 @@ describe('assertAnalyticsWindow', () => {
       z.ZodError,
     );
   });
+
+  // CR-6: the producer materialises every matching header, monetary exception
+  // and receipt row into JavaScript arrays, so an unbounded window let an
+  // approved caller ask for the whole database lifetime and take application
+  // memory proportional to all of it. The house cap is the same 366 inclusive
+  // day-keys the reconciliation report and the assistant's windows already use.
+  it('caps the span at 366 inclusive day-keys — the house bound', () => {
+    // 366 keys (a 365-day span) is the widest legal window.
+    expect(() => assertAnalyticsWindow({ from: '2026-01-01', to: '2027-01-01' })).not.toThrow();
+    // 367 keys is not.
+    expect(() => assertAnalyticsWindow({ from: '2026-01-01', to: '2027-01-02' })).toThrow(
+      z.ZodError,
+    );
+  });
+
+  it('names the bound in the sentence the client renders', () => {
+    try {
+      assertAnalyticsWindow({ from: '2020-01-01', to: '2026-08-01' });
+      throw new Error('expected a ZodError');
+    } catch (error) {
+      expect(error).toBeInstanceOf(z.ZodError);
+      expect((error as z.ZodError).issues[0].message).toBe(
+        'the window may span at most 366 days',
+      );
+      expect((error as z.ZodError).issues[0].path).toEqual(['to']);
+    }
+  });
 });

@@ -127,11 +127,43 @@ describe('GET /api/reconciliation/attribution', () => {
       how: { classKey: 'attributed·selected' },
       order: { orderNumber: '#1001' },
       actor: { id: 7, username: 'kris' },
+      fulfillmentTargetMissing: false,
     });
     expect(body.coverage.orderFilterScope).toBe('all orders');
     expect(body.count).toBe(1);
     expect(body.moreCount).toBe(0);
     expect(body.nextCursor).toBeNull();
+  });
+
+  // CR-1: a deleted R2b target, on the wire. The report's own batched order
+  // lookup is what knows, so the row arrives with the fact and without the lock.
+  it('a deleted R2b target reaches the client as a stated fact, never as a lock', async () => {
+    db.$queryRaw.mockResolvedValue([
+      summaryRow({
+        distinctStamps: 0,
+        firstStamp: null,
+        lastStamp: null,
+        unstampedRows: 2,
+        attemptId: null,
+        attemptOutcome: null,
+        attemptEvidence: null,
+        attemptSource: null,
+        attemptActorUserId: null,
+        attemptOrderRecordId: null,
+        auditId: 6,
+        auditActionType: 'EXTERNAL_ORDER_FULFILLMENT',
+        auditEntityId: 'ord-gone',
+      }),
+    ] as never);
+    db.externalOrder.findMany.mockResolvedValue([] as never);
+
+    const res = await reportGET(reportRequest('from=2026-08-01&to=2026-08-31'));
+    const body = await res.json();
+
+    expect(body.rows[0].fulfillmentTargetMissing).toBe(true);
+    expect(body.rows[0].canAttribute).toBe(false);
+    expect(body.rows[0].attributeLock).toBeNull();
+    expect(typeof body.definitions.fulfillmentTargetMissing).toBe('string');
   });
 
   it('400s when `from` is after `to`', async () => {
@@ -235,11 +267,17 @@ describe('GET /api/reconciliation/attribution/[batchId]', () => {
 
     // `ledgerRowsTruncated` joined the envelope with the bounded ledger read
     // (OC-8): the drill-down list is now a PAGE of the batch, and the flag is
-    // what stops a short list being read as a complete one.
+    // what stops a short list being read as a complete one. CR-4 bounded the two
+    // APPEND-ONLY histories the same way, so each of those carries the same pair
+    // — the flag and the total it is a page of.
     expect(Object.keys(body).sort()).toEqual(
       [
         'attempts',
+        'attemptsCount',
+        'attemptsTruncated',
         'attributionEvents',
+        'attributionEventsCount',
+        'attributionEventsTruncated',
         'auditEvent',
         'batch',
         'derived',
@@ -250,6 +288,10 @@ describe('GET /api/reconciliation/attribution/[batchId]', () => {
     expect(body.batch.batchId).toBe('batch-1');
     expect(body.ledgerRows[0].productName).toBe('Widget');
     expect(body.ledgerRowsTruncated).toBe(false);
+    expect(body.attemptsTruncated).toBe(false);
+    expect(body.attemptsCount).toBe(0);
+    expect(body.attributionEventsTruncated).toBe(false);
+    expect(body.attributionEventsCount).toBe(0);
   });
 
   it('404s an unknown batch with the pack envelope', async () => {

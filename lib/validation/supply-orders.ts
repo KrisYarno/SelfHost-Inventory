@@ -357,7 +357,22 @@ export function assertRealCalendarDate(value: string, field: string): void {
   }
 }
 
-/** Both ends must be real days, and the window must run forwards. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The house span cap, in INCLUSIVE day-keys — the same bound the reconciliation
+ * report route and the assistant's date windows already enforce (CR-6).
+ *
+ * It is what BOUNDS this read. `lib/analytics/supply-orders.ts` materialises
+ * every matching header, monetary exception and receipt row into JavaScript
+ * arrays, so without a maximum span an approved caller could ask for the whole
+ * database lifetime and force application memory proportional to all of
+ * warehouse history. The hub's own window is 90 days by default and its two date
+ * inputs are free-form, so this is a bound on the API, not on the card.
+ */
+const MAX_ANALYTICS_SPAN_DAYS = 366;
+
+/** Both ends must be real days, the window must run forwards, and it is capped. */
 export function assertAnalyticsWindow(query: SupplyOrdersAnalyticsQuery): void {
   assertRealCalendarDate(query.from, 'from');
   assertRealCalendarDate(query.to, 'to');
@@ -365,6 +380,15 @@ export function assertAnalyticsWindow(query: SupplyOrdersAnalyticsQuery): void {
   // comparison (the same property `lib/analytics/date-grain.ts` relies on).
   if (query.from > query.to) {
     refuse(['to'], '`to` must not be before `from`');
+  }
+  // N inclusive keys span (N-1) days, so 366 keys pass and 367 do not — the
+  // arithmetic the attribution route already uses, mirrored exactly.
+  const spanDays =
+    (Date.parse(`${query.to}T00:00:00.000Z`) - Date.parse(`${query.from}T00:00:00.000Z`)) /
+      DAY_MS +
+    1;
+  if (spanDays > MAX_ANALYTICS_SPAN_DAYS) {
+    refuse(['to'], `the window may span at most ${MAX_ANALYTICS_SPAN_DAYS} days`);
   }
 }
 

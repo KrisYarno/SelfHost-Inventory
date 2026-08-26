@@ -27,6 +27,15 @@ export function fulfilledAgainstCopy(fulfilled: NonNullable<Row["fulfilledAgains
   return `fulfilled against #${fulfilled.orderNumber ?? fulfilled.orderRecordId} — change via unfulfill/refulfill`;
 }
 
+/**
+ * The R2b lock's order is gone (CR-1). Without this, the row simply loses its
+ * Attribute… button and the admin is left to guess why one unattributed
+ * fulfillment batch can be corrected and the one beside it cannot. The producer
+ * decides the fact; this is the sentence for it.
+ */
+export const FULFILLMENT_TARGET_MISSING_COPY =
+  "fulfillment target missing — the named order no longer exists";
+
 /** The operator, or the word for "no human was in this loop". */
 function actorLabel(row: Row): string {
   return row.actor ? row.actor.username : "pipeline";
@@ -75,6 +84,13 @@ function FulfilledNote({ row }: { row: Row }) {
   );
 }
 
+function MissingTargetNote({ row }: { row: Row }) {
+  if (!row.fulfillmentTargetMissing) return null;
+  return (
+    <p className="text-body-sm text-muted-foreground">{FULFILLMENT_TARGET_MISSING_COPY}</p>
+  );
+}
+
 export function AttributionTableRow({
   row,
   onOpen,
@@ -103,6 +119,7 @@ export function AttributionTableRow({
       <TableCell>
         <p>{orderLabel(row)}</p>
         <FulfilledNote row={row} />
+        <MissingTargetNote row={row} />
       </TableCell>
       <TableCell className="text-right">
         <AttributeButton row={row} onAttribute={onAttribute} testId={`attribute-${row.batchId}`} />
@@ -154,6 +171,7 @@ export function AttributionMobileCard({
           </div>
         </dl>
         <FulfilledNote row={row} />
+        <MissingTargetNote row={row} />
       </button>
       <div className="mt-3">
         <AttributeButton

@@ -269,9 +269,63 @@ describe('the read shape', () => {
 
   it('carries NO id list — the window is the bound, never an enumeration of batches', async () => {
     await getAttributionReport(INPUT, ADMIN);
+    const statement = db.$queryRaw.mock.calls[0][0] as unknown as {
+      sql: string;
+      values: unknown[];
+    };
+    expect(statement.sql).not.toContain('b.batchId IN (');
+    // The candidate preselection below is a SUBQUERY, not an enumeration: no
+    // batch id is ever materialised into SQL. Everything this statement binds is
+    // a window bound, a logType of the population predicate, or a fulfillment
+    // action type — the closed vocabularies, never a row identity.
+    expect(statement.sql).toContain('l.batchId IN (SELECT DISTINCT l2.batchId');
+    const bound = new Set(
+      statement.values.filter((value): value is string => typeof value === 'string'),
+    );
+    expect(Array.from(bound).sort()).toEqual([
+      'ADJUSTMENT',
+      'EXTERNAL_ORDER_FULFILLMENT',
+      'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
+      'SALE',
+    ]);
+  });
+
+  // CR-5: the HAVING alone made this read GROUP THE WHOLE POPULATION and then
+  // throw away every batch outside the window — a 14-day report paid for the
+  // entire ledger's history. The overview's candidate preselection (OC-3, then
+  // QA-3) is the exact shape that bounds the scan without truncating a selected
+  // batch: it names the batches with at least one population row at or after
+  // `start`, and every row of a named batch is still grouped, so no batch can
+  // lose a row and mis-report its MIN(changeTime), its stamps or its units.
+  it('preselects candidate batches from population rows in the window (CR-5)', async () => {
+    await getAttributionReport(INPUT, ADMIN);
     const sql = rawSql();
-    expect(sql).not.toContain('b.batchId IN (');
-    expect(sql).not.toContain('l.batchId IN (');
+
+    expect(sql).toContain(
+      'l.batchId IN (SELECT DISTINCT l2.batchId FROM inventory_logs l2 WHERE',
+    );
+    // The subquery carries the POPULATION predicate too — a transfer leg at the
+    // window's edge must not nominate a batch this report cannot speak about.
+    expect(sql).toContain('l2.logType IN (?,?)');
+    expect(sql).toContain('l2.delta < 0');
+    expect(sql).toContain('l2.changeTime >= ?');
+    // The HAVING stays: preselection WIDENS, and the exactness check is still
+    // the batch's own time axis.
+    expect(sql).toContain('HAVING MIN(l.changeTime) >= ?');
+    expect(sql).toContain('MIN(l.changeTime) < ?');
+    // Still ONE statement.
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('the preselection has NO upper bound — no ledger row exists after now (QA-3)', async () => {
+    await getAttributionReport(INPUT, ADMIN);
+    const sql = rawSql();
+    const subquery = sql.slice(
+      sql.indexOf('SELECT DISTINCT l2.batchId'),
+      sql.indexOf('GROUP BY l.batchId'),
+    );
+    expect(subquery).toContain('l2.changeTime >= ?');
+    expect(subquery).not.toContain('l2.changeTime <');
   });
 
   it('never selects the audit `details` blob — only the typed facts the rules read (D6)', async () => {
@@ -757,9 +811,20 @@ describe('coverage', () => {
 // ---------------------------------------------------------------------------
 
 describe('the manual-attribution predicate', () => {
-  async function oneRow(over: Partial<SqlRow>): Promise<AttributionReport> {
+  /**
+   * The order book this page's batched lookup finds. `ord-7` is here by default
+   * because the R2b fixtures below LOCK to it: a lock names an order the picker
+   * will submit, so from CR-1 onward the row is only allowed to offer one when
+   * that order still exists.
+   */
+  const ORDER_BOOK = [orderRow(), orderRow({ id: 'ord-7', orderNumber: '#1007' })];
+
+  async function oneRow(
+    over: Partial<SqlRow>,
+    orders: Array<Record<string, unknown>> = ORDER_BOOK,
+  ): Promise<AttributionReport> {
     db.$queryRaw.mockResolvedValue([summaryRow(over)] as never);
-    db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
+    db.externalOrder.findMany.mockResolvedValue(orders as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
     return getAttributionReport(INPUT, ADMIN);
   }
@@ -769,6 +834,7 @@ describe('the manual-attribution predicate', () => {
     expect(report.rows[0].canAttribute).toBe(true);
     expect(report.rows[0].attributeLock).toBeNull();
     expect(report.rows[0].fulfilledAgainst).toBeNull();
+    expect(report.rows[0].fulfillmentTargetMissing).toBe(false);
   });
 
   it('a STAMPED fulfillment cannot — it names the order to change it through', async () => {
@@ -803,6 +869,65 @@ describe('the manual-attribution predicate', () => {
       orderRecordId: 'ord-7',
       reason: 'r2b-completion',
     });
+    expect(report.rows[0].fulfillmentTargetMissing).toBe(false);
+  });
+
+  // CR-1: the lock names an id the picker submits and the POST looks up FOR
+  // SHARE. The order id is a SOFT reference, so a sync can delete the order a
+  // historical fulfillment event named — and the row went on offering
+  // "Attribute…", locking the admin to that id, with a guaranteed 404 at the end
+  // of it. The report loads its orders for the STAMPS; the fulfillment target
+  // now rides that same batched lookup, and a target that is gone is SAID rather
+  // than offered.
+  it('an R2b batch whose target order was DELETED offers nothing, and says why (CR-1)', async () => {
+    const report = await oneRow(
+      {
+        auditId: 6,
+        auditActionType: 'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
+        auditEntityId: 'ord-7',
+      },
+      [orderRow()], // ord-1 exists; ord-7 does not
+    );
+
+    expect(report.rows[0].how.ruleId).toBe('R2b');
+    expect(report.rows[0].fulfillmentTargetMissing).toBe(true);
+    expect(report.rows[0].canAttribute).toBe(false);
+    expect(report.rows[0].attributeLock).toBeNull();
+  });
+
+  it('the fulfillment target rides the SAME batched order lookup as the stamps (CR-1)', async () => {
+    await oneRow({
+      auditId: 6,
+      auditActionType: 'EXTERNAL_ORDER_FULFILLMENT',
+      auditOrderId: 'ord-7',
+    });
+
+    // Still ONE findMany for the page — the id joins the list, it does not buy
+    // a statement of its own.
+    expect(db.externalOrder.findMany).toHaveBeenCalledTimes(1);
+    expect(db.externalOrder.findMany.mock.calls[0][0]).toMatchObject({
+      where: { id: { in: ['ord-7'] } },
+    });
+  });
+
+  it('a STAMPED fulfillment is unaffected — the missing-target fact is about the R2b LOCK (CR-1)', async () => {
+    const report = await oneRow(
+      {
+        distinctStamps: 1,
+        firstStamp: 'ord-1',
+        lastStamp: 'ord-1',
+        unstampedRows: 0,
+        auditId: 6,
+        auditActionType: 'EXTERNAL_ORDER_FULFILLMENT',
+        auditOrderId: 'ord-1',
+      },
+      [], // even the stamp's own order is gone
+    );
+
+    // The stamp says so through `order`, which is the fact that belongs to it.
+    expect(report.rows[0].order).toEqual({ orderMissing: true });
+    expect(report.rows[0].fulfillmentTargetMissing).toBe(false);
+    expect(report.rows[0].canAttribute).toBe(false);
   });
 
   it('more than fifty rows, or mixed stamps, cannot', async () => {
@@ -1081,21 +1206,14 @@ describe('getBatchDetail', () => {
     });
   });
 
-  it('the recorded attempt history rides, newest LAST, and drives the class', async () => {
+  // CR-4: the attempt array is READ NEWEST-FIRST and BOUNDED, so what the cap
+  // keeps is the recent history and the latest row is structurally attempts[0].
+  // Reading the latest as `attempts[attempts.length - 1]` off a capped
+  // oldest-first read would have classified the batch by its OLDEST attempt the
+  // moment the history crossed the bound.
+  it('the recorded attempt history rides NEWEST-FIRST, and the newest drives the class', async () => {
     wireDetail({
       attempts: [
-        {
-          id: 1,
-          attemptedAt: new Date('2026-08-10T12:00:00.000Z'),
-          outcome: 'declined',
-          evidence: null,
-          reason: 'unmatched',
-          source: 'live-deduct',
-          actorUserId: 7,
-          orderRecordId: null,
-          previousOrderRecordId: null,
-          details: null,
-        },
         {
           id: 2,
           attemptedAt: new Date('2026-08-11T12:00:00.000Z'),
@@ -1108,14 +1226,107 @@ describe('getBatchDetail', () => {
           previousOrderRecordId: null,
           details: { rowCount: 1 },
         },
+        {
+          id: 1,
+          attemptedAt: new Date('2026-08-10T12:00:00.000Z'),
+          outcome: 'declined',
+          evidence: null,
+          reason: 'unmatched',
+          source: 'live-deduct',
+          actorUserId: 7,
+          orderRecordId: null,
+          previousOrderRecordId: null,
+          details: null,
+        },
       ],
     });
 
     const detail = await getBatchDetail('batch-1', ADMIN);
 
-    expect(detail!.attempts).toHaveLength(2);
+    expect(detail!.attempts.map((attempt) => attempt.id)).toEqual([2, 1]);
     expect(detail!.batch.how.classKey).toBe('attributed·manual');
     expect(detail!.derived).toBeNull();
+
+    // The READ itself is newest-first — that is what makes the sentence above a
+    // structural property rather than a hope about array length.
+    expect(db.orderAttributionAttempt.findMany.mock.calls[0][0]).toMatchObject({
+      where: { batchId: 'batch-1' },
+      orderBy: [{ attemptedAt: 'desc' }, { id: 'desc' }],
+      take: 21,
+    });
+    expect(detail!.attemptsTruncated).toBe(false);
+    expect(detail!.attemptsCount).toBe(2);
+  });
+
+  // CR-4: attempts are APPEND-ONLY and manual attributions accumulate, so both
+  // arrays used to grow without bound — one detail response, one actor lookup
+  // and one browser render that got larger with every legitimate re-attribution.
+  it('bounds the attempt history at twenty and SAYS when it cut (CR-4)', async () => {
+    const attempts = Array.from({ length: 21 }, (_, i) => ({
+      id: 100 - i,
+      attemptedAt: new Date(Date.UTC(2026, 7, 21 - i, 12)),
+      outcome: 'declined',
+      evidence: null,
+      reason: 'unmatched',
+      source: 'live-deduct',
+      actorUserId: 7,
+      orderRecordId: null,
+      previousOrderRecordId: null,
+      details: null,
+    }));
+    wireDetail({ attempts });
+    db.orderAttributionAttempt.count.mockResolvedValue(137 as never);
+
+    const detail = await getBatchDetail('batch-1', ADMIN);
+
+    expect(detail!.attempts).toHaveLength(20);
+    // The NEWEST twenty, newest first.
+    expect(detail!.attempts[0].id).toBe(100);
+    expect(detail!.attemptsTruncated).toBe(true);
+    // The total is bought ONLY over the bound (the QA-1 aggregate's idiom).
+    expect(detail!.attemptsCount).toBe(137);
+    expect(db.orderAttributionAttempt.count.mock.calls[0][0]).toMatchObject({
+      where: { batchId: 'batch-1' },
+    });
+  });
+
+  it('bounds the manual-attribution history the same way (CR-4)', async () => {
+    const events = Array.from({ length: 21 }, (_, i) => ({
+      id: 200 - i,
+      createdAt: new Date(Date.UTC(2026, 7, 21 - i, 12)),
+      userId: 7,
+      details: { orderRecordId: 'ord-1', previousOrderRecordId: null, reason: null, rowCount: 1 },
+    }));
+    wireDetail({ attribution: events });
+    db.auditLog.count.mockResolvedValue(44 as never);
+
+    const detail = await getBatchDetail('batch-1', ADMIN);
+
+    expect(detail!.attributionEvents).toHaveLength(20);
+    expect(detail!.attributionEvents[0].id).toBe(200);
+    expect(detail!.attributionEventsTruncated).toBe(true);
+    expect(detail!.attributionEventsCount).toBe(44);
+    expect(db.auditLog.findMany.mock.calls.some((call) => {
+      const args = call[0] as { where?: { actionType?: string }; orderBy?: unknown; take?: number };
+      return (
+        args?.where?.actionType === 'INVENTORY_ATTRIBUTE' &&
+        args.take === 21 &&
+        JSON.stringify(args.orderBy) === JSON.stringify([{ createdAt: 'desc' }, { id: 'desc' }])
+      );
+    })).toBe(true);
+  });
+
+  it('inside the bounds, the counts are the arrays and cost NO extra statement (CR-4)', async () => {
+    wireDetail({});
+
+    const detail = await getBatchDetail('batch-1', ADMIN);
+
+    expect(detail!.attemptsTruncated).toBe(false);
+    expect(detail!.attemptsCount).toBe(0);
+    expect(detail!.attributionEventsTruncated).toBe(false);
+    expect(detail!.attributionEventsCount).toBe(0);
+    expect(db.orderAttributionAttempt.count).not.toHaveBeenCalled();
+    expect(db.auditLog.count).not.toHaveBeenCalled();
   });
 
   // OC-2: the drill-down's R0 used to read the action type off the EARLIEST audit
@@ -1284,6 +1495,53 @@ describe('getBatchDetail', () => {
     expect(detail!.batch.actor).toBeNull();
     expect(detail!.attempts[0].actor).toBeNull();
     expect(db.user.findMany).not.toHaveBeenCalled();
+  });
+
+  // CR-1, on the drill-down: this surface builds its row through the SAME
+  // buildRow, so the missing-target branch has to be reachable here too — and
+  // its order lookup has to hydrate the fulfillment target, not just the stamp.
+  function wireR2bDetail(orders: Array<Record<string, unknown>>) {
+    wireDetail({
+      audits: [
+        {
+          id: 6,
+          actionType: 'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
+          entityId: 'ord-7',
+          createdAt: new Date('2026-08-10T12:00:00.000Z'),
+          details: { orderId: 'ord-7' },
+        },
+      ],
+    });
+    db.inventory_logs.findMany.mockResolvedValue([
+      { ...ledgerRow, orderRecordId: null },
+    ] as never);
+    db.externalOrder.findMany.mockResolvedValue(orders as never);
+  }
+
+  it('the drill-down LOCKS an R2b batch whose target still exists (CR-1)', async () => {
+    wireR2bDetail([orderRow({ id: 'ord-7', orderNumber: '#1007' })]);
+
+    const detail = await getBatchDetail('batch-1', ADMIN);
+
+    expect(db.externalOrder.findMany.mock.calls[0][0]).toMatchObject({
+      where: { id: { in: ['ord-7'] } },
+    });
+    expect(detail!.batch.canAttribute).toBe(true);
+    expect(detail!.batch.attributeLock).toEqual({
+      orderRecordId: 'ord-7',
+      reason: 'r2b-completion',
+    });
+    expect(detail!.batch.fulfillmentTargetMissing).toBe(false);
+  });
+
+  it('the drill-down offers nothing when that target was DELETED (CR-1)', async () => {
+    wireR2bDetail([]);
+
+    const detail = await getBatchDetail('batch-1', ADMIN);
+
+    expect(detail!.batch.fulfillmentTargetMissing).toBe(true);
+    expect(detail!.batch.canAttribute).toBe(false);
+    expect(detail!.batch.attributeLock).toBeNull();
   });
 });
 

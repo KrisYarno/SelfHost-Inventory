@@ -80,6 +80,7 @@ function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
     canAttribute: true,
     attributeLock: null,
     fulfilledAgainst: null,
+    fulfillmentTargetMissing: false,
     ...over,
   };
 }
@@ -322,6 +323,44 @@ describe("rows", () => {
       "fulfilled against #1009 — change via unfulfill/refulfill",
     );
     expect(screen.queryByTestId("attribute-batch-1")).toBeNull();
+  });
+
+  // CR-1: a historical fulfillment event naming an order a sync later removed.
+  // The row used to offer "Attribute…", lock the admin to that id, and 404 on
+  // every submission. It says what happened instead — in BOTH presentations, so
+  // the mobile card is not the one that keeps offering it.
+  it("a fulfillment whose target order is gone says so instead of offering a button", () => {
+    setReport(
+      makeReport({
+        rows: [
+          makeRow({
+            canAttribute: false,
+            attributeLock: null,
+            fulfillmentTargetMissing: true,
+          }),
+        ],
+      }),
+    );
+    render(<AttributionTab />);
+
+    expect(screen.getByTestId("row-batch-1")).toHaveTextContent(
+      "fulfillment target missing — the named order no longer exists",
+    );
+    expect(screen.queryByTestId("attribute-batch-1")).toBeNull();
+
+    const cards = screen.getByTestId("attribution-cards");
+    expect(within(cards).getByTestId("card-batch-1")).toHaveTextContent(
+      "fulfillment target missing — the named order no longer exists",
+    );
+    expect(screen.queryByTestId("attribute-card-batch-1")).toBeNull();
+  });
+
+  it("says nothing about a missing target on an ordinary row", () => {
+    render(<AttributionTab />);
+
+    expect(screen.getByTestId("row-batch-1").textContent).not.toContain(
+      "fulfillment target missing",
+    );
   });
 
   it("an order the report could not read says so, and never renders an empty cell", () => {

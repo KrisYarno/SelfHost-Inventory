@@ -95,4 +95,19 @@ describe('GET /api/analytics/supply-orders', () => {
     expect(res.status).toBe(400);
     expect(mockProducer).not.toHaveBeenCalled();
   });
+
+  // CR-6: the producer materialises every matching header, exception and receipt
+  // row, so an unbounded window is application memory proportional to all of
+  // warehouse history. The 366-day house cap is what bounds this read.
+  it('400s a window wider than the 366-day span cap, and never reaches the producer', async () => {
+    const res = await analyticsGET(mkReq('?from=2020-01-01&to=2026-08-31'), {} as never);
+    expect(res.status).toBe(400);
+    expect(mockProducer).not.toHaveBeenCalled();
+  });
+
+  it('accepts the widest legal window (366 inclusive day-keys)', async () => {
+    const res = await analyticsGET(mkReq('?from=2026-01-01&to=2027-01-01'), {} as never);
+    expect(res.status).toBe(200);
+    expect(mockProducer).toHaveBeenCalledWith({ from: '2026-01-01', to: '2027-01-01' });
+  });
 });

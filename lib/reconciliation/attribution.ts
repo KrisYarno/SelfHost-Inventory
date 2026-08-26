@@ -20,10 +20,15 @@
  * budget for a report read is AT MOST FIVE, and the exclusion figures ride in
  * the same statement rather than buying one of their own.
  *
- * WHAT IT COSTS, said out loud: the summary CTE groups the whole population and
- * windows on `MIN(changeTime)`, because the window's axis IS the batch's first
- * row (spec §2.0). The 366-day span cap is what bounds the read; measured
- * wall-time on the dev prod-dump belongs to the wave close, not to a comment.
+ * WHAT IT COSTS, said out loud: the window's axis IS the batch's first row
+ * (spec §2.0), so the summary CTE windows on `MIN(changeTime)` in a HAVING —
+ * which on its own would group the WHOLE population and then discard everything
+ * older than the window (CR-5). What bounds the scan is the CANDIDATE
+ * PRESELECTION the overview established (OC-3 / QA-3), adopted here verbatim:
+ * only batches with at least one population row at or after `start` are grouped,
+ * and every row of a selected batch still is. The 366-day span cap bounds the
+ * window itself; measured wall-time on the dev prod-dump belongs to the wave
+ * close, not to a comment.
  *
  * PII (D6). Orders are projected through ONE frozen select and rebuilt field by
  * field — never spread — and `companyId` (the membership math) is stripped on
@@ -136,6 +141,13 @@ export type AttributionRow = {
   canAttribute: boolean;
   attributeLock: { orderRecordId: string; reason: 'r2b-completion' } | null;
   fulfilledAgainst: { orderRecordId: string; orderNumber: string | null } | null;
+  /**
+   * THE R2b TARGET IS GONE (CR-1). The fulfillment event names an order that no
+   * longer exists, so the only completion the core would accept is impossible.
+   * `canAttribute` is false and `attributeLock` is null for this row — this fact
+   * is what lets the surface say WHY instead of silently dropping the control.
+   */
+  fulfillmentTargetMissing: boolean;
 };
 
 export type AttributionTotals = {
@@ -199,6 +211,16 @@ export type BatchDetail = {
    * its order and `canAttribute` — describe the whole batch, not the page.
    */
   ledgerRowsTruncated: boolean;
+  /**
+   * Every attempt recorded against this batch, NEWEST FIRST, bounded at
+   * `DETAIL_HISTORY_LIMIT` (CR-4).
+   *
+   * Attempts are APPEND-ONLY by contract, so this array used to grow forever:
+   * one response, one actor lookup and one browser render that got bigger with
+   * every legitimate re-attribution. Newest-first is not a presentation choice —
+   * it is what makes the CAP keep the recent history and what makes "the latest
+   * attempt" (which decides the class) structurally `attempts[0]`.
+   */
   attempts: Array<{
     id: number;
     attemptedAt: string;
@@ -211,6 +233,11 @@ export type BatchDetail = {
     previousOrderRecordId: string | null;
     details: AttemptDetails | null;
   }>;
+  /** TRUE when `attempts` is the newest page of a longer history (CR-4). */
+  attemptsTruncated: boolean;
+  /** How many attempts this batch has in total — not how many are above. */
+  attemptsCount: number;
+  /** The manual attributions, NEWEST FIRST, under the same bound (CR-4). */
   attributionEvents: Array<{
     id: number;
     createdAt: string;
@@ -222,6 +249,10 @@ export type BatchDetail = {
       rowCount: number;
     };
   }>;
+  /** TRUE when `attributionEvents` is the newest page of a longer history. */
+  attributionEventsTruncated: boolean;
+  /** How many manual attributions this batch has in total. */
+  attributionEventsCount: number;
   derived: DerivedClass | null;
 };
 
@@ -290,7 +321,9 @@ const DEFINITIONS: Readonly<Record<string, string>> = Object.freeze({
   recordingSince:
     "the first attempt row's attemptedAt — batches before it were never recorded live and carry a derived class",
   canAttribute:
-    'whether the manual-attribution core would accept this batch: attributable, at most 50 rows, uniformly stamped (one id on every row, or none on any), not a stamped fulfillment, and not a fulfillment whose event names no order to complete',
+    'whether the manual-attribution core would accept this batch: attributable, at most 50 rows, uniformly stamped (one id on every row, or none on any), not a stamped fulfillment, and not a fulfillment whose event names no order to complete — or names one that no longer exists',
+  fulfillmentTargetMissing:
+    'the fulfillment event names an order that is no longer in the book, so the completion this batch is locked to cannot be performed at all',
 });
 
 // ---------------------------------------------------------------------------
@@ -471,6 +504,16 @@ type BatchSummarySqlRow = {
  * second used to arrive here with no fulfillment fact at all — so the Attribute…
  * control lit on a batch the core refuses, which is the OC-1 class exactly. Both
  * joins are 1:1 on `id`, so neither can multiply a batch's units.
+ *
+ * THE CANDIDATE PRESELECTION is what bounds the `b` CTE (CR-5) — the overview's
+ * shape, adopted unchanged. It names the batches carrying at least one
+ * POPULATION row at or after `start` (served by `(logType, changeTime)`), and a
+ * batch outside it cannot have `MIN(changeTime) >= start`, so it excludes
+ * nothing the HAVING would have kept. It WIDENS rather than filters: every row
+ * of a selected batch is still grouped, so no batch can lose a row and
+ * mis-report its units, its stamps or its time axis. There is deliberately no
+ * upper bound on the subquery — no ledger row exists after now (QA-3) — and the
+ * HAVING stays as the exactness check.
  */
 function batchSummarySql(
   start: Date,
@@ -514,7 +557,9 @@ b AS (
     MAX(l.orderRecordId) AS lastStamp,
     SUM(CASE WHEN l.orderRecordId IS NULL THEN 1 ELSE 0 END) AS unstampedRows
   FROM inventory_logs l
-  WHERE ${rowWhereSql('l')}
+  WHERE ${rowWhereSql('l')} AND l.batchId IN (SELECT DISTINCT l2.batchId FROM inventory_logs l2 WHERE ${rowWhereSql(
+    'l2'
+  )} AND l2.changeTime >= ${start})
   GROUP BY l.batchId
   HAVING MIN(l.changeTime) >= ${start} AND MIN(l.changeTime) < ${end}${orderFilter}
 )
@@ -828,6 +873,27 @@ function actorOf(
   return actors.get(actorUserId) ?? null;
 }
 
+/**
+ * The order an R2b COMPLETION would target: the order a fulfillment event named
+ * on a batch whose ledger carries no stamp at all. Read here rather than inline
+ * because two things need it — the batched order lookup (the target has to be
+ * HYDRATED, CR-1) and the lock itself.
+ */
+function r2bTargetOf(batch: ClassifiedBatch): string | null {
+  return batch.distinctStamps === 0 ? batch.fulfillmentOrderId : null;
+}
+
+/** Every order id a page's rows need in hand: the stamps AND the R2b targets. */
+function orderIdsOf(batches: ReadonlyArray<ClassifiedBatch>): string[] {
+  const ids = new Set<string>();
+  for (const batch of batches) {
+    if (batch.theStamp !== null) ids.add(batch.theStamp);
+    const target = r2bTargetOf(batch);
+    if (target !== null) ids.add(target);
+  }
+  return Array.from(ids);
+}
+
 function buildRow(
   batch: ClassifiedBatch,
   orders: Map<string, OrderProjection>,
@@ -852,13 +918,25 @@ function buildRow(
   // the control here is offering a button whose only outcome is a 409.
   const unnamedFulfillment = batch.fulfillment && batch.fulfillmentOrderId === null;
 
+  // FULFILLED, THE EVENT NAMES AN ORDER, AND THAT ORDER IS GONE (CR-1). The
+  // ledger's order id is a SOFT reference with no foreign key, so an integration
+  // sync can delete the order a historical fulfillment event named. The lock
+  // below hands the picker that id, the picker submits it, and the POST — which
+  // takes the target `FOR SHARE` before anything else — answers 404, every time.
+  // A control whose only possible outcome is an error is not an affordance; the
+  // row says what happened instead. The target rides the page's own batched
+  // order lookup, so knowing this costs no statement.
+  const r2bTarget = r2bTargetOf(batch);
+  const fulfillmentTargetMissing = r2bTarget !== null && !orders.has(r2bTarget);
+
   const canAttribute =
     batch.attributable &&
     batch.rowCount <= MANUAL_ATTRIBUTION_ROW_LIMIT &&
     batch.distinctStamps <= 1 &&
     !partiallyStamped &&
     !stampedFulfillment &&
-    !unnamedFulfillment;
+    !unnamedFulfillment &&
+    !fulfillmentTargetMissing;
 
   return {
     batchId: batch.batchId,
@@ -877,12 +955,13 @@ function buildRow(
     // it. Reading `ruleId === 'R2b'` lost the lock the moment any attempt row
     // existed, and the picker then offered every order in the book.
     attributeLock:
-      batch.distinctStamps === 0 && batch.fulfillmentOrderId !== null
-        ? { orderRecordId: batch.fulfillmentOrderId, reason: 'r2b-completion' }
+      r2bTarget !== null && !fulfillmentTargetMissing
+        ? { orderRecordId: r2bTarget, reason: 'r2b-completion' }
         : null,
     fulfilledAgainst: stampedFulfillment
       ? { orderRecordId: batch.theStamp as string, orderNumber }
       : null,
+    fulfillmentTargetMissing,
   };
 }
 
@@ -1016,9 +1095,10 @@ export async function getAttributionReport(
         );
   const page = after.slice(0, input.limit);
 
-  const orders = await loadOrders(
-    Array.from(new Set(page.map((batch) => batch.theStamp).filter((id): id is string => id !== null)))
-  );
+  // The page's stamps AND its R2b completion targets, in ONE findMany (CR-1):
+  // whether the named order still exists is what decides the Attribute… control,
+  // and asking per row would be a statement per row.
+  const orders = await loadOrders(orderIdsOf(page));
   const actors = await loadActors(
     Array.from(
       new Set(page.map((batch) => batch.actorUserId).filter((id): id is number => id !== null))
@@ -1078,6 +1158,16 @@ export async function getAttributionReport(
 // ---------------------------------------------------------------------------
 
 const ATTRIBUTION_ACTION_TYPE = 'INVENTORY_ATTRIBUTE';
+
+/**
+ * How much of a batch's APPEND-ONLY history the drill-down carries (CR-4).
+ *
+ * Attempts are append-only by contract and manual attributions accumulate, so
+ * both arrays grew without bound: repeated legitimate re-attributions made one
+ * detail response, one actor lookup and one browser render that got larger
+ * forever. Twenty is what a person reads; the newest twenty is what they want.
+ */
+const DETAIL_HISTORY_LIMIT = 20;
 
 const AUDIT_EVENT_LABEL = 'from the audit event (free text, admin-visible on /admin/logs)' as const;
 
@@ -1190,16 +1280,21 @@ function attemptDetailsOf(value: unknown): AttemptDetails | null {
 
 /**
  * The drill-down for one batch: its ledger rows, the audit event that wrote them
- * (labelled, because it carries the operator's own words), every attempt ever
- * recorded against it, the manual attributions, and the derivation when that is
- * what classified it. `null` when the batch has no population row at all — the
- * route answers 404.
+ * (labelled, because it carries the operator's own words), its recent attempts,
+ * its recent manual attributions, and the derivation when that is what
+ * classified it. `null` when the batch has no population row at all — the route
+ * answers 404.
+ *
+ * EVERY ARRAY HERE IS BOUNDED, and every bound is said out loud on the wire: the
+ * ledger at the manual-attribution limit (OC-8), and the two APPEND-ONLY
+ * histories at `DETAIL_HISTORY_LIMIT`, newest first (CR-4).
  *
  * THIS READ HAS NO STATEMENT BUDGET. D7's AT-MOST-FIVE is the REPORT's bound,
  * because that one serves a whole window and a poll; this one serves a single
- * batch a person opened deliberately. It spends five statements on a batch inside
- * the row bound and six on one over it — the sixth being the exact aggregate that
- * keeps `batch` true (QA-1).
+ * batch a person opened deliberately. It spends five statements on a batch whose
+ * arrays all fit, and buys one more for each bound it actually crossed: the
+ * exact aggregate that keeps `batch` true (QA-1), and a count per truncated
+ * history so "the newest twenty of N" is a fact rather than a guess.
  */
 export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<BatchDetail | null> {
   const ledger = await prisma.inventory_logs.findMany({
@@ -1237,9 +1332,16 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
       orderBy: { id: 'asc' },
       select: { id: true, actionType: true, entityId: true, details: true, createdAt: true },
     }),
+    // NEWEST FIRST, and BOUNDED at the history limit + 1 (CR-4). The direction
+    // is load bearing twice over: the cap keeps the RECENT history rather than
+    // the first twenty rows a batch ever had, and `attempts[0]` is then the
+    // actual latest attempt — the row that decides the class. An oldest-first
+    // read under a cap would have classified a long-lived batch by its OLDEST
+    // attempt. The extra row is what makes the bound self-describing.
     prisma.orderAttributionAttempt.findMany({
       where: { batchId },
-      orderBy: [{ attemptedAt: 'asc' }, { id: 'asc' }],
+      orderBy: [{ attemptedAt: 'desc' }, { id: 'desc' }],
+      take: DETAIL_HISTORY_LIMIT + 1,
       select: {
         id: true,
         attemptedAt: true,
@@ -1255,7 +1357,8 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
     }),
     prisma.auditLog.findMany({
       where: { entityType: 'INVENTORY', entityId: batchId, actionType: ATTRIBUTION_ACTION_TYPE },
-      orderBy: { id: 'asc' },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: DETAIL_HISTORY_LIMIT + 1,
       select: { id: true, createdAt: true, userId: true, details: true },
     }),
     getRecordingSince(),
@@ -1267,7 +1370,34 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
       : Promise.resolve<BatchAggregateSqlRow[]>([]),
   ]);
 
-  const latest = attempts[attempts.length - 1];
+  // The arrays are newest-first, so the LATEST attempt is the head — structural,
+  // not an arithmetic on a length the cap can change (CR-4).
+  const latest = attempts[0];
+  const attemptsTruncated = attempts.length > DETAIL_HISTORY_LIMIT;
+  const shownAttempts = attemptsTruncated ? attempts.slice(0, DETAIL_HISTORY_LIMIT) : attempts;
+  const attributionEventsTruncated = attributionEvents.length > DETAIL_HISTORY_LIMIT;
+  const shownAttributionEvents = attributionEventsTruncated
+    ? attributionEvents.slice(0, DETAIL_HISTORY_LIMIT)
+    : attributionEvents;
+
+  // The TOTALS, and only when an array was actually cut (the QA-1 aggregate's
+  // idiom): inside the bound the rows in hand ARE the history, so buying a count
+  // would be a statement spent to learn what we already read.
+  const [attemptsCount, attributionEventsCount] = await Promise.all([
+    attemptsTruncated
+      ? prisma.orderAttributionAttempt.count({ where: { batchId } })
+      : Promise.resolve(shownAttempts.length),
+    attributionEventsTruncated
+      ? prisma.auditLog.count({
+          where: {
+            entityType: 'INVENTORY',
+            entityId: batchId,
+            actionType: ATTRIBUTION_ACTION_TYPE,
+          },
+        })
+      : Promise.resolve(shownAttributionEvents.length),
+  ]);
+
   const earliest = auditEvents[0];
   const earliestDetails = isObj(earliest?.details) ? earliest.details : {};
 
@@ -1316,14 +1446,19 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
   };
 
   const batch = classifyBatch(facts, recordingSince);
-  const orders = await loadOrders(batch.theStamp === null ? [] : [batch.theStamp]);
+  // The stamp AND the R2b target (CR-1) — the same list the report builds, for
+  // the same reason: this surface renders the same control off the same row.
+  const orders = await loadOrders(orderIdsOf([batch]));
+  // The actors of the rows this response actually CARRIES (CR-4) — resolving
+  // identities for a history nobody receives is what made this lookup grow with
+  // the batch's whole append-only past.
   const actors = await loadActors(
     Array.from(
       new Set(
         [
           batch.actorUserId,
-          ...attempts.map((attempt) => attempt.actorUserId),
-          ...attributionEvents.map((event) => event.userId),
+          ...shownAttempts.map((attempt) => attempt.actorUserId),
+          ...shownAttributionEvents.map((event) => event.userId),
         ].filter((id): id is number => id !== null && id !== undefined)
       )
     ),
@@ -1358,7 +1493,7 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
             ...(typeof selectedExternalOrderId === 'string' ? { selectedExternalOrderId } : {}),
             label: AUDIT_EVENT_LABEL,
           },
-    attempts: attempts.map((attempt) => ({
+    attempts: shownAttempts.map((attempt) => ({
       id: attempt.id,
       attemptedAt: attempt.attemptedAt.toISOString(),
       outcome: attempt.outcome,
@@ -1370,7 +1505,9 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
       previousOrderRecordId: attempt.previousOrderRecordId,
       details: attemptDetailsOf(attempt.details),
     })),
-    attributionEvents: attributionEvents.map((event) => {
+    attemptsTruncated,
+    attemptsCount,
+    attributionEvents: shownAttributionEvents.map((event) => {
       const details = isObj(event.details) ? event.details : {};
       return {
         id: event.id,
@@ -1385,6 +1522,8 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
         },
       };
     }),
+    attributionEventsTruncated,
+    attributionEventsCount,
     derived: batch.derived,
   };
 }
