@@ -2,16 +2,16 @@
  * NOT ON THE READ PATH (reconciliation lane, pack C2b.5 / R-4; spec REV-7 D4).
  *
  * M2b lands the lane's first WRITER — `lib/reconciliation/attribute-batch.ts`,
- * which locks ledger rows and re-stamps them. NINE modules are reachable from
- * `lib/assistant/tools.ts` (Part 2's matcher added five), where the
- * zero-business-writes invariant is enforced by a TEXTUAL scan: a Prisma
- * write-method token anywhere in their source — comments included — fails the
- * toolsuite gate.
+ * which locks ledger rows and re-stamps them. TEN modules are reachable from
+ * `lib/assistant/tools.ts` (Part 2's matcher added five, its producer a sixth),
+ * where the zero-business-writes invariant is enforced by a TEXTUAL scan: a
+ * Prisma write-method token anywhere in their source — comments included —
+ * fails the toolsuite gate.
  *
  * So this file pins the boundary from the other side, at the moment the writer
  * arrives rather than at M5a when the tool wires the producer in:
  *
- *   1. none of the nine read modules imports the manual-attribution core;
+ *   1. none of the ten read modules imports the manual-attribution core;
  *   2. none of them imports the attempt writer (they take their vocabulary from
  *      `lib/attribution/contracts.ts`, which is types-only);
  *   3. none of them carries a write token at all, in code OR in prose — the R-4
@@ -32,7 +32,7 @@ import path from 'node:path';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 
-/** The nine modules the assistant's tool surface can reach (pack R-4 / CA1.6). */
+/** The ten modules the assistant's tool surface can reach (pack R-4 / CA1.6 + CA2.3). */
 const READ_MODULES = [
   'lib/reconciliation/population.ts',
   'lib/reconciliation/derive.ts',
@@ -46,6 +46,8 @@ const READ_MODULES = [
   'lib/reconciliation/items.ts',
   'lib/external-orders/bundle-snapshot.ts',
   'lib/validation/bundle-links.ts',
+  // Part 2 A2 (pack CA2.3): the producer that spends the matcher's statements.
+  'lib/reconciliation/match-producer.ts',
 ];
 
 /** The write module they must never reach, and the writer beside it. */

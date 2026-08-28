@@ -80,7 +80,19 @@ jest.mock("@/lib/prisma", () => {
             // seeded any other way, and an un-seedable branch is a branch whose PII
             // projection the gate would assert vacuously.
             const key = `$root.${p}`;
-            if (key in overrides) return Promise.resolve(overrides[key]);
+            if (key in overrides) {
+              // A seeded value may be a FUNCTION of the statement (Part 2 A2): TWO
+              // producers now share the raw channel — the reconciliation batch
+              // summary and the match's deducted-side aggregate — and handing
+              // either one's rows to the other is a fixture bug, never a reason
+              // for a producer to tolerate rows it was not sent.
+              const seeded = overrides[key];
+              return Promise.resolve(
+                typeof seeded === "function"
+                  ? (seeded as (...a: unknown[]) => unknown)(...args)
+                  : seeded,
+              );
+            }
             return Promise.resolve(p.toLowerCase().includes("query") ? [] : 0);
           };
         }
@@ -886,6 +898,9 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
     "lib/reconciliation/items.ts",
     "lib/external-orders/bundle-snapshot.ts",
     "lib/validation/bundle-links.ts",
+    // A2 (pack CA2.3): the producer the report calls, registered BY HAND for the
+    // same reason — the meta-test below reads only `tools.ts`'s direct imports.
+    "lib/reconciliation/match-producer.ts",
   ];
   const WRITE_TOKEN_SRC =
     "\\.\\s*(create|createMany|update|updateMany|upsert|delete|deleteMany)\\s*\\(|" +
@@ -1279,7 +1294,10 @@ describe("PII PROJECTION gate (reconciliation lane D6 — get_order_reconciliati
 
   async function runSeeded(args: Record<string, unknown>): Promise<ToolResult> {
     prismaCtl.__reset();
-    prismaCtl.__overrides["$root.$queryRaw"] = [SUMMARY_ROW];
+    // The batch summary, and NOT the match's deducted-side aggregate — which
+    // this window's order has no rows for (pack CA2.1's alias, `AS outUnits`).
+    prismaCtl.__overrides["$root.$queryRaw"] = (query: { sql: string }) =>
+      query.sql.includes("AS outUnits") ? [] : [SUMMARY_ROW];
     prismaCtl.__overrides["externalOrder.findMany"] = [ORDER_ROW];
     return assistantTools.get_order_reconciliation.run(args, CTX);
   }

@@ -27,7 +27,7 @@ jest.mock('@/lib/prisma', () => {
 
 import { NextRequest } from 'next/server';
 import { mockReset, type DeepMockProxy } from 'jest-mock-extended';
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import { requireAdmin } from '@/lib/api-utils';
 import { __resetForTests } from '@/lib/reconciliation/attribution';
@@ -93,15 +93,30 @@ function reportRequest(query: string): NextRequest {
   return new NextRequest(`http://localhost/api/reconciliation/attribution?${query}`);
 }
 
+/**
+ * ONE raw channel, TWO statements (Part 2 A2, pack CA2.3): the batch summary and
+ * the match's deducted-side aggregate, told apart by the builder's own alias.
+ * Feeding summary rows to the matcher is a fixture bug, not a producer that
+ * should tolerate them.
+ */
+function mockSummary(rows: unknown[]): void {
+  db.$queryRaw.mockImplementation(((query: Prisma.Sql) =>
+    Promise.resolve(query.sql.includes('AS outUnits') ? [] : rows)) as never);
+}
+
 beforeEach(() => {
   mockReset(db);
   __resetForTests();
   mockRequireAdmin.mockClear();
   mockRequireAdmin.mockResolvedValue({ user: { id: 1, isAdmin: true } });
-  db.$queryRaw.mockResolvedValue([summaryRow()] as never);
+  mockSummary([summaryRow()]);
   db.orderAttributionAttempt.findFirst.mockResolvedValue(null as never);
   db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
   db.externalOrder.findMany.mockResolvedValue([ORDER] as never);
+  // The match producer's two delegate reads (A2): empty by default, so a
+  // fixture that says nothing about the match still answers.
+  db.externalOrderItem.findMany.mockResolvedValue([] as never);
+  db.product.findMany.mockResolvedValue([] as never);
   db.$transaction.mockImplementation(((ops: unknown) =>
     Promise.all(ops as Promise<unknown>[])) as never);
 });
@@ -119,7 +134,18 @@ describe('GET /api/reconciliation/attribution', () => {
     const body = await res.json();
 
     expect(Object.keys(body).sort()).toEqual(
-      ['coverage', 'count', 'definitions', 'moreCount', 'nextCursor', 'rows', 'totals', 'window'].sort(),
+      [
+        'coverage',
+        'count',
+        'definitions',
+        // Part 2 A2 (pack CA2.2 / spec §5): the page's matches ride the envelope.
+        'matches',
+        'moreCount',
+        'nextCursor',
+        'rows',
+        'totals',
+        'window',
+      ].sort(),
     );
     expect(body.window).toEqual({ from: '2026-08-01', to: '2026-08-31' });
     expect(body.rows[0]).toMatchObject({
@@ -138,7 +164,7 @@ describe('GET /api/reconciliation/attribution', () => {
   // CR-1: a deleted R2b target, on the wire. The report's own batched order
   // lookup is what knows, so the row arrives with the fact and without the lock.
   it('a deleted R2b target reaches the client as a stated fact, never as a lock', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({
         distinctStamps: 0,
         firstStamp: null,
@@ -154,7 +180,7 @@ describe('GET /api/reconciliation/attribution', () => {
         auditActionType: 'EXTERNAL_ORDER_FULFILLMENT',
         auditEntityId: 'ord-gone',
       }),
-    ] as never);
+    ]);
     db.externalOrder.findMany.mockResolvedValue([] as never);
 
     const res = await reportGET(reportRequest('from=2026-08-01&to=2026-08-31'));
@@ -200,10 +226,10 @@ describe('GET /api/reconciliation/attribution', () => {
   });
 
   it('passes the class chip, the order number, the bound and the cursor through', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({ batchId: 'a', minChangeTime: new Date('2026-08-12T12:00:00.000Z') }),
       summaryRow({ batchId: 'b', minChangeTime: new Date('2026-08-11T12:00:00.000Z') }),
-    ] as never);
+    ]);
 
     const first = await reportGET(
       reportRequest(
@@ -217,10 +243,10 @@ describe('GET /api/reconciliation/attribution', () => {
       '#1001',
     );
 
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({ batchId: 'a', minChangeTime: new Date('2026-08-12T12:00:00.000Z') }),
       summaryRow({ batchId: 'b', minChangeTime: new Date('2026-08-11T12:00:00.000Z') }),
-    ] as never);
+    ]);
     const second = await reportGET(
       reportRequest(
         `from=2026-08-01&to=2026-08-31&limit=1&cursor=${encodeURIComponent(firstBody.nextCursor)}`,
@@ -283,6 +309,9 @@ describe('GET /api/reconciliation/attribution/[batchId]', () => {
         'derived',
         'ledgerRows',
         'ledgerRowsTruncated',
+        // Part 2 A2 (pack CA2.2): the "This order" panel's pair.
+        'orderMatch',
+        'orderMatchUnavailable',
       ].sort(),
     );
     expect(body.batch.batchId).toBe('batch-1');

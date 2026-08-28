@@ -17,8 +17,10 @@
  * ONCE, in TypeScript, over those summaries; the class filter and the keyset
  * page are applied AFTER classification, and `byClass` is computed BEFORE the
  * active class filter so the other chips keep telling the truth. The statement
- * budget for a report read is AT MOST FIVE, and the exclusion figures ride in
- * the same statement rather than buying one of their own.
+ * budget for a report read is AT MOST EIGHT — five for the report itself, and
+ * three for the ORDER MATCH the page's rows carry (Part 2, pack CA2.2), spent
+ * ONCE over the page's stamps rather than once per row. The exclusion figures
+ * ride in the same statement rather than buying one of their own.
  *
  * WHAT IT COSTS, said out loud: the window's axis IS the batch's first row
  * (spec §2.0), so the summary CTE windows on `MIN(changeTime)` in a HAVING —
@@ -64,6 +66,15 @@ import {
   type DeriveAuditEvent,
 } from './derive';
 import { RECONCILIATION_ORDER_SELECT, RECONCILIATION_USER_SELECT } from './pii';
+import {
+  MATCH_CLASS_KEYS,
+  MATCH_DEFINITIONS,
+  MATCH_UNAVAILABLE_REASONS,
+  type MatchClassKey,
+  type MatchUnavailableReason,
+} from './match-keys';
+import type { OrderMatch } from './match';
+import { getOrderMatches } from './match-producer';
 
 // ---------------------------------------------------------------------------
 // The vocabulary
@@ -148,6 +159,15 @@ export type AttributionRow = {
    * is what lets the surface say WHY instead of silently dropping the control.
    */
   fulfillmentTargetMissing: boolean;
+  /**
+   * THE ORDER'S MATCH (Part 2, spec REV-8 §2.0). Attribution is BATCH grain and
+   * matching is ORDER grain, so a row carries the match of the order its rows
+   * name — and when it cannot, `matchUnavailable` names why instead. EXACTLY ONE
+   * of the pair is non-null: "no match" without a reason is the kind of blank an
+   * admin reads as "nothing wrong here".
+   */
+  match: OrderMatch | null;
+  matchUnavailable: MatchUnavailableReason | null;
 };
 
 export type AttributionTotals = {
@@ -164,6 +184,9 @@ export type AttributionCoverage = {
   needsALook: { stampDisagreesWithLatestAttempt: number; mixedStamps: number };
   recordingSince: string | null;
   orderFilterScope: 'all orders' | 'your companies only';
+  /** The two match totals, where the rest of the page's coverage lives. */
+  matchedOrders: number;
+  matchUnavailableRows: number;
   notes: string[];
 };
 
@@ -171,6 +194,21 @@ export type AttributionReport = {
   window: { from: string; to: string };
   rows: AttributionRow[];
   totals: AttributionTotals;
+  /**
+   * THE PAGE'S MATCHES — and the scope says so ON THE WIRE. The other totals on
+   * this envelope describe the whole WINDOW; these describe the rows that were
+   * returned, because the match costs three statements over the page's orders
+   * and computing it for a window nobody paged through would be a read with no
+   * reader. `byClass` counts ORDERS (two batches stamped with one order are one
+   * order); `unavailable` counts ROWS, because the reason is a property of the
+   * row, not of an order that does not exist.
+   */
+  matches: {
+    scope: 'this page';
+    orders: number;
+    byClass: Record<MatchClassKey, number>;
+    unavailable: Record<MatchUnavailableReason, number>;
+  };
   coverage: AttributionCoverage;
   count: number;
   /** The ONE authoritative bound: `count - consumed - rowsReturned`. */
@@ -254,6 +292,15 @@ export type BatchDetail = {
   /** How many manual attributions this batch has in total. */
   attributionEventsCount: number;
   derived: DerivedClass | null;
+  /**
+   * THE ORDER'S MATCH, for the "This order" panel — the same pair the row
+   * carries, hoisted where the drill-down reads it. The unmapped counts ride
+   * INSIDE the match (`unmappedLines` / `unmappedUnits`), so there is no
+   * per-line item read here: the exception's recompute is P2-C's, not this
+   * surface's (pack CA2.2).
+   */
+  orderMatch: OrderMatch | null;
+  orderMatchUnavailable: MatchUnavailableReason | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -894,10 +941,37 @@ function orderIdsOf(batches: ReadonlyArray<ClassifiedBatch>): string[] {
   return Array.from(ids);
 }
 
+/**
+ * WHY THIS ROW HAS NO MATCH — the ONE spelling of the rule (seam S-A10).
+ *
+ * Three callers ask it: the read, to build the stamp set it will actually pay
+ * for; `buildRow`, to say so on the row; and the drill-down, to decide whether
+ * to read at all. Two of them asking slightly different questions is how a
+ * report comes to show a match beside a reason it could not be computed.
+ *
+ * `order-redacted` is unreachable while both GET routes hardcode the admin
+ * viewer; it is reachable from the assistant tool in P2-C, and it is spelled
+ * here now so the member's answer is a named reason rather than a blank.
+ */
+function matchUnavailableFor(
+  batch: ClassifiedBatch,
+  orders: Map<string, OrderProjection>,
+  viewer: Viewer
+): MatchUnavailableReason | null {
+  if (batch.distinctStamps !== 1 || batch.theStamp === null) {
+    return batch.distinctStamps === 0 ? 'unstamped' : 'mixed-stamps';
+  }
+  const order = orders.get(batch.theStamp);
+  if (order === undefined) return 'order-missing';
+  // The redaction rule itself is `projectOrder`'s, asked rather than re-spelled.
+  return 'orderRedacted' in projectOrder(order, viewer) ? 'order-redacted' : null;
+}
+
 function buildRow(
   batch: ClassifiedBatch,
   orders: Map<string, OrderProjection>,
   actors: Map<number, { id: number; username: string }>,
+  matches: ReadonlyMap<string, OrderMatch>,
   viewer: Viewer
 ): AttributionRow {
   const order = batch.theStamp === null ? null : projectOrder(orders.get(batch.theStamp), viewer);
@@ -928,6 +1002,13 @@ function buildRow(
   // order lookup, so knowing this costs no statement.
   const r2bTarget = r2bTargetOf(batch);
   const fulfillmentTargetMissing = r2bTarget !== null && !orders.has(r2bTarget);
+
+  // EXACTLY ONE of the pair (spec §2.0). An available row reads the page's own
+  // match map, which is empty at the drill-down when the row is unavailable —
+  // so the fallback is `null`, never a lookup that quietly succeeds elsewhere.
+  const matchUnavailable = matchUnavailableFor(batch, orders, viewer);
+  const match =
+    matchUnavailable === null ? (matches.get(batch.theStamp as string) ?? null) : null;
 
   const canAttribute =
     batch.attributable &&
@@ -962,6 +1043,8 @@ function buildRow(
       ? { orderRecordId: batch.theStamp as string, orderNumber }
       : null,
     fulfillmentTargetMissing,
+    match,
+    matchUnavailable,
   };
 }
 
@@ -1118,7 +1201,43 @@ export async function getAttributionReport(
     viewer
   );
 
-  const rows = page.map((batch) => buildRow(batch, orders, actors, viewer));
+  // THE MATCH, over the page's READABLE stamps only (S-A10): a row with no
+  // single stamp, or one naming an order this viewer cannot see, is not an
+  // order the producer may be asked about — and the deduped list is what keeps
+  // two batches of one order to a single order's worth of reading.
+  const stamps = Array.from(
+    new Set(
+      page
+        .filter((batch) => matchUnavailableFor(batch, orders, viewer) === null)
+        .map((batch) => batch.theStamp as string)
+    )
+  );
+  const matches = await getOrderMatches(prisma, stamps);
+
+  const rows = page.map((batch) => buildRow(batch, orders, actors, matches, viewer));
+
+  // ORDERS, not rows: `byClass` counts each stamped order once, so a page
+  // carrying two batches of order #1009 reports one `exact`, which is what the
+  // chip above the table claims to be counting.
+  const matchByClass = Object.fromEntries(
+    MATCH_CLASS_KEYS.map((key) => [key, 0])
+  ) as Record<MatchClassKey, number>;
+  for (const stamp of stamps) {
+    const cls = matches.get(stamp)?.class ?? null;
+    if (cls !== null) matchByClass[cls] += 1;
+  }
+  // ROWS, because the reason belongs to the row: an unstamped batch and a
+  // mixed-stamped one are two rows nobody can compare, not one absent order.
+  const matchUnavailable = Object.fromEntries(
+    MATCH_UNAVAILABLE_REASONS.map((reason) => [reason, 0])
+  ) as Record<MatchUnavailableReason, number>;
+  let matchUnavailableRows = 0;
+  for (const row of rows) {
+    if (row.matchUnavailable === null) continue;
+    matchUnavailable[row.matchUnavailable] += 1;
+    matchUnavailableRows += 1;
+  }
+
   const consumed = cursor?.c ?? 0;
   const count = selected.length;
   const moreCount = Math.max(count - consumed - rows.length, 0);
@@ -1142,6 +1261,14 @@ export async function getAttributionReport(
         noBatchRows: exclusionCounts.noBatchRows,
       },
     },
+    matches: {
+      // Said on the wire, because every other total here is the WINDOW's: the
+      // match describes the rows that came back, and nothing more.
+      scope: 'this page',
+      orders: stamps.length,
+      byClass: matchByClass,
+      unavailable: matchUnavailable,
+    },
     coverage: {
       batchesInWindow: classified.length,
       rowsReturned: rows.length,
@@ -1153,6 +1280,8 @@ export async function getAttributionReport(
       needsALook: { stampDisagreesWithLatestAttempt: stampDisagrees, mixedStamps },
       recordingSince: iso(recordingSince),
       orderFilterScope: viewer.kind === 'admin' ? 'all orders' : 'your companies only',
+      matchedOrders: stamps.length,
+      matchUnavailableRows,
       notes,
     },
     count,
@@ -1161,7 +1290,10 @@ export async function getAttributionReport(
       moreCount > 0 && last !== undefined
         ? encodeCursor({ t: last.at.getTime(), b: last.batchId, c: consumed + rows.length })
         : null,
-    definitions: { ...DEFINITIONS },
+    // The match vocabulary rides with the numbers that use it (truthful-data).
+    // The two key sets are disjoint by construction — one names coverage
+    // figures, the other classes and reasons — and the pin says so.
+    definitions: { ...DEFINITIONS, ...MATCH_DEFINITIONS },
   };
 }
 
@@ -1303,9 +1435,11 @@ function attemptDetailsOf(value: unknown): AttemptDetails | null {
  *
  * THIS READ HAS NO STATEMENT BUDGET. D7's AT-MOST-FIVE is the REPORT's bound,
  * because that one serves a whole window and a poll; this one serves a single
- * Cost: six statements warm on a stamped admin read (ledger, audit, attempts,
- * attribution events, orders, actors; recordingSince adds one cold), plus one
- * per bound actually crossed (FD-4 — the earlier 'five' undercounted).
+ * Cost: nine statements warm on a stamped admin read (ledger, audit, attempts,
+ * attribution events, orders, actors, and the match's three — the items, the
+ * deducted-side aggregate and the product facts; recordingSince adds one cold),
+ * plus one per bound actually crossed (FD-4 — the earlier 'five' undercounted).
+ * A row whose match is UNAVAILABLE spends none of the match's three.
  * arrays all fit, and buys one more for each bound it actually crossed: the
  * exact aggregate that keeps `batch` true (QA-1), and a count per truncated
  * history so "the newest twenty of N" is a fact rather than a guess.
@@ -1463,28 +1597,38 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
   // The stamp AND the R2b target (CR-1) — the same list the report builds, for
   // the same reason: this surface renders the same control off the same row.
   const orders = await loadOrders(orderIdsOf([batch]));
-  // The actors of the rows this response actually CARRIES (CR-4) — resolving
-  // identities for a history nobody receives is what made this lookup grow with
-  // the batch's whole append-only past.
-  const actors = await loadActors(
-    Array.from(
-      new Set(
-        [
-          batch.actorUserId,
-          ...shownAttempts.map((attempt) => attempt.actorUserId),
-          ...shownAttributionEvents.map((event) => event.userId),
-        ].filter((id): id is number => id !== null && id !== undefined)
-      )
+
+  // THE MATCH, decided by the ONE owner (S-A10) before anything is read: an
+  // UNAVAILABLE row asks about no order at all, and the empty list costs zero
+  // statements rather than three whose answer nobody could use.
+  const stamps =
+    matchUnavailableFor(batch, orders, viewer) === null ? [batch.theStamp as string] : [];
+  const [actors, matches] = await Promise.all([
+    // The actors of the rows this response actually CARRIES (CR-4) — resolving
+    // identities for a history nobody receives is what made this lookup grow
+    // with the batch's whole append-only past.
+    loadActors(
+      Array.from(
+        new Set(
+          [
+            batch.actorUserId,
+            ...shownAttempts.map((attempt) => attempt.actorUserId),
+            ...shownAttributionEvents.map((event) => event.userId),
+          ].filter((id): id is number => id !== null && id !== undefined)
+        )
+      ),
+      viewer
     ),
-    viewer
-  );
+    getOrderMatches(prisma, stamps),
+  ]);
+  const batchRow = buildRow(batch, orders, actors, matches, viewer);
 
   const orderReference = earliestDetails[AUDIT_REFERENCE_KEY];
   const intent = earliestDetails[AUDIT_INTENT_KEY];
   const selectedExternalOrderId = earliestDetails[AUDIT_SELECTED_KEY];
 
   return {
-    batch: buildRow(batch, orders, actors, viewer),
+    batch: batchRow,
     ledgerRowsTruncated,
     ledgerRows: shownRows.map((row) => ({
       id: row.id,
@@ -1539,6 +1683,10 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
     attributionEventsTruncated,
     attributionEventsCount,
     derived: batch.derived,
+    // The row already carries the pair; the panel reads it here. Taken OFF the
+    // row rather than recomputed, so the two can never disagree.
+    orderMatch: batchRow.match,
+    orderMatchUnavailable: batchRow.matchUnavailable,
   };
 }
 

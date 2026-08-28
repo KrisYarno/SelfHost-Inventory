@@ -28,6 +28,7 @@ import * as React from "react";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ATTRIBUTION_CLASS_KEYS } from "@/lib/reconciliation/attribution";
+import { MATCH_CLASS_KEYS, type MatchClassKey } from "@/lib/reconciliation/match-keys";
 import type {
   AttributionClassKey,
   AttributionReport,
@@ -57,6 +58,14 @@ function zeroByClass(): Record<AttributionClassKey, number> {
   >;
 }
 
+/** The Part 2 match vocabulary, all zero (pack CA2.2) — fixture support only. */
+function zeroMatchByClass(): Record<MatchClassKey, number> {
+  return Object.fromEntries(MATCH_CLASS_KEYS.map((k) => [k, 0])) as Record<
+    MatchClassKey,
+    number
+  >;
+}
+
 function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
   return {
     batchId: "batch-1",
@@ -81,6 +90,11 @@ function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
     attributeLock: null,
     fulfilledAgainst: null,
     fulfillmentTargetMissing: false,
+    // Part 2 (pack CA2.2): the row carries its order's match, or the named
+    // reason it has none. A2 adds the FIXTURE keys only — the Match cell that
+    // renders them is A3's.
+    match: null,
+    matchUnavailable: null,
     ...over,
   };
 }
@@ -94,6 +108,19 @@ function makeReport(over: Partial<AttributionReport> = {}): AttributionReport {
       byClass: { ...zeroByClass(), "attributed·selected": 3, "attributed·manual": 1 },
       exclusions: { nonAttributable: 5, historicalMassUpdate: 2, noBatchRows: 9 },
     },
+    // Part 2 (pack CA2.2): the page's matches. A2 adds the FIXTURE keys only —
+    // the chip row that reads them is A3's.
+    matches: {
+      scope: "this page",
+      orders: 0,
+      byClass: zeroMatchByClass(),
+      unavailable: {
+        unstamped: 0,
+        "mixed-stamps": 0,
+        "order-missing": 0,
+        "order-redacted": 0,
+      },
+    },
     coverage: {
       batchesInWindow: 11,
       rowsReturned: 1,
@@ -102,6 +129,8 @@ function makeReport(over: Partial<AttributionReport> = {}): AttributionReport {
       needsALook: { stampDisagreesWithLatestAttempt: 0, mixedStamps: 0 },
       recordingSince: "2026-08-19T00:00:00.000Z",
       orderFilterScope: "all orders",
+      matchedOrders: 0,
+      matchUnavailableRows: 0,
       notes: ["a pre-0b-1 mass update whose summary event was never written is invisible to R0"],
     },
     count: 4,

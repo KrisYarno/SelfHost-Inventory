@@ -70,6 +70,11 @@ function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
     attributeLock: null,
     fulfilledAgainst: null,
     fulfillmentTargetMissing: false,
+    // Part 2 (pack CA2.2): the row carries its order's match, or the named
+    // reason it has none. A2 adds the FIXTURE keys only — the Match cell that
+    // renders them is A3's.
+    match: null,
+    matchUnavailable: null,
     ...over,
   };
 }
@@ -106,6 +111,9 @@ function makeDetail(over: Partial<BatchDetail> = {}): BatchDetail {
     attributionEventsCount: 0,
     derived: null,
     ledgerRowsTruncated: false,
+    // Part 2 (pack CA2.2): the "This order" panel's pair, fixture-only here.
+    orderMatch: null,
+    orderMatchUnavailable: null,
     ...over,
   };
 }

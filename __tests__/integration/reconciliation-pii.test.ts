@@ -93,6 +93,65 @@ const LEAKY_ORDER = {
   _count: { items: 2 },
 };
 
+/**
+ * The MATCH's three reads, seeded as leakily as the orders are (Part 2, pack
+ * CA2.3). `external_order_items` carries the customer's variant string and the
+ * mock does not honour `select`, so a reader that spread its row — or a matcher
+ * that carried a line onto the wire — fails the walk below rather than a code
+ * review.
+ *
+ * The numbers are chosen so the order's match has BOTH halves of a tolerance:
+ * 2 x 5 mg missing balances 4 x 2.5 mg extra (an `equivalentGroup`), and a
+ * `pack` unit is refused (an `excludedProduct`). Without them the recursive
+ * walk would pass over a `tolerance: null` and prove nothing.
+ */
+const LEAKY_ITEM_ROWS = [
+  {
+    id: 'item-1',
+    orderId: 'ord-1',
+    quantity: 2,
+    fulfilledQty: 0,
+    isMapped: true,
+    productLinkId: 'link-1',
+    bundleComponentSnapshot: null,
+    productLink: { internalProductId: 9, isBundle: false, bundleComponents: [] },
+    variantName: '10 mg / 2 vials',
+    customerEmail: 'buyer@example.com',
+  },
+  {
+    id: 'item-2',
+    orderId: 'ord-1',
+    quantity: 1,
+    fulfilledQty: 0,
+    isMapped: true,
+    productLinkId: 'link-2',
+    bundleComponentSnapshot: null,
+    productLink: { internalProductId: 11, isBundle: false, bundleComponents: [] },
+    variantName: '1 pack',
+    customerEmail: 'buyer@example.com',
+  },
+];
+
+/** The deducted side: four units of the 2.5 mg product left against this order. */
+const DEDUCTED_SIDE_ROWS = [
+  { orderRecordId: 'ord-1', productId: 10, outUnits: '4', correctedUnits: '0' },
+];
+
+/** The decomposition facts, seeded with names the response must never echo. */
+const LEAKY_PRODUCT_ROWS = [
+  {
+    id: 9,
+    name: 'Alpha 5 mg',
+    baseName: 'alpha',
+    unit: 'mg',
+    numericValue: '5.00',
+    variantName: '10 mg / 2 vials',
+    customerName: 'A Buyer',
+  },
+  { id: 10, name: 'Alpha 2.5 mg', baseName: 'alpha', unit: 'mg', numericValue: '2.50' },
+  { id: 11, name: 'Beta pack', baseName: 'beta', unit: 'pack', numericValue: '1.00' },
+];
+
 /** An exception row whose SUBJECT is as leaky as the orders are. */
 const LEAKY_EXCEPTION_ROW = {
   id: 11,
@@ -192,15 +251,21 @@ const AUDIT_ROW = {
 beforeEach(() => {
   mockReset(db);
   __resetForTests();
-  // ONE dispatcher, because three producers now share the raw channel.
+  // ONE dispatcher, because FOUR producers now share the raw channel — the
+  // match's deducted-side aggregate joined them at Part 2 A2, and it is
+  // selected on its own alias (`AS outUnits`).
   db.$queryRaw.mockImplementation(((query: Prisma.Sql) =>
     Promise.resolve(
-      query.sql.includes('AS total')
-        ? [UNMAPPED_TOTALS]
-        : query.sql.includes('FROM grouped')
-          ? [LEAKY_UNMAPPED_ROW]
-          : [SUMMARY_ROW],
+      query.sql.includes('AS outUnits')
+        ? DEDUCTED_SIDE_ROWS
+        : query.sql.includes('AS total')
+          ? [UNMAPPED_TOTALS]
+          : query.sql.includes('FROM grouped')
+            ? [LEAKY_UNMAPPED_ROW]
+            : [SUMMARY_ROW],
     )) as never);
+  db.externalOrderItem.findMany.mockResolvedValue(LEAKY_ITEM_ROWS as never);
+  db.product.findMany.mockResolvedValue(LEAKY_PRODUCT_ROWS as never);
   db.inventoryException.count.mockResolvedValue(1 as never);
   db.inventoryException.findMany.mockResolvedValue([LEAKY_EXCEPTION_ROW] as never);
   db.stagingItem.findMany.mockResolvedValue([] as never);
@@ -343,6 +408,37 @@ describe('reconciliation routes never answer with order PII', () => {
   it('the seeded exception subject really is leaky too (the new rows are not vacuous)', () => {
     expect(() => assertNoPiiKeys(LEAKY_EXCEPTION_ROW)).toThrow('subject.customerEmail');
     expect(() => assertNoPiiKeys(LEAKY_UNMAPPED_ROW)).toThrow('customerEmail');
+  });
+
+  it('the walked envelopes really DO carry a match and a tolerance (not vacuous)', async () => {
+    const report = await (
+      await reportGET(
+        new NextRequest(
+          'http://localhost/api/reconciliation/attribution?from=2026-08-01&to=2026-08-31',
+        ),
+      )
+    ).json();
+    const match = report.rows[0].match;
+    expect(match).not.toBeNull();
+    expect(match.perProduct.length).toBeGreaterThan(0);
+    expect(match.tolerance).not.toBeNull();
+    expect(match.tolerance.equivalentGroups.length).toBeGreaterThan(0);
+    expect(match.tolerance.excludedProducts.length).toBeGreaterThan(0);
+
+    const detail = await (
+      await detailGET(new NextRequest('http://localhost/api/reconciliation/attribution/batch-1'), {
+        params: { batchId: 'batch-1' },
+      })
+    ).json();
+    expect(detail.orderMatch).not.toBeNull();
+    expect(detail.orderMatch.tolerance).not.toBeNull();
+  });
+
+  it('the positive control: a variantName on a perProduct row is caught, with its path', () => {
+    // The match nests three arrays deep; the walk is recursive, and this is the
+    // fixture that says so from the outside.
+    const fixture = { rows: [{ match: { perProduct: [{ variantName: '10 mg / 2 vials' }] } }] };
+    expect(() => assertNoPiiKeys(fixture)).toThrow('rows[0].match.perProduct[0].variantName');
   });
 
   it('the positive control: customerEmail three levels deep is caught, with its path', () => {

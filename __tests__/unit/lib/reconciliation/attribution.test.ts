@@ -18,7 +18,7 @@
  */
 
 import { mockDeep, mockReset, type DeepMockProxy } from 'jest-mock-extended';
-import type { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 
 jest.mock('@/lib/prisma', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -30,6 +30,7 @@ import prisma from '@/lib/prisma';
 import { attributeBatch } from '@/lib/reconciliation/attribute-batch';
 import { ATTRIBUTABLE_DEFINITION } from '@/lib/reconciliation/population';
 import { DERIVED_SENTENCES } from '@/lib/reconciliation/derive';
+import { MATCH_CLASS_KEYS, MATCH_DEFINITIONS } from '@/lib/reconciliation/match-keys';
 import {
   ATTRIBUTION_CLASS_KEYS,
   __resetForTests,
@@ -155,16 +156,81 @@ function orderRow(over: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+/**
+ * The match's three reads, as fixtures (Part 2, pack CA2.2). One mapped line of
+ * one product, one unit out against `ord-1`, and the product's decomposition —
+ * i.e. an `exact` order, which is the shape a page mostly carries.
+ */
+function itemRow(over: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 'item-1',
+    orderId: 'ord-1',
+    quantity: 1,
+    fulfilledQty: 0,
+    isMapped: true,
+    productLinkId: 'link-1',
+    productLink: { internalProductId: 9, isBundle: false, bundleComponents: [] },
+    bundleComponentSnapshot: null,
+    ...over,
+  };
+}
+
+/** The driver hands a SUM back as a Decimal; the producer converts. */
+function deductedSideRow(over: Partial<Record<string, unknown>> = {}) {
+  return {
+    orderRecordId: 'ord-1',
+    productId: 9,
+    outUnits: new Prisma.Decimal('1'),
+    correctedUnits: new Prisma.Decimal('0'),
+    ...over,
+  };
+}
+
+function productRow(over: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: 9,
+    name: 'Widget',
+    baseName: 'widget',
+    unit: 'mg',
+    numericValue: new Prisma.Decimal('5.00'),
+    ...over,
+  };
+}
+
 const INPUT: AttributionInput = { from: '2026-08-01', to: '2026-08-31', limit: 50 };
 
-/** Every prisma call the report read is allowed to make (D7's budget). */
+/**
+ * Every prisma call the report read is allowed to make (D7's budget).
+ *
+ * WIDENED FIRST, before A2's number was measured (pack CA2.2): the match
+ * producer's two DELEGATE reads are statements like any other, and a recorder
+ * that could not see them would have reported a budget that was simply false.
+ */
 function statementCount(): number {
   return (
     db.$queryRaw.mock.calls.length +
     db.user.findMany.mock.calls.length +
     db.externalOrder.findMany.mock.calls.length +
-    db.orderAttributionAttempt.findFirst.mock.calls.length
+    db.orderAttributionAttempt.findFirst.mock.calls.length +
+    db.externalOrderItem.findMany.mock.calls.length +
+    db.product.findMany.mock.calls.length
   );
+}
+
+/**
+ * ONE RAW CHANNEL, TWO STATEMENTS (pack CA2.3). The batch summary (or, in the
+ * drill-down, the batch aggregate) and the match's deducted-side aggregate both
+ * arrive through `$queryRaw`, so a single `mockResolvedValue` would feed summary
+ * rows to the matcher — whose integer guard would then throw, which is the
+ * symptom of a missing dispatcher and never a reason to make the producer
+ * tolerant of rows it was not sent.
+ *
+ * The branch is selected on `AS outUnits`, the deducted-side builder's own
+ * alias: neither of the other two statements has one.
+ */
+function mockSummary(rows: unknown[], deducted: unknown[] = []): void {
+  db.$queryRaw.mockImplementation(((query: Prisma.Sql) =>
+    Promise.resolve(query.sql.includes('AS outUnits') ? deducted : rows)) as never);
 }
 
 function rawSql(call = 0): string {
@@ -175,10 +241,15 @@ function rawSql(call = 0): string {
 beforeEach(() => {
   mockReset(db);
   __resetForTests();
-  db.$queryRaw.mockResolvedValue([] as never);
+  mockSummary([]);
   db.orderAttributionAttempt.findFirst.mockResolvedValue(null as never);
   db.user.findMany.mockResolvedValue([] as never);
   db.externalOrder.findMany.mockResolvedValue([] as never);
+  // The match producer's two delegate reads: empty by default, so a fixture
+  // that says nothing about the match gets an order with no lines and no
+  // movement — the matcher's unmatchable result — rather than an undefined row.
+  db.externalOrderItem.findMany.mockResolvedValue([] as never);
+  db.product.findMany.mockResolvedValue([] as never);
 });
 
 // ---------------------------------------------------------------------------
@@ -352,27 +423,53 @@ describe('the read shape', () => {
     expect(sql).toContain("JSON_EXTRACT(ae.details, '$.intent')");
   });
 
-  it('spends AT MOST five statements — four on a plain admin read', async () => {
-    db.$queryRaw.mockResolvedValue([selectedRow()] as never);
+  // MEASURED at A2, not asserted from the plan (P-5): the recorder above was
+  // widened FIRST, then this ran. Seven is the whole cost of a stamped page —
+  // recordingSince, the batch summary, the orders, the actors, and the match's
+  // three: the items, the deducted-side aggregate and the product facts.
+  it('spends AT MOST eight statements — seven on a plain admin read', async () => {
+    mockSummary([selectedRow()], [deductedSideRow()]);
+    db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
+    db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
+    db.externalOrderItem.findMany.mockResolvedValue([itemRow()] as never);
+    db.product.findMany.mockResolvedValue([productRow()] as never);
+
+    await getAttributionReport(INPUT, ADMIN);
+
+    expect(statementCount()).toBe(7);
+    expect(statementCount()).toBeLessThanOrEqual(8);
+  });
+
+  // The producer's own contract, seen from the page: the product lookup is
+  // SKIPPED when neither side names a product, so an order with no items and no
+  // movement is six, not a seventh statement that looks nothing up.
+  it('a stamped order with nothing on either side costs SIX — the product read is skipped', async () => {
+    mockSummary([selectedRow()]);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
 
     await getAttributionReport(INPUT, ADMIN);
 
-    expect(statementCount()).toBe(4);
-    expect(statementCount()).toBeLessThanOrEqual(5);
+    expect(statementCount()).toBe(6);
+    expect(db.product.findMany).not.toHaveBeenCalled();
   });
 
-  it('the order-number filter rides IN the same statement (still at most five)', async () => {
-    db.$queryRaw.mockResolvedValue([selectedRow()] as never);
+  it('the order-number filter rides IN the batch-summary statement (still at most eight)', async () => {
+    mockSummary([selectedRow()], [deductedSideRow()]);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
+    db.externalOrderItem.findMany.mockResolvedValue([itemRow()] as never);
+    db.product.findMany.mockResolvedValue([productRow()] as never);
 
     await getAttributionReport({ ...INPUT, orderNumber: '#1001' }, ADMIN);
 
-    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+    // RE-MEASURED at A2 (P-5): TWO raw statements now share the channel — the
+    // batch summary, which still carries the filter, and the match's
+    // deducted-side aggregate. The filter itself still buys nothing.
+    expect(db.$queryRaw).toHaveBeenCalledTimes(2);
     expect(rawSql()).toContain('FROM external_orders f WHERE f.orderNumber = ?');
-    expect(statementCount()).toBeLessThanOrEqual(5);
+    expect(rawSql(1)).toContain('AS outUnits');
+    expect(statementCount()).toBeLessThanOrEqual(8);
   });
 });
 
@@ -382,7 +479,7 @@ describe('the read shape', () => {
 
 describe('classification', () => {
   it('a recorded attempt wins over the derivation', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({
         auditId: 3,
         auditActionType: 'EXTERNAL_ORDER_FULFILLMENT',
@@ -393,7 +490,7 @@ describe('classification', () => {
         attemptSource: 'live-deduct',
         attemptActorUserId: 7,
       }),
-    ] as never);
+    ]);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
 
     const report = await getAttributionReport(INPUT, ADMIN);
@@ -406,9 +503,9 @@ describe('classification', () => {
   });
 
   it('no attempt row derives the class and carries the ruleId + the rule sentence', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({ distinctStamps: 1, firstStamp: 'ord-1', lastStamp: 'ord-1', unstampedRows: 0 }),
-    ] as never);
+    ]);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
 
     const report = await getAttributionReport(INPUT, ADMIN);
@@ -424,7 +521,7 @@ describe('classification', () => {
     db.orderAttributionAttempt.findFirst.mockResolvedValue({
       attemptedAt: new Date('2026-08-01T00:00:00.000Z'),
     } as never);
-    db.$queryRaw.mockResolvedValue([summaryRow()] as never);
+    mockSummary([summaryRow()]);
 
     const report = await getAttributionReport(INPUT, ADMIN);
 
@@ -435,7 +532,7 @@ describe('classification', () => {
   });
 
   it('an attempt row outside the closed vocabulary falls back to the derivation', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({
         distinctStamps: 1,
         firstStamp: 'ord-1',
@@ -445,7 +542,7 @@ describe('classification', () => {
         attemptOutcome: 'teleported',
         attemptSource: 'live-deduct',
       }),
-    ] as never);
+    ]);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
 
     const report = await getAttributionReport(INPUT, ADMIN);
@@ -455,7 +552,7 @@ describe('classification', () => {
   });
 
   it('an R0 mass-update batch is excluded from the rows and counted as an exclusion', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({
         batchId: 'bulk-1',
         logTypes: 'ADJUSTMENT',
@@ -464,7 +561,7 @@ describe('classification', () => {
         auditHasRows: 1,
       }),
       selectedRow({ batchId: 'batch-2', minChangeTime: new Date('2026-08-09T12:00:00.000Z') }),
-    ] as never);
+    ]);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
 
@@ -477,7 +574,7 @@ describe('classification', () => {
   });
 
   it('units and product counts come from the batch summary (never multiplied)', async () => {
-    db.$queryRaw.mockResolvedValue([summaryRow({ units: 12, productCount: 3, rowCount: 4 })] as never);
+    mockSummary([summaryRow({ units: 12, productCount: 3, rowCount: 4 })]);
 
     const report = await getAttributionReport(INPUT, ADMIN);
 
@@ -499,10 +596,10 @@ describe('totals', () => {
   });
 
   it('byClass is computed BEFORE the active class filter (the other chips stay truthful)', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       selectedRow({ batchId: 'a', minChangeTime: new Date('2026-08-10T12:00:00.000Z') }),
       summaryRow({ batchId: 'b', minChangeTime: new Date('2026-08-09T12:00:00.000Z') }),
-    ] as never);
+    ]);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
 
@@ -516,9 +613,9 @@ describe('totals', () => {
   });
 
   it('carries the exclusions the same statement counted', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({ nonAttributableBatches: 17, noBatchRows: 240 }),
-    ] as never);
+    ]);
 
     const report = await getAttributionReport(INPUT, ADMIN);
 
@@ -530,9 +627,9 @@ describe('totals', () => {
   });
 
   it('an EMPTY window still reports its exclusions (the coverage row survives no batches)', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({ batchId: null, minChangeTime: null, nonAttributableBatches: 3, noBatchRows: 9 }),
-    ] as never);
+    ]);
 
     const report = await getAttributionReport(INPUT, ADMIN);
 
@@ -558,7 +655,7 @@ describe('paging', () => {
     );
 
   it('page 1 bounds itself out loud and hands back a cursor', async () => {
-    db.$queryRaw.mockResolvedValue(five() as never);
+    mockSummary(five());
 
     const report = await getAttributionReport({ ...INPUT, limit: 2 }, ADMIN);
 
@@ -570,10 +667,10 @@ describe('paging', () => {
   });
 
   it('the cursor round-trips and moreCount is EXACT on page 2', async () => {
-    db.$queryRaw.mockResolvedValue(five() as never);
+    mockSummary(five());
     const page1 = await getAttributionReport({ ...INPUT, limit: 2 }, ADMIN);
 
-    db.$queryRaw.mockResolvedValue(five() as never);
+    mockSummary(five());
     const page2 = await getAttributionReport(
       { ...INPUT, limit: 2, cursor: page1.nextCursor! },
       ADMIN,
@@ -583,7 +680,7 @@ describe('paging', () => {
     expect(page2.count).toBe(5);
     expect(page2.moreCount).toBe(1);
 
-    db.$queryRaw.mockResolvedValue(five() as never);
+    mockSummary(five());
     const page3 = await getAttributionReport(
       { ...INPUT, limit: 2, cursor: page2.nextCursor! },
       ADMIN,
@@ -601,7 +698,7 @@ describe('paging', () => {
       summaryRow({ batchId: 'd', minChangeTime: new Date('2026-08-16T12:00:00.000Z') }),
       selectedRow({ batchId: 'e', minChangeTime: new Date('2026-08-15T12:00:00.000Z') }),
     ];
-    db.$queryRaw.mockResolvedValue(rows as never);
+    mockSummary(rows);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
 
@@ -613,7 +710,7 @@ describe('paging', () => {
     expect(page1.count).toBe(3);
     expect(page1.moreCount).toBe(1);
 
-    db.$queryRaw.mockResolvedValue(rows as never);
+    mockSummary(rows);
     const page2 = await getAttributionReport(
       { ...INPUT, limit: 2, classKey: 'attributed·selected', cursor: page1.nextCursor! },
       ADMIN,
@@ -635,7 +732,7 @@ describe('paging', () => {
 
 describe('viewer semantics', () => {
   it('ADMIN: every order projected, actor named, scope said out loud', async () => {
-    db.$queryRaw.mockResolvedValue([selectedRow()] as never);
+    mockSummary([selectedRow()]);
     db.externalOrder.findMany.mockResolvedValue([orderRow({ companyId: 'co-theirs' })] as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
 
@@ -653,7 +750,7 @@ describe('viewer semantics', () => {
   });
 
   it('MEMBER: order fields only inside the membership, no actor identity anywhere', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       selectedRow({ batchId: 'a', minChangeTime: new Date('2026-08-11T12:00:00.000Z') }),
       selectedRow({
         batchId: 'b',
@@ -662,7 +759,7 @@ describe('viewer semantics', () => {
         lastStamp: 'ord-2',
         attemptOrderRecordId: 'ord-2',
       }),
-    ] as never);
+    ]);
     db.externalOrder.findMany.mockResolvedValue([
       orderRow(),
       orderRow({ id: 'ord-2', orderNumber: '#2002', companyId: 'co-theirs' }),
@@ -681,9 +778,9 @@ describe('viewer semantics', () => {
   });
 
   it("MEMBER: a non-member's order number matches ZERO rows and says so", async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({ batchId: null, minChangeTime: null, orderNumberMatches: 0 }),
-    ] as never);
+    ]);
 
     const report = await getAttributionReport({ ...INPUT, orderNumber: '#9999' }, MEMBER);
 
@@ -699,21 +796,21 @@ describe('viewer semantics', () => {
   });
 
   it('companyId never reaches the wire, in either viewer', async () => {
-    db.$queryRaw.mockResolvedValue([selectedRow()] as never);
+    mockSummary([selectedRow()]);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
 
     const admin = await getAttributionReport(INPUT, ADMIN);
     expect(JSON.stringify(admin)).not.toContain('companyId');
 
-    db.$queryRaw.mockResolvedValue([selectedRow()] as never);
+    mockSummary([selectedRow()]);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
     const member = await getAttributionReport(INPUT, MEMBER);
     expect(JSON.stringify(member)).not.toContain('companyId');
   });
 
   it('a stamped batch whose order was DELETED renders orderMissing (never redaction)', async () => {
-    db.$queryRaw.mockResolvedValue([selectedRow()] as never);
+    mockSummary([selectedRow()]);
     db.externalOrder.findMany.mockResolvedValue([] as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
 
@@ -723,7 +820,7 @@ describe('viewer semantics', () => {
   });
 
   it('orders are fetched ONCE for the returned page only', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       selectedRow({ batchId: 'a', minChangeTime: new Date('2026-08-12T12:00:00.000Z') }),
       selectedRow({
         batchId: 'b',
@@ -731,7 +828,7 @@ describe('viewer semantics', () => {
         firstStamp: 'ord-2',
         lastStamp: 'ord-2',
       }),
-    ] as never);
+    ]);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
 
@@ -758,7 +855,7 @@ describe('coverage', () => {
   });
 
   it('counts the tripwires and the ledger-unstamped share', async () => {
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       // mixed stamps
       summaryRow({
         batchId: 'mixed',
@@ -782,7 +879,7 @@ describe('coverage', () => {
         auditActionType: 'EXTERNAL_ORDER_FULFILLMENT',
         auditOrderId: 'ord-3',
       }),
-    ] as never);
+    ]);
     db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
 
@@ -823,6 +920,177 @@ describe('coverage', () => {
 });
 
 // ---------------------------------------------------------------------------
+// THE ORDER MATCH (Part 2, spec REV-8 §2.0 / §5; pack CA2.2, seam S-A10)
+// ---------------------------------------------------------------------------
+
+describe('the order match', () => {
+  /** A page whose stamped order really does have a line, a movement and facts. */
+  function wireMatch(rows: SqlRow[], deducted: unknown[] = [deductedSideRow()]) {
+    mockSummary(rows, deducted);
+    db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
+    db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
+    db.externalOrderItem.findMany.mockResolvedValue([itemRow()] as never);
+    db.product.findMany.mockResolvedValue([productRow()] as never);
+  }
+
+  it("a stamped row carries its ORDER's match, and no reason", async () => {
+    wireMatch([selectedRow()]);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(report.rows[0].matchUnavailable).toBeNull();
+    expect(report.rows[0].match).toMatchObject({
+      class: 'exact',
+      flagged: false,
+      kinds: [],
+      perProduct: [expect.objectContaining({ productId: 9, ordered: 1, deducted: 1 })],
+    });
+  });
+
+  // The four reasons, through the PRODUCER — one owner (S-A10), so the row's
+  // pair and the stamp set the producer is asked about can never disagree.
+  it("an UNSTAMPED batch reads 'unstamped', and the producer is never asked", async () => {
+    wireMatch([summaryRow()]);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(report.rows[0].match).toBeNull();
+    expect(report.rows[0].matchUnavailable).toBe('unstamped');
+    expect(db.externalOrderItem.findMany).not.toHaveBeenCalled();
+    expect(db.product.findMany).not.toHaveBeenCalled();
+  });
+
+  it("a batch whose rows name TWO orders reads 'mixed-stamps'", async () => {
+    wireMatch([
+      summaryRow({ distinctStamps: 2, firstStamp: 'ord-1', lastStamp: 'ord-2', unstampedRows: 0 }),
+    ]);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(report.rows[0].match).toBeNull();
+    expect(report.rows[0].matchUnavailable).toBe('mixed-stamps');
+  });
+
+  it("a stamp naming an order this database no longer holds reads 'order-missing'", async () => {
+    wireMatch([selectedRow()]);
+    db.externalOrder.findMany.mockResolvedValue([] as never);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(report.rows[0].match).toBeNull();
+    expect(report.rows[0].matchUnavailable).toBe('order-missing');
+    expect(db.externalOrderItem.findMany).not.toHaveBeenCalled();
+  });
+
+  // UNREACHABLE through either GET route (both hardcode the admin viewer) and
+  // live from P2-C's tool — pinned now, through the same producer, so the
+  // member's answer is a named reason rather than a blank nobody can read.
+  it("a MEMBER's foreign order reads 'order-redacted', and its lines are never read", async () => {
+    wireMatch([selectedRow()]);
+    db.externalOrder.findMany.mockResolvedValue([orderRow({ companyId: 'co-theirs' })] as never);
+
+    const report = await getAttributionReport(INPUT, MEMBER);
+
+    expect(report.rows[0].match).toBeNull();
+    expect(report.rows[0].matchUnavailable).toBe('order-redacted');
+    expect(db.externalOrderItem.findMany).not.toHaveBeenCalled();
+  });
+
+  it('exactly one of the pair is non-null on every row of the page', async () => {
+    wireMatch([selectedRow(), summaryRow({ batchId: 'batch-2' })]);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(report.rows).toHaveLength(2);
+    for (const row of report.rows) {
+      expect((row.match === null) !== (row.matchUnavailable === null)).toBe(true);
+    }
+  });
+
+  it('byClass counts ORDERS, not rows: two batches of one order are ONE exact', async () => {
+    // Both batches carry the same stamp, so the page holds two rows and one
+    // order — and the chip above the table claims to be counting orders.
+    wireMatch([selectedRow(), selectedRow({ batchId: 'batch-2' })]);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(report.rows).toHaveLength(2);
+    expect(report.matches.orders).toBe(1);
+    expect(report.matches.byClass.exact).toBe(1);
+    expect(report.coverage.matchedOrders).toBe(1);
+    // ...and the order was read ONCE, not once per row.
+    expect(db.externalOrderItem.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('unavailable counts ROWS, and the scope says "this page" on the wire', async () => {
+    wireMatch([
+      summaryRow({ batchId: 'batch-1' }),
+      summaryRow({ batchId: 'batch-2' }),
+      summaryRow({
+        batchId: 'batch-3',
+        distinctStamps: 2,
+        firstStamp: 'ord-1',
+        lastStamp: 'ord-2',
+        unstampedRows: 0,
+      }),
+    ]);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(report.matches.scope).toBe('this page');
+    expect(report.matches.orders).toBe(0);
+    expect(report.matches.unavailable).toEqual({
+      unstamped: 2,
+      'mixed-stamps': 1,
+      'order-missing': 0,
+      'order-redacted': 0,
+    });
+    expect(report.coverage.matchUnavailableRows).toBe(3);
+    expect(Object.values(report.matches.byClass).every((n) => n === 0)).toBe(true);
+  });
+
+  it('every MATCH_CLASS_KEY is a key of byClass, at zero when unseen', async () => {
+    wireMatch([selectedRow()]);
+    const report = await getAttributionReport(INPUT, ADMIN);
+    expect(Object.keys(report.matches.byClass).sort()).toEqual([...MATCH_CLASS_KEYS].sort());
+  });
+
+  // The match vocabulary rides with the numbers that use it — and the merge is
+  // last, so a shared key would silently REPLACE a lane sentence with a class
+  // sentence. The two sets are pinned disjoint by naming the lane's own keys.
+  it('definitions carry every match definition, with no key collision', async () => {
+    const LANE_DEFINITION_KEYS = [
+      'population',
+      'window',
+      'batchesInWindow',
+      'attributable',
+      'nonAttributable',
+      'noBatchRows',
+      'historicalMassUpdate',
+      'derived',
+      'derivedShare',
+      'moreCount',
+      'needsALook',
+      'recordingSince',
+      'canAttribute',
+      'fulfillmentTargetMissing',
+    ];
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(LANE_DEFINITION_KEYS.filter((key) => key in MATCH_DEFINITIONS)).toEqual([]);
+    expect(Object.keys(report.definitions).sort()).toEqual(
+      [...LANE_DEFINITION_KEYS, ...Object.keys(MATCH_DEFINITIONS)].sort(),
+    );
+    for (const [key, sentence] of Object.entries(MATCH_DEFINITIONS)) {
+      expect(report.definitions[key]).toBe(sentence);
+    }
+    // ...and the lane's own sentences survived the merge.
+    expect(report.definitions.population).toBe(ATTRIBUTABLE_DEFINITION);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // canAttribute / attributeLock / fulfilledAgainst (D4's UI predicate)
 // ---------------------------------------------------------------------------
 
@@ -839,7 +1107,7 @@ describe('the manual-attribution predicate', () => {
     over: Partial<SqlRow>,
     orders: Array<Record<string, unknown>> = ORDER_BOOK,
   ): Promise<AttributionReport> {
-    db.$queryRaw.mockResolvedValue([summaryRow(over)] as never);
+    mockSummary([summaryRow(over)]);
     db.externalOrder.findMany.mockResolvedValue(orders as never);
     db.user.findMany.mockResolvedValue([{ id: 7, username: 'kris' }] as never);
     return getAttributionReport(INPUT, ADMIN);
@@ -1408,8 +1676,13 @@ describe('getBatchDetail', () => {
 
     expect(detail!.ledgerRowsTruncated).toBe(false);
     expect(detail!.ledgerRows).toHaveLength(1);
-    // ...and it costs no aggregate statement: the array IS the whole ledger.
-    expect(db.$queryRaw).not.toHaveBeenCalled();
+    // ...and it costs no AGGREGATE statement: the array IS the whole ledger.
+    // RE-MEASURED at A2 (P-5): the raw channel is no longer idle here — the
+    // match's deducted-side aggregate rides it — so the pin names the statement
+    // that must NOT be there instead of counting the channel.
+    const raw = db.$queryRaw.mock.calls.map((call) => (call[0] as unknown as { sql: string }).sql);
+    expect(raw.filter((sql) => sql.includes('GROUP_CONCAT(DISTINCT l.logType'))).toEqual([]);
+    expect(raw.filter((sql) => sql.includes('AS outUnits'))).toHaveLength(1);
   });
 
   // QA-1: the bound belongs to the ARRAY. `batch` is the report row, and one
@@ -1430,7 +1703,7 @@ describe('getBatchDetail', () => {
   it('over the bound, `batch` is EXACT — ONE batch-scoped aggregate over the whole ledger (QA-1)', async () => {
     wireDetail({});
     truncatedLedger();
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       {
         rowCount: 500,
         units: 1200,
@@ -1442,7 +1715,7 @@ describe('getBatchDetail', () => {
         lastStamp: null,
         unstampedRows: 500,
       },
-    ] as never);
+    ]);
 
     const detail = await getBatchDetail('batch-1', ADMIN);
 
@@ -1476,7 +1749,7 @@ describe('getBatchDetail', () => {
   it("over the bound, the STAMPS are the whole ledger's — a batch stamped from row 100 says so (QA-1)", async () => {
     wireDetail({});
     truncatedLedger();
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       {
         rowCount: 500,
         units: 500,
@@ -1488,7 +1761,7 @@ describe('getBatchDetail', () => {
         lastStamp: 'ord-1',
         unstampedRows: 0,
       },
-    ] as never);
+    ]);
 
     const detail = await getBatchDetail('batch-1', ADMIN);
 
@@ -1568,6 +1841,62 @@ describe('getBatchDetail', () => {
     expect(detail!.batch.canAttribute).toBe(false);
     expect(detail!.batch.attributeLock).toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // The "This order" panel (Part 2, pack CA2.2)
+  // -------------------------------------------------------------------------
+
+  /** Every statement one drill-down spends, including the match's three. */
+  function detailStatementCount(): number {
+    return (
+      statementCount() +
+      db.inventory_logs.findMany.mock.calls.length +
+      db.auditLog.findMany.mock.calls.length +
+      db.auditLog.count.mock.calls.length +
+      db.orderAttributionAttempt.findMany.mock.calls.length +
+      db.orderAttributionAttempt.count.mock.calls.length
+    );
+  }
+
+  it("carries the order's match, taken off the row so the two can never disagree", async () => {
+    wireDetail({});
+    mockSummary([], [deductedSideRow()]);
+    db.externalOrderItem.findMany.mockResolvedValue([itemRow()] as never);
+    db.product.findMany.mockResolvedValue([productRow()] as never);
+
+    const detail = await getBatchDetail('detail-batch-1', ADMIN);
+
+    expect(detail!.orderMatchUnavailable).toBeNull();
+    expect(detail!.orderMatch).toBe(detail!.batch.match);
+    expect(detail!.orderMatch).toMatchObject({
+      class: 'exact',
+      unmappedLines: 0,
+      unmappedUnits: 0,
+    });
+    // MEASURED at A2 (P-5): the six a stamped admin read already spent (the
+    // ledger, the audit rows, the attempts, the manual attributions,
+    // recordingSince and the order lookup) plus the match's three.
+    expect(detailStatementCount()).toBe(9);
+  });
+
+  it('an UNAVAILABLE row spends NOTHING on the match — no items, no aggregate, no products', async () => {
+    wireDetail({});
+    db.inventory_logs.findMany.mockResolvedValue([
+      { ...ledgerRow, orderRecordId: null },
+    ] as never);
+
+    const detail = await getBatchDetail('detail-batch-1', ADMIN);
+
+    expect(detail!.orderMatch).toBeNull();
+    expect(detail!.orderMatchUnavailable).toBe('unstamped');
+    expect(db.externalOrderItem.findMany).not.toHaveBeenCalled();
+    expect(db.product.findMany).not.toHaveBeenCalled();
+    expect(db.$queryRaw).not.toHaveBeenCalled();
+    // FIVE, not six: an unstamped batch with no fulfillment target has no order
+    // id to hydrate either, so the order lookup returns without a statement of
+    // its own. Three of the four missing statements are the match's.
+    expect(detailStatementCount()).toBe(5);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1588,14 +1917,14 @@ describe('getBatchDetail', () => {
 describe('R0 parity across the three call sites', () => {
   it('the list, the drill-down and the core all refuse the SAME pre-lane mass update', async () => {
     // 1. THE LIST
-    db.$queryRaw.mockResolvedValue([
+    mockSummary([
       summaryRow({
         logTypes: 'ADJUSTMENT',
         auditId: 1,
         auditActionType: 'INVENTORY_BULK_UPDATE',
         auditHasRows: 1,
       }),
-    ] as never);
+    ]);
     const report = await getAttributionReport(INPUT, ADMIN);
     expect(report.rows).toEqual([]);
     expect(report.totals.exclusions.historicalMassUpdate).toBe(1);
