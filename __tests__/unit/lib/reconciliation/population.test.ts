@@ -31,6 +31,7 @@ import {
   ATTRIBUTABLE_DEFINITION,
   ATTRIBUTABLE_PREDICATE,
   classifyMassUpdateBatch,
+  deductedSideSql,
   isAttributableBatch,
   renderRowWhere,
   renderRowWhereSql,
@@ -135,6 +136,92 @@ describe('both renderers are RENDERED from the predicate table (plan P-4)', () =
     );
     expect(src.match(/'SALE'/g) ?? []).toHaveLength(2);
     expect(src.match(/'ADJUSTMENT'/g) ?? []).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE DEDUCTED SIDE (Part 2, pack CA1.5) — the aggregate builder.
+//
+// The matcher's other side. It is rendered HERE, beside the population, for the
+// same reason the two renderers above are: `out` is "what the population took
+// out for this order", and a builder that re-spelled the predicate would be a
+// second definition of the population wearing an aggregate's clothes.
+// ---------------------------------------------------------------------------
+
+describe('deductedSideSql — ONE plain mode, the population rendered through rowWhereSql', () => {
+  const flatten = (sql: string) => sql.replace(/\s+/g, ' ').trim();
+
+  it('renders both CASE arms, the bound ids and the GROUP BY, verbatim', () => {
+    const built = deductedSideSql(['o1', 'o2']);
+    expect(flatten(built.sql)).toBe(
+      'SELECT l.orderRecordId AS orderRecordId, l.productId AS productId, ' +
+        'COALESCE(SUM(CASE WHEN l.logType IN (?,?) AND l.delta < 0 AND l.batchId IS NOT NULL ' +
+        'THEN -l.delta ELSE 0 END), 0) AS outUnits, ' +
+        "COALESCE(SUM(CASE WHEN l.logType = 'CORRECTION' AND l.delta > 0 THEN l.delta ELSE 0 END), 0) " +
+        'AS correctedUnits ' +
+        'FROM inventory_logs l ' +
+        'WHERE l.orderRecordId IN (?,?) AND ((l.logType IN (?,?) AND l.delta < 0 AND l.batchId IS NOT NULL) ' +
+        "OR (l.logType = 'CORRECTION' AND l.delta > 0)) " +
+        'GROUP BY l.orderRecordId, l.productId'
+    );
+  });
+
+  it('BINDS the order ids (never interpolates them) and the log types with them', () => {
+    expect(deductedSideSql(['o1', 'o2']).values).toEqual([
+      'SALE',
+      'ADJUSTMENT',
+      'o1',
+      'o2',
+      'SALE',
+      'ADJUSTMENT',
+    ]);
+    expect(deductedSideSql(["o'1"]).sql).not.toContain("o'1");
+  });
+
+  it('renders the population conjuncts FROM rowWhereSql, twice, never re-spelled', () => {
+    const fragment = rowWhereSql('l').sql;
+    const built = flatten(deductedSideSql(['o1']).sql);
+    expect(built.split(fragment)).toHaveLength(3); // two occurrences
+  });
+
+  it('follows the predicate TABLE — a mutated table renders a fragment this builder does not carry', () => {
+    // The builder takes no predicate parameter (there is one population), so the
+    // mutate-through is asserted from the other side: what a CHANGED table
+    // renders is exactly what the builder must NOT contain, while what the
+    // frozen table renders is what it must.
+    const mutated: PopulationPredicate = {
+      logTypes: ['CORRECTION'],
+      deltaBelow: -5,
+      batchIdRequired: false,
+    };
+    const built = flatten(deductedSideSql(['o1']).sql);
+    expect(built).toContain(renderRowWhereSql(ATTRIBUTABLE_PREDICATE, 'l').sql);
+    expect(built).not.toContain(renderRowWhereSql(mutated, 'l').sql);
+  });
+
+  it('TRANSFER legs enter neither side by construction', () => {
+    // Not in the population (logType IN (SALE, ADJUSTMENT)), and not a positive
+    // CORRECTION. Nothing to filter out: there is no TRANSFER token at all.
+    expect(deductedSideSql(['o1']).sql).not.toContain('TRANSFER');
+  });
+
+  it('refuses an EMPTY id list (it would render IN ()) and more than 200', () => {
+    expect(() => deductedSideSql([])).toThrow(RangeError);
+    expect(() => deductedSideSql([])).toThrow(/at least one order/);
+    const ids = Array.from({ length: 201 }, (_, i) => `o${i}`);
+    expect(() => deductedSideSql(ids)).toThrow(RangeError);
+    expect(() => deductedSideSql(ids)).toThrow(/at most 200 orders/);
+    expect(() => deductedSideSql(ids.slice(0, 200))).not.toThrow();
+  });
+
+  it('the module STILL carries no Prisma write token (the aggregate is a read)', () => {
+    const src = fs.readFileSync(
+      path.resolve(__dirname, '../../../../lib/reconciliation/population.ts'),
+      'utf8'
+    );
+    const re =
+      /\.\s*(create|createMany|update|updateMany|upsert|delete|deleteMany)\s*\(|\$(executeRaw|executeRawUnsafe|queryRawUnsafe)\b/g;
+    expect(src.match(re)).toBeNull();
   });
 });
 

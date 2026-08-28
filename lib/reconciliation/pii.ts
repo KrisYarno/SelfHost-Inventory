@@ -24,8 +24,12 @@
  * Recursively freeze an allowlist so it cannot be widened at runtime — the
  * `lib/reports/order-pipeline.ts` idiom. A stray `SELECT.customerEmail = true`
  * throws in strict mode instead of silently changing the projection.
+ *
+ * EXPORTED for Part 2 (pack CA1.4): the order-items read the matcher stands on
+ * freezes its own select the same way, and a second copy of this function would
+ * be a second rule about what a select is.
  */
-function deepFreeze<T>(o: T): T {
+export function deepFreeze<T>(o: T): T {
   if (o && typeof o === 'object') {
     for (const v of Object.values(o)) deepFreeze(v);
     Object.freeze(o);
@@ -34,9 +38,14 @@ function deepFreeze<T>(o: T): T {
 }
 
 /**
- * The EIGHT names that must never appear as a key anywhere in a reconciliation
+ * The NINE names that must never appear as a key anywhere in a reconciliation
  * response — customer identity, verbatim platform payloads, and the outward
  * links that carry an order's identity with them.
+ *
+ * `variantName` is Part 2's addition (spec REV-8 §2.1): the order-items read
+ * the matcher stands on projects the item row, and the per-customer variant
+ * string is the one PII-shaped column on it. The reader never selects it; this
+ * is the second layer that proves no composite put it back.
  */
 export const RECONCILIATION_PII_FIELD_NAMES: ReadonlySet<string> = Object.freeze(
   new Set([
@@ -48,6 +57,7 @@ export const RECONCILIATION_PII_FIELD_NAMES: ReadonlySet<string> = Object.freeze
     'customerPhone',
     'shippingAddress',
     'billingAddress',
+    'variantName',
   ])
 );
 

@@ -5,12 +5,14 @@
 // This module is where the reconciliation surface's projection rules live, and
 // it exists so there is exactly ONE list to widen by mistake. Three pins:
 //
-//   * the EIGHT forbidden names, exactly — with `note` deliberately NOT among
+//   * the NINE forbidden names, exactly — with `note` deliberately NOT among
 //     them (CX-6): the Exceptions finder RETURNS the admin-only
 //     InventoryException.note, and a generic forbidden-name set would fail every
 //     row it produces. The toolsuite gate keeps its own independent literal and
 //     asserts this set is a SUPERSET of it (M5a), so narrowing here can never
-//     quietly weaken that gate;
+//     quietly weaken that gate. `variantName` is Part 2's addition (pack CA1.4):
+//     the order-items read the matcher stands on projects the item row, and the
+//     per-customer variant string is the one PII-shaped column on it;
 //   * the two selects, deep-frozen — a select is an allowlist, and an allowlist
 //     that can be widened at runtime is a suggestion;
 //   * assertNoPiiKeys, which is what the route-response harness (M2a-2) runs
@@ -20,10 +22,11 @@ import {
   RECONCILIATION_PII_FIELD_NAMES,
   RECONCILIATION_USER_SELECT,
   assertNoPiiKeys,
+  deepFreeze,
 } from '@/lib/reconciliation/pii';
 
 describe('RECONCILIATION_PII_FIELD_NAMES', () => {
-  it('is exactly the eight names', () => {
+  it('is exactly the nine names', () => {
     expect(Array.from(RECONCILIATION_PII_FIELD_NAMES).sort()).toEqual([
       'billingAddress',
       'customerEmail',
@@ -33,6 +36,7 @@ describe('RECONCILIATION_PII_FIELD_NAMES', () => {
       'platformStatusRaw',
       'rawPayload',
       'shippingAddress',
+      'variantName',
     ]);
   });
 
@@ -53,6 +57,24 @@ describe('RECONCILIATION_PII_FIELD_NAMES', () => {
     ]) {
       expect(RECONCILIATION_PII_FIELD_NAMES.has(name)).toBe(true);
     }
+  });
+});
+
+describe('deepFreeze — EXPORTED for the Part 2 item select (pack CA1.4, seam S-A7)', () => {
+  it('freezes recursively and returns the same object', () => {
+    const o = { a: true, nested: { b: { c: true } } };
+    expect(deepFreeze(o)).toBe(o);
+    expect(Object.isFrozen(o)).toBe(true);
+    expect(Object.isFrozen(o.nested)).toBe(true);
+    expect(Object.isFrozen(o.nested.b)).toBe(true);
+  });
+
+  it('is what makes a select an allowlist rather than a suggestion', () => {
+    'use strict';
+    const select = deepFreeze({ id: true, nested: { select: { productId: true } } });
+    expect(() => {
+      (select as unknown as Record<string, boolean>).customerEmail = true;
+    }).toThrow();
   });
 });
 

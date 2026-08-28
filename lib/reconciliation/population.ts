@@ -136,6 +136,58 @@ export function rowWhereSql(alias = 'l'): Prisma.Sql {
   return renderRowWhereSql(ATTRIBUTABLE_PREDICATE, alias);
 }
 
+/**
+ * A row of the deducted side, exactly as MySQL returns it. The two sums arrive
+ * as whatever the driver decides a SUM is (a Decimal, a string, a number), so
+ * they are `unknown` here and the CONSUMER converts — a builder that promised
+ * `number` would be promising something it cannot check.
+ */
+export type DeductedSideSqlRow = {
+  orderRecordId: string;
+  productId: number;
+  outUnits: unknown;
+  correctedUnits: unknown;
+};
+
+/** At most this many orders per aggregate; symmetric with `readOrderItems`. */
+const MAX_DEDUCTED_SIDE_ORDERS = 200;
+
+/**
+ * THE DEDUCTED SIDE (Part 2, spec REV-8 §2.2; pack CA1.5) — one plain read,
+ * per (order, product): `out` = what the POPULATION took out for that order,
+ * `corrected` = what positive CORRECTION rows gave back. The matcher nets them.
+ *
+ * It lives here, beside the population, because `out` is defined BY the
+ * population: the `CASE` arm renders `rowWhereSql('l')` rather than re-spelling
+ * three conjuncts, so the day the predicate table changes, this aggregate
+ * changes with it. TRANSFER legs enter neither side by construction — not in
+ * the population, and not a positive CORRECTION.
+ *
+ * ONE mode, PLAIN (no `FOR SHARE`): inside a writer this is fresh because the
+ * writer holds the order's lock as its first statement (cut A).
+ *
+ * The ids are BOUND. `[]` and more than 200 are caller errors rather than a
+ * quietly empty result, and `[]` would render `IN ()`, which is not valid SQL.
+ */
+export function deductedSideSql(orderIds: readonly string[]): Prisma.Sql {
+  if (orderIds.length === 0) {
+    throw new RangeError('deductedSideSql: at least one order id is required');
+  }
+  if (orderIds.length > MAX_DEDUCTED_SIDE_ORDERS) {
+    throw new RangeError(`deductedSideSql: at most ${MAX_DEDUCTED_SIDE_ORDERS} orders`);
+  }
+  const population = rowWhereSql('l');
+  return Prisma.sql`
+    SELECT l.orderRecordId AS orderRecordId, l.productId AS productId,
+           COALESCE(SUM(CASE WHEN ${population} THEN -l.delta ELSE 0 END), 0) AS outUnits,
+           COALESCE(SUM(CASE WHEN l.logType = 'CORRECTION' AND l.delta > 0 THEN l.delta ELSE 0 END), 0) AS correctedUnits
+    FROM inventory_logs l
+    WHERE l.orderRecordId IN (${Prisma.join([...orderIds])})
+      AND ((${population}) OR (l.logType = 'CORRECTION' AND l.delta > 0))
+    GROUP BY l.orderRecordId, l.productId
+  `;
+}
+
 /** What R0 reads off an audit row: the type, and whether the shape keys exist. */
 export type PopulationAuditEvent = { actionType: string; details: unknown };
 

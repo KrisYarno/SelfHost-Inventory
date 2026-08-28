@@ -85,6 +85,11 @@ const LEAKY_ORDER = {
   rawPayload: { id: 4242, billing: { email: 'buyer@example.com' } },
   platformStatusRaw: { status: 'processing' },
   externalOrderUrl: 'https://shop.example.com/wp-admin/post.php?post=4242',
+  // The ninth forbidden name (Part 2, pack CA1.4) is an ITEM column, not an
+  // order one. It rides on this row anyway: the fixture's job is to carry every
+  // name the assertion forbids, so the non-vacuity pin below stays total as the
+  // set grows.
+  variantName: '10 mg / 2 vials',
   _count: { items: 2 },
 };
 

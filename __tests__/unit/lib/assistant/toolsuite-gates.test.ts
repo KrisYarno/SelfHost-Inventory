@@ -877,6 +877,15 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
     // CX-3: the types the producer needs from the attempts writer live here instead, so
     // the read path never imports `lib/attribution/attempts.ts`.
     "lib/attribution/contracts.ts",
+    // Reconciliation Part 2 (pack CA1.6): the order-grain matcher. get_order_reconciliation
+    // reaches it through the report producer from P2-C, and `items.ts` drags the bundle
+    // resolver plus its Zod schema along — registered BY HAND for the same reason the four
+    // above are, so the "no write token, comments included" rule covers them too.
+    "lib/reconciliation/match-keys.ts",
+    "lib/reconciliation/match.ts",
+    "lib/reconciliation/items.ts",
+    "lib/external-orders/bundle-snapshot.ts",
+    "lib/validation/bundle-links.ts",
   ];
   const WRITE_TOKEN_SRC =
     "\\.\\s*(create|createMany|update|updateMany|upsert|delete|deleteMany)\\s*\\(|" +

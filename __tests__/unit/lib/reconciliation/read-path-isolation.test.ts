@@ -2,15 +2,16 @@
  * NOT ON THE READ PATH (reconciliation lane, pack C2b.5 / R-4; spec REV-7 D4).
  *
  * M2b lands the lane's first WRITER — `lib/reconciliation/attribute-batch.ts`,
- * which locks ledger rows and re-stamps them. Four modules in the same directory
- * are reachable from `lib/assistant/tools.ts`, where the zero-business-writes
- * invariant is enforced by a TEXTUAL scan: a Prisma write-method token anywhere
- * in their source — comments included — fails the toolsuite gate.
+ * which locks ledger rows and re-stamps them. NINE modules are reachable from
+ * `lib/assistant/tools.ts` (Part 2's matcher added five), where the
+ * zero-business-writes invariant is enforced by a TEXTUAL scan: a Prisma
+ * write-method token anywhere in their source — comments included — fails the
+ * toolsuite gate.
  *
  * So this file pins the boundary from the other side, at the moment the writer
  * arrives rather than at M5a when the tool wires the producer in:
  *
- *   1. none of the four read modules imports the manual-attribution core;
+ *   1. none of the nine read modules imports the manual-attribution core;
  *   2. none of them imports the attempt writer (they take their vocabulary from
  *      `lib/attribution/contracts.ts`, which is types-only);
  *   3. none of them carries a write token at all, in code OR in prose — the R-4
@@ -31,12 +32,20 @@ import path from 'node:path';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 
-/** The four modules the assistant's tool surface can reach (pack R-4). */
+/** The nine modules the assistant's tool surface can reach (pack R-4 / CA1.6). */
 const READ_MODULES = [
   'lib/reconciliation/population.ts',
   'lib/reconciliation/derive.ts',
   'lib/reconciliation/pii.ts',
   'lib/reconciliation/attribution.ts',
+  // Part 2 (pack CA1.6): the order-grain matcher. `items.ts` drags the bundle
+  // resolver and its Zod schema onto the read path with it — both carry zero
+  // write tokens today and inherit the rule from here on.
+  'lib/reconciliation/match-keys.ts',
+  'lib/reconciliation/match.ts',
+  'lib/reconciliation/items.ts',
+  'lib/external-orders/bundle-snapshot.ts',
+  'lib/validation/bundle-links.ts',
 ];
 
 /** The write module they must never reach, and the writer beside it. */
