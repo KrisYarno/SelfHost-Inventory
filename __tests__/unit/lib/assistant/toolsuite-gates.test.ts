@@ -711,9 +711,13 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     const definitions = (result.data as { definitions: Record<string, string> }).definitions;
 
     expect(Object.keys(definitions).filter((k) => k in MATCH_DEFINITIONS)).toEqual([]);
-    // ...and the two match TOTALS the coverage block DOES carry keep theirs.
-    expect(typeof definitions.matchedOrders).toBe("string");
-    expect(typeof definitions.matchUnavailableRows).toBe("string");
+    // QA-4: the two match TOTALS leave with their vocabulary — neither the figures
+    // nor their sentences reach the tool until C4 puts the match on the rows.
+    expect(definitions.matchedOrders).toBeUndefined();
+    expect(definitions.matchUnavailableRows).toBeUndefined();
+    const coverage = (result.data as { coverage: Record<string, unknown> }).coverage;
+    expect(coverage.matchedOrders).toBeUndefined();
+    expect(coverage.matchUnavailableRows).toBeUndefined();
     // FD-2's original two are still stripped: `toolRow` carries neither field.
     expect(definitions.canAttribute).toBeUndefined();
     expect(definitions.fulfillmentTargetMissing).toBeUndefined();

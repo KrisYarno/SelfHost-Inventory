@@ -136,12 +136,6 @@ const COMPARABLE_KINDS: ReadonlySet<MatchKind> = new Set<MatchKind>([
 const SHORTFALL_KINDS: ReadonlySet<MatchKind> = new Set<MatchKind>(['missing', 'short']);
 
 /**
- * The only throw on this path. Units are integers by construction (the ledger's
- * `delta` is an INT and `quantity` is an INT), so a fractional or negative one
- * means a caller handed the matcher something that is not a unit count — and
- * silently rounding it would put a made-up number on an admin's screen.
- */
-/**
  * THE ONE error the matcher throws on purpose (FD-2): its guards refusing
  * data that is not a unit count. The producer catches EXACTLY this class per
  * order and lets every other throw — a defect, not a refusal — propagate.
@@ -153,6 +147,13 @@ export class MatcherRefusal extends Error {
   }
 }
 
+/**
+ * The guards' refusal. Units are integers by construction (the ledger's `delta`
+ * is an INT and `quantity` is an INT), so a fractional or negative one means a
+ * caller handed the matcher something that is not a unit count — and silently
+ * rounding it would put a made-up number on an admin's screen. The producer
+ * catches `MatcherRefusal` per order; nothing else this module throws is caught.
+ */
 function assertUnits(value: number, what: string): void {
   if (!Number.isInteger(value) || value < 0) {
     throw new MatcherRefusal(`matchOrder: ${what} must be a non-negative integer, got ${value}`);

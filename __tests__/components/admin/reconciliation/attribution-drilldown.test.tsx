@@ -569,6 +569,44 @@ describe("the This order panel (pack CA3)", () => {
     expect(screen.queryByTestId("order-match-unavailable")).toBeNull();
   });
 
+  // QA-2: a class-less match LISTS its deducted products without comparing
+  // them; "no difference" about a product with ordered 0 / deducted 5 is a
+  // positive false claim. And a tolerance-nulled row differs by the mass the
+  // swap below explains.
+  it("never says 'no difference' where nothing was compared, or where a swap explains the gap", () => {
+    const base = makeMatch();
+    renderPanel({
+      orderMatch: makeMatch({
+        class: null,
+        reason: "unmatchable",
+        flagged: false,
+        kinds: [],
+        perProduct: [
+          { ...base.perProduct[0], ordered: 0, deducted: 5, corrected: 0, delta: 5, kind: null, units: 0 },
+        ],
+      }),
+    });
+    expect(screen.getByTestId("order-match-product-3")).toHaveTextContent("not compared");
+    expect(screen.getByTestId("order-match-product-3")).not.toHaveTextContent("no difference");
+  });
+
+  it("a tolerance-nulled row says the swap explains it; a truly equal row says 'no difference'", () => {
+    const base = makeMatch();
+    renderPanel({
+      orderMatch: makeMatch({
+        class: "substitution-equivalent",
+        flagged: false,
+        kinds: [],
+        perProduct: [
+          { ...base.perProduct[0], ordered: 2, deducted: 0, corrected: 0, delta: -2, kind: null, units: 0 },
+          { ...base.perProduct[0], productId: 4, productName: "Gadget", ordered: 1, deducted: 1, corrected: 0, delta: 0, kind: null, units: 0 },
+        ],
+      }),
+    });
+    expect(screen.getByTestId("order-match-product-3")).toHaveTextContent("balanced (see swap below)");
+    expect(screen.getByTestId("order-match-product-4")).toHaveTextContent("no difference");
+  });
+
   // Pack rule 5: `perProduct[].productName` is the only string inside the match
   // that names anything. The row beside it carries an actor and an order number;
   // neither belongs in this panel.

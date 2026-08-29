@@ -275,6 +275,8 @@ function MatchChips({
     (sum, reason) => sum + matches.unavailable[reason],
     0,
   );
+  const classed = MATCH_CLASS_KEYS.reduce((sum, key) => sum + matches.byClass[key], 0);
+  const notComparable = Math.max(0, matches.orders - classed);
 
   return (
     <div
@@ -282,7 +284,8 @@ function MatchChips({
       data-testid="match-chips"
     >
       {/* The label is ALWAYS the first element (pack CA3), whatever follows it. */}
-      <span className="text-body-sm font-medium">Matches (this page)</span>
+      {/* QA-5: the chips count ORDERS and the filter shows their BATCHES — the grain is in the label. */}
+      <span className="text-body-sm font-medium">Matches (this page, by order)</span>
 
       {MATCH_CLASS_KEYS.filter((key) => matches.byClass[key] > 0).map((key) => (
         <MatchChip
@@ -311,6 +314,14 @@ function MatchChips({
           active={active === "unavailable"}
           onToggle={onToggle}
         />
+      )}
+
+      {/* QA-6: an order the matcher answered with NO class (nothing to compare) has
+          no chip; say how many rather than leave a bare label. */}
+      {notComparable > 0 && (
+        <span className="text-body-sm text-muted-foreground" data-testid="match-chips-unmatchable">
+          {notComparable} order(s) with nothing to compare
+        </span>
       )}
 
       {matches.orders === 0 &&

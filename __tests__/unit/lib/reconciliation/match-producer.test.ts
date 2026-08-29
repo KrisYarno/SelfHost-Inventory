@@ -46,6 +46,9 @@ jest.mock('@/lib/reconciliation/match', () => {
   const actual = jest.requireActual('@/lib/reconciliation/match');
   return { ...actual, matchOrder: jest.fn(actual.matchOrder) };
 });
+const actualMatchOrder = jest.requireActual<typeof import('@/lib/reconciliation/match')>(
+  '@/lib/reconciliation/match',
+).matchOrder;
 import type { DeductedSideSqlRow } from '@/lib/reconciliation/population';
 
 const db = mockDeep<PrismaClient>();
@@ -127,6 +130,8 @@ function rawStatement(call = 0): { sql: string; values: unknown[] } {
 
 beforeEach(() => {
   mockReset(db);
+  // FD2-5: a queued one-shot throw must never leak into the next test.
+  (matchOrder as jest.MockedFunction<typeof matchOrder>).mockReset().mockImplementation(actualMatchOrder);
   db.externalOrderItem.findMany.mockResolvedValue([] as never);
   db.$queryRaw.mockResolvedValue([] as never);
   db.product.findMany.mockResolvedValue([] as never);

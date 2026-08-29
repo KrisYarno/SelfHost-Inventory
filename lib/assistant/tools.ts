@@ -293,6 +293,9 @@ const TOOL_OMITTED_DEFINITIONS: ReadonlySet<string> = new Set<string>([
   "canAttribute",
   "fulfillmentTargetMissing",
   ...Object.keys(MATCH_DEFINITIONS),
+  // QA-4: the two match totals leave the tool's coverage block with them.
+  "matchedOrders",
+  "matchUnavailableRows",
 ]);
 // DB-level `take` for the snapshot series rows. Reconciled with the budget (D-T7): a
 // point serializes to ~52 bytes, so 1000 points ≈ 51 KiB < the reserved row-page budget
@@ -2966,13 +2969,21 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         { kind: "member", companyIds: ctx.companyIds },
       );
       const { nonAttributable, historicalMassUpdate, noBatchRows } = report.totals.exclusions;
+      const {
+        matchedOrders: _matchedOrders,
+        matchUnavailableRows: _matchUnavailableRows,
+        ...toolCoverage
+      } = report.coverage;
       return ok(
         {
           window,
           totals: report.totals,
           rows: report.rows.map(toolRow),
           coverage: {
-            ...report.coverage,
+            // QA-4: the two match TOTALS leave with their vocabulary — `toolRow` carries
+            // no match, so "5 unavailable of 5" would be a number the model cannot
+            // explain (a member sees its foreign orders as unavailable). Back with C4.
+            ...toolCoverage,
             batchScope: "global — the physical pool, no actor identity",
             orderFieldScope: "your companies only",
             // Every exclusion, said out loud beside the figures that carry them: the

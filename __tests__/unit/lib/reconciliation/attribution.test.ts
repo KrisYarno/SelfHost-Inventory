@@ -1069,7 +1069,7 @@ describe('the order match', () => {
       expect(report.rows[0].matchUnavailable).toBe('match-error');
       expect(report.matches.unavailable['match-error']).toBe(1);
       expect(report.coverage.matchUnavailableRows).toBe(1);
-      // FD-1: a refused order was NOT compared — it must not sit on both sides.
+      // P2 FD-1: a refused order was NOT compared — it must not sit on both sides.
       expect(report.matches.orders).toBe(0);
       expect(report.coverage.matchedOrders).toBe(0);
       expect(errorSpy).toHaveBeenCalledTimes(1);

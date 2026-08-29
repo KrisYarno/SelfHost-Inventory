@@ -15,18 +15,19 @@
  * whole /admin subtree dynamic — so `useSearchParams` needs no Suspense
  * boundary here, exactly as /admin/logs relies on.
  *
- * THE URL IS AN INPUT, NOT ONLY AN OUTPUT (OCa-7). Reading `?tab=` in the
- * `useState` initializer alone made the drill-down's finder links inert: an
- * in-place soft navigation to `?tab=unmapped` changed the URL and the shell
- * stayed where it was. And rebuilding the query string from the tab alone
- * ERASED every other param the link or the admin had put there. So the tab is
- * adjusted FROM the URL during render (the "adjusting state when props change"
- * idiom the Attribution tab already uses for its match chip), the replace
- * carries the other params through, and it only fires when the two actually
- * disagree — replacing a URL with itself is the loop.
+ * THE URL IS THE ONLY SOURCE OF TRUTH FOR THE TAB (OCa-7 → FD-3 → FD2-1).
+ * Reading `?tab=` once into local state made the drill-down's finder links
+ * inert, and every attempt to reconcile a local mirror WITH the URL (a
+ * render-time adjust, then a last-written ref) was correct for exactly one
+ * in-flight replace and wrong for two. So there is no mirror: the tab IS
+ * `?tab=`, a click is a `router.replace` inside a transition, and the only
+ * local value is the clicked tab shown while that transition is pending —
+ * bounded by `isPending`, so nothing outlives the navigation that wrote it.
+ * The replace carries the other params through (a link's or the admin's).
  */
 
 import * as React from "react";
+import { cn } from "@/lib/utils";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { AttributionTab } from "./attribution-tab";
@@ -41,38 +42,43 @@ const AVAILABLE_TABS: readonly TabKey[] = ["attribution", "exceptions", "unmappe
 export function ReconciliationPageShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const [isPending, startTransition] = React.useTransition();
   const requested = (searchParams?.get("tab") ?? null) as TabKey | null;
   /** The tab the URL names, or null when it names nothing this release renders. */
   const urlTab =
     requested !== null && AVAILABLE_TABS.includes(requested) ? requested : null;
 
-  const [tab, setTab] = React.useState<TabKey>(urlTab ?? "attribution");
+  // The clicked tab, shown ONLY while its navigation is pending: once the
+  // transition settles the URL is the answer again, landed or not.
+  const [clicked, setClicked] = React.useState<TabKey | null>(null);
+  const tab: TabKey = isPending && clicked !== null ? clicked : (urlTab ?? "attribution");
 
-  // Adjusted DURING render, so no effect can race the replace below: when the
-  // URL's tab CHANGES (a finder link), it wins; when the admin clicks a
-  // trigger, the URL has not changed and the click stands.
-  // FD-3: the URL changing to the tab WE last wrote is our own replace landing,
-  // not a navigation — a second click made before it landed must stand. The
-  // ref is consumed once, so a later genuine link to that same tab still wins.
-  const lastWrittenRef = React.useRef<TabKey | null>(null);
-  const [urlTabSeen, setUrlTabSeen] = React.useState<TabKey | null>(urlTab);
-  if (urlTabSeen !== urlTab) {
-    setUrlTabSeen(urlTab);
-    if (urlTab !== null && urlTab === lastWrittenRef.current) {
-      lastWrittenRef.current = null;
-    } else if (urlTab !== null && urlTab !== tab) {
-      setTab(urlTab);
-    }
-  }
+  const goTo = React.useCallback(
+    (next: TabKey) => {
+      const params = new URLSearchParams(searchParams?.toString() ?? "");
+      params.set("tab", next);
+      setClicked(next);
+      startTransition(() => {
+        router.replace(`/admin/reconciliation?${params.toString()}`);
+      });
+    },
+    [router, searchParams],
+  );
 
+  // A URL naming no renderable tab is written ONCE per such episode, so a reload
+  // lands where the admin was (the /admin/logs idiom). The ref makes "once"
+  // structural: a router whose identity changes per render (a test double) must
+  // not turn this into a transition loop.
+  const wroteDefaultRef = React.useRef(false);
   React.useEffect(() => {
-    // Nothing to say: the URL already names this tab.
-    if (urlTab === tab) return;
-    const next = new URLSearchParams(searchParams?.toString() ?? "");
-    next.set("tab", tab);
-    lastWrittenRef.current = tab;
-    router.replace(`/admin/reconciliation?${next.toString()}`);
-  }, [tab, urlTab, searchParams, router]);
+    if (urlTab !== null) {
+      wroteDefaultRef.current = false;
+      return;
+    }
+    if (wroteDefaultRef.current) return;
+    wroteDefaultRef.current = true;
+    goTo("attribution");
+  }, [urlTab, goTo]);
 
   return (
     <div className="container mx-auto space-y-6 overflow-x-hidden p-4 sm:p-6">
@@ -84,8 +90,11 @@ export function ReconciliationPageShell() {
         </p>
       </div>
 
-      <Tabs value={tab} onValueChange={(value) => setTab(value as TabKey)}>
-        <TabsList className="flex flex-wrap gap-2">
+      <Tabs value={tab} onValueChange={(value) => goTo(value as TabKey)}>
+        <TabsList
+          className={cn("flex flex-wrap gap-2", isPending && "opacity-70")}
+          aria-busy={isPending || undefined}
+        >
           <TabsTrigger value="attribution">Attribution</TabsTrigger>
           <TabsTrigger value="exceptions">Exceptions</TabsTrigger>
           <TabsTrigger value="unmapped">Unmapped</TabsTrigger>

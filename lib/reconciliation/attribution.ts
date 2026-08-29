@@ -1255,7 +1255,7 @@ export async function getAttributionReport(
     getOrderMatches(prisma, stamps),
   ]);
 
-  // FD-1: a stamp the matcher REFUSED is not an order it compared — counting it
+  // P2 FD-1: a stamp the matcher REFUSED is not an order it compared — counting it
   // here would put the same order on both sides of the coverage pair.
   const comparedOrders = stamps.filter((stamp) => matches.has(stamp)).length;
 

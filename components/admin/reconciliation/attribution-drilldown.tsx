@@ -107,8 +107,16 @@ function massText(hundredths: number): string {
   return String(Number((hundredths / 100).toFixed(2)));
 }
 
-function kindText(product: PerProduct): string {
-  return product.kind === null ? "no difference" : `${KIND_COPY[product.kind]} ${product.units}`;
+/**
+ * The difference in words — and only where the matcher actually compared (QA-2).
+ * A class-less match listed its deducted products without comparing them, and
+ * a tolerance-nulled row differs by mass the swap explains below; "no
+ * difference" is true of neither.
+ */
+function kindText(match: WireOrderMatch, product: PerProduct): string {
+  if (match.class === null) return "not compared";
+  if (product.kind === null) return product.delta === 0 ? "no difference" : "balanced (see swap below)";
+  return `${KIND_COPY[product.kind]} ${product.units}`;
 }
 
 /**
@@ -190,7 +198,7 @@ function OrderMatchPanel({ match }: { match: WireOrderMatch }) {
                 <TableCell className="tabular-nums">{product.ordered}</TableCell>
                 <TableCell className="tabular-nums">{product.deducted}</TableCell>
                 <TableCell className="tabular-nums">{product.corrected}</TableCell>
-                <TableCell>{kindText(product)}</TableCell>
+                <TableCell>{kindText(match, product)}</TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -227,7 +235,7 @@ function OrderMatchPanel({ match }: { match: WireOrderMatch }) {
                 <dd className="tabular-nums">{product.corrected}</dd>
               </div>
             </dl>
-            <p className="mt-2">{kindText(product)}</p>
+            <p className="mt-2">{kindText(match, product)}</p>
           </div>
         ))}
       </div>

@@ -588,12 +588,38 @@ describe("the Matches chips (pack CA3)", () => {
     expect(screen.queryByTestId("match-chip-mixed")).toBeNull();
   });
 
+  // QA-6: an order the matcher answered with NO class has no chip bucket; the
+  // row must say how many, never sit as a bare label.
+  it("says how many orders had nothing to compare (orders beyond the classed ones)", () => {
+    setReport(
+      makeReport({
+        matches: {
+          scope: "this page",
+          orders: 3,
+          byClass: { ...zeroMatchByClass(), exact: 2 },
+          unavailable: {
+            unstamped: 0,
+            "mixed-stamps": 0,
+            "order-missing": 0,
+            "order-redacted": 0,
+            "match-error": 0,
+          },
+        },
+      }),
+    );
+    render(<AttributionTab />);
+
+    expect(screen.getByTestId("match-chips-unmatchable")).toHaveTextContent(
+      "1 order(s) with nothing to compare",
+    );
+  });
+
   it("is labelled 'Matches (this page)', and the label is the row's FIRST element", () => {
     setReport(makeReport({ rows: matchedRows(), matches: matchesOf() }));
     render(<AttributionTab />);
 
     const chips = screen.getByTestId("match-chips");
-    expect(chips.firstElementChild?.textContent).toBe("Matches (this page)");
+    expect(chips.firstElementChild?.textContent).toBe("Matches (this page, by order)");
   });
 
   it("tapping a chip filters the RENDERED rows and never re-issues the report query", async () => {
@@ -713,7 +739,7 @@ describe("the Matches chips (pack CA3)", () => {
     expect(screen.getByTestId("match-chip-unavailable").textContent).toBe("Unavailable (3)");
     // The label is still there, and the absence of a MATCH is said beside it.
     expect(screen.getByTestId("match-chips").firstElementChild?.textContent).toBe(
-      "Matches (this page)",
+      "Matches (this page, by order)",
     );
     expect(screen.getByTestId("match-chips-no-orders")).toHaveTextContent(
       "no matched order on this page",

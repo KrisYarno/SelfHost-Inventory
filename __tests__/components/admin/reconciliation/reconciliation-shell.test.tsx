@@ -95,17 +95,57 @@ describe("ReconciliationPageShell", () => {
     await waitFor(() => expect(replace).not.toHaveBeenCalled());
   });
 
-  it("switching to the unmapped tab mounts it and syncs the URL", async () => {
+  // FD2-1: the URL is the ONLY source of truth. A click writes the URL; the
+  // tab follows once the write lands (simulated here by the mocked replace
+  // updating the params and a rerender). Before it lands the old tab stays.
+  it("switching to the unmapped tab writes the URL, and the tab follows the URL", async () => {
     const user = userEvent.setup();
-    render(<ReconciliationPageShell />);
+    const view = render(<ReconciliationPageShell />);
 
     await user.click(screen.getByRole("tab", { name: /unmapped/i }));
 
-    expect(screen.getByTestId("unmapped-tab-mount")).toBeInTheDocument();
-    expect(screen.queryByTestId("attribution-tab-mount")).toBeNull();
     await waitFor(() =>
       expect(replace).toHaveBeenCalledWith("/admin/reconciliation?tab=unmapped"),
     );
+    // Not landed yet: the shell shows what the URL says.
+    expect(screen.getByTestId("attribution-tab-mount")).toBeInTheDocument();
+
+    searchParams = new URLSearchParams("tab=unmapped");
+    view.rerender(<ReconciliationPageShell />);
+
+    expect(screen.getByTestId("unmapped-tab-mount")).toBeInTheDocument();
+    expect(screen.queryByTestId("attribution-tab-mount")).toBeNull();
+  });
+
+  // FD2-1: two clicks in flight — there is no local mirror to revert; the URL's
+  // LAST landing is the tab, whichever order the writes land in.
+  it("with two writes in flight, whatever the URL says last is the tab — nothing reverts it", async () => {
+    const user = userEvent.setup();
+    searchParams = new URLSearchParams("tab=unmapped");
+    const view = render(<ReconciliationPageShell />);
+
+    await user.click(screen.getByRole("tab", { name: /attribution/i }));
+    await user.click(screen.getByRole("tab", { name: /exceptions/i }));
+    await waitFor(() =>
+      expect(replace).toHaveBeenCalledWith("/admin/reconciliation?tab=attribution"),
+    );
+    expect(replace).toHaveBeenCalledWith("/admin/reconciliation?tab=exceptions");
+
+    // (With a router double that never lands, Radix's focus-activation and the
+    // click each fire — a real router lands and the pending display absorbs the
+    // second. The contract is about LANDINGS: none of them writes.)
+    const writesBeforeLanding = replace.mock.calls.length;
+
+    searchParams = new URLSearchParams("tab=attribution");
+    view.rerender(<ReconciliationPageShell />);
+    expect(screen.getByTestId("attribution-tab-mount")).toBeInTheDocument();
+
+    searchParams = new URLSearchParams("tab=exceptions");
+    view.rerender(<ReconciliationPageShell />);
+    expect(screen.getByTestId("exceptions-tab-mount")).toBeInTheDocument();
+    expect(screen.queryByTestId("attribution-tab-mount")).toBeNull();
+    // A landing never triggers a write of its own.
+    expect(replace).toHaveBeenCalledTimes(writesBeforeLanding);
   });
 
   // OCa-7: the drill-down's finder links are in-place soft navigations to
@@ -160,31 +200,5 @@ describe("AdminSubNav", () => {
 
     const hrefs = screen.getAllByRole("link").map((a) => a.getAttribute("href"));
     expect(hrefs.indexOf("/admin/reconciliation")).toBe(hrefs.indexOf("/admin/reports") + 1);
-  });
-  // FD-3: our OWN replace landing must not undo a click made while it was in
-  // flight. Start on unmapped; click Attribution (replace issued); click Unmapped
-  // before it lands; then the first replace lands (the URL now says
-  // attribution) — the tab must STAY on unmapped and be written back.
-  it("a click made while our own replace is in flight is not reverted when it lands", async () => {
-    const user = userEvent.setup();
-    searchParams = new URLSearchParams("tab=unmapped");
-    const view = render(<ReconciliationPageShell />);
-
-    await user.click(screen.getByRole("tab", { name: /attribution/i }));
-    await waitFor(() =>
-      expect(replace).toHaveBeenCalledWith("/admin/reconciliation?tab=attribution"),
-    );
-    await user.click(screen.getByRole("tab", { name: /unmapped/i }));
-    expect(screen.getByTestId("unmapped-tab-mount")).toBeInTheDocument();
-
-    // The in-flight replace lands: the URL now names attribution.
-    searchParams = new URLSearchParams("tab=attribution");
-    view.rerender(<ReconciliationPageShell />);
-
-    expect(screen.getByTestId("unmapped-tab-mount")).toBeInTheDocument();
-    expect(screen.queryByTestId("attribution-tab-mount")).toBeNull();
-    await waitFor(() =>
-      expect(replace).toHaveBeenLastCalledWith("/admin/reconciliation?tab=unmapped"),
-    );
   });
 });
