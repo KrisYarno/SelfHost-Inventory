@@ -30,7 +30,11 @@ import { mockDeep, mockReset } from 'jest-mock-extended';
 import { Prisma, type PrismaClient } from '@prisma/client';
 
 import { MATCH_DEFINITIONS } from '@/lib/reconciliation/match-keys';
-import { getOrderMatches, type MatchReader } from '@/lib/reconciliation/match-producer';
+import {
+  MAX_MATCH_ORDERS,
+  getOrderMatches,
+  type MatchReader,
+} from '@/lib/reconciliation/match-producer';
 import type { ReconciliationItemRow } from '@/lib/reconciliation/items';
 import type { OrderMatch } from '@/lib/reconciliation/match';
 import type { DeductedSideSqlRow } from '@/lib/reconciliation/population';
@@ -189,6 +193,17 @@ describe('getOrderMatches — the statement budget', () => {
 
     expect(statementCount()).toBe(2);
   });
+
+  // ONE bound, three modules (G2-11). `items.ts` and `population.ts` cannot
+  // import this one (they are below it in the graph), so their 200 is their own
+  // literal — and the number the ROUTE admits is this constant, exported for it.
+  // A pin that the three agree is the only thing standing between them.
+  it('MAX_MATCH_ORDERS is 200 — the same bound the two readers enforce', async () => {
+    expect(MAX_MATCH_ORDERS).toBe(200);
+    await expect(
+      getOrderMatches(client, Array.from({ length: MAX_MATCH_ORDERS + 1 }, (_, i) => `ord-${i}`)),
+    ).rejects.toThrow(`getOrderMatches: at most ${MAX_MATCH_ORDERS} orders`);
+  });
 });
 
 // --------------------------------------------------------------------------
@@ -233,7 +248,7 @@ describe('getOrderMatches — the reads it issues', () => {
 // --------------------------------------------------------------------------
 
 describe('getOrderMatches — the result is keyed by the id that was ASKED', () => {
-  it('every asked id is a key, including an order with nothing on either side', async () => {
+  it('every asked id is a key, EXCEPT an order the matcher refused', async () => {
     db.externalOrderItem.findMany.mockResolvedValue([
       itemRow({ id: 'i1', orderId: 'ord-1', productId: 9 }),
     ] as never);
@@ -352,6 +367,55 @@ describe('getOrderMatches — the facts it does not invent', () => {
       expect.objectContaining({ productId: 77, productName: 'unknown product', deducted: 3 }),
     ]);
     expect(match.deductedUnits).toBe(3);
+  });
+
+  // ONE BAD ORDER IS ONE MISSING KEY, never a failed page (OCa-6 / G2-3). The
+  // matcher's integer guard is a claim about data nobody can render; a page of
+  // fifty orders that 500s because one of them carries a negative quantity is a
+  // surface nobody can use to find that order.
+  describe('a matcher refusal is per ORDER', () => {
+    let errorSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      errorSpy.mockRestore();
+    });
+
+    it('omits the refused order, keeps the rest, and logs the ID — never the rows', async () => {
+      db.externalOrderItem.findMany.mockResolvedValue([
+        itemRow({ id: 'i1', orderId: 'ord-bad', productId: 9, quantity: -1 }),
+        itemRow({ id: 'i2', orderId: 'ord-good', productId: 9, quantity: 1 }),
+      ] as never);
+      db.product.findMany.mockResolvedValue([productRow({ id: 9 })] as never);
+
+      const matches = await getOrderMatches(client, ['ord-bad', 'ord-good']);
+
+      expect(Array.from(matches.keys())).toEqual(['ord-good']);
+      expect(matches.get('ord-good')?.class).toBe('missing-product');
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const [message, context] = errorSpy.mock.calls[0] as [string, Record<string, unknown>];
+      expect(message).toBe('[match-producer] matcher refused order');
+      expect(context.orderId).toBe('ord-bad');
+      expect(typeof context.message).toBe('string');
+      // The line data itself never reaches the log.
+      expect(Object.keys(context).sort()).toEqual(['message', 'orderId']);
+    });
+  });
+
+  // A FABRICATED ZERO IS THE ONE ANSWER THIS MODULE MAY NOT GIVE (OCa-6). A SUM
+  // that is not a number means the aggregate did not answer the question asked;
+  // reporting it as "nothing left stock" would call every product missing.
+  it('THROWS on a non-numeric SUM rather than reading it as zero', async () => {
+    db.$queryRaw.mockResolvedValue([
+      { orderRecordId: 'ord-1', productId: 9, outUnits: 'not a number', correctedUnits: 0 },
+    ] as never);
+
+    await expect(getOrderMatches(client, ['ord-1'])).rejects.toThrow(
+      'match-producer: non-numeric SUM from the deducted-side aggregate',
+    );
   });
 
   it('every result carries MATCH_DEFINITIONS by identity', async () => {

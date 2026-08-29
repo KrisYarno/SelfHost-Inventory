@@ -25,8 +25,12 @@ import {
   MATCH_UNAVAILABLE_COPY,
   MATCH_UNAVAILABLE_REASONS,
 } from "@/lib/reconciliation/match-keys";
-import type { OrderMatch } from "@/lib/reconciliation/match";
-import type { AttributionRow, BatchDetail } from "@/lib/reconciliation/attribution";
+import type {
+  AttributionRow,
+  BatchDetail,
+  WireOrderMatch,
+} from "@/lib/reconciliation/attribution";
+import { MATCH_NOT_COMPUTED_COPY } from "@/components/admin/reconciliation/attribution-row";
 
 const useBatchDetailMock = jest.fn();
 
@@ -305,7 +309,7 @@ it("offers the correction only where the server would accept it", async () => {
  *   4. NO NAME RIDES THE MATCHER (pack rule 5). The only string naming anything
  *      inside this panel is `perProduct[].productName`.
  */
-function makeMatch(over: Partial<OrderMatch> = {}): OrderMatch {
+function makeMatch(over: Partial<WireOrderMatch> = {}): WireOrderMatch {
   return {
     class: "short",
     flagged: true,
@@ -351,7 +355,8 @@ function makeMatch(over: Partial<OrderMatch> = {}): OrderMatch {
     unresolvableBundleLines: 0,
     deductedUnits: 4,
     tolerance: null,
-    definitions: MATCH_DEFINITIONS,
+    // NO `definitions` (OCa-10): the envelope carries the one copy, and the
+    // panel reads its sentences from `match-keys.ts`.
     ...over,
   };
 }
@@ -537,6 +542,20 @@ describe("the This order panel (pack CA3)", () => {
 
       view.unmount();
     }
+  });
+
+  // G2-6: the pair is exactly-one-of by contract, so this branch is unreachable
+  // from a real read — which is exactly why it must not render as an ABSENT
+  // section. A missing "This order" panel reads as "nothing to see here"; the
+  // row cell has said "not computed" since A3, and the panel now says the same.
+  it("renders 'not computed' on the both-null pair, never an absent section", () => {
+    renderPanel({ orderMatch: null, orderMatchUnavailable: null });
+
+    expect(screen.getByTestId("order-match-not-computed")).toHaveTextContent(
+      MATCH_NOT_COMPUTED_COPY,
+    );
+    expect(screen.queryByTestId("order-match-panel")).toBeNull();
+    expect(screen.queryByTestId("order-match-unavailable")).toBeNull();
   });
 
   it("a class-less match renders its DEFINITION, not an unavailable reason (pack REV 4)", () => {

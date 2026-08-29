@@ -57,12 +57,15 @@ describe('the closed key vocabularies', () => {
     expect([...MATCH_KINDS]).toEqual(['missing', 'short', 'over', 'extra', 'overrun']);
   });
 
-  it('MATCH_UNAVAILABLE_REASONS is exactly the four producer reasons', () => {
+  it('MATCH_UNAVAILABLE_REASONS is exactly the five producer reasons', () => {
     expect([...MATCH_UNAVAILABLE_REASONS]).toEqual([
       'unstamped',
       'mixed-stamps',
       'order-missing',
       'order-redacted',
+      // The fifth (pack REV-7): the matcher refused this order's line data, so
+      // the row is listed WITHOUT a match rather than taking the whole page down.
+      'match-error',
     ]);
   });
 
@@ -214,6 +217,7 @@ describe('the words that ride with every class (truthful data + seam S-A11)', ()
       'mixed-stamps': 'mixed stamps',
       'order-missing': 'order missing',
       'order-redacted': "another company's order",
+      'match-error': 'could not be matched (bad line data)',
     });
   });
 

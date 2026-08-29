@@ -47,8 +47,16 @@ export type MatchReader = Pick<
   'externalOrderItem' | 'product' | '$queryRaw'
 >;
 
-/** At most this many orders per read; symmetric with the two readers below. */
-const MAX_ORDERS = 200;
+/**
+ * At most this many orders per read; symmetric with the two readers below.
+ *
+ * EXPORTED because the route's zod bound is the same number (G2-11): a page the
+ * caller is allowed to ask for and a page this producer will read must be one
+ * bound, or the API answers 200 rows with a 500. `items.ts` and `population.ts`
+ * sit BELOW this module in the graph and cannot import it, so their own literal
+ * stands — pinned equal in this module's suite.
+ */
+export const MAX_MATCH_ORDERS = 200;
 
 /**
  * The empty ordered side. `readOrderItems` answers for every id that was asked,
@@ -68,16 +76,21 @@ function emptyOrderItems(): OrderItems {
 /**
  * A SUM comes back as whatever the driver decided (a Decimal, a string, a
  * number), so the aggregate typed its two columns `unknown` and the conversion
- * is the consumer's — this one, the `attribution.ts` `toNumber` idiom. The
- * matcher's integer guard is what stands behind it: a value that is not a unit
- * count throws there rather than being rounded onto an admin's screen.
+ * is the consumer's — this one, the `attribution.ts` `toNumber` idiom.
+ *
+ * A value that is not a number THROWS (OCa-6). Reading it as 0 was the one
+ * answer this module may not give: zero deducted units is the sentence "nothing
+ * left stock against this order", which would call every product on it missing.
+ * `null`/`undefined` stay 0 — the aggregate's COALESCE makes them unreachable,
+ * and an absent row genuinely is no movement.
  */
 function toUnits(value: unknown): number {
-  if (typeof value === 'number') return value;
-  if (typeof value === 'bigint') return Number(value);
   if (value === null || value === undefined) return 0;
-  const asNumber = Number(value);
-  return Number.isFinite(asNumber) ? asNumber : 0;
+  const asNumber = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(asNumber)) {
+    throw new Error('match-producer: non-numeric SUM from the deducted-side aggregate');
+  }
+  return asNumber;
 }
 
 /**
@@ -147,18 +160,20 @@ function deductedByAskedId(
  * order lock in P2-C, and a transaction client is not a place to issue two
  * statements at once.
  *
- * `[]` spends nothing and answers with an empty map. More than 200 orders is a
- * caller error (`RangeError`), symmetric with both readers — the caller pages.
- * Every asked id is a key of the result: an order with no items and no ledger
- * rows is the matcher's unmatchable result, never a missing key.
+ * `[]` spends nothing and answers with an empty map. More than `MAX_MATCH_ORDERS`
+ * orders is a caller error (`RangeError`), symmetric with both readers — the
+ * caller pages. Every asked id is a key of the result, with EXACTLY ONE
+ * exception: an order the matcher REFUSED is omitted (see the loop below). An
+ * order with no items and no ledger rows is the matcher's unmatchable result,
+ * never a missing key.
  */
 export async function getOrderMatches(
   client: MatchReader,
   orderIds: readonly string[],
 ): Promise<Map<string, OrderMatch>> {
   const asked = Array.from(new Set(orderIds));
-  if (asked.length > MAX_ORDERS) {
-    throw new RangeError(`getOrderMatches: at most ${MAX_ORDERS} orders`);
+  if (asked.length > MAX_MATCH_ORDERS) {
+    throw new RangeError(`getOrderMatches: at most ${MAX_MATCH_ORDERS} orders`);
   }
   const byOrder = new Map<string, OrderMatch>();
   if (asked.length === 0) return byOrder;
@@ -202,18 +217,31 @@ export async function getOrderMatches(
     hundredths: hundredthsOf(product.numericValue),
   }));
 
+  // ONE BAD ORDER IS ONE MISSING KEY (OCa-6 / G2-3). The matcher's integer guard
+  // fires on data no figure could be derived from, and letting it escape here
+  // took the whole page down with it — the caller then has fifty orders it
+  // cannot see and no way to find the one that is broken. The key is OMITTED
+  // instead, and the row that asked for it says `match-error`. The order ID and
+  // the guard's message go to the log; the LINE DATA never does.
   for (const id of asked) {
-    byOrder.set(
-      id,
-      matchOrder({
-        items: items.get(id) ?? emptyOrderItems(),
-        deducted: deducted.get(id) ?? [],
-        products: facts,
-        // The declared substitutions are P2-D's; until then the tolerance is
-        // the mass balance alone.
-        declarations: [],
-      }),
-    );
+    try {
+      byOrder.set(
+        id,
+        matchOrder({
+          items: items.get(id) ?? emptyOrderItems(),
+          deducted: deducted.get(id) ?? [],
+          products: facts,
+          // The declared substitutions are P2-D's; until then the tolerance is
+          // the mass balance alone.
+          declarations: [],
+        }),
+      );
+    } catch (err) {
+      console.error('[match-producer] matcher refused order', {
+        orderId: id,
+        message: (err as Error).message,
+      });
+    }
   }
   return byOrder;
 }

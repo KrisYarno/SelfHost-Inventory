@@ -26,6 +26,8 @@ import {
   MATCH_CLASS_KEYS,
   MATCH_DEFINITIONS,
   MATCH_KINDS,
+  familyKey,
+  matcherUnit,
 } from '@/lib/reconciliation/match-keys';
 import {
   matchOrder,
@@ -435,6 +437,21 @@ describe('the mass balance in integer hundredths', () => {
     ]);
   });
 
+  // AN EMPTY UNIT IS NOT A REFUSED UNIT (pack REV-7). `unit-refused` says a unit
+  // was written down and the matcher would not admit it — a claim an admin can
+  // act on by fixing the product. An empty string says nothing was written down
+  // at all, which is exactly what `undecomposable` already means.
+  it.each([[''], ['  ']])('an empty unit %p is UNDECOMPOSABLE, never unit-refused', (unit) => {
+    const m = matchOrder({
+      items: items([line(9, 1)]),
+      deducted: [],
+      products: [facts(9, 'Peptide', 'Peptide', unit, 500)],
+    });
+    expect(m.tolerance?.excludedProducts).toEqual([
+      { productId: 9, reason: 'undecomposable', unit },
+    ]);
+  });
+
   it('a null baseName and a null unit are UNDECOMPOSABLE (unit null is not a REFUSED unit)', () => {
     const m = matchOrder({
       items: items([line(9, 1)]),
@@ -603,6 +620,19 @@ describe('the integer guard', () => {
       matchOrder({ items: items([line(1, 1)]), deducted: [deducted(1, 1.5)], products: [] }),
     ).toThrow(/matchOrder/);
   });
+
+  // FULFILLED QUANTITY IS NOT GUARDED HERE (pack REV-7). P2-A never reads the
+  // field — P2-D does — so a guard on it refused a whole page of orders over a
+  // number no figure on this surface is derived from. The guard travels with the
+  // reader that uses it.
+  it('does NOT guard fulfilledQty — the field P2-A never reads', () => {
+    const m = matchOrder({
+      items: items([line(1, 2, { fulfilledQty: -3.5 })]),
+      deducted: [deducted(1, 2)],
+      products: [],
+    });
+    expect(m.class).toBe('exact');
+  });
 });
 
 // --------------------------------------------------------------------------
@@ -661,7 +691,22 @@ describe('totality — 600 random orders, no throw, every invariant', () => {
         else expect(p.units).toBeGreaterThan(0);
       }
       if (m.tolerance === null) {
-        expect(m.kinds.length + m.perProduct.length).toBeGreaterThanOrEqual(0);
+        // A NULL TOLERANCE IS A CLAIM, not an absence (G2-7): no group balanced,
+        // no pair was declared and NOTHING was excluded. So neither tolerated
+        // class can have been reached, and every product still carrying a
+        // comparable kind must have decomposed from the INPUT's own facts —
+        // otherwise it would be sitting in `excludedProducts` and the tolerance
+        // would not be null. This is the one-sided check; the tautology it
+        // replaced (`length + length >= 0`) held for every possible result.
+        expect(['substitution-equivalent', 'substitution-declared']).not.toContain(m.class);
+        for (const p of m.perProduct) {
+          if (p.kind === null || p.kind === 'overrun') continue;
+          const f = products.find((row) => row.productId === p.productId);
+          expect(f).toBeDefined();
+          expect(f?.baseName === null ? '' : familyKey(f?.baseName ?? '')).not.toBe('');
+          expect(f?.hundredths ?? 0).toBeGreaterThan(0);
+          expect(matcherUnit(f?.unit)).not.toBeNull();
+        }
       } else {
         expect(
           m.tolerance.equivalentGroups.length +

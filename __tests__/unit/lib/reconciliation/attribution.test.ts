@@ -947,8 +947,9 @@ describe('the order match', () => {
     });
   });
 
-  // The four reasons, through the PRODUCER — one owner (S-A10), so the row's
-  // pair and the stamp set the producer is asked about can never disagree.
+  // The FIVE reasons, through the PRODUCER — one owner (S-A10), so the row's
+  // pair and the stamp set the producer is asked about can never disagree. The
+  // fifth (`match-error`, pack REV-7) is pinned below with the refusal.
   it("an UNSTAMPED batch reads 'unstamped', and the producer is never asked", async () => {
     wireMatch([summaryRow()]);
 
@@ -1044,9 +1045,48 @@ describe('the order match', () => {
       'mixed-stamps': 1,
       'order-missing': 0,
       'order-redacted': 0,
+      'match-error': 0,
     });
     expect(report.coverage.matchUnavailableRows).toBe(3);
     expect(Object.values(report.matches.byClass).every((n) => n === 0)).toBe(true);
+  });
+
+  // ONE BAD ORDER IS ONE ROW (OCa-6 / G2-3). The producer omits the key rather
+  // than letting the matcher's guard escape, and the row that asked for it says
+  // so by name — the pair stays exactly-one-of, and the page still renders.
+  it("a stamp the matcher REFUSED reads 'match-error', and the page still renders", async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      wireMatch([selectedRow()]);
+      // A negative ordered quantity: data no figure on this surface could be
+      // derived from, and the only thing the matcher throws on.
+      db.externalOrderItem.findMany.mockResolvedValue([itemRow({ quantity: -1 })] as never);
+
+      const report = await getAttributionReport(INPUT, ADMIN);
+
+      expect(report.rows).toHaveLength(1);
+      expect(report.rows[0].match).toBeNull();
+      expect(report.rows[0].matchUnavailable).toBe('match-error');
+      expect(report.matches.unavailable['match-error']).toBe(1);
+      expect(report.coverage.matchUnavailableRows).toBe(1);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  // OCa-10 / G2-4: `MATCH_DEFINITIONS` is ~1.8 KB and the envelope already
+  // carries it ONCE. A copy per row made a fifty-row page carry it fifty-one
+  // times, saying nothing the reader could not already read.
+  it('no wire row carries a `definitions` key — the envelope holds the one copy', async () => {
+    wireMatch([selectedRow()]);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(report.rows[0].match).not.toBeNull();
+    expect(Object.keys(report.rows[0].match as object)).not.toContain('definitions');
+    // ...and the sentences are still on the envelope, where they are read from.
+    expect(report.definitions.exact).toBe(MATCH_DEFINITIONS.exact);
   });
 
   it('every MATCH_CLASS_KEY is a key of byClass, at zero when unseen', async () => {
@@ -1074,6 +1114,11 @@ describe('the order match', () => {
       'recordingSince',
       'canAttribute',
       'fulfillmentTargetMissing',
+      // G2-2: the two match TOTALS live in coverage, so their sentences live
+      // with the lane's own — `MATCH_DEFINITIONS` defines classes and reasons,
+      // and neither of these is either.
+      'matchedOrders',
+      'matchUnavailableRows',
     ];
 
     const report = await getAttributionReport(INPUT, ADMIN);
@@ -1877,6 +1922,39 @@ describe('getBatchDetail', () => {
     // ledger, the audit rows, the attempts, the manual attributions,
     // recordingSince and the order lookup) plus the match's three.
     expect(detailStatementCount()).toBe(9);
+  });
+
+  // The drill-down's twin of the report pin: the panel says the row could not be
+  // matched rather than the sheet failing to open at all (OCa-6).
+  it("a REFUSED order reads 'match-error' on the detail too, and the sheet still opens", async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      wireDetail({});
+      mockSummary([], [deductedSideRow()]);
+      db.externalOrderItem.findMany.mockResolvedValue([itemRow({ quantity: -1 })] as never);
+      db.product.findMany.mockResolvedValue([productRow()] as never);
+
+      const detail = await getBatchDetail('detail-batch-1', ADMIN);
+
+      expect(detail).not.toBeNull();
+      expect(detail!.orderMatch).toBeNull();
+      expect(detail!.orderMatchUnavailable).toBe('match-error');
+      expect(detail!.batch.matchUnavailable).toBe('match-error');
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('the detail match carries no `definitions` key either (OCa-10)', async () => {
+    wireDetail({});
+    mockSummary([], [deductedSideRow()]);
+    db.externalOrderItem.findMany.mockResolvedValue([itemRow()] as never);
+    db.product.findMany.mockResolvedValue([productRow()] as never);
+
+    const detail = await getBatchDetail('detail-batch-1', ADMIN);
+
+    expect(Object.keys(detail!.orderMatch as object)).not.toContain('definitions');
   });
 
   it('an UNAVAILABLE row spends NOTHING on the match — no items, no aggregate, no products', async () => {

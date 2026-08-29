@@ -27,8 +27,10 @@ import {
   MATCH_UNAVAILABLE_COPY,
   UNMATCHABLE,
 } from "@/lib/reconciliation/match-keys";
-import type { OrderMatch } from "@/lib/reconciliation/match";
-import type { AttributionRow as Row } from "@/lib/reconciliation/attribution";
+import type {
+  AttributionRow as Row,
+  WireOrderMatch,
+} from "@/lib/reconciliation/attribution";
 
 /** A stamp with no order record behind it — said, never left blank. */
 export const ORDER_MISSING_COPY = "order missing";
@@ -66,12 +68,17 @@ export const NOT_COMPARABLE_COPY = "not comparable";
 export const MATCH_NOT_COMPUTED_COPY = "not computed";
 
 /** The class in the vocabulary's words — S-A11's map, never re-spelled here. */
-export function matchClassLabel(match: OrderMatch): string {
+export function matchClassLabel(match: WireOrderMatch): string {
   return match.class === null ? NOT_COMPARABLE_COPY : MATCH_CLASS_LABELS[match.class];
 }
 
-/** The sentence that rides with the class (truthful-data: a class alone is a rumour). */
-export function matchDefinition(match: OrderMatch): string {
+/**
+ * The sentence that rides with the class (truthful-data: a class alone is a
+ * rumour). Read from `MATCH_DEFINITIONS` here, never from the row: the wire
+ * match carries no `definitions` of its own (OCa-10), and this module is the
+ * one that already holds the vocabulary.
+ */
+export function matchDefinition(match: WireOrderMatch): string {
   return MATCH_DEFINITIONS[match.class === null ? UNMATCHABLE : match.class];
 }
 
@@ -80,7 +87,7 @@ export function matchDefinition(match: OrderMatch): string {
  * should look at carry `warning`, the rest are muted. There is no third colour
  * on this surface to invent.
  */
-export function matchToneClass(match: OrderMatch): string {
+export function matchToneClass(match: WireOrderMatch): string {
   return match.class !== null && FLAGGED_MATCH_CLASSES.has(match.class)
     ? "text-warning font-medium"
     : "text-muted-foreground";

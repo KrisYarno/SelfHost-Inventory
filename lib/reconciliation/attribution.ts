@@ -139,6 +139,18 @@ export type AttributionHow = {
   postLaneGap?: true;
 };
 
+/**
+ * THE MATCH AS IT RIDES THE WIRE (OCa-10 / G2-4).
+ *
+ * `OrderMatch.definitions` is `MATCH_DEFINITIONS` — about 1.8 KB of sentences
+ * that are ALREADY on the envelope's `definitions`, once. A copy per row made a
+ * fifty-row page carry it fifty-one times and told the reader nothing it could
+ * not read from the envelope. The IN-PROCESS `OrderMatch` keeps the field (the
+ * assistant tool takes the producer's object directly in C4); only the wire
+ * shape drops it, and `buildRow` is the one place that happens.
+ */
+export type WireOrderMatch = Omit<OrderMatch, 'definitions'>;
+
 export type AttributionRow = {
   batchId: string;
   at: string;
@@ -166,7 +178,7 @@ export type AttributionRow = {
    * of the pair is non-null: "no match" without a reason is the kind of blank an
    * admin reads as "nothing wrong here".
    */
-  match: OrderMatch | null;
+  match: WireOrderMatch | null;
   matchUnavailable: MatchUnavailableReason | null;
 };
 
@@ -299,7 +311,7 @@ export type BatchDetail = {
    * per-line item read here: the exception's recompute is P2-C's, not this
    * surface's (pack CA2.2).
    */
-  orderMatch: OrderMatch | null;
+  orderMatch: WireOrderMatch | null;
   orderMatchUnavailable: MatchUnavailableReason | null;
 };
 
@@ -371,6 +383,12 @@ const DEFINITIONS: Readonly<Record<string, string>> = Object.freeze({
     'whether the manual-attribution core would accept this batch: attributable, at most 50 rows, uniformly stamped (one id on every row, or none on any), not a stamped fulfillment, and not a fulfillment whose event names no order to complete — or names one that no longer exists',
   fulfillmentTargetMissing:
     'the fulfillment event names an order that is no longer in the book, so the completion this batch is locked to cannot be performed at all',
+  // The two match TOTALS are coverage figures, so their sentences live here
+  // rather than in MATCH_DEFINITIONS, which defines classes and reasons (G2-2).
+  matchedOrders:
+    'orders on this page whose stamp could be compared — including orders the matcher found unmatchable — counted once per order',
+  matchUnavailableRows:
+    'rows on this page with no match and a named reason (unstamped, mixed stamps, order missing, order redacted, match error)',
 });
 
 // ---------------------------------------------------------------------------
@@ -967,6 +985,12 @@ function matchUnavailableFor(
   return 'orderRedacted' in projectOrder(order, viewer) ? 'order-redacted' : null;
 }
 
+/** `OrderMatch` minus the sentences the envelope already carries (OCa-10). */
+function wireMatch(match: OrderMatch): WireOrderMatch {
+  const { definitions: _definitions, ...wire } = match;
+  return wire;
+}
+
 function buildRow(
   batch: ClassifiedBatch,
   orders: Map<string, OrderProjection>,
@@ -1006,9 +1030,19 @@ function buildRow(
   // EXACTLY ONE of the pair (spec §2.0). An available row reads the page's own
   // match map, which is empty at the drill-down when the row is unavailable —
   // so the fallback is `null`, never a lookup that quietly succeeds elsewhere.
-  const matchUnavailable = matchUnavailableFor(batch, orders, viewer);
-  const match =
-    matchUnavailable === null ? (matches.get(batch.theStamp as string) ?? null) : null;
+  //
+  // A CANDIDATE ROW WHOSE STAMP IS ABSENT FROM THE MAP is the producer saying
+  // the matcher REFUSED that order (OCa-6): the one shape where this row was
+  // asked about and got no answer. It is `match-error`, not a blank — a blank
+  // here reads as "nothing wrong with this order".
+  const reason = matchUnavailableFor(batch, orders, viewer);
+  const matched = reason === null ? (matches.get(batch.theStamp as string) ?? null) : null;
+  const matchUnavailable: MatchUnavailableReason | null =
+    reason === null && matched === null ? 'match-error' : reason;
+  // The definitions ride ONCE, on the envelope (OCa-10). Destructured, never
+  // deleted: `delete` would mutate the producer's own object, which the tool
+  // reads in C4.
+  const match = matched === null ? null : wireMatch(matched);
 
   const canAttribute =
     batch.attributable &&
@@ -1194,12 +1228,6 @@ export async function getAttributionReport(
   // whether the named order still exists is what decides the Attribute… control,
   // and asking per row would be a statement per row.
   const orders = await loadOrders(orderIdsOf(page));
-  const actors = await loadActors(
-    Array.from(
-      new Set(page.map((batch) => batch.actorUserId).filter((id): id is number => id !== null))
-    ),
-    viewer
-  );
 
   // THE MATCH, over the page's READABLE stamps only (S-A10): a row with no
   // single stamp, or one naming an order this viewer cannot see, is not an
@@ -1212,7 +1240,20 @@ export async function getAttributionReport(
         .map((batch) => batch.theStamp as string)
     )
   );
-  const matches = await getOrderMatches(prisma, stamps);
+
+  // The actors and the match are INDEPENDENT of each other (G2-10) — only the
+  // STAMP SET needed the orders — so they run together, the same shape the
+  // drill-down already uses. The statement COUNT is unchanged; the wall clock
+  // is not.
+  const [actors, matches] = await Promise.all([
+    loadActors(
+      Array.from(
+        new Set(page.map((batch) => batch.actorUserId).filter((id): id is number => id !== null))
+      ),
+      viewer
+    ),
+    getOrderMatches(prisma, stamps),
+  ]);
 
   const rows = page.map((batch) => buildRow(batch, orders, actors, matches, viewer));
 
@@ -1433,16 +1474,18 @@ function attemptDetailsOf(value: unknown): AttemptDetails | null {
  * ledger at the manual-attribution limit (OC-8), and the two APPEND-ONLY
  * histories at `DETAIL_HISTORY_LIMIT`, newest first (CR-4).
  *
- * THIS READ HAS NO STATEMENT BUDGET. D7's AT-MOST-FIVE is the REPORT's bound,
- * because that one serves a whole window and a poll; this one serves a single
- * Cost: nine statements warm on a stamped admin read (ledger, audit, attempts,
- * attribution events, orders, actors, and the match's three — the items, the
- * deducted-side aggregate and the product facts; recordingSince adds one cold),
- * plus one per bound actually crossed (FD-4 — the earlier 'five' undercounted).
- * A row whose match is UNAVAILABLE spends none of the match's three.
- * arrays all fit, and buys one more for each bound it actually crossed: the
+ * THIS READ HAS NO STATEMENT BUDGET OF ITS OWN. D7's bound — AT MOST EIGHT, and
+ * seven on a plain admin read — is the REPORT's, because that one serves a whole
+ * window and a poll; this one serves a single batch an admin opened. What it
+ * costs is stated instead of capped: NINE statements warm on a stamped admin
+ * read (the ledger, the audit rows, the attempts, the attribution events, the
+ * orders, the actors, and the match's three — the items, the deducted-side
+ * aggregate and the product facts), plus one per bound actually crossed — the
  * exact aggregate that keeps `batch` true (QA-1), and a count per truncated
  * history so "the newest twenty of N" is a fact rather than a guess.
+ * `recordingSince` adds one more when its cache is cold, and a row whose match
+ * is UNAVAILABLE spends none of the match's three (FD-4 measured the warm nine;
+ * the earlier 'five' undercounted).
  */
 export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<BatchDetail | null> {
   const ledger = await prisma.inventory_logs.findMany({

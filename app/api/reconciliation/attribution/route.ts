@@ -6,6 +6,7 @@ import {
   ATTRIBUTION_CLASS_KEYS,
   getAttributionReport,
 } from '@/lib/reconciliation/attribution';
+import { MAX_MATCH_ORDERS } from '@/lib/reconciliation/match-producer';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,7 +30,11 @@ const AttributionReportQuerySchema = z.object({
   to: calendarDay,
   class: z.enum(ATTRIBUTION_CLASS_KEYS).optional(),
   orderNumber: z.string().trim().min(1).max(100).optional(),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
+  // THE PAGE BOUND IS THE PRODUCER'S BOUND (G2-11). A page this route admits and
+  // a page the match producer will read must be ONE number: at 201 the report
+  // built its rows and then threw a RangeError from the match, i.e. a 500 for an
+  // input the schema had already called valid.
+  limit: z.coerce.number().int().min(1).max(MAX_MATCH_ORDERS).default(50),
   cursor: z.string().min(1).optional(),
 });
 

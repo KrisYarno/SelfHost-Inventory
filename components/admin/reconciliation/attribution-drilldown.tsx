@@ -51,10 +51,11 @@ import {
   type MatchKind,
   type MatchUnavailableReason,
 } from "@/lib/reconciliation/match-keys";
-import type { OrderMatch, PerProduct, ToleranceReport } from "@/lib/reconciliation/match";
-import type { AttributionRow } from "@/lib/reconciliation/attribution";
+import type { PerProduct, ToleranceReport } from "@/lib/reconciliation/match";
+import type { AttributionRow, WireOrderMatch } from "@/lib/reconciliation/attribution";
 import {
   FULFILLMENT_TARGET_MISSING_COPY,
+  MATCH_NOT_COMPUTED_COPY,
   fulfilledAgainstCopy,
   matchClassLabel,
   matchDefinition,
@@ -116,13 +117,13 @@ function kindText(product: PerProduct): string {
  * hold cannot happen (both come from the same rows); it reads as its id rather
  * than as a blank if it ever does.
  */
-function productNameOf(match: OrderMatch, productId: number): string {
+function productNameOf(match: WireOrderMatch, productId: number): string {
   const product = match.perProduct.find((row) => row.productId === productId);
   return product === undefined ? `product ${productId}` : product.productName;
 }
 
 function memberText(
-  match: OrderMatch,
+  match: WireOrderMatch,
   member: { productId: number; units: number; hundredths: number },
   unit: string,
 ): string {
@@ -130,7 +131,10 @@ function memberText(
 }
 
 /** One BALANCED group, with the mass it balanced at — the audit of a tolerance. */
-function groupText(match: OrderMatch, group: ToleranceReport["equivalentGroups"][number]): string {
+function groupText(
+  match: WireOrderMatch,
+  group: ToleranceReport["equivalentGroups"][number],
+): string {
   const shortfall = group.shortfall.map((m) => memberText(match, m, group.unit)).join(", ");
   const extra = group.extra.map((m) => memberText(match, m, group.unit)).join(", ");
   return `Swap within ${group.familyKey} (${group.unit}): ${shortfall} ⇄ ${extra} — balanced at ${massText(group.massHundredths)} ${group.unit}`;
@@ -142,7 +146,7 @@ function groupText(match: OrderMatch, group: ToleranceReport["equivalentGroups"]
  * order's lines, and an admin would count what is missing from a list that never
  * claimed to be complete.
  */
-function OrderMatchPanel({ match }: { match: OrderMatch }) {
+function OrderMatchPanel({ match }: { match: WireOrderMatch }) {
   const flagged = match.class !== null && FLAGGED_MATCH_CLASSES.has(match.class);
 
   return (
@@ -291,14 +295,16 @@ function OrderMatchPanel({ match }: { match: OrderMatch }) {
 /**
  * The panel, or the producer's named reason there is none. The pair is
  * EXACTLY-ONE-OF by contract (`attribution.ts`), so the both-null branch is
- * unreachable — and renders nothing rather than an empty section if the wire
- * ever disagrees.
+ * unreachable — and it SAYS SO rather than disappearing if the wire ever
+ * disagrees (G2-6). An absent "This order" section reads as "nothing to see
+ * here", which is the one thing it must never mean; the row's Match cell has
+ * carried this same copy since A3.
  */
 function OrderMatchSection({
   match,
   unavailable,
 }: {
-  match: OrderMatch | null;
+  match: WireOrderMatch | null;
   unavailable: MatchUnavailableReason | null;
 }) {
   if (match !== null) {
@@ -308,7 +314,18 @@ function OrderMatchSection({
       </Section>
     );
   }
-  if (unavailable === null) return null;
+  if (unavailable === null) {
+    return (
+      <Section title="This order">
+        <p
+          className="text-body-sm text-muted-foreground"
+          data-testid="order-match-not-computed"
+        >
+          {MATCH_NOT_COMPUTED_COPY}
+        </p>
+      </Section>
+    );
+  }
   return (
     <Section title="This order">
       <p

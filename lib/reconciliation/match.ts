@@ -205,9 +205,11 @@ export function matchOrder(input: {
   const { items, deducted: deductedRows, products } = input;
   const declarations = input.declarations ?? [];
 
+  // `fulfilledQty` is NOT guarded (pack REV-7): P2-A derives no figure from it —
+  // P2-D does — and a guard on a field this wave never reads refused a whole
+  // page of orders over a number nothing on the screen depends on.
   for (const l of items.lines) {
     assertUnits(l.quantity, `ordered quantity for product ${l.productId}`);
-    assertUnits(l.fulfilledQty, `fulfilled quantity for product ${l.productId}`);
   }
   for (const d of deductedRows) {
     assertUnits(d.out, `deducted units for product ${d.productId}`);
@@ -345,7 +347,14 @@ export function matchOrder(input: {
     if (family === '' || hundredths === null || hundredths <= 0 || admitted === null) {
       excludedProducts.push({
         productId: row.productId,
-        reason: unit !== null && admitted === null ? 'unit-refused' : 'undecomposable',
+        // `unit-refused` is a claim about a unit that WAS written down and the
+        // matcher would not admit — something an admin can go and fix. An empty
+        // or whitespace-only unit is nothing written down at all, which is what
+        // `undecomposable` already says (pack REV-7).
+        reason:
+          unit !== null && unit.trim() !== '' && admitted === null
+            ? 'unit-refused'
+            : 'undecomposable',
         unit,
       });
       continue;

@@ -81,7 +81,10 @@ describe("ReconciliationPageShell", () => {
     expect(unmapped).not.toHaveAttribute("title");
   });
 
-  it("opens the tab the URL names, and mounts ONLY that tab", async () => {
+  // The replace only runs when the URL and the state actually DISAGREE (OCa-7):
+  // a URL that already names this tab has nothing to sync, and replacing it with
+  // itself is the loop that made the finder links unusable.
+  it("opens the tab the URL names, mounts ONLY that tab, and replaces nothing", async () => {
     searchParams = new URLSearchParams("tab=exceptions");
 
     render(<ReconciliationPageShell />);
@@ -89,9 +92,7 @@ describe("ReconciliationPageShell", () => {
     expect(screen.getByTestId("exceptions-tab-mount")).toBeInTheDocument();
     expect(screen.queryByTestId("attribution-tab-mount")).toBeNull();
     expect(screen.queryByTestId("unmapped-tab-mount")).toBeNull();
-    await waitFor(() =>
-      expect(replace).toHaveBeenCalledWith("/admin/reconciliation?tab=exceptions"),
-    );
+    await waitFor(() => expect(replace).not.toHaveBeenCalled());
   });
 
   it("switching to the unmapped tab mounts it and syncs the URL", async () => {
@@ -105,6 +106,34 @@ describe("ReconciliationPageShell", () => {
     await waitFor(() =>
       expect(replace).toHaveBeenCalledWith("/admin/reconciliation?tab=unmapped"),
     );
+  });
+
+  // OCa-7: the drill-down's finder links are in-place soft navigations to
+  // `?tab=unmapped` / `?tab=exceptions`. Reading the URL only in the useState
+  // initializer made them inert — the URL changed and the shell stayed put.
+  it("follows the URL when it changes, so the finder links actually switch tabs", async () => {
+    const { rerender } = render(<ReconciliationPageShell />);
+    expect(screen.getByTestId("attribution-tab-mount")).toBeInTheDocument();
+
+    // The soft navigation a finder link performs: same mount, new searchParams.
+    searchParams = new URLSearchParams("tab=unmapped");
+    rerender(<ReconciliationPageShell />);
+
+    expect(screen.getByTestId("unmapped-tab-mount")).toBeInTheDocument();
+    expect(screen.queryByTestId("attribution-tab-mount")).toBeNull();
+  });
+
+  // OCa-7: the replace rebuilt the query string from the tab ALONE, so every
+  // other param an admin had typed or a link had carried was erased.
+  it("preserves the other query params when it syncs the tab", async () => {
+    searchParams = new URLSearchParams("foo=1");
+
+    render(<ReconciliationPageShell />);
+
+    await waitFor(() => expect(replace).toHaveBeenCalled());
+    const url = replace.mock.calls[0][0] as string;
+    expect(url).toContain("foo=1");
+    expect(url).toContain("tab=attribution");
   });
 
   it("falls back to attribution when the URL names a tab that does not exist", async () => {

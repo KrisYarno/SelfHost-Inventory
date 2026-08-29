@@ -105,6 +105,7 @@ import { getProductOverview, getBusinessSnapshot } from "@/lib/assistant/composi
 // for the same reason the admin UI does it that way (amendment 3h).
 import { getAttributionReport, type AttributionRow } from "@/lib/reconciliation/attribution";
 import { ATTRIBUTION_CLASS_KEYS } from "@/lib/reconciliation/class-keys";
+import { MATCH_DEFINITIONS } from "@/lib/reconciliation/match-keys";
 
 // ---------------------------------------------------------------------------
 // Result contract (spec D4 / §3 E1). Discriminated union so consumers branch on
@@ -281,6 +282,18 @@ const REORDER_BATCH_MAX = 20;
 const RECONCILIATION_MAX = 50;
 const RECONCILIATION_DEFAULT_LIMIT = 25;
 const RECONCILIATION_CURSOR_MAX = 200;
+/**
+ * Definitions the report's envelope carries that this TOOL's payload does not
+ * (FD-2, widened by G2-2): the two admin-write affordances `toolRow` strips, and
+ * the whole order-match vocabulary — `toolRow` carries no `match`, and the
+ * `class` its rows DO carry is the attribution vocabulary, a different closed
+ * set. A definition without its field is a field the model will invent.
+ */
+const TOOL_OMITTED_DEFINITIONS: ReadonlySet<string> = new Set<string>([
+  "canAttribute",
+  "fulfillmentTargetMissing",
+  ...Object.keys(MATCH_DEFINITIONS),
+]);
 // DB-level `take` for the snapshot series rows. Reconciled with the budget (D-T7): a
 // point serializes to ~52 bytes, so 1000 points ≈ 51 KiB < the reserved row-page budget
 // (per-tool cap − envelope reserve ≈ 56 KiB) < the per-tool cap (64 KiB) < the turn
@@ -2979,10 +2992,16 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           // FD-2: canAttribute / fulfillmentTargetMissing are admin-WRITE affordances
           // toolRow deliberately strips — defining fields the rows never carry would
           // invite the model to invent them.
+          //
+          // G2-2: the same rule now covers the whole ORDER-MATCH vocabulary. The
+          // report's envelope merges MATCH_DEFINITIONS, but `toolRow` strips
+          // `match`, and the `class` these rows DO carry is the attribution
+          // vocabulary — a different closed set. Relaying seventeen sentences
+          // about classes nothing in this payload can be is how a model comes to
+          // report an order as "short". They return when C4 puts the match on
+          // the rows.
           definitions: Object.fromEntries(
-            Object.entries(report.definitions).filter(
-              ([k]) => k !== "canAttribute" && k !== "fulfillmentTargetMissing",
-            ),
+            Object.entries(report.definitions).filter(([k]) => !TOOL_OMITTED_DEFINITIONS.has(k)),
           ),
         },
         { scope: "mixed" },

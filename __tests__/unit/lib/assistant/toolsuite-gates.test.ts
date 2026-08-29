@@ -123,6 +123,7 @@ import {
   type ToolResult,
 } from "@/lib/assistant/tools";
 import { TOOL_PRESENTATION } from "@/lib/assistant/tool-presentation";
+import { MATCH_DEFINITIONS } from "@/lib/reconciliation/match-keys";
 import { resolveAssistantProduct } from "@/lib/assistant/resolve-product";
 import { STATIC_WRITE_ALLOWLIST } from "./static-write-allowlist";
 import { ORDER_PIPELINE_SELECT, ORDER_ITEM_UNITS_SELECT } from "@/lib/reports/order-pipeline";
@@ -695,6 +696,27 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     const coverage = (result.data as { coverage: Record<string, unknown> }).coverage;
     expect(Object.keys(coverage)).toContain("nextCursor");
     expect(coverage.nextCursor).toBeNull();
+  });
+
+  // G2-2: the tool's rows carry the ATTRIBUTION class vocabulary and `toolRow`
+  // strips `match` entirely, so relaying the 17 MATCH_DEFINITIONS sentences
+  // defined a vocabulary nothing in the payload speaks — an invitation to invent
+  // a `class: 'short'` that no row could ever carry. They come back when C4 puts
+  // the match ON the rows, and not before.
+  it("get_order_reconciliation's definitions carry NO match key until C4 wires the match", async () => {
+    prismaCtl.__reset();
+    const result = await assistantTools.get_order_reconciliation.run({}, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const definitions = (result.data as { definitions: Record<string, string> }).definitions;
+
+    expect(Object.keys(definitions).filter((k) => k in MATCH_DEFINITIONS)).toEqual([]);
+    // ...and the two match TOTALS the coverage block DOES carry keep theirs.
+    expect(typeof definitions.matchedOrders).toBe("string");
+    expect(typeof definitions.matchUnavailableRows).toBe("string");
+    // FD-2's original two are still stripped: `toolRow` carries neither field.
+    expect(definitions.canAttribute).toBeUndefined();
+    expect(definitions.fulfillmentTargetMissing).toBeUndefined();
   });
 
   it("get_business_snapshot frames itself as one-call, names the section tools, and discloses mixed scope + independent degradation", () => {

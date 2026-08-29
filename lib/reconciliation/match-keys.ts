@@ -31,8 +31,16 @@ export const FLAGGED_MATCH_CLASSES: ReadonlySet<MatchClassKey> = new Set<MatchCl
 export const MATCH_KINDS = ['missing', 'short', 'over', 'extra', 'overrun'] as const;
 export type MatchKind = (typeof MATCH_KINDS)[number];
 
-/** Why a ROW has no match at all (the producer's reasons — never the matcher's). */
-export const MATCH_UNAVAILABLE_REASONS = ['unstamped', 'mixed-stamps', 'order-missing', 'order-redacted'] as const;
+/**
+ * Why a ROW has no match at all (the producer's reasons — never the matcher's).
+ *
+ * `match-error` is the fifth and the only one that is not about the ORDER: the
+ * matcher refused this order's line data, and the row says so instead of the
+ * whole page failing for one bad row (pack REV-7).
+ */
+export const MATCH_UNAVAILABLE_REASONS = [
+  'unstamped', 'mixed-stamps', 'order-missing', 'order-redacted', 'match-error',
+] as const;
 export type MatchUnavailableReason = (typeof MATCH_UNAVAILABLE_REASONS)[number];
 
 /** The ONLY reason the matcher itself returns `class: null` (spec §2.3 rule 1). */
@@ -103,6 +111,8 @@ export const MATCH_DEFINITIONS: Readonly<
   'mixed-stamps': 'the rows name more than one order, so no single order can be compared',
   'order-missing': 'the stamp names an order this database no longer holds',
   'order-redacted': "the order belongs to another company, so its lines are not readable here",
+  'match-error':
+    "the matcher refused this order's line data (a non-integer or negative quantity) — the order is listed without a match; see the server log",
   [UNMATCHABLE]:
     'the order has no mapped line and no resolvable bundle line, so there is nothing to compare the movement against',
   grain:
@@ -134,4 +144,5 @@ export const MATCH_UNAVAILABLE_COPY: Readonly<Record<MatchUnavailableReason, str
   'mixed-stamps': 'mixed stamps',
   'order-missing': 'order missing',
   'order-redacted': "another company's order",
+  'match-error': 'could not be matched (bad line data)',
 });

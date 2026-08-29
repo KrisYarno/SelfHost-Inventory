@@ -31,6 +31,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import { requireAdmin } from '@/lib/api-utils';
 import { __resetForTests } from '@/lib/reconciliation/attribution';
+import { MAX_MATCH_ORDERS } from '@/lib/reconciliation/match-producer';
 import { GET as reportGET, dynamic as reportDynamic } from '@/app/api/reconciliation/attribution/route';
 import {
   GET as detailGET,
@@ -204,9 +205,19 @@ describe('GET /api/reconciliation/attribution', () => {
     expect((await res.json()).error).toBe('the window may span at most 366 days');
   });
 
-  it('400s on a limit above 200', async () => {
-    const res = await reportGET(reportRequest('from=2026-08-01&to=2026-08-31&limit=201'));
-    expect(res.status).toBe(400);
+  // ONE BOUND (G2-11): the schema's max IS `MAX_MATCH_ORDERS`, so the largest
+  // page the route accepts is the largest page the match producer will read. A
+  // route bound above the producer's meant a valid request answering 500.
+  it('400s one past MAX_MATCH_ORDERS, and accepts exactly MAX_MATCH_ORDERS', async () => {
+    const over = await reportGET(
+      reportRequest(`from=2026-08-01&to=2026-08-31&limit=${MAX_MATCH_ORDERS + 1}`),
+    );
+    expect(over.status).toBe(400);
+
+    const at = await reportGET(
+      reportRequest(`from=2026-08-01&to=2026-08-31&limit=${MAX_MATCH_ORDERS}`),
+    );
+    expect(at.status).toBe(200);
   });
 
   it('400s on a cursor it did not mint', async () => {

@@ -14,6 +14,16 @@
  * enforced server-side by `app/(app)/admin/layout.tsx`, which also makes the
  * whole /admin subtree dynamic — so `useSearchParams` needs no Suspense
  * boundary here, exactly as /admin/logs relies on.
+ *
+ * THE URL IS AN INPUT, NOT ONLY AN OUTPUT (OCa-7). Reading `?tab=` in the
+ * `useState` initializer alone made the drill-down's finder links inert: an
+ * in-place soft navigation to `?tab=unmapped` changed the URL and the shell
+ * stayed where it was. And rebuilding the query string from the tab alone
+ * ERASED every other param the link or the admin had put there. So the tab is
+ * adjusted FROM the URL during render (the "adjusting state when props change"
+ * idiom the Attribution tab already uses for its match chip), the replace
+ * carries the other params through, and it only fires when the two actually
+ * disagree — replacing a URL with itself is the loop.
  */
 
 import * as React from "react";
@@ -31,14 +41,29 @@ const AVAILABLE_TABS: readonly TabKey[] = ["attribution", "exceptions", "unmappe
 export function ReconciliationPageShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const requested = searchParams?.get("tab") as TabKey | null;
-  const [tab, setTab] = React.useState<TabKey>(
-    requested !== null && AVAILABLE_TABS.includes(requested) ? requested : "attribution",
-  );
+  const requested = (searchParams?.get("tab") ?? null) as TabKey | null;
+  /** The tab the URL names, or null when it names nothing this release renders. */
+  const urlTab =
+    requested !== null && AVAILABLE_TABS.includes(requested) ? requested : null;
+
+  const [tab, setTab] = React.useState<TabKey>(urlTab ?? "attribution");
+
+  // Adjusted DURING render, so no effect can race the replace below: when the
+  // URL's tab CHANGES (a finder link), it wins; when the admin clicks a
+  // trigger, the URL has not changed and the click stands.
+  const [urlTabSeen, setUrlTabSeen] = React.useState<TabKey | null>(urlTab);
+  if (urlTabSeen !== urlTab) {
+    setUrlTabSeen(urlTab);
+    if (urlTab !== null && urlTab !== tab) setTab(urlTab);
+  }
 
   React.useEffect(() => {
-    router.replace(`/admin/reconciliation?tab=${tab}`);
-  }, [tab, router]);
+    // Nothing to say: the URL already names this tab.
+    if (urlTab === tab) return;
+    const next = new URLSearchParams(searchParams?.toString() ?? "");
+    next.set("tab", tab);
+    router.replace(`/admin/reconciliation?${next.toString()}`);
+  }, [tab, urlTab, searchParams, router]);
 
   return (
     <div className="container mx-auto space-y-6 overflow-x-hidden p-4 sm:p-6">

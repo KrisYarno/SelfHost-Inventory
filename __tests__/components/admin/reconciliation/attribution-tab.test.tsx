@@ -158,6 +158,7 @@ function makeReport(over: Partial<AttributionReport> = {}): AttributionReport {
         "mixed-stamps": 0,
         "order-missing": 0,
         "order-redacted": 0,
+        "match-error": 0,
       },
     },
     coverage: {
@@ -553,7 +554,13 @@ function matchesOf(
     scope: "this page",
     orders: 8,
     byClass: { ...zeroMatchByClass(), exact: 5, short: 2 },
-    unavailable: { unstamped: 1, "mixed-stamps": 2, "order-missing": 0, "order-redacted": 0 },
+    unavailable: {
+      unstamped: 1,
+      "mixed-stamps": 2,
+      "order-missing": 0,
+      "order-redacted": 0,
+      "match-error": 0,
+    },
     ...over,
   };
 }
@@ -662,8 +669,9 @@ describe("the Matches chips (pack CA3)", () => {
     );
   });
 
-  it("a page with no matched order says so rather than hiding the row", () => {
-    setReport(makeReport()); // matches.orders === 0
+  it("a page with NOTHING to say — no matched order and no reason — says exactly that", () => {
+    // BOTH totals zero. This is the only shape "none on this page" is true of.
+    setReport(makeReport());
     render(<AttributionTab />);
 
     expect(screen.getByTestId("match-chips-none")).toHaveTextContent(
@@ -671,6 +679,81 @@ describe("the Matches chips (pack CA3)", () => {
     );
     expect(screen.queryByTestId("match-chip-exact")).toBeNull();
     expect(screen.queryByTestId("match-chip-unavailable")).toBeNull();
+  });
+
+  // OCa-2 / G2-1: a page of unstamped batches has `orders === 0` and a full
+  // Unavailable bucket. The chip lived inside the `orders > 0` branch, so that
+  // page read "Matches: none on this page" — and the fifty rows that DID carry
+  // a named reason were unreachable and uncounted.
+  it("a page of UNAVAILABLE rows renders the chip, not 'none on this page'", async () => {
+    const user = userEvent.setup();
+    setReport(
+      makeReport({
+        rows: [
+          makeRow({ batchId: "batch-1", match: null, matchUnavailable: "unstamped" }),
+          makeRow({ batchId: "batch-2", match: null, matchUnavailable: "unstamped" }),
+          makeRow({ batchId: "batch-3", match: null, matchUnavailable: "unstamped" }),
+        ],
+        matches: matchesOf({
+          orders: 0,
+          byClass: zeroMatchByClass(),
+          unavailable: {
+            unstamped: 3,
+            "mixed-stamps": 0,
+            "order-missing": 0,
+            "order-redacted": 0,
+            "match-error": 0,
+          },
+        }),
+      }),
+    );
+    render(<AttributionTab />);
+
+    expect(screen.queryByTestId("match-chips-none")).toBeNull();
+    expect(screen.getByTestId("match-chip-unavailable").textContent).toBe("Unavailable (3)");
+    // The label is still there, and the absence of a MATCH is said beside it.
+    expect(screen.getByTestId("match-chips").firstElementChild?.textContent).toBe(
+      "Matches (this page)",
+    );
+    expect(screen.getByTestId("match-chips-no-orders")).toHaveTextContent(
+      "no matched order on this page",
+    );
+
+    // ...and the chip still filters.
+    await user.click(screen.getByTestId("match-chip-unavailable"));
+    expect(screen.getByTestId("row-batch-1")).toBeInTheDocument();
+    expect(screen.getByTestId("match-chip-unavailable")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  // OCa-3: the two coverage sentences describe the UNFILTERED page, exactly as
+  // the "more in this window" line does — and while a chip hides rows, saying so
+  // is the difference between a bound and a wrong number.
+  it("qualifies the coverage sentences as (unfiltered) while a match chip is active", async () => {
+    const user = userEvent.setup();
+    setReport(
+      makeReport({
+        rows: matchedRows(),
+        matches: matchesOf(),
+        count: 4,
+        coverage: { ...makeReport().coverage, rowsReturned: 3 },
+      }),
+    );
+    render(<AttributionTab />);
+
+    // Before: the sentences are the page's own, unqualified.
+    const coverage = screen.getByTestId("coverage");
+    expect(coverage.textContent).toContain("Showing 3 of 4 attributable batches");
+    expect(coverage.textContent).not.toContain("(unfiltered)");
+
+    await user.click(screen.getByTestId("class-chip-attributed·selected"));
+    await user.click(screen.getByTestId("match-chip-exact"));
+
+    expect(screen.getByTestId("coverage").textContent).toContain(
+      "inclusive UTC) (unfiltered).",
+    );
+    expect(screen.getByTestId("class-count")).toHaveTextContent(
+      "4 in the selected class (unfiltered).",
+    );
   });
 });
 

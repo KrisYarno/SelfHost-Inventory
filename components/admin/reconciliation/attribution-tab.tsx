@@ -114,17 +114,22 @@ function Coverage({
       <div>
         {/* The WINDOW's total, never the selected class's (OC-7). `report.count`
             is the count AFTER the class filter, so reading it here made every
-            chip look like a window that had shrunk to fit the chip. */}
+            chip look like a window that had shrunk to fit the chip.
+            A MATCH chip hides rows on the CLIENT and rewrites none of these
+            figures (OCa-3), so while one is active every sentence that counts
+            rows says "(unfiltered)" — the same idiom the window bound below
+            uses, because they are the same claim. */}
         <p className="text-body">
           Showing {coverage.rowsReturned} of {totals.attributable} attributable batches in this
-          window ({report.window.from} to {report.window.to}, inclusive UTC).
+          window ({report.window.from} to {report.window.to}, inclusive UTC)
+          {matchFiltered ? " (unfiltered)" : ""}.
         </p>
         <Definition text={definitions.attributable} />
       </div>
 
       {classKey !== null && (
         <p className="text-body" data-testid="class-count">
-          {report.count} in the selected class.
+          {report.count} in the selected class{matchFiltered ? " (unfiltered)" : ""}.
         </p>
       )}
 
@@ -250,6 +255,12 @@ function MatchChip({
  * A class-less match (`class: null`, the matcher's `unmatchable`) has no bucket
  * here on purpose (pack REV 4): it is a match with nothing to compare, so it is
  * in `matches.orders` and in no chip. The row says so in its own Match cell.
+ *
+ * THE TWO TOTALS ARE INDEPENDENT (OCa-2 / G2-1). `orders` counts orders that
+ * were compared; `unavailable` counts rows that could not be. A page can carry
+ * either, both or neither — a page of unstamped batches has fifty of the second
+ * and none of the first — so the Unavailable chip renders on its own count, and
+ * "Matches: none on this page" is said only when BOTH are zero.
  */
 function MatchChips({
   matches,
@@ -270,41 +281,53 @@ function MatchChips({
       className="flex flex-wrap items-center gap-2 border-t border-border pt-4"
       data-testid="match-chips"
     >
+      {/* The label is ALWAYS the first element (pack CA3), whatever follows it. */}
       <span className="text-body-sm font-medium">Matches (this page)</span>
 
-      {matches.orders === 0 ? (
-        // Never hidden: a page whose rows carry no order at all is a fact about
-        // the page, and an absent row would read as "not computed yet".
-        <span className="text-body-sm text-muted-foreground" data-testid="match-chips-none">
-          Matches: none on this page
-        </span>
-      ) : (
-        <>
-          {MATCH_CLASS_KEYS.filter((key) => matches.byClass[key] > 0).map((key) => (
-            <MatchChip
-              key={key}
-              chipKey={key}
-              label={MATCH_CLASS_LABELS[key]}
-              count={matches.byClass[key]}
-              tone={
-                FLAGGED_MATCH_CLASSES.has(key) ? "text-warning font-medium" : "text-muted-foreground"
-              }
-              active={active === key}
-              onToggle={onToggle}
-            />
-          ))}
-          {unavailable > 0 && (
-            <MatchChip
-              chipKey="unavailable"
-              label="Unavailable"
-              count={unavailable}
-              tone="text-muted-foreground"
-              active={active === "unavailable"}
-              onToggle={onToggle}
-            />
-          )}
-        </>
+      {MATCH_CLASS_KEYS.filter((key) => matches.byClass[key] > 0).map((key) => (
+        <MatchChip
+          key={key}
+          chipKey={key}
+          label={MATCH_CLASS_LABELS[key]}
+          count={matches.byClass[key]}
+          tone={
+            FLAGGED_MATCH_CLASSES.has(key) ? "text-warning font-medium" : "text-muted-foreground"
+          }
+          active={active === key}
+          onToggle={onToggle}
+        />
+      ))}
+
+      {/* THE UNAVAILABLE CHIP DOES NOT DEPEND ON `orders` (OCa-2 / G2-1). A page
+          of unstamped batches has NO matched order and a full unavailable
+          bucket; hanging this chip off `orders > 0` hid fifty rows that each had
+          a named reason behind the sentence "none on this page". */}
+      {unavailable > 0 && (
+        <MatchChip
+          chipKey="unavailable"
+          label="Unavailable"
+          count={unavailable}
+          tone="text-muted-foreground"
+          active={active === "unavailable"}
+          onToggle={onToggle}
+        />
       )}
+
+      {matches.orders === 0 &&
+        (unavailable === 0 ? (
+          // NOTHING on either side. Never hidden: a page whose rows carry no
+          // order at all is a fact about the page, and an absent row would read
+          // as "not computed yet".
+          <span className="text-body-sm text-muted-foreground" data-testid="match-chips-none">
+            Matches: none on this page
+          </span>
+        ) : (
+          // Rows with reasons but no order to compare: the chip above says how
+          // many, and this says the other half of the same fact.
+          <span className="text-body-sm text-muted-foreground" data-testid="match-chips-no-orders">
+            no matched order on this page
+          </span>
+        ))}
     </div>
   );
 }
