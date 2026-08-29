@@ -1008,6 +1008,49 @@ describe('the order match', () => {
     expect(Object.keys(match as object)).not.toContain('definitions');
   });
 
+  // FD4-1: the same walk over a TOLERANCE-bearing match — a balanced mg group
+  // (2 x 5 mg ordered, 1 x 10 mg out) beside a `pack`-unit exclusion — so the
+  // `tolerance.*` paths are exercised, not merely allowlisted.
+  it('…and over a tolerance-bearing match, the tolerance paths are exercised (rule 5)', async () => {
+    wireMatch([selectedRow()]);
+    db.externalOrderItem.findMany.mockResolvedValue([
+      itemRow({ id: 'item-1', quantity: 2 }),
+      itemRow({ id: 'item-2', productLinkId: 'link-11', productLink: { internalProductId: 11, isBundle: false, bundleComponents: [] } }),
+    ] as never);
+    mockSummary([selectedRow()], [deductedSideRow({ productId: 10 })]);
+    db.product.findMany.mockResolvedValue([
+      productRow(),
+      productRow({ id: 10, name: 'Widget 10', numericValue: new Prisma.Decimal('10.00') }),
+      productRow({ id: 11, name: 'Pack of 10', baseName: 'pack', unit: 'pack', numericValue: new Prisma.Decimal('10.00') }),
+    ] as never);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+    const match = report.rows[0].match;
+    expect(match).not.toBeNull();
+    expect(match?.class).toBe('missing-product');
+    expect(match?.tolerance?.equivalentGroups).toHaveLength(1);
+    expect(match?.tolerance?.excludedProducts).toEqual([{ productId: 11, reason: 'unit-refused', unit: 'pack' }]);
+
+    const ALLOWED = new Set([
+      'class', 'reason', 'kinds[]', 'perProduct[].productName', 'perProduct[].kind',
+      'tolerance.equivalentGroups[].familyKey', 'tolerance.equivalentGroups[].unit',
+      'tolerance.excludedProducts[].reason', 'tolerance.excludedProducts[].unit',
+    ]);
+    const paths = new Set<string>();
+    const walk = (value: unknown, path: string): void => {
+      if (typeof value === 'string') { paths.add(path); return; }
+      if (Array.isArray(value)) { value.forEach((v) => walk(v, `${path}[]`)); return; }
+      if (value !== null && typeof value === 'object') {
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) walk(v, path === '' ? k : `${path}.${k}`);
+      }
+    };
+    walk(match, '');
+    expect(Array.from(paths).filter((p) => !ALLOWED.has(p))).toEqual([]);
+    for (const exercised of ['tolerance.equivalentGroups[].familyKey', 'tolerance.equivalentGroups[].unit', 'tolerance.excludedProducts[].reason', 'tolerance.excludedProducts[].unit', 'perProduct[].kind', 'kinds[]']) {
+      expect(paths.has(exercised)).toBe(true);
+    }
+  });
+
   // The FIVE reasons, through the PRODUCER — one owner (S-A10), so the row's
   // pair and the stamp set the producer is asked about can never disagree. The
   // fifth (`match-error`, pack REV-7) is pinned below with the refusal.

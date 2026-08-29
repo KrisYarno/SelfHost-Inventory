@@ -7,10 +7,11 @@
  * consequences worth stating, because both are load-bearing:
  *
  *   * it is TOTAL on data, bar one refusal. Every input shape returns a result;
- *     the only throw is `MatcherRefusal` from the integer guards below — a
- *     negative or fractional unit count, which a reader CAN hand over (the
- *     item quantity is a plain signed Int) and which the producer catches per
- *     order and renders as `match-error`. An admin surface that says so is
+ *     the only throw is `MatcherRefusal` from the guards below — a negative,
+ *     fractional or unsafe (past 2^53) unit count, or a sum or mass product
+ *     that would leave the safe range and round — which a reader CAN hand over
+ *     (the item quantity is a plain signed Int) and which the producer catches
+ *     per order and renders as `match-error`. An admin surface that says so is
  *     honest; one that 500s on an odd order is not.
  *   * it holds NO names it did not need. `perProduct[].productName` is an
  *     INTERNAL product name (the same fact the ledger rows already ship) and is
@@ -151,7 +152,7 @@ export class MatcherRefusal extends Error {
 
 /**
  * The guards' refusal. Units are integers by construction (the ledger's `delta`
- * is an INT and `quantity` is an INT), so a fractional or negative one means a
+ * is an INT and `quantity` is an INT), so a fractional, negative or unsafe one means a
  * caller handed the matcher something that is not a unit count — and silently
  * rounding it would put a made-up number on an admin's screen. The producer
  * catches `MatcherRefusal` per order; nothing else this module throws is caught.
@@ -213,7 +214,7 @@ function toPerProduct(row: WorkingRow): PerProduct {
     ordered: row.ordered,
     deducted: row.deducted,
     corrected: row.corrected,
-    delta: row.deducted - row.ordered,
+    delta: safeSum(row.deducted, -row.ordered, `delta for product ${row.productId}`),
     kind: row.kind,
     units: row.units,
     fromBundle: row.fromBundle,
@@ -251,7 +252,7 @@ export function matchOrder(input: {
   for (const p of products) {
     if (p.hundredths !== null && !Number.isSafeInteger(p.hundredths)) {
       throw new MatcherRefusal(
-        `matchOrder: hundredths for product ${p.productId} must be an integer, got ${p.hundredths}`,
+        `matchOrder: hundredths for product ${p.productId} must be a safe integer, got ${p.hundredths}`,
       );
     }
     factsById.set(p.productId, p);
