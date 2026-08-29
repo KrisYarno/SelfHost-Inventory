@@ -6,10 +6,12 @@
  * the class is decided HERE and nowhere else (pack cross-wave rule 8). Two
  * consequences worth stating, because both are load-bearing:
  *
- *   * it is TOTAL on data. Every input shape returns a result; the only throws
- *     are the integer guard below, which a reader cannot trigger and a mock
- *     can. An admin surface that renders "unknown" is honest; one that 500s on
- *     an odd order is not.
+ *   * it is TOTAL on data, bar one refusal. Every input shape returns a result;
+ *     the only throw is `MatcherRefusal` from the integer guards below — a
+ *     negative or fractional unit count, which a reader CAN hand over (the
+ *     item quantity is a plain signed Int) and which the producer catches per
+ *     order and renders as `match-error`. An admin surface that says so is
+ *     honest; one that 500s on an odd order is not.
  *   * it holds NO names it did not need. `perProduct[].productName` is an
  *     INTERNAL product name (the same fact the ledger rows already ship) and is
  *     the only string on the result that names anything (pack rule 5).

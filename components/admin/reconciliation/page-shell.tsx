@@ -39,6 +39,20 @@ type TabKey = "attribution" | "exceptions" | "unmapped";
 /** The tabs this release can actually render. */
 const AVAILABLE_TABS: readonly TabKey[] = ["attribution", "exceptions", "unmapped"];
 
+/**
+ * THE ONE RULE for which tab is on screen (FD3-1 — exported so the pending
+ * half can be pinned without a router double that never lands): the clicked
+ * tab while its navigation is pending, else the URL's, else the default.
+ */
+export function resolveTab(input: {
+  isPending: boolean;
+  clicked: TabKey | null;
+  urlTab: TabKey | null;
+}): TabKey {
+  if (input.isPending && input.clicked !== null) return input.clicked;
+  return input.urlTab ?? "attribution";
+}
+
 export function ReconciliationPageShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -51,7 +65,7 @@ export function ReconciliationPageShell() {
   // The clicked tab, shown ONLY while its navigation is pending: once the
   // transition settles the URL is the answer again, landed or not.
   const [clicked, setClicked] = React.useState<TabKey | null>(null);
-  const tab: TabKey = isPending && clicked !== null ? clicked : (urlTab ?? "attribution");
+  const tab = resolveTab({ isPending, clicked, urlTab });
 
   const goTo = React.useCallback(
     (next: TabKey) => {

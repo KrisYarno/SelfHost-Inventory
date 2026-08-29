@@ -293,7 +293,7 @@ const TOOL_OMITTED_DEFINITIONS: ReadonlySet<string> = new Set<string>([
   "canAttribute",
   "fulfillmentTargetMissing",
   ...Object.keys(MATCH_DEFINITIONS),
-  // QA-4: the two match totals leave the tool's coverage block with them.
+  // P2 QA-4: the two match totals leave the tool's coverage block with them.
   "matchedOrders",
   "matchUnavailableRows",
 ]);
@@ -2980,7 +2980,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           totals: report.totals,
           rows: report.rows.map(toolRow),
           coverage: {
-            // QA-4: the two match TOTALS leave with their vocabulary — `toolRow` carries
+            // P2 QA-4: the two match TOTALS leave with their vocabulary — `toolRow` carries
             // no match, so "5 unavailable of 5" would be a number the model cannot
             // explain (a member sees its foreign orders as unavailable). Back with C4.
             ...toolCoverage,

@@ -583,7 +583,8 @@ describe("the Matches chips (pack CA3)", () => {
 
     expect(screen.getByTestId("match-chip-exact").textContent).toBe("Exact (5)");
     expect(screen.getByTestId("match-chip-short").textContent).toBe("Short (2)");
-    expect(screen.getByTestId("match-chip-unavailable").textContent).toBe("Unavailable (3)");
+    // FD3-2: the Unavailable chip counts ROWS under a header that says "by order" — its grain rides on the chip.
+    expect(screen.getByTestId("match-chip-unavailable").textContent).toBe("Unavailable (3 rows)");
     // A class no order on this page landed in is not a chip.
     expect(screen.queryByTestId("match-chip-mixed")).toBeNull();
   });
@@ -614,7 +615,7 @@ describe("the Matches chips (pack CA3)", () => {
     );
   });
 
-  it("is labelled 'Matches (this page)', and the label is the row's FIRST element", () => {
+  it("is labelled 'Matches (this page, by order)', and the label is the row's FIRST element", () => {
     setReport(makeReport({ rows: matchedRows(), matches: matchesOf() }));
     render(<AttributionTab />);
 
@@ -736,7 +737,7 @@ describe("the Matches chips (pack CA3)", () => {
     render(<AttributionTab />);
 
     expect(screen.queryByTestId("match-chips-none")).toBeNull();
-    expect(screen.getByTestId("match-chip-unavailable").textContent).toBe("Unavailable (3)");
+    expect(screen.getByTestId("match-chip-unavailable").textContent).toBe("Unavailable (3 rows)");
     // The label is still there, and the absence of a MATCH is said beside it.
     expect(screen.getByTestId("match-chips").firstElementChild?.textContent).toBe(
       "Matches (this page, by order)",

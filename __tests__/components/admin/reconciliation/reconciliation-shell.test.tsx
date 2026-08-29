@@ -51,12 +51,27 @@ jest.mock("@/components/admin/reconciliation/unmapped-tab", () => ({
   UnmappedTab: () => <div data-testid="unmapped-tab-mount" />,
 }));
 
-import { ReconciliationPageShell } from "@/components/admin/reconciliation/page-shell";
+import { ReconciliationPageShell, resolveTab } from "@/components/admin/reconciliation/page-shell";
 import { AdminSubNav } from "@/components/admin/admin-sub-nav";
 
 beforeEach(() => {
   jest.clearAllMocks();
   searchParams = new URLSearchParams("");
+});
+
+// FD3-1: the pending half of the tab rule cannot be reached through a router
+// double that never lands (the transition settles before any assertion), so
+// the rule is a pure function and its four corners are pinned here.
+describe("resolveTab — the one rule for which tab is on screen", () => {
+  it("shows the clicked tab ONLY while its navigation is pending", () => {
+    expect(resolveTab({ isPending: true, clicked: "unmapped", urlTab: "attribution" })).toBe("unmapped");
+    expect(resolveTab({ isPending: false, clicked: "unmapped", urlTab: "attribution" })).toBe("attribution");
+  });
+  it("follows the URL when nothing is pending, and defaults when the URL names nothing", () => {
+    expect(resolveTab({ isPending: false, clicked: null, urlTab: "exceptions" })).toBe("exceptions");
+    expect(resolveTab({ isPending: true, clicked: null, urlTab: null })).toBe("attribution");
+    expect(resolveTab({ isPending: false, clicked: null, urlTab: null })).toBe("attribution");
+  });
 });
 
 describe("ReconciliationPageShell", () => {

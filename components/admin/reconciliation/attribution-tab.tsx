@@ -213,6 +213,7 @@ function MatchChip({
   chipKey,
   label,
   count,
+  unit,
   tone,
   active,
   onToggle,
@@ -220,6 +221,8 @@ function MatchChip({
   chipKey: MatchChipKey;
   label: string;
   count: number;
+  /** The count's grain when it is NOT the row's (FD3-2: the Unavailable chip counts rows). */
+  unit?: string;
   tone: string;
   active: boolean;
   onToggle: (chip: MatchChipKey) => void;
@@ -240,7 +243,7 @@ function MatchChip({
           : "border-border bg-surface hover:bg-surface-hover",
       )}
     >
-      {label} ({count})
+      {`${label} (${count}${unit ? ` ${unit}` : ""})`}
     </button>
   );
 }
@@ -310,6 +313,7 @@ function MatchChips({
           chipKey="unavailable"
           label="Unavailable"
           count={unavailable}
+          unit={unavailable === 1 ? "row" : "rows"}
           tone="text-muted-foreground"
           active={active === "unavailable"}
           onToggle={onToggle}

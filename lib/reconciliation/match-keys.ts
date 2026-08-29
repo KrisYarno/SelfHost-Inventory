@@ -101,7 +101,8 @@ export const MATCH_DEFINITIONS: Readonly<
     'a product the order asked for has no attributable outbound movement against this order (a SALE/ADJUSTMENT deduction carrying a batch id — the report population; a stamped row without a batch id is outside it)',
   short: 'less left stock against this order than it asked for, on at least one product',
   over: 'more left stock against this order than it asked for, on at least one product',
-  'extra-product': 'a product the order never asked for has attributable outbound movement against it (the report population)',
+  'extra-product':
+    'a product the order never asked for has attributable outbound movement against this order (a SALE/ADJUSTMENT deduction carrying a batch id — the report population; a stamped row without a batch id is outside it)',
   substitution:
     'one product is missing and another was taken in its place, and the two did not balance by mass',
   'correction-overrun':
