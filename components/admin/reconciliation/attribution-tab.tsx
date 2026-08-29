@@ -17,6 +17,15 @@
  * which the producer computes BEFORE the active class filter, so selecting one
  * never rewrites the numbers on the others. No dependent selects, no impossible
  * combination.
+ *
+ * THE MATCHES CHIPS ARE A SECOND, SMALLER THING (Part 2, pack CA3), and the
+ * difference is the whole reason they are a separate row. The class chips are a
+ * SERVER filter over the window; these describe THIS PAGE's orders — the match
+ * costs three statements over the page's stamps, so it is computed for the rows
+ * that came back and for nothing else. Selecting one therefore filters the rows
+ * already on screen and asks the server nothing: the counts beside it stay the
+ * page's own, and the window bound says "(unfiltered)" so the two are never
+ * read as one number.
  */
 
 import * as React from "react";
@@ -29,6 +38,13 @@ import { cn } from "@/lib/utils";
 import { useDebounce } from "@/hooks/use-debounce";
 import { useAttributionReport, type AttributionReportInput } from "@/hooks/use-admin";
 import { ATTRIBUTION_CLASS_KEYS } from "@/lib/reconciliation/class-keys";
+import {
+  FLAGGED_MATCH_CLASSES,
+  MATCH_CLASS_KEYS,
+  MATCH_CLASS_LABELS,
+  MATCH_UNAVAILABLE_REASONS,
+  type MatchClassKey,
+} from "@/lib/reconciliation/match-keys";
 import type {
   AttributionClassKey,
   AttributionReport,
@@ -82,9 +98,12 @@ function Definition({ text }: { text: string | undefined }) {
 function Coverage({
   report,
   classKey,
+  matchFiltered,
 }: {
   report: AttributionReport;
   classKey: AttributionClassKey | null;
+  /** A match chip is hiding rows the bound below still counts (pack CA3). */
+  matchFiltered: boolean;
 }) {
   const { coverage, totals, definitions } = report;
   const needsALook =
@@ -112,7 +131,7 @@ function Coverage({
       {report.moreCount > 0 && (
         <div>
           <p className="text-body" data-testid="more-count">
-            {report.moreCount} more in this window.
+            {report.moreCount} more in this window{matchFiltered ? " (unfiltered)" : ""}.
           </p>
           <Definition text={definitions.moreCount} />
         </div>
@@ -173,6 +192,123 @@ function Coverage({
   );
 }
 
+/**
+ * WHICH BUCKET OF THE PAGE'S MATCHES IS SELECTED. A class key and the
+ * unavailable bucket cannot collide — `unavailable` is not a class — so one
+ * string carries both, and `null` is "the whole page".
+ */
+type MatchChipKey = MatchClassKey | "unavailable";
+
+/** The rows a chip selects. The unavailable chip reads the REASON, not a class. */
+function rowInChip(row: AttributionRow, chip: MatchChipKey): boolean {
+  return chip === "unavailable" ? row.matchUnavailable !== null : row.match?.class === chip;
+}
+
+function MatchChip({
+  chipKey,
+  label,
+  count,
+  tone,
+  active,
+  onToggle,
+}: {
+  chipKey: MatchChipKey;
+  label: string;
+  count: number;
+  tone: string;
+  active: boolean;
+  onToggle: (chip: MatchChipKey) => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={`match-chip-${chipKey}`}
+      aria-pressed={active}
+      onClick={() => onToggle(chipKey)}
+      className={cn(
+        "rounded-full border px-3 py-1 text-body-sm transition-colors",
+        // The tone is the CLASS's, in both states: whether an admin should look
+        // at this bucket is a fact about the bucket, not about what is selected.
+        tone,
+        active
+          ? "border-primary bg-surface-hover"
+          : "border-border bg-surface hover:bg-surface-hover",
+      )}
+    >
+      {label} ({count})
+    </button>
+  );
+}
+
+/**
+ * THE PAGE'S MATCHES. Every number here is `matches.byClass` / `matches.unavailable`
+ * as the producer counted it — `byClass` counts ORDERS and `unavailable` counts
+ * ROWS, and neither is recoverable by counting what is on screen (two batches
+ * stamped with one order are one order). A chip that recounted the rows would
+ * quietly disagree with the coverage block above it.
+ *
+ * A class-less match (`class: null`, the matcher's `unmatchable`) has no bucket
+ * here on purpose (pack REV 4): it is a match with nothing to compare, so it is
+ * in `matches.orders` and in no chip. The row says so in its own Match cell.
+ */
+function MatchChips({
+  matches,
+  active,
+  onToggle,
+}: {
+  matches: AttributionReport["matches"];
+  active: MatchChipKey | null;
+  onToggle: (chip: MatchChipKey) => void;
+}) {
+  const unavailable = MATCH_UNAVAILABLE_REASONS.reduce(
+    (sum, reason) => sum + matches.unavailable[reason],
+    0,
+  );
+
+  return (
+    <div
+      className="flex flex-wrap items-center gap-2 border-t border-border pt-4"
+      data-testid="match-chips"
+    >
+      <span className="text-body-sm font-medium">Matches (this page)</span>
+
+      {matches.orders === 0 ? (
+        // Never hidden: a page whose rows carry no order at all is a fact about
+        // the page, and an absent row would read as "not computed yet".
+        <span className="text-body-sm text-muted-foreground" data-testid="match-chips-none">
+          Matches: none on this page
+        </span>
+      ) : (
+        <>
+          {MATCH_CLASS_KEYS.filter((key) => matches.byClass[key] > 0).map((key) => (
+            <MatchChip
+              key={key}
+              chipKey={key}
+              label={MATCH_CLASS_LABELS[key]}
+              count={matches.byClass[key]}
+              tone={
+                FLAGGED_MATCH_CLASSES.has(key) ? "text-warning font-medium" : "text-muted-foreground"
+              }
+              active={active === key}
+              onToggle={onToggle}
+            />
+          ))}
+          {unavailable > 0 && (
+            <MatchChip
+              chipKey="unavailable"
+              label="Unavailable"
+              count={unavailable}
+              tone="text-muted-foreground"
+              active={active === "unavailable"}
+              onToggle={onToggle}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export function AttributionTab() {
   const [filters, setFilters] = React.useState<Filters>(() => ({
     ...defaultWindow(),
@@ -203,6 +339,25 @@ export function AttributionTab() {
   };
   const query = useAttributionReport(input);
   const report = query.data;
+
+  // THE MATCH CHIP IS ABOUT THE ROWS ON SCREEN, so it cannot outlive them: a
+  // cursor step, a class chip, a new window or a new order number all hand back
+  // a different report, and a selection made about the old page would filter the
+  // new one by a bucket nobody chose for it. Adjusted DURING render (React's
+  // "adjusting state when props change") so the stale filter is never committed.
+  const [matchChip, setMatchChip] = React.useState<MatchChipKey | null>(null);
+  const [reportSeen, setReportSeen] = React.useState<AttributionReport | undefined>(report);
+  if (reportSeen !== report) {
+    setReportSeen(report);
+    setMatchChip(null);
+  }
+
+  const visibleRows =
+    report === undefined
+      ? []
+      : matchChip === null
+        ? report.rows
+        : report.rows.filter((row) => rowInChip(row, matchChip));
 
   // A cursor belongs to the filter that produced it: page 2 of one window is
   // not page 2 of another, so every filter change drops it in the SAME update.
@@ -279,7 +434,17 @@ export function AttributionTab() {
 
       {report && (
         <>
-          <Coverage report={report} classKey={filters.classKey} />
+          <Coverage
+            report={report}
+            classKey={filters.classKey}
+            matchFiltered={matchChip !== null}
+          />
+
+          <MatchChips
+            matches={report.matches}
+            active={matchChip}
+            onToggle={(chip) => setMatchChip((current) => (current === chip ? null : chip))}
+          />
 
           {report.rows.length === 0 ? (
             <p
@@ -300,11 +465,12 @@ export function AttributionTab() {
                       <TableHead>Rows</TableHead>
                       <TableHead>Products</TableHead>
                       <TableHead>Order</TableHead>
+                      <TableHead>Match</TableHead>
                       <TableHead className="text-right">Attribute</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {report.rows.map((row) => (
+                    {visibleRows.map((row) => (
                       <AttributionTableRow
                         key={row.batchId}
                         row={row}
@@ -317,7 +483,7 @@ export function AttributionTab() {
               </div>
 
               <div className="space-y-3 md:hidden" data-testid="attribution-cards">
-                {report.rows.map((row) => (
+                {visibleRows.map((row) => (
                   <AttributionMobileCard
                     key={row.batchId}
                     row={row}

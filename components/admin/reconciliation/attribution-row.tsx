@@ -11,10 +11,23 @@
  * appears only where `canAttribute` says the server would accept the write, and
  * a stamped fulfillment says who owns that change instead (D4: re-stamping it
  * here would desync `fulfilledQty` and the status already pushed to the store).
+ *
+ * THE MATCH CELL (Part 2, pack CA3) is the same kind of dumb: the class, the
+ * reason there is none, or the words for a match that had nothing to compare —
+ * all three from `match-keys.ts`, which is the ONE home for them (seam S-A11).
+ * The only judgment is the tone, and it has exactly two registered tokens.
  */
 
 import { Button } from "@/components/ui/button";
 import { TableCell, TableRow } from "@/components/ui/table";
+import {
+  FLAGGED_MATCH_CLASSES,
+  MATCH_CLASS_LABELS,
+  MATCH_DEFINITIONS,
+  MATCH_UNAVAILABLE_COPY,
+  UNMATCHABLE,
+} from "@/lib/reconciliation/match-keys";
+import type { OrderMatch } from "@/lib/reconciliation/match";
 import type { AttributionRow as Row } from "@/lib/reconciliation/attribution";
 
 /** A stamp with no order record behind it — said, never left blank. */
@@ -35,6 +48,74 @@ export function fulfilledAgainstCopy(fulfilled: NonNullable<Row["fulfilledAgains
  */
 export const FULFILLMENT_TARGET_MISSING_COPY =
   "fulfillment target missing — the named order no longer exists";
+
+/**
+ * A MATCH WHOSE CLASS IS NULL IS STILL A MATCH (pack REV 4). The matcher read
+ * both sides and found nothing on the ordered side to compare against — which
+ * is a different fact from "this row has no order", and rendering it from
+ * `MATCH_UNAVAILABLE_COPY` would tell an admin the row could not be read.
+ */
+export const NOT_COMPARABLE_COPY = "not comparable";
+
+/**
+ * The pair `match` / `matchUnavailable` is EXACTLY-ONE-OF by contract
+ * (`attribution.ts`), so both being null cannot happen on a real read. It is
+ * said rather than left blank anyway: an empty cell in this column reads as
+ * "nothing wrong here", which is the one thing it must never mean.
+ */
+export const MATCH_NOT_COMPUTED_COPY = "not computed";
+
+/** The class in the vocabulary's words — S-A11's map, never re-spelled here. */
+export function matchClassLabel(match: OrderMatch): string {
+  return match.class === null ? NOT_COMPARABLE_COPY : MATCH_CLASS_LABELS[match.class];
+}
+
+/** The sentence that rides with the class (truthful-data: a class alone is a rumour). */
+export function matchDefinition(match: OrderMatch): string {
+  return MATCH_DEFINITIONS[match.class === null ? UNMATCHABLE : match.class];
+}
+
+/**
+ * The two REGISTERED tokens, and only those (pack CA3): the classes an admin
+ * should look at carry `warning`, the rest are muted. There is no third colour
+ * on this surface to invent.
+ */
+export function matchToneClass(match: OrderMatch): string {
+  return match.class !== null && FLAGGED_MATCH_CLASSES.has(match.class)
+    ? "text-warning font-medium"
+    : "text-muted-foreground";
+}
+
+/** One row's match, in the one presentation both breakpoints share. */
+export function MatchCell({ row, testId }: { row: Row; testId: string }) {
+  if (row.matchUnavailable !== null) {
+    return (
+      <span
+        data-testid={testId}
+        className="text-muted-foreground"
+        title={MATCH_DEFINITIONS[row.matchUnavailable]}
+      >
+        {MATCH_UNAVAILABLE_COPY[row.matchUnavailable]}
+      </span>
+    );
+  }
+  if (row.match === null) {
+    return (
+      <span data-testid={testId} className="text-muted-foreground">
+        {MATCH_NOT_COMPUTED_COPY}
+      </span>
+    );
+  }
+  return (
+    <span
+      data-testid={testId}
+      className={matchToneClass(row.match)}
+      title={matchDefinition(row.match)}
+    >
+      {matchClassLabel(row.match)}
+    </span>
+  );
+}
 
 /** The operator, or the word for "no human was in this loop". */
 function actorLabel(row: Row): string {
@@ -121,6 +202,9 @@ export function AttributionTableRow({
         <FulfilledNote row={row} />
         <MissingTargetNote row={row} />
       </TableCell>
+      <TableCell>
+        <MatchCell row={row} testId={`match-${row.batchId}`} />
+      </TableCell>
       <TableCell className="text-right">
         <AttributeButton row={row} onAttribute={onAttribute} testId={`attribute-${row.batchId}`} />
       </TableCell>
@@ -168,6 +252,12 @@ export function AttributionMobileCard({
           <div className="min-w-0">
             <dt className="text-muted-foreground">Products</dt>
             <dd className="tabular-nums">{row.productCount}</dd>
+          </div>
+          <div className="min-w-0">
+            <dt className="text-muted-foreground">Match</dt>
+            <dd>
+              <MatchCell row={row} testId={`match-card-${row.batchId}`} />
+            </dd>
           </div>
         </dl>
         <FulfilledNote row={row} />

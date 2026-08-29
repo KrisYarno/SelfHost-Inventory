@@ -20,6 +20,12 @@
 import * as React from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import {
+  MATCH_DEFINITIONS,
+  MATCH_UNAVAILABLE_COPY,
+  MATCH_UNAVAILABLE_REASONS,
+} from "@/lib/reconciliation/match-keys";
+import type { OrderMatch } from "@/lib/reconciliation/match";
 import type { AttributionRow, BatchDetail } from "@/lib/reconciliation/attribution";
 
 const useBatchDetailMock = jest.fn();
@@ -278,4 +284,281 @@ it("offers the correction only where the server would accept it", async () => {
     />,
   );
   expect(screen.queryByTestId("attribute-drilldown-batch-2")).toBeNull();
+});
+
+// ---------------------------------------------------------------------------
+// A3 — the "This order" panel (pack CA3)
+// ---------------------------------------------------------------------------
+
+/**
+ * THE PANEL IS THE ONLY PLACE THE TWO SIDES MEET, so the pins are the ways it
+ * would flatter what the matcher actually knows:
+ *
+ *   1. EVERY PRODUCT ON EITHER SIDE IS LISTED. A panel that showed only the
+ *      products with a difference would read as "these are the order's lines".
+ *   2. A TOLERANCE THAT FIRED IS SHOWN, WITH ITS MASS. `substitution-equivalent`
+ *      is the matcher deciding a swap balanced; an admin cannot audit that from
+ *      the class name alone.
+ *   3. THE COUNTS THAT ARE NOT COMPARED ARE SAID: unmapped lines, bundle lines
+ *      that would not expand, products excluded from the mass balance. Each of
+ *      them is a piece of the order the class had NO opinion about.
+ *   4. NO NAME RIDES THE MATCHER (pack rule 5). The only string naming anything
+ *      inside this panel is `perProduct[].productName`.
+ */
+function makeMatch(over: Partial<OrderMatch> = {}): OrderMatch {
+  return {
+    class: "short",
+    flagged: true,
+    kinds: ["short"],
+    perProduct: [
+      {
+        productId: 3,
+        productName: "Widget",
+        ordered: 3,
+        deducted: 1,
+        corrected: 0,
+        delta: -2,
+        kind: "short",
+        units: 2,
+      },
+      {
+        productId: 4,
+        productName: "Gadget",
+        ordered: 0,
+        deducted: 1,
+        corrected: 0,
+        delta: 1,
+        kind: "extra",
+        units: 1,
+      },
+      {
+        productId: 5,
+        productName: "Doohickey",
+        ordered: 2,
+        deducted: 2,
+        corrected: 1,
+        delta: 0,
+        kind: null,
+        units: 0,
+      },
+    ],
+    unmappedLines: 0,
+    unmappedUnits: 0,
+    bundleLines: 0,
+    unresolvableBundleLines: 0,
+    deductedUnits: 4,
+    tolerance: null,
+    definitions: MATCH_DEFINITIONS,
+    ...over,
+  };
+}
+
+function renderPanel(detail: Partial<BatchDetail>, row: Partial<AttributionRow> = {}) {
+  setDetail(makeDetail(detail));
+  return render(
+    <AttributionDrilldown
+      row={makeRow(row)}
+      open
+      onOpenChange={jest.fn()}
+      onAttribute={jest.fn()}
+    />,
+  );
+}
+
+describe("the This order panel (pack CA3)", () => {
+  it("lists EVERY per-product row, both sides, the corrections and the kind", () => {
+    renderPanel({ orderMatch: makeMatch() });
+
+    const panel = screen.getByTestId("order-match-panel");
+    expect(panel).toHaveTextContent("Short");
+
+    const shortRow = screen.getByTestId("order-match-product-3");
+    expect(shortRow).toHaveTextContent("Widget");
+    expect(shortRow).toHaveTextContent("short by 2");
+
+    expect(screen.getByTestId("order-match-product-4")).toHaveTextContent("extra 1");
+    // The product with no difference is listed too — a panel that dropped it
+    // would read as an order with two lines.
+    expect(screen.getByTestId("order-match-product-5")).toHaveTextContent("Doohickey");
+  });
+
+  it("says an overrun in the words for it — corrections gave back more than ever left", () => {
+    renderPanel({
+      orderMatch: makeMatch({
+        class: "correction-overrun",
+        kinds: ["overrun"],
+        perProduct: [
+          {
+            productId: 3,
+            productName: "Widget",
+            ordered: 2,
+            deducted: -3,
+            corrected: 5,
+            delta: -5,
+            kind: "overrun",
+            units: 3,
+          },
+        ],
+      }),
+    });
+
+    expect(screen.getByTestId("order-match-product-3")).toHaveTextContent(
+      "corrections exceed outbound by 3",
+    );
+  });
+
+  it("shows a balanced swap with its mass, in the unit's own scale (1000 -> 10 mg)", () => {
+    renderPanel({
+      orderMatch: makeMatch({
+        class: "substitution-equivalent",
+        flagged: false,
+        kinds: [],
+        tolerance: {
+          equivalentGroups: [
+            {
+              familyKey: "vitamin c",
+              unit: "mg",
+              massHundredths: 1000,
+              shortfall: [{ productId: 3, units: 2, hundredths: 500 }],
+              extra: [{ productId: 4, units: 1, hundredths: 1000 }],
+            },
+          ],
+          declaredPairs: [],
+          excludedProducts: [],
+        },
+      }),
+    });
+
+    const tolerance = screen.getByTestId("order-match-tolerance");
+    expect(tolerance).toHaveTextContent("Swap within vitamin c (mg)");
+    expect(tolerance).toHaveTextContent("balanced at 10 mg");
+    expect(tolerance).toHaveTextContent("⇄");
+  });
+
+  it("names the products the mass balance could NOT compare, and why", () => {
+    renderPanel({
+      orderMatch: makeMatch({
+        tolerance: {
+          equivalentGroups: [],
+          declaredPairs: [],
+          excludedProducts: [
+            { productId: 3, reason: "undecomposable", unit: null },
+            { productId: 4, reason: "unit-refused", unit: "capsule" },
+          ],
+        },
+      }),
+    });
+
+    const excluded = screen.getByTestId("order-match-excluded");
+    expect(excluded).toHaveTextContent("Widget — not compared (cannot be decomposed)");
+    expect(excluded).toHaveTextContent("Gadget — not compared (unit not comparable)");
+  });
+
+  it("says how much of the order was never mapped, and links to where it is fixed", () => {
+    renderPanel({ orderMatch: makeMatch({ unmappedLines: 2, unmappedUnits: 5 }) });
+
+    const unmapped = screen.getByTestId("order-match-unmapped");
+    expect(unmapped).toHaveTextContent("2 unmapped line(s), 5 units");
+    expect(screen.getByTestId("order-match-unmapped-link")).toHaveAttribute(
+      "href",
+      "/admin/reconciliation?tab=unmapped",
+    );
+  });
+
+  it("says nothing about unmapped lines when there are none", () => {
+    renderPanel({ orderMatch: makeMatch() });
+
+    expect(screen.queryByTestId("order-match-unmapped")).toBeNull();
+    expect(screen.queryByTestId("order-match-unresolvable-bundles")).toBeNull();
+  });
+
+  it("says when a bundle line could not be expanded — the class had no opinion about it", () => {
+    renderPanel({ orderMatch: makeMatch({ unresolvableBundleLines: 1 }) });
+
+    expect(screen.getByTestId("order-match-unresolvable-bundles")).toHaveTextContent(
+      "1 bundle line(s) could not be expanded",
+    );
+  });
+
+  it("marks the components that came from a bundle with where they are deducted", () => {
+    renderPanel({ orderMatch: makeMatch({ bundleLines: 2 }) });
+
+    expect(screen.getByTestId("order-match-bundle-lines")).toHaveTextContent(
+      "from bundle — deduct via the adjust page's Order intent or fulfil",
+    );
+  });
+
+  it("offers the exceptions finder on a FLAGGED class only", () => {
+    const view = renderPanel({ orderMatch: makeMatch() });
+
+    expect(screen.getByTestId("order-match-exceptions-link")).toHaveAttribute(
+      "href",
+      "/admin/reconciliation?tab=exceptions",
+    );
+    expect(screen.getByTestId("order-match-exceptions-link")).toHaveTextContent(
+      "Find this order's exceptions",
+    );
+    view.unmount();
+
+    renderPanel({ orderMatch: makeMatch({ class: "exact", flagged: false, kinds: [] }) });
+    expect(screen.queryByTestId("order-match-exceptions-link")).toBeNull();
+  });
+
+  it("renders the reason there is no match, from the map, for every reason", () => {
+    for (const reason of MATCH_UNAVAILABLE_REASONS) {
+      const view = renderPanel({ orderMatch: null, orderMatchUnavailable: reason });
+
+      expect(screen.getByTestId("order-match-unavailable")).toHaveTextContent(
+        MATCH_UNAVAILABLE_COPY[reason],
+      );
+      expect(screen.queryByTestId("order-match-panel")).toBeNull();
+
+      view.unmount();
+    }
+  });
+
+  it("a class-less match renders its DEFINITION, not an unavailable reason (pack REV 4)", () => {
+    renderPanel({
+      orderMatch: makeMatch({ class: null, reason: "unmatchable", flagged: false, kinds: [] }),
+    });
+
+    const panel = screen.getByTestId("order-match-panel");
+    expect(panel).toHaveTextContent("not comparable");
+    expect(panel).toHaveTextContent(MATCH_DEFINITIONS.unmatchable);
+    expect(screen.queryByTestId("order-match-unavailable")).toBeNull();
+  });
+
+  // Pack rule 5: `perProduct[].productName` is the only string inside the match
+  // that names anything. The row beside it carries an actor and an order number;
+  // neither belongs in this panel.
+  it("prints no name inside the panel other than the products' own", () => {
+    renderPanel(
+      { orderMatch: makeMatch() },
+      {
+        actor: { id: 7, username: "kris" },
+        order: {
+          id: "ord-1",
+          orderNumber: "9911",
+          internalStatus: "PROCESSING",
+          platform: "woocommerce",
+          externalCreatedAt: "2026-08-19T09:00:00.000Z",
+        },
+      },
+    );
+
+    const panel = screen.getByTestId("order-match-panel");
+    expect(panel).toHaveTextContent("Widget");
+    expect(panel.textContent).not.toContain("kris");
+    expect(panel.textContent).not.toContain("9911");
+    expect(panel.textContent).not.toContain("ord-1");
+  });
+
+  it("stacks the per-product table as cards on mobile (the md: breakpoint pair)", () => {
+    renderPanel({ orderMatch: makeMatch() });
+
+    const cards = screen.getByTestId("order-match-product-cards");
+    expect(cards.className).toContain("md:hidden");
+    expect(screen.getByTestId("order-match-products").className).toContain("hidden md:block");
+    expect(screen.getByTestId("order-match-product-card-3").className).toContain("bg-surface");
+  });
 });

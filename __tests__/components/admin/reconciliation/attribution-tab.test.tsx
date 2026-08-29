@@ -28,7 +28,16 @@ import * as React from "react";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ATTRIBUTION_CLASS_KEYS } from "@/lib/reconciliation/attribution";
-import { MATCH_CLASS_KEYS, type MatchClassKey } from "@/lib/reconciliation/match-keys";
+import {
+  FLAGGED_MATCH_CLASSES,
+  MATCH_CLASS_KEYS,
+  MATCH_CLASS_LABELS,
+  MATCH_DEFINITIONS,
+  MATCH_UNAVAILABLE_COPY,
+  MATCH_UNAVAILABLE_REASONS,
+  type MatchClassKey,
+} from "@/lib/reconciliation/match-keys";
+import type { OrderMatch } from "@/lib/reconciliation/match";
 import type {
   AttributionClassKey,
   AttributionReport,
@@ -64,6 +73,35 @@ function zeroMatchByClass(): Record<MatchClassKey, number> {
     MatchClassKey,
     number
   >;
+}
+
+/** One order's match, as the producer ships it (pack CA1.2 / CA3). */
+function makeMatch(over: Partial<OrderMatch> = {}): OrderMatch {
+  return {
+    class: "short",
+    flagged: true,
+    kinds: ["short"],
+    perProduct: [
+      {
+        productId: 3,
+        productName: "Widget",
+        ordered: 3,
+        deducted: 1,
+        corrected: 0,
+        delta: -2,
+        kind: "short",
+        units: 2,
+      },
+    ],
+    unmappedLines: 0,
+    unmappedUnits: 0,
+    bundleLines: 0,
+    unresolvableBundleLines: 0,
+    deductedUnits: 1,
+    tolerance: null,
+    definitions: MATCH_DEFINITIONS,
+    ...over,
+  };
 }
 
 function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
@@ -484,5 +522,225 @@ describe("the error card (QA-5)", () => {
     expect(screen.getByTestId("reconciliation-error").textContent).not.toContain(
       "Failed to fetch",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A3 — the Matches chip row and the Match cell (pack CA3)
+// ---------------------------------------------------------------------------
+
+/**
+ * THE MATCH CHIPS ARE THE ENVELOPE'S COUNTS, and the pins say so from both
+ * sides:
+ *
+ *   1. THE NUMBERS ARE `matches.byClass` / `Σ matches.unavailable`. A chip that
+ *      counted the rows it can see would report BATCHES where the producer
+ *      counted ORDERS (two batches stamped with one order are one order), and
+ *      would silently disagree with the coverage block beside it.
+ *   2. THE CHIP IS A CLIENT-SIDE VIEW OF THE PAGE, not a query. Nothing new is
+ *      asked of the server, so the page's own counts stay true while it is on —
+ *      which is exactly why the window bound says "(unfiltered)" beside it.
+ *   3. THE SELECTION DOES NOT SURVIVE A NEW REPORT. Page 2's rows are not
+ *      page 1's, so a chip left pressed across a cursor step would filter the
+ *      new page by a selection made about the old one.
+ *   4. `matches.orders === 0` IS SAID OUT LOUD. The absence is information.
+ */
+function matchesOf(
+  over: Partial<AttributionReport["matches"]> = {},
+): AttributionReport["matches"] {
+  return {
+    scope: "this page",
+    orders: 8,
+    byClass: { ...zeroMatchByClass(), exact: 5, short: 2 },
+    unavailable: { unstamped: 1, "mixed-stamps": 2, "order-missing": 0, "order-redacted": 0 },
+    ...over,
+  };
+}
+
+/** One row per bucket the chips can select: a class, another class, a reason. */
+function matchedRows(): AttributionRow[] {
+  return [
+    makeRow({ batchId: "batch-1", match: makeMatch({ class: "exact", flagged: false, kinds: [] }) }),
+    makeRow({ batchId: "batch-2", match: makeMatch() }),
+    makeRow({ batchId: "batch-3", match: null, matchUnavailable: "unstamped" }),
+  ];
+}
+
+describe("the Matches chips (pack CA3)", () => {
+  it("each chip's number IS matches.byClass / Σ unavailable — never a recount of the rows", () => {
+    // Three rows on the page, eight orders behind them: the chips report the
+    // producer's counts, not the three rows they can see.
+    setReport(makeReport({ rows: matchedRows(), matches: matchesOf() }));
+    render(<AttributionTab />);
+
+    expect(screen.getByTestId("match-chip-exact").textContent).toBe("Exact (5)");
+    expect(screen.getByTestId("match-chip-short").textContent).toBe("Short (2)");
+    expect(screen.getByTestId("match-chip-unavailable").textContent).toBe("Unavailable (3)");
+    // A class no order on this page landed in is not a chip.
+    expect(screen.queryByTestId("match-chip-mixed")).toBeNull();
+  });
+
+  it("is labelled 'Matches (this page)', and the label is the row's FIRST element", () => {
+    setReport(makeReport({ rows: matchedRows(), matches: matchesOf() }));
+    render(<AttributionTab />);
+
+    const chips = screen.getByTestId("match-chips");
+    expect(chips.firstElementChild?.textContent).toBe("Matches (this page)");
+  });
+
+  it("tapping a chip filters the RENDERED rows and never re-issues the report query", async () => {
+    const user = userEvent.setup();
+    setReport(makeReport({ rows: matchedRows(), matches: matchesOf() }));
+    render(<AttributionTab />);
+    const before = lastInput();
+
+    await user.click(screen.getByTestId("match-chip-exact"));
+
+    expect(screen.getByTestId("row-batch-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("row-batch-2")).toBeNull();
+    expect(screen.queryByTestId("row-batch-3")).toBeNull();
+    expect(screen.getByTestId("match-chip-exact")).toHaveAttribute("aria-pressed", "true");
+    // The server was never asked a new question.
+    expect(lastInput()).toEqual(before);
+    expect(Object.keys(lastInput()).some((k) => k.toLowerCase().includes("match"))).toBe(false);
+  });
+
+  it("a second tap clears the filter", async () => {
+    const user = userEvent.setup();
+    setReport(makeReport({ rows: matchedRows(), matches: matchesOf() }));
+    render(<AttributionTab />);
+
+    await user.click(screen.getByTestId("match-chip-exact"));
+    expect(screen.queryByTestId("row-batch-2")).toBeNull();
+
+    await user.click(screen.getByTestId("match-chip-exact"));
+    expect(screen.getByTestId("row-batch-2")).toBeInTheDocument();
+    expect(screen.getByTestId("match-chip-exact")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("the Unavailable chip selects the rows that carry a REASON, not a class", async () => {
+    const user = userEvent.setup();
+    setReport(makeReport({ rows: matchedRows(), matches: matchesOf() }));
+    render(<AttributionTab />);
+
+    await user.click(screen.getByTestId("match-chip-unavailable"));
+
+    expect(screen.getByTestId("row-batch-3")).toBeInTheDocument();
+    expect(screen.queryByTestId("row-batch-1")).toBeNull();
+    expect(screen.queryByTestId("row-batch-2")).toBeNull();
+  });
+
+  it("the active chip is CLEARED when the report identity changes (a cursor step)", async () => {
+    const user = userEvent.setup();
+    setReport(makeReport({ rows: matchedRows(), matches: matchesOf() }));
+    const { rerender } = render(<AttributionTab />);
+
+    await user.click(screen.getByTestId("match-chip-exact"));
+    expect(screen.queryByTestId("row-batch-2")).toBeNull();
+
+    // The next page: a NEW report object for the same component.
+    setReport(makeReport({ rows: matchedRows(), matches: matchesOf() }));
+    rerender(<AttributionTab />);
+
+    expect(screen.getByTestId("match-chip-exact")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("row-batch-2")).toBeInTheDocument();
+  });
+
+  it("says the window bound is UNFILTERED while a match chip is active", async () => {
+    const user = userEvent.setup();
+    setReport(makeReport({ rows: matchedRows(), matches: matchesOf(), moreCount: 3 }));
+    render(<AttributionTab />);
+
+    expect(screen.getByTestId("more-count")).toHaveTextContent("3 more in this window.");
+    expect(screen.getByTestId("more-count").textContent).not.toContain("(unfiltered)");
+
+    await user.click(screen.getByTestId("match-chip-exact"));
+
+    expect(screen.getByTestId("more-count")).toHaveTextContent(
+      "3 more in this window (unfiltered).",
+    );
+  });
+
+  it("a page with no matched order says so rather than hiding the row", () => {
+    setReport(makeReport()); // matches.orders === 0
+    render(<AttributionTab />);
+
+    expect(screen.getByTestId("match-chips-none")).toHaveTextContent(
+      "Matches: none on this page",
+    );
+    expect(screen.queryByTestId("match-chip-exact")).toBeNull();
+    expect(screen.queryByTestId("match-chip-unavailable")).toBeNull();
+  });
+});
+
+/**
+ * THE MATCH CELL — one row's answer to "did this order's movement match what it
+ * asked for". Three shapes, and the third is the one a plausible implementation
+ * gets wrong: a match whose CLASS is null is still a match (pack REV 4), and
+ * rendering it from the unavailable copy would tell the admin the row could not
+ * be read when in fact it was read and had nothing to compare.
+ */
+describe("the Match cell (pack CA3)", () => {
+  it("names the class in the vocabulary's words, flags exactly the flagged ones, and carries its definition", () => {
+    for (const key of MATCH_CLASS_KEYS) {
+      setReport(
+        makeReport({
+          rows: [makeRow({ match: makeMatch({ class: key, flagged: FLAGGED_MATCH_CLASSES.has(key) }) })],
+        }),
+      );
+      const view = render(<AttributionTab />);
+
+      const cell = screen.getByTestId("match-batch-1");
+      expect(cell.textContent).toBe(MATCH_CLASS_LABELS[key]);
+      expect(cell).toHaveAttribute("title", MATCH_DEFINITIONS[key]);
+      if (FLAGGED_MATCH_CLASSES.has(key)) {
+        expect(cell.className).toContain("text-warning");
+        expect(cell.className).toContain("font-medium");
+      } else {
+        expect(cell.className).toContain("text-muted-foreground");
+        expect(cell.className).not.toContain("text-warning");
+      }
+
+      view.unmount();
+    }
+  });
+
+  it("renders each unavailable reason's copy FROM THE MAP, never a blank cell", () => {
+    for (const reason of MATCH_UNAVAILABLE_REASONS) {
+      setReport(makeReport({ rows: [makeRow({ match: null, matchUnavailable: reason })] }));
+      const view = render(<AttributionTab />);
+
+      expect(screen.getByTestId("match-batch-1").textContent).toBe(
+        MATCH_UNAVAILABLE_COPY[reason],
+      );
+
+      view.unmount();
+    }
+  });
+
+  it("a class-less match is a MATCH, not an unavailable row (pack REV 4)", () => {
+    setReport(
+      makeReport({
+        rows: [
+          makeRow({
+            match: makeMatch({ class: null, reason: "unmatchable", flagged: false, kinds: [] }),
+          }),
+        ],
+      }),
+    );
+    render(<AttributionTab />);
+
+    const cell = screen.getByTestId("match-batch-1");
+    expect(cell.textContent).toBe("not comparable");
+    expect(cell).toHaveAttribute("title", MATCH_DEFINITIONS.unmatchable);
+    expect(Object.values(MATCH_UNAVAILABLE_COPY)).not.toContain(cell.textContent);
+  });
+
+  it("the mobile card carries the same cell (the md: breakpoint pair)", () => {
+    setReport(makeReport({ rows: [makeRow({ match: makeMatch() })] }));
+    render(<AttributionTab />);
+
+    const cards = screen.getByTestId("attribution-cards");
+    expect(within(cards).getByTestId("match-card-batch-1").textContent).toBe("Short");
   });
 });
