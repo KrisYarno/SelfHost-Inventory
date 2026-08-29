@@ -37,6 +37,15 @@ import {
 } from '@/lib/reconciliation/match-producer';
 import type { ReconciliationItemRow } from '@/lib/reconciliation/items';
 import type { OrderMatch } from '@/lib/reconciliation/match';
+import { matchOrder } from '@/lib/reconciliation/match';
+
+// FD-2: the propagation pin needs ONE throw that is not a refusal. The module's
+// exports are non-configurable under ts-jest, so `spyOn` cannot hook them; the
+// matcher is wrapped in a jest.fn that calls the real one everywhere else.
+jest.mock('@/lib/reconciliation/match', () => {
+  const actual = jest.requireActual('@/lib/reconciliation/match');
+  return { ...actual, matchOrder: jest.fn(actual.matchOrder) };
+});
 import type { DeductedSideSqlRow } from '@/lib/reconciliation/population';
 
 const db = mockDeep<PrismaClient>();
@@ -400,8 +409,28 @@ describe('getOrderMatches — the facts it does not invent', () => {
       expect(message).toBe('[match-producer] matcher refused order');
       expect(context.orderId).toBe('ord-bad');
       expect(typeof context.message).toBe('string');
-      // The line data itself never reaches the log.
+      // The log carries the order id plus the guard's own sentence (a product id
+      // and the offending integer) — never the row objects (FD-4).
       expect(Object.keys(context).sort()).toEqual(['message', 'orderId']);
+      expect(context.message).toMatch(/^matchOrder: /);
+      expect(context.message).not.toMatch(/itemId|fulfilledQty|[{[]/);
+    });
+
+    it('catches ONLY a refusal — any other throw from the matcher propagates (FD-2)', async () => {
+      const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const mocked = matchOrder as jest.MockedFunction<typeof matchOrder>;
+      mocked.mockImplementationOnce(() => {
+        throw new TypeError('boom');
+      });
+      try {
+        db.externalOrderItem.findMany.mockResolvedValue([] as never);
+        db.$queryRaw.mockResolvedValue([] as never);
+        db.product.findMany.mockResolvedValue([] as never);
+        await expect(getOrderMatches(db, ['ord-1'])).rejects.toThrow(TypeError);
+        expect(errorSpy).not.toHaveBeenCalled();
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
   });
 

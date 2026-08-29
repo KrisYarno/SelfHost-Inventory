@@ -2996,7 +2996,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           // G2-2: the same rule now covers the whole ORDER-MATCH vocabulary. The
           // report's envelope merges MATCH_DEFINITIONS, but `toolRow` strips
           // `match`, and the `class` these rows DO carry is the attribution
-          // vocabulary — a different closed set. Relaying seventeen sentences
+          // vocabulary — a different closed set. Relaying eighteen sentences
           // about classes nothing in this payload can be is how a model comes to
           // report an order as "short". They return when C4 puts the match on
           // the rows.

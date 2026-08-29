@@ -161,4 +161,30 @@ describe("AdminSubNav", () => {
     const hrefs = screen.getAllByRole("link").map((a) => a.getAttribute("href"));
     expect(hrefs.indexOf("/admin/reconciliation")).toBe(hrefs.indexOf("/admin/reports") + 1);
   });
+  // FD-3: our OWN replace landing must not undo a click made while it was in
+  // flight. Start on unmapped; click Attribution (replace issued); click Unmapped
+  // before it lands; then the first replace lands (the URL now says
+  // attribution) — the tab must STAY on unmapped and be written back.
+  it("a click made while our own replace is in flight is not reverted when it lands", async () => {
+    const user = userEvent.setup();
+    searchParams = new URLSearchParams("tab=unmapped");
+    const view = render(<ReconciliationPageShell />);
+
+    await user.click(screen.getByRole("tab", { name: /attribution/i }));
+    await waitFor(() =>
+      expect(replace).toHaveBeenCalledWith("/admin/reconciliation?tab=attribution"),
+    );
+    await user.click(screen.getByRole("tab", { name: /unmapped/i }));
+    expect(screen.getByTestId("unmapped-tab-mount")).toBeInTheDocument();
+
+    // The in-flight replace lands: the URL now names attribution.
+    searchParams = new URLSearchParams("tab=attribution");
+    view.rerender(<ReconciliationPageShell />);
+
+    expect(screen.getByTestId("unmapped-tab-mount")).toBeInTheDocument();
+    expect(screen.queryByTestId("attribution-tab-mount")).toBeNull();
+    await waitFor(() =>
+      expect(replace).toHaveBeenLastCalledWith("/admin/reconciliation?tab=unmapped"),
+    );
+  });
 });

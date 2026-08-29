@@ -30,6 +30,7 @@ import type { Prisma } from '@prisma/client';
 
 import { readOrderItems } from './items';
 import {
+  MatcherRefusal,
   matchOrder,
   type DeductedProduct,
   type OrderItems,
@@ -237,9 +238,13 @@ export async function getOrderMatches(
         }),
       );
     } catch (err) {
+      // ONLY a refusal is caught (FD-2): any other throw is a defect, and a
+      // defect laundered into "bad line data" on an admin's screen is the
+      // inverse of the truthful-data rule this catch exists to serve.
+      if (!(err instanceof MatcherRefusal)) throw err;
       console.error('[match-producer] matcher refused order', {
         orderId: id,
-        message: (err as Error).message,
+        message: err.message,
       });
     }
   }

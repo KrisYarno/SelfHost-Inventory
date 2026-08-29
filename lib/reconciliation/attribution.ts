@@ -386,7 +386,7 @@ const DEFINITIONS: Readonly<Record<string, string>> = Object.freeze({
   // The two match TOTALS are coverage figures, so their sentences live here
   // rather than in MATCH_DEFINITIONS, which defines classes and reasons (G2-2).
   matchedOrders:
-    'orders on this page whose stamp could be compared — including orders the matcher found unmatchable — counted once per order',
+    'orders on this page the matcher answered for — including orders it found unmatchable — counted once per order; an order the matcher REFUSED (match-error) is not among them',
   matchUnavailableRows:
     'rows on this page with no match and a named reason (unstamped, mixed stamps, order missing, order redacted, match error)',
 });
@@ -1255,6 +1255,10 @@ export async function getAttributionReport(
     getOrderMatches(prisma, stamps),
   ]);
 
+  // FD-1: a stamp the matcher REFUSED is not an order it compared — counting it
+  // here would put the same order on both sides of the coverage pair.
+  const comparedOrders = stamps.filter((stamp) => matches.has(stamp)).length;
+
   const rows = page.map((batch) => buildRow(batch, orders, actors, matches, viewer));
 
   // ORDERS, not rows: `byClass` counts each stamped order once, so a page
@@ -1306,7 +1310,7 @@ export async function getAttributionReport(
       // Said on the wire, because every other total here is the WINDOW's: the
       // match describes the rows that came back, and nothing more.
       scope: 'this page',
-      orders: stamps.length,
+      orders: comparedOrders,
       byClass: matchByClass,
       unavailable: matchUnavailable,
     },
@@ -1321,7 +1325,7 @@ export async function getAttributionReport(
       needsALook: { stampDisagreesWithLatestAttempt: stampDisagrees, mixedStamps },
       recordingSince: iso(recordingSince),
       orderFilterScope: viewer.kind === 'admin' ? 'all orders' : 'your companies only',
-      matchedOrders: stamps.length,
+      matchedOrders: comparedOrders,
       matchUnavailableRows,
       notes,
     },

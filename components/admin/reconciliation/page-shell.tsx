@@ -51,10 +51,18 @@ export function ReconciliationPageShell() {
   // Adjusted DURING render, so no effect can race the replace below: when the
   // URL's tab CHANGES (a finder link), it wins; when the admin clicks a
   // trigger, the URL has not changed and the click stands.
+  // FD-3: the URL changing to the tab WE last wrote is our own replace landing,
+  // not a navigation — a second click made before it landed must stand. The
+  // ref is consumed once, so a later genuine link to that same tab still wins.
+  const lastWrittenRef = React.useRef<TabKey | null>(null);
   const [urlTabSeen, setUrlTabSeen] = React.useState<TabKey | null>(urlTab);
   if (urlTabSeen !== urlTab) {
     setUrlTabSeen(urlTab);
-    if (urlTab !== null && urlTab !== tab) setTab(urlTab);
+    if (urlTab !== null && urlTab === lastWrittenRef.current) {
+      lastWrittenRef.current = null;
+    } else if (urlTab !== null && urlTab !== tab) {
+      setTab(urlTab);
+    }
   }
 
   React.useEffect(() => {
@@ -62,6 +70,7 @@ export function ReconciliationPageShell() {
     if (urlTab === tab) return;
     const next = new URLSearchParams(searchParams?.toString() ?? "");
     next.set("tab", tab);
+    lastWrittenRef.current = tab;
     router.replace(`/admin/reconciliation?${next.toString()}`);
   }, [tab, urlTab, searchParams, router]);
 

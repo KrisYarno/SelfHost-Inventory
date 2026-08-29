@@ -141,9 +141,21 @@ const SHORTFALL_KINDS: ReadonlySet<MatchKind> = new Set<MatchKind>(['missing', '
  * means a caller handed the matcher something that is not a unit count — and
  * silently rounding it would put a made-up number on an admin's screen.
  */
+/**
+ * THE ONE error the matcher throws on purpose (FD-2): its guards refusing
+ * data that is not a unit count. The producer catches EXACTLY this class per
+ * order and lets every other throw — a defect, not a refusal — propagate.
+ */
+export class MatcherRefusal extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MatcherRefusal';
+  }
+}
+
 function assertUnits(value: number, what: string): void {
   if (!Number.isInteger(value) || value < 0) {
-    throw new Error(`matchOrder: ${what} must be a non-negative integer, got ${value}`);
+    throw new MatcherRefusal(`matchOrder: ${what} must be a non-negative integer, got ${value}`);
   }
 }
 
@@ -219,7 +231,7 @@ export function matchOrder(input: {
   const factsById = new Map<number, ProductFacts>();
   for (const p of products) {
     if (p.hundredths !== null && !Number.isInteger(p.hundredths)) {
-      throw new Error(
+      throw new MatcherRefusal(
         `matchOrder: hundredths for product ${p.productId} must be an integer, got ${p.hundredths}`,
       );
     }

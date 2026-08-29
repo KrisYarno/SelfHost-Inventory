@@ -699,7 +699,7 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
   });
 
   // G2-2: the tool's rows carry the ATTRIBUTION class vocabulary and `toolRow`
-  // strips `match` entirely, so relaying the 17 MATCH_DEFINITIONS sentences
+  // strips `match` entirely, so relaying the 18 MATCH_DEFINITIONS sentences
   // defined a vocabulary nothing in the payload speaks — an invitation to invent
   // a `class: 'short'` that no row could ever carry. They come back when C4 puts
   // the match ON the rows, and not before.
