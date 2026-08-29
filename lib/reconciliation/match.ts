@@ -157,9 +157,25 @@ export class MatcherRefusal extends Error {
  * catches `MatcherRefusal` per order; nothing else this module throws is caught.
  */
 function assertUnits(value: number, what: string): void {
-  if (!Number.isInteger(value) || value < 0) {
-    throw new MatcherRefusal(`matchOrder: ${what} must be a non-negative integer, got ${value}`);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new MatcherRefusal(`matchOrder: ${what} must be a non-negative safe integer, got ${value}`);
   }
+}
+
+/**
+ * Checked integer arithmetic (CXa-1): a sum or product that leaves the safe
+ * range would round, and a rounded mass can erase a one-hundredth residual
+ * and call a real difference a balanced swap. It refuses instead.
+ */
+function safeSum(a: number, b: number, what: string): number {
+  const r = a + b;
+  if (!Number.isSafeInteger(r)) throw new MatcherRefusal(`matchOrder: ${what} exceeds the safe integer range`);
+  return r;
+}
+function safeProduct(a: number, b: number, what: string): number {
+  const r = a * b;
+  if (!Number.isSafeInteger(r)) throw new MatcherRefusal(`matchOrder: ${what} exceeds the safe integer range`);
+  return r;
 }
 
 /** The working row: the per-product facts plus the kind, which tolerances mutate. */
@@ -233,7 +249,7 @@ export function matchOrder(input: {
 
   const factsById = new Map<number, ProductFacts>();
   for (const p of products) {
-    if (p.hundredths !== null && !Number.isInteger(p.hundredths)) {
+    if (p.hundredths !== null && !Number.isSafeInteger(p.hundredths)) {
       throw new MatcherRefusal(
         `matchOrder: hundredths for product ${p.productId} must be an integer, got ${p.hundredths}`,
       );
@@ -244,16 +260,22 @@ export function matchOrder(input: {
   const orderedById = new Map<number, number>();
   const bundleIds = new Set<number>();
   for (const l of items.lines) {
-    orderedById.set(l.productId, (orderedById.get(l.productId) ?? 0) + l.quantity);
+    orderedById.set(
+      l.productId,
+      safeSum(orderedById.get(l.productId) ?? 0, l.quantity, `ordered units for product ${l.productId}`),
+    );
     if (l.fromBundle) bundleIds.add(l.productId);
   }
   const outById = new Map<number, number>();
   const correctedById = new Map<number, number>();
   let deductedUnits = 0;
   for (const d of deductedRows) {
-    outById.set(d.productId, (outById.get(d.productId) ?? 0) + d.out);
-    correctedById.set(d.productId, (correctedById.get(d.productId) ?? 0) + d.corrected);
-    deductedUnits += d.out;
+    outById.set(d.productId, safeSum(outById.get(d.productId) ?? 0, d.out, `outbound units for product ${d.productId}`));
+    correctedById.set(
+      d.productId,
+      safeSum(correctedById.get(d.productId) ?? 0, d.corrected, `corrected units for product ${d.productId}`),
+    );
+    deductedUnits = safeSum(deductedUnits, d.out, 'deducted units');
   }
 
   const counts = {
@@ -385,9 +407,9 @@ export function matchOrder(input: {
     let shortfallMass = 0;
     let extraMass = 0;
     for (const m of group.members) {
-      const mass = m.row.units * m.hundredths;
-      if (m.row.kind !== null && SHORTFALL_KINDS.has(m.row.kind)) shortfallMass += mass;
-      else extraMass += mass;
+      const mass = safeProduct(m.row.units, m.hundredths, `mass for product ${m.row.productId}`);
+      if (m.row.kind !== null && SHORTFALL_KINDS.has(m.row.kind)) shortfallMass = safeSum(shortfallMass, mass, 'shortfall mass');
+      else extraMass = safeSum(extraMass, mass, 'extra mass');
     }
     if (shortfallMass === 0 || shortfallMass !== extraMass) continue;
 

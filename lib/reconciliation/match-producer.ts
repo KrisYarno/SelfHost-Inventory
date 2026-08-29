@@ -91,6 +91,11 @@ function toUnits(value: unknown): number {
   if (!Number.isFinite(asNumber)) {
     throw new Error('match-producer: non-numeric SUM from the deducted-side aggregate');
   }
+  // CXa-1: a SUM past the safe range has already lost precision in the driver's
+  // number — a rounded unit count is a wrong unit count, never a unit count.
+  if (!Number.isSafeInteger(asNumber)) {
+    throw new Error('match-producer: the deducted-side SUM exceeds the safe integer range');
+  }
   return asNumber;
 }
 

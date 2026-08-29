@@ -1036,7 +1036,9 @@ function buildRow(
   // asked about and got no answer. It is `match-error`, not a blank — a blank
   // here reads as "nothing wrong with this order".
   const reason = matchUnavailableFor(batch, orders, viewer);
-  const matched = reason === null ? (matches.get(batch.theStamp as string) ?? null) : null;
+  // The map is keyed by the hydrated order id (CXa-2), which `reason === null` guarantees exists.
+  const canonicalId = reason === null ? orders.get(batch.theStamp as string)?.id ?? null : null;
+  const matched = canonicalId === null ? null : (matches.get(canonicalId) ?? null);
   const matchUnavailable: MatchUnavailableReason | null =
     reason === null && matched === null ? 'match-error' : reason;
   // The definitions ride ONCE, on the envelope (OCa-10). Destructured, never
@@ -1233,11 +1235,15 @@ export async function getAttributionReport(
   // single stamp, or one naming an order this viewer cannot see, is not an
   // order the producer may be asked about — and the deduped list is what keeps
   // two batches of one order to a single order's worth of reading.
+  // CXa-2: keyed by the HYDRATED order id, not the stamp's spelling — two
+  // batches stamped `ord-1` and `ORD-1` name one MySQL order (loadOrders resolved
+  // both), and the chips promise "by order". `matchUnavailableFor === null`
+  // guarantees `orders.has(theStamp)`.
   const stamps = Array.from(
     new Set(
       page
         .filter((batch) => matchUnavailableFor(batch, orders, viewer) === null)
-        .map((batch) => batch.theStamp as string)
+        .map((batch) => (orders.get(batch.theStamp as string) as OrderProjection).id)
     )
   );
 
@@ -1649,7 +1655,9 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
   // UNAVAILABLE row asks about no order at all, and the empty list costs zero
   // statements rather than three whose answer nobody could use.
   const stamps =
-    matchUnavailableFor(batch, orders, viewer) === null ? [batch.theStamp as string] : [];
+    matchUnavailableFor(batch, orders, viewer) === null
+      ? [(orders.get(batch.theStamp as string) as OrderProjection).id]
+      : [];
   const [actors, matches] = await Promise.all([
     // The actors of the rows this response actually CARRIES (CR-4) — resolving
     // identities for a history nobody receives is what made this lookup grow

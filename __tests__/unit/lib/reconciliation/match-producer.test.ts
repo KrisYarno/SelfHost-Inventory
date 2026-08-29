@@ -452,6 +452,16 @@ describe('getOrderMatches — the facts it does not invent', () => {
     );
   });
 
+  it('THROWS on a SUM past the safe integer range rather than rounding it (CXa-1)', async () => {
+    db.$queryRaw.mockResolvedValue([
+      { orderRecordId: 'ord-1', productId: 9, outUnits: BigInt('1152921504606846976'), correctedUnits: 0 },
+    ] as never);
+
+    await expect(getOrderMatches(client, ['ord-1'])).rejects.toThrow(
+      'match-producer: the deducted-side SUM exceeds the safe integer range',
+    );
+  });
+
   it('every result carries MATCH_DEFINITIONS by identity', async () => {
     const matches = await getOrderMatches(client, ['ord-1', 'ord-2']);
 

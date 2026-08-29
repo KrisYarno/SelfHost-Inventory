@@ -36,6 +36,7 @@ import {
   type OrderItems,
   type OrderedLine,
   type ProductFacts,
+  MatcherRefusal,
 } from '@/lib/reconciliation/match';
 
 // --------------------------------------------------------------------------
@@ -742,5 +743,37 @@ describe('perProduct.fromBundle (seam-check fix, pack REV-6)', () => {
   it('is false on every row of the unmatchable result (no ordered lines exist)', () => {
     const m = matchOrder({ items: items([]), deducted: [{ productId: 7, out: 1, corrected: 0 }], products: [] });
     expect(m.perProduct.map((p) => p.fromBundle)).toEqual([false]);
+  });
+});
+
+describe('checked integer arithmetic (CXa-1)', () => {
+  const BIG = 9_999_999_999; // Decimal(10,2) max, in hundredths
+
+  it('refuses a mass that would round in a double rather than balancing it', () => {
+    // 900720 x 9,999,999,999 sits past 2^53: one hundredth of residual would be
+    // erased and a real difference called a balanced swap.
+    expect(() =>
+      matchOrder({
+        items: items([line(1, 900_720)]),
+        deducted: [{ productId: 2, out: 900_720, corrected: 0 }],
+        products: [
+          facts(1, 'Thing A', 'Thing', 'mg', BIG),
+          facts(2, 'Thing B', 'Thing', 'mg', BIG),
+        ],
+      }),
+    ).toThrow(MatcherRefusal);
+  });
+
+  it('refuses an unsafe unit count on either side', () => {
+    expect(() =>
+      matchOrder({ items: items([line(1, Number.MAX_SAFE_INTEGER + 2)]), deducted: [], products: [] }),
+    ).toThrow(MatcherRefusal);
+    expect(() =>
+      matchOrder({
+        items: items([line(1, 1)]),
+        deducted: [{ productId: 1, out: Number.MAX_SAFE_INTEGER, corrected: 0 }, { productId: 1, out: 2, corrected: 0 }],
+        products: [],
+      }),
+    ).toThrow(MatcherRefusal);
   });
 });

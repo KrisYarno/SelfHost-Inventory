@@ -947,6 +947,67 @@ describe('the order match', () => {
     });
   });
 
+  // CXa-2: two batches stamped `ord-1` and `ORD-1` name ONE MySQL order
+  // (utf8mb4_unicode_ci; loadOrders resolves both) — the chips promise "by
+  // order", so the producer is asked ONCE by the hydrated id and the order is
+  // counted once.
+  it('case-variant stamps of one order are ONE order: asked once, counted once', async () => {
+    wireMatch([selectedRow(), selectedRow({ batchId: 'batch-2', firstStamp: 'ORD-1', lastStamp: 'ORD-1', attemptOrderRecordId: 'ORD-1' })]);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+
+    expect(report.rows).toHaveLength(2);
+    expect(report.rows.every((row) => row.match !== null)).toBe(true);
+    expect(report.matches.orders).toBe(1);
+    expect(report.coverage.matchedOrders).toBe(1);
+    expect(report.matches.byClass.exact).toBe(1);
+    const askedIds = (db.externalOrderItem.findMany.mock.calls[0][0] as { where: { orderId: { in: string[] } } }).where.orderId.in;
+    expect(askedIds).toEqual(['ord-1']);
+  });
+
+  // CXa-3: cross-wave rule 5 as a MECHANICAL check on the wire — every string
+  // leaf inside a row's match sits on an allowlisted path. A future field that
+  // carries a name would land here before it landed on a screen.
+  it('every string inside a wire match sits on an allowlisted path (rule 5)', async () => {
+    wireMatch([selectedRow()]);
+
+    const report = await getAttributionReport(INPUT, ADMIN);
+    const match = report.rows[0].match;
+    expect(match).not.toBeNull();
+
+    const ALLOWED = new Set([
+      'class',
+      'reason',
+      'kinds[]',
+      'perProduct[].productName',
+      'perProduct[].kind',
+      'tolerance.equivalentGroups[].familyKey',
+      'tolerance.equivalentGroups[].unit',
+      'tolerance.excludedProducts[].reason',
+      'tolerance.excludedProducts[].unit',
+    ]);
+    const paths: string[] = [];
+    const walk = (value: unknown, path: string): void => {
+      if (typeof value === 'string') {
+        paths.push(path);
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach((v) => walk(v, `${path}[]`));
+        return;
+      }
+      if (value !== null && typeof value === 'object') {
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+          walk(v, path === '' ? k : `${path}.${k}`);
+        }
+      }
+    };
+    walk(match, '');
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths.filter((p) => !ALLOWED.has(p))).toEqual([]);
+    expect(Object.keys(match as object)).not.toContain('definitions');
+  });
+
   // The FIVE reasons, through the PRODUCER — one owner (S-A10), so the row's
   // pair and the stamp set the producer is asked about can never disagree. The
   // fifth (`match-error`, pack REV-7) is pinned below with the refusal.
