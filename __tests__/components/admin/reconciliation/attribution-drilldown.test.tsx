@@ -314,6 +314,7 @@ function makeMatch(over: Partial<OrderMatch> = {}): OrderMatch {
       {
         productId: 3,
         productName: "Widget",
+        fromBundle: false,
         ordered: 3,
         deducted: 1,
         corrected: 0,
@@ -324,6 +325,7 @@ function makeMatch(over: Partial<OrderMatch> = {}): OrderMatch {
       {
         productId: 4,
         productName: "Gadget",
+        fromBundle: false,
         ordered: 0,
         deducted: 1,
         corrected: 0,
@@ -334,6 +336,7 @@ function makeMatch(over: Partial<OrderMatch> = {}): OrderMatch {
       {
         productId: 5,
         productName: "Doohickey",
+        fromBundle: false,
         ordered: 2,
         deducted: 2,
         corrected: 1,
@@ -391,6 +394,7 @@ describe("the This order panel (pack CA3)", () => {
           {
             productId: 3,
             productName: "Widget",
+            fromBundle: false,
             ordered: 2,
             deducted: -3,
             corrected: 5,
@@ -486,6 +490,24 @@ describe("the This order panel (pack CA3)", () => {
     expect(screen.getByTestId("order-match-bundle-lines")).toHaveTextContent(
       "from bundle — deduct via the adjust page's Order intent or fulfil",
     );
+  });
+
+  it("marks each product that came from a bundle on its OWN row (seam-check fix, pack REV-6)", () => {
+    const base = makeMatch();
+    renderPanel({
+      orderMatch: makeMatch({
+        bundleLines: 1,
+        perProduct: [
+          { ...base.perProduct[0], fromBundle: true },
+          { ...base.perProduct[0], productId: 4, productName: "Gadget", fromBundle: false },
+        ],
+      }),
+    });
+
+    const mark = screen.getByTestId("order-match-from-bundle-3");
+    expect(mark).toHaveTextContent("from bundle");
+    expect(mark).toHaveAttribute("title", "from bundle — deduct via the adjust page's Order intent or fulfil");
+    expect(screen.queryByTestId("order-match-from-bundle-4")).toBeNull();
   });
 
   it("offers the exceptions finder on a FLAGGED class only", () => {

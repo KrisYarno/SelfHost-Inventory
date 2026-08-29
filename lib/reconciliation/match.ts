@@ -88,6 +88,7 @@ export type PerProduct = {
   delta: number;      // deducted - ordered
   kind: MatchKind | null;   // AFTER tolerance
   units: number;      // the kind's magnitude; 0 when kind null
+  fromBundle: boolean; // true when any ORDERED line for this product came from a bundle (seam-check fix, pack REV-6)
 };
 
 export type ToleranceReport = {
@@ -156,6 +157,7 @@ type WorkingRow = {
   deducted: number;
   kind: MatchKind | null;
   units: number;
+  fromBundle: boolean;
 };
 
 function unknownProduct(productId: number): ProductFacts {
@@ -183,6 +185,7 @@ function toPerProduct(row: WorkingRow): PerProduct {
     delta: row.deducted - row.ordered,
     kind: row.kind,
     units: row.units,
+    fromBundle: row.fromBundle,
   };
 }
 
@@ -222,8 +225,10 @@ export function matchOrder(input: {
   }
 
   const orderedById = new Map<number, number>();
+  const bundleIds = new Set<number>();
   for (const l of items.lines) {
     orderedById.set(l.productId, (orderedById.get(l.productId) ?? 0) + l.quantity);
+    if (l.fromBundle) bundleIds.add(l.productId);
   }
   const outById = new Map<number, number>();
   const correctedById = new Map<number, number>();
@@ -263,6 +268,7 @@ export function matchOrder(input: {
           deducted: out - corrected,
           kind: null,
           units: 0,
+          fromBundle: false,
         });
       }),
       ...counts,
@@ -291,6 +297,7 @@ export function matchOrder(input: {
       deducted,
       kind,
       units,
+      fromBundle: bundleIds.has(productId),
     };
   });
   const rowsById = new Map(rows.map((r) => [r.productId, r]));

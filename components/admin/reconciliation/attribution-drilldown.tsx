@@ -171,7 +171,18 @@ function OrderMatchPanel({ match }: { match: OrderMatch }) {
                 key={product.productId}
                 data-testid={`order-match-product-${product.productId}`}
               >
-                <TableCell>{product.productName}</TableCell>
+                <TableCell>
+                  {product.productName}
+                  {product.fromBundle && (
+                    <span
+                      className="ml-2 text-body-sm text-muted-foreground"
+                      title={FROM_BUNDLE_COPY}
+                      data-testid={`order-match-from-bundle-${product.productId}`}
+                    >
+                      from bundle
+                    </span>
+                  )}
+                </TableCell>
                 <TableCell className="tabular-nums">{product.ordered}</TableCell>
                 <TableCell className="tabular-nums">{product.deducted}</TableCell>
                 <TableCell className="tabular-nums">{product.corrected}</TableCell>
@@ -190,7 +201,14 @@ function OrderMatchPanel({ match }: { match: OrderMatch }) {
             data-testid={`order-match-product-card-${product.productId}`}
             className="rounded-lg border border-border bg-surface p-3 text-body-sm"
           >
-            <p className="font-medium">{product.productName}</p>
+            <p className="font-medium">
+              {product.productName}
+              {product.fromBundle && (
+                <span className="ml-2 font-normal text-muted-foreground" title={FROM_BUNDLE_COPY}>
+                  from bundle
+                </span>
+              )}
+            </p>
             <dl className="mt-2 grid grid-cols-3 gap-x-3 gap-y-1">
               <div className="min-w-0">
                 <dt className="text-muted-foreground">Ordered</dt>

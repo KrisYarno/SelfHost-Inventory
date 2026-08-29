@@ -85,6 +85,7 @@ function makeMatch(over: Partial<OrderMatch> = {}): OrderMatch {
       {
         productId: 3,
         productName: "Widget",
+        fromBundle: false,
         ordered: 3,
         deducted: 1,
         corrected: 0,

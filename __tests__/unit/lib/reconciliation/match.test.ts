@@ -110,6 +110,7 @@ describe('the class, one fixture per class', () => {
       {
         productId: 1,
         productName: 'Semaglutide 5 mg',
+        fromBundle: false,
         ordered: 2,
         deducted: 0,
         corrected: 0,
@@ -281,6 +282,7 @@ describe('not evaluable — the ONLY source of class null', () => {
       {
         productId: 1,
         productName: 'Semaglutide 5 mg',
+        fromBundle: false,
         ordered: 0,
         deducted: 2,
         corrected: 1,
@@ -464,6 +466,7 @@ describe('the mass balance in integer hundredths', () => {
       {
         productId: 42,
         productName: 'unknown product',
+        fromBundle: false,
         ordered: 1,
         deducted: 0,
         corrected: 0,
@@ -667,5 +670,32 @@ describe('totality — 600 random orders, no throw, every invariant', () => {
         ).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe('perProduct.fromBundle (seam-check fix, pack REV-6)', () => {
+  it('is true for a product any of whose ORDERED lines came from a bundle, false otherwise', () => {
+    const m = matchOrder({
+      items: items([
+        { ...line(1, 2), fromBundle: true },
+        line(2, 1),
+      ]),
+      deducted: [
+        { productId: 1, out: 2, corrected: 0 },
+        { productId: 2, out: 1, corrected: 0 },
+        { productId: 3, out: 1, corrected: 0 },
+      ],
+      products: [],
+    });
+    expect(m.perProduct.map((p) => [p.productId, p.fromBundle])).toEqual([
+      [1, true],
+      [2, false],
+      [3, false],
+    ]);
+  });
+
+  it('is false on every row of the unmatchable result (no ordered lines exist)', () => {
+    const m = matchOrder({ items: items([]), deducted: [{ productId: 7, out: 1, corrected: 0 }], products: [] });
+    expect(m.perProduct.map((p) => p.fromBundle)).toEqual([false]);
   });
 });
