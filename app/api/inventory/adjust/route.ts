@@ -4,6 +4,7 @@ import {
   createInventoryAdjustment,
   validateStockAvailability,
 } from "@/lib/inventory";
+import { lockFirst } from "@/lib/inventory/order-lock";
 import { inventory_logs_logType } from "@prisma/client";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
 import prisma from "@/lib/prisma";
@@ -132,6 +133,13 @@ export const POST = apiHandler(async (request: NextRequest) => {
       reasonCode: intentMapping.reasonCode,
       orderRecordId,
       batchId,
+      // Reconciliation Part 2 (spec §2.7(1), pack CB1b.5): when this adjustment
+      // STAMPS an order, that order is locked as the transaction's first act.
+      // The primitive owns the transaction (and retries it), so the lock rides
+      // in as a hook and re-runs per attempt. An unstamped adjustment — the
+      // journal's, a transfer auto-add — locks nothing.
+      lockFirst:
+        orderRecordId !== null ? (tx) => lockFirst(tx, { required: [orderRecordId] }) : undefined,
       // Reconciliation lane R-A: the closure now takes the LOG the primitive
       // just wrote, so the attempt row can name the ledger row it describes.
       // createInventoryAdjustment has always passed `{ log, newVersion }` — this
@@ -200,6 +208,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
     success: true,
     log: result.log,
     newVersion: result.newVersion,
+    // Reconciliation Part 2 (pack CB1b.5): the batch this adjustment's ledger
+    // row and audit event share, named on the wire so a caller can point at the
+    // movement it just made.
+    batchId,
   });
   return applyRateLimitHeaders(response, rateLimitHeaders);
 });

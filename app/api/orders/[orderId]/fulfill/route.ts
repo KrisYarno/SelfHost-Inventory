@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireApproved, requireCompanyMembership, apiHandler, requireCSRF } from '@/lib/api-utils';
 import { fulfillExternalOrder } from '@/lib/fulfillment';
+import { lockFirst } from '@/lib/inventory/order-lock';
 import { FulfillmentRequestSchema } from '@/lib/validation/fulfillment';
 import {
   applyRateLimitHeaders,
@@ -123,7 +124,13 @@ export const POST = apiHandler(async (
     },
     // Phase C (P-C1): thread the event batchId into the deduction tx so every
     // SALE ledger row it writes joins this fulfillment's audit event.
-    batchId
+    batchId,
+    // Reconciliation Part 2 (spec §2.7(1), pack CB1b.2): the ORDER LOCK, run as
+    // the deduction transaction's first act — the transaction lives inside
+    // fulfillExternalOrder, so the lock rides in as a hook rather than a wrap.
+    // The id is the one this request was ASKED with (the path parameter), which
+    // is also the id the audit event and the attempt row name.
+    { lockFirst: (tx) => lockFirst(tx, { required: [params.orderId] }) }
   );
 
   // Determine overall fulfillment status
@@ -260,6 +267,10 @@ export const POST = apiHandler(async (
       skipped: result.skipped.length,
       failed: result.failed.length,
     },
+    // Reconciliation Part 2 (pack CB1b.2): the batch every SALE row this
+    // fulfillment wrote carries. The workbench's completion dialog threads it
+    // beside the manual leg's, so an Undo can name both halves of a mixed cart.
+    batchId,
   });
 
   return applyRateLimitHeaders(response, rateLimitHeaders);

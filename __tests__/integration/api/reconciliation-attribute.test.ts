@@ -102,8 +102,14 @@ interface TxFixture {
   auditEvents?: AuditRow[];
   /** The latest attempt row, or null. */
   latestAttempt?: { evidence: string | null } | null;
-  /** The target order the route locks FOR SHARE — null = it no longer exists. */
+  /** The target order the route locks FOR UPDATE — null = it no longer exists. */
   order?: { id: string; orderNumber: string } | null;
+  /**
+   * The caller's stated PREVIOUS order, when the lock finds it. Advisory: the
+   * route asks for it in the same statement and carries on without it (pack
+   * CB1b.4), so it is absent from the returned rows unless a test says otherwise.
+   */
+  previousOrder?: { id: string; orderNumber: string };
   /** What the guarded updateMany reports. Defaults to the locked row count. */
   updatedCount?: number;
 }
@@ -112,7 +118,7 @@ interface TxFixture {
  * A transaction client that RECORDS what was asked of it, in order.
  *
  * The two raw statements are told apart by their SQL, which doubles as a pin on
- * the frozen lock order (`external_orders` target, then this batch's rows).
+ * the frozen lock order (`external_orders` orders, then this batch's rows).
  */
 function makeTx(fixture: TxFixture) {
   const locked = fixture.locked ?? rows();
@@ -121,9 +127,11 @@ function makeTx(fixture: TxFixture) {
 
   (tx.$queryRaw as unknown as jest.Mock).mockImplementation(async (query: Prisma.Sql) => {
     if (query.sql.includes('external_orders')) {
-      trace.push('lock order FOR SHARE');
+      trace.push('lock orders FOR UPDATE');
       const order = fixture.order === undefined ? { id: 'ord-9', orderNumber: '#1009' } : fixture.order;
-      return order === null ? [] : [order];
+      const rows = order === null ? [] : [order];
+      if (fixture.previousOrder) rows.push(fixture.previousOrder);
+      return rows;
     }
     trace.push('lock batch rows FOR UPDATE');
     return locked;
@@ -226,14 +234,14 @@ describe('POST /api/reconciliation/attribution/[batchId] — the route surface',
     ).toBe(400);
   });
 
-  it('404s when the target order no longer exists (locked FOR SHARE inside the tx)', async () => {
+  it('404s when the target order no longer exists (locked FOR UPDATE inside the tx)', async () => {
     const { trace } = makeTx({ order: null });
     const res = await attribute(CLEAN_BODY);
 
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'unknown order', code: 'NOT_FOUND' });
     // The order lock is the FIRST statement — the batch is never even read.
-    expect(trace).toEqual(['lock order FOR SHARE']);
+    expect(trace).toEqual(['lock orders FOR UPDATE']);
   });
 
   // CR-1: the READ side now refuses to offer an R2b completion whose named order
@@ -252,7 +260,7 @@ describe('POST /api/reconciliation/attribution/[batchId] — the route surface',
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'unknown order', code: 'NOT_FOUND' });
     // Nothing was locked, read or written beyond the target lookup itself.
-    expect(trace).toEqual(['lock order FOR SHARE']);
+    expect(trace).toEqual(['lock orders FOR UPDATE']);
     expect(tx.inventory_logs.updateMany).not.toHaveBeenCalled();
     expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
     expect(tx.auditLog.create).not.toHaveBeenCalled();
@@ -285,7 +293,7 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
       batchId: LEDGER_BATCH,
     });
     // The empty guard fires BEFORE the audit read.
-    expect(trace).toEqual(['lock order FOR SHARE', 'lock batch rows FOR UPDATE']);
+    expect(trace).toEqual(['lock orders FOR UPDATE', 'lock batch rows FOR UPDATE']);
   });
 
   it('2. NOT_ATTRIBUTABLE — R0: a pre-0b-1 mass-update session', async () => {
@@ -380,7 +388,7 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
     expect((await res.json()).code).toBe('BATCH_MOVED');
     // Nothing beyond the two reads ran: no attempt read, no write.
     expect(trace).toEqual([
-      'lock order FOR SHARE',
+      'lock orders FOR UPDATE',
       'lock batch rows FOR UPDATE',
       'auditLog.findMany',
     ]);
@@ -416,7 +424,7 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
     // BEFORE the same-id short circuit and before the write: nothing beyond the
     // two reads ran.
     expect(trace).toEqual([
-      'lock order FOR SHARE',
+      'lock orders FOR UPDATE',
       'lock batch rows FOR UPDATE',
       'auditLog.findMany',
     ]);
@@ -579,7 +587,7 @@ describe('already attributed to the same order', () => {
     });
 
     expect(trace).toEqual([
-      'lock order FOR SHARE',
+      'lock orders FOR UPDATE',
       'lock batch rows FOR UPDATE',
       'auditLog.findMany',
     ]);
@@ -622,7 +630,7 @@ describe('the write path', () => {
     await attribute(CLEAN_BODY);
 
     expect(trace).toEqual([
-      'lock order FOR SHARE',
+      'lock orders FOR UPDATE',
       'lock batch rows FOR UPDATE',
       'auditLog.findMany',
       'orderAttributionAttempt.findFirst',
@@ -685,16 +693,76 @@ describe('the write path', () => {
     expect(batchSelect.values).toContain(LEDGER_BATCH);
   });
 
+  // Reconciliation Part 2 (spec §2.7(1), pack CB1b.4): the `FOR SHARE` single-
+  // target read this pin used to describe is GONE. The shared order lock takes
+  // both orders this correction touches, X, in ONE statement, ordered by id so
+  // two admins moving batches between the same pair acquire in the same order.
   it('locks the TARGET ORDER first, with the two-column write-path projection', async () => {
     const { tx } = makeTx({});
     await attribute(CLEAN_BODY);
 
     const orderLock = (tx.$queryRaw as unknown as jest.Mock).mock
       .calls[0][0] as unknown as Prisma.Sql;
-    expect(orderLock.sql).toContain('FOR SHARE');
+    expect(orderLock.sql).toContain('FOR UPDATE');
+    expect(orderLock.sql).toContain('ORDER BY id');
     expect(orderLock.sql).toContain('external_orders');
     expect(orderLock.sql).toContain('orderNumber');
+    // No previous order stated: the union is the target alone.
     expect(orderLock.values).toEqual(['ord-9']);
+  });
+
+  it('asks for the TARGET and the STATED PREVIOUS order in the SAME statement', async () => {
+    const { tx, trace } = makeTx({
+      locked: rows({ orderRecordId: 'ord-1' }),
+      previousOrder: { id: 'ord-1', orderNumber: '#1001' },
+    });
+    const res = await attribute({
+      orderRecordId: 'ord-9',
+      expectPreviousOrderRecordId: 'ord-1',
+      reason: 'the packer picked the wrong order',
+    });
+
+    expect(res.status).toBe(200);
+    const orderLock = (tx.$queryRaw as unknown as jest.Mock).mock
+      .calls[0][0] as unknown as Prisma.Sql;
+    expect(orderLock.values).toEqual(['ord-9', 'ord-1']);
+    // Still ONE statement — the batch rows follow it, as before.
+    expect(trace[0]).toBe('lock orders FOR UPDATE');
+    expect(trace[1]).toBe('lock batch rows FOR UPDATE');
+  });
+
+  it('a vanished PREVIOUS order is ADVISORY — absent from the lock, never a refusal', async () => {
+    // The order the batch was stamped with has since been deleted. The move is
+    // still legal: the `BATCH_MOVED` ladder reads the LEDGER's stamp, not the
+    // order table, and an advisory id that resolves to nothing is simply not
+    // locked.
+    const { tx } = makeTx({ locked: rows({ orderRecordId: 'ord-1' }) });
+    const res = await attribute({
+      orderRecordId: 'ord-9',
+      expectPreviousOrderRecordId: 'ord-1',
+      reason: 'the packer picked the wrong order',
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      changed: true,
+      orderRecordId: 'ord-9',
+      previousOrderRecordId: 'ord-1',
+    });
+    expect((tx.inventory_logs.updateMany as unknown as jest.Mock).mock.calls[0][0].data).toEqual({
+      orderRecordId: 'ord-9',
+    });
+  });
+
+  // The lock's own missing-required answer is a 409 `ORDER_GONE`; on this route
+  // the target is the ONLY required id, so it means exactly what this handler's
+  // 404 has always meant. A 409 is unreachable here.
+  it('maps the lock’s ORDER_GONE to the route’s 404, never a 409', async () => {
+    makeTx({ order: null });
+    const res = await attribute(CLEAN_BODY);
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'unknown order', code: 'NOT_FOUND' });
   });
 
   it('records the attempt as attributed/manual with the first locked row', async () => {
@@ -785,7 +853,7 @@ describe('the write path', () => {
     ).toEqual({ rowCount: 2, completedFulfillment: true });
   });
 
-  // CR-2: `external_orders.id` is `utf8mb4_unicode_ci`, so the FOR SHARE lock
+  // CR-2: `external_orders.id` is `utf8mb4_unicode_ci`, so the order lock
   // matches CASE-INSENSITIVELY — `ORD-9` finds the row stored as `ord-9`. The
   // route used to lock through that comparison and then pass the CALLER'S
   // SPELLING onward, so the ledger was stamped `ORD-9`, the attempt row recorded
@@ -795,7 +863,7 @@ describe('the write path', () => {
   //
   // (The identity contract itself — binary columns vs. an ASCII constraint, and
   // repairing existing variant spellings — is REGISTERED, not this fix.)
-  it('CANONICALIZES the target to the id the FOR SHARE lock read back, never the caller spelling (CR-2)', async () => {
+  it('CANONICALIZES the target to the id the ORDER LOCK read back, never the caller spelling (CR-2)', async () => {
     const { tx } = makeTx({});
     const res = await attribute({
       orderRecordId: 'ORD-9',

@@ -14,7 +14,14 @@ export const UnfulfillItemSchema = z.object({
  * Schema for unfulfillment request
  */
 export const UnfulfillRequestSchema = z.object({
-  items: z.array(UnfulfillItemSchema).min(1, 'At least one item is required'),
+  // Reconciliation Part 2 (pack CB1b.5): the request-size maximum. A bundle
+  // item restores one key per COMPONENT, so this bound alone does not keep the
+  // prelock's key count under its cap — the route's own TOO_MANY_KEYS guard
+  // covers the multiplication. Both refusals are 400s.
+  items: z
+    .array(UnfulfillItemSchema)
+    .min(1, 'At least one item is required')
+    .max(100, 'at most 100 items per request'),
   notes: z.string().trim().max(1000).optional(),
 });
 

@@ -16,7 +16,14 @@ export const DeductInventorySchema = z.object({
 
 export const SimpleDeductSchema = z.object({
   locationId: positiveInt,
-  items: z.array(WorkbenchItemSchema).min(1, 'At least one item is required'),
+  // Reconciliation Part 2 (pack CB1b.5): the request-size maximum. Every item
+  // here becomes a prelocked `product_locations` key, and the prelock's own cap
+  // is a LIB BACKSTOP whose RangeError would reach the wire as a bare 500. The
+  // bound belongs on the request, where it is an ordinary 400.
+  items: z
+    .array(WorkbenchItemSchema)
+    .min(1, 'At least one item is required')
+    .max(100, 'at most 100 items per request'),
   orderReference: z.string().trim().max(255).optional(),
   notes: z.string().trim().max(1000).optional(),
   // Phase 0b-2 (spec REV-2 / OC-1): the external order the packer had selected,

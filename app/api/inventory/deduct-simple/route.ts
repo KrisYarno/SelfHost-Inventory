@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { createInventoryTransaction } from "@/lib/inventory";
+import { lockFirst } from "@/lib/inventory/order-lock";
 import { mapDeductionIntent } from "@/lib/inventory/intent";
 import { resolveSelectedExternalOrderId } from "@/lib/orders/resolve-selected-order";
 import {
@@ -207,7 +208,19 @@ export const POST = apiHandler(async (request: NextRequest) => {
     // ER-C3: thread the event batchId so every DEDUCTION->SALE ledger row joins
     // this deduction's bulk-update event. W2-1 adds the order attribution, which
     // is null unless the chip said `order` AND the resolver returned an id.
-    { batchId, orderRecordId }
+    //
+    // Reconciliation Part 2 (spec §2.7(1), pack CB1b.1): when this deduction
+    // STAMPS an order, that order is locked as the transaction's first act —
+    // the primitive owns the transaction, so the lock rides in as a hook. The
+    // id asked for is the one being stamped (the resolver's stored id or the
+    // caller's selected spelling); canonicalizing it is a later milestone's.
+    // An UNstamped deduction locks nothing: there is no order to serialize on.
+    {
+      batchId,
+      orderRecordId,
+      lockFirst:
+        orderRecordId !== null ? (tx) => lockFirst(tx, { required: [orderRecordId] }) : undefined,
+    }
   );
 
   const response = NextResponse.json({
@@ -215,6 +228,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
     transactionId: result.transaction.id,
     itemsProcessed: result.logs.length,
     message: `Successfully processed ${result.logs.length} items`,
+    // Reconciliation Part 2 (pack CB1b.1): the batch this deduction wrote under.
+    // The workbench's Undo needs it to reverse the deduction as ONE movement
+    // instead of N blind adjustments (B2b consumes it); it also lets any caller
+    // name the batch it just created without going looking for it.
+    batchId,
   });
   return applyRateLimitHeaders(response, rateLimitHeaders);
 });

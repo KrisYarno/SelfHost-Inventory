@@ -69,6 +69,7 @@ function getMockPrisma(): DeepMockProxy<PrismaClient> {
 beforeEach(() => {
   mockReset(getMockPrisma())
   jest.clearAllMocks()
+  rawCalls.length = 0
   _csrfValid = true
   _inventoryLogImpl = () => Promise.resolve({ id: 100 })
   mockPushOrderStatus.mockReset().mockResolvedValue({ success: true })
@@ -128,11 +129,88 @@ function buildOrder(overrides: any = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// THE RECORDING RAW TRIO (pack CB0.3, the per-suite paragraph).
+//
+// This suite declares its OWN `@/lib/prisma` factory and builds a fresh tx per
+// test, so the global harness's trio never reaches it: the trio is installed on
+// each `setupTransaction()` tx instead. Two layers — the OUTER fn always records
+// and then delegates to an INNER behaviour fn (`rawBehavior`), which is what a
+// test configures, so an override can never silently switch the recording off.
+// ---------------------------------------------------------------------------
+type RawCall = { kind: 'query' | 'execute' | 'executeUnsafe'; sql: string; at: number }
+
+const rawCalls: RawCall[] = []
+const rawBehavior: Record<string, jest.Mock> = {}
+const rawFns: Record<string, jest.Mock> = {}
+let rawSeq = 0
+
+function sqlTextOf(arg: unknown): string {
+  return arg && typeof arg === 'object' && typeof (arg as { sql?: unknown }).sql === 'string'
+    ? (arg as { sql: string }).sql
+    : String(arg)
+}
+
+function installRecordingRaw(target: Record<string, unknown>): void {
+  const install = (kind: RawCall['kind'], method: string, make: () => unknown) => {
+    const behavior = jest.fn((..._args: unknown[]) => Promise.resolve(make()))
+    const recording = jest.fn((...args: unknown[]) => {
+      rawCalls.push({ kind, sql: sqlTextOf(args[0]), at: rawSeq++ })
+      return behavior(...args)
+    })
+    rawBehavior[method] = behavior
+    rawFns[method] = recording
+    target[method] = recording
+  }
+  install('query', '$queryRaw', () => [])
+  // The route reads $executeRaw as its atomic UPDATEs' affected-row count.
+  // Default: 1 row affected (success). Tests override per-case.
+  install('execute', '$executeRaw', () => 1)
+  install('executeUnsafe', '$executeRawUnsafe', () => 0)
+}
+
+/** The order lock's SELECT (lib/inventory/order-lock.ts), by its text. */
+function isOrderLockSelect(sql: string): boolean {
+  return sql.includes('FROM external_orders') && sql.includes('FOR UPDATE')
+}
+
+/** The prelock's returning SELECT (lib/inventory/prelock.ts), by its text. */
+function isPrelockSelect(sql: string): boolean {
+  return sql.includes('FROM product_locations') && sql.includes('(productId, locationId) IN')
+}
+
+/** The locked order the route asks for: the one in the path. */
+const LOCKED_ORDERS = [{ id: 'order-1', orderNumber: '#1001' }]
+
+/**
+ * The two locking reads this route now spends, answered by their text. The
+ * prelock's rows are what the restorations' keys materialize to; unfulfill reads
+ * no value off them (its guard is the atomic fulfilledQty decrement), so the
+ * default set only has to cover the keys, never particular quantities.
+ */
+function lockedReads(
+  prelocked: Array<{ productId: number; locationId: number; quantity: number; version: number }>
+): void {
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) => {
+    const sql = sqlTextOf(args[0])
+    if (isOrderLockSelect(sql)) return LOCKED_ORDERS
+    if (isPrelockSelect(sql)) return prelocked
+    return []
+  })
+}
+
+/** Every key these tests restore into, materialized and stocked. */
+const PRELOCKED = [
+  { productId: 1, locationId: 1, quantity: 100, version: 1 },
+  { productId: 2, locationId: 1, quantity: 100, version: 1 },
+  { productId: 10, locationId: 1, quantity: 100, version: 1 },
+  { productId: 20, locationId: 1, quantity: 100, version: 1 },
+]
+
 function setupTransaction() {
   const mockTx = mockDeep<PrismaClient>()
-  // Atomic $executeRaw returns affected row count.
-  // Default: 1 row affected (success). Tests override per-case.
-  mockTx.$executeRaw.mockResolvedValue(1 as any)
+  installRecordingRaw(mockTx as unknown as Record<string, unknown>)
+  lockedReads(PRELOCKED)
   getMockPrisma().$transaction.mockImplementation(async (cb: any) => {
     return cb(mockTx)
   })
@@ -271,7 +349,7 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     tx.product.findUnique.mockResolvedValue({ id: 1, deletedAt: null } as any)
     // P0-1 fix: the atomic UPDATE returns 0 affected rows when fulfilledQty < quantity.
     // First call is the fulfilledQty decrement, which should return 0 here.
-    tx.$executeRaw.mockResolvedValueOnce(0 as any)
+    rawBehavior.$executeRaw.mockResolvedValueOnce(0 as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 2 },
     ] as any)
@@ -423,13 +501,16 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
 
     await POST(req, { params: { orderId: 'order-1' } })
 
-    // Verify atomic UPDATEs were issued. Three $executeRaw calls per item:
-    //   1. fulfilledQty decrement with WHERE fulfilledQty >= ?
-    //   2. product_locations quantity increment
-    //   3. products.quantity legacy mirror (because locationId === 1)
-    expect(tx.$executeRaw).toHaveBeenCalledTimes(3)
+    // Verify atomic UPDATEs were issued. FOUR $executeRaw calls for one item:
+    //   1. fulfilledQty decrement with WHERE fulfilledQty >= ? (pass 1)
+    //   2. the prelock's materialize INSERT (pack CB1b.3, between the passes)
+    //   3. product_locations quantity increment (pass 2)
+    //   4. products.quantity legacy mirror (because locationId === 1)
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(4)
 
-    // Fallback upsert-create should NOT fire when the UPDATE affected a row
+    // The create fallback is GONE — the prelock materialized the row, so the
+    // increment cannot miss (pack CB1b.3). This pin now says "never", not
+    // "not this time".
     expect(tx.product_locations.create).not.toHaveBeenCalled()
   })
 
@@ -672,7 +753,7 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
 
     tx.externalOrder.findUnique.mockResolvedValue(bundleOrder as any)
     // $executeRaw: 1 = fulfilledQty decrement succeeds, then 1 per component product_locations update (×2)
-    tx.$executeRaw.mockResolvedValue(1 as any)
+    rawBehavior.$executeRaw.mockResolvedValue(1 as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 1, fulfilledQty: 0 },
     ] as any)
@@ -715,9 +796,10 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     // Second component: productId 20, qty 2 (2×1), positive delta
     expect(logCalls[1][0]).toMatchObject({ productId: 20, delta: 2 })
 
-    // $executeRaw: 1 for fulfilledQty decrement + 2 for product_locations + 2 for legacy mirror (locationId=1)
-    // = 5 total calls
-    expect(tx.$executeRaw).toHaveBeenCalledTimes(5)
+    // $executeRaw: 1 for fulfilledQty decrement + 1 for the prelock's materialize
+    // INSERT (both component keys in ONE statement) + 2 for product_locations
+    // + 2 for the legacy mirror (locationId=1) = 6 total calls
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(6)
   })
 
   // -----------------------------------------------------------------------
@@ -746,7 +828,7 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     })
 
     tx.externalOrder.findUnique.mockResolvedValue(bundleOrder as any)
-    tx.$executeRaw.mockResolvedValue(1 as any)
+    rawBehavior.$executeRaw.mockResolvedValue(1 as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 1, fulfilledQty: 1 },
     ] as any)
@@ -803,7 +885,7 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     })
 
     tx.externalOrder.findUnique.mockResolvedValue(bundleOrder as any)
-    tx.$executeRaw.mockResolvedValue(1 as any)
+    rawBehavior.$executeRaw.mockResolvedValue(1 as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 1, fulfilledQty: 1 },
     ] as any)
@@ -864,7 +946,7 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     })
 
     tx.externalOrder.findUnique.mockResolvedValue(bundleOrder as any)
-    tx.$executeRaw.mockResolvedValue(1 as any)
+    rawBehavior.$executeRaw.mockResolvedValue(1 as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 1, fulfilledQty: 0 },
     ] as any)
@@ -958,7 +1040,7 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
     })
 
     tx.externalOrder.findUnique.mockResolvedValue(bundleOrder as any)
-    tx.$executeRaw.mockResolvedValue(1 as any)
+    rawBehavior.$executeRaw.mockResolvedValue(1 as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 1, fulfilledQty: 0 },
     ] as any)
@@ -984,5 +1066,233 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
       expect(logArg.reasonCode).toBe('CORRECTION')
       expect(logArg.batchId).toBe(auditData.batchId)
     }
+  })
+})
+
+// ===========================================================================
+// THE LOCK DISCIPLINE (reconciliation Part 2, spec §2.7; pack CB1b.3)
+//
+// Unfulfill is the route whose lock order was hardest to see: it decrements
+// `fulfilledQty` and restores `product_locations` per item, interleaved, so a
+// second request could sit between one item's decrement and its restoration.
+// The route now takes the order first, does every decrement (pass 1), prelocks
+// every surviving key at once, and only then writes stock (pass 2). These pins
+// are about that SHAPE — the statements, in order, with the keys the passes
+// actually produced.
+// ===========================================================================
+
+describe('unfulfill — the order lock, the two passes, and the prelock between them', () => {
+  /** The raw statements this request spent, in call order. */
+  function kinds() {
+    return rawCalls.map((c) => c.kind)
+  }
+
+  function singleOrder() {
+    return buildOrder({
+      items: [
+        {
+          id: 'item-1',
+          orderId: 'order-1',
+          quantity: 5,
+          fulfilledQty: 5,
+          productLink: { internalProductId: 1 },
+        },
+      ],
+    })
+  }
+
+  it('takes the ORDER LOCK as statement 1 — before the order read', async () => {
+    const tx = setupTransaction()
+    tx.externalOrder.findUnique.mockResolvedValue(singleOrder() as any)
+    tx.product.findUnique.mockResolvedValue({ id: 1, deletedAt: null } as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 5, fulfilledQty: 0 }] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    const res = await POST(
+      buildRequest({ items: [{ itemId: 'item-1', productId: 1, quantity: 5, locationId: 5 }] }),
+      { params: { orderId: 'order-1' } }
+    )
+    expect(res.status).toBe(200)
+
+    // The FIRST raw statement of the transaction is the lock, and it names the
+    // order from the PATH.
+    expect(rawCalls[0].kind).toBe('query')
+    expect(isOrderLockSelect(rawCalls[0].sql)).toBe(true)
+    const lockSql = rawFns.$queryRaw.mock.calls[0][0] as any
+    expect(lockSql.values).toEqual(['order-1'])
+    // ...and it precedes the transaction's first consistent read.
+    expect(rawFns.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      (tx.externalOrder.findUnique as jest.Mock).mock.invocationCallOrder[0]
+    )
+  })
+
+  it('keeps the route’s 30 second budget on the wrapped transaction', async () => {
+    const tx = setupTransaction()
+    tx.externalOrder.findUnique.mockResolvedValue(singleOrder() as any)
+    tx.product.findUnique.mockResolvedValue({ id: 1, deletedAt: null } as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 5, fulfilledQty: 0 }] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    await POST(
+      buildRequest({ items: [{ itemId: 'item-1', productId: 1, quantity: 5, locationId: 5 }] }),
+      { params: { orderId: 'order-1' } }
+    )
+
+    expect((getMockPrisma().$transaction as jest.Mock).mock.calls[0][1]).toEqual({ timeout: 30000 })
+  })
+
+  it('runs pass 1 (the decrements), THEN the prelock, THEN pass 2 (the stock writes)', async () => {
+    const tx = setupTransaction()
+    tx.externalOrder.findUnique.mockResolvedValue(buildOrder() as any)
+    tx.product.findUnique.mockResolvedValue({ id: 1, deletedAt: null } as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 5, fulfilledQty: 0 },
+      { quantity: 3, fulfilledQty: 0 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    const res = await POST(
+      buildRequest({
+        items: [
+          { itemId: 'item-1', productId: 1, quantity: 5, locationId: 5 },
+          { itemId: 'item-2', productId: 2, quantity: 3, locationId: 5 },
+        ],
+      }),
+      { params: { orderId: 'order-1' } }
+    )
+    expect(res.status).toBe(200)
+
+    // lock · decrement · decrement · prelock INSERT · prelock SELECT · 2 restores
+    expect(kinds()).toEqual(['query', 'execute', 'execute', 'execute', 'query', 'execute', 'execute'])
+    expect(rawCalls[1].sql).toContain('UPDATE external_order_items')
+    expect(rawCalls[2].sql).toContain('UPDATE external_order_items')
+    expect(rawCalls[3].sql).toContain('INSERT INTO product_locations')
+    expect(isPrelockSelect(rawCalls[4].sql)).toBe(true)
+    expect(rawCalls[5].sql).toContain('UPDATE product_locations')
+    expect(rawCalls[6].sql).toContain('UPDATE product_locations')
+
+    // ONE prelock for BOTH items' keys, in canonical order.
+    const insert = rawFns.$executeRaw.mock.calls.find((c: any[]) =>
+      sqlTextOf(c[0]).includes('INSERT INTO product_locations')
+    ) as any[]
+    expect((insert[0] as any).values).toEqual([1, 5, 2, 5])
+  })
+
+  it('prelocks the BUNDLE’s COMPONENT keys, not the bundle line’s own product', async () => {
+    const tx = setupTransaction()
+    tx.externalOrder.findUnique.mockResolvedValue(
+      buildOrder({
+        items: [
+          {
+            id: 'item-1',
+            orderId: 'order-1',
+            quantity: 1,
+            fulfilledQty: 1,
+            isMapped: true,
+            bundleComponentSnapshot: [
+              { internalProductId: 20, internalProductName: 'Y', quantity: 2, sortOrder: 1 },
+              { internalProductId: 10, internalProductName: 'X', quantity: 1, sortOrder: 0 },
+            ],
+            productLink: { internalProductId: 99, isBundle: true, bundleComponents: [] },
+          },
+        ],
+      }) as any
+    )
+    tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 1, fulfilledQty: 0 }] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    const res = await POST(
+      buildRequest({ items: [{ itemId: 'item-1', productId: 99, quantity: 1, locationId: 5 }] }),
+      { params: { orderId: 'order-1' } }
+    )
+    expect(res.status).toBe(200)
+
+    const insert = rawFns.$executeRaw.mock.calls.find((c: any[]) =>
+      sqlTextOf(c[0]).includes('INSERT INTO product_locations')
+    ) as any[]
+    // Canonically sorted, components only — 99 is the bundle line, never a key.
+    expect((insert[0] as any).values).toEqual([10, 5, 20, 5])
+  })
+
+  it('spends NO locking statement past the order lock when every item is skipped', async () => {
+    const tx = setupTransaction()
+    tx.externalOrder.findUnique.mockResolvedValue(buildOrder() as any)
+    tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 5, fulfilledQty: 5 }] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    // A product mismatch: pass 1 skips it, so there is no survivor to prelock.
+    const res = await POST(
+      buildRequest({ items: [{ itemId: 'item-1', productId: 999, quantity: 5, locationId: 5 }] }),
+      { params: { orderId: 'order-1' } }
+    )
+    expect(res.status).toBe(200)
+    expect(kinds()).toEqual(['query'])
+  })
+
+  it('refuses a restoration whose survivor keys exceed the prelock cap, with TOO_MANY_KEYS', async () => {
+    const tx = setupTransaction()
+    // Bundles multiply keys: five items of fifty distinct components each is
+    // 250 rows to lock from a request the schema is perfectly happy with.
+    const bundleItem = (n: number) => ({
+      id: `item-${n}`,
+      orderId: 'order-1',
+      quantity: 1,
+      fulfilledQty: 1,
+      isMapped: true,
+      bundleComponentSnapshot: Array.from({ length: 50 }, (_, i) => ({
+        internalProductId: n * 50 + i + 1,
+        internalProductName: `P${n * 50 + i + 1}`,
+        quantity: 1,
+        sortOrder: i,
+      })),
+      productLink: { internalProductId: 99, isBundle: true, bundleComponents: [] },
+    })
+    tx.externalOrder.findUnique.mockResolvedValue(
+      buildOrder({ items: [0, 1, 2, 3, 4].map(bundleItem) }) as any
+    )
+
+    // apiHandler is a passthrough here; the real one renders this as a 400.
+    await expect(
+      POST(
+        buildRequest({
+          items: [0, 1, 2, 3, 4].map((n) => ({
+            itemId: `item-${n}`,
+            productId: 99,
+            quantity: 1,
+            locationId: 5,
+          })),
+        }),
+        {
+          params: { orderId: 'order-1' },
+        }
+      )
+    ).rejects.toMatchObject({
+      message: 'too many restorations in one request — split it',
+      code: 'TOO_MANY_KEYS',
+      statusCode: 400,
+    })
+
+    // The tx aborts before ANY stock write — pass 1's decrements included, since
+    // they roll back with it.
+    expect(rawCalls.some((c) => c.sql.includes('UPDATE product_locations'))).toBe(false)
+    expect(rawCalls.some((c) => c.sql.includes('INSERT INTO product_locations'))).toBe(false)
+    expect(tx.auditLog.create).not.toHaveBeenCalled()
+  })
+
+  it('409s ORDER_GONE when the order vanished between the membership check and the lock', async () => {
+    const tx = setupTransaction()
+    // The lock finds nothing; the required id is the one in the path.
+    rawBehavior.$queryRaw.mockResolvedValue([] as any)
+    tx.externalOrder.findUnique.mockResolvedValue(buildOrder() as any)
+
+    await expect(
+      POST(buildRequest({ items: [{ itemId: 'item-1', productId: 1, quantity: 5, locationId: 5 }] }), {
+        params: { orderId: 'order-1' },
+      })
+    ).rejects.toMatchObject({
+      code: 'ORDER_GONE',
+      statusCode: 409,
+    })
+    expect(tx.externalOrder.findUnique).not.toHaveBeenCalled()
   })
 })

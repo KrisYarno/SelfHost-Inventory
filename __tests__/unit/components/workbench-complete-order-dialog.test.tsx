@@ -202,13 +202,14 @@ function renderDialog() {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   const onOpenChange = jest.fn();
+  const onSuccess = jest.fn();
   const ui = (open: boolean) => (
     <QueryClientProvider client={queryClient}>
-      <CompleteOrderDialog open={open} onOpenChange={onOpenChange} />
+      <CompleteOrderDialog open={open} onOpenChange={onOpenChange} onSuccess={onSuccess} />
     </QueryClientProvider>
   );
   const view = render(ui(true));
-  return { onOpenChange, setOpen: (open: boolean) => view.rerender(ui(open)) };
+  return { onOpenChange, onSuccess, setOpen: (open: boolean) => view.rerender(ui(open)) };
 }
 
 const completeButton = () => screen.getByRole("button", { name: "Complete & Fulfill" });
@@ -352,5 +353,96 @@ describe("complete-order dialog — per-class skipped-line checklist (T6)", () =
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE BATCH-ID THREAD (reconciliation Part 2, pack CB1b.6 / seam S-B5)
+//
+// A completion is one operator action and up to TWO movements: the WC lines go
+// through fulfill, the manual lines through deduct-simple, each minting its own
+// batch. The Undo that follows has to be able to name what it is reversing, so
+// the pair travels on the completion envelope — read off the responses, never
+// inferred, and `null` for a leg that did not run.
+// ---------------------------------------------------------------------------
+
+describe("complete-order dialog — the completion names the batches it wrote", () => {
+  /** Answer each leg with the batch id its route would have minted. */
+  function respondWithBatches(fulfilBatchId: string | null, deductBatchId: string | null) {
+    fetchMock.mockImplementation(async (url: unknown) => {
+      const href = String(url);
+      const batchId = href.includes("/fulfill") ? fulfilBatchId : deductBatchId;
+      return {
+        ok: true,
+        json: async () => ({ success: true, ...(batchId ? { batchId } : {}) }),
+      } as unknown as Response;
+    });
+  }
+
+  it("a MIXED cart carries BOTH ids, each from its own leg's response", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respondWithBatches("fulfil-batch-1", "deduct-batch-1");
+    seedOrder([CART_ITEM]);
+    // ...plus a manual line, which is what makes this cart mixed.
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    expect(onSuccess.mock.calls[0][0].batchIds).toEqual({
+      fulfilBatchId: "fulfil-batch-1",
+      deductSimpleBatchId: "deduct-batch-1",
+    });
+    // Both legs ran, in the house order: fulfil first, then the manual deduct.
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/fulfill");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("/api/inventory/deduct-simple");
+  });
+
+  it("a MANUAL-ONLY cart carries fulfilBatchId: null — never undefined", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respondWithBatches(null, "deduct-batch-2");
+    act(() => {
+      useWorkbench.getState().setOrderReference("manual-ref");
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    const { onSuccess } = renderDialog();
+
+    await user.click(screen.getByRole("button", { name: "Complete Order" }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    const { batchIds } = onSuccess.mock.calls[0][0];
+    expect(batchIds).toEqual({ fulfilBatchId: null, deductSimpleBatchId: "deduct-batch-2" });
+    // The key EXISTS and is null: "this cart had no WC leg" is a fact the Undo
+    // reads, not an absence it has to guess at.
+    expect(Object.keys(batchIds).sort()).toEqual(["deductSimpleBatchId", "fulfilBatchId"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a response with NO batchId threads null rather than undefined", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    // The pre-B1b wire shape, in case an older server answers a newer client.
+    respondWithBatches(null, null);
+    act(() => {
+      useWorkbench.getState().setOrderReference("manual-ref");
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    const { onSuccess } = renderDialog();
+
+    await user.click(screen.getByRole("button", { name: "Complete Order" }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    expect(onSuccess.mock.calls[0][0].batchIds).toEqual({
+      fulfilBatchId: null,
+      deductSimpleBatchId: null,
+    });
   });
 });

@@ -128,17 +128,35 @@ function isPrelockSelect(sql: string): boolean {
 }
 
 /**
+ * The order lock's SELECT (lib/inventory/order-lock.ts), by its text — the
+ * statement every stock-writing route now spends FIRST when it names an order
+ * (pack CB1b). A route whose lock finds nothing answers 409 ORDER_GONE, so the
+ * orders these tests drive have to be here.
+ */
+function isOrderLockSelect(sql: string): boolean {
+  return sql.includes("FROM external_orders") && sql.includes("FOR UPDATE");
+}
+
+/** The orders these routes lock, as the lock reads them back. */
+const LOCKED_ORDERS = [{ id: ORDER_CUID, orderNumber: "12345" }];
+
+/**
  * What the prelock's returning SELECT hands back. The primitives' per-key
  * `product_locations.findUnique` retired with the prelock (pack CB1a-i), so
  * the fixture that read { quantity: 100, version: 1 } is spelled here as the
  * materialized rows the version guard and the stock floor now read.
+ *
+ * The order lock's rows ride the same dispatcher (pack CB1b): one raw read
+ * answers both statements, told apart by their text.
  */
 function prelocked(
   rows: Array<{ productId: number; locationId: number; quantity: number; version: number }>
 ): void {
-  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) =>
-    isPrelockSelect(sqlTextOf(args[0])) ? rows : []
-  );
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) => {
+    const sql = sqlTextOf(args[0]);
+    if (isOrderLockSelect(sql)) return LOCKED_ORDERS;
+    return isPrelockSelect(sql) ? rows : [];
+  });
 }
 
 /** The prelocked key both surfaces touch: stocked, at version 1. */
@@ -653,5 +671,68 @@ describe("AdjustWithIntentSchema — the chip is optional and closed-vocabulary"
     expect(
       AdjustWithIntentSchema.parse({ ...base, autoAddForTransfer: true }).autoAddForTransfer
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE LOCK DISCIPLINE on the adjust surface (spec §2.7(1); pack CB1b.5)
+// ---------------------------------------------------------------------------
+
+describe("adjust route — the order lock rides the primitive's hook", () => {
+  it("STAMPED: the lock SELECT is the transaction's first statement, asked with the stamped id", async () => {
+    db.externalOrder.findUnique.mockResolvedValue({ companyId: COMPANY_ID } as any);
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    const res = await ADJUST(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: -3,
+        intent: "order",
+        selectedExternalOrderId: ORDER_CUID,
+      })
+    );
+    expect(res.status).toBe(200);
+
+    expect(isOrderLockSelect(rawCalls[0].sql)).toBe(true);
+    expect((rawFns.$queryRaw.mock.calls[0][0] as any).values).toEqual([ORDER_CUID]);
+    // ...before the prelock, which is before the ledger write.
+    expect(rawCalls[1].sql).toContain("INSERT INTO product_locations");
+    expect(rawFns.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
+      tx.inventory_logs.create.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("UNSTAMPED: no order, no lock — the prelock is the first statement", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    const res = await ADJUST(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: -3,
+        intent: "damage-loss",
+      })
+    );
+    expect(res.status).toBe(200);
+
+    expect(rawCalls.filter((c) => isOrderLockSelect(c.sql))).toHaveLength(0);
+    expect(rawCalls[0].sql).toContain("INSERT INTO product_locations");
+  });
+
+  it("answers with the batch its ledger row and audit event share", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    const res = await ADJUST(
+      post("http://x/api/inventory/adjust", { productId: 5, locationId: 2, delta: -3 })
+    );
+    const body = await res.json();
+
+    expect(typeof body.batchId).toBe("string");
+    expect((tx.inventory_logs.create.mock.calls[0][0].data as any).batchId).toBe(body.batchId);
+    expect((tx.auditLog.create.mock.calls[0][0] as any).data.batchId).toBe(body.batchId);
   });
 });

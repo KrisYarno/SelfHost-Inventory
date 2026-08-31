@@ -80,7 +80,14 @@ export const AdjustWithIntentSchema = InventoryAdjustmentSchema.extend({
 });
 
 export const BatchInventoryAdjustmentSchema = z.object({
-  adjustments: z.array(InventoryAdjustmentSchema).min(1, 'At least one adjustment is required'),
+  // Reconciliation Part 2 (pack CB1b.5): the request-size maximum. The journal
+  // sends one adjustment per counted product and the route prelocks all of them
+  // in one statement; past the prelock's own cap that would be a bare 500, so
+  // the request is bounded here instead.
+  adjustments: z
+    .array(InventoryAdjustmentSchema)
+    .min(1, 'At least one adjustment is required')
+    .max(100, 'at most 100 items per request'),
   type: z.string().trim().optional(),
 });
 

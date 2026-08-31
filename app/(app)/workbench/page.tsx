@@ -11,7 +11,11 @@ import { ProductTile } from "@/components/workbench/product-tile";
 import { QuantityPicker } from "@/components/workbench/quantity-picker";
 import { OrderList } from "@/components/workbench/order-list";
 import { OrderQueue } from "@/components/workbench/order-queue";
-import { CompleteOrderDialog, type DeductionDetail } from "@/components/workbench/complete-order-dialog";
+import {
+  CompleteOrderDialog,
+  type CompletionBatchIds,
+  type DeductionDetail,
+} from "@/components/workbench/complete-order-dialog";
 import { WCOrderSelector } from "@/components/workbench/wc-order-selector";
 import { UnmappedItemsAlert } from "@/components/workbench/unmapped-items-alert";
 import { FloatingCartButton } from "@/components/workbench/floating-cart-button";
@@ -95,9 +99,23 @@ export default function WorkbenchPage() {
     };
   }, []);
 
-  // Amendment 7: Undo handler with unfulfill API for WC orders
+  // Amendment 7: Undo handler with unfulfill API for WC orders.
+  //
+  // Reconciliation Part 2 (pack CB1b.6 / seam S-B5): `batchIds` names the two
+  // movements the completion made — REQUIRED, and placed before the optional
+  // `externalOrderId` (a required parameter cannot follow an optional one). The
+  // WRITER is unchanged here: the manual leg is still N positive adjusts. What
+  // the ids buy is the next milestone's one-call reverse, and they are threaded
+  // now so the thread is proven before anything depends on it.
   const handleUndoDeduction = useCallback(
-    async (items: DeductionDetail[], orderRef: string, externalOrderId?: string) => {
+    async (
+      items: DeductionDetail[],
+      orderRef: string,
+      batchIds: CompletionBatchIds,
+      externalOrderId?: string
+    ) => {
+      // Threaded, not yet consumed: the ONE-reverse writer is the next milestone.
+      void batchIds;
       if (!csrfToken) {
         toast.error("Session expired. Cannot undo.");
         return;
@@ -163,7 +181,12 @@ export default function WorkbenchPage() {
   );
 
   const showUndoToast = useCallback(
-    (orderRef: string, items: DeductionDetail[], externalOrderId?: string) => {
+    (
+      orderRef: string,
+      items: DeductionDetail[],
+      batchIds: CompletionBatchIds,
+      externalOrderId?: string
+    ) => {
       const message = externalOrderId
         ? `Order ${orderRef} fulfilled.`
         : `Order ${orderRef} completed.`;
@@ -178,7 +201,7 @@ export default function WorkbenchPage() {
             className="inline-flex items-center gap-1.5 rounded-md bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:bg-foreground/90 transition-colors shrink-0"
             onClick={() => {
               toast.dismiss(`undo-${orderRef}`);
-              handleUndoDeduction(items, orderRef, externalOrderId);
+              handleUndoDeduction(items, orderRef, batchIds, externalOrderId);
             }}
           >
             <Undo2 className="h-3 w-3" />
@@ -655,11 +678,16 @@ export default function WorkbenchPage() {
       <CompleteOrderDialog
         open={showCompleteDialog}
         onOpenChange={setShowCompleteDialog}
-        onSuccess={({ orderReference: completedRef, items: deductedItems, externalOrderId }) => {
+        onSuccess={({
+          orderReference: completedRef,
+          items: deductedItems,
+          batchIds,
+          externalOrderId,
+        }) => {
           refetchProducts();
           setMobileCartOpen(false);
           // Show undo toast for 10 seconds (Amendment 7: includes unfulfill for WC orders)
-          showUndoToast(completedRef, deductedItems, externalOrderId);
+          showUndoToast(completedRef, deductedItems, batchIds, externalOrderId);
           // Advance to the next order in the queue (Amendment 6: forces manual mode)
           const next = advanceQueue();
           if (next) {

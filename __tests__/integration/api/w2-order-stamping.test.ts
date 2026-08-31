@@ -108,21 +108,49 @@ function isPrelockSelect(sql: string): boolean {
 }
 
 /**
+ * The order lock's SELECT (lib/inventory/order-lock.ts), by its text — the
+ * statement every stock-writing route now spends FIRST when it names an order
+ * (pack CB1b). A route whose lock finds nothing answers 409 ORDER_GONE, so the
+ * orders these tests drive have to be here.
+ */
+function isOrderLockSelect(sql: string): boolean {
+  return sql.includes("FROM external_orders") && sql.includes("FOR UPDATE");
+}
+
+/** The orders these routes lock, as the lock reads them back. */
+const LOCKED_ORDERS = [{ id: ORDER_CUID, orderNumber: "12345" }];
+
+/**
  * What the prelock's returning SELECT hands back. The primitives' per-key
  * `product_locations.findUnique` retired with the prelock (pack CB1a-i), so
  * the fixture that read { quantity: 100, version: 1 } is spelled here as the
  * materialized rows the version guard and the stock floor now read.
+ *
+ * The order lock's rows ride the same dispatcher (pack CB1b): one raw read
+ * answers both statements, told apart by their text.
  */
 function prelocked(
   rows: Array<{ productId: number; locationId: number; quantity: number; version: number }>
 ): void {
-  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) =>
-    isPrelockSelect(sqlTextOf(args[0])) ? rows : []
-  );
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) => {
+    const sql = sqlTextOf(args[0]);
+    if (isOrderLockSelect(sql)) return LOCKED_ORDERS;
+    return isPrelockSelect(sql) ? rows : [];
+  });
 }
 
-/** The prelocked key the manual deduction touches: stocked, at version 1. */
-const STOCKED = [{ productId: 5, locationId: 2, quantity: 100, version: 1 }];
+/**
+ * Every prelocked key the three routes here touch: stocked, at version 1. The
+ * manual deduction's (5,2); fulfil/unfulfill's single line (10,5); and the
+ * bundle's components (21,5) and (22,5) — unfulfill prelocks per COMPONENT
+ * (pack CB1b.3), never the bundle line's own product.
+ */
+const STOCKED = [
+  { productId: 5, locationId: 2, quantity: 100, version: 1 },
+  { productId: 10, locationId: 5, quantity: 100, version: 1 },
+  { productId: 21, locationId: 5, quantity: 100, version: 1 },
+  { productId: 22, locationId: 5, quantity: 100, version: 1 },
+];
 
 function makeTx() {
   const tx = mockDeep<Prisma.TransactionClient>();
@@ -493,5 +521,147 @@ describe("deduct-simple — the ATTEMPT row records WHICH evidence, or why none"
       source: "live-deduct",
       actorUserId: 7,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE LOCK DISCIPLINE (reconciliation Part 2, spec §2.7; pack CB1b.1/.2)
+//
+// Same three routes, one level down: not WHICH order they stamp but WHEN they
+// take it. The order lock is statement 1, the prelock follows it, and the first
+// stock write follows both — so two requests packing the same order serialize
+// on `external_orders` before either has touched a ledger row. An UNSTAMPED
+// deduction has no order to serialize on and spends nothing.
+// ---------------------------------------------------------------------------
+
+describe("the lock discipline — the order lock, then the prelock, then the writes", () => {
+  /** The raw statements this request spent, in call order. */
+  const kinds = () => rawCalls.map((c) => c.kind);
+
+  function driveManualDeduct(tx: ReturnType<typeof makeTx>, body: Record<string, unknown>) {
+    tx.inventory_logs.create.mockResolvedValue({
+      id: 4242,
+      productId: 5,
+      delta: -3,
+      products: { name: "Widget" },
+    } as any);
+    driveTxWith(tx);
+    return DEDUCT(
+      post("http://x/api/inventory/deduct-simple", {
+        locationId: 2,
+        items: [{ productId: 5, quantity: 3 }],
+        ...body,
+      })
+    );
+  }
+
+  it("deduct-simple STAMPED: the lock SELECT precedes the prelock, which precedes the first write", async () => {
+    db.externalOrder.findUnique.mockResolvedValue({ companyId: COMPANY_ID } as any);
+    const tx = makeTx();
+
+    const res = await driveManualDeduct(tx, {
+      intent: "order",
+      selectedExternalOrderId: ORDER_CUID,
+    });
+    expect(res.status).toBe(200);
+
+    // lock SELECT · prelock INSERT · prelock SELECT — and nothing before them.
+    expect(kinds().slice(0, 3)).toEqual(["query", "execute", "query"]);
+    expect(isOrderLockSelect(rawCalls[0].sql)).toBe(true);
+    expect(rawCalls[1].sql).toContain("INSERT INTO product_locations");
+    expect(isPrelockSelect(rawCalls[2].sql)).toBe(true);
+    // The lock names the id being STAMPED.
+    expect((rawFns.$queryRaw.mock.calls[0][0] as any).values).toEqual([ORDER_CUID]);
+    // ...and every raw statement precedes the first ledger write.
+    expect(rawFns.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
+      tx.inventory_logs.create.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("deduct-simple UNSTAMPED: ZERO order-lock statements, the prelock alone", async () => {
+    const tx = makeTx();
+
+    const res = await driveManualDeduct(tx, {});
+    expect(res.status).toBe(200);
+
+    expect(rawCalls.filter((c) => isOrderLockSelect(c.sql))).toHaveLength(0);
+    expect(kinds().slice(0, 2)).toEqual(["execute", "query"]);
+    expect(rawCalls[0].sql).toContain("INSERT INTO product_locations");
+  });
+
+  it("deduct-simple answers with the batch it wrote under", async () => {
+    const tx = makeTx();
+    const res = await driveManualDeduct(tx, {});
+    const body = await res.json();
+
+    expect(typeof body.batchId).toBe("string");
+    // The SAME batch the ledger rows and the audit event carry.
+    expect(tx.inventory_logs.create.mock.calls[0][0].data.batchId).toBe(body.batchId);
+    expect((tx.auditLog.create.mock.calls[0][0] as any).data.batchId).toBe(body.batchId);
+  });
+
+  it("fulfil: the lock is statement 1, asked with the id from the PATH", async () => {
+    const tx = makeTx();
+    tx.externalOrder.findUnique.mockResolvedValue({
+      id: ORDER_CUID,
+      externalId: "ext-1",
+      integrationId: "int-1",
+      internalStatus: "pending",
+      fulfilledAt: null,
+      fulfilledBy: null,
+      integration: { id: "int-1", platform: "WOOCOMMERCE", fulfillmentPushEnabled: false },
+      items: [singleLine()],
+    } as any);
+    driveTxWith(tx);
+
+    const res = await FULFILL(
+      post(`http://x/api/orders/${ORDER_CUID}/fulfill`, {
+        locationId: 5,
+        items: [{ itemId: "item-1", quantity: 2 }],
+      }),
+      { params: { orderId: ORDER_CUID } } as any
+    );
+    expect(res.status).toBe(200);
+
+    expect(isOrderLockSelect(rawCalls[0].sql)).toBe(true);
+    expect((rawFns.$queryRaw.mock.calls[0][0] as any).values).toEqual([ORDER_CUID]);
+    // The lock precedes the order read this transaction's view opens on.
+    expect(rawFns.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.externalOrder.findUnique.mock.invocationCallOrder[0]
+    );
+
+    // ...and the response names the batch its SALE rows carry.
+    const body = await res.json();
+    expect(typeof body.batchId).toBe("string");
+    expect(tx.inventory_logs.create.mock.calls[0][0].data.batchId).toBe(body.batchId);
+  });
+
+  it("unfulfill: the lock, then pass 1, then the prelock, then the restorations", async () => {
+    const tx = makeTx();
+    tx.externalOrder.findUnique.mockResolvedValue({
+      id: ORDER_CUID,
+      externalId: "ext-1",
+      integrationId: "int-1",
+      internalStatus: "processing",
+      integration: { id: "int-1", fulfillmentPushEnabled: false },
+      items: [singleLine({ fulfilledQty: 2 })],
+    } as any);
+    driveTxWith(tx);
+
+    const res = await UNFULFILL(
+      post(`http://x/api/orders/${ORDER_CUID}/unfulfill`, {
+        items: [{ itemId: "item-1", productId: 10, quantity: 2, locationId: 5 }],
+      }),
+      { params: { orderId: ORDER_CUID } } as any
+    );
+    expect(res.status).toBe(200);
+
+    expect(isOrderLockSelect(rawCalls[0].sql)).toBe(true);
+    expect(rawCalls[1].sql).toContain("UPDATE external_order_items");
+    expect(rawCalls[2].sql).toContain("INSERT INTO product_locations");
+    expect(isPrelockSelect(rawCalls[3].sql)).toBe(true);
+    expect(rawCalls[4].sql).toContain("UPDATE product_locations");
+    // The materialized row is always there — the create fallback is gone.
+    expect(tx.product_locations.create).not.toHaveBeenCalled();
   });
 });

@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { Prisma } from '@prisma/client';
 import { apiHandler, requireAdmin, requireCSRF } from '@/lib/api-utils';
 import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
 import { newBatchId, recordChange } from '@/lib/change-tracking';
 import { withDeadlockRetry } from '@/lib/inventory';
+import { ORDER_GONE, withOrderLock } from '@/lib/inventory/order-lock';
 import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
 import { recordAttributionAttempt } from '@/lib/attribution/attempts';
 import { getBatchDetail } from '@/lib/reconciliation/attribution';
@@ -148,14 +148,21 @@ function refusalResponse(err: unknown): NextResponse | null {
  * "That batch belongs to order #1009." The route is admin-only, CSRF-guarded and
  * rate-limited, and everything it changes happens inside ONE transaction:
  *
- *   1. LOCK THE TARGET ORDER `FOR SHARE`, first, inside the transaction. The
- *      order id is a SOFT reference with no foreign key, so a webhook or an
- *      integration sync can delete it between a pre-flight check and the COMMIT
- *      — and the batch would end up stamped with an order that no longer exists.
- *      The lock order is frozen: external_orders target, then inventory_logs
- *      batch (CX-5). The two-column projection is D6's writer-only exception.
- *      The id it READS BACK is the canonical one, and it is what the rest of this
- *      handler uses — never the caller's spelling (CR-2, below).
+ *   1. LOCK THE ORDERS, first, inside the transaction — the target as REQUIRED,
+ *      the caller's stated previous order as ADVISORY, in ONE statement
+ *      (reconciliation Part 2, spec §2.7(1), pack CB1b.4). The order id is a
+ *      SOFT reference with no foreign key, so a webhook or an integration sync
+ *      can delete it between a pre-flight check and the COMMIT — and the batch
+ *      would end up stamped with an order that no longer exists. The lock order
+ *      is frozen: external_orders orders, then inventory_logs batch (CX-5). The
+ *      two-column projection is D6's writer-only exception. The lock is an X
+ *      lock now, not `FOR SHARE`: this handler moves a batch BETWEEN two orders,
+ *      and two admins moving batches between the same pair must serialize here
+ *      rather than deadlock later. A missing ADVISORY previous order is simply
+ *      absent — a stale reference must never brick the correction that names it,
+ *      and the `BATCH_MOVED` ladder still fires off the ledger's own stamp. The
+ *      id the lock READS BACK is the canonical one, and it is what the rest of
+ *      this handler uses — never the caller's spelling (CR-2, below).
  *   2. RUN THE CORE, which owns the eligibility ladder and the guarded write.
  *   3. RECORD, inside `onRecord`: the attempt row (attributed / manual) and the
  *      `INVENTORY_ATTRIBUTE` audit event. The audit event carries a NEWLY MINTED
@@ -191,71 +198,83 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
   let result;
   try {
     result = await withDeadlockRetry(() =>
-      prisma.$transaction(async (tx) => {
-        const [order] = await tx.$queryRaw<Array<{ id: string; orderNumber: string }>>(
-          Prisma.sql`SELECT id, orderNumber FROM external_orders WHERE id = ${body.orderRecordId} FOR SHARE`,
-        );
-        if (!order) {
-          throw new AppError('unknown order', 'NOT_FOUND', 404);
-        }
+      withOrderLock(
+        prisma,
+        {
+          required: [body.orderRecordId],
+          advisory: body.expectPreviousOrderRecordId ? [body.expectPreviousOrderRecordId] : [],
+        },
+        async (tx, orders) => {
+          // The target is REQUIRED, so it is in the map or the lock threw; the
+          // map answers for the id that was ASKED (the collation resolves the
+          // spelling, see below).
+          const order = orders.get(body.orderRecordId)!;
 
-        // THE CANONICAL ID IS THE ONE THE LOCK READ BACK (CR-2). `external_orders.id`
-        // is `utf8mb4_unicode_ci`, so the lookup above matches case-INSENSITIVELY:
-        // `ORD-A` finds the row stored as `ord-a`. Everything downstream of this
-        // point is JavaScript string identity — the report's order map, the core's
-        // stamp `Set`, the same-id short circuit, the R2b target comparison — so
-        // carrying the caller's spelling stamped the ledger with an id no later
-        // read could match, and the next report said "order missing" about an
-        // order that is right there. The lock is still ASKED with what the caller
-        // typed (the collation is what resolves it); it is the ANSWER that travels.
-        const orderRecordId = order.id;
+          // THE CANONICAL ID IS THE ONE THE LOCK READ BACK (CR-2). `external_orders.id`
+          // is `utf8mb4_unicode_ci`, so the lookup above matches case-INSENSITIVELY:
+          // `ORD-A` finds the row stored as `ord-a`. Everything downstream of this
+          // point is JavaScript string identity — the report's order map, the core's
+          // stamp `Set`, the same-id short circuit, the R2b target comparison — so
+          // carrying the caller's spelling stamped the ledger with an id no later
+          // read could match, and the next report said "order missing" about an
+          // order that is right there. The lock is still ASKED with what the caller
+          // typed (the collation is what resolves it); it is the ANSWER that travels.
+          const orderRecordId = order.id;
 
-        return attributeBatch(
-          tx,
-          {
-            batchId,
-            orderRecordId,
-            expectPreviousOrderRecordId: body.expectPreviousOrderRecordId,
-            reason,
-            actorUserId: user.id,
-          },
-          async (txn, ctx) => {
-            await recordAttributionAttempt(txn, {
+          return attributeBatch(
+            tx,
+            {
               batchId,
-              ledgerRowId: ctx.firstRowId,
-              outcome: 'attributed',
-              evidence: 'manual',
-              source: 'manual',
-              actorUserId: user.id,
               orderRecordId,
-              previousOrderRecordId: ctx.previousOrderRecordId,
-              details: {
-                rowCount: ctx.rowCount,
-                ...(reason ? { overwriteReason: reason } : {}),
-                ...(ctx.completedFulfillment ? { completedFulfillment: true } : {}),
-              },
-            });
-
-            await recordChange(txn, {
-              actor: { userId: user.id },
-              actionType: 'INVENTORY_ATTRIBUTE',
-              entityType: 'INVENTORY',
-              entityId: batchId,
-              action: `Attributed outbound batch ${batchId} to order ${order.orderNumber}`,
-              details: {
+              expectPreviousOrderRecordId: body.expectPreviousOrderRecordId,
+              reason,
+              actorUserId: user.id,
+            },
+            async (txn, ctx) => {
+              await recordAttributionAttempt(txn, {
+                batchId,
+                ledgerRowId: ctx.firstRowId,
+                outcome: 'attributed',
+                evidence: 'manual',
+                source: 'manual',
+                actorUserId: user.id,
                 orderRecordId,
                 previousOrderRecordId: ctx.previousOrderRecordId,
-                reason,
-                rowCount: ctx.rowCount,
-              },
-              batchId: auditBatchId,
-              affectedCount: ctx.rowCount,
-            });
-          },
-        );
-      }),
+                details: {
+                  rowCount: ctx.rowCount,
+                  ...(reason ? { overwriteReason: reason } : {}),
+                  ...(ctx.completedFulfillment ? { completedFulfillment: true } : {}),
+                },
+              });
+
+              await recordChange(txn, {
+                actor: { userId: user.id },
+                actionType: 'INVENTORY_ATTRIBUTE',
+                entityType: 'INVENTORY',
+                entityId: batchId,
+                action: `Attributed outbound batch ${batchId} to order ${order.orderNumber}`,
+                details: {
+                  orderRecordId,
+                  previousOrderRecordId: ctx.previousOrderRecordId,
+                  reason,
+                  rowCount: ctx.rowCount,
+                },
+                batchId: auditBatchId,
+                affectedCount: ctx.rowCount,
+              });
+            },
+          );
+        },
+      ),
     );
   } catch (err) {
+    // THE TARGET VANISHED. The shared lock says 409 `ORDER_GONE` for a missing
+    // REQUIRED id; on this route the target is the ONLY required id, and "the
+    // order you named does not exist" has always been this handler's 404. The
+    // answer an admin gets is therefore unchanged by the lock's arrival.
+    if (err instanceof AppError && err.code === ORDER_GONE) {
+      throw new AppError('unknown order', 'NOT_FOUND', 404);
+    }
     const refusal = refusalResponse(err);
     if (refusal) {
       return refusal;

@@ -15,10 +15,43 @@ import { AppError } from '@/lib/error-handling';
 import prisma from '@/lib/prisma';
 import { Prisma, inventory_logs_logType } from '@prisma/client';
 import { createInventoryLog } from '@/lib/inventory';
+import { withOrderLock } from '@/lib/inventory/order-lock';
+import {
+  MAX_PRELOCK_KEYS,
+  prelockKey,
+  prelockProductLocations,
+  type PrelockKeyInput,
+} from '@/lib/inventory/prelock';
 import { pushOrderStatusToExternal } from '@/lib/external-orders/shared';
 import { pushStockForProducts } from '@/lib/external-orders/stock-sync';
 
 export const dynamic = 'force-dynamic';
+
+/**
+ * ONE item that SURVIVED pass 1 — its `fulfilledQty` is already decremented and
+ * every guard has passed, so pass 2 owes it exactly the stock it names.
+ *
+ * Discriminated because the two branches restore different things: a single
+ * mapping restores its own product, a bundle restores one row per COMPONENT
+ * (and answers with the sentinel entry the public shape expects). The
+ * restoration quantities are computed here, in pass 1, so the prelock between
+ * the passes can be built from the survivors alone.
+ */
+type Survivor =
+  | {
+      kind: 'single';
+      itemId: string;
+      locationId: number;
+      productId: number;
+      quantity: number;
+    }
+  | {
+      kind: 'bundle';
+      itemId: string;
+      locationId: number;
+      quantity: number;
+      components: Array<{ productId: number; restoreQty: number }>;
+    };
 
 export const POST = apiHandler(async (
   request: NextRequest,
@@ -71,7 +104,13 @@ export const POST = apiHandler(async (
   // details so the audit row and the restoration's ledger rows are joinable.
   const batchId = newBatchId();
 
-  await prisma.$transaction(
+  // Reconciliation Part 2 (spec §2.7(1), pack CB1b.3): the ORDER LOCK is
+  // statement 1 of this transaction — before the order read below, which is its
+  // first consistent read. The route's own 30 second budget rides through as
+  // `txOptions`; the wrapper must not drop it.
+  await withOrderLock(
+    prisma,
+    { required: [params.orderId] },
     async (tx) => {
       // Load order with productLink for productId verification (P1-4)
       const order = await tx.externalOrder.findUnique({
@@ -111,7 +150,21 @@ export const POST = apiHandler(async (
       orderExternalId = order.externalId;
       orderIntegrationId = order.integrationId;
 
-      // Process each unfulfillment item
+      // ---------------------------------------------------------------------
+      // PASS 1 — decide, and decrement `fulfilledQty` (pack CB1b.3).
+      //
+      // Everything that can refuse an item happens here: the mapping checks,
+      // the bundle resolution, the deleted-product check and the atomic
+      // fulfilledQty decrement that IS this route's concurrency guard. What
+      // comes out is the SURVIVORS — the items this request will restore stock
+      // for — and with them the complete key set the prelock has to cover. The
+      // stock writes wait for pass 2 because the prelock has to sit between:
+      // interleaving them, as this route used to, would take
+      // `product_locations` locks one item at a time, in request order, which
+      // is exactly the lock order the lane is removing.
+      // ---------------------------------------------------------------------
+      const survivors: Survivor[] = [];
+
       for (const unfulfillItem of body.items) {
         // Find the order item in the loaded order
         const orderItem = order.items.find(
@@ -194,81 +247,19 @@ export const POST = apiHandler(async (
             continue;
           }
 
-          // Restore each component inside the same transaction (all-or-nothing)
-          for (const component of components) {
-            const restoreQty = component.quantity * unfulfillItem.quantity;
-
-            await createInventoryLog(
-              {
-                userId: user.id,
-                productId: component.internalProductId,
-                locationId: unfulfillItem.locationId,
-                delta: +restoreQty, // POSITIVE (restoration)
-                // Phase C (P-C2): unfulfill reverses a prior SALE — a CORRECTION,
-                // not a fresh adjustment; batchId joins the row to the audit event.
-                logType: inventory_logs_logType.CORRECTION,
-                reasonCode: 'CORRECTION',
-                batchId,
-                // W2-1 (pack T7 stamping): the reversal names the same order the
-                // deduction did, so a reconciliation sees BOTH halves of the
-                // movement. `order.id` is this transaction's loaded order (path
-                // parameter, membership-checked above) — never a body field.
-                orderRecordId: order.id,
-              },
-              tx
-            );
-
-            // Atomic product_locations increment for this component
-            const compPlAffected = await tx.$executeRaw(Prisma.sql`
-              UPDATE product_locations
-              SET quantity = quantity + ${restoreQty},
-                  version = version + 1,
-                  updatedAt = NOW()
-              WHERE productId = ${component.internalProductId}
-                AND locationId = ${unfulfillItem.locationId}
-            `);
-
-            if (compPlAffected === 0) {
-              // Row doesn't exist — create it with the restored quantity
-              await tx.product_locations.create({
-                data: {
-                  productId: component.internalProductId,
-                  locationId: unfulfillItem.locationId,
-                  quantity: restoreQty,
-                  version: 1,
-                },
-              });
-            }
-
-            // Legacy product.quantity mirror for location 1 (atomic)
-            if (unfulfillItem.locationId === 1) {
-              await tx.$executeRaw(Prisma.sql`
-                UPDATE products
-                SET quantity = quantity + ${restoreQty}
-                WHERE id = ${component.internalProductId}
-              `);
-            }
-          }
-
-          // Per-item component IDs for clean public response (Fix C P0 #6)
-          const itemComponentIds = components.map((c) => c.internalProductId);
-
-          restored.push({
+          // The component restorations this item earned — computed now, written
+          // in pass 2. Each component's units are multiplied by the unfulfilled
+          // quantity exactly as before.
+          survivors.push({
+            kind: 'bundle',
             itemId: unfulfillItem.itemId,
-            productId: BUNDLE_SENTINEL_PRODUCT_ID,
-            quantity: unfulfillItem.quantity,
             locationId: unfulfillItem.locationId,
-            inventoryLogId: BUNDLE_SENTINEL_INVENTORY_LOG_ID,
-            isBundle: true,
-            componentIds: itemComponentIds,
+            quantity: unfulfillItem.quantity,
+            components: components.map((component) => ({
+              productId: component.internalProductId,
+              restoreQty: component.quantity * unfulfillItem.quantity,
+            })),
           });
-
-          // P0-3: Accumulate component IDs so the route can push bundle WC stock
-          for (const component of components) {
-            if (!restoredComponentIds.includes(component.internalProductId)) {
-              restoredComponentIds.push(component.internalProductId);
-            }
-          }
 
           continue; // Skip the single-mapping path below
         }
@@ -318,13 +309,135 @@ export const POST = apiHandler(async (
           continue;
         }
 
+        survivors.push({
+          kind: 'single',
+          itemId: unfulfillItem.itemId,
+          locationId: unfulfillItem.locationId,
+          productId: unfulfillItem.productId,
+          quantity: unfulfillItem.quantity,
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // THE PRELOCK — one statement pair over EVERY surviving key, components
+      // included (spec §2.7(3), pack CB1b.3).
+      //
+      // A bundle multiplies keys past the request's item count, so the request
+      // schema's cap of 100 items does not bound this set on its own: the count
+      // is checked here, against the prelock's own cap, and refused as a 400
+      // rather than reaching the library's RangeError (an unhelpful 500). The
+      // refusal aborts the transaction atomically — pass 1's decrements included.
+      // ---------------------------------------------------------------------
+      const restorationKeys: PrelockKeyInput[] = [];
+      for (const survivor of survivors) {
+        if (survivor.kind === 'bundle') {
+          survivor.components.forEach((component) => {
+            restorationKeys.push({
+              productId: component.productId,
+              locationId: survivor.locationId,
+            });
+          });
+        } else {
+          restorationKeys.push({
+            productId: survivor.productId,
+            locationId: survivor.locationId,
+          });
+        }
+      }
+
+      const distinctKeys = new Set(
+        restorationKeys.map((key) => prelockKey(key.productId, key.locationId))
+      );
+      if (distinctKeys.size > MAX_PRELOCK_KEYS) {
+        throw new AppError(
+          'too many restorations in one request — split it',
+          'TOO_MANY_KEYS',
+          400
+        );
+      }
+
+      await prelockProductLocations(tx, restorationKeys);
+
+      // ---------------------------------------------------------------------
+      // PASS 2 — the restorations themselves, on rows this transaction already
+      // holds. Every `product_locations` row named here was materialized by the
+      // prelock, so the "row doesn't exist, create it" fallback that used to
+      // guard each increment is dead code and is gone (pack CB1b.3).
+      // ---------------------------------------------------------------------
+      for (const survivor of survivors) {
+        if (survivor.kind === 'bundle') {
+          // Restore each component inside the same transaction (all-or-nothing)
+          for (const component of survivor.components) {
+            await createInventoryLog(
+              {
+                userId: user.id,
+                productId: component.productId,
+                locationId: survivor.locationId,
+                delta: +component.restoreQty, // POSITIVE (restoration)
+                // Phase C (P-C2): unfulfill reverses a prior SALE — a CORRECTION,
+                // not a fresh adjustment; batchId joins the row to the audit event.
+                logType: inventory_logs_logType.CORRECTION,
+                reasonCode: 'CORRECTION',
+                batchId,
+                // W2-1 (pack T7 stamping): the reversal names the same order the
+                // deduction did, so a reconciliation sees BOTH halves of the
+                // movement. `order.id` is this transaction's loaded order (path
+                // parameter, membership-checked above) — never a body field.
+                orderRecordId: order.id,
+              },
+              tx
+            );
+
+            // Atomic product_locations increment for this component
+            await tx.$executeRaw(Prisma.sql`
+              UPDATE product_locations
+              SET quantity = quantity + ${component.restoreQty},
+                  version = version + 1,
+                  updatedAt = NOW()
+              WHERE productId = ${component.productId}
+                AND locationId = ${survivor.locationId}
+            `);
+
+            // Legacy product.quantity mirror for location 1 (atomic)
+            if (survivor.locationId === 1) {
+              await tx.$executeRaw(Prisma.sql`
+                UPDATE products
+                SET quantity = quantity + ${component.restoreQty}
+                WHERE id = ${component.productId}
+              `);
+            }
+          }
+
+          // Per-item component IDs for clean public response (Fix C P0 #6)
+          const itemComponentIds = survivor.components.map((c) => c.productId);
+
+          restored.push({
+            itemId: survivor.itemId,
+            productId: BUNDLE_SENTINEL_PRODUCT_ID,
+            quantity: survivor.quantity,
+            locationId: survivor.locationId,
+            inventoryLogId: BUNDLE_SENTINEL_INVENTORY_LOG_ID,
+            isBundle: true,
+            componentIds: itemComponentIds,
+          });
+
+          // P0-3: Accumulate component IDs so the route can push bundle WC stock
+          for (const componentId of itemComponentIds) {
+            if (!restoredComponentIds.includes(componentId)) {
+              restoredComponentIds.push(componentId);
+            }
+          }
+
+          continue;
+        }
+
         // Create inventory log (restoration) — only after fulfilledQty decrement succeeded
         const log = await createInventoryLog(
           {
             userId: user.id,
-            productId: unfulfillItem.productId,
-            locationId: unfulfillItem.locationId,
-            delta: +unfulfillItem.quantity, // POSITIVE (restoration)
+            productId: survivor.productId,
+            locationId: survivor.locationId,
+            delta: +survivor.quantity, // POSITIVE (restoration)
             // Phase C (P-C2): unfulfill reverses a prior SALE — a CORRECTION,
             // not a fresh adjustment; batchId joins the row to the audit event.
             logType: inventory_logs_logType.CORRECTION,
@@ -337,43 +450,32 @@ export const POST = apiHandler(async (
           tx
         );
 
-        // Atomic product_locations increment. No WHERE quantity guard needed because
-        // we're adding stock, but we handle the missing-row case by creating.
-        const plAffected = await tx.$executeRaw(Prisma.sql`
+        // Atomic product_locations increment. No WHERE quantity guard needed
+        // because we're adding stock, and no missing-row case to handle: the
+        // prelock materialized this key before pass 2 began.
+        await tx.$executeRaw(Prisma.sql`
           UPDATE product_locations
-          SET quantity = quantity + ${unfulfillItem.quantity},
+          SET quantity = quantity + ${survivor.quantity},
               version = version + 1,
               updatedAt = NOW()
-          WHERE productId = ${unfulfillItem.productId}
-            AND locationId = ${unfulfillItem.locationId}
+          WHERE productId = ${survivor.productId}
+            AND locationId = ${survivor.locationId}
         `);
 
-        if (plAffected === 0) {
-          // Row doesn't exist — create it with the restored quantity
-          await tx.product_locations.create({
-            data: {
-              productId: unfulfillItem.productId,
-              locationId: unfulfillItem.locationId,
-              quantity: unfulfillItem.quantity,
-              version: 1,
-            },
-          });
-        }
-
         // Legacy product.quantity mirror for location 1 (atomic)
-        if (unfulfillItem.locationId === 1) {
+        if (survivor.locationId === 1) {
           await tx.$executeRaw(Prisma.sql`
             UPDATE products
-            SET quantity = quantity + ${unfulfillItem.quantity}
-            WHERE id = ${unfulfillItem.productId}
+            SET quantity = quantity + ${survivor.quantity}
+            WHERE id = ${survivor.productId}
           `);
         }
 
         restored.push({
-          itemId: unfulfillItem.itemId,
-          productId: unfulfillItem.productId,
-          quantity: unfulfillItem.quantity,
-          locationId: unfulfillItem.locationId,
+          itemId: survivor.itemId,
+          productId: survivor.productId,
+          quantity: survivor.quantity,
+          locationId: survivor.locationId,
           inventoryLogId: log.id,
         });
       }

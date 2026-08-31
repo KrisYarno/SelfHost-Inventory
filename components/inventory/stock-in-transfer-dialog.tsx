@@ -60,20 +60,29 @@ export function StockInTransferDialog({
   const [isLoading, setIsLoading] = React.useState(false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
-  // Fetch available quantities at all locations when dialog opens
-  React.useEffect(() => {
-    if (!open || !product) {
-      setLocations([]);
-      return;
-    }
+  /**
+   * Read the per-location availability AND VERSIONS this dialog submits with.
+   *
+   * Extracted from the mount effect (reconciliation Part 2, pack CB1b.6) because
+   * the partial-success branch has to run it again: every `expectedVersion` the
+   * dialog holds after a 207 is stale for the locations that moved stock, and a
+   * retry sending stale versions is exactly the conflict the prelock now
+   * refuses. `carry` is what a retry keeps — a failed transfer's requested
+   * quantity, RE-CLAMPED against what the refreshed read says is available, so
+   * the retry can never ask for stock that has since gone.
+   */
+  const refetchLocations = React.useCallback(
+    async (carry: Record<number, number> = {}) => {
+      if (!product) {
+        setLocations([]);
+        return;
+      }
 
-    setIsLoading(true);
-    fetch(`/api/inventory/product/${product.productId}/locations`)
-      .then((res) => {
+      setIsLoading(true);
+      try {
+        const res = await fetch(`/api/inventory/product/${product.productId}/locations`);
         if (!res.ok) throw new Error("Failed to fetch locations");
-        return res.json();
-      })
-      .then((data: { locations: ProductLocationQuantity[] }) => {
+        const data: { locations: ProductLocationQuantity[] } = await res.json();
         // Filter out the destination location and sort by available quantity (highest first)
         const otherLocations = data.locations
           .filter((loc) => loc.locationId !== destinationLocationId)
@@ -83,16 +92,27 @@ export function StockInTransferDialog({
             locationName: loc.locationName,
             available: loc.quantity,
             version: loc.version,
-            quantity: 0,
+            quantity: Math.min(Math.max(0, carry[loc.locationId] ?? 0), loc.quantity),
           }));
         setLocations(otherLocations);
-      })
-      .catch((err) => {
+      } catch (err) {
         console.error("Error fetching product locations:", err);
         toast.error("Failed to load available stock from other locations");
-      })
-      .finally(() => setIsLoading(false));
-  }, [open, product, destinationLocationId]);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [product, destinationLocationId]
+  );
+
+  // Fetch available quantities at all locations when dialog opens
+  React.useEffect(() => {
+    if (!open || !product) {
+      setLocations([]);
+      return;
+    }
+    void refetchLocations();
+  }, [open, product, refetchLocations]);
 
   if (!product) return null;
 
@@ -169,16 +189,42 @@ export function StockInTransferDialog({
         onOpenChange(false);
         onSuccess?.();
       } else if (response.status === 207) {
-        // Partial success
+        // PARTIAL SUCCESS — some source locations moved stock, some refused
+        // (reconciliation Part 2, pack CB1b.6; spec REV-9 CX6-18).
+        //
+        // The batch route answers per transfer, and so does this branch: a
+        // version conflict at ONE location is that location's message, not a
+        // request-wide failure the operator has to decode. The dialog STAYS
+        // OPEN, because the failed rows ARE the retry — closing it threw away
+        // the only screen that knew which sources still owed stock.
         const succeeded = data.results.filter((r) => r.success);
         const failed = data.results.filter((r) => !r.success);
-        toast.warning(
-          `Partially completed: ${succeeded.length} transfer${succeeded.length !== 1 ? "s" : ""} succeeded (${data.totalTransferred} units), ${failed.length} failed`
-        );
+
+        if (succeeded.length > 0) {
+          toast.success(
+            `Transferred ${data.totalTransferred} units of ${product.productName} from ${succeeded.length} location${succeeded.length !== 1 ? "s" : ""}`
+          );
+        }
+        for (const result of failed) {
+          const sourceName =
+            locations.find((loc) => loc.locationId === result.fromLocationId)?.locationName ??
+            `Location ${result.fromLocationId}`;
+          // The route's own sentence, verbatim — a version conflict says so.
+          toast.error(`${sourceName}: ${result.error ?? "Transfer failed"}`);
+        }
+
         // Partial success still moved stock; invalidate the same cross-page keys.
         invalidateInventoryCaches(queryClient, product.productId);
         onSuccess?.(); // Still refresh data
-        onOpenChange(false);
+
+        // Re-read availability AND versions: the succeeded rows come back at
+        // zero, the failed ones keep what was asked for, re-clamped — so a
+        // retry submits fresh `expectedVersion`s for exactly what is left.
+        const carry: Record<number, number> = {};
+        failed.forEach((result) => {
+          carry[result.fromLocationId] = result.quantity;
+        });
+        await refetchLocations(carry);
       } else {
         const errorMessage =
           (data as unknown as { error?: string }).error || "Failed to complete transfers";

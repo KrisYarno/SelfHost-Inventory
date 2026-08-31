@@ -627,22 +627,48 @@ export async function resetGateFixtures(scope: GateScope): Promise<void> {
   const prisma = new PrismaClient({ datasources: { db: { url: gateDatabaseUrl() } } });
   try {
     await prisma.$transaction(async (tx) => {
-      await tx.inventory_logs.deleteMany({
-        where: {
-          // THE RECONCILIATION FAMILY SURVIVES (pack C6.1). Its rows are the
-          // fixture scenarios 8/8b race on, they are seeded once, and they are
-          // put back by the re-stamp below rather than by a rebuild — a deletion
-          // here would take the batch itself away between two sub-cases.
-          id: { notIn: [...RECON_LEDGER_IDS] },
-          OR: [
-            { stagingItemId: { in: [...scope.lineIds] } },
-            { productId: { in: [...scope.productIds] } },
-            // Rows a scenario-created line left behind. NULL stagingItemId never
-            // matches a NOT IN and is left alone — this gate writes none.
-            { stagingItemId: { notIn: [...SEED_LINE_IDS] } },
-          ],
-        },
-      });
+      // ONE spelling of "the ledger rows this reset owns" — the derivation below
+      // and the delete itself must ask exactly the same question (pack CB1b.7).
+      const scopedLedgerWhere = {
+        // THE RECONCILIATION FAMILY SURVIVES (pack C6.1). Its rows are the
+        // fixture scenarios 8/8b race on, they are seeded once, and they are
+        // put back by the re-stamp below rather than by a rebuild — a deletion
+        // here would take the batch itself away between two sub-cases.
+        id: { notIn: [...RECON_LEDGER_IDS] },
+        OR: [
+          { stagingItemId: { in: [...scope.lineIds] } },
+          { productId: { in: [...scope.productIds] } },
+          // Rows a scenario-created line left behind. NULL stagingItemId never
+          // matches a NOT IN and is left alone — this gate writes none.
+          { stagingItemId: { notIn: [...SEED_LINE_IDS] } },
+        ],
+      };
+
+      // B1 OWNS THIS (reconciliation Part 2, pack CB1b.7). Scenario 13 drives
+      // the REAL deduct-simple and batch-adjust routes, and every route mints
+      // its own batchId, stamps it on the ledger rows AND files an
+      // `INVENTORY_BULK_UPDATE` audit row and an attempt row under it. No
+      // existing clause below names those ids — they are minted at run time —
+      // so they used to survive the reset, and receiving scenario 2's ABSOLUTE
+      // audit count is exactly the kind of assertion that residue breaks.
+      //
+      // The derivation reuses the delete's FULL where, `id: { notIn:
+      // RECON_LEDGER_IDS }` included: taken over the scope alone it would pick
+      // up RECON_BATCH_ID, and the reset would then eat the recon fixture's own
+      // audit summary and attempt rows — the ones the clauses below go out of
+      // their way to keep. It runs BEFORE the delete, because after it there is
+      // nothing left to derive from.
+      const routeBatchIds = (
+        await tx.inventory_logs.findMany({
+          where: { ...scopedLedgerWhere, batchId: { not: null } },
+          select: { batchId: true },
+          distinct: ["batchId"],
+        })
+      )
+        .map((row) => row.batchId)
+        .filter((batchId): batchId is string => batchId !== null);
+
+      await tx.inventory_logs.deleteMany({ where: scopedLedgerWhere });
       // The ONE thing a scenario changes about those rows: put the stamp back.
       await tx.inventory_logs.updateMany({
         where: { id: { in: [...RECON_LEDGER_IDS] } },
@@ -656,7 +682,11 @@ export async function resetGateFixtures(scope: GateScope): Promise<void> {
       // the scenario's own batch now that the recon fixture exists: nothing else
       // in this gate writes an attempt row, and an unscoped delete would quietly
       // cover for one that did.
-      await tx.orderAttributionAttempt.deleteMany({ where: { batchId: RECON_BATCH_ID } });
+      // ...plus, per B1, the attempts the route-driven scenarios minted (the
+      // fixture's own RECON_BATCH_ID attempts are still the other half).
+      await tx.orderAttributionAttempt.deleteMany({
+        where: { batchId: { in: [RECON_BATCH_ID, ...routeBatchIds] } },
+      });
       await tx.auditLog.deleteMany({
         where: {
           OR: [
@@ -668,6 +698,10 @@ export async function resetGateFixtures(scope: GateScope): Promise<void> {
             // this clause are needed — and neither of them matches the fixture's
             // INVENTORY_BULK_UPDATE summary, which stays put.
             { actionType: "INVENTORY_ATTRIBUTE", entityId: RECON_BATCH_ID },
+            // B1 (pack CB1b.7): the INVENTORY events a route-driven scenario
+            // filed under its own minted batchId — scoped by that id, so the
+            // fixture's summary row (RECON_BATCH_ID, excluded above) is safe.
+            { entityType: "INVENTORY", batchId: { in: routeBatchIds } },
           ],
         },
       });

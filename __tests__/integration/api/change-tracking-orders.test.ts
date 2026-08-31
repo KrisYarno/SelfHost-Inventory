@@ -119,8 +119,22 @@ function recordingRaw(): Record<string, jest.Mock> {
   install('query', '$queryRaw', []);
   install('execute', '$executeRaw', 1);
   install('executeUnsafe', '$executeRawUnsafe', 0);
+  // B1b: the ORDER LOCK is statement 1 of both routes' transactions now, and a
+  // lock that finds nothing answers 409 ORDER_GONE — so the order these tests
+  // drive has to come back from it. Everything else still answers empty.
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) =>
+    isOrderLockSelect(sqlTextOf(args[0])) ? LOCKED_ORDERS : []
+  );
   return out;
 }
+
+/** The order lock's SELECT (lib/inventory/order-lock.ts), by its text. */
+function isOrderLockSelect(sql: string): boolean {
+  return sql.includes('FROM external_orders') && sql.includes('FOR UPDATE');
+}
+
+/** The order both routes lock, as the lock reads it back. */
+const LOCKED_ORDERS = [{ id: ORDER_CUID, orderNumber: '12345' }];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -295,8 +309,12 @@ function makeUnfulfillTx() {
     externalOrderItem: {
       findMany: jest.fn().mockResolvedValue([{ quantity: 1, fulfilledQty: 0 }]),
     },
+    // The create fallback retired with B1b's prelock (the row is materialized
+    // before pass 2), so this stand-in exists only to prove it stays unused.
     product_locations: { create: jest.fn().mockResolvedValue({}) },
-    $executeRaw: jest.fn().mockResolvedValue(1),
+    // B1b: the route now spends the order lock, the two prelock statements and
+    // its own atomic UPDATEs on this tx — the whole recording trio rides here.
+    ...recordingRaw(),
     auditLog: { create: jest.fn().mockResolvedValue({ id: 2 }) },
   };
 }

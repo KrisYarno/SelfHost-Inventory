@@ -47,12 +47,29 @@ export interface DeductionDetail {
   fulfillmentItemId?: string;  // For WC order undo via unfulfill API
 }
 
+/**
+ * Reconciliation Part 2 (spec §2.7, pack CB1b.6 / seam S-B5): the batches this
+ * completion wrote, one per LEG.
+ *
+ * A mixed cart is two movements — the WC lines go through fulfill, the manual
+ * lines through deduct-simple — and each mints its own batch. The pair is
+ * REQUEST-grain, not item-grain, which is why it rides the completion envelope
+ * rather than `DeductionDetail`: every row a leg wrote carries that leg's id.
+ * A leg that did not run is `null`, never `undefined` — "this cart had no manual
+ * lines" is a fact the Undo has to be able to read.
+ */
+export type CompletionBatchIds = {
+  deductSimpleBatchId: string | null;
+  fulfilBatchId: string | null;
+};
+
 interface CompleteOrderDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess?: (details: {
     orderReference: string;
     items: DeductionDetail[];
+    batchIds: CompletionBatchIds;
     externalOrderId?: string;
   }) => void;
 }
@@ -190,6 +207,13 @@ export function CompleteOrderDialog({
     // user always sees a clean all-or-nothing transaction.
     let wcFulfilled = false;
 
+    // Reconciliation Part 2 (pack CB1b.6): the batch each leg wrote under, read
+    // off the response rather than guessed. Null until that leg actually runs.
+    const batchIds: CompletionBatchIds = {
+      deductSimpleBatchId: null,
+      fulfilBatchId: null,
+    };
+
     try {
       // Amendment 2: Dual API call for mixed carts
       // 1. Fulfill WC items via fulfillment API
@@ -220,7 +244,9 @@ export function CompleteOrderDialog({
           throw new Error(errorData.error || "Failed to fulfill WC order");
         }
 
-        await fulfillResponse.json();
+        const fulfillBody = await fulfillResponse.json();
+        batchIds.fulfilBatchId =
+          typeof fulfillBody?.batchId === "string" ? fulfillBody.batchId : null;
         wcFulfilled = true;
       }
 
@@ -320,7 +346,9 @@ export function CompleteOrderDialog({
           throw new Error(errorData.error || "Failed to process order");
         }
 
-        await deductResponse.json();
+        const deductBody = await deductResponse.json();
+        batchIds.deductSimpleBatchId =
+          typeof deductBody?.batchId === "string" ? deductBody.batchId : null;
       }
 
       // Capture deduction details BEFORE clearing (includes fulfillmentItemId for undo)
@@ -350,6 +378,9 @@ export function CompleteOrderDialog({
         onSuccess({
           orderReference: completedOrderRef,
           items: deductionDetails,
+          // Pack CB1b.6: the pair travels INTACT — the Undo names the movements
+          // this completion made, instead of inferring them from the items.
+          batchIds,
           externalOrderId,
         });
       }

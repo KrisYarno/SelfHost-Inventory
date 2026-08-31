@@ -118,17 +118,38 @@ function isPrelockSelect(sql: string): boolean {
 }
 
 /**
+ * The order lock's SELECT (lib/inventory/order-lock.ts), by its text — the
+ * statement every stock-writing route now spends FIRST when it names an order
+ * (pack CB1b). A route whose lock finds nothing answers 409 ORDER_GONE, so the
+ * orders these tests drive have to be here.
+ */
+function isOrderLockSelect(sql: string): boolean {
+  return sql.includes("FROM external_orders") && sql.includes("FOR UPDATE");
+}
+
+/** The orders these routes lock, as the lock reads them back. */
+const LOCKED_ORDERS = [
+  { id: ORDER_A, orderNumber: REF },
+  { id: ORDER_B, orderNumber: REF },
+];
+
+/**
  * What the prelock's returning SELECT hands back. `createInventoryTransaction`'s
  * per-item `product_locations.findUnique` retired with the prelock (pack
  * CB1a-i.4), so the fixture that read { quantity: 100, version: 1 } is spelled
  * here as the materialized row the stock floor now reads.
+ *
+ * The order lock's rows ride the same dispatcher (pack CB1b): one raw read
+ * answers both statements, told apart by their text.
  */
 function prelocked(
   rows: Array<{ productId: number; locationId: number; quantity: number; version: number }>
 ): void {
-  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) =>
-    isPrelockSelect(sqlTextOf(args[0])) ? rows : []
-  );
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) => {
+    const sql = sqlTextOf(args[0]);
+    if (isOrderLockSelect(sql)) return LOCKED_ORDERS;
+    return isPrelockSelect(sql) ? rows : [];
+  });
 }
 
 /** The prelocked key the manual deduction touches: stocked, at version 1. */

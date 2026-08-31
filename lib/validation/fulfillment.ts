@@ -17,7 +17,13 @@ export const FulfillmentItemSchema = z.object({
  */
 export const FulfillmentRequestSchema = z.object({
   locationId: positiveInt,
-  items: z.array(FulfillmentItemSchema).min(1, 'At least one item is required'),
+  // Reconciliation Part 2 (pack CB1b.5): the request-size maximum — see the
+  // note on SimpleDeductSchema.items. The simple path prelocks one key per
+  // fulfillable item; the bound keeps that inside the prelock's backstop.
+  items: z
+    .array(FulfillmentItemSchema)
+    .min(1, 'At least one item is required')
+    .max(100, 'at most 100 items per request'),
   notes: z.string().trim().max(1000).optional(),
 });
 
