@@ -10,7 +10,21 @@ import {
   InsufficientStockError,
   ProductNotFoundError
 } from '@/lib/error-handling';
+// Reconciliation Part 2 (spec §2.7(3), pack CB0.1/CB1a-i): THE canonical
+// prelock. Every covered writer in this file materializes + X-locks its
+// `product_locations` rows through this one function, in its canonical order,
+// before the transaction pins a read view — and reads its guards off what it
+// returns.
+import { prelockKey, prelockProductLocations } from '@/lib/inventory/prelock';
 import { v4 as uuidv4 } from 'uuid';
+
+/**
+ * What a prelocked key reads when the SELECT returned no row for it.
+ * Materialize-first makes that unreachable (the INSERT ran first, so the row
+ * exists); the default spells the never-stocked reading — `{ 0, 0 }`, the live
+ * column defaults — rather than crashing on an absence.
+ */
+const NEVER_STOCKED = { quantity: 0, version: 0 };
 
 /**
  * Creates an inventory log entry
@@ -22,7 +36,10 @@ export async function createInventoryLog(
     locationId: number;
     delta: number;
     logType?: inventory_logs_logType;
-    transferId?: string;
+    // Reconciliation Part 2 (pack CB1a-i.1 / REV-14 PKb-1): NULLABLE, like every
+    // passthrough below it — the field already normalises `?? null` at the write,
+    // and `applyStockDelta` now hands it straight through.
+    transferId?: string | null;
     // Phase C (P-C1): nullable passthrough. reasonCode/unitCostCents give the row
     // its ledger meaning; batchId joins the row to its companion audit event.
     reasonCode?: string | null;
@@ -224,6 +241,10 @@ export async function applyStockDelta(
     locationId: number;
     delta: number;
     logType?: inventory_logs_logType;
+    // Reconciliation Part 2 (pack CB1a-i.1): the leg-pair key, passed through to
+    // createInventoryLog exactly as bookingKey is. Additive — this path adds no
+    // semantics of its own, and no existing caller sends it.
+    transferId?: string | null;
     // Phase C (P-C1): pure passthrough into createInventoryLog — this hot path
     // adds no semantics of its own; callers decide the values.
     reasonCode?: string | null;
@@ -249,6 +270,7 @@ export async function applyStockDelta(
     locationId,
     delta,
     logType = inventory_logs_logType.ADJUSTMENT,
+    transferId,
     reasonCode,
     unitCostCents,
     batchId,
@@ -267,6 +289,7 @@ export async function applyStockDelta(
       locationId,
       delta,
       logType,
+      transferId,
       reasonCode,
       unitCostCents,
       batchId,
@@ -368,6 +391,13 @@ export async function createInventoryAdjustment(
     // id onto the adjustment's ledger row. Passthrough only — this function does
     // not resolve, validate or infer it.
     orderRecordId?: string | null;
+    // Reconciliation Part 2 (spec §2.7(1), pack CB1a-i.2): the ORDER lock, as a
+    // hook the caller supplies. This primitive owns its own transaction, so a
+    // route that needs `external_orders` locked first cannot wrap it — it hands
+    // the locking read in here instead, and it runs as the transaction's FIRST
+    // act. Idempotent by contract (it IS a locking read): the retry loop below
+    // re-enters the callback and runs it again.
+    lockFirst?: (tx: Prisma.TransactionClient) => Promise<unknown>;
     record?: (
       tx: Prisma.TransactionClient,
       result: { log: Awaited<ReturnType<typeof createInventoryLog>>; newVersion: number }
@@ -381,6 +411,7 @@ export async function createInventoryAdjustment(
     unitCostCents,
     batchId,
     orderRecordId,
+    lockFirst,
     record,
   } = opts ?? {};
 
@@ -390,53 +421,50 @@ export async function createInventoryAdjustment(
   while (retryCount < maxRetries) {
     try {
       return await prisma.$transaction(async (tx) => {
-        // Get current product location with version
-        const currentProductLocation = await tx.product_locations.findUnique({
-          where: {
-            productId_locationId: {
-              productId,
-              locationId,
-            },
-          },
-        });
+        // The order lock is statement 1 — before any read, so nothing this
+        // transaction sees predates it.
+        if (lockFirst) await lockFirst(tx);
 
-        // Check version if provided (for optimistic locking)
-        if (expectedVersion !== undefined && currentProductLocation) {
-          if (currentProductLocation.version !== expectedVersion) {
-            throw new OptimisticLockError(
-              'Product inventory has been modified by another user. Please refresh and try again.',
-              currentProductLocation.version,
-              expectedVersion
-            );
-          }
+        // THE CANONICAL PRELOCK (spec §2.7(3)): materialize + X-lock this row
+        // before the transaction's first consistent read of product_locations,
+        // and read the guards off what it returns. The `findUnique` that stood
+        // here is retired — a second read of a row we already hold buys nothing
+        // and costs a statement inside the lock window (pack REV-13 dev (i)).
+        const locked = await prelockProductLocations(tx, [{ productId, locationId }]);
+        const current = locked.get(prelockKey(productId, locationId)) ?? NEVER_STOCKED;
+
+        // Check version if provided (for optimistic locking). B1 behaviour
+        // change 1: the check now ALWAYS runs when a version was sent. It used
+        // to be skipped when no row existed, so a caller holding a stale version
+        // of a since-deleted/never-stocked key won silently; after the
+        // materialize that key reads { 0, 0 } and a wrong version 409s.
+        if (expectedVersion !== undefined && current.version !== expectedVersion) {
+          throw new OptimisticLockError(
+            'Product inventory has been modified by another user. Please refresh and try again.',
+            current.version,
+            expectedVersion
+          );
         }
 
-        // If removing stock, validate availability
-        if (delta < 0) {
-          const validation = await validateStockAvailability(
-            productId,
-            locationId,
-            Math.abs(delta),
-            tx
-          );
+        // If removing stock, validate availability — against the PRELOCKED
+        // quantity. `validateStockAvailability` is not called here any more: its
+        // read is the consistent read the prelock exists to precede.
+        if (delta < 0 && current.quantity < Math.abs(delta)) {
+          // Get product name for better error message
+          const product = await tx.product.findUnique({
+            where: { id: productId },
+            select: { name: true }
+          });
 
-          if (!validation.isValid) {
-            // Get product name for better error message
-            const product = await tx.product.findUnique({
-              where: { id: productId },
-              select: { name: true }
-            });
-            
-            if (!product) {
-              throw new ProductNotFoundError(productId);
-            }
-            
-            throw new InsufficientStockError(
-              product.name,
-              validation.currentQuantity,
-              Math.abs(delta)
-            );
+          if (!product) {
+            throw new ProductNotFoundError(productId);
           }
+
+          throw new InsufficientStockError(
+            product.name,
+            current.quantity,
+            Math.abs(delta)
+          );
         }
 
         // Apply the stock delta: log + product_locations upsert + loc-1 mirror.
@@ -528,52 +556,47 @@ export async function createInventoryTransfer(options: {
   while (retryCount < maxRetries) {
     try {
       return await prisma.$transaction(async (tx) => {
-        // Load current rows for optimistic checks
-        const [fromRow, toRow] = await Promise.all([
-          tx.product_locations.findUnique({
-            where: { productId_locationId: { productId, locationId: fromLocationId } },
-          }),
-          tx.product_locations.findUnique({
-            where: { productId_locationId: { productId, locationId: toLocationId } },
-          }),
+        // No order hook here: a transfer carries no order. THE CANONICAL
+        // PRELOCK takes BOTH ends in ONE pair of statements, in canonical key
+        // order — which is what makes two transfers over the same two rows in
+        // opposite directions take them in the same order. The paired
+        // `findUnique`s are retired (pack CB1a-i.3).
+        const locked = await prelockProductLocations(tx, [
+          { productId, locationId: fromLocationId },
+          { productId, locationId: toLocationId },
         ]);
+        const fromRow = locked.get(prelockKey(productId, fromLocationId)) ?? NEVER_STOCKED;
+        const toRow = locked.get(prelockKey(productId, toLocationId)) ?? NEVER_STOCKED;
 
-        // Version checks if provided
-        if (expectedFromVersion !== undefined && fromRow) {
-          if (fromRow.version !== expectedFromVersion) {
-            throw new OptimisticLockError(
-              'Source location inventory was modified by another user.',
-              fromRow.version,
-              expectedFromVersion
-            );
-          }
+        // Version checks if provided. B1 behaviour change 1 again: both now run
+        // for a never-stocked row too ({ 0, 0 } after the materialize), so a
+        // stale version can no longer win by virtue of the row not existing.
+        if (expectedFromVersion !== undefined && fromRow.version !== expectedFromVersion) {
+          throw new OptimisticLockError(
+            'Source location inventory was modified by another user.',
+            fromRow.version,
+            expectedFromVersion
+          );
         }
-        if (expectedToVersion !== undefined && toRow) {
-          if (toRow.version !== expectedToVersion) {
-            throw new OptimisticLockError(
-              'Destination location inventory was modified by another user.',
-              toRow.version,
-              expectedToVersion
-            );
-          }
+        if (expectedToVersion !== undefined && toRow.version !== expectedToVersion) {
+          throw new OptimisticLockError(
+            'Destination location inventory was modified by another user.',
+            toRow.version,
+            expectedToVersion
+          );
         }
 
-        // Validate availability at source within transaction
-        const availability = await validateStockAvailability(
-          productId,
-          fromLocationId,
-          quantity,
-          tx
-        );
-        if (!availability.isValid) {
+        // Validate availability at source — the prelocked from-quantity
+        // (`validateStockAvailability`'s consistent read is retired).
+        if (fromRow.quantity < quantity) {
           const product = await tx.product.findUnique({ where: { id: productId }, select: { name: true } });
           if (!product) {
             throw new ProductNotFoundError(productId);
           }
           throw new InsufficientStockError(
             product.name,
-            availability.currentQuantity,
-            availability.requestedQuantity
+            fromRow.quantity,
+            quantity
           );
         }
 
@@ -723,7 +746,15 @@ export async function createInventoryTransaction(
   // W2-1: opts.orderRecordId is REQUEST-level (unlike reasonCode above) because
   // one deduction is packed against at most one order — the caller resolved it
   // once and every row it writes names that same order.
-  opts?: { batchId?: string | null; orderRecordId?: string | null }
+  //
+  // Reconciliation Part 2 (spec §2.7(1), pack CB1a-i.4): opts.lockFirst is the
+  // ORDER lock, run as the transaction's FIRST act. Same shape as
+  // createInventoryAdjustment's; this path has no retry loop, so it runs once.
+  opts?: {
+    batchId?: string | null;
+    orderRecordId?: string | null;
+    lockFirst?: (tx: Prisma.TransactionClient) => Promise<unknown>;
+  }
 ) {
   const batchId = opts?.batchId ?? null;
   const orderRecordId = opts?.orderRecordId ?? null;
@@ -740,55 +771,62 @@ export async function createInventoryTransaction(
     const logs = [];
     const versions: Record<string, number> = {};
 
+    // The order lock is statement 1 — before any read.
+    if (opts?.lockFirst) await opts.lockFirst(tx);
+
+    // THE CANONICAL PRELOCK, ONCE, over EVERY item's key before the loop —
+    // never per item, or two requests naming the same two rows in opposite
+    // orders would take them in opposite orders. `prelockProductLocations`
+    // owns the dedupe and the canonical sort (one owner per invariant), so the
+    // items ride in as they came. The per-item `findUnique` is retired.
+    const locked = await prelockProductLocations(
+      tx,
+      items.map((item) => ({ productId: item.productId, locationId: item.locationId }))
+    );
+
+    // THE WITHIN-TX TALLY (pack CB1a-i.4 / REV-13 dev (v)). The retired
+    // `findUnique` read this transaction's OWN uncommitted writes, so a request
+    // naming one key twice had its second item see the first item's effect.
+    // The prelock snapshot is taken once, so the tally reproduces that exactly:
+    // seeded from the prelock, then `quantity += delta; version += 1` after each
+    // applyStockDelta.
+    const tally = new Map<string, { quantity: number; version: number }>();
+    locked.forEach((row, key) => tally.set(key, { quantity: row.quantity, version: row.version }));
+
     // Process each item
     for (const item of items) {
-      // Get current product location with version
-      const currentProductLocation = await tx.product_locations.findUnique({
-        where: {
-          productId_locationId: {
-            productId: item.productId,
-            locationId: item.locationId,
-          },
-        },
-      });
+      const key = prelockKey(item.productId, item.locationId);
+      const current = tally.get(key) ?? { ...NEVER_STOCKED };
 
-      // Check version if provided (for optimistic locking)
-      if (item.expectedVersion !== undefined && currentProductLocation) {
-        if (currentProductLocation.version !== item.expectedVersion) {
-          throw new OptimisticLockError(
-            `Product ${item.productId} inventory has been modified by another user. Please refresh and try again.`,
-            currentProductLocation.version,
-            item.expectedVersion
-          );
-        }
+      // Check version if provided (for optimistic locking). B1 behaviour change
+      // 1: enforced on never-stocked keys too — the same class as
+      // createInventoryAdjustment's.
+      if (item.expectedVersion !== undefined && current.version !== item.expectedVersion) {
+        throw new OptimisticLockError(
+          `Product ${item.productId} inventory has been modified by another user. Please refresh and try again.`,
+          current.version,
+          item.expectedVersion
+        );
       }
 
-      // Validate stock if removing
-      if (item.quantityChange < 0) {
-        const validation = await validateStockAvailability(
-          item.productId,
-          item.locationId,
-          Math.abs(item.quantityChange),
-          tx
-        );
+      // Validate stock if removing — against the tally, not a fresh read
+      // (`validateStockAvailability` is not called here any more).
+      if (item.quantityChange < 0 && current.quantity < Math.abs(item.quantityChange)) {
+        // Get product name for better error message
+        const product = await tx.product.findUnique({
+          where: { id: item.productId },
+          select: { name: true }
+        });
 
-        if (!validation.isValid) {
-          // Get product name for better error message
-          const product = await tx.product.findUnique({
-            where: { id: item.productId },
-            select: { name: true }
-          });
-          
-          if (!product) {
-            throw new ProductNotFoundError(item.productId);
-          }
-          
-          throw new InsufficientStockError(
-            product.name,
-            validation.currentQuantity,
-            Math.abs(item.quantityChange)
-          );
+        if (!product) {
+          throw new ProductNotFoundError(item.productId);
         }
+
+        throw new InsufficientStockError(
+          product.name,
+          current.quantity,
+          Math.abs(item.quantityChange)
+        );
       }
 
       // Apply the stock delta through the shared write core: log +
@@ -798,12 +836,12 @@ export async function createInventoryTransaction(
       // and ADJUSTMENT otherwise — computed once above from `type`; item.changeType
       // is still not mapped. batchId (from opts) joins each row to its event.
       //
-      // Concurrency note: the read-compare version guard above stays OUTSIDE
-      // applyStockDelta and is UNCHANGED. Like createInventoryAdjustment, this
-      // path's write is a commutative relative increment, for which read-compare
-      // is the documented-safe idiom. Unlike createInventoryAdjustment, this path
-      // intentionally has NO retry loop (single attempt) — that pre-existing
-      // difference is preserved.
+      // Concurrency note: the version and floor guards above stay OUTSIDE
+      // applyStockDelta. They now compare against the prelocked snapshot as the
+      // tally has advanced it, not against a per-item read — the row is already
+      // X-held, so latest-committed is what the prelock returned. Unlike
+      // createInventoryAdjustment, this path intentionally has NO retry loop
+      // (single attempt) — that pre-existing difference is preserved.
       const { log, newVersion } = await applyStockDelta(tx, {
         userId,
         productId: item.productId,
@@ -816,6 +854,14 @@ export async function createInventoryTransaction(
         reasonCode: item.reasonCode ?? null,
         batchId,
         orderRecordId,
+      });
+
+      // Advance the tally by what this item just wrote, so a second item on the
+      // same key sees the first item's effect — exactly what the retired
+      // own-write-visible read gave it.
+      tally.set(key, {
+        quantity: current.quantity + item.quantityChange,
+        version: current.version + 1,
       });
 
       versions[`${item.productId}-${item.locationId}`] = newVersion;

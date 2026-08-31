@@ -30,11 +30,59 @@ jest.mock('@/lib/prisma', () => {
 
 import { applyStockDelta } from '@/lib/inventory';
 
+// ---------------------------------------------------------------------------
+// THE RECORDING RAW TRIO (pack CB0.3, the per-suite paragraph).
+//
+// This suite declares its OWN `@/lib/prisma` factory, so the global harness's
+// trio never reaches it, and it REBUILDS `mockTx` per test — which is why the
+// trio is installed on the fresh object AFTER the reset, inside the same
+// beforeEach (REV-15 OC-4): a factory-installed trio would simply be discarded,
+// and a `mockReset` on an inner behaviour fn erases its default. A fresh install
+// per test is the re-seed.
+//
+// Two layers: the OUTER fn always records and then delegates to an INNER
+// behaviour fn (`rawBehavior`), which is what a test configures — so an override
+// can never silently switch the recording off.
+// ---------------------------------------------------------------------------
+type RawCall = { kind: 'query' | 'execute' | 'executeUnsafe'; sql: string; at: number };
+
+/** Every raw statement the test under way has spent, in call order. */
+const rawCalls: RawCall[] = [];
+/** The INNER behaviour fns, by method name — what a test configures. */
+const rawBehavior: Record<string, jest.Mock> = {};
+/** The OUTER recording fns — for `invocationCallOrder` against the delegates. */
+const rawFns: Record<string, jest.Mock> = {};
+let rawSeq = 0;
+
+function sqlTextOf(arg: unknown): string {
+  return arg && typeof arg === 'object' && typeof (arg as { sql?: unknown }).sql === 'string'
+    ? (arg as { sql: string }).sql
+    : String(arg);
+}
+
+function installRecordingRaw(target: Record<string, unknown>): void {
+  const install = (kind: RawCall['kind'], method: string, make: () => unknown) => {
+    const behavior = jest.fn((..._args: unknown[]) => Promise.resolve(make()));
+    const recording = jest.fn((...args: unknown[]) => {
+      rawCalls.push({ kind, sql: sqlTextOf(args[0]), at: rawSeq++ });
+      return behavior(...args);
+    });
+    rawBehavior[method] = behavior;
+    rawFns[method] = recording;
+    target[method] = recording;
+  };
+  install('query', '$queryRaw', () => []);
+  install('execute', '$executeRaw', () => 0);
+  install('executeUnsafe', '$executeRawUnsafe', () => 0);
+}
+
 let mockTx: DeepMockProxy<Prisma.TransactionClient>;
 
 beforeEach(() => {
   mockTx = mockDeep<Prisma.TransactionClient>();
   mockReset(mockTx);
+  rawCalls.length = 0;
+  installRecordingRaw(mockTx as unknown as Record<string, unknown>);
   // createInventoryLog returns the created row; upsert return is used for newVersion.
   mockTx.inventory_logs.create.mockResolvedValue({ id: 100 } as any);
   mockTx.product_locations.upsert.mockResolvedValue({ version: 7 } as any);
@@ -162,6 +210,42 @@ describe('applyStockDelta', () => {
     const logArg = mockTx.inventory_logs.create.mock.calls[0][0] as any;
     expect(logArg.data.stagingItemId).toBe(88);
     expect(logArg.data.receiptCostCents).toBeNull();
+  });
+
+  it('passes transferId straight through to the log row (B1a-i.1)', async () => {
+    // Reconciliation Part 2: the leg-pair key joins the hot path as a nullable
+    // passthrough, exactly like bookingKey above it. A caller that stamps one
+    // (the transfer primitive's future callers) must see it land on the row.
+    await applyStockDelta(mockTx, {
+      userId: 4,
+      productId: 11,
+      locationId: 2,
+      delta: -6,
+      logType: inventory_logs_logType.TRANSFER,
+      transferId: 'a1b2c3d4-0000-4000-8000-00000000abcd',
+    });
+
+    const logArg = mockTx.inventory_logs.create.mock.calls[0][0] as any;
+    expect(logArg.data.transferId).toBe('a1b2c3d4-0000-4000-8000-00000000abcd');
+  });
+
+  it('defaults transferId to NULL for every existing caller', async () => {
+    await applyStockDelta(mockTx, { userId: 1, productId: 7, locationId: 1, delta: 5 });
+
+    const logArg = mockTx.inventory_logs.create.mock.calls[0][0] as any;
+    expect(logArg.data.transferId).toBeNull();
+  });
+
+  it('takes no lock of its own — ZERO raw statements (its callers prelock)', async () => {
+    // applyStockDelta is NOT a covered writer (pack CB1a-i.1): the discipline
+    // lives in the primitives that call it, so this path must stay exactly the
+    // three-delegate block it was. The recording trio is what makes that
+    // checkable rather than assumed.
+    await applyStockDelta(mockTx, { userId: 1, productId: 7, locationId: 1, delta: 5 });
+
+    expect(rawCalls).toHaveLength(0);
+    expect(rawFns.$queryRaw).not.toHaveBeenCalled();
+    expect(rawFns.$executeRaw).not.toHaveBeenCalled();
   });
 
   it('passes through an explicit logType and negative deltas unchanged', async () => {

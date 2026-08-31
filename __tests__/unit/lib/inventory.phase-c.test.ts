@@ -33,8 +33,60 @@ import {
   centsFromRetailPrice,
   OptimisticLockError,
 } from '@/lib/inventory';
+import { InsufficientStockError } from '@/lib/error-handling';
 
 const mockPrisma = prisma as unknown as DeepMockProxy<typeof prisma>;
+
+// ---------------------------------------------------------------------------
+// THE RECORDING RAW TRIO (pack CB0.3, the per-suite paragraph).
+//
+// Own `@/lib/prisma` factory + a `mockTx` rebuilt per test, so the trio is
+// installed on the FRESH object AFTER the reset, in the same beforeEach
+// (REV-15 OC-4). Two layers: the OUTER fn always records, then delegates to an
+// INNER behaviour fn (`rawBehavior`) — which is what a test configures, so an
+// override cannot switch the recording off.
+// ---------------------------------------------------------------------------
+type RawCall = { kind: 'query' | 'execute' | 'executeUnsafe'; sql: string; at: number };
+
+/** Every raw statement the test under way has spent, in call order. */
+const rawCalls: RawCall[] = [];
+/** The INNER behaviour fns, by method name — what a test configures. */
+const rawBehavior: Record<string, jest.Mock> = {};
+/** The OUTER recording fns — for `invocationCallOrder` against the delegates. */
+const rawFns: Record<string, jest.Mock> = {};
+let rawSeq = 0;
+
+function sqlTextOf(arg: unknown): string {
+  return arg && typeof arg === 'object' && typeof (arg as { sql?: unknown }).sql === 'string'
+    ? (arg as { sql: string }).sql
+    : String(arg);
+}
+
+function installRecordingRaw(target: Record<string, unknown>): void {
+  const install = (kind: RawCall['kind'], method: string, make: () => unknown) => {
+    const behavior = jest.fn((..._args: unknown[]) => Promise.resolve(make()));
+    const recording = jest.fn((...args: unknown[]) => {
+      rawCalls.push({ kind, sql: sqlTextOf(args[0]), at: rawSeq++ });
+      return behavior(...args);
+    });
+    rawBehavior[method] = behavior;
+    rawFns[method] = recording;
+    target[method] = recording;
+  };
+  install('query', '$queryRaw', () => []);
+  install('execute', '$executeRaw', () => 0);
+  install('executeUnsafe', '$executeRawUnsafe', () => 0);
+}
+
+/**
+ * What the prelock's returning SELECT hands back — the fixture the adjustment's
+ * guards read now that the `findUnique` at the head of the transaction is gone.
+ */
+function prelocked(
+  rows: Array<{ productId: number; locationId: number; quantity: number; version: number }>
+): void {
+  rawBehavior.$queryRaw.mockResolvedValue(rows);
+}
 
 let mockTx: DeepMockProxy<Prisma.TransactionClient>;
 
@@ -42,6 +94,8 @@ beforeEach(() => {
   mockTx = mockDeep<Prisma.TransactionClient>();
   mockReset(mockTx);
   mockReset(mockPrisma);
+  rawCalls.length = 0;
+  installRecordingRaw(mockTx as unknown as Record<string, unknown>);
 
   (mockPrisma.$transaction as jest.Mock).mockImplementation(
     async (fn: (tx: Prisma.TransactionClient) => Promise<unknown>) => fn(mockTx)
@@ -50,13 +104,9 @@ beforeEach(() => {
   mockTx.inventory_logs.create.mockResolvedValue({ id: 100 } as any);
   mockTx.product_locations.upsert.mockResolvedValue({ version: 7 } as any);
   mockTx.product.update.mockResolvedValue({} as any);
-  mockTx.product_locations.findUnique.mockResolvedValue({
-    id: 1,
-    productId: 7,
-    locationId: 2,
-    quantity: 100,
-    version: 1,
-  } as any);
+  // Plenty of stock at version 1 — through the PRELOCK now (pack CB1a-i.2
+  // retired the `findUnique` that used to open this transaction).
+  prelocked([{ productId: 7, locationId: 2, quantity: 100, version: 1 }]);
 });
 
 describe('createInventoryLog — reasonCode/unitCostCents/batchId passthrough (P-C1)', () => {
@@ -159,6 +209,108 @@ describe('createInventoryAdjustment — options bag (P-C4)', () => {
     const second = (mockTx.inventory_logs.create.mock.calls[1][0] as any).data;
     expect(first.batchId).toBe('batch-retry');
     expect(second.batchId).toBe('batch-retry');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE LOCK DISCIPLINE (Part 2, pack CB1a-i.2). The order is the contract: the
+// caller's order lock is the transaction's first act, the canonical prelock
+// follows it and precedes the first consistent read of product_locations, and
+// both guards read what the prelock returned.
+// ---------------------------------------------------------------------------
+describe('createInventoryAdjustment — the lock order (B1a-i.2)', () => {
+  /** A locking read of the caller's own, exactly as a route's `lockFirst` is. */
+  function orderLockHook() {
+    return jest.fn(async (tx: Prisma.TransactionClient) => {
+      await (tx as unknown as { $queryRaw: (q: unknown) => Promise<unknown> }).$queryRaw(
+        Prisma.sql`SELECT id, orderNumber FROM external_orders WHERE id IN (${'ORD-1'}) ORDER BY id FOR UPDATE`
+      );
+    });
+  }
+
+  it('runs opts.lockFirst FIRST — before the prelock, before every delegate', async () => {
+    const lockFirst = orderLockHook();
+
+    await createInventoryAdjustment(1, 7, 2, 5, { batchId: 'batch-1', lockFirst });
+
+    expect(lockFirst).toHaveBeenCalledTimes(1);
+    expect(lockFirst.mock.calls[0][0]).toBe(mockTx);
+    // The hook's locking read, then the prelock's materialize + returning read.
+    expect(rawCalls.map((c) => c.kind)).toEqual(['query', 'execute', 'query']);
+    expect(rawCalls[0].sql).toContain('external_orders');
+    expect(rawCalls[1].sql).toContain('INSERT INTO product_locations');
+    expect(rawCalls[2].sql).toContain('FOR UPDATE');
+    // …and the whole lock block precedes every delegate write.
+    expect(rawFns.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
+      mockTx.inventory_logs.create.mock.invocationCallOrder[0]
+    );
+    expect(rawFns.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
+      mockTx.product_locations.upsert.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('re-runs opts.lockFirst on every retry attempt', async () => {
+    // The hook is a locking read, idempotent by contract — and it MUST re-run,
+    // because a retry re-enters the transaction callback with a fresh tx that
+    // holds nothing.
+    const lockFirst = orderLockHook();
+    let calls = 0;
+    const record = jest.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new OptimisticLockError('conflict', 2, 1);
+    });
+
+    await createInventoryAdjustment(1, 7, 2, 5, { lockFirst, record });
+
+    expect(lockFirst).toHaveBeenCalledTimes(2);
+    expect(mockTx.inventory_logs.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('spends exactly the prelock pair when no hook is supplied', async () => {
+    await createInventoryAdjustment(1, 7, 2, 5);
+
+    expect(rawCalls.map((c) => c.kind)).toEqual(['execute', 'query']);
+    expect(mockTx.product_locations.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('materialize-first: a never-stocked key reads { 0, 0 } and refuses the deduction', async () => {
+    // The SELECT answers with the row the materialize just created. A negative
+    // delta must refuse against that 0 — never against an absence the old
+    // `findUnique` would have returned as null.
+    prelocked([{ productId: 7, locationId: 2, quantity: 0, version: 0 }]);
+    mockTx.product.findUnique.mockResolvedValue({ name: 'Widget' } as any);
+
+    await expect(createInventoryAdjustment(1, 7, 2, -5)).rejects.toBeInstanceOf(
+      InsufficientStockError
+    );
+    // The prelocked quantity rides into the message. (The two numbers are
+    // labelled the way this constructor has always labelled them — positions
+    // preserved verbatim from the retired call site.)
+    await expect(createInventoryAdjustment(1, 7, 2, -5)).rejects.toThrow(
+      'Insufficient stock for Widget. Requested: 0, Available: 5'
+    );
+    expect(mockTx.inventory_logs.create).not.toHaveBeenCalled();
+  });
+
+  it('B1 ACTIVATION: a never-stocked key + a stale expectedVersion now conflicts', async () => {
+    // Today the version check was skipped whenever no row existed, so this
+    // submission won silently. It is a 409 now.
+    prelocked([{ productId: 7, locationId: 2, quantity: 0, version: 0 }]);
+
+    await expect(
+      createInventoryAdjustment(1, 7, 2, 5, { expectedVersion: 1 })
+    ).rejects.toMatchObject({ name: 'OptimisticLockError', currentVersion: 0, expectedVersion: 1 });
+
+    expect(mockTx.inventory_logs.create).not.toHaveBeenCalled();
+    expect(mockTx.product_locations.upsert).not.toHaveBeenCalled();
+  });
+
+  it('a matching expectedVersion on a stocked key still writes', async () => {
+    prelocked([{ productId: 7, locationId: 2, quantity: 100, version: 4 }]);
+
+    await createInventoryAdjustment(1, 7, 2, 5, { expectedVersion: 4 });
+
+    expect(mockTx.product_locations.upsert).toHaveBeenCalledTimes(1);
   });
 });
 
