@@ -5,6 +5,8 @@ import prisma from "@/lib/prisma";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { recordAttributionAttempt } from "@/lib/attribution/attempts";
 import { applyStockDelta, OptimisticLockError } from "@/lib/inventory";
+import { prelockKey, prelockProductLocations } from "@/lib/inventory/prelock";
+import { AppError } from "@/lib/error-handling";
 import { BatchInventoryAdjustmentSchema } from "@/lib/validation/inventory";
 import { enforceRateLimit, applyRateLimitHeaders } from "@/lib/rateLimit";
 
@@ -35,50 +37,57 @@ export const POST = apiHandler(async (request: NextRequest) => {
     const logs: inventory_logs[] = [];
     const auditUpdates: Array<{ productId: number; productName: string; delta: number }> = [];
 
+    // THE CANONICAL PRELOCK (spec §2.7(3), pack CB1a-ii.2), statements 1-2 of
+    // this transaction: every key this request touches, materialized and
+    // X-locked once in the canonical order, before anything reads a row. There
+    // is no order lock here — the journal carries no order context of any kind.
+    // The per-item `findFirst` is retired: these rows are what the guards read.
+    const locked = await prelockProductLocations(
+      tx,
+      adjustments.map((adj) => ({ productId: adj.productId, locationId: adj.locationId }))
+    );
+
+    // THE WITHIN-TX TALLY (the same shape as createInventoryTransaction's). The
+    // retired read saw this transaction's OWN uncommitted writes, so a request
+    // naming one key twice had its second item see the first item's effect. The
+    // prelock snapshot is taken once, so the tally reproduces that exactly:
+    // seeded from the prelock, then advanced after each applyStockDelta.
+    const tally = new Map<string, { quantity: number; version: number }>();
+    locked.forEach((row, key) => tally.set(key, { quantity: row.quantity, version: row.version }));
+
     for (const adjustment of adjustments) {
       try {
-        // Read current inventory for validation (version check + stock floor).
-        // The actual write below is a relative increment, so a stale read here
-        // can no longer cause a lost update.
-        const inventory = await tx.product_locations.findFirst({
-          where: {
-            productId: adjustment.productId,
-            locationId: adjustment.locationId,
-          },
-          select: {
-            id: true,
-            quantity: true,
-            version: true,
-          },
-        });
+        const key = prelockKey(adjustment.productId, adjustment.locationId);
+        // The map-miss default is a type belt: after the materialize every asked
+        // key has a row, and a never-stocked one reads the live column defaults.
+        const current = tally.get(key) ?? { quantity: 0, version: 0 };
 
-        if (!inventory) {
-          // No record yet: applyStockDelta's upsert will create it, but a
-          // negative delta against nothing is an error.
-          if (adjustment.delta < 0) {
-            throw new Error(
-              `No inventory found for product ${adjustment.productId} at location ${adjustment.locationId}`
-            );
-          }
-        } else {
-          // Check version if provided (optimistic locking)
-          if (
-            adjustment.expectedVersion !== undefined &&
-            inventory.version !== adjustment.expectedVersion
-          ) {
-            throw new OptimisticLockError(
-              "Inventory has been modified by another user",
-              inventory.version,
-              adjustment.expectedVersion
-            );
-          }
+        // Check version if provided (optimistic locking). B1 behaviour change 1:
+        // enforced on never-stocked keys too — the old absent-row branch skipped
+        // it, so a stale journal submission against a row someone else had just
+        // created won silently.
+        if (
+          adjustment.expectedVersion !== undefined &&
+          current.version !== adjustment.expectedVersion
+        ) {
+          throw new OptimisticLockError(
+            "Inventory has been modified by another user",
+            current.version,
+            adjustment.expectedVersion
+          );
+        }
 
-          const newQuantity = inventory.quantity + adjustment.delta;
-          if (newQuantity < 0) {
-            throw new Error(
-              `Insufficient inventory: current ${inventory.quantity}, trying to remove ${Math.abs(adjustment.delta)}`
-            );
-          }
+        // The stock floor. B1 behaviour change 2: the old "No inventory found"
+        // branch is dead (the row always exists post-materialize), so a negative
+        // delta on a never-stocked key now refuses with `current 0` — and as an
+        // AppError, because a plain Error reaches the wire as a generic 500 that
+        // says nothing. These refusals are 400 INSUFFICIENT_STOCK from here on.
+        if (current.quantity + adjustment.delta < 0) {
+          throw new AppError(
+            `Product ${adjustment.productId}: Insufficient inventory: current ${current.quantity}, trying to remove ${Math.abs(adjustment.delta)}`,
+            "INSUFFICIENT_STOCK",
+            400
+          );
         }
 
         // Atomic write path shared with the other stock routes:
@@ -97,6 +106,14 @@ export const POST = apiHandler(async (request: NextRequest) => {
           batchId,
         });
 
+        // Advance the tally by what this item just wrote, so a second item on
+        // the same key sees the first item's effect — exactly what the retired
+        // own-write-visible read gave it.
+        tally.set(key, {
+          quantity: current.quantity + adjustment.delta,
+          version: current.version + 1,
+        });
+
         // applyStockDelta's log includes full relations (users incl.
         // passwordHash) — strip to scalars before exposing in the response.
         const { users: _u, products: _p, locations: _l, ...logScalars } = log;
@@ -110,6 +127,9 @@ export const POST = apiHandler(async (request: NextRequest) => {
       } catch (error) {
         // Preserve the typed conflict so apiHandler can map it to 409
         if (error instanceof OptimisticLockError) throw error;
+        // Same reason, for the typed refusals: apiHandler maps an AppError to
+        // its own code + status, and the message already names the product.
+        if (error instanceof AppError) throw error;
         throw new Error(
           `Product ${adjustment.productId}: ${error instanceof Error ? error.message : "Unknown error"}`
         );

@@ -130,6 +130,9 @@ const STOCKED = [
   { productId: 5, locationId: 2, quantity: 100, version: 1 },
   { productId: 5, locationId: 3, quantity: 100, version: 1 },
   { productId: 5, locationId: 9, quantity: 100, version: 1 },
+  // B1a-ii: batch-adjust prelocks its whole request, so its second product is a
+  // key now too. A missing row would read the { 0, 0 } floor and refuse.
+  { productId: 6, locationId: 2, quantity: 100, version: 1 },
 ];
 
 /** A fresh deep-mocked TransactionClient with the reads every stock path needs. */

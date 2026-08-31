@@ -27,6 +27,72 @@ jest.mock('@/lib/csrf', () => ({
   validateCSRFToken: jest.fn(async () => true),
 }))
 
+// ---------------------------------------------------------------------------
+// THE RECORDING RAW TRIO (pack CB0.3, the per-suite paragraph).
+//
+// This suite runs on the GLOBAL `@/lib/prisma` mock but HAND-BUILDS the tx
+// object each `$transaction` stub hands the route, so the harness's trio never
+// reaches the route's transaction. Every hand-built tx therefore gets the trio
+// spread in: without it the canonical prelock's two statements would crash on
+// an undefined method rather than run.
+//
+// Two layers, as everywhere else in B1: the OUTER fn always records and then
+// delegates to an INNER behaviour fn, which is what a test configures.
+// ---------------------------------------------------------------------------
+type RawCall = { kind: 'query' | 'execute' | 'executeUnsafe'; sql: string; at: number }
+
+/** Every raw statement the test under way has spent, in call order. */
+const rawCalls: RawCall[] = []
+/** The INNER behaviour fns, by method name — what a test configures. */
+const rawBehavior: Record<string, jest.Mock> = {}
+/** The OUTER recording fns — for `invocationCallOrder` against the delegates. */
+const rawFns: Record<string, jest.Mock> = {}
+let rawSeq = 0
+
+function sqlTextOf(arg: unknown): string {
+  return arg && typeof arg === 'object' && typeof (arg as { sql?: unknown }).sql === 'string'
+    ? (arg as { sql: string }).sql
+    : String(arg)
+}
+
+function installRecordingRaw(target: Record<string, unknown>): void {
+  const install = (kind: RawCall['kind'], method: string, make: () => unknown) => {
+    const behavior = jest.fn((..._args: unknown[]) => Promise.resolve(make()))
+    const recording = jest.fn((...args: unknown[]) => {
+      rawCalls.push({ kind, sql: sqlTextOf(args[0]), at: rawSeq++ })
+      return behavior(...args)
+    })
+    rawBehavior[method] = behavior
+    rawFns[method] = recording
+    target[method] = recording
+  }
+  install('query', '$queryRaw', () => [])
+  install('execute', '$executeRaw', () => 0)
+  install('executeUnsafe', '$executeRawUnsafe', () => 0)
+}
+
+/** The prelock's returning SELECT (lib/inventory/prelock.ts), by its text. */
+function isPrelockSelect(sql: string): boolean {
+  return sql.includes('FROM product_locations') && sql.includes('(productId, locationId) IN')
+}
+
+type PrelockRow = { productId: number; locationId: number; quantity: number; version: number }
+
+/**
+ * Install the trio on a hand-built tx and seed what the prelock's returning
+ * SELECT hands back. The per-item `product_locations.findFirst` retired with the
+ * prelock (pack CB1a-ii.2), so the fixtures that read `{ quantity, version }`
+ * off that read are spelled here as the materialized rows the version guard and
+ * the stock floor now read.
+ */
+function withRecordingRaw<T extends object>(tx: T, prelockRows: PrelockRow[]): T {
+  installRecordingRaw(tx as unknown as Record<string, unknown>)
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) =>
+    isPrelockSelect(sqlTextOf(args[0])) ? prelockRows : []
+  )
+  return tx
+}
+
 describe('/api/inventory/batch-adjust', () => {
   // Must satisfy requireApproved(): email present + isApproved true + numeric id
   const mockSession = {
@@ -42,6 +108,7 @@ describe('/api/inventory/batch-adjust', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    rawCalls.length = 0
     ;(getServerSession as jest.Mock).mockResolvedValue(mockSession)
   })
 
@@ -131,7 +198,12 @@ describe('/api/inventory/batch-adjust', () => {
             create: jest.fn().mockResolvedValue(mockLog),
           },
         }
-        return callback(tx)
+        return callback(
+          withRecordingRaw(tx, [
+            { productId: 1, locationId: 1, quantity: mockInventory.quantity, version: mockInventory.version },
+            { productId: 2, locationId: 1, quantity: mockInventory.quantity, version: mockInventory.version },
+          ])
+        )
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -173,7 +245,11 @@ describe('/api/inventory/batch-adjust', () => {
             create: jest.fn().mockResolvedValue({ id: 1, delta: 10 }),
           },
         }
-        return callback(capturedTx)
+        return callback(
+          withRecordingRaw(capturedTx, [
+            { productId: 1, locationId: 1, quantity: mockInventory.quantity, version: mockInventory.version },
+          ])
+        )
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -214,7 +290,11 @@ describe('/api/inventory/batch-adjust', () => {
           product: { update: jest.fn() },
           inventory_logs: { create: jest.fn() },
         }
-        return callback(tx)
+        return callback(
+          withRecordingRaw(tx, [
+            { productId: 1, locationId: 1, quantity: mockInventory.quantity, version: mockInventory.version },
+          ])
+        )
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -263,7 +343,11 @@ describe('/api/inventory/batch-adjust', () => {
             create: jest.fn().mockResolvedValue(mockLogWithRelations),
           },
         }
-        return callback(tx)
+        return callback(
+          withRecordingRaw(tx, [
+            { productId: 1, locationId: 1, quantity: mockInventory.quantity, version: mockInventory.version },
+          ])
+        )
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -288,6 +372,7 @@ describe('/api/inventory/batch-adjust', () => {
 
     it('should handle inventory not found for new products', async () => {
       const mockProducts = [{ id: 1, name: 'Product 1' }]
+      let capturedTx: any
 
       ;(prisma.product.findMany as jest.Mock).mockResolvedValue(mockProducts)
       ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
@@ -316,7 +401,11 @@ describe('/api/inventory/batch-adjust', () => {
             }),
           },
         }
-        return callback(tx)
+        capturedTx = tx
+        // Never stocked: the materialize creates the row and the returning
+        // SELECT hands back the live column defaults, so the guards read
+        // { quantity: 0, version: 0 } instead of skipping on an absent row.
+        return callback(withRecordingRaw(tx, []))
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -331,9 +420,18 @@ describe('/api/inventory/batch-adjust', () => {
 
       expect(response.status).toBe(200)
       expect(data.success).toBe(true)
+      // The per-item read is retired — the prelock's rows ARE the read.
+      expect(capturedTx.product_locations.findFirst).not.toHaveBeenCalled()
     })
 
-    it('should prevent negative inventory', async () => {
+    // -----------------------------------------------------------------------
+    // B1a-ii (pack CB1a-ii.2): the stock floor. These refusals used to reach the
+    // wire as a GENERIC 500 — a plain Error is not a class apiHandler maps — so
+    // the sentence the spec pins was unreachable. They are 400s now, and the
+    // never-stocked case reaches the SAME sentence instead of the dead
+    // "No inventory found" branch.
+    // -----------------------------------------------------------------------
+    it('refuses an over-deduction with 400 INSUFFICIENT_STOCK and the real numbers', async () => {
       const mockProducts = [{ id: 1, name: 'Product 1' }]
       const mockInventory = {
         id: 1,
@@ -353,7 +451,11 @@ describe('/api/inventory/batch-adjust', () => {
             create: jest.fn(),
           },
         }
-        return callback(tx)
+        return callback(
+          withRecordingRaw(tx, [
+            { productId: 1, locationId: 1, quantity: mockInventory.quantity, version: mockInventory.version },
+          ])
+        )
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -366,9 +468,157 @@ describe('/api/inventory/batch-adjust', () => {
       const response = await POST(request)
       const data = await response.json()
 
-      // apiHandler maps unrecognized errors to a flat 500 body
-      expect(response.status).toBe(500)
-      expect(data.error).toBe('Internal server error')
+      expect(response.status).toBe(400)
+      expect(data.code).toBe('INSUFFICIENT_STOCK')
+      expect(data.error).toBe(
+        'Product 1: Insufficient inventory: current 5, trying to remove 10'
+      )
+    })
+
+    it('refuses a NEVER-STOCKED negative delta with current 0 — the dead branch is gone', async () => {
+      const mockProducts = [{ id: 1, name: 'Product 1' }]
+      let capturedTx: any
+
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue(mockProducts)
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
+        const tx = {
+          product_locations: {
+            findFirst: jest.fn().mockResolvedValue(null),
+            upsert: jest.fn(),
+          },
+          product: { update: jest.fn() },
+          inventory_logs: { create: jest.fn() },
+        }
+        capturedTx = tx
+        return callback(withRecordingRaw(tx, []))
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [{ productId: 1, locationId: 1, delta: -10 }],
+        }),
+      })
+
+      const response = await POST(request)
+      const data = await response.json()
+
+      expect(response.status).toBe(400)
+      expect(data.code).toBe('INSUFFICIENT_STOCK')
+      // Not "No inventory found for product 1 at location 1" — that branch was
+      // dead the moment the prelock started materializing the row.
+      expect(data.error).toBe(
+        'Product 1: Insufficient inventory: current 0, trying to remove 10'
+      )
+      expect(capturedTx.product_locations.findFirst).not.toHaveBeenCalled()
+    })
+
+    it('prelocks BEFORE any write: the two statements lead the transaction', async () => {
+      const mockProducts = [
+        { id: 1, name: 'Product 1' },
+        { id: 2, name: 'Product 2' },
+      ]
+      let capturedTx: any
+
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue(mockProducts)
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
+        const tx = {
+          product_locations: {
+            findFirst: jest.fn(),
+            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 60, version: 2 }),
+          },
+          product: { update: jest.fn() },
+          inventory_logs: {
+            create: jest.fn().mockResolvedValue({ id: 1, delta: 10 }),
+          },
+        }
+        capturedTx = tx
+        return callback(
+          withRecordingRaw(tx, [
+            { productId: 1, locationId: 1, quantity: 50, version: 1 },
+            { productId: 2, locationId: 1, quantity: 50, version: 1 },
+          ])
+        )
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [
+            { productId: 2, locationId: 1, delta: 10 },
+            { productId: 1, locationId: 1, delta: -5 },
+          ],
+        }),
+      })
+
+      const response = await POST(request)
+      expect(response.status).toBe(200)
+
+      // Statements 1-2 of the transaction, in that order, and nothing before.
+      expect(rawCalls).toHaveLength(2)
+      expect(rawCalls[0].kind).toBe('execute')
+      expect(rawCalls[0].sql).toContain(
+        'INSERT INTO product_locations (productId, locationId, quantity, version, updatedAt)'
+      )
+      expect(rawCalls[1].kind).toBe('query')
+      expect(isPrelockSelect(rawCalls[1].sql)).toBe(true)
+      expect(rawCalls[1].sql).toContain('FOR UPDATE')
+      // Canonical order, not request order: the request named product 2 first.
+      expect((rawFns.$executeRaw.mock.calls[0][0] as any).values).toEqual([1, 1, 2, 1])
+      // …and both precede every delegate write.
+      expect(rawFns.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+        capturedTx.inventory_logs.create.mock.invocationCallOrder[0]
+      )
+    })
+
+    it('a key named TWICE keeps its own-write-visible semantics through the tally', async () => {
+      const mockProducts = [{ id: 1, name: 'Product 1' }]
+      let capturedTx: any
+
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue(mockProducts)
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
+        const tx = {
+          product_locations: {
+            findFirst: jest.fn(),
+            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 0, version: 2 }),
+          },
+          product: { update: jest.fn() },
+          inventory_logs: {
+            create: jest.fn().mockResolvedValue({ id: 1, delta: -5 }),
+          },
+        }
+        capturedTx = tx
+        return callback(
+          withRecordingRaw(tx, [{ productId: 1, locationId: 1, quantity: 8, version: 1 }])
+        )
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [
+            { productId: 1, locationId: 1, delta: -5, expectedVersion: 1 },
+            // 8 - 5 = 3 left, and the row is at version 2 by now: the second
+            // item sees the first item's effect, exactly as the retired
+            // own-write-visible read gave it. Asking for 5 more is refused.
+            { productId: 1, locationId: 1, delta: -5, expectedVersion: 2 },
+          ],
+        }),
+      })
+
+      const response = await POST(request)
+      const data = await response.json()
+
+      expect(response.status).toBe(400)
+      expect(data.code).toBe('INSUFFICIENT_STOCK')
+      expect(data.error).toBe(
+        'Product 1: Insufficient inventory: current 3, trying to remove 5'
+      )
+      // One prelock for the deduped key, not one per item.
+      expect(rawCalls.filter((c) => c.kind === 'execute')).toHaveLength(1)
+      expect((rawFns.$executeRaw.mock.calls[0][0] as any).values).toEqual([1, 1])
+      // The first item did write before the second was refused (the tx aborts).
+      expect(capturedTx.inventory_logs.create).toHaveBeenCalledTimes(1)
     })
 
     it('should handle optimistic locking conflicts', async () => {
@@ -390,7 +640,11 @@ describe('/api/inventory/batch-adjust', () => {
           inventory_logs: { create: jest.fn() },
         }
         // Let the route's OptimisticLockError propagate untouched
-        return callback(tx)
+        return callback(
+          withRecordingRaw(tx, [
+            { productId: 1, locationId: 1, quantity: mockInventory.quantity, version: mockInventory.version },
+          ])
+        )
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -459,7 +713,13 @@ describe('/api/inventory/batch-adjust', () => {
             }),
           },
         }
-        return callback(tx)
+        return callback(
+          withRecordingRaw(tx, [
+            { productId: 1, locationId: 1, quantity: 100, version: 1 },
+            { productId: 2, locationId: 1, quantity: 100, version: 1 },
+            { productId: 3, locationId: 1, quantity: 100, version: 1 },
+          ])
+        )
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -522,7 +782,15 @@ describe('/api/inventory/batch-adjust', () => {
         { id: 2, name: 'Product 2' },
         { id: 3, name: 'Product 3' },
       ])
-      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => callback(tx))
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) =>
+        callback(
+          withRecordingRaw(tx, [
+            { productId: 1, locationId: 1, quantity: 100, version: 1 },
+            { productId: 2, locationId: 1, quantity: 100, version: 1 },
+            { productId: 3, locationId: 1, quantity: 100, version: 1 },
+          ])
+        )
+      )
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
         method: 'POST',
@@ -560,7 +828,15 @@ describe('/api/inventory/batch-adjust', () => {
         { id: 1, name: 'Product 1' },
         { id: 2, name: 'Product 2' },
       ])
-      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => callback(tx))
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) =>
+        callback(
+          withRecordingRaw(tx, [
+            { productId: 1, locationId: 1, quantity: 100, version: 1 },
+            { productId: 2, locationId: 1, quantity: 100, version: 1 },
+            { productId: 3, locationId: 1, quantity: 100, version: 1 },
+          ])
+        )
+      )
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
         method: 'POST',

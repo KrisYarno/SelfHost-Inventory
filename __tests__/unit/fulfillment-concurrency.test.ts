@@ -63,10 +63,85 @@ function buildOrder(overrides: any = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// THE RECORDING RAW TRIO (pack CB0.3, the per-suite paragraph).
+//
+// B1a-ii put the canonical prelock in front of the item loop, so this path now
+// spends `$executeRaw` on the materialize and `$queryRaw` on the returning
+// locking read as well as on the atomic UPDATE these pins are about. The trio
+// is installed on the FRESH mockTx each test builds (the OC-4 placement rule),
+// and the behaviours below DISPATCH ON THE STATEMENT: a test that says "the
+// UPDATE affected 0 rows" must keep saying exactly that, rather than having its
+// answer eaten by the prelock's statement.
+// ---------------------------------------------------------------------------
+type RawCall = { kind: 'query' | 'execute' | 'executeUnsafe'; sql: string; at: number }
+
+const rawCalls: RawCall[] = []
+const rawBehavior: Record<string, jest.Mock> = {}
+const rawFns: Record<string, jest.Mock> = {}
+let rawSeq = 0
+
+function sqlTextOf(arg: unknown): string {
+  return arg && typeof arg === 'object' && typeof (arg as { sql?: unknown }).sql === 'string'
+    ? (arg as { sql: string }).sql
+    : String(arg)
+}
+
+function installRecordingRaw(target: Record<string, unknown>): void {
+  const install = (kind: RawCall['kind'], method: string, make: () => unknown) => {
+    const behavior = jest.fn((..._args: unknown[]) => Promise.resolve(make()))
+    const recording = jest.fn((...args: unknown[]) => {
+      rawCalls.push({ kind, sql: sqlTextOf(args[0]), at: rawSeq++ })
+      return behavior(...args)
+    })
+    rawBehavior[method] = behavior
+    rawFns[method] = recording
+    target[method] = recording
+  }
+  install('query', '$queryRaw', () => [])
+  install('execute', '$executeRaw', () => 1)
+  install('executeUnsafe', '$executeRawUnsafe', () => 0)
+}
+
+/** The prelock's returning SELECT (lib/inventory/prelock.ts), by its text. */
+function isPrelockSelect(sql: string): boolean {
+  return sql.includes('FROM product_locations') && sql.includes('(productId, locationId) IN')
+}
+
+/**
+ * What the item's atomic `UPDATE product_locations` reports, per call — the
+ * last count repeats. Every other execute (the prelock's materialize, the loc-1
+ * mirror) reports 1.
+ */
+function updateAffectedRows(...counts: number[]): void {
+  let seen = 0
+  rawBehavior.$executeRaw.mockImplementation(async (...args: unknown[]) => {
+    if (/UPDATE product_locations/.test(sqlTextOf(args[0]))) {
+      const at = Math.min(seen, counts.length - 1)
+      seen += 1
+      return counts[at]
+    }
+    return 1
+  })
+}
+
+/**
+ * What the refusal diagnostic's locking re-read finds — `null` for a row that
+ * holds nothing. (It replaces the `product_locations.findUnique` these tests
+ * used to seed; the prelock's own SELECT is not what the message reads.)
+ */
+function currentQuantity(quantity: number | null): void {
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) =>
+    isPrelockSelect(sqlTextOf(args[0])) || quantity === null ? [] : [{ quantity }]
+  )
+}
+
 function setupTransaction() {
   const mockTx = mockDeep<PrismaClient>()
+  installRecordingRaw(mockTx as unknown as Record<string, unknown>)
   // Default: atomic UPDATE affects 1 row (success)
-  mockTx.$executeRaw.mockResolvedValue(1 as any)
+  updateAffectedRows(1)
+  currentQuantity(null)
   getMockPrisma().$transaction.mockImplementation(async (cb: any, _opts?: any) => {
     return cb(mockTx)
   })
@@ -77,6 +152,7 @@ beforeEach(() => {
   mockReset(getMockPrisma())
   _inventoryLogImpl = () => Promise.resolve({ id: 100 })
   jest.clearAllMocks()
+  rawCalls.length = 0
 })
 
 describe('fulfillExternalOrder atomic stock deduction', () => {
@@ -103,10 +179,18 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     expect(result.skipped).toHaveLength(0)
     expect(result.failed).toHaveLength(0)
 
-    // Two $executeRaw calls expected:
+    // The two deduction statements this pin is about:
     //   1. product_locations decrement with WHERE quantity >= ?
     //   2. products.quantity legacy mirror (locationId === 1)
-    expect(tx.$executeRaw).toHaveBeenCalledTimes(2)
+    const executes = rawCalls.filter((c) => c.kind === 'execute')
+    const decrements = executes.filter((c) => /UPDATE product_locations/.test(c.sql))
+    expect(decrements).toHaveLength(1)
+    expect(decrements[0].sql).toContain('quantity >=')
+    expect(executes.filter((c) => /UPDATE products\b/.test(c.sql))).toHaveLength(1)
+    // B1a-ii: plus the canonical prelock's materialize ahead of them, which is
+    // the only statement this count gained.
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(3)
+    expect(rawCalls[0].sql).toContain('INSERT INTO product_locations')
 
     // The old read-then-upsert pattern must NOT be used
     expect(tx.product_locations.upsert).not.toHaveBeenCalled()
@@ -118,9 +202,9 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
 
     tx.externalOrder.findUnique.mockResolvedValue(order as any)
     tx.product.findUnique.mockResolvedValue({ name: 'Widget A' } as any)
-    // First call (product_locations UPDATE) returns 0 → stock WHERE clause rejected
-    tx.$executeRaw.mockResolvedValueOnce(0 as any)
-    tx.product_locations.findUnique.mockResolvedValue({ quantity: 2 } as any)
+    // The product_locations UPDATE returns 0 → stock WHERE clause rejected
+    updateAffectedRows(0)
+    currentQuantity(2)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 0 },
     ] as any)
@@ -153,9 +237,10 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
 
     tx.externalOrder.findUnique.mockResolvedValue(order as any)
     tx.product.findUnique.mockResolvedValue({ name: 'Widget A' } as any)
-    // UPDATE affects 0 rows because the product_locations row doesn't exist
-    tx.$executeRaw.mockResolvedValueOnce(0 as any)
-    tx.product_locations.findUnique.mockResolvedValue(null) // no row
+    // UPDATE affects 0 rows because the row holds nothing (post-materialize it
+    // exists at { 0, 0 }, which the WHERE quantity >= guard rejects all the same)
+    updateAffectedRows(0)
+    currentQuantity(null)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 0 },
     ] as any)
@@ -242,14 +327,10 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
       .mockResolvedValueOnce({ name: 'Widget A' } as any)
       .mockResolvedValueOnce({ name: 'Widget B' } as any)
 
-    // First item: UPDATE succeeds (1), legacy UPDATE succeeds (1)
-    // Second item: UPDATE fails (0) — insufficient stock
-    tx.$executeRaw
-      .mockResolvedValueOnce(1 as any) // item-1 product_locations
-      .mockResolvedValueOnce(1 as any) // item-1 products legacy mirror
-      .mockResolvedValueOnce(0 as any) // item-2 product_locations — rejected
-
-    tx.product_locations.findUnique.mockResolvedValue({ quantity: 1 } as any)
+    // First item: UPDATE succeeds (1). Second item: UPDATE fails (0) —
+    // insufficient stock. (The mirror and the prelock report 1 either way.)
+    updateAffectedRows(1, 0)
+    currentQuantity(1)
     tx.externalOrderItem.update.mockResolvedValue({} as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 5 },

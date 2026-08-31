@@ -15,6 +15,30 @@
 // factory and expose the mock via globalThis for access in tests.
 
 jest.mock('@/lib/prisma', () => {
+  // THE RECORDING RAW TRIO (pack CB0.3, the per-suite paragraph). This factory
+  // is hoisted above module scope, so the trio is built in here and handed out
+  // on globalThis beside the tx mock. Two layers, as everywhere else in B1: the
+  // OUTER fn always records and then delegates to an INNER behaviour fn, which
+  // is what a test configures — so an override can never quietly switch the
+  // recording off. The pre-existing $executeRaw/$executeRawUnsafe stubs are
+  // WRAPPED, not replaced: their per-test behaviours move to the inner fn.
+  const rawCalls: Array<{ kind: string; sql: string; at: number }> = [];
+  const rawBehavior: Record<string, jest.Mock> = {};
+  const rawFns: Record<string, jest.Mock> = {};
+  let rawSeq = 0;
+  const sqlTextOf = (arg: any): string =>
+    arg && typeof arg === 'object' && typeof arg.sql === 'string' ? arg.sql : String(arg);
+  const install = (target: any, kind: string, method: string, defaultValue: unknown) => {
+    const behavior = jest.fn((..._args: any[]) => Promise.resolve(defaultValue));
+    const recording = jest.fn((...args: any[]) => {
+      rawCalls.push({ kind, sql: sqlTextOf(args[0]), at: rawSeq++ });
+      return behavior(...args);
+    });
+    rawBehavior[method] = behavior;
+    rawFns[method] = recording;
+    target[method] = recording;
+  };
+
   const txMock: any = {
     externalOrder: { findUnique: jest.fn(), update: jest.fn() },
     externalOrderItem: { update: jest.fn(), findMany: jest.fn() },
@@ -25,10 +49,13 @@ jest.mock('@/lib/prisma', () => {
       findMany: jest.fn(),
     },
     inventory_logs: { create: jest.fn() },
-    $executeRaw: jest.fn(),
-    $executeRawUnsafe: jest.fn(),
   };
+  install(txMock, 'query', '$queryRaw', []);
+  install(txMock, 'execute', '$executeRaw', 0);
+  install(txMock, 'executeUnsafe', '$executeRawUnsafe', 0);
+
   (globalThis as any).__txMockBundle = txMock;
+  (globalThis as any).__rawBundle = { rawCalls, rawBehavior, rawFns };
   return {
     __esModule: true,
     default: {
@@ -43,11 +70,23 @@ jest.mock('@/lib/inventory', () => ({
 }));
 
 // --- Imports after mocks ---
+import { Prisma } from '@prisma/client';
 import { fulfillExternalOrder } from '@/lib/fulfillment';
 import { createInventoryLog } from '@/lib/inventory';
 
 function getTx(): any {
   return (globalThis as any).__txMockBundle;
+}
+
+type RawCall = { kind: string; sql: string; at: number };
+
+/** The suite-local recording trio: what ran, in order, and how to steer it. */
+function getRaw(): {
+  rawCalls: RawCall[];
+  rawBehavior: Record<string, jest.Mock>;
+  rawFns: Record<string, jest.Mock>;
+} {
+  return (globalThis as any).__rawBundle;
 }
 
 // --- Helpers ---
@@ -103,10 +142,12 @@ function buildBundleOrder(opts: {
 
 function setupSuccessfulMocks(orderQty: number) {
   const tx = getTx();
-  // $executeRaw returns 1 (row updated) for all calls
-  tx.$executeRaw.mockResolvedValue(1);
+  const { rawBehavior } = getRaw();
+  // $executeRaw returns 1 (row updated) for all calls — kept verbatim, now as
+  // the INNER behaviour (the outer fn is the recorder).
+  rawBehavior.$executeRaw.mockResolvedValue(1);
   // SAVEPOINT / ROLLBACK / RELEASE — Prisma returns 0 for DDL, harmless for tests
-  tx.$executeRawUnsafe.mockResolvedValue(0);
+  rawBehavior.$executeRawUnsafe.mockResolvedValue(0);
   tx.externalOrderItem.update.mockResolvedValue({});
   tx.externalOrderItem.findMany.mockResolvedValue([
     { quantity: orderQty, fulfilledQty: orderQty },
@@ -125,6 +166,7 @@ function setupSuccessfulMocks(orderQty: number) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  getRaw().rawCalls.length = 0;
   _inventoryLogImpl = () => Promise.resolve({ id: 100 });
   // Restore update mock after clearAllMocks
   const tx = getTx();
@@ -265,8 +307,8 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     });
     tx.externalOrder.findUnique.mockResolvedValue(order);
 
-    tx.$executeRaw.mockResolvedValue(1);
-    tx.$executeRawUnsafe.mockResolvedValue(0);
+    getRaw().rawBehavior.$executeRaw.mockResolvedValue(1);
+    getRaw().rawBehavior.$executeRawUnsafe.mockResolvedValue(0);
     tx.externalOrderItem.update.mockResolvedValue({});
     tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 1, fulfilledQty: 0 }]);
     tx.externalOrder.update.mockResolvedValue({});
@@ -306,8 +348,8 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     tx.externalOrder.findUnique.mockResolvedValue(order);
 
     // Base fulfillment mocks (status update at end)
-    tx.$executeRaw.mockResolvedValue(1);
-    tx.$executeRawUnsafe.mockResolvedValue(0);
+    getRaw().rawBehavior.$executeRaw.mockResolvedValue(1);
+    getRaw().rawBehavior.$executeRawUnsafe.mockResolvedValue(0);
     tx.externalOrderItem.update.mockResolvedValue({});
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 1, fulfilledQty: 0 },
@@ -373,14 +415,14 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     // UPDATE per component, so the actual $executeRaw call interleaving for
     // 3 components is: [deduct1, mirror1, deduct2, mirror2, deduct3] — break
     // happens before mirror3 fires.
-    tx.$executeRaw
-      .mockResolvedValueOnce(1)  // component 10 deduct — success
+    getRaw()
+      .rawBehavior.$executeRaw.mockResolvedValueOnce(1)  // component 10 deduct — success
       .mockResolvedValueOnce(1)  // component 10 legacy mirror — success
       .mockResolvedValueOnce(1)  // component 11 deduct — success
       .mockResolvedValueOnce(1)  // component 11 legacy mirror — success
       .mockResolvedValueOnce(0); // component 12 deduct — RACE LOST
 
-    tx.$executeRawUnsafe.mockResolvedValue(0);
+    getRaw().rawBehavior.$executeRawUnsafe.mockResolvedValue(0);
     tx.externalOrderItem.update.mockResolvedValue({});
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 1, fulfilledQty: 0 },
@@ -526,5 +568,85 @@ describe('fulfillExternalOrder — bundle expansion', () => {
       (c: any[]) => c[0]?.data?.bundleComponentSnapshot !== undefined
     );
     expect(snapshotWriteCalls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B1a-ii (reconciliation Part 2, spec §2.7(1)/(3), pack CB1a-ii.1) — the order
+// hook, and what the BUNDLE path contributes to the prelock: nothing.
+// ---------------------------------------------------------------------------
+
+describe('fulfillExternalOrder — the order lock hook (opts.lockFirst)', () => {
+  /** A stand-in for `lockFirst(tx, { required: [orderId] })`: one locking read. */
+  function orderLockHook() {
+    return jest.fn(async (tx: any) => {
+      await tx.$queryRaw(
+        Prisma.sql`SELECT id, orderNumber FROM external_orders WHERE id IN (${'ord1'}) ORDER BY id FOR UPDATE`
+      );
+    });
+  }
+
+  it('runs the hook as the transaction FIRST act — before the order read', async () => {
+    const tx = getTx();
+    const order = buildBundleOrder({
+      snapshot: [
+        { internalProductId: 1, internalProductName: 'A', quantity: 1, sortOrder: 0 },
+      ],
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+    setupSuccessfulMocks(1);
+
+    const lockFirst = orderLockHook();
+    await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42, undefined, undefined, null, {
+      lockFirst,
+    });
+
+    expect(lockFirst).toHaveBeenCalledTimes(1);
+    // The hook's statement is the FIRST raw statement of the transaction.
+    const { rawCalls, rawFns } = getRaw();
+    expect(rawCalls[0].kind).toBe('query');
+    expect(rawCalls[0].sql).toContain('FROM external_orders');
+    expect(rawCalls[0].sql).toContain('FOR UPDATE');
+    // …and it precedes the order read, which is a delegate call.
+    expect(rawFns.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      tx.externalOrder.findUnique.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('costs NOTHING when no hook is supplied — existing callers are unchanged', async () => {
+    const tx = getTx();
+    const order = buildBundleOrder({
+      snapshot: [
+        { internalProductId: 1, internalProductName: 'A', quantity: 1, sortOrder: 0 },
+      ],
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+    setupSuccessfulMocks(1);
+
+    await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
+
+    expect(getRaw().rawFns.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('a BUNDLE-only request contributes NO prelock key (the deferred residual)', async () => {
+    const tx = getTx();
+    const order = buildBundleOrder({
+      snapshot: [
+        { internalProductId: 1, internalProductName: 'A', quantity: 1, sortOrder: 0 },
+      ],
+      itemQuantity: 1,
+    });
+    tx.externalOrder.findUnique.mockResolvedValue(order);
+    setupSuccessfulMocks(1);
+
+    // A manual override on a bundle line does NOT make it a simple-path item:
+    // the bundle branch wins, so the key set stays empty.
+    await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1, productId: 77 }], 42);
+
+    const { rawCalls } = getRaw();
+    expect(rawCalls.some((c) => /INSERT INTO product_locations/.test(c.sql))).toBe(false);
+    expect(rawCalls.some((c) => c.kind === 'query')).toBe(false);
   });
 });

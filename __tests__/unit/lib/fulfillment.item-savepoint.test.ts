@@ -41,6 +41,57 @@ import { fulfillExternalOrder } from '@/lib/fulfillment';
 const ORDER_ID = 'ord-1';
 
 // ---------------------------------------------------------------------------
+// THE RECORDING RAW TRIO (pack CB0.3, the per-suite paragraph).
+//
+// This suite declares its OWN `@/lib/prisma` factory and hands the fulfilment
+// path a stand-in transaction, so the global harness's trio never reaches it.
+// Two layers, as everywhere else in B1: the OUTER fn always records and then
+// delegates to an INNER behaviour fn — here the store's own implementation, so
+// the savepoint semantics these pins exist for are kept verbatim while every
+// statement still lands in `rawCalls`.
+// ---------------------------------------------------------------------------
+type RawCall = { kind: 'query' | 'execute' | 'executeUnsafe'; sql: string; at: number };
+
+/** Every raw statement the test under way has spent, in call order. */
+const rawCalls: RawCall[] = [];
+/** The INNER behaviour fns, by method name. */
+const rawBehavior: Record<string, jest.Mock> = {};
+/** The OUTER recording fns — for `invocationCallOrder` against the delegates. */
+const rawFns: Record<string, jest.Mock> = {};
+let rawSeq = 0;
+
+function sqlTextOf(arg: unknown): string {
+  return arg && typeof arg === 'object' && typeof (arg as { sql?: unknown }).sql === 'string'
+    ? (arg as { sql: string }).sql
+    : String(arg);
+}
+
+function installRecordingRaw(
+  impls: Record<string, (...args: any[]) => Promise<unknown>>
+): Record<string, jest.Mock> {
+  const out: Record<string, jest.Mock> = {};
+  const install = (kind: RawCall['kind'], method: string) => {
+    const behavior = jest.fn(impls[method]);
+    const recording = jest.fn((...args: any[]) => {
+      rawCalls.push({ kind, sql: sqlTextOf(args[0]), at: rawSeq++ });
+      return behavior(...args);
+    });
+    rawBehavior[method] = behavior;
+    rawFns[method] = recording;
+    out[method] = recording;
+  };
+  install('query', '$queryRaw');
+  install('execute', '$executeRaw');
+  install('executeUnsafe', '$executeRawUnsafe');
+  return out;
+}
+
+/** The prelock's returning SELECT (lib/inventory/prelock.ts), by its text. */
+function isPrelockSelect(sql: string): boolean {
+  return sql.includes('FROM product_locations') && sql.includes('(productId, locationId) IN');
+}
+
+// ---------------------------------------------------------------------------
 // The stand-in transaction: real state, real savepoints, injectable faults.
 // ---------------------------------------------------------------------------
 
@@ -119,7 +170,7 @@ function makeStore(seed: {
   /** MySQL savepoint stack: name -> the state at the moment it was set. */
   const savepoints: Array<{ name: string; snap: Snap }> = [];
 
-  const tx: any = {
+  const rawImpls: Record<string, (...args: any[]) => Promise<any>> = {
     $executeRawUnsafe: async (statement: string) => {
       statements.push(statement);
       let m = /^SAVEPOINT (\w+)$/.exec(statement);
@@ -154,6 +205,25 @@ function makeStore(seed: {
     $executeRaw: async (query: Prisma.Sql) => {
       const text = query.sql;
       const values = query.values as number[];
+      if (/INSERT INTO product_locations/.test(text)) {
+        // The MATERIALIZE half of the canonical prelock. ODKU `version =
+        // version` leaves an existing row exactly as it is (updatedAt included);
+        // a missing key is created at the live column defaults, which is what
+        // makes `{ 0, 0 }` a value a guard can read instead of an absence.
+        // VALUES ride as (productId, locationId, 0, 0, NOW()) per row.
+        for (let i = 0; i < values.length; i += 2) {
+          const key = plKey(values[i], values[i + 1]);
+          if (!productLocations.has(key)) {
+            productLocations.set(key, {
+              productId: values[i],
+              locationId: values[i + 1],
+              quantity: 0,
+              version: 0,
+            });
+          }
+        }
+        return values.length / 2;
+      }
       if (/UPDATE product_locations/.test(text)) {
         const [deductQty, productId, locationId, guard] = values;
         const row = productLocations.get(plKey(productId, locationId));
@@ -173,8 +243,34 @@ function makeStore(seed: {
       throw new Error(`unexpected sql: ${text}`);
     },
 
+    $queryRaw: async (query: Prisma.Sql) => {
+      const text = query.sql;
+      const values = query.values as number[];
+      if (isPrelockSelect(text)) {
+        // The RETURNING LOCKING READ half, same set, same order.
+        const rows: PlRow[] = [];
+        for (let i = 0; i < values.length; i += 2) {
+          const row = productLocations.get(plKey(values[i], values[i + 1]));
+          if (row) rows.push({ ...row });
+        }
+        return rows;
+      }
+      if (/SELECT quantity FROM product_locations/.test(text)) {
+        // The refusal diagnostic's locking re-read (pack CB1a-ii.1): the CURRENT
+        // quantity, which is not the prelocked one once an earlier item in the
+        // same request has deducted the same key.
+        const row = productLocations.get(plKey(values[0], values[1]));
+        return row ? [{ quantity: row.quantity }] : [];
+      }
+      throw new Error(`unexpected sql: ${text}`);
+    },
+  };
+
+  const tx: any = {
+    ...installRecordingRaw(rawImpls),
+
     externalOrder: {
-      findUnique: async () => seed.order,
+      findUnique: jest.fn(async () => seed.order),
       update: async () => ({}),
     },
     externalOrderItem: {
@@ -330,6 +426,7 @@ function lateFailureOn(itemId: string) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  rawCalls.length = 0;
 });
 
 // ---------------------------------------------------------------------------
@@ -523,5 +620,165 @@ describe('W2S-1 — a failed item commits nothing', () => {
     expect(result.fulfilled.map((f) => f.itemId)).toEqual(['item-2']);
     // No rollback statement was needed: nothing had been written for item-1.
     expect(store.statements.some((s) => /^ROLLBACK TO SAVEPOINT /.test(s))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B1a-ii (reconciliation Part 2, spec §2.7(3), pack CB1a-ii.1) — THE SIMPLE-PATH
+// PRELOCK: which keys it takes, where it sits, and what the refusal says.
+// ---------------------------------------------------------------------------
+
+/** The one INSERT the canonical prelock issues, with its VALUES. */
+function prelockInsert(): { sql: string; values: number[] } | undefined {
+  const call = rawFns.$executeRaw.mock.calls.find((c: any[]) =>
+    /INSERT INTO product_locations/.test(sqlTextOf(c[0]))
+  );
+  return call ? { sql: sqlTextOf(call[0]), values: (call[0] as any).values } : undefined;
+}
+
+/** The index in `rawCalls` of the first statement matching `re`. */
+function firstRawIndex(re: RegExp): number {
+  return rawCalls.findIndex((c) => re.test(c.sql));
+}
+
+describe('B1a-ii — the simple-path prelock', () => {
+  it('PIN B1a-ii-a: takes ONE prelock over the simple-path keys only', async () => {
+    const store = makeStore({
+      order: order([
+        // Simple, mapped, unfulfilled — the ONLY contributor.
+        singleLine(),
+        // A bundle line: excluded (the deferred residual).
+        bundleLine(),
+        // A bundle line WITH a manual override: the bundle branch wins anyway.
+        bundleLine({ id: 'item-bo' }),
+        // Already fully fulfilled: the loop skips it before any write.
+        singleLine({ id: 'item-done', quantity: 2, fulfilledQty: 2 }),
+        // Unmapped, user-skipped: resolves no product, so no key.
+        singleLine({ id: 'item-unmapped', isMapped: false, productLink: null }),
+      ]),
+      products: [
+        { id: 10, name: 'Widget A', quantity: 100 },
+        { id: 21, name: 'Alpha', quantity: 100 },
+        { id: 22, name: 'Beta', quantity: 100 },
+      ],
+      productLocations: [
+        { productId: 10, locationId: 1, quantity: 100, version: 1 },
+        { productId: 21, locationId: 1, quantity: 100, version: 1 },
+        { productId: 22, locationId: 1, quantity: 100, version: 1 },
+      ],
+    });
+    drive(store);
+
+    await fulfillExternalOrder(
+      ORDER_ID,
+      1,
+      [
+        { itemId: 'item-1', quantity: 5 },
+        { itemId: 'item-b', quantity: 1 },
+        { itemId: 'item-bo', quantity: 1, productId: 99 },
+        { itemId: 'item-done', quantity: 2 },
+        { itemId: 'item-unmapped', quantity: 1, skipUnmapped: true },
+      ],
+      42
+    );
+
+    // EXACTLY ONE materialize statement, carrying EXACTLY the mapped item's key.
+    const inserts = rawCalls.filter((c) => /INSERT INTO product_locations/.test(c.sql));
+    expect(inserts).toHaveLength(1);
+    expect(prelockInsert()!.values).toEqual([10, 1]);
+    // Neither the bundle components (21/22) nor the override (99) are in it.
+    expect(prelockInsert()!.values).not.toContain(21);
+    expect(prelockInsert()!.values).not.toContain(99);
+  });
+
+  it('PIN B1a-ii-b: the prelock sits AFTER the order read and BEFORE the first item UPDATE', async () => {
+    const store = makeStore({
+      order: order([singleLine()]),
+      products: [{ id: 10, name: 'Widget A', quantity: 100 }],
+      productLocations: [{ productId: 10, locationId: 1, quantity: 100, version: 1 }],
+    });
+    drive(store);
+
+    await fulfillExternalOrder(ORDER_ID, 1, [{ itemId: 'item-1', quantity: 5 }], 42);
+
+    // The two prelock statements, in order, then the item's atomic UPDATE.
+    const insertAt = firstRawIndex(/INSERT INTO product_locations/);
+    const selectAt = rawCalls.findIndex((c) => isPrelockSelect(c.sql));
+    const updateAt = firstRawIndex(/UPDATE product_locations/);
+    expect(insertAt).toBe(0);
+    expect(rawCalls[insertAt].kind).toBe('execute');
+    expect(selectAt).toBe(1);
+    expect(rawCalls[selectAt].kind).toBe('query');
+    expect(rawCalls[selectAt].sql).toContain('FOR UPDATE');
+    expect(updateAt).toBeGreaterThan(selectAt);
+    // …and the whole prelock follows the transaction's order read, which is the
+    // consistent read that exists on this path by construction.
+    expect(rawFns.$executeRaw.mock.invocationCallOrder[0]).toBeGreaterThan(
+      store.tx.externalOrder.findUnique.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('PIN B1a-ii-c: a never-stocked key is materialized, not skipped', async () => {
+    const store = makeStore({
+      order: order([singleLine()]),
+      products: [{ id: 10, name: 'Widget A', quantity: 0 }],
+      productLocations: [],
+    });
+    drive(store);
+
+    const result = await fulfillExternalOrder(
+      ORDER_ID,
+      1,
+      [{ itemId: 'item-1', quantity: 5 }],
+      42
+    );
+
+    // The row now EXISTS at the live defaults, and the refusal reads it.
+    expect(store.productLocation(10, 1)).toMatchObject({ quantity: 0, version: 0 });
+    expect(result.skipped[0]).toMatchObject({ itemId: 'item-1', reason: 'insufficient_stock' });
+    expect(result.skipped[0].details).toContain('Available: 0');
+  });
+
+  it('PIN B1a-ii-d: the refusal diagnostic is a LOCKING re-read of the CURRENT row', async () => {
+    // Two lines on the SAME key. The first deducts 3 of the 5 in stock; the
+    // second asks for 4 and is refused. The prelocked snapshot said 5 — the
+    // message has to say 2, which is the number an operator can act on.
+    const store = makeStore({
+      order: order([
+        singleLine({ quantity: 3 }),
+        singleLine({ id: 'item-2', quantity: 4 }),
+      ]),
+      products: [{ id: 10, name: 'Widget A', quantity: 5 }],
+      productLocations: [{ productId: 10, locationId: 1, quantity: 5, version: 1 }],
+    });
+    drive(store);
+
+    const result = await fulfillExternalOrder(
+      ORDER_ID,
+      1,
+      [
+        { itemId: 'item-1', quantity: 3 },
+        { itemId: 'item-2', quantity: 4 },
+      ],
+      42
+    );
+
+    expect(result.fulfilled.map((f) => f.itemId)).toEqual(['item-1']);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]).toMatchObject({ itemId: 'item-2', reason: 'insufficient_stock' });
+    // Not "Available: 5" — the prelocked snapshot went stale inside the request.
+    expect(result.skipped[0].details).toBe(
+      'Insufficient stock for Widget A. Available: 2, Requested: 4'
+    );
+
+    // The diagnostic is a raw LOCKING read, not the retired findUnique.
+    const diagnostics = rawCalls.filter(
+      (c) => c.kind === 'query' && /SELECT quantity FROM product_locations/.test(c.sql)
+    );
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].sql).toContain('FOR UPDATE');
+
+    // One key named twice is prelocked ONCE (prelockProductLocations dedupes).
+    expect(prelockInsert()!.values).toEqual([10, 1]);
   });
 });

@@ -80,8 +80,51 @@ const db = prisma as unknown as {
   $transaction: jest.Mock;
 };
 
+// ---------------------------------------------------------------------------
+// THE RECORDING RAW TRIO (pack CB0.3, the per-suite paragraph).
+//
+// This suite hand-builds the tx object each route's `$transaction` receives, so
+// the global harness's trio never reaches it: the trio is installed on every
+// hand-built tx instead. Two layers — the OUTER fn always records and then
+// delegates to an INNER behaviour fn, which is what a test configures.
+// ---------------------------------------------------------------------------
+type RawCall = { kind: 'query' | 'execute' | 'executeUnsafe'; sql: string; at: number };
+
+const rawCalls: RawCall[] = [];
+const rawBehavior: Record<string, jest.Mock> = {};
+const rawFns: Record<string, jest.Mock> = {};
+let rawSeq = 0;
+
+function sqlTextOf(arg: unknown): string {
+  return arg && typeof arg === 'object' && typeof (arg as { sql?: unknown }).sql === 'string'
+    ? (arg as { sql: string }).sql
+    : String(arg);
+}
+
+function recordingRaw(): Record<string, jest.Mock> {
+  const out: Record<string, jest.Mock> = {};
+  const install = (kind: RawCall['kind'], method: string, defaultValue: unknown) => {
+    const behavior = jest.fn((..._args: unknown[]) => Promise.resolve(defaultValue));
+    const recording = jest.fn((...args: unknown[]) => {
+      rawCalls.push({ kind, sql: sqlTextOf(args[0]), at: rawSeq++ });
+      return behavior(...args);
+    });
+    rawBehavior[method] = behavior;
+    rawFns[method] = recording;
+    out[method] = recording;
+  };
+  // The fulfil path reads $executeRaw as its atomic UPDATE's affected-row count,
+  // so 1 (the row moved) is this stand-in's happy path; the prelock's returning
+  // SELECT is unread on that path and answers empty.
+  install('query', '$queryRaw', []);
+  install('execute', '$executeRaw', 1);
+  install('executeUnsafe', '$executeRawUnsafe', 0);
+  return out;
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
+  rawCalls.length = 0;
   (requireApproved as jest.Mock).mockResolvedValue({
     user: { id: 7, isAdmin: false, isApproved: true },
   });
@@ -141,13 +184,13 @@ function makeFulfillTx() {
       update: jest.fn().mockResolvedValue({}),
       findMany: jest.fn().mockResolvedValue([{ quantity: 2, fulfilledQty: 2 }]),
     },
-    $executeRaw: jest.fn().mockResolvedValue(1),
     // W2S-1: fulfillment brackets each item's writes in a SAVEPOINT, issued
     // through $executeRawUnsafe. This stand-in only ever takes the happy path,
     // so the statements are accepted and ignored — the savepoint's own semantics
     // are pinned in fulfillment.item-savepoint.test.ts against a store that
-    // actually models them.
-    $executeRawUnsafe: jest.fn().mockResolvedValue(0),
+    // actually models them. B1a-ii added the prelock's two statements ahead of
+    // the loop, so the whole trio rides here now.
+    ...recordingRaw(),
     auditLog: { create: jest.fn().mockResolvedValue({ id: 1 }) },
     // Reconciliation lane R-A: the fulfill closure now writes its attribution
     // attempt on this same tx, right after the audit event. The EXACT row is

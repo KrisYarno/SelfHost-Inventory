@@ -1,6 +1,7 @@
 import prisma from '@/lib/prisma';
 import { Prisma, inventory_logs_logType } from '@prisma/client';
 import { createInventoryLog } from '@/lib/inventory';
+import { prelockProductLocations } from '@/lib/inventory/prelock';
 import { ProductNotFoundError } from '@/lib/error-handling';
 import {
   BUNDLE_SENTINEL_PRODUCT_ID,
@@ -366,7 +367,17 @@ export async function fulfillExternalOrder(
    * BOTH deduction ledger rows (single + bundle-component) so each SALE row
    * joins the fulfillment audit event. NULL for callers that don't record.
    */
-  batchId?: string | null
+  batchId?: string | null,
+  /**
+   * Reconciliation Part 2 (spec §2.7(1), pack CB1a-ii.1): opts.lockFirst is the
+   * ORDER lock, run as the transaction's FIRST act — before the order read, so
+   * nothing this function reads predates it. Same shape as the three stock
+   * primitives'; this path has no retry loop, so it runs once. Optional: a
+   * caller that supplies nothing spends no extra statement.
+   */
+  opts?: {
+    lockFirst?: (tx: Prisma.TransactionClient) => Promise<unknown>;
+  }
 ): Promise<FulfillmentResult> {
   const result: FulfillmentResult = {
     fulfilled: [],
@@ -383,6 +394,10 @@ export async function fulfillExternalOrder(
 
   return await prisma.$transaction(
     async (tx) => {
+      // The order lock is statement 1 — before the order read below, which is
+      // this transaction's first consistent read.
+      if (opts?.lockFirst) await opts.lockFirst(tx);
+
       // Get order with items and integration (Amendment 5: need integration for push)
       const order = await tx.externalOrder.findUnique({
         where: { id: orderId },
@@ -417,6 +432,50 @@ export async function fulfillExternalOrder(
       result.externalId = order.externalId;
       result.integrationId = order.integrationId;
       result.integrationPlatform = order.integration.platform;
+
+      // THE SIMPLE-PATH PRELOCK (spec §2.7(3), pack CB1a-ii.1). Unlike the stock
+      // primitives, this transaction already has a read view — the order read
+      // above opened it — so the prelock's job here is the OTHER half of the
+      // discipline: take every `product_locations` row this request will X-lock,
+      // once, in the canonical order, before the first item touches one. Two
+      // requests that name the same two rows in opposite item order can then no
+      // longer take them in opposite orders.
+      //
+      // The key set is exactly what the loop's own skip ladder will send down
+      // the simple path: the order item must EXIST, have remaining quantity, and
+      // not be the bundle branch (which wins over a manual override), and it
+      // must resolve a product — the override if one was sent, else the mapped
+      // internal product. An unmapped item without an override contributes
+      // nothing because it deducts nothing.
+      //
+      // The BUNDLE path is deliberately excluded (the named deferred residual):
+      // its per-item savepoints roll components back individually, which is a
+      // different lock shape than one prelock over the whole request.
+      //
+      // The returned rows are NOT read here. This path's guard is the atomic
+      // conditional UPDATE below — the write IS the guard (spec REV-11) — and
+      // its refusal diagnostic re-reads the row under the lock, because the
+      // prelocked snapshot goes stale as soon as an earlier item in this same
+      // request deducts the same key.
+      const prelockKeys: Array<{ productId: number; locationId: number }> = [];
+      items.forEach((fulfillmentItem) => {
+        const orderItem = order.items.find(
+          (item) => item.id === fulfillmentItem.itemId
+        );
+        if (!orderItem) return;
+        if (orderItem.quantity - orderItem.fulfilledQty <= 0) return;
+        if (orderItem.isMapped && orderItem.productLink?.isBundle) return;
+        const productId = fulfillmentItem.productId
+          ? fulfillmentItem.productId
+          : orderItem.isMapped && orderItem.productLink?.internalProduct
+            ? orderItem.productLink.internalProduct.id
+            : undefined;
+        if (productId === undefined) return;
+        prelockKeys.push({ productId, locationId });
+      });
+      // `prelockProductLocations` owns the dedupe and the canonical sort (one
+      // owner per invariant), so the keys ride in as the request named them.
+      await prelockProductLocations(tx, prelockKeys);
 
       // Process each fulfillment item
       for (const fulfillmentItem of items) {
@@ -750,18 +809,26 @@ export async function fulfillExternalOrder(
           `);
 
           if (affectedRows === 0) {
-            // Either the row doesn't exist or insufficient stock. Read the current
-            // state for the error message (best-effort — may still race but the
-            // actual deduction already declined).
-            const currentRow = await tx.product_locations.findUnique({
-              where: { productId_locationId: { productId, locationId } },
-              select: { quantity: true },
-            });
+            // The stock was insufficient (the row itself exists — the prelock
+            // materialized it). Read the current quantity for the message.
+            //
+            // B1a-ii: a LOCKING re-read, not the retired consistent findUnique
+            // and not the prelocked snapshot. The consistent read would answer
+            // from a view that predates the prelock, and the snapshot goes stale
+            // the moment an earlier item in this request deducts the same key —
+            // both would print a number nobody can act on. The row is already
+            // X-held by this transaction, so FOR UPDATE here blocks nothing; it
+            // costs one extra statement on the refusal path only.
+            const currentRows = await tx.$queryRaw<Array<{ quantity: number }>>(Prisma.sql`
+              SELECT quantity FROM product_locations
+              WHERE productId = ${productId} AND locationId = ${locationId}
+              FOR UPDATE
+            `);
 
             result.skipped.push({
               itemId: fulfillmentItem.itemId,
               reason: 'insufficient_stock',
-              details: `Insufficient stock for ${product.name}. Available: ${currentRow?.quantity ?? 0}, Requested: ${quantityToFulfill}`,
+              details: `Insufficient stock for ${product.name}. Available: ${currentRows[0]?.quantity ?? 0}, Requested: ${quantityToFulfill}`,
             });
             continue;
           }

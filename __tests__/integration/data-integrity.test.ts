@@ -25,6 +25,65 @@ jest.mock('@/lib/csrf', () => ({
   validateCSRFToken: jest.fn(async () => true),
 }))
 
+// ---------------------------------------------------------------------------
+// THE RECORDING RAW TRIO (pack CB0.3, the per-suite paragraph).
+//
+// This suite hand-builds the tx object it hands the route, so the global
+// harness's trio never reaches the route's transaction. B1a-ii opened that
+// transaction with the canonical prelock, so every hand-built tx gets the trio
+// spread in — and the rows the prelock's returning SELECT hands back are what
+// the version guard and the stock floor read, in place of the retired per-item
+// `product_locations.findFirst`.
+// ---------------------------------------------------------------------------
+type RawCall = { kind: 'query' | 'execute' | 'executeUnsafe'; sql: string; at: number }
+
+const rawCalls: RawCall[] = []
+const rawBehavior: Record<string, jest.Mock> = {}
+let rawSeq = 0
+
+function sqlTextOf(arg: unknown): string {
+  return arg && typeof arg === 'object' && typeof (arg as { sql?: unknown }).sql === 'string'
+    ? (arg as { sql: string }).sql
+    : String(arg)
+}
+
+function isPrelockSelect(sql: string): boolean {
+  return sql.includes('FROM product_locations') && sql.includes('(productId, locationId) IN')
+}
+
+type PrelockRow = { productId: number; locationId: number; quantity: number; version: number }
+
+/** Install the trio on a hand-built tx and seed what the prelock returns. */
+function withRecordingRaw<T extends object>(tx: T, prelockRows: PrelockRow[]): T {
+  const target = tx as unknown as Record<string, unknown>
+  const install = (kind: RawCall['kind'], method: string, make: () => unknown) => {
+    const behavior = jest.fn((..._args: unknown[]) => Promise.resolve(make()))
+    const recording = jest.fn((...args: unknown[]) => {
+      rawCalls.push({ kind, sql: sqlTextOf(args[0]), at: rawSeq++ })
+      return behavior(...args)
+    })
+    rawBehavior[method] = behavior
+    target[method] = recording
+  }
+  install('query', '$queryRaw', () => [])
+  install('execute', '$executeRaw', () => 0)
+  install('executeUnsafe', '$executeRawUnsafe', () => 0)
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) =>
+    isPrelockSelect(sqlTextOf(args[0])) ? prelockRows : []
+  )
+  return tx
+}
+
+/** Every key at one location, stocked the same — the bulk fixtures' shape. */
+function stockedAt(
+  locationId: number,
+  productIds: number[],
+  quantity: number,
+  version: number
+): PrelockRow[] {
+  return productIds.map((productId) => ({ productId, locationId, quantity, version }))
+}
+
 describe('Data Integrity Tests', () => {
   // Must satisfy requireApproved(): email present + isApproved true + numeric id
   const mockSession = {
@@ -40,6 +99,7 @@ describe('Data Integrity Tests', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    rawCalls.length = 0
     ;(getServerSession as jest.Mock).mockResolvedValue(mockSession)
   })
 
@@ -74,7 +134,15 @@ describe('Data Integrity Tests', () => {
       ;(prisma.product.findMany as jest.Mock).mockResolvedValue(mockProducts)
       ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
         try {
-          return await callback(mockTx)
+          return await callback(
+            withRecordingRaw(mockTx, [
+              { productId: 1, locationId: 1, quantity: 100, version: 1 },
+              { productId: 2, locationId: 1, quantity: 50, version: 1 },
+              // Product 3 cannot pay the -10: the floor refuses and the whole
+              // transaction goes with it.
+              { productId: 3, locationId: 1, quantity: 5, version: 1 },
+            ])
+          )
         } catch (error) {
           // Transaction rolls back: no writes persist
           writeCalls = 0
@@ -94,8 +162,13 @@ describe('Data Integrity Tests', () => {
       })
 
       const response = await POST(request)
+      const data = await response.json()
 
-      expect(response.status).toBe(500)
+      // B1a-ii: the floor refusal is a typed 400 now — it used to reach the wire
+      // as a generic 500, which told the operator nothing. What this pin is
+      // about is unchanged: the whole batch rolls back.
+      expect(response.status).toBe(400)
+      expect(data.code).toBe('INSUFFICIENT_STOCK')
       expect(writeCalls).toBe(0) // No updates should persist
     })
 
@@ -125,7 +198,9 @@ describe('Data Integrity Tests', () => {
             }),
           },
         }
-        return callback(tx)
+        return callback(
+          withRecordingRaw(tx, [{ productId: 1, locationId: 1, quantity: 100, version: 1 }])
+        )
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -163,7 +238,9 @@ describe('Data Integrity Tests', () => {
           inventory_logs: { create: jest.fn() },
         }
         // Let the route's OptimisticLockError propagate untouched
-        return callback(tx)
+        return callback(
+          withRecordingRaw(tx, [{ productId: 1, locationId: 1, quantity: 90, version: 2 }])
+        )
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -212,7 +289,7 @@ describe('Data Integrity Tests', () => {
           // batch-adjust-api.test.ts); the stand-in just has to exist.
           orderAttributionAttempt: { create: jest.fn().mockResolvedValue({ id: 1 }) },
         }
-        return callback(tx)
+        return callback(withRecordingRaw(tx, stockedAt(1, [1, 2], 100, 1)))
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -272,7 +349,12 @@ describe('Data Integrity Tests', () => {
           // Reconciliation lane R-A: see above.
           orderAttributionAttempt: { create: jest.fn().mockResolvedValue({ id: 1 }) },
         }
-        return callback(tx)
+        return callback(
+          withRecordingRaw(
+            tx,
+            stockedAt(1, largeProductSet.map((p) => p.id), 1000, 1)
+          )
+        )
       })
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
