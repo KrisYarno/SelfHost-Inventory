@@ -56,8 +56,78 @@ function post(url: string, body: unknown): NextRequest {
   });
 }
 
+// ---------------------------------------------------------------------------
+// THE RECORDING RAW TRIO (pack CB0.3, the per-suite paragraph).
+//
+// This suite declares its OWN `@/lib/prisma` factory, so the global harness's
+// trio never reaches it, and it builds a FRESH tx per test — so the trio is
+// installed on each tx `makeTx()` hands out, at the point it is built (the
+// REV-15 OC-4 placement rule: never somewhere a later rebuild would discard).
+//
+// Two layers: the OUTER fn always records and then delegates to an INNER
+// behaviour fn (`rawBehavior`), which is what a test configures — so an
+// override can never silently switch the recording off. The suite's existing
+// `$executeRaw`/`$executeRawUnsafe` stubs (the fulfil/unfulfill paths' atomic
+// UPDATEs and savepoints) are kept as exactly that: inner behaviours.
+// ---------------------------------------------------------------------------
+type RawCall = { kind: "query" | "execute" | "executeUnsafe"; sql: string; at: number };
+
+/** Every raw statement the test under way has spent, in call order. */
+const rawCalls: RawCall[] = [];
+/** The INNER behaviour fns, by method name — what a test configures. */
+const rawBehavior: Record<string, jest.Mock> = {};
+/** The OUTER recording fns — for `invocationCallOrder` against the delegates. */
+const rawFns: Record<string, jest.Mock> = {};
+let rawSeq = 0;
+
+function sqlTextOf(arg: unknown): string {
+  return arg && typeof arg === "object" && typeof (arg as { sql?: unknown }).sql === "string"
+    ? (arg as { sql: string }).sql
+    : String(arg);
+}
+
+function installRecordingRaw(target: Record<string, unknown>): void {
+  const install = (kind: RawCall["kind"], method: string, make: () => unknown) => {
+    const behavior = jest.fn((..._args: unknown[]) => Promise.resolve(make()));
+    const recording = jest.fn((...args: unknown[]) => {
+      rawCalls.push({ kind, sql: sqlTextOf(args[0]), at: rawSeq++ });
+      return behavior(...args);
+    });
+    rawBehavior[method] = behavior;
+    rawFns[method] = recording;
+    target[method] = recording;
+  };
+  install("query", "$queryRaw", () => []);
+  install("execute", "$executeRaw", () => 0);
+  install("executeUnsafe", "$executeRawUnsafe", () => 0);
+}
+
+/** The prelock's returning SELECT (lib/inventory/prelock.ts), by its text. */
+function isPrelockSelect(sql: string): boolean {
+  return sql.includes("FROM product_locations") && sql.includes("(productId, locationId) IN");
+}
+
+/**
+ * What the prelock's returning SELECT hands back. The primitives' per-key
+ * `product_locations.findUnique` retired with the prelock (pack CB1a-i), so
+ * the fixture that read { quantity: 100, version: 1 } is spelled here as the
+ * materialized rows the version guard and the stock floor now read.
+ */
+function prelocked(
+  rows: Array<{ productId: number; locationId: number; quantity: number; version: number }>
+): void {
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) =>
+    isPrelockSelect(sqlTextOf(args[0])) ? rows : []
+  );
+}
+
+/** The prelocked key the manual deduction touches: stocked, at version 1. */
+const STOCKED = [{ productId: 5, locationId: 2, quantity: 100, version: 1 }];
+
 function makeTx() {
   const tx = mockDeep<Prisma.TransactionClient>();
+  installRecordingRaw(tx as unknown as Record<string, unknown>);
+  prelocked(STOCKED);
   tx.product_locations.findUnique.mockResolvedValue({ version: 1, quantity: 100 } as any);
   tx.product_locations.upsert.mockResolvedValue({ version: 2 } as any);
   tx.product_locations.create.mockResolvedValue({} as any);
@@ -73,8 +143,10 @@ function makeTx() {
   tx.externalOrder.update.mockResolvedValue({} as any);
   tx.externalOrderItem.update.mockResolvedValue({} as any);
   tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 2, fulfilledQty: 2 }] as any);
-  tx.$executeRaw.mockResolvedValue(1 as any);
-  tx.$executeRawUnsafe.mockResolvedValue(1 as any);
+  // Kept verbatim, now as INNER behaviours: the fulfil/unfulfill paths read
+  // these as their atomic UPDATEs' affected-row counts.
+  rawBehavior.$executeRaw.mockResolvedValue(1 as any);
+  rawBehavior.$executeRawUnsafe.mockResolvedValue(1 as any);
   return tx;
 }
 
@@ -104,6 +176,7 @@ function singleLine(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  rawCalls.length = 0;
   (requireApproved as jest.Mock).mockResolvedValue({
     user: { id: 7, email: "u@x.com", isApproved: true, isAdmin: false },
   });
