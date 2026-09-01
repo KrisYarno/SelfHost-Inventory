@@ -40,6 +40,11 @@ jest.mock("sonner", () => ({
 
 import { toast } from "sonner";
 import { CompleteOrderDialog } from "@/components/workbench/complete-order-dialog";
+import {
+  CAP_COUNTER_FROM,
+  MAX_FULFILLMENT_ITEMS,
+  MAX_SIMPLE_DEDUCT_ITEMS,
+} from "@/lib/inventory/request-limits";
 import { useWorkbench } from "@/hooks/use-workbench";
 import type { ExternalOrder } from "@/types/external-orders";
 import type { ProductWithQuantity } from "@/types/product";
@@ -513,5 +518,455 @@ describe("complete-order dialog — the completion names the batches it wrote", 
       fulfilBatchId: null,
       deductSimpleBatchId: null,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE ENVELOPE, READ (reconciliation Part 2, pack CB1.5c / seam S-B15).
+//
+// This surface used to test `response.ok` and nothing else: it set
+// wcFulfilled = true, ran the manual leg, and then reported every cart item as
+// deducted. From B1.5 a fulfil can answer 200 having refused some or all of the
+// lines (a short line is a `skipped` entry), so a 200 is an ANSWER, not a
+// success — and the WC leg here is all-or-nothing by its documented P0-2
+// posture: a partial fulfilment is put back and the completion stops.
+//
+// The rollback is built from `results.fulfilled` — the lines the SERVER says it
+// deducted — never from the cart, and a 2xx that restored nothing is not a
+// rollback.
+// ---------------------------------------------------------------------------
+
+describe("complete-order dialog — a 200 that refused lines is a refusal", () => {
+  // The sonner mock is module-level and the file's own beforeEach does not
+  // touch it, so each pin starts from a clean toast log — a leaked call from an
+  // earlier test would read as this test's copy.
+  beforeEach(() => {
+    (toast.error as jest.Mock).mockClear();
+    (toast.warning as jest.Mock).mockClear();
+    (toast.success as jest.Mock).mockClear();
+  });
+
+  /** N mapped WC lines the store will put straight into the cart. */
+  function wcOrderOf(count: number) {
+    const products = Array.from({ length: count }, (_, idx) => ({
+      id: 600 + idx,
+      name: `Line ${idx}`,
+      currentQuantity: 10,
+    })) as unknown as ProductWithQuantity[];
+    const items = Array.from({ length: count }, (_, idx) =>
+      orderItem({
+        id: `it-${idx}`,
+        name: `Line ${idx}`,
+        quantity: 1,
+        isMapped: true,
+        productLinkId: `pl-${idx}`,
+        productLink: {
+          id: `pl-${idx}`,
+          internalProductId: 600 + idx,
+          externalSku: null,
+          externalTitle: null,
+          internalProduct: {
+            id: 600 + idx,
+            name: `Line ${idx}`,
+            baseName: null,
+            variant: null,
+          },
+        },
+      })
+    );
+    return { items, products };
+  }
+
+  function seedWcCart(count: number) {
+    const { items, products } = wcOrderOf(count);
+    act(() => {
+      useWorkbench.getState().selectExternalOrder(makeOrder(items), products);
+    });
+  }
+
+  /** Route each leg's response by URL. */
+  function respond(handlers: {
+    fulfill?: () => Partial<Response> & { json: () => Promise<unknown> };
+    unfulfill?: () => Partial<Response> & { json: () => Promise<unknown> };
+    deduct?: () => Partial<Response> & { json: () => Promise<unknown> };
+  }) {
+    fetchMock.mockImplementation(async (url: unknown) => {
+      const href = String(url);
+      if (href.includes("/unfulfill")) {
+        return (handlers.unfulfill?.() ?? {
+          ok: true,
+          json: async () => ({ restored: [] }),
+        }) as unknown as Response;
+      }
+      if (href.includes("/fulfill")) {
+        return (handlers.fulfill?.() ?? {
+          ok: true,
+          json: async () => ({ success: true }),
+        }) as unknown as Response;
+      }
+      return (handlers.deduct?.() ?? {
+        ok: true,
+        json: async () => ({ success: true }),
+      }) as unknown as Response;
+    });
+  }
+
+  const calls = (fragment: string) =>
+    fetchMock.mock.calls.filter((call) => String(call[0]).includes(fragment));
+
+  const bodyOf = (call: unknown[]) =>
+    JSON.parse((call[1] as { body: string }).body) as Record<string, unknown>;
+
+  /** Render every toast body sonner was handed, and return the combined text. */
+  function toastText(fn: jest.Mock): string {
+    return fn.mock.calls
+      .map((call) => {
+        const { container } = render(<>{call[0] as React.ReactElement}</>);
+        return container.textContent ?? "";
+      })
+      .join(" | ");
+  }
+
+  it("NOTHING fulfilled: no manual leg, no rollback, and the coded refusal copy", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: null,
+          summary: { total: 2, fulfilled: 0, skipped: 2, failed: 0 },
+          results: {
+            fulfilled: [],
+            skipped: [
+              { itemId: "it-0", reason: "unmapped", details: "Item is not mapped" },
+              {
+                itemId: "it-1",
+                reason: "insufficient_stock",
+                details: "Insufficient stock for Line 1. Available: 0, Requested: 1",
+              },
+            ],
+            failed: [],
+          },
+        }),
+      }),
+    });
+    seedWcCart(2);
+    // ...plus a manual line, whose whole point here is that it never ships.
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    // The fulfil was the ONLY request: nothing was deducted, so there is
+    // nothing to put back and no second movement to make.
+    expect(calls("/api/inventory/deduct-simple")).toHaveLength(0);
+    expect(calls("/unfulfill")).toHaveLength(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("Nothing was deducted");
+    // The refusal is chosen by PRIORITY: the short line, not the pass-1 skip
+    // that precedes it in the array.
+    expect(text).toContain("Insufficient stock for Line 1. Available: 0, Requested: 1");
+    expect(text).toContain("Any fulfilled WooCommerce lines were put back.");
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("1 of 2 fulfilled: ONE unfulfill naming ONLY the fulfilled entry, and no manual leg", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-9",
+          summary: { total: 2, fulfilled: 1, skipped: 1, failed: 0 },
+          results: {
+            fulfilled: [{ itemId: "it-0", productId: 600, quantity: 1, productName: "Line 0" }],
+            skipped: [
+              {
+                itemId: "it-1",
+                reason: "insufficient_stock",
+                details: "Insufficient stock for Line 1. Available: 0, Requested: 1",
+              },
+            ],
+            failed: [],
+          },
+        }),
+      }),
+      unfulfill: () => ({ ok: true, json: async () => ({ restored: [{ itemId: "it-0" }] }) }),
+    });
+    seedWcCart(2);
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const rollbacks = calls("/unfulfill");
+    expect(rollbacks).toHaveLength(1);
+    // ONLY the line the server said it deducted — the refused sibling is not
+    // credited stock it never lost.
+    expect(bodyOf(rollbacks[0]).items).toEqual([
+      { itemId: "it-0", productId: 600, quantity: 1, locationId: 1 },
+    ]);
+    expect(calls("/api/inventory/deduct-simple")).toHaveLength(0);
+
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("Nothing was deducted");
+    expect(text).toContain("Insufficient stock for Line 1. Available: 0, Requested: 1");
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("a rollback that restored NOTHING throws UNCODED, so no toast claims the lines came back", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-9",
+          summary: { total: 2, fulfilled: 1, skipped: 1, failed: 0 },
+          results: {
+            fulfilled: [{ itemId: "it-0", productId: 600, quantity: 1 }],
+            skipped: [
+              {
+                itemId: "it-1",
+                reason: "insufficient_stock",
+                details: "Insufficient stock for Line 1. Available: 0, Requested: 1",
+              },
+            ],
+            failed: [],
+          },
+        }),
+      }),
+      // A 2xx that restored nothing is NOT a rollback (QB-4).
+      unfulfill: () => ({ ok: true, json: async () => ({ restored: [] }) }),
+    });
+    seedWcCart(2);
+    renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect((toast.error as jest.Mock).mock.calls.length).toBeGreaterThan(1));
+
+    const text = toastText(toast.error as jest.Mock);
+    // The incident toast tells the truth...
+    expect(text).toContain("Rollback failed");
+    expect(text).toContain("restored only 0 of 1 lines");
+    // ...and the second toast does NOT contradict it. This is the one path
+    // where the data really is inconsistent, so the coded copy is withheld.
+    expect(text).not.toContain("Nothing was deducted");
+    expect(text).not.toContain("were put back");
+    expect(text).toContain("Something went wrong");
+  });
+
+  it("a manual-leg failure after a FULL WC leg rolls back THE SERVER'S entries, by item id", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-3",
+          summary: { total: 2, fulfilled: 2, skipped: 0, failed: 0 },
+          results: {
+            // Deliberately NOT in cart order, and the second entry carries no
+            // productId: the rollback must match it by `fulfillmentItemId`
+            // (DCc-11), never by position — a positional fallback here would
+            // credit product 601 the stock that came off product 600.
+            fulfilled: [
+              { itemId: "it-1", productId: 601, quantity: 1 },
+              { itemId: "it-0", quantity: 1 },
+            ],
+            skipped: [],
+            failed: [],
+          },
+        }),
+      }),
+      deduct: () => ({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error: "Product 777: Insufficient inventory: current 0, trying to remove 1",
+          code: "INSUFFICIENT_STOCK",
+        }),
+      }),
+      unfulfill: () => ({
+        ok: true,
+        json: async () => ({ restored: [{ itemId: "it-1" }, { itemId: "it-0" }] }),
+      }),
+    });
+    seedWcCart(2);
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const rollbacks = calls("/unfulfill");
+    expect(rollbacks).toHaveLength(1);
+    // The FULFILLED entries, in the server's own order — not the cart.
+    expect(bodyOf(rollbacks[0]).items).toEqual([
+      { itemId: "it-1", productId: 601, quantity: 1, locationId: 1 },
+      { itemId: "it-0", productId: 600, quantity: 1, locationId: 1 },
+    ]);
+    // restored.length === the entries sent, so the rollback stands and the
+    // incident toast is NOT raised.
+    expect(toastText(toast.error as jest.Mock)).not.toContain("Rollback failed");
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("a manual-leg failure whose rollback restores NOTHING raises the incident toast", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-4",
+          summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+          results: {
+            fulfilled: [{ itemId: "it-0", productId: 600, quantity: 1 }],
+            skipped: [],
+            failed: [],
+          },
+        }),
+      }),
+      deduct: () => ({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: "Failed to process order", code: "INSUFFICIENT_STOCK" }),
+      }),
+      // A 2xx carrying `restored: []` — accepted as a successful rollback
+      // before B1.5c, which is how a WC leg could stay deducted with the
+      // operator told only that the manual leg failed.
+      unfulfill: () => ({ ok: true, json: async () => ({ restored: [] }) }),
+    });
+    seedWcCart(1);
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("Rollback failed");
+    expect(text).toContain("restored only 0 of 1 lines");
+  });
+
+  it("a 503 BUSY from the fulfil leg names itself as busy (OCc-20)", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: false,
+        status: 503,
+        // The ladder's whole-request answer (B1.5 behaviour change 1).
+        json: async () => ({
+          error: "the system was busy with another change — try again",
+          code: "BUSY",
+        }),
+      }),
+    });
+    seedWcCart(1);
+    renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("The system was busy");
+    expect(text).toContain("the system was busy with another change — try again");
+    expect(text).toContain("Try again in a moment.");
+  });
+
+  // -------------------------------------------------------------------------
+  // THE CAP GUARD (QB-3 / seam S-B10). Each leg counts against its own route's
+  // cap, and the over-cap sentence renders at the `Total Items:` row — the one
+  // row BOTH the WC and the non-WC paths render (OCc-7).
+  // -------------------------------------------------------------------------
+
+  const WC_OVER = `This order has ${MAX_FULFILLMENT_ITEMS + 1} WooCommerce lines; fulfilment handles at most ${MAX_FULFILLMENT_ITEMS} per request.`;
+  const MANUAL_OVER = `This cart has ${MAX_SIMPLE_DEDUCT_ITEMS + 1} manual lines; deduction handles at most ${MAX_SIMPLE_DEDUCT_ITEMS} per request.`;
+
+  it("no counter at 50 WC lines", () => {
+    seedWcCart(50);
+    renderDialog();
+
+    expect(screen.queryByText(new RegExp(`of ${MAX_FULFILLMENT_ITEMS}$`))).toBeNull();
+    expect(completeButton()).toBeEnabled();
+  });
+
+  it(`the WC counter appears above ${CAP_COUNTER_FROM}`, () => {
+    seedWcCart(CAP_COUNTER_FROM + 1);
+    renderDialog();
+
+    expect(
+      screen.getByText(`${CAP_COUNTER_FROM + 1} of ${MAX_FULFILLMENT_ITEMS}`)
+    ).toBeInTheDocument();
+    expect(screen.queryByText(WC_OVER)).toBeNull();
+    expect(completeButton()).toBeEnabled();
+  });
+
+  it("at exactly the cap the confirm is still enabled", () => {
+    seedWcCart(MAX_FULFILLMENT_ITEMS);
+    renderDialog();
+
+    expect(
+      screen.getByText(`${MAX_FULFILLMENT_ITEMS} of ${MAX_FULFILLMENT_ITEMS}`)
+    ).toBeInTheDocument();
+    expect(completeButton()).toBeEnabled();
+  });
+
+  it("one WC line over the cap: Confirm is refused, with the sentence at the Total Items row", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    seedWcCart(MAX_FULFILLMENT_ITEMS + 1);
+    renderDialog();
+
+    const sentence = screen.getByText(WC_OVER);
+    // AT the Total Items row (OCc-7): the summary card is the one block both
+    // the WC and the non-WC paths render, which is what makes the refusal
+    // visible to a cart that has no `From Order` header at all.
+    expect(sentence.closest("div")?.textContent).toContain("Total Items:");
+    expect(completeButton()).toBeDisabled();
+
+    await user.click(completeButton());
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a 101-line NON-WC cart gets the same treatment — the row both paths render", () => {
+    act(() => {
+      useWorkbench.getState().setOrderReference("manual-ref");
+      Array.from({ length: MAX_SIMPLE_DEDUCT_ITEMS + 1 }, (_, idx) => idx).forEach((idx) => {
+        useWorkbench
+          .getState()
+          .addItem(
+            { id: 800 + idx, name: `Manual ${idx}`, currentQuantity: 5 } as unknown as ProductWithQuantity,
+            1
+          );
+      });
+    });
+    renderDialog();
+
+    const sentence = screen.getByText(MANUAL_OVER);
+    expect(sentence.closest("div")?.textContent).toContain("Total Items:");
+    expect(screen.getByRole("button", { name: "Complete Order" })).toBeDisabled();
   });
 });

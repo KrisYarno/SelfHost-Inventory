@@ -89,6 +89,28 @@ export function getUserFriendlyMessage(error: Error): UserFriendlyError {
           title: 'Invalid Input',
           description: error.message || 'Please check your input and try again.',
         };
+      // Reconciliation Part 2, pack CB1.5c (OCc-20). B1.5's ladder answers a
+      // transient engine fault as ONE whole-request 503 `BUSY` carrying
+      // `TX_BUSY_MESSAGE`; without this case the operator reads "Something went
+      // wrong ... contact support" for a condition whose whole answer is "try
+      // again", and nothing was committed either way.
+      case 'BUSY':
+        return {
+          title: 'The system was busy',
+          description: error.message,
+          action: 'Try again in a moment.'
+        };
+      // FVc-5. The workbench throws this when a fulfil answered 200 but refused
+      // some or all of the lines: far more common than a fault, and the WC leg
+      // has already been put back by the time it is thrown. Only the coded path
+      // gets this copy — a partial rollback throws UNCODED on purpose, because
+      // there the critical toast has already said the opposite.
+      case 'FULFILMENT_REFUSED':
+        return {
+          title: 'Nothing was deducted',
+          description: error.message,
+          action: 'Any fulfilled WooCommerce lines were put back. Fix the issue and try again.'
+        };
       default:
         break;
     }

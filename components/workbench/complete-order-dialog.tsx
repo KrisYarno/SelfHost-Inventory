@@ -23,6 +23,12 @@ import { useLocation } from "@/contexts/location-context";
 import { apiErrorMessage, readApiError } from "@/lib/api-error";
 import { getUserFriendlyMessage } from "@/lib/error-handling";
 import {
+  CAP_COUNTER_FROM,
+  MAX_FULFILLMENT_ITEMS,
+  MAX_SIMPLE_DEDUCT_ITEMS,
+} from "@/lib/inventory/request-limits";
+import { primaryRefusal } from "@/lib/orders/refusal";
+import {
   SKIPPED_LINE_CLASSES,
   SKIPPED_LINE_COPY,
   SKIPPED_LINE_LABEL,
@@ -64,6 +70,18 @@ export type CompletionBatchIds = {
   fulfilBatchId: string | null;
 };
 
+/**
+ * One entry of the fulfil route's `results.fulfilled[]` (pack CB1.5c, seam
+ * S-B15) — the lines the server says it ACTUALLY deducted, which is what a
+ * rollback must be built from. Every field is optional at this seam because it
+ * arrives as parsed JSON: the reader proves what it needs before using it.
+ */
+type FulfilledEntry = {
+  itemId?: string;
+  productId?: number;
+  quantity?: number;
+};
+
 interface CompleteOrderDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -103,6 +121,16 @@ export function CompleteOrderDialog({
     const manual = orderItems.filter((item) => !item.fulfillmentItemId);
     return { wcItems: wc, manualItems: manual };
   }, [orderItems]);
+
+  // The request caps, client-side (pack CB1.5c / seam S-B10, the journal's
+  // threshold-gated idiom). Each leg posts to its own route with its own cap, so
+  // each is counted against its own owner constant; the counters appear before
+  // the cap bites, and above it Complete is refused with a sentence that says
+  // why rather than a 400 after the work is done.
+  const wcOver = wcItems.length > MAX_FULFILLMENT_ITEMS;
+  const manualOver = manualItems.length > MAX_SIMPLE_DEDUCT_ITEMS;
+  const showWcCounter = wcItems.length > CAP_COUNTER_FROM;
+  const showManualCounter = manualItems.length > CAP_COUNTER_FROM;
 
   // W0.5-a (T6): the skipped lines, classified, plus the per-line
   // acknowledgements. Acknowledgement is LOCAL state only — nothing is
@@ -208,6 +236,124 @@ export function CompleteOrderDialog({
     // user always sees a clean all-or-nothing transaction.
     let wcFulfilled = false;
 
+    // Pack CB1.5c: the entries the fulfil route said it deducted. A rollback is
+    // built from THESE, never from the cart — sending every requested line back
+    // would credit stock for lines the server refused.
+    let fulfilledEntries: FulfilledEntry[] = [];
+
+    /**
+     * Put the WC leg back (pack CB1.5c, seam S-B15). SINGLES-ONLY by contract:
+     * the workbench cart cannot hold a bundle line (`use-workbench.ts`,
+     * `lib/workbench/skipped-lines.ts`), so every entry here is a single with a
+     * real productId. An entry without one is skipped from the body and NAMED
+     * in the critical toast rather than guessed at — a belt over a stated
+     * unreachable case (PKd-5/FVc-9).
+     *
+     * Returns true ONLY when the server restored every entry it was given:
+     * a 2xx with `restored: []` is not a rollback, and the caller's choice of
+     * error code turns on this answer.
+     */
+    const rollbackWcLeg = async (entries: FulfilledEntry[]): Promise<boolean> => {
+      if (!selectedExternalOrder || !selectedLocationId || !csrfToken) return false;
+
+      // Nothing to send is NOT a rollback: `restored.length === entries.length`
+      // would read 0 === 0 and claim a full restoration of a leg still
+      // deducted. Unreachable on today's wire — the route always sends
+      // `results.fulfilled`, and a zero-fulfilled leg never gets here — so this
+      // is a belt, and it fails to the uncoded (honest) branch.
+      if (entries.length === 0) {
+        console.error(
+          `CRITICAL: WC rollback had no fulfilled entries to restore for order ${selectedExternalOrder.id}`
+        );
+        return false;
+      }
+
+      const unresolved: string[] = [];
+      const items: Array<{
+        itemId: string;
+        productId: number;
+        quantity: number;
+        locationId: number;
+      }> = [];
+
+      entries.forEach((entry) => {
+        // DCc-11: matched BY ITEM ID, never positionally — `results.fulfilled`
+        // is not the cart, and an index-matched fallback would restore stock to
+        // whichever product happened to sit at that offset.
+        const cartLine = wcItems.find((item) => item.fulfillmentItemId === entry.itemId);
+        const productId =
+          typeof entry.productId === "number" && entry.productId > 0
+            ? entry.productId
+            : cartLine?.product.id;
+        if (!entry.itemId || typeof productId !== "number" || productId <= 0) {
+          unresolved.push(cartLine?.product.name ?? entry.itemId ?? "an unnamed line");
+          return;
+        }
+        items.push({
+          itemId: entry.itemId,
+          productId,
+          quantity: typeof entry.quantity === "number" ? entry.quantity : (cartLine?.quantity ?? 0),
+          locationId: selectedLocationId,
+        });
+      });
+
+      let restoredCount = 0;
+      try {
+        const rollbackResponse = await fetch(
+          `/api/orders/${selectedExternalOrder.id}/unfulfill`,
+          {
+            method: "POST",
+            headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+            body: JSON.stringify({
+              items,
+              notes: "Auto-rollback: the completion could not finish after WC fulfillment",
+            }),
+          }
+        );
+
+        if (rollbackResponse.ok) {
+          // QB-4 (truthful data): a 200 can carry `restored: []`. Count it.
+          const rollbackBody = (await rollbackResponse.json().catch(() => null)) as {
+            restored?: unknown[];
+          } | null;
+          restoredCount = rollbackBody?.restored?.length ?? 0;
+          if (restoredCount === entries.length && unresolved.length === 0) return true;
+          console.error(
+            `CRITICAL: WC rollback restored ${restoredCount} of ${entries.length} lines for order ${selectedExternalOrder.id}`
+          );
+        } else {
+          // Rollback failed — this is a data-integrity incident. Surface it
+          // to the user with the order ID so they can investigate manually.
+          const rollbackError = await rollbackResponse.json().catch(() => ({}));
+          console.error(
+            `CRITICAL: WC rollback failed for order ${selectedExternalOrder.id}:`,
+            rollbackError
+          );
+        }
+      } catch (rollbackError) {
+        console.error(
+          `CRITICAL: WC rollback threw for order ${selectedExternalOrder.id}:`,
+          rollbackError
+        );
+      }
+
+      toast.error(
+        <div className="space-y-1">
+          <p className="font-medium">Rollback failed</p>
+          <p className="text-sm">
+            {`WC order #${selectedExternalOrder.orderNumber} was fulfilled but the completion could not finish, and the rollback restored only ${restoredCount} of ${entries.length} lines. Please check inventory manually for order ${selectedExternalOrder.id}.`}
+          </p>
+          {unresolved.length > 0 && (
+            <p className="text-sm">
+              {`Not sent for restoration (no product id): ${unresolved.join(", ")}.`}
+            </p>
+          )}
+        </div>,
+        { duration: 15000 }
+      );
+      return false;
+    };
+
     // Reconciliation Part 2 (pack CB1b.6): the batch each leg wrote under, read
     // off the response rather than guessed. Null until that leg actually runs.
     const batchIds: CompletionBatchIds = {
@@ -250,6 +396,50 @@ export function CompleteOrderDialog({
         batchIds.fulfilBatchId =
           typeof fulfillBody?.batchId === "string" ? fulfillBody.batchId : null;
         wcFulfilled = true;
+
+        // ---------------------------------------------------------------------
+        // THE ENVELOPE, READ (pack CB1.5c / seam S-B15). A 200 is an ANSWER, not
+        // a success: from B1.5 a short line comes back as a `skipped` entry on a
+        // 200, and this surface used to report every 2xx as "all deducted".
+        //
+        // The WC leg is ALL-OR-NOTHING here (its documented P0-2 posture): a
+        // partial fulfilment is rolled back and the completion stops, because
+        // the manual leg that would follow it is a second movement the operator
+        // never agreed to make on half an order.
+        // ---------------------------------------------------------------------
+        fulfilledEntries = Array.isArray(fulfillBody?.results?.fulfilled)
+          ? (fulfillBody.results.fulfilled as FulfilledEntry[])
+          : [];
+        // A body with no readable summary is NOT read as a refusal: it would
+        // roll back a leg that may well have succeeded and then tell the
+        // operator nothing was deducted. Today's route always sends one.
+        const fulfilledCount =
+          typeof fulfillBody?.summary?.fulfilled === "number"
+            ? (fulfillBody.summary.fulfilled as number)
+            : null;
+
+        if (fulfilledCount !== null && fulfilledCount < wcItems.length) {
+          // Nothing fulfilled => nothing to put back, so the leg IS clean.
+          let restoredFully = true;
+          if (fulfilledCount > 0) {
+            restoredFully = await rollbackWcLeg(fulfilledEntries);
+            if (restoredFully) wcFulfilled = false;
+          }
+
+          const error = new Error(
+            primaryRefusal(fulfillBody?.results) ?? "the order could not be fulfilled"
+          );
+          // DCc-4: the code is CONDITIONAL. `FULFILMENT_REFUSED` promises the
+          // WC lines were put back — true when none were fulfilled or the
+          // rollback fully restored. A partial rollback throws UNCODED: the
+          // critical toast above already told the truth, and a second toast
+          // claiming the lines "were put back" would contradict it on the one
+          // path where the data really is inconsistent.
+          if (fulfilledCount === 0 || restoredFully) {
+            (error as any).code = "FULFILMENT_REFUSED";
+          }
+          throw error;
+        }
       }
 
       // 2. Deduct manual items via deduct-simple API
@@ -283,58 +473,14 @@ export function CompleteOrderDialog({
         if (!deductResponse.ok) {
           // P0-2: Manual deduct failed AFTER WC fulfill succeeded. Roll back the
           // WC portion by calling unfulfill, otherwise we leave the user with
-          // deducted WC inventory and no undo path. The rollback is best-effort
-          // but logged prominently if it fails.
+          // deducted WC inventory and no undo path.
+          // Pack CB1.5c: the SAME helper, over the entries the server said it
+          // deducted — not every cart line, and no longer accepting a 2xx that
+          // restored nothing as a rollback. Still best-effort at the wire, but
+          // a rollback that did not restore every line now says so, loudly.
           if (wcFulfilled && selectedExternalOrder) {
-            try {
-              const rollbackResponse = await fetch(
-                `/api/orders/${selectedExternalOrder.id}/unfulfill`,
-                {
-                  method: "POST",
-                  headers: withCSRFHeaders(
-                    { "Content-Type": "application/json" },
-                    csrfToken
-                  ),
-                  body: JSON.stringify({
-                    items: wcItems.map((item) => ({
-                      itemId: item.fulfillmentItemId,
-                      productId: item.product.id,
-                      quantity: item.quantity,
-                      locationId: selectedLocationId,
-                    })),
-                    notes: "Auto-rollback: manual item deduction failed after WC fulfillment",
-                  }),
-                }
-              );
-
-              if (!rollbackResponse.ok) {
-                // Rollback failed — this is a data-integrity incident. Surface it
-                // to the user with the order ID so they can investigate manually.
-                const rollbackError = await rollbackResponse.json().catch(() => ({}));
-                console.error(
-                  `CRITICAL: WC rollback failed for order ${selectedExternalOrder.id}:`,
-                  rollbackError
-                );
-                toast.error(
-                  <div className="space-y-1">
-                    <p className="font-medium">Rollback failed</p>
-                    <p className="text-sm">
-                      WC order #{selectedExternalOrder.orderNumber} was fulfilled but
-                      manual items failed. Rollback also failed. Please check
-                      inventory manually for order {selectedExternalOrder.id}.
-                    </p>
-                  </div>,
-                  { duration: 15000 }
-                );
-              } else {
-                wcFulfilled = false; // rollback succeeded
-              }
-            } catch (rollbackError) {
-              console.error(
-                `CRITICAL: WC rollback threw for order ${selectedExternalOrder.id}:`,
-                rollbackError
-              );
-            }
+            const restoredFully = await rollbackWcLeg(fulfilledEntries);
+            if (restoredFully) wcFulfilled = false;
           }
 
           // Same shared reader on the deduct leg (pack REV-22 F7): a 400
@@ -470,6 +616,20 @@ export function CompleteOrderDialog({
                   <span className="font-medium">Total Items:</span>
                   <span>{orderItems.length}</span>
                 </div>
+                {/* OCc-7: the over-cap sentence lives HERE — the one row both
+                    the WC and the non-WC paths render. Hung off the `Added
+                    Manually` header it would have left a 101-line manual cart
+                    with a dead Confirm and no reason on screen. */}
+                {wcOver && (
+                  <p className="text-sm font-medium text-destructive">
+                    {`This order has ${wcItems.length} WooCommerce lines; fulfilment handles at most ${MAX_FULFILLMENT_ITEMS} per request.`}
+                  </p>
+                )}
+                {manualOver && (
+                  <p className="text-sm font-medium text-destructive">
+                    {`This cart has ${manualItems.length} manual lines; deduction handles at most ${MAX_SIMPLE_DEDUCT_ITEMS} per request.`}
+                  </p>
+                )}
                 <div className="flex justify-between text-sm">
                   <span className="font-medium">Total Quantity:</span>
                   <span>{getTotalQuantity()} units</span>
@@ -482,6 +642,15 @@ export function CompleteOrderDialog({
                   <p className="text-sm font-medium flex items-center gap-1.5">
                     <CheckCircle2 className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />
                     From Order ({wcItems.length})
+                    {showWcCounter && (
+                      <span
+                        className={`text-xs font-mono tabular-nums ${
+                          wcOver ? "text-destructive font-semibold" : "text-muted-foreground"
+                        }`}
+                      >
+                        {`${wcItems.length} of ${MAX_FULFILLMENT_ITEMS}`}
+                      </span>
+                    )}
                   </p>
                   <ul className="text-sm space-y-1 max-h-24 overflow-y-auto">
                     {wcItems.map((item, idx) => (
@@ -498,7 +667,18 @@ export function CompleteOrderDialog({
 
               {isWCOrder && manualItems.length > 0 && (
                 <div className="space-y-1">
-                  <p className="text-sm font-medium">Added Manually ({manualItems.length})</p>
+                  <p className="text-sm font-medium flex items-center gap-1.5">
+                    Added Manually ({manualItems.length})
+                    {showManualCounter && (
+                      <span
+                        className={`text-xs font-mono tabular-nums ${
+                          manualOver ? "text-destructive font-semibold" : "text-muted-foreground"
+                        }`}
+                      >
+                        {`${manualItems.length} of ${MAX_SIMPLE_DEDUCT_ITEMS}`}
+                      </span>
+                    )}
+                  </p>
                   <ul className="text-sm space-y-1 max-h-24 overflow-y-auto">
                     {manualItems.map((item) => (
                       <li key={`manual-${item.product.id}`} className="flex justify-between">
@@ -658,7 +838,16 @@ export function CompleteOrderDialog({
             onClick={handleComplete}
             // T6: the only new gate is the acknowledgement one, and it lifts
             // for good once every tap-required line has been tapped.
-            disabled={isProcessing || csrfLoading || !csrfToken || !allAcknowledged}
+            // CB1.5c: plus the request caps — either leg over its own cap would
+            // be refused by its route with the whole cart already spent.
+            disabled={
+              isProcessing ||
+              csrfLoading ||
+              !csrfToken ||
+              !allAcknowledged ||
+              wcOver ||
+              manualOver
+            }
           >
             {isProcessing
               ? "Processing..."

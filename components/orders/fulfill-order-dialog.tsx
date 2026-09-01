@@ -23,7 +23,24 @@ import { ProductMapDialog } from "@/components/products/product-map-dialog";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useFulfillmentValidation, useFulfillOrder } from "@/hooks/use-orders";
+import { CAP_COUNTER_FROM, MAX_FULFILLMENT_ITEMS } from "@/lib/inventory/request-limits";
+import { primaryRefusal } from "@/lib/orders/refusal";
 import type { ExternalOrder } from "@/types/external-orders";
+
+type OrderLine = NonNullable<ExternalOrder["items"]>[number];
+
+/**
+ * The lines this dialog would SEND — reconciliation Part 2, pack CB1.5c.
+ *
+ * One spelling, module-level, because two different readers of "how many lines
+ * is this" is how a cap counter ends up disagreeing with the request it counts:
+ * `handleFulfill` builds its items from this, and the cap guard measures this.
+ * A line is open when part of it is still unfulfilled — a fully fulfilled line
+ * is never sent, so it never counts against the request cap either.
+ */
+export function openLines(items: OrderLine[]): OrderLine[] {
+  return items.filter((item) => item.quantity - item.fulfilledQty > 0);
+}
 
 interface FulfillOrderDialogProps {
   order: ExternalOrder | null;
@@ -116,20 +133,16 @@ export function FulfillOrderDialog({
       return;
     }
 
-    // Build items array for fulfillment
-    const items = (order.items || [])
-      .filter((item) => {
-        const remainingQty = item.quantity - item.fulfilledQty;
-        return remainingQty > 0;
-      })
-      .map((item) => {
-        const remainingQty = item.quantity - item.fulfilledQty;
-        return {
-          itemId: item.id,
-          quantity: remainingQty,
-          skipUnmapped: !item.isMapped, // Skip unmapped items by default
-        };
-      });
+    // Build items array for fulfillment — the SAME predicate the cap counter
+    // renders from (pack CB1.5c), so the two can never drift apart.
+    const items = openLines(order.items || []).map((item) => {
+      const remainingQty = item.quantity - item.fulfilledQty;
+      return {
+        itemId: item.id,
+        quantity: remainingQty,
+        skipUnmapped: !item.isMapped, // Skip unmapped items by default
+      };
+    });
 
     if (items.length === 0) {
       toast.error("No items to fulfill");
@@ -143,16 +156,65 @@ export function FulfillOrderDialog({
         items,
       });
 
-      // Show success message
-      toast.success(
-        <div className="flex items-center gap-2">
-          <CheckCircle className="h-4 w-4" />
-          <span>Order {order.orderNumber} processed</span>
-        </div>,
-        {
-          description: `${result.summary.fulfilled} items fulfilled, ${result.summary.skipped} skipped`,
-        }
-      );
+      // ---------------------------------------------------------------------
+      // THE ENVELOPE, READ (reconciliation Part 2, pack CB1.5c / seam S-B15).
+      //
+      // A 200 is not a success — it is an ANSWER. Until B1.5 this dialog
+      // toasted "processed" and called onSuccess for every 200 without ever
+      // reading `summary.failed`, which is the surface that hid DR-1 for two
+      // weeks. From B1.5 a partial 200 (a short line lands in `skipped`) is
+      // reachable in production, so the toast tiers by what actually happened.
+      // ---------------------------------------------------------------------
+      const summary = result.summary;
+      const refusal = primaryRefusal(result.results);
+
+      if (summary.fulfilled === 0) {
+        // Nothing moved. The dialog STAYS OPEN and onSuccess is NOT called:
+        // there is no new state to refresh into, and closing would tell the
+        // operator the order was dealt with.
+        toast.error(
+          <div className="flex items-center gap-2">
+            <AlertCircle className="h-4 w-4" />
+            <span>Nothing was fulfilled</span>
+          </div>,
+          {
+            description: refusal ?? undefined,
+            duration: 5000,
+          }
+        );
+        return;
+      }
+
+      const counts = `${summary.fulfilled} fulfilled, ${summary.skipped} skipped, ${summary.failed} failed`;
+
+      if (summary.fulfilled < items.length) {
+        // Legitimate state: part of the order IS fulfilled, and the validation
+        // step already showed which lines had issues. Close and refresh — but
+        // never call it "processed".
+        toast.warning(
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4" />
+            <span>Order {order.orderNumber} partially processed</span>
+          </div>,
+          {
+            description: refusal ? `${counts} — ${refusal}` : counts,
+            duration: 5000,
+          }
+        );
+      } else {
+        toast.success(
+          <div className="flex items-center gap-2">
+            <CheckCircle className="h-4 w-4" />
+            <span>Order {order.orderNumber} processed</span>
+          </div>,
+          {
+            description:
+              `${summary.fulfilled} fulfilled` +
+              (summary.skipped > 0 ? `, ${summary.skipped} skipped` : "") +
+              (summary.failed > 0 ? `, ${summary.failed} failed` : ""),
+          }
+        );
+      }
 
       // Close dialog and refresh
       onOpenChange(false);
@@ -196,6 +258,14 @@ export function FulfillOrderDialog({
   ).length || 0;
 
   const canFulfill = validation?.canFulfill && selectedLocationId !== null;
+
+  // The request cap, client-side (pack CB1.5c / seam S-B10, the journal's
+  // threshold-gated idiom): the counter appears while the order is still under
+  // the cap — a bound an operator meets for the first time as a 400 is a bound
+  // they were never told about. The numbers come from the ONE owner.
+  const openCount = openLines(order.items ?? []).length;
+  const showCounter = openCount > CAP_COUNTER_FROM;
+  const overCap = openCount > MAX_FULFILLMENT_ITEMS;
 
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
@@ -300,6 +370,21 @@ export function FulfillOrderDialog({
                   )}
                 </div>
 
+                {showCounter && (
+                  <p
+                    className={cn(
+                      "text-xs",
+                      overCap
+                        ? "text-destructive font-semibold"
+                        : "font-mono tabular-nums text-muted-foreground"
+                    )}
+                  >
+                    {overCap
+                      ? `This order has ${openCount} open lines; fulfilment handles at most ${MAX_FULFILLMENT_ITEMS} per request.`
+                      : `${openCount} of ${MAX_FULFILLMENT_ITEMS} lines`}
+                  </p>
+                )}
+
                 <Separator />
 
                 {/* Item Details */}
@@ -390,7 +475,8 @@ export function FulfillOrderDialog({
               isLoadingValidation ||
               !validation ||
               !selectedLocationId ||
-              itemsWithStock === 0
+              itemsWithStock === 0 ||
+              overCap
             }
             className={cn(
               !canFulfill && itemsWithStock > 0 && "bg-orange-600 hover:bg-orange-700"
