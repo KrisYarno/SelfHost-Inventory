@@ -124,7 +124,10 @@ export const BatchTransferSchema = z.object({
         expectedVersion: z.number().int().min(0).optional(),
       })
     )
-    .min(1, "At least one transfer is required"),
+    .min(1, "At least one transfer is required")
+    // QB-9: the one covered-writer feeding schema that had no request-size
+    // maximum — and this route runs one full transaction PER transfer.
+    .max(100, "at most 100 transfers per request"),
 });
 
 // Admin bulk mass-update (POST /api/admin/inventory/mass-update).

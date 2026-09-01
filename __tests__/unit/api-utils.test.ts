@@ -158,19 +158,32 @@ describe('apiHandler — Prisma P2028/P2034 -> 503 BUSY', () => {
   // FDg-2 negative (the FDf-2 spoof lock): a JSON-parse SyntaxError echoing the
   // request's own bytes must NEVER read as contention.
   it('does NOT map a body-echoing SyntaxError to BUSY — a malformed body is a 500, not contention', async () => {
+    // QB-1: the input must genuinely ECHO a trigger word into the message —
+    // V8 only echoes on a bare-token parse, and the precondition is asserted
+    // so this pin can never rot back into passing vacuously.
+    let echoed: Error | null = null
+    try {
+      JSON.parse('deadlock lock wait timeout')
+    } catch (e) {
+      echoed = e as Error
+    }
+    expect(echoed).not.toBeNull()
+    expect(/deadlock/.test(echoed!.message)).toBe(true)
     const handler = apiHandler(async () => {
-      JSON.parse('{deadlock lock wait timeout')
-      return undefined as never
+      throw echoed
     })
     const res = await handler(req(), {} as never)
     expect(res.status).toBe(500)
     expect((await res.json()).code).not.toBe('BUSY')
   })
 
-  it('maps a code-less raw deadlock (the engine sentence alone) to 503 BUSY', async () => {
+  it('maps a P2010 raw-failure carrying the deadlock sentence to 503 BUSY (the real raw shape)', async () => {
+    // QB-6 rewrote this from a plain Error (a shape production never emits —
+    // FDg-2) to the KnownRequestError P2010 wrapping raw failures actually use.
     const handler = apiHandler(async () => {
-      throw new Error(
-        'Raw query failed. Code: `1213`. Message: `Deadlock found when trying to get lock; try restarting transaction`'
+      throw new Prisma.PrismaClientKnownRequestError(
+        'Raw query failed. Code: `1213`. Message: `Deadlock found when trying to get lock; try restarting transaction`',
+        { code: 'P2010', clientVersion: 'test' } as never
       )
     })
     const res = await handler(req(), {} as never)

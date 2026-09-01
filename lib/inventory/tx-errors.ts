@@ -41,15 +41,19 @@ const TRANSIENT_MESSAGE = /deadlock|lock wait timeout|write conflict|connection 
  * `instanceof Error` test would also match a JSON-parse SyntaxError, whose V8
  * message ECHOES ~30 bytes of the request body verbatim — a client POSTing the
  * word "deadlock" in a malformed body could spoof a 503 BUSY and poison the
- * contention signal. Engine-shaped = a Prisma client error object, or a message carrying
- * the raw executor's own "Raw query failed. Code: `1213`. …" text (UN-anchored:
- * the default errorFormat prefixes the invocation preamble — FDg-2).
+ * contention signal. Engine-shaped = a Prisma client error object, (QB-6: instances ONLY —
+ * the raw code-less shapes are PrismaClientUnknownRequestError, so a message
+ * clause on plain Errors bought nothing and opened a caller-text vector).
  */
 function isEngineShaped(error: Error): boolean {
+  // Prisma CLIENT ERROR INSTANCES only (QB-6): every real engine error —
+  // including the code-less raw shapes — arrives as one of these two classes,
+  // and a message-only clause would let ANY Error carrying caller-controlled
+  // text (an ORDER_GONE naming a hostile order id) classify as transient at a
+  // site that tests the classifier first.
   return (
     error instanceof Prisma.PrismaClientKnownRequestError ||
-    error instanceof Prisma.PrismaClientUnknownRequestError ||
-    /Raw query failed/.test(error.message)
+    error instanceof Prisma.PrismaClientUnknownRequestError
   );
 }
 

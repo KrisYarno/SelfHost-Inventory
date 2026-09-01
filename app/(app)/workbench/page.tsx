@@ -165,7 +165,26 @@ export default function WorkbenchPage() {
         const results = await Promise.all(promises);
         const failedResponse = results.find((r) => !r.ok);
         if (!failedResponse) {
-          toast.success(`Undone: ${items.length} item${items.length !== 1 ? "s" : ""} restored for order ${orderRef}`);
+          // QB-4 (truthful data): a 200 from unfulfill can carry `restored: []`
+          // — every item hit a pass-1 guard (already reversed, concurrent
+          // change). "Undone" would be a number nobody can stand behind; read
+          // what actually moved and say that.
+          let restoredCount = manualItems.length;
+          if (externalOrderId && wcItems.length > 0) {
+            const unfulfillBody = (await results[0]
+              .json()
+              .catch(() => null)) as { restored?: unknown[] } | null;
+            restoredCount += unfulfillBody?.restored?.length ?? 0;
+          }
+          if (restoredCount === 0) {
+            toast.warning(
+              `Nothing was restored for order ${orderRef} — the items were already reversed or changed by someone else.`
+            );
+          } else {
+            toast.success(
+              `Undone: ${restoredCount} item${restoredCount !== 1 ? "s" : ""} restored for order ${orderRef}`
+            );
+          }
           // The undo restored inventory via unfulfill/adjust — flush the full
           // inventory cache set (not just this page) so /inventory, dashboard,
           // and journal stay coherent, matching the deduct path.

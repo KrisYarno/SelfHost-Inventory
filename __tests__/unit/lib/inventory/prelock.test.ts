@@ -162,6 +162,16 @@ describe('prelockProductLocations — the key set', () => {
     expect(mockTx.$queryRaw).not.toHaveBeenCalled();
   });
 
+  it('QB-8: refuses a non-integer key with ZERO statements — the canonical sort must stay total', async () => {
+    await expect(
+      prelockProductLocations(tx, [
+        { productId: 5, locationId: 1 },
+        { productId: Number.NaN, locationId: 1 },
+      ])
+    ).rejects.toThrow(/non-integer key/);
+    expect(rawCalls).toHaveLength(0);
+  });
+
   it('exports MAX_PRELOCK_KEYS = 200 and refuses a bigger DEDUPED set with ZERO statements', async () => {
     expect(MAX_PRELOCK_KEYS).toBe(200);
 

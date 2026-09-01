@@ -7,6 +7,7 @@ import type {
   StockValidation
 } from '@/types/inventory';
 import {
+  AppError,
   InsufficientStockError,
   ProductNotFoundError
 } from '@/lib/error-handling';
@@ -374,6 +375,10 @@ export async function withDeadlockRetry<T>(
       return await fn();
     } catch (e: any) {
       lastErr = e;
+      // QB-7: a typed refusal is NEVER transient — ORDER_GONE's message
+      // interpolates a caller-controlled id, and an id containing "deadlock"
+      // must not buy three retries of a deterministic 409/404.
+      if (e instanceof AppError) throw e;
       const code = e?.code ?? '';
       const msg = String(e?.message ?? '');
       if (DEADLOCK_CODES.has(code) || /deadlock|lock wait timeout/i.test(msg)) {

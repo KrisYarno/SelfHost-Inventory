@@ -78,6 +78,16 @@ export async function prelockProductLocations(
   if (deduped.size > MAX_PRELOCK_KEYS) {
     throw new RangeError(`prelockProductLocations: at most ${MAX_PRELOCK_KEYS} keys`);
   }
+  // QB-8: the canonical sort is subtraction-based and NaN/non-integers would
+  // make it non-total — the one property this function exists for. Unreachable
+  // through validated routes; a backstop like the cap above.
+  deduped.forEach((key) => {
+    if (!Number.isSafeInteger(key.productId) || !Number.isSafeInteger(key.locationId)) {
+      throw new RangeError(
+        `prelockProductLocations: non-integer key ${key.productId}:${key.locationId}`
+      );
+    }
+  });
 
   const canonical: PrelockKeyInput[] = [];
   deduped.forEach((key) => canonical.push(key));

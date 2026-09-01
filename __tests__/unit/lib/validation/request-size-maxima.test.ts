@@ -93,3 +93,25 @@ describe('the four feeding schemas cap their item arrays at 100', () => {
     expect(MAX_ITEMS).toBeLessThan(MAX_PRELOCK_KEYS);
   });
 });
+describe("BatchTransferSchema.transfers (QB-9)", () => {
+  const { BatchTransferSchema } = jest.requireActual("@/lib/validation/inventory");
+  const transfer = (i: number) => ({ fromLocationId: i + 2, quantity: 1 });
+  it("accepts 100 and refuses 101 transfers with the split sentence", () => {
+    const base = { productId: 1, toLocationId: 1 };
+    expect(
+      BatchTransferSchema.safeParse({
+        ...base,
+        transfers: Array.from({ length: 100 }, (_, i) => transfer(i)),
+      }).success
+    ).toBe(true);
+    const over = BatchTransferSchema.safeParse({
+      ...base,
+      transfers: Array.from({ length: 101 }, (_, i) => transfer(i)),
+    });
+    expect(over.success).toBe(false);
+    if (!over.success) {
+      expect(JSON.stringify(over.error.issues)).toContain("at most 100 transfers per request");
+    }
+  });
+});
+

@@ -39,12 +39,13 @@ jest.mock("@/hooks/use-low-stock-default", () => ({ useLowStockDefault: () => 10
 const mockToast = jest.fn();
 const mockToastError = jest.fn();
 const mockToastSuccess = jest.fn();
+const mockToastWarning = jest.fn();
 jest.mock("sonner", () => {
   const toast = (...args: unknown[]) => mockToast(...args);
   toast.error = (...args: unknown[]) => mockToastError(...args);
   toast.success = (...args: unknown[]) => mockToastSuccess(...args);
   toast.info = jest.fn();
-  toast.warning = jest.fn();
+  toast.warning = (...args: unknown[]) => mockToastWarning(...args);
   toast.message = jest.fn();
   toast.dismiss = jest.fn();
   return { toast };
@@ -91,8 +92,11 @@ beforeEach(() => {
   mockToast.mockClear();
   mockToastError.mockClear();
   mockToastSuccess.mockClear();
+  mockToastWarning.mockClear();
   completionProps = {};
-  undoResponse = { status: 200, body: { success: true } };
+  // The REAL unfulfill answers with the restored[] array (QB-4: the success
+  // toast now counts it instead of trusting the request size).
+  undoResponse = { status: 200, body: { success: true, restored: [{ itemId: "fi-1" }] } };
 
   fetchMock = jest.fn(async (url: unknown) => {
     const href = String(url);
@@ -189,5 +193,16 @@ describe("workbench undo — a failed restore says what the server said", () => 
       "Undone: 1 item restored for order ORD-1"
     );
     expect(mockToastError).not.toHaveBeenCalled();
+  });
+
+  it("QB-4: a 200 that restored NOTHING warns instead of claiming success", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    undoResponse = { status: 200, body: { success: true, restored: [], skipped: [{ itemId: "fi-1" }] } };
+
+    await completeThenUndo(user);
+
+    await waitFor(() => expect(mockToastWarning).toHaveBeenCalled());
+    expect(String(mockToastWarning.mock.calls[0][0])).toContain("Nothing was restored");
+    expect(mockToastSuccess).not.toHaveBeenCalled();
   });
 });
