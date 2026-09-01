@@ -457,7 +457,7 @@ export async function fulfillExternalOrder(
       // its refusal diagnostic re-reads the row under the lock, because the
       // prelocked snapshot goes stale as soon as an earlier item in this same
       // request deducts the same key.
-      const prelockKeys: Array<{ productId: number; locationId: number }> = [];
+      const prelockCandidates: Array<{ productId: number; locationId: number }> = [];
       items.forEach((fulfillmentItem) => {
         const orderItem = order.items.find(
           (item) => item.id === fulfillmentItem.itemId
@@ -471,8 +471,40 @@ export async function fulfillExternalOrder(
             ? orderItem.productLink.internalProduct.id
             : undefined;
         if (productId === undefined) return;
-        prelockKeys.push({ productId, locationId });
+        prelockCandidates.push({ productId, locationId });
       });
+
+      // A candidate id must name a real product before it may be prelocked
+      // (pack REV-22 F2). A manual override is a raw number from the request:
+      // the prelock would happily materialize a `product_locations` row for an
+      // id no product answers to, and the INSERT's foreign key would then kill
+      // the WHOLE transaction — taking every sibling item's committed work with
+      // it, over one bad id. One read decides it; a candidate that is not
+      // returned contributes NO key and its item still fails ITEM-LOCALLY on the
+      // loop's own `findUnique` below, exactly as it does today (a ProductNot-
+      // FoundError inside the item's try -> `failed`, its savepoint rolled back,
+      // its siblings committed).
+      const candidateProductIds: number[] = [];
+      const seenCandidate = new Set<number>();
+      prelockCandidates.forEach((candidate) => {
+        if (seenCandidate.has(candidate.productId)) return;
+        seenCandidate.add(candidate.productId);
+        candidateProductIds.push(candidate.productId);
+      });
+      // No candidates, no statement — the same rule the prelock itself keeps for
+      // an empty key set, so the bundle-only and all-unmapped paths still spend
+      // nothing here.
+      const existingProducts =
+        candidateProductIds.length > 0
+          ? await tx.product.findMany({
+              where: { id: { in: candidateProductIds } },
+              select: { id: true },
+            })
+          : [];
+      const existingProductIds = new Set(existingProducts.map((p) => p.id));
+      const prelockKeys = prelockCandidates.filter((candidate) =>
+        existingProductIds.has(candidate.productId)
+      );
       // `prelockProductLocations` owns the dedupe and the canonical sort (one
       // owner per invariant), so the keys ride in as the request named them.
       await prelockProductLocations(tx, prelockKeys);

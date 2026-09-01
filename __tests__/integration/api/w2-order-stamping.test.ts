@@ -166,6 +166,11 @@ function makeTx() {
   ] as any);
   tx.inventory_logs.create.mockResolvedValue({ id: 777, products: { name: "Widget A" } } as any);
   tx.product.findUnique.mockResolvedValue({ id: 10, name: "Widget A", deletedAt: null } as any);
+  // The candidate-existence read the simple-path prelock runs before it builds
+  // its keys (pack REV-22 F2): every asked id is a real product here.
+  (tx.product.findMany as unknown as jest.Mock).mockImplementation(async (args: any) =>
+    ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id }))
+  );
   tx.product.update.mockResolvedValue({} as any);
   tx.auditLog.create.mockResolvedValue({ id: 1 } as any);
   tx.externalOrder.update.mockResolvedValue({} as any);
@@ -634,6 +639,41 @@ describe("the lock discipline — the order lock, then the prelock, then the wri
     const body = await res.json();
     expect(typeof body.batchId).toBe("string");
     expect(tx.inventory_logs.create.mock.calls[0][0].data.batchId).toBe(body.batchId);
+  });
+
+  it("fulfil: an ALL-SKIPPED request answers batchId null (pack REV-22 F8)", async () => {
+    // The id is minted before the deduction runs, so a fulfilment that moved
+    // nothing used to hand the client a batch naming no ledger row at all — an
+    // Undo target that cannot exist. Non-null now means "at least one item was
+    // fulfilled".
+    const tx = makeTx();
+    tx.externalOrder.findUnique.mockResolvedValue({
+      id: ORDER_CUID,
+      externalId: "ext-1",
+      integrationId: "int-1",
+      internalStatus: "pending",
+      fulfilledAt: null,
+      fulfilledBy: null,
+      integration: { id: "int-1", platform: "WOOCOMMERCE", fulfillmentPushEnabled: false },
+      items: [singleLine({ isMapped: false, productLink: null })],
+    } as any);
+    tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 2, fulfilledQty: 0 }] as any);
+    driveTxWith(tx);
+
+    const res = await FULFILL(
+      post(`http://x/api/orders/${ORDER_CUID}/fulfill`, {
+        locationId: 5,
+        items: [{ itemId: "item-1", quantity: 2, skipUnmapped: true }],
+      }),
+      { params: { orderId: ORDER_CUID } } as any
+    );
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.fulfillmentStatus).toBe("none");
+    expect(body.summary).toMatchObject({ fulfilled: 0, skipped: 1 });
+    expect(body.batchId).toBeNull();
+    expect(tx.inventory_logs.create).not.toHaveBeenCalled();
   });
 
   it("unfulfill: the lock, then pass 1, then the prelock, then the restorations", async () => {

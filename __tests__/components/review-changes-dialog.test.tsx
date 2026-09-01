@@ -172,6 +172,94 @@ describe('ReviewChangesDialog', () => {
     expect(confirmButton).toBeEnabled()
   })
 
+  // -------------------------------------------------------------------------
+  // THE REQUEST CAP (reconciliation Part 2, pack REV-22 F4 — CXb-3 / OCb-7).
+  //
+  // `/api/inventory/batch-adjust` takes at most 100 adjustments per request and
+  // B1's prelock caps the key set for the same reason. The journal's cart never
+  // knew: a stocker could count 140 rows and meet the limit as a 400 that
+  // refused the whole batch, with nothing on screen saying which half to cut.
+  // The counter appears BEFORE the cap; the Confirm goes dead AT it.
+  // -------------------------------------------------------------------------
+  describe('the 100-item request cap', () => {
+    const cartOf = (count: number) => {
+      const products: ProductWithQuantity[] = []
+      const adjustments: Record<number, JournalAdjustment> = {}
+      for (let id = 1; id <= count; id++) {
+        products.push(createMockProduct(id, `Product ${id}`, 100, 'EA'))
+        adjustments[id] = { productId: id, quantityChange: 1, version: 1 }
+      }
+      return { products, adjustments }
+    }
+
+    const renderCart = (count: number) => {
+      const { products, adjustments } = cartOf(count)
+      return render(
+        <ReviewChangesDialog {...defaultProps} products={products} adjustments={adjustments} />
+      )
+    }
+
+    it('says nothing about the cap while the cart is nowhere near it', () => {
+      renderCart(80)
+
+      expect(screen.queryByText(/of 100 items/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/at most 100 items per request/)).not.toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: /confirm and submit adjustments/i })
+      ).toBeEnabled()
+    })
+
+    it('shows the counter once the cart passes 80, still submittable', () => {
+      renderCart(81)
+
+      expect(screen.getByText('81 of 100 items')).toBeInTheDocument()
+      expect(screen.queryByText(/at most 100 items per request/)).not.toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: /confirm and submit adjustments/i })
+      ).toBeEnabled()
+    })
+
+    it('still submits AT the cap — 100 is what the route accepts', () => {
+      renderCart(100)
+
+      expect(screen.getByText('100 of 100 items')).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: /confirm and submit adjustments/i })
+      ).toBeEnabled()
+    })
+
+    it('disables Confirm above the cap and says how to fix it', () => {
+      renderCart(101)
+
+      expect(screen.getByText('101 of 100 items')).toBeInTheDocument()
+      expect(
+        screen.getByText('at most 100 items per request — split this batch')
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: /confirm and submit adjustments/i })
+      ).toBeDisabled()
+    })
+
+    it('never fires onConfirm from an over-cap cart', async () => {
+      const user = userEvent.setup()
+      const onConfirm = jest.fn()
+      const { products, adjustments } = cartOf(101)
+      render(
+        <ReviewChangesDialog
+          {...defaultProps}
+          products={products}
+          adjustments={adjustments}
+          onConfirm={onConfirm}
+        />
+      )
+
+      await user.click(
+        screen.getByRole('button', { name: /confirm and submit adjustments/i })
+      )
+      expect(onConfirm).not.toHaveBeenCalled()
+    })
+  })
+
   it('displays net change correctly', () => {
     render(
       <ReviewChangesDialog

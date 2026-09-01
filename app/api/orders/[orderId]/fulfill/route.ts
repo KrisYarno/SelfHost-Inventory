@@ -270,7 +270,12 @@ export const POST = apiHandler(async (
     // Reconciliation Part 2 (pack CB1b.2): the batch every SALE row this
     // fulfillment wrote carries. The workbench's completion dialog threads it
     // beside the manual leg's, so an Undo can name both halves of a mixed cart.
-    batchId,
+    //
+    // NULL when nothing was fulfilled (pack REV-22 F8): the id is minted before
+    // the deduction runs, so an all-skipped fulfilment would otherwise hand the
+    // client a batch that names no ledger row at all — an Undo target that
+    // cannot exist. Non-null therefore means at least one item was fulfilled.
+    batchId: fulfilledCount > 0 ? batchId : null,
   });
 
   return applyRateLimitHeaders(response, rateLimitHeaders);

@@ -14,7 +14,12 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import type { ProductWithQuantity } from "@/types/product";
-import type { JournalAdjustment } from "@/hooks/use-journal";
+import {
+  JOURNAL_CAP_MESSAGE,
+  JOURNAL_COUNTER_FROM,
+  MAX_JOURNAL_ITEMS,
+  type JournalAdjustment,
+} from "@/hooks/use-journal";
 
 interface ReviewChangesDialogProps {
   open: boolean;
@@ -51,6 +56,13 @@ export function ReviewChangesDialog({
     { additions: 0, removals: 0, net: 0 }
   );
 
+  // The request cap, enforced BEFORE the submit (pack REV-22 F4). The counter
+  // appears while the cart is still under the cap — a limit an operator meets
+  // for the first time as a refusal is a limit they were never told about.
+  const itemCount = adjustmentList.length;
+  const showItemCounter = itemCount > JOURNAL_COUNTER_FROM;
+  const overItemCap = itemCount > MAX_JOURNAL_ITEMS;
+
   // Check for any products that would go negative
   const negativeStockWarnings = adjustmentList.filter((adj) => {
     const product = productMap.get(adj.productId);
@@ -75,6 +87,15 @@ export function ReviewChangesDialog({
             <div className="text-2xl font-bold" aria-hidden="true">{adjustmentList.length}</div>
             <div className="text-sm text-muted-foreground">Products</div>
             <span className="sr-only">{adjustmentList.length} products will be adjusted</span>
+            {showItemCounter && (
+              <div
+                className={`text-xs font-mono tabular-nums mt-1 ${
+                  overItemCap ? "text-destructive font-semibold" : "text-muted-foreground"
+                }`}
+              >
+                {itemCount} of {MAX_JOURNAL_ITEMS} items
+              </div>
+            )}
           </div>
           <div className="text-center">
             <div className="text-2xl font-bold text-positive" aria-hidden="true">
@@ -93,6 +114,25 @@ export function ReviewChangesDialog({
         </div>
 
         <Separator />
+
+        {/* Over the request cap — a refusal the operator can act on, before
+            anything is sent (pack REV-22 F4). */}
+        {overItemCap && (
+          <>
+            <div
+              className="rounded-lg border border-destructive/50 bg-destructive/10 p-4"
+              role="alert"
+              aria-live="assertive"
+            >
+              <div className="flex items-center gap-2 text-destructive">
+                <AlertTriangle className="h-5 w-5" aria-hidden="true" />
+                <span className="font-medium">Too many items</span>
+              </div>
+              <p className="mt-1 text-sm text-muted-foreground">{JOURNAL_CAP_MESSAGE}</p>
+            </div>
+            <Separator />
+          </>
+        )}
 
         {/* Warnings */}
         {negativeStockWarnings.length > 0 && (
@@ -195,13 +235,24 @@ export function ReviewChangesDialog({
           </Button>
           <Button
             onClick={onConfirm}
-            disabled={isSubmitting || negativeStockWarnings.length > 0}
+            disabled={isSubmitting || negativeStockWarnings.length > 0 || overItemCap}
             aria-label={isSubmitting ? "Submitting adjustments" : "Confirm and submit adjustments"}
-            aria-describedby={negativeStockWarnings.length > 0 ? "negative-stock-warning" : undefined}
+            aria-describedby={
+              overItemCap
+                ? "item-cap-warning"
+                : negativeStockWarnings.length > 0
+                  ? "negative-stock-warning"
+                  : undefined
+            }
           >
             {isSubmitting ? "Submitting..." : "Confirm Adjustments"}
           </Button>
         </DialogFooter>
+        {overItemCap && (
+          <span className="sr-only" id="item-cap-warning">
+            Cannot submit because this batch is over the request cap: {JOURNAL_CAP_MESSAGE}
+          </span>
+        )}
         {negativeStockWarnings.length > 0 && (
           <span className="sr-only" id="negative-stock-warning">
             Cannot submit because some products would have negative stock

@@ -18,7 +18,9 @@ jest.mock('@/lib/prisma', () => {
 })
 
 // Import AFTER mock
-import { requireCompanyMembership } from '@/lib/api-utils'
+import { NextRequest, NextResponse } from 'next/server'
+import { Prisma } from '@prisma/client'
+import { apiHandler, requireCompanyMembership } from '@/lib/api-utils'
 import { AppError } from '@/lib/error-handling'
 
 function getMockPrisma(): DeepMockProxy<PrismaClient> {
@@ -106,5 +108,80 @@ describe('requireCompanyMembership', () => {
     await expect(
       requireCompanyMembership(1, 'co-z', true)
     ).resolves.toBeUndefined()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// apiHandler — THE TRANSACTION-BUSY BRANCH (reconciliation Part 2, pack REV-22
+// F3). The covered writers now queue on each other's prelocked rows, so a
+// request can lose its transaction to a write conflict / deadlock (P2034) or to
+// the interactive-transaction budget expiring (P2028). Both are "someone else
+// was writing the same rows" — an operator-actionable 503, not a generic 500
+// that reads as data loss. The rest of the ladder is untouched.
+// ---------------------------------------------------------------------------
+describe('apiHandler — Prisma P2028/P2034 -> 503 BUSY', () => {
+  let errSpy: jest.SpyInstance
+  beforeEach(() => {
+    errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined)
+  })
+  afterEach(() => {
+    errSpy.mockRestore()
+  })
+
+  const req = () =>
+    new NextRequest('http://localhost:3000/api/anything', { method: 'POST' })
+
+  const known = (code: string) =>
+    new Prisma.PrismaClientKnownRequestError('transaction trouble', {
+      code,
+      clientVersion: 'test',
+    })
+
+  it.each(['P2028', 'P2034'])('maps %s to a 503 BUSY the operator can act on', async (code) => {
+    const handler = apiHandler(async () => {
+      throw known(code)
+    })
+
+    const res = await handler(req())
+
+    expect(res.status).toBe(503)
+    expect(await res.json()).toEqual({
+      error: 'the system was busy with another change — try again',
+      code: 'BUSY',
+    })
+  })
+
+  it('leaves every OTHER known Prisma error on the generic 500', async () => {
+    const handler = apiHandler(async () => {
+      throw known('P2002')
+    })
+
+    const res = await handler(req())
+
+    expect(res.status).toBe(500)
+    expect(await res.json()).toEqual({ error: 'Internal server error' })
+  })
+
+  it('does not disturb the AppError rung above it', async () => {
+    const handler = apiHandler(async () => {
+      throw new AppError('Account pending approval', 'FORBIDDEN', 403)
+    })
+
+    const res = await handler(req())
+
+    expect(res.status).toBe(403)
+    expect(await res.json()).toEqual({
+      error: 'Account pending approval',
+      code: 'FORBIDDEN',
+    })
+  })
+
+  it('passes a successful response straight through', async () => {
+    const handler = apiHandler(async () => NextResponse.json({ ok: true }))
+
+    const res = await handler(req())
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true })
   })
 })

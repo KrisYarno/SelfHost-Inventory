@@ -617,8 +617,12 @@ describe('/api/inventory/batch-adjust', () => {
       // One prelock for the deduped key, not one per item.
       expect(rawCalls.filter((c) => c.kind === 'execute')).toHaveLength(1)
       expect((rawFns.$executeRaw.mock.calls[0][0] as any).values).toEqual([1, 1])
-      // The first item did write before the second was refused (the tx aborts).
-      expect(capturedTx.inventory_logs.create).toHaveBeenCalledTimes(1)
+      // PIN DELTA (pack REV-22 F1, guards-first): the first item no longer
+      // writes before the second is refused. It used to (`create` ×1) and the
+      // transaction rolled it back, so the WIRE envelope is unchanged — what
+      // changed is that a refusing request holds no ledger-insert `products` FK
+      // lock while it refuses, which is the deadlock this fix closes.
+      expect(capturedTx.inventory_logs.create).not.toHaveBeenCalled()
     })
 
     it('should handle optimistic locking conflicts', async () => {
@@ -662,7 +666,10 @@ describe('/api/inventory/batch-adjust', () => {
     })
 
     it('should handle transaction failures', async () => {
-      ;(prisma.product.findMany as jest.Mock).mockResolvedValue([])
+      // The product read is seeded (it was `[]` before pack REV-22 F10, which
+      // now refuses an unknown id with a 400 BEFORE the transaction opens) —
+      // this test is about what an infrastructure failure INSIDE the tx answers.
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 1, name: 'Product 1' }])
       ;(prisma.$transaction as jest.Mock).mockRejectedValue(new Error('Database error'))
 
       const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
@@ -852,6 +859,163 @@ describe('/api/inventory/batch-adjust', () => {
       expect(response.status).toBe(200)
 
       expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled()
+    })
+
+    // -----------------------------------------------------------------------
+    // FIX ROUND 1 (pack REV-22).
+    //
+    // F1 — GUARDS FIRST. Every adjustment is validated against a simulation of
+    // the tally before the write loop opens, so a request that will refuse ANY
+    // item holds nothing but its prelock when it does. The wire envelope is
+    // unchanged (the transaction aborted the earlier writes anyway); the
+    // statement ORDER is what moved.
+    // F10 — an id no product answers to is a 400, not a foreign-key 500.
+    // F3  — the route spends the covered writers' shared transaction budget.
+    // -----------------------------------------------------------------------
+    it('F1: a LAST-item refusal writes NOTHING — the payable first item included', async () => {
+      const mockProducts = [
+        { id: 1, name: 'Product 1' },
+        { id: 2, name: 'Product 2' },
+      ]
+      let capturedTx: any
+
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue(mockProducts)
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
+        capturedTx = {
+          product_locations: {
+            findFirst: jest.fn(),
+            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 60, version: 2 }),
+          },
+          product: { update: jest.fn() },
+          inventory_logs: { create: jest.fn().mockResolvedValue({ id: 1, delta: 10 }) },
+        }
+        return callback(
+          withRecordingRaw(capturedTx, [
+            { productId: 1, locationId: 1, quantity: 50, version: 1 },
+            { productId: 2, locationId: 1, quantity: 1, version: 1 },
+          ])
+        )
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [
+            { productId: 1, locationId: 1, delta: 10 },
+            { productId: 2, locationId: 1, delta: -5 },
+          ],
+        }),
+      })
+
+      const response = await POST(request)
+      const data = await response.json()
+
+      expect(response.status).toBe(400)
+      expect(data.code).toBe('INSUFFICIENT_STOCK')
+      expect(data.error).toBe(
+        'Product 2: Insufficient inventory: current 1, trying to remove 5'
+      )
+      // Nothing was written, and the only statements spent are the prelock's.
+      expect(capturedTx.inventory_logs.create).not.toHaveBeenCalled()
+      expect(capturedTx.product_locations.upsert).not.toHaveBeenCalled()
+      expect(rawCalls.map((c) => c.kind)).toEqual(['execute', 'query'])
+    })
+
+    it('F1: a LAST-item version conflict writes nothing either', async () => {
+      let capturedTx: any
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue([
+        { id: 1, name: 'Product 1' },
+        { id: 2, name: 'Product 2' },
+      ])
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
+        capturedTx = {
+          product_locations: {
+            findFirst: jest.fn(),
+            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 60, version: 2 }),
+          },
+          product: { update: jest.fn() },
+          inventory_logs: { create: jest.fn().mockResolvedValue({ id: 1, delta: 10 }) },
+        }
+        return callback(
+          withRecordingRaw(capturedTx, [
+            { productId: 1, locationId: 1, quantity: 50, version: 1 },
+            { productId: 2, locationId: 1, quantity: 50, version: 4 },
+          ])
+        )
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [
+            { productId: 1, locationId: 1, delta: 10 },
+            { productId: 2, locationId: 1, delta: 10, expectedVersion: 1 },
+          ],
+        }),
+      })
+
+      const response = await POST(request)
+      const data = await response.json()
+
+      expect(response.status).toBe(409)
+      expect(data.code).toBe('OPTIMISTIC_LOCK_ERROR')
+      expect(capturedTx.inventory_logs.create).not.toHaveBeenCalled()
+    })
+
+    it('F10: an unknown productId is a 400 PRODUCT_NOT_FOUND, before the transaction', async () => {
+      // The pre-read that feeds the audit line already knows: product 42 is not
+      // a product. Letting it through materialized a row for it and killed the
+      // whole transaction on the ledger row's foreign key — a generic 500.
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 1, name: 'Product 1' }])
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [
+            { productId: 1, locationId: 1, delta: 10 },
+            { productId: 42, locationId: 1, delta: 5 },
+          ],
+        }),
+      })
+
+      const response = await POST(request)
+      const data = await response.json()
+
+      expect(response.status).toBe(400)
+      expect(data.code).toBe('PRODUCT_NOT_FOUND')
+      expect(data.error).toBe('Product 42 not found')
+      expect(prisma.$transaction).not.toHaveBeenCalled()
+    })
+
+    it('F3: the route transaction carries the covered writers\' budget', async () => {
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 1, name: 'Product 1' }])
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
+        const tx = {
+          product_locations: {
+            findFirst: jest.fn(),
+            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 60, version: 2 }),
+          },
+          product: { update: jest.fn() },
+          inventory_logs: { create: jest.fn().mockResolvedValue({ id: 1, delta: 10 }) },
+        }
+        return callback(
+          withRecordingRaw(tx, [{ productId: 1, locationId: 1, quantity: 50, version: 1 }])
+        )
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          adjustments: [{ productId: 1, locationId: 1, delta: 10 }],
+        }),
+      })
+
+      const response = await POST(request)
+      expect(response.status).toBe(200)
+      expect((prisma.$transaction as jest.Mock).mock.calls[0][1]).toEqual({
+        maxWait: 5000,
+        timeout: 30000,
+      })
     })
   })
 })

@@ -193,7 +193,14 @@ function makeFulfillTx() {
       findUnique: jest.fn().mockResolvedValue(order),
       update: jest.fn().mockResolvedValue({}),
     },
-    product: { findUnique: jest.fn().mockResolvedValue({ name: 'Widget A' }) },
+    product: {
+      findUnique: jest.fn().mockResolvedValue({ name: 'Widget A' }),
+      // REV-22 F2: the simple-path prelock pre-validates its candidate ids
+      // against `products` — every id this fixture names is a real product.
+      findMany: jest.fn(async (args: any) =>
+        ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id }))
+      ),
+    },
     externalOrderItem: {
       update: jest.fn().mockResolvedValue({}),
       findMany: jest.fn().mockResolvedValue([{ quantity: 2, fulfilledQty: 2 }]),

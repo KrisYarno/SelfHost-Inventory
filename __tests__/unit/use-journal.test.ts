@@ -273,6 +273,76 @@ describe('useJournalStore', () => {
     })
   })
 
+  // -------------------------------------------------------------------------
+  // reseedVersions (reconciliation Part 2, pack REV-22 F5)
+  //
+  // The cart is PERSISTED (localStorage), and every entry carries the product
+  // version that was on screen when the operator typed the number. After a 409
+  // the page refetches — but the cart kept the captured versions, so every
+  // retry re-sent the same stale `expectedVersion` and 409'd again, forever.
+  // Re-seeding is the escape: fresh versions, UNTOUCHED quantities.
+  // -------------------------------------------------------------------------
+  describe('reseedVersions', () => {
+    it('replaces every entry version from the refetched products, keeping quantities', () => {
+      const { result } = renderHook(() => useJournalStore())
+
+      act(() => {
+        result.current.addAdjustment({ productId: 1, quantityChange: 10, version: 3 })
+        result.current.addAdjustment({ productId: 2, quantityChange: -5, version: 7 })
+      })
+
+      act(() => {
+        result.current.reseedVersions([
+          { id: 1, version: 4 },
+          { id: 2, version: 9 },
+        ])
+      })
+
+      expect(result.current.adjustments[1]).toEqual({
+        productId: 1,
+        quantityChange: 10,
+        version: 4,
+      })
+      expect(result.current.adjustments[2]).toEqual({
+        productId: 2,
+        quantityChange: -5,
+        version: 9,
+      })
+    })
+
+    it('leaves an entry the refetch did not return exactly as it was', () => {
+      const { result } = renderHook(() => useJournalStore())
+
+      act(() => {
+        result.current.addAdjustment({ productId: 1, quantityChange: 10, version: 3 })
+        result.current.addAdjustment({ productId: 99, quantityChange: 2, version: 1 })
+      })
+
+      act(() => {
+        result.current.reseedVersions([{ id: 1, version: 4 }])
+      })
+
+      expect(result.current.adjustments[1].version).toBe(4)
+      // Product 99 vanished from the read — inventing a version for it would be
+      // worse than the stale one; that row's 409 is honest.
+      expect(result.current.adjustments[99]).toEqual({
+        productId: 99,
+        quantityChange: 2,
+        version: 1,
+      })
+    })
+
+    it('is a no-op on an empty cart', () => {
+      const { result } = renderHook(() => useJournalStore())
+
+      act(() => {
+        result.current.reseedVersions([{ id: 1, version: 4 }])
+      })
+
+      expect(Object.keys(result.current.adjustments)).toHaveLength(0)
+    })
+  })
+
   describe('edge cases', () => {
     it('should handle zero quantity change', () => {
       const { result } = renderHook(() => useJournalStore())

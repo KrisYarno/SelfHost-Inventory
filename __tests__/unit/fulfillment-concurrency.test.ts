@@ -136,12 +136,25 @@ function currentQuantity(quantity: number | null): void {
   )
 }
 
+/**
+ * The candidate-existence read the simple-path prelock now runs (pack REV-22
+ * F2): every asked id answers as a real product unless a test says otherwise.
+ * A candidate the read does NOT return contributes no prelock key and its item
+ * fails item-locally on the loop's own `findUnique`.
+ */
+function productsExist(tx: DeepMockProxy<PrismaClient>): void {
+  ;(tx.product.findMany as unknown as jest.Mock).mockImplementation(
+    async (args: any) => ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id }))
+  )
+}
+
 function setupTransaction() {
   const mockTx = mockDeep<PrismaClient>()
   installRecordingRaw(mockTx as unknown as Record<string, unknown>)
   // Default: atomic UPDATE affects 1 row (success)
   updateAffectedRows(1)
   currentQuantity(null)
+  productsExist(mockTx)
   getMockPrisma().$transaction.mockImplementation(async (cb: any, _opts?: any) => {
     return cb(mockTx)
   })

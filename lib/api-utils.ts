@@ -1,5 +1,6 @@
 import { getSession } from '@/lib/auth';
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { AppError, errorLogger } from '@/lib/error-handling';
 import { validateCSRFToken } from '@/lib/csrf';
 import { ZodError } from 'zod';
@@ -123,6 +124,24 @@ export function apiHandler(handler: RouteHandler): RouteHandler {
       if (error instanceof AppError) {
         errorLogger.log(error);
         return errorResponse(error.message, error.statusCode, error.code);
+      }
+
+      // Reconciliation Part 2 (pack REV-22 F3): the covered writers now QUEUE on
+      // each other's prelocked rows, so a request can lose its transaction to a
+      // write conflict / deadlock (P2034) or to the interactive-transaction
+      // budget running out (P2028). Both mean "someone else was writing the same
+      // rows", and neither is an internal fault: a generic 500 would tell the
+      // operator nothing and read as data loss. Nothing else in the ladder moves.
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2028' || error.code === 'P2034')
+      ) {
+        errorLogger.log(error);
+        return errorResponse(
+          'the system was busy with another change — try again',
+          503,
+          'BUSY'
+        );
       }
 
       console.error('Unhandled API error:', error);

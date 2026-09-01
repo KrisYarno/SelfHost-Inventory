@@ -38,6 +38,7 @@ jest.mock("sonner", () => ({
   toast: { error: jest.fn(), warning: jest.fn(), success: jest.fn(), message: jest.fn() },
 }));
 
+import { toast } from "sonner";
 import { CompleteOrderDialog } from "@/components/workbench/complete-order-dialog";
 import { useWorkbench } from "@/hooks/use-workbench";
 import type { ExternalOrder } from "@/types/external-orders";
@@ -423,6 +424,74 @@ describe("complete-order dialog — the completion names the batches it wrote", 
     // reads, not an absence it has to guess at.
     expect(Object.keys(batchIds).sort()).toEqual(["deductSimpleBatchId", "fulfilBatchId"]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // THE REFUSAL COPY (reconciliation Part 2, pack REV-22 F7 / OCb-6).
+  //
+  // Both of this dialog's error readers only understood the NESTED body shape
+  // (`{ error: { message, code } }`), while `apiHandler` — which every B1 route
+  // answers through — emits the FLAT one. So a named refusal (`ORDER_GONE`,
+  // `INSUFFICIENT_STOCK`, `TOO_MANY_KEYS`) arrived as "Failed to fulfill WC
+  // order" with its code dropped on the floor. One shared reader now reads both.
+  // -------------------------------------------------------------------------
+  describe("complete-order dialog — a refusal says what the server said", () => {
+    /** Render the JSX sonner was handed and return the screen it produced. */
+    function renderToastBody() {
+      const body = (toast.error as jest.Mock).mock.calls[0][0] as React.ReactElement;
+      render(<>{body}</>);
+    }
+
+    it("says the ORDER_GONE copy, not a generic fulfil failure", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      (toast.error as jest.Mock).mockClear();
+      fetchMock.mockImplementation(async () => ({
+        ok: false,
+        status: 409,
+        // Flat: exactly what `apiHandler` sends for the order lock's refusal.
+        json: async () => ({ error: "order ord-1 no longer exists", code: "ORDER_GONE" }),
+      } as unknown as Response));
+      seedOrder([CART_ITEM]);
+      const { onSuccess } = renderDialog();
+
+      await user.click(completeButton());
+      await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+      renderToastBody();
+      expect(
+        screen.getByText("this order no longer exists — refresh and re-check")
+      ).toBeInTheDocument();
+      // Nothing was completed, so nothing is announced as completed.
+      expect(onSuccess).not.toHaveBeenCalled();
+    });
+
+    it("says the INSUFFICIENT_STOCK sentence verbatim on the manual leg", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      (toast.error as jest.Mock).mockClear();
+      fetchMock.mockImplementation(async () => ({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error: "Product 777: Insufficient inventory: current 0, trying to remove 1",
+          code: "INSUFFICIENT_STOCK",
+        }),
+      } as unknown as Response));
+      act(() => {
+        useWorkbench.getState().setOrderReference("manual-ref");
+        useWorkbench
+          .getState()
+          .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+      });
+      renderDialog();
+
+      await user.click(screen.getByRole("button", { name: "Complete Order" }));
+      await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+      renderToastBody();
+      expect(
+        screen.getByText("Product 777: Insufficient inventory: current 0, trying to remove 1")
+      ).toBeInTheDocument();
+    });
   });
 
   it("a response with NO batchId threads null rather than undefined", async () => {

@@ -4,7 +4,7 @@ import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { recordAttributionAttempt } from "@/lib/attribution/attempts";
-import { applyStockDelta, OptimisticLockError } from "@/lib/inventory";
+import { applyStockDelta, OptimisticLockError, STOCK_TX_OPTIONS } from "@/lib/inventory";
 import { prelockKey, prelockProductLocations } from "@/lib/inventory/prelock";
 import { AppError } from "@/lib/error-handling";
 import { BatchInventoryAdjustmentSchema } from "@/lib/validation/inventory";
@@ -29,10 +29,29 @@ export const POST = apiHandler(async (request: NextRequest) => {
   });
   const productMap = new Map(products.map((p) => [p.id, p.name]));
 
+  // An id no product answers to is refused HERE, on the read the audit line
+  // already depends on (pack REV-22 F10). It used to travel: the row got
+  // materialized by the prelock, the ledger row's FK check killed the whole
+  // transaction, and the operator got a generic 500 naming nothing. The journal
+  // cannot send this — it picks products from its own catalog — so the honest
+  // answer to a hand-built request is a 400 that names the id.
+  for (const adjustment of adjustments) {
+    if (!productMap.has(adjustment.productId)) {
+      throw new AppError(
+        `Product ${adjustment.productId} not found`,
+        "PRODUCT_NOT_FOUND",
+        400
+      );
+    }
+  }
+
   // One batch id per request flow, shared by every event in this transaction.
   const batchId = newBatchId();
 
-  // Execute all adjustments in a transaction
+  // Execute all adjustments in a transaction, on the covered writers' shared
+  // budget (pack REV-22 F3): this route owns its own transaction over the same
+  // prelocked rows the primitives take, so it spends the same maxWait/timeout
+  // rather than Prisma's 2 s/5 s defaults.
   const results = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const logs: inventory_logs[] = [];
     const auditUpdates: Array<{ productId: number; productName: string; delta: number }> = [];
@@ -55,41 +74,71 @@ export const POST = apiHandler(async (request: NextRequest) => {
     const tally = new Map<string, { quantity: number; version: number }>();
     locked.forEach((row, key) => tally.set(key, { quantity: row.quantity, version: row.version }));
 
+    // GUARDS FIRST (pack REV-22 F1). Every adjustment's version check and stock
+    // floor runs — in request order, version before floor, first failure wins —
+    // over a SIMULATION of the tally, before this transaction writes anything.
+    //
+    // Why the pass exists: the prelock front-loads the `products` shared locks
+    // that each ledger INSERT's FK check takes, so a request that wrote some
+    // items and then refused a later one held `product_locations` X locks AND
+    // `products` S locks while a sibling request refusing its own item held the
+    // mirror image — a deadlock between two requests that both end in a typed
+    // refusal. Refusing before the first write means a refused request holds
+    // nothing but the prelock.
+    //
+    // Nothing observable moves: the error classes, their messages and the order
+    // they fire in are unchanged, and a request whose last item is refused wrote
+    // nothing on the wire either way (the transaction aborted the earlier ones).
+    // The typed throws below are exactly the two the write loop's catch rethrows
+    // untouched, so no per-item wrapping is lost by guarding out here.
+    for (const adjustment of adjustments) {
+      const key = prelockKey(adjustment.productId, adjustment.locationId);
+      // The map-miss default is a type belt: after the materialize every asked
+      // key has a row, and a never-stocked one reads the live column defaults.
+      const current = tally.get(key) ?? { quantity: 0, version: 0 };
+
+      // Check version if provided (optimistic locking). B1 behaviour change 1:
+      // enforced on never-stocked keys too — the old absent-row branch skipped
+      // it, so a stale journal submission against a row someone else had just
+      // created won silently.
+      if (
+        adjustment.expectedVersion !== undefined &&
+        current.version !== adjustment.expectedVersion
+      ) {
+        throw new OptimisticLockError(
+          "Inventory has been modified by another user",
+          current.version,
+          adjustment.expectedVersion
+        );
+      }
+
+      // The stock floor. B1 behaviour change 2: the old "No inventory found"
+      // branch is dead (the row always exists post-materialize), so a negative
+      // delta on a never-stocked key now refuses with `current 0` — and as an
+      // AppError, because a plain Error reaches the wire as a generic 500 that
+      // says nothing. These refusals are 400 INSUFFICIENT_STOCK from here on.
+      if (current.quantity + adjustment.delta < 0) {
+        throw new AppError(
+          `Product ${adjustment.productId}: Insufficient inventory: current ${current.quantity}, trying to remove ${Math.abs(adjustment.delta)}`,
+          "INSUFFICIENT_STOCK",
+          400
+        );
+      }
+
+      // Advance the SIMULATED tally, so a later adjustment naming the same key
+      // is guarded against what this one will write — exactly what the retired
+      // own-write-visible read gave it, computed before the writes rather than
+      // between them.
+      tally.set(key, {
+        quantity: current.quantity + adjustment.delta,
+        version: current.version + 1,
+      });
+    }
+
+    // THE WRITE LOOP — reached only when EVERY adjustment passed above, so it
+    // holds no guard of its own and reads nothing.
     for (const adjustment of adjustments) {
       try {
-        const key = prelockKey(adjustment.productId, adjustment.locationId);
-        // The map-miss default is a type belt: after the materialize every asked
-        // key has a row, and a never-stocked one reads the live column defaults.
-        const current = tally.get(key) ?? { quantity: 0, version: 0 };
-
-        // Check version if provided (optimistic locking). B1 behaviour change 1:
-        // enforced on never-stocked keys too — the old absent-row branch skipped
-        // it, so a stale journal submission against a row someone else had just
-        // created won silently.
-        if (
-          adjustment.expectedVersion !== undefined &&
-          current.version !== adjustment.expectedVersion
-        ) {
-          throw new OptimisticLockError(
-            "Inventory has been modified by another user",
-            current.version,
-            adjustment.expectedVersion
-          );
-        }
-
-        // The stock floor. B1 behaviour change 2: the old "No inventory found"
-        // branch is dead (the row always exists post-materialize), so a negative
-        // delta on a never-stocked key now refuses with `current 0` — and as an
-        // AppError, because a plain Error reaches the wire as a generic 500 that
-        // says nothing. These refusals are 400 INSUFFICIENT_STOCK from here on.
-        if (current.quantity + adjustment.delta < 0) {
-          throw new AppError(
-            `Product ${adjustment.productId}: Insufficient inventory: current ${current.quantity}, trying to remove ${Math.abs(adjustment.delta)}`,
-            "INSUFFICIENT_STOCK",
-            400
-          );
-        }
-
         // Atomic write path shared with the other stock routes:
         // log + product_locations upsert (quantity/version increment)
         // + Product.quantity mirror for location 1.
@@ -104,14 +153,6 @@ export const POST = apiHandler(async (request: NextRequest) => {
           reasonCode: adjustment.reasonCode ?? null,
           // ER-C3: join every ledger row to this request's bulk-update event.
           batchId,
-        });
-
-        // Advance the tally by what this item just wrote, so a second item on
-        // the same key sees the first item's effect — exactly what the retired
-        // own-write-visible read gave it.
-        tally.set(key, {
-          quantity: current.quantity + adjustment.delta,
-          version: current.version + 1,
         });
 
         // applyStockDelta's log includes full relations (users incl.
@@ -170,7 +211,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
     }
 
     return { logs, auditUpdates };
-  });
+  }, STOCK_TX_OPTIONS);
 
   const response = NextResponse.json({
     success: true,

@@ -20,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { AlertCircle, AlertTriangle, Check, CheckCircle2, Package } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
+import { apiErrorMessage, readApiError } from "@/lib/api-error";
 import { getUserFriendlyMessage } from "@/lib/error-handling";
 import {
   SKIPPED_LINE_CLASSES,
@@ -234,14 +235,15 @@ export function CompleteOrderDialog({
         );
 
         if (!fulfillResponse.ok) {
-          const errorData = await fulfillResponse.json();
-          if (errorData.error && typeof errorData.error === "object") {
-            const error = new Error(errorData.error.message);
-            (error as any).code = errorData.error.code;
-            (error as any).context = errorData.error.context;
-            throw error;
-          }
-          throw new Error(errorData.error || "Failed to fulfill WC order");
+          // ONE reader for BOTH body shapes (pack REV-22 F7). The fulfil route
+          // answers through `apiHandler` — flat — so the old nested-only branch
+          // fell through to the generic fallback and dropped the code with it.
+          const errorData = await fulfillResponse.json().catch(() => ({}));
+          const { code, context } = readApiError(errorData);
+          const error = new Error(apiErrorMessage(errorData, "Failed to fulfill WC order"));
+          (error as any).code = code ?? undefined;
+          (error as any).context = context;
+          throw error;
         }
 
         const fulfillBody = await fulfillResponse.json();
@@ -335,15 +337,15 @@ export function CompleteOrderDialog({
             }
           }
 
-          const errorData = await deductResponse.json();
-          if (errorData.error && typeof errorData.error === "object") {
-            const { message, code, context } = errorData.error;
-            const error = new Error(message);
-            (error as any).code = code;
-            (error as any).context = context;
-            throw error;
-          }
-          throw new Error(errorData.error || "Failed to process order");
+          // Same shared reader on the deduct leg (pack REV-22 F7): a 400
+          // `INSUFFICIENT_STOCK` from batch-adjust/deduct-simple now reaches the
+          // toast as the server's own sentence, with its code intact.
+          const errorData = await deductResponse.json().catch(() => ({}));
+          const { code, context } = readApiError(errorData);
+          const error = new Error(apiErrorMessage(errorData, "Failed to process order"));
+          (error as any).code = code ?? undefined;
+          (error as any).context = context;
+          throw error;
         }
 
         const deductBody = await deductResponse.json();

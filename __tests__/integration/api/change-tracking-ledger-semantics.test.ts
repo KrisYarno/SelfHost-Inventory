@@ -185,6 +185,11 @@ function makeTx() {
     products: { name: "Widget" },
   } as any);
   tx.product.update.mockResolvedValue({} as any);
+  // The candidate-existence read the simple-path prelock runs before it builds
+  // its keys (pack REV-22 F2): every asked id is a real product here.
+  (tx.product.findMany as unknown as jest.Mock).mockImplementation(async (args: any) =>
+    ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id }))
+  );
   tx.auditLog.create.mockResolvedValue({ id: 1 } as any);
   // Kept verbatim, now as the INNER behaviour: the fulfil path reads this as
   // its atomic UPDATE's affected-row count.

@@ -6,6 +6,7 @@ import {
   invalidateInventoryCaches,
   type ApiMutationError,
 } from "@/hooks/use-inventory-mutations";
+import { apiErrorMessage, readApiError } from "@/lib/api-error";
 import type { FulfillmentValidationResult } from "@/lib/fulfillment";
 
 /**
@@ -36,8 +37,11 @@ export function useFulfillmentValidation(
         { signal },
       );
       if (!res.ok) {
+        // Both body shapes (pack REV-22 F7): the validate route answers through
+        // `apiHandler`, so its sentence is FLAT — the old `error?.message` read
+        // it as undefined and showed the generic fallback instead.
         const errorData = await res.json().catch(() => ({}));
-        throw new Error(errorData.error?.message || "Failed to validate order");
+        throw new Error(apiErrorMessage(errorData, "Failed to validate order"));
       }
       return res.json();
     },
@@ -71,12 +75,20 @@ export function useFulfillOrder() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        // Preserve the dialog's existing error surface: message + code + context.
+        // Preserve the dialog's existing error surface: message + code + context
+        // — now read through the shared both-shapes reader (pack REV-22 F7), so
+        // the codes B1 puts on the wire (`ORDER_GONE`, `TOO_MANY_KEYS`,
+        // `INSUFFICIENT_STOCK`) survive the flat envelope instead of being
+        // flattened to a generic sentence with no code.
+        const read = readApiError(data);
         const err = new Error(
-          data?.error?.message || data?.error || "Failed to fulfill order",
+          apiErrorMessage(data, "Failed to fulfill order"),
         ) as ApiMutationError;
-        err.code = data?.error?.code;
-        err.data = data?.error?.context;
+        err.code = read.code ?? undefined;
+        err.data =
+          typeof read.context === "object" && read.context !== null
+            ? (read.context as Record<string, unknown>)
+            : undefined;
         throw err;
       }
       return data;

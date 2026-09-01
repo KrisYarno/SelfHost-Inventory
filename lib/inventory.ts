@@ -27,6 +27,18 @@ import { v4 as uuidv4 } from 'uuid';
 const NEVER_STOCKED = { quantity: 0, version: 0 };
 
 /**
+ * THE COVERED WRITERS' TRANSACTION BUDGET (reconciliation Part 2, pack REV-22
+ * F3). Prisma's interactive-transaction defaults are maxWait 2 s / timeout 5 s;
+ * with the canonical prelock in place these transactions QUEUE on each other's
+ * rows instead of racing them, so both defaults are now reachable in normal
+ * operation and a request that waited would be rolled back with P2028/P2034 —
+ * which `apiHandler` answers as a typed 503 BUSY rather than a generic 500.
+ * Exported so the one route that owns its own transaction over these rows
+ * (batch-adjust) spends the same budget rather than a second spelling of it.
+ */
+export const STOCK_TX_OPTIONS = { maxWait: 5000, timeout: 30000 };
+
+/**
  * Creates an inventory log entry
  */
 export async function createInventoryLog(
@@ -489,7 +501,7 @@ export async function createInventoryAdjustment(
           log,
           newVersion,
         };
-      });
+      }, STOCK_TX_OPTIONS);
     } catch (error) {
       if (error instanceof OptimisticLockError && retryCount < maxRetries - 1) {
         retryCount++;
@@ -683,7 +695,7 @@ export async function createInventoryTransfer(options: {
           fromVersion: updatedFrom.version,
           toVersion: updatedTo.version,
         };
-      });
+      }, STOCK_TX_OPTIONS);
     } catch (error) {
       if (error instanceof OptimisticLockError && retryCount < maxRetries - 1) {
         retryCount++;
@@ -788,12 +800,25 @@ export async function createInventoryTransaction(
     // `findUnique` read this transaction's OWN uncommitted writes, so a request
     // naming one key twice had its second item see the first item's effect.
     // The prelock snapshot is taken once, so the tally reproduces that exactly:
-    // seeded from the prelock, then `quantity += delta; version += 1` after each
-    // applyStockDelta.
+    // seeded from the prelock, then `quantity += delta; version += 1` per item.
     const tally = new Map<string, { quantity: number; version: number }>();
     locked.forEach((row, key) => tally.set(key, { quantity: row.quantity, version: row.version }));
 
-    // Process each item
+    // GUARDS FIRST (pack REV-22 F1). Every item's version check and stock floor
+    // runs — in request order, version before floor, first failure wins — over a
+    // SIMULATION of the tally, before this transaction writes anything at all.
+    //
+    // Why the pass exists: the prelock front-loads the `products` shared locks
+    // that each ledger INSERT's FK check takes, so a transaction that wrote some
+    // items and then refused a later one held `product_locations` X locks AND
+    // `products` S locks while a sibling request refusing its own item held the
+    // mirror image — a deadlock between two transactions that both end in a
+    // typed refusal. Refusing before the first write means a refused request
+    // holds nothing but the prelock.
+    //
+    // Nothing observable moves: the error classes, their messages and the order
+    // they fire in are unchanged, and a request whose last item is refused wrote
+    // nothing on the wire either way (the transaction aborted the earlier items).
     for (const item of items) {
       const key = prelockKey(item.productId, item.locationId);
       const current = tally.get(key) ?? { ...NEVER_STOCKED };
@@ -810,7 +835,9 @@ export async function createInventoryTransaction(
       }
 
       // Validate stock if removing — against the tally, not a fresh read
-      // (`validateStockAvailability` is not called here any more).
+      // (`validateStockAvailability` is not called here any more). The product
+      // read on the failure path is a plain consistent read of `products`, and
+      // it only happens on the way to throwing.
       if (item.quantityChange < 0 && current.quantity < Math.abs(item.quantityChange)) {
         // Get product name for better error message
         const product = await tx.product.findUnique({
@@ -829,6 +856,20 @@ export async function createInventoryTransaction(
         );
       }
 
+      // Advance the SIMULATED tally, so a later item naming the same key is
+      // guarded against what this item will write — exactly what the retired
+      // own-write-visible read gave it, just computed before the writes instead
+      // of between them.
+      tally.set(key, {
+        quantity: current.quantity + item.quantityChange,
+        version: current.version + 1,
+      });
+    }
+
+    // THE WRITE LOOP — reached only when EVERY item passed above, so it holds no
+    // guard of its own and reads nothing: the tally it would consult has already
+    // been advanced to this request's end state.
+    for (const item of items) {
       // Apply the stock delta through the shared write core: log +
       // product_locations upsert (quantity/version increment) + loc-1
       // Product.quantity mirror — the same path adjust/stock-in/batch-adjust use.
@@ -836,12 +877,13 @@ export async function createInventoryTransaction(
       // and ADJUSTMENT otherwise — computed once above from `type`; item.changeType
       // is still not mapped. batchId (from opts) joins each row to its event.
       //
-      // Concurrency note: the version and floor guards above stay OUTSIDE
-      // applyStockDelta. They now compare against the prelocked snapshot as the
-      // tally has advanced it, not against a per-item read — the row is already
-      // X-held, so latest-committed is what the prelock returned. Unlike
-      // createInventoryAdjustment, this path intentionally has NO retry loop
-      // (single attempt) — that pre-existing difference is preserved.
+      // Concurrency note: the version and floor guards stay OUTSIDE
+      // applyStockDelta, and now run ahead of this loop entirely. They compare
+      // against the prelocked snapshot as the simulated tally advanced it, not
+      // against a per-item read — the row is already X-held, so latest-committed
+      // is what the prelock returned. Unlike createInventoryAdjustment, this
+      // path intentionally has NO retry loop (single attempt) — that
+      // pre-existing difference is preserved.
       const { log, newVersion } = await applyStockDelta(tx, {
         userId,
         productId: item.productId,
@@ -854,14 +896,6 @@ export async function createInventoryTransaction(
         reasonCode: item.reasonCode ?? null,
         batchId,
         orderRecordId,
-      });
-
-      // Advance the tally by what this item just wrote, so a second item on the
-      // same key sees the first item's effect — exactly what the retired
-      // own-write-visible read gave it.
-      tally.set(key, {
-        quantity: current.quantity + item.quantityChange,
-        version: current.version + 1,
       });
 
       versions[`${item.productId}-${item.locationId}`] = newVersion;
@@ -883,6 +917,6 @@ export async function createInventoryTransaction(
       logs,
       versions,
     };
-  });
+  }, STOCK_TX_OPTIONS);
 }
 

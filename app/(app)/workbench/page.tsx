@@ -32,6 +32,7 @@ import { ProductWithQuantity } from "@/types/product";
 import { RotateCcw, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { useLocation } from "@/contexts/location-context";
+import { apiErrorMessage } from "@/lib/api-error";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/page-header";
@@ -162,15 +163,29 @@ export default function WorkbenchPage() {
         }
 
         const results = await Promise.all(promises);
-        const allOk = results.every((r) => r.ok);
-        if (allOk) {
+        const failedResponse = results.find((r) => !r.ok);
+        if (!failedResponse) {
           toast.success(`Undone: ${items.length} item${items.length !== 1 ? "s" : ""} restored for order ${orderRef}`);
           // The undo restored inventory via unfulfill/adjust — flush the full
           // inventory cache set (not just this page) so /inventory, dashboard,
           // and journal stay coherent, matching the deduct path.
           invalidateInventoryCaches(queryClient);
         } else {
-          toast.error("Some items could not be restored. Check inventory manually.");
+          // Pack REV-22 F7: SAY WHY. The undo calls unfulfill and adjust, both of
+          // which now refuse with a named code — `ORDER_GONE` when the order
+          // vanished under the operator, `TOO_MANY_KEYS` when the restoration
+          // set is too wide to lock in one request, `INSUFFICIENT_STOCK` when
+          // the stock it would restore from has moved. The old copy told the
+          // operator to go and check inventory without telling them what
+          // happened; the server's sentence rides along now (the first refusal —
+          // the legs are independent, and one reason is what a toast can hold).
+          const failedBody = await failedResponse.json().catch(() => ({}));
+          const detail = apiErrorMessage(failedBody, "");
+          toast.error(
+            detail
+              ? `Some items could not be restored: ${detail}`
+              : "Some items could not be restored. Check inventory manually."
+          );
         }
       } catch (err) {
         console.error("Undo deduction error:", err);

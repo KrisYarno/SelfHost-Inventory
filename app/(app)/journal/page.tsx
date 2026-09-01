@@ -25,13 +25,23 @@ import { ReviewChangesDialog } from "@/components/journal/review-changes-dialog"
 import { JournalFilters } from "@/components/journal/journal-filters";
 import type { JournalFilters as JournalFilterState } from "@/components/journal/journal-filters";
 import { useQueryClient } from "@tanstack/react-query";
-import { useJournalStore } from "@/hooks/use-journal";
+import {
+  JOURNAL_CAP_MESSAGE,
+  JOURNAL_COUNTER_FROM,
+  MAX_JOURNAL_ITEMS,
+  useJournalStore,
+} from "@/hooks/use-journal";
 import { useInventoryProducts } from "@/hooks/use-inventory-products";
 import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import { useLocation } from "@/contexts/location-context";
 import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
 import { useLowStockDefault } from "@/hooks/use-low-stock-default";
-import { getUserFriendlyMessage, handleBatchOperationErrors } from "@/lib/error-handling";
+import { apiErrorMessage, readApiError } from "@/lib/api-error";
+import {
+  getUserFriendlyMessage,
+  handleBatchOperationErrors,
+  type BatchOperationResult,
+} from "@/lib/error-handling";
 import { useInventoryChangeAnnouncer } from "@/hooks/use-accessibility-announcer";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { ContextTag } from "@/components/ui/context-tag";
@@ -48,6 +58,11 @@ export default function JournalPage() {
   const [showFilters, setShowFilters] = useState(false);
   const [showReviewDialog, setShowReviewDialog] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Pack REV-22 F5: raised once the post-409 refetch has resolved. The re-seed
+  // itself runs in the effect below, because `refetchProducts` is an
+  // `invalidateQueries` (it resolves with nothing) — the fresh rows arrive as
+  // the hook's next `products`, and THAT is what the cart re-seeds from.
+  const [pendingVersionReseed, setPendingVersionReseed] = useState(false);
   const [filters, setFilters] = useState<JournalFilterState>({
     showWithChanges: true,
     showWithoutChanges: true,
@@ -63,6 +78,7 @@ export default function JournalPage() {
     addAdjustment,
     removeAdjustment,
     clearAllAdjustments,
+    reseedVersions,
     getAdjustmentForProduct,
     hasChanges,
     getTotalChanges,
@@ -79,6 +95,15 @@ export default function JournalPage() {
       router.push("/auth/signin");
     }
   }, [session, status, router]);
+
+  // The 409 recovery's second half (pack REV-22 F5): the refreshed rows are on
+  // screen, so give the PERSISTED cart their versions. Only versions move — a
+  // product the read no longer returns keeps what it had.
+  useEffect(() => {
+    if (!pendingVersionReseed) return;
+    reseedVersions(products);
+    setPendingVersionReseed(false);
+  }, [pendingVersionReseed, products, reseedVersions]);
 
   // Filter + sort products based on the search term and the advanced filter panel.
   // Product Status (active/inactive) filters were dropped from the panel: the
@@ -167,6 +192,15 @@ export default function JournalPage() {
       return;
     }
 
+    // The request cap, refused HERE (pack REV-22 F4). The dialog already
+    // disables its Confirm above the cap; this is the same refusal at the one
+    // place that can actually send the request, so no path reaches the route
+    // with a batch it will only reject.
+    if (Object.keys(adjustments).length > MAX_JOURNAL_ITEMS) {
+      toast.error(JOURNAL_CAP_MESSAGE);
+      return;
+    }
+
     setIsSubmitting(true);
 
     // Announce submission start
@@ -201,96 +235,100 @@ export default function JournalPage() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorData = await response.json().catch(() => ({}));
 
-        // apiHandler returns flat 409 bodies ({ error: string, code: "OPTIMISTIC_LOCK_ERROR" });
-        // normalize to the nested shape so the conflict toast + auto-refresh below fire.
-        if (errorData.code === "OPTIMISTIC_LOCK_ERROR" && typeof errorData.error === "string") {
-          errorData.error = { message: errorData.error, code: errorData.code };
+        // ONE reader for both body shapes (pack REV-22 F7) — this replaces the
+        // hand-rolled flat->nested normalization that only ever knew about
+        // OPTIMISTIC_LOCK_ERROR, so every OTHER flat code (INSUFFICIENT_STOCK
+        // from the B1 floor refusal, VALIDATION_ERROR from the request maxima)
+        // now reaches the operator with its own sentence instead of falling
+        // through to a generic failure.
+        const { message, code, context } = readApiError(errorData);
+
+        // Handle optimistic lock errors specially
+        if (code === "OPTIMISTIC_LOCK_ERROR") {
+          toast.error(
+            <div className="space-y-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                <div>
+                  <p className="font-medium">Inventory Conflict</p>
+                  <p className="text-sm">{message}</p>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    The page will refresh to show the latest inventory levels.
+                  </p>
+                </div>
+              </div>
+            </div>,
+            { duration: 6000 }
+          );
+          // Automatically refresh after a short delay — and RE-SEED the cart's
+          // versions from what comes back (pack REV-22 F5). The cart is
+          // persisted with the version each row was typed against; without this
+          // the refetch only updated the SCREEN, the retry re-sent the same
+          // losing `expectedVersion`, and the operator sat in a 409 loop with no
+          // way out but discarding their work. Quantities are their intent and
+          // are untouched; only versions move.
+          setTimeout(() => {
+            void refetchProducts().then(() => setPendingVersionReseed(true));
+          }, 1000);
+          return;
         }
 
-        // Handle structured error response
-        if (errorData.error && typeof errorData.error === "object") {
-          const { message, code, context } = errorData.error;
+        // Handle batch operation errors
+        const batchResults = (context as { results?: BatchOperationResult[] } | undefined)?.results;
+        if (code === "BATCH_OPERATION_PARTIAL_FAILURE" && batchResults) {
+          const { successful, failed, summary } = handleBatchOperationErrors(
+            batchResults,
+            "Journal Adjustments"
+          );
 
-          // Handle optimistic lock errors specially
-          if (code === "OPTIMISTIC_LOCK_ERROR") {
-            toast.error(
-              <div className="space-y-2">
-                <div className="flex items-start gap-2">
-                  <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-                  <div>
-                    <p className="font-medium">Inventory Conflict</p>
-                    <p className="text-sm">{message}</p>
-                    <p className="text-sm text-muted-foreground mt-1">
-                      The page will refresh to show the latest inventory levels.
-                    </p>
-                  </div>
+          toast.error(
+            <div className="space-y-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                <div>
+                  <p className="font-medium">Partial Success</p>
+                  <p className="text-sm">{summary}</p>
+                  {failed.length > 0 && (
+                    <ul className="text-sm mt-2 space-y-1">
+                      {failed.slice(0, 3).map((f, i) => (
+                        <li key={i} className="text-muted-foreground">
+                          • {f.error?.message || "Unknown error"}
+                        </li>
+                      ))}
+                      {failed.length > 3 && (
+                        <li className="text-muted-foreground">
+                          • And {failed.length - 3} more errors...
+                        </li>
+                      )}
+                    </ul>
+                  )}
                 </div>
-              </div>,
-              { duration: 6000 }
-            );
-            // Automatically refresh after a short delay
-            setTimeout(() => {
-              refetchProducts();
-            }, 1000);
-            return;
+              </div>
+            </div>,
+            { duration: 8000 }
+          );
+
+          // Refresh to show what succeeded
+          if (successful.length > 0) {
+            clearAllAdjustments();
+            refetchProducts();
+            // Partial success still mutated inventory; keep other pages coherent.
+            invalidateInventoryCaches(queryClient);
+            setShowReviewDialog(false);
           }
-
-          // Handle batch operation errors
-          if (code === "BATCH_OPERATION_PARTIAL_FAILURE" && context?.results) {
-            const { successful, failed, summary } = handleBatchOperationErrors(
-              context.results,
-              "Journal Adjustments"
-            );
-
-            toast.error(
-              <div className="space-y-2">
-                <div className="flex items-start gap-2">
-                  <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-                  <div>
-                    <p className="font-medium">Partial Success</p>
-                    <p className="text-sm">{summary}</p>
-                    {failed.length > 0 && (
-                      <ul className="text-sm mt-2 space-y-1">
-                        {failed.slice(0, 3).map((f, i) => (
-                          <li key={i} className="text-muted-foreground">
-                            • {f.error?.message || "Unknown error"}
-                          </li>
-                        ))}
-                        {failed.length > 3 && (
-                          <li className="text-muted-foreground">
-                            • And {failed.length - 3} more errors...
-                          </li>
-                        )}
-                      </ul>
-                    )}
-                  </div>
-                </div>
-              </div>,
-              { duration: 8000 }
-            );
-
-            // Refresh to show what succeeded
-            if (successful.length > 0) {
-              clearAllAdjustments();
-              refetchProducts();
-              // Partial success still mutated inventory; keep other pages coherent.
-              invalidateInventoryCaches(queryClient);
-              setShowReviewDialog(false);
-            }
-            return;
-          }
-
-          // Create a proper error object
-          const error = new Error(message);
-          (error as any).code = code;
-          (error as any).context = context;
-
-          throw error;
-        } else {
-          throw new Error(errorData.error || "Failed to submit adjustments");
+          return;
         }
+
+        // Everything else: the server's own sentence when it sent one, this
+        // page's fallback when it did not — with the code and context intact
+        // for `getUserFriendlyMessage` below.
+        const error = new Error(apiErrorMessage(errorData, "Failed to submit adjustments"));
+        (error as any).code = code ?? undefined;
+        (error as any).context = context;
+
+        throw error;
       }
 
       const result = await response.json();
@@ -336,6 +374,11 @@ export default function JournalPage() {
   };
 
   const totalChanges = getTotalChanges();
+  const itemCount = Object.keys(adjustments).length;
+  // Pack REV-22 F4: the cart counts against the route's cap on the way UP, not
+  // at the refusal — the counter appears well before the limit bites.
+  const showItemCounter = itemCount > JOURNAL_COUNTER_FROM;
+  const overItemCap = itemCount > MAX_JOURNAL_ITEMS;
   const selectedLocationName =
     locations.find((loc) => loc.id === selectedLocationId)?.name ?? "Select a location";
 
@@ -466,8 +509,16 @@ export default function JournalPage() {
               {/* Summary chips */}
               <div className="flex items-center gap-3 flex-wrap">
                 <Badge variant="outline" className="font-mono tabular-nums">
-                  {Object.keys(adjustments).length} products
+                  {itemCount} products
                 </Badge>
+                {showItemCounter && (
+                  <ValueChip
+                    tone={overItemCap ? "negative" : "neutral"}
+                    className="font-mono tabular-nums"
+                  >
+                    {itemCount} of {MAX_JOURNAL_ITEMS} items
+                  </ValueChip>
+                )}
                 {totalChanges.additions > 0 && (
                   <ValueChip tone="positive" className="gap-1">
                     <TrendingUp className="h-3 w-3" />
@@ -486,6 +537,11 @@ export default function JournalPage() {
                 >
                   Net: {totalChanges.total > 0 ? "+" : ""}{totalChanges.total}
                 </ValueChip>
+                {overItemCap && (
+                  <span className="text-sm text-destructive" role="alert">
+                    {JOURNAL_CAP_MESSAGE}
+                  </span>
+                )}
               </div>
 
               {/* Actions */}

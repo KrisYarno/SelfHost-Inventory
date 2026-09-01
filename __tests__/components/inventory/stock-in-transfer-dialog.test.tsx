@@ -49,26 +49,36 @@ const PRODUCT = {
 };
 
 /**
- * The two source locations, before anything moves. The dialog lists them by
- * available quantity, highest first — so row 0 is Warehouse, row 1 is Office.
+ * The locations payload, before anything moves. The route answers with EVERY
+ * location including the destination (pack REV-22 F6) — the dialog lists the
+ * sources by available quantity, highest first (row 0 Warehouse, row 1 Office)
+ * and takes the DESTINATION row for its own header.
+ *
+ * Main is deliberately 4 here while the `product` prop says 2: the prop is a
+ * snapshot from the screen that opened this dialog, and the payload is what the
+ * database says right now. The header must show the payload's number.
  */
 const LOCATIONS_BEFORE = [
+  { locationId: 1, locationName: "Main", quantity: 4, version: 2 },
   { locationId: 2, locationName: "Office", quantity: 20, version: 7 },
   { locationId: 3, locationName: "Warehouse", quantity: 30, version: 4 },
 ];
 
 /**
- * After the partial success: Warehouse moved 5, and Office — which refused on a
- * version conflict — has been drained to 3 by whoever won that race. The list
- * order is unchanged, so the same rows are still in the same places.
+ * After the partial success: Warehouse moved 5 into Main (which is now at 7),
+ * and Office — which refused on a version conflict — has been drained to 3 by
+ * whoever won that race. The list order is unchanged, so the same rows are
+ * still in the same places.
  */
 const LOCATIONS_AFTER = [
+  { locationId: 1, locationName: "Main", quantity: 7, version: 3 },
   { locationId: 2, locationName: "Office", quantity: 3, version: 9 },
   { locationId: 3, locationName: "Warehouse", quantity: 25, version: 5 },
 ];
 
 let fetchMock: jest.Mock;
-let locationsPayloads: Array<typeof LOCATIONS_BEFORE>;
+/** A queued locations answer: a payload, or `"fail"` for a non-ok response. */
+let locationsPayloads: Array<typeof LOCATIONS_BEFORE | "fail">;
 let transferResponse: { status: number; body: unknown };
 
 beforeEach(() => {
@@ -82,6 +92,9 @@ beforeEach(() => {
     const href = String(url);
     if (href.includes("/locations")) {
       const payload = locationsPayloads.shift() ?? LOCATIONS_AFTER;
+      if (payload === "fail") {
+        return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
+      }
       return { ok: true, json: async () => ({ locations: payload }) } as unknown as Response;
     }
     return {
@@ -232,6 +245,131 @@ describe("Stock-In transfer dialog — the 207 partial-success branch", () => {
 
     await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
     expect(toastError).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE HEADER (reconciliation Part 2, pack REV-22 F6 / OCb-5).
+//
+// Current / Shortage / Projected used to be rendered from the `product` PROP —
+// a snapshot taken by whichever screen opened this dialog. The dialog already
+// fetches every location's real quantity (it just threw the destination row
+// away), so after a partial transfer the header showed the operator the
+// pre-transfer number while the source rows below it showed the post-transfer
+// truth. Same payload, two different stories.
+// ---------------------------------------------------------------------------
+describe("Stock-In transfer dialog — the destination header", () => {
+  it("renders Current/Shortage from the LOCATIONS PAYLOAD, not the opening prop", async () => {
+    renderDialog();
+
+    // The payload says Main holds 4; the prop that opened the dialog said 2.
+    await waitFor(() => expect(screen.getByText("Current: 4")).toBeInTheDocument());
+    // ...and the shortage is re-derived against the same fresh number (min 10).
+    expect(screen.getByText("Shortage: 6")).toBeInTheDocument();
+    expect(screen.getByText("Min: 10")).toBeInTheDocument();
+  });
+
+  it("falls back to the opening prop when the payload has no destination row", async () => {
+    locationsPayloads = [LOCATIONS_BEFORE.filter((loc) => loc.locationId !== 1)];
+    renderDialog();
+
+    await waitFor(() => expect(quantityInputs()).toHaveLength(2));
+    // Nothing fresh was said about Main, so nothing fresh is claimed about it.
+    expect(screen.getByText("Current: 2")).toBeInTheDocument();
+    expect(screen.getByText("Shortage: 8")).toBeInTheDocument();
+  });
+
+  it("re-renders the header from the destination quantity the 207 refetch returns", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    transferResponse = {
+      status: 207,
+      body: {
+        success: false,
+        totalTransferred: 5,
+        batchId: "batch-1",
+        results: [
+          { fromLocationId: 3, quantity: 5, success: true, transferId: "t-1" },
+          {
+            fromLocationId: 2,
+            quantity: 4,
+            success: false,
+            error: "Inventory was modified by another user",
+          },
+        ],
+      },
+    };
+    renderDialog();
+    await waitFor(() => expect(screen.getByText("Current: 4")).toBeInTheDocument());
+
+    await askFor(user, [5, 4]);
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: /Stock In 9 units/ }));
+    });
+
+    // The 5 units that DID move are in the header now: Main 4 -> 7, so the
+    // shortage against min 10 closes from 6 to 3.
+    await waitFor(() => expect(screen.getByText("Current: 7")).toBeInTheDocument());
+    expect(screen.getByText("Shortage: 3")).toBeInTheDocument();
+    // Projected = the fresh destination quantity + what the retry still asks
+    // for (Office, re-clamped to 3) — 7 + 3, not 2 + 3.
+    expect(screen.getByText("10 units")).toBeInTheDocument();
+    // The refetch succeeded, so the retry is live.
+    expect(screen.getByRole("button", { name: /Stock In 3 units/ })).toBeEnabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE 207 WHOSE REFETCH FAILS (pack REV-22 F6b / CXb-5).
+//
+// The old branch awaited the refetch BEFORE touching local state, so a failed
+// re-read left the dialog holding the exact request that had just half-failed:
+// the succeeded rows still asking to move stock that has already moved, every
+// row still carrying versions the prelock will now refuse. Pressing the button
+// again was the wrong thing to do, and the button was still live.
+// ---------------------------------------------------------------------------
+describe("Stock-In transfer dialog — a 207 whose refetch fails", () => {
+  it("keeps the safe state and DISABLES submit until fresh versions arrive", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    locationsPayloads = [LOCATIONS_BEFORE, "fail"];
+    transferResponse = {
+      status: 207,
+      body: {
+        success: false,
+        totalTransferred: 5,
+        batchId: "batch-1",
+        results: [
+          { fromLocationId: 3, quantity: 5, success: true, transferId: "t-1" },
+          {
+            fromLocationId: 2,
+            quantity: 4,
+            success: false,
+            error: "Inventory was modified by another user",
+          },
+        ],
+      },
+    };
+    const { onOpenChange } = renderDialog();
+    await waitFor(() => expect(quantityInputs()).toHaveLength(2));
+
+    await askFor(user, [5, 4]);
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: /Stock In 9 units/ }));
+    });
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+
+    // The safe state landed even though the re-read never did: Warehouse (which
+    // moved) is back to zero, Office (which refused) keeps its ask.
+    await waitFor(() => {
+      const inputs = quantityInputs();
+      expect(inputs[0].value).toBe("");
+      expect(inputs[1].value).toBe("4");
+    });
+
+    // ...and the retry is refused, because every version this dialog holds is
+    // now unverifiable. The dialog stays open with the work intact.
+    expect(screen.getByRole("button", { name: /Stock In 4 units/ })).toBeDisabled();
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 });
 

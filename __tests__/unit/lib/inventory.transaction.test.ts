@@ -310,9 +310,13 @@ describe('createInventoryTransaction — the lock order (B1a-i.4)', () => {
       ])
     ).rejects.toThrow('Insufficient stock for Widget. Requested: 2, Available: 3');
 
-    // The first item DID write before the second refused (the transaction is
-    // what rolls it back) — the loop's shape is unchanged.
-    expect(mockTx.inventory_logs.create).toHaveBeenCalledTimes(1);
+    // PIN DELTA (pack REV-22 F1, guards-first): the first item no longer writes
+    // before the second is refused. It used to (`create` ×1) and the transaction
+    // rolled it back, so the WIRE is unchanged — what changed is that a refused
+    // request now holds no `products` FK lock from a ledger insert while it
+    // refuses, which is the deadlock this fix closes.
+    expect(mockTx.inventory_logs.create).not.toHaveBeenCalled();
+    expect(mockTx.product_locations.upsert).not.toHaveBeenCalled();
   });
 
   it('the within-tx tally advances the VERSION too', async () => {
@@ -359,5 +363,100 @@ describe('createInventoryTransaction — the lock order (B1a-i.4)', () => {
         { productId: 7, locationId: 1, quantityChange: -5 },
       ])
     ).rejects.toThrow('Insufficient stock for Widget. Requested: 0, Available: 5');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GUARDS FIRST (pack REV-22 F1). Every item is validated against a SIMULATION of
+// the tally before the write loop opens, so a request that will refuse ANY item
+// holds nothing but its prelock when it does. The refusal classes, their
+// messages and the order they fire in are unchanged — only the statement order.
+// ---------------------------------------------------------------------------
+describe('createInventoryTransaction — guards before writes (REV-22 F1)', () => {
+  it('a LAST-item stock refusal writes NOTHING — not even the payable first item', async () => {
+    prelocked([
+      { productId: 7, locationId: 1, quantity: 100, version: 1 },
+      { productId: 9, locationId: 2, quantity: 1, version: 1 },
+    ]);
+    mockTx.product.findUnique.mockResolvedValue({ name: 'Gadget' } as any);
+
+    await expect(
+      createInventoryTransaction('DEDUCTION', 42, [
+        { productId: 7, locationId: 1, quantityChange: -5 },
+        { productId: 9, locationId: 2, quantityChange: -5 },
+      ])
+    ).rejects.toBeInstanceOf(InsufficientStockError);
+
+    expect(mockTx.inventory_logs.create).not.toHaveBeenCalled();
+    expect(mockTx.product_locations.upsert).not.toHaveBeenCalled();
+    expect(mockTx.product.update).not.toHaveBeenCalled();
+    // The only raw statements spent are the prelock's pair; the guard's
+    // product-name read is a plain delegate read and follows them.
+    expect(rawCalls.map((c) => c.kind)).toEqual(['execute', 'query']);
+    expect(mockTx.product.findUnique.mock.invocationCallOrder[0]).toBeGreaterThan(
+      rawFns.$queryRaw.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('a LAST-item version conflict writes NOTHING either', async () => {
+    prelocked([
+      { productId: 7, locationId: 1, quantity: 100, version: 1 },
+      { productId: 9, locationId: 2, quantity: 100, version: 4 },
+    ]);
+
+    await expect(
+      createInventoryTransaction('DEDUCTION', 42, [
+        { productId: 7, locationId: 1, quantityChange: -5 },
+        { productId: 9, locationId: 2, quantityChange: -5, expectedVersion: 1 },
+      ])
+    ).rejects.toMatchObject({ name: 'OptimisticLockError', currentVersion: 4, expectedVersion: 1 });
+
+    expect(mockTx.inventory_logs.create).not.toHaveBeenCalled();
+    expect(mockTx.product_locations.upsert).not.toHaveBeenCalled();
+  });
+
+  it('the version check still precedes the floor check ON THE SAME ITEM', async () => {
+    // One item that fails BOTH: the version conflict is what the caller sees,
+    // exactly as it did when the two guards sat inside the write loop.
+    prelocked([{ productId: 7, locationId: 1, quantity: 1, version: 9 }]);
+    mockTx.product.findUnique.mockResolvedValue({ name: 'Widget' } as any);
+
+    await expect(
+      createInventoryTransaction('DEDUCTION', 42, [
+        { productId: 7, locationId: 1, quantityChange: -5, expectedVersion: 1 },
+      ])
+    ).rejects.toBeInstanceOf(OptimisticLockError);
+    expect(mockTx.product.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('every item still writes, in request order, when they all pass', async () => {
+    prelocked([
+      { productId: 7, locationId: 1, quantity: 100, version: 1 },
+      { productId: 9, locationId: 2, quantity: 100, version: 1 },
+    ]);
+    mockTx.product_locations.upsert
+      .mockResolvedValueOnce({ version: 8 } as any)
+      .mockResolvedValueOnce({ version: 3 } as any);
+
+    const result = await createInventoryTransaction('DEDUCTION', 42, [
+      { productId: 7, locationId: 1, quantityChange: -5 },
+      { productId: 9, locationId: 2, quantityChange: -2 },
+    ]);
+
+    expect(mockTx.inventory_logs.create).toHaveBeenCalledTimes(2);
+    expect((mockTx.inventory_logs.create.mock.calls[0][0] as any).data.productId).toBe(7);
+    expect((mockTx.inventory_logs.create.mock.calls[1][0] as any).data.productId).toBe(9);
+    expect(result.versions).toEqual({ '7-1': 8, '9-2': 3 });
+  });
+
+  it('spends the covered writers\' transaction budget (REV-22 F3)', async () => {
+    await createInventoryTransaction('DEDUCTION', 42, [
+      { productId: 7, locationId: 1, quantityChange: -5 },
+    ]);
+
+    expect((mockPrisma.$transaction as jest.Mock).mock.calls[0][1]).toEqual({
+      maxWait: 5000,
+      timeout: 30000,
+    });
   });
 });

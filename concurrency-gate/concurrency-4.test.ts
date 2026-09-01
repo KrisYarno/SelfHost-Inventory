@@ -16,8 +16,16 @@
  *
  *   9c  TWO WRITERS ASKING IN OPPOSITE ORDER TAKE THE ROWS IN THE SAME ORDER.
  *       Session A locks order 1 and asks for [P1, P2]; session B locks order 2
- *       and asks for [P2, P1]. The canonical sort inside the prelock is the ONLY
- *       thing standing between that and a textbook AB/BA deadlock. Both commit.
+ *       and asks for [P2, P1]. WHAT THE SCENARIO PROVES, exactly: both sessions
+ *       COMMIT under reversed ask order, one at a time, because the module sorts
+ *       the deduped key set before it locks anything. It does NOT prove the
+ *       counterfactual — that an unsorted prelock would necessarily deadlock
+ *       here. That argument is plan P-2's documented InnoDB reasoning (every
+ *       writer takes the same keys in the same order; the ODKU takes an
+ *       EXCLUSIVE lock on a duplicate, so the S→X duplicate-key shape does not
+ *       arise, and each locked record's next-key gap lies BEFORE it, which
+ *       sorted acquisition keeps acyclic), and the empirical negative control is
+ *       the ONE sort-disabled mutation run recorded beside the scenario below.
  *       It races OFF the location-1 compatibility mirror, for a measured reason
  *       spelled out at `OFF_MIRROR_1` below: the mirror's write on `products`
  *       has a deadlock of its own with a concurrent prelock's FK parent check,
@@ -42,14 +50,30 @@
  * MySQL exposes no `Innodb_deadlocks` status counter, so the only truthful
  * instrument is the `LATEST DETECTED DEADLOCK` section of `SHOW ENGINE INNODB
  * STATUS`, sampled before and after each race and printed either way. Scenario
- * 13's outcome envelope is therefore BOTH 200, or one 200 and one GENERIC 500 —
- * `apiHandler` maps an unrecognised error (P2034 included) to
- * `{ error: 'Internal server error' }`, so the wire never says "deadlock", and
- * a gate that demanded two 200s would be asserting an InnoDB scheduling
- * accident. The `products` FK S→X residual (every ledger insert takes a shared
- * lock on its product row, and the location-1 mirror takes an exclusive one) is
- * the named reason that branch stays open; deduct-simple is single-attempt by
- * design and does not retry into it.
+ * 13's outcome envelope is therefore BOTH 200, or one 200 and one ROLLED-BACK
+ * request — a gate that demanded two 200s would be asserting an InnoDB
+ * scheduling accident. The rolled-back request reaches the wire as a GENERIC
+ * 500 (`apiHandler` mapped an unrecognised error, P2034 included, to
+ * `{ error: 'Internal server error' }`, so the wire never said "deadlock") or,
+ * once pack REV-22 F3 lands its typed P2028/P2034 branch, as a 503 `BUSY`; the
+ * envelope accepts either and NEITHER names the cycle, which is why the report
+ * above prints the engine's own section. The `products` FK S→X residual (every
+ * ledger insert takes a shared lock on its product row, and the location-1
+ * mirror takes an exclusive one) is the named reason that branch stays open;
+ * deduct-simple is single-attempt by design and does not retry into it.
+ *
+ * ...BUT THE OPEN BRANCH IS NOT A FREE PASS (pack REV-22 F9). "One committed,
+ * one rolled back" is tolerated for that ONE named reason, so when it fires the
+ * scenario CLASSIFIES the engine's own trace instead of shrugging: a fresh cycle
+ * whose waits name `products` is the accepted residual (recorded, and the
+ * scenario passes); a fresh cycle whose waits are two `product_locations`
+ * records is the AB/BA shape the canonical prelock exists to prevent, and it
+ * FAILS the scenario with the trace in the message; anything else — including a
+ * failed request with no fresh deadlock at all, which is what a blown
+ * transaction budget looks like from the wire — is unattributable and fails the
+ * same way. The both-200 path is untouched by this. The classifier itself is
+ * pinned on two CAPTURED traces (see `CAPTURED_PRODUCT_LOCATIONS_CYCLE`), so it
+ * is not code that only runs on a bad day.
  *
  * THE RENDEZVOUS. 9c and 9d hold their two sessions at an in-process barrier
  * placed INSIDE both interactive transactions — after both have begun and (9c)
@@ -311,6 +335,122 @@ function deadlockSummary(section: string | null): string {
     .map((line) => line.trim())
     .filter((line) => line !== "" && !/^-+$/.test(line));
   return lines.slice(0, 2).join(" | ");
+}
+
+/** One lock a deadlocked transaction was WAITING FOR, as the engine names it.
+ *  `index` is "(table lock)" for the `TABLE LOCK` form, which carries none. */
+type DeadlockWait = { table: string; index: string; line: string };
+
+/**
+ * The locks the two sides of a detected deadlock were WAITING for, read off the
+ * section's own text.
+ *
+ * The shape MySQL 8.4 prints, per party:
+ *
+ *   *** (1) TRANSACTION: … *** (1) HOLDS THE LOCK(S): …
+ *   *** (1) WAITING FOR THIS LOCK TO BE GRANTED:
+ *   RECORD LOCKS space id 5 page no 4 … index PRIMARY of table `db`.`products` …
+ *
+ * Only the WAITING side is parsed: a cycle is named by what its members could
+ * not get, not by what they already held (every party in this file's races
+ * holds `product_locations` rows, so the HOLDS lines classify nothing). A line
+ * counts as a wait when it follows a `WAITING FOR THIS LOCK` marker or says
+ * `waiting` itself; the next `***` line ends the block. Table names are taken
+ * from the backticks, so `products` and `product_locations` can never be
+ * confused for one another.
+ */
+function deadlockWaits(section: string): DeadlockWait[] {
+  const waits: DeadlockWait[] = [];
+  let inWaitingBlock = false;
+  for (const raw of section.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("***")) {
+      inWaitingBlock = /WAITING FOR THIS LOCK/.test(line);
+      continue;
+    }
+    if (!line.startsWith("RECORD LOCKS") && !line.startsWith("TABLE LOCK")) continue;
+    if (!inWaitingBlock && !/\bwaiting\b/.test(line)) continue;
+    const indexed = /\bindex (\S+) of table `[^`]+`\.`([^`]+)`/.exec(line);
+    if (indexed) {
+      waits.push({ table: indexed[2], index: indexed[1], line });
+      continue;
+    }
+    const tabled = /\btable `[^`]+`\.`([^`]+)`/.exec(line);
+    if (tabled) waits.push({ table: tabled[1], index: "(table lock)", line });
+  }
+  return waits;
+}
+
+/** ACCEPTED = the named `products` residual; FORBIDDEN = the AB/BA shape;
+ *  UNATTRIBUTABLE = a rollback the engine's section does not account for. */
+type DeadlockShape = "products-residual" | "product-locations-cycle" | "unattributable";
+
+/**
+ * WHICH deadlock this was (pack REV-22 F9), from the LATEST DETECTED DEADLOCK
+ * section — `null`/stale in, `unattributable` out.
+ *
+ * The two shapes the gate has to tell apart:
+ *
+ *   `products`-residual — at least one waiter wants a `products` row. That is
+ *     the residual spec §2.7 names and `OFF_MIRROR_1` measures: `products` sits
+ *     OUTSIDE the canonical order (the ledger insert's FK parent check takes S
+ *     on it, the location-1 mirror takes X), its shape predates B1, and it is
+ *     why scenario 13's envelope allows a rolled-back writer at all.
+ *
+ *   `product_locations` cycle — EVERY waiter wants a `product_locations`
+ *     record and none wants a `products` row. Two writers took the covered rows
+ *     in opposite orders: precisely the AB/BA deadlock the canonical prelock
+ *     exists to make impossible. It is a defect, never a residual.
+ *
+ * Anything else (no fresh section, an unparsable one, a cycle over some third
+ * table) is `unattributable` — the caller must not read silence as the accepted
+ * residual.
+ */
+function classifyDeadlock(section: string | null): {
+  shape: DeadlockShape;
+  waits: DeadlockWait[];
+  why: string;
+} {
+  if (section === null) {
+    return {
+      shape: "unattributable",
+      waits: [],
+      why:
+        "the engine reports NO fresh LATEST DETECTED DEADLOCK for this race — the rollback " +
+        "is not attributable to a deadlock at all (a blown transaction budget reaches the " +
+        "wire as the same generic 500)",
+    };
+  }
+  const waits = deadlockWaits(section);
+  const named = waits.map((wait) => `${wait.table}.${wait.index}`).join(", ");
+  if (waits.length === 0) {
+    return {
+      shape: "unattributable",
+      waits,
+      why: "the section names no lock this parser could read as a WAITING record lock",
+    };
+  }
+  if (waits.every((wait) => wait.table === "product_locations")) {
+    return {
+      shape: "product-locations-cycle",
+      waits,
+      why:
+        `every waiter in the cycle wants a \`product_locations\` record (${named}) — the ` +
+        "AB/BA shape the canonical prelock exists to prevent",
+    };
+  }
+  if (waits.some((wait) => wait.table === "products")) {
+    return {
+      shape: "products-residual",
+      waits,
+      why: `a waiter wants a \`products\` row (${named}) — the named FK S→X residual`,
+    };
+  }
+  return {
+    shape: "unattributable",
+    waits,
+    why: `the cycle waits on neither the residual nor the covered rows (${named})`,
+  };
 }
 
 /** Sample, run, sample, PRINT. Never an assertion — the caller decides whether
@@ -718,9 +858,173 @@ describe("the canonical prelock — real-MySQL pins (pack CB1c)", () => {
   });
 });
 
+/**
+ * TWO TRACES THIS GATE ACTUALLY PRODUCED, kept verbatim as the classifier's
+ * fixtures (pack REV-22 F9). Not invented shapes: the first came out of the
+ * sort-disabled mutation run recorded above scenario 9c, the second out of a
+ * throwaway run of 9c's race at location 1 — the configuration `OFF_MIRROR_1`
+ * says deadlocks on the `products` residual, which is exactly what it did.
+ *
+ * They are here because the classification branch in scenario 13 fires only on
+ * a rollback this gate has never yet observed, and unexercised code is how this
+ * file's own header describes a hole (see RESET OWNERSHIP). These two pins
+ * exercise both verdicts against real engine output, every run.
+ *
+ * Both are copied line for line, with ONE elision: the numbered
+ * `N: len …; hex …` record-field dumps under each `PHYSICAL RECORD` header are
+ * dropped, because the parser reads no field data and a product row's twenty
+ * columns would bury the four lines that matter.
+ */
+const CAPTURED_PRODUCT_LOCATIONS_CYCLE = [
+  "LATEST DETECTED DEADLOCK",
+  "------------------------",
+  "2026-08-31 23:54:29 140122553046592",
+  "*** (1) TRANSACTION:",
+  "TRANSACTION 5105, ACTIVE 0 sec inserting",
+  "mysql tables in use 1, locked 1",
+  "LOCK WAIT 9 lock struct(s), heap size 1128, 6 row lock(s)",
+  "MySQL thread id 27, OS thread handle 140122642282048, query id 928 172.17.0.1 root update",
+  "INSERT INTO product_locations (productId, locationId, quantity, version, updatedAt)",
+  "    VALUES (9103, 2, 0, 0, NOW()), (9101, 2, 0, 0, NOW())",
+  "    ON DUPLICATE KEY UPDATE version = version",
+  "",
+  "*** (1) HOLDS THE LOCK(S):",
+  "RECORD LOCKS space id 49 page no 4 n bits 88 index PRIMARY of table `concurrency_gate`.`product_locations` trx id 5105 lock_mode X",
+  "Record lock, heap no 1 PHYSICAL RECORD: n_fields 1; compact format; info bits 0",
+  "",
+  "*** (1) WAITING FOR THIS LOCK TO BE GRANTED:",
+  "RECORD LOCKS space id 49 page no 4 n bits 88 index PRIMARY of table `concurrency_gate`.`product_locations` trx id 5105 lock_mode X insert intention waiting",
+  "Record lock, heap no 1 PHYSICAL RECORD: n_fields 1; compact format; info bits 0",
+  "",
+  "*** (2) TRANSACTION:",
+  "TRANSACTION 5104, ACTIVE 0 sec inserting",
+  "mysql tables in use 1, locked 1",
+  "LOCK WAIT 10 lock struct(s), heap size 1128, 6 row lock(s)",
+  "MySQL thread id 29, OS thread handle 140122641225280, query id 927 172.17.0.1 root update",
+  "INSERT INTO product_locations (productId, locationId, quantity, version, updatedAt)",
+  "    VALUES (9101, 2, 0, 0, NOW()), (9103, 2, 0, 0, NOW())",
+  "    ON DUPLICATE KEY UPDATE version = version",
+  "",
+  "*** (2) HOLDS THE LOCK(S):",
+  "RECORD LOCKS space id 49 page no 4 n bits 88 index PRIMARY of table `concurrency_gate`.`product_locations` trx id 5104 lock_mode X",
+  "Record lock, heap no 1 PHYSICAL RECORD: n_fields 1; compact format; info bits 0",
+  "",
+  "*** (2) WAITING FOR THIS LOCK TO BE GRANTED:",
+  "RECORD LOCKS space id 49 page no 4 n bits 88 index PRIMARY of table `concurrency_gate`.`product_locations` trx id 5104 lock_mode X insert intention waiting",
+  "Record lock, heap no 1 PHYSICAL RECORD: n_fields 1; compact format; info bits 0",
+  "",
+  "*** WE ROLL BACK TRANSACTION (1)",
+].join("\n");
+
+const CAPTURED_PRODUCTS_RESIDUAL = [
+  "LATEST DETECTED DEADLOCK",
+  "------------------------",
+  "2026-08-31 23:57:15 140274554623552",
+  "*** (1) TRANSACTION:",
+  "TRANSACTION 5101, ACTIVE 0 sec inserting",
+  "mysql tables in use 1, locked 1",
+  "LOCK WAIT 6 lock struct(s), heap size 1128, 3 row lock(s), undo log entries 1",
+  "MySQL thread id 29, OS thread handle 140274642802240, query id 928 172.17.0.1 root update",
+  "INSERT INTO product_locations (productId, locationId, quantity, version, updatedAt)",
+  "    VALUES (9101, 1, 0, 0, NOW()), (9103, 1, 0, 0, NOW())",
+  "    ON DUPLICATE KEY UPDATE version = version",
+  "",
+  "*** (1) HOLDS THE LOCK(S):",
+  "RECORD LOCKS space id 94 page no 4 n bits 72 index PRIMARY of table `concurrency_gate`.`products` trx id 5101 lock mode S locks rec but not gap",
+  "Record lock, heap no 2 PHYSICAL RECORD: n_fields 20; compact format; info bits 0",
+  "",
+  "*** (1) WAITING FOR THIS LOCK TO BE GRANTED:",
+  "RECORD LOCKS space id 49 page no 5 n bits 88 index unique_product_location of table `concurrency_gate`.`product_locations` trx id 5101 lock_mode X waiting",
+  "Record lock, heap no 2 PHYSICAL RECORD: n_fields 3; compact format; info bits 0",
+  "",
+  "*** (2) TRANSACTION:",
+  "TRANSACTION 5100, ACTIVE 0 sec starting index read",
+  "mysql tables in use 1, locked 1",
+  "LOCK WAIT 15 lock struct(s), heap size 1128, 11 row lock(s), undo log entries 2",
+  "MySQL thread id 27, OS thread handle 140274643859008, query id 953 172.17.0.1 root updating",
+  "UPDATE `concurrency_gate`.`products` SET `quantity` = (`concurrency_gate`.`products`.`quantity` + 1) WHERE (`concurrency_gate`.`products`.`id` IN (9101) AND (`concurrency_gate`.`products`.`id` = 9101 AND 1=1))",
+  "",
+  "*** (2) HOLDS THE LOCK(S):",
+  "RECORD LOCKS space id 49 page no 5 n bits 88 index unique_product_location of table `concurrency_gate`.`product_locations` trx id 5100 lock_mode X",
+  "Record lock, heap no 2 PHYSICAL RECORD: n_fields 3; compact format; info bits 0",
+  "Record lock, heap no 6 PHYSICAL RECORD: n_fields 3; compact format; info bits 0",
+  "",
+  "*** (2) WAITING FOR THIS LOCK TO BE GRANTED:",
+  "RECORD LOCKS space id 94 page no 4 n bits 72 index PRIMARY of table `concurrency_gate`.`products` trx id 5100 lock_mode X locks rec but not gap waiting",
+  "Record lock, heap no 2 PHYSICAL RECORD: n_fields 20; compact format; info bits 0",
+  "",
+  "*** WE ROLL BACK TRANSACTION (1)",
+].join("\n");
+
+describe("the deadlock classifier (pack REV-22 F9) — pinned on CAPTURED engine traces", () => {
+  test("the sort-disabled run's cycle reads as the FORBIDDEN two-`product_locations` shape", () => {
+    const verdict = classifyDeadlock(CAPTURED_PRODUCT_LOCATIONS_CYCLE);
+
+    // Both waiters wanted the covered rows and NEITHER wanted a `products` row:
+    // two writers took `product_locations` in opposite orders. Never a residual.
+    expect(verdict.waits.map((wait) => `${wait.table}.${wait.index}`)).toEqual([
+      "product_locations.PRIMARY",
+      "product_locations.PRIMARY",
+    ]);
+    expect(verdict.shape).toBe("product-locations-cycle");
+  });
+
+  test("the location-1 mirror cycle reads as the ACCEPTED `products` residual", () => {
+    const verdict = classifyDeadlock(CAPTURED_PRODUCTS_RESIDUAL);
+
+    // The residual's exact signature: one waiter parked on the covered row, the
+    // other parked on the `products` row the mirror UPDATE needs exclusively —
+    // and the HOLDS lines (a shared `products` lock, held `product_locations`
+    // rows) contribute nothing, which is why only the waits are read.
+    expect(verdict.waits.map((wait) => `${wait.table}.${wait.index}`)).toEqual([
+      "product_locations.unique_product_location",
+      "products.PRIMARY",
+    ]);
+    expect(verdict.shape).toBe("products-residual");
+  });
+
+  test("silence is UNATTRIBUTABLE — a rollback with no fresh section never borrows the residual's licence", () => {
+    expect(classifyDeadlock(null).shape).toBe("unattributable");
+    expect(classifyDeadlock("LATEST DETECTED DEADLOCK\n(nothing this parser can read)").shape).toBe(
+      "unattributable",
+    );
+  });
+});
+
 describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 9d / 13)", () => {
   jest.setTimeout(120_000);
 
+  /**
+   * THE NEGATIVE CONTROL, RUN ONCE AND RECORDED (pack REV-22 F9). 9c passing
+   * says the sorted prelock commits both sessions; it cannot, by itself, say
+   * the SORT is what did it. So the sort was disabled in
+   * `lib/inventory/prelock.ts` (the `canonical.sort` call commented out — the
+   * VALUES then ride in each caller's ASK order), the whole gate was run once,
+   * and the file was restored byte-identically. OUTCOME, 2026-08-31:
+   *
+   *   THE GATE WENT RED — `Tests: 1 failed, 20 passed, 21 total`, the failure
+   *   being THIS scenario, and the engine recorded a deadlock it had not
+   *   recorded in the run before (`a NEW deadlock was detected during this
+   *   race: true`, from `no LATEST DETECTED DEADLOCK section`). The section
+   *   names both materialize statements, in opposite VALUES order:
+   *
+   *     (1) INSERT … VALUES (9103, 2, …), (9101, 2, …) ON DUPLICATE KEY UPDATE
+   *     (2) INSERT … VALUES (9101, 2, …), (9103, 2, …) ON DUPLICATE KEY UPDATE
+   *
+   *   each HOLDING `lock_mode X` and each WAITING for `lock_mode X insert
+   *   intention` on `index PRIMARY of table `concurrency_gate`.`product_locations``
+   *   — i.e. the FORBIDDEN two-`product_locations` cycle `classifyDeadlock`
+   *   above exists to catch — ending `*** WE ROLL BACK TRANSACTION (1)`.
+   *
+   *   The assertion that actually tripped first was `expect(blocked).toBe(true)`
+   *   rather than the both-commit assertion: InnoDB's detector killed the cycle
+   *   faster than `waitForLockWait`'s 10ms poll could see a LOCK WAIT row. The
+   *   rolled-back session would have failed the "no rejections" assertion two
+   *   lines later.
+   *
+   * So the canonical sort is LOAD-BEARING on this engine, measured, not
+   * assumed — and the control is conclusive: it did not stay green.
+   */
   test("scenario 9c: two sessions, two orders, the two product keys asked in OPPOSITE order — the canonical sort makes the acquisition identical and BOTH commit", async () => {
     // (Off the location-1 mirror by design — see `OFF_MIRROR_1`.)
     await resetAll();
@@ -746,10 +1050,11 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
        * the prelock over the keys IN THE ORDER THIS SESSION ASKS, then a
        * covered write per key in that same asked order.
        *
-       * The asked order is the whole experiment. If `prelockProductLocations`
-       * did not sort, A would hold OFF_MIRROR_1 wanting OFF_MIRROR_2 while B
-       * held OFF_MIRROR_2 wanting OFF_MIRROR_1, and InnoDB would roll one of
-       * them back.
+       * The asked order is the whole experiment: two sessions ask for the same
+       * two rows in OPPOSITE orders and both still commit, one at a time,
+       * because `prelockProductLocations` sorts before it locks. The unsorted
+       * counterfactual is not asserted here — see the MUTATION RUN note above
+       * the test for what disabling the sort actually did.
        */
       const session = (
         client: PrismaClient,
@@ -788,8 +1093,8 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       // prelocked rows. Without this, two sessions that never met would pass.
       expect(blocked).toBe(true);
 
-      // BOTH COMMIT. That is the claim: an AB/BA acquisition would have cost
-      // one of them a P2034 rollback.
+      // BOTH COMMIT. That is the claim, and the whole of it: reversed ask
+      // order, sorted acquisition, two commits and no rollback.
       const rejected = race.filter((entry) => entry.status === "rejected");
       expect(rejected.map((entry) => String((entry as PromiseRejectedResult).reason))).toEqual([]);
       expect(race.map((entry) => entry.status)).toEqual(["fulfilled", "fulfilled"]);
@@ -972,7 +1277,11 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       await installHoldTrigger([KEY_1.productId, KEY_2.productId], 0.3);
 
       let blocked = false;
-      const { value: answers } = await reportDeadlocks("scenario 13", async () => {
+      const {
+        value: answers,
+        after: deadlockAfter,
+        fresh: deadlockFresh,
+      } = await reportDeadlocks("scenario 13", async () => {
         const inFlight: Promise<RouteAnswer>[] = [];
         inFlight.push(
           deductSimple(LOCATION_MAIN, [
@@ -1001,21 +1310,62 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       );
       expect(blocked).toBe(true);
 
-      // THE OUTCOME ENVELOPE (pack REV-14 PKb-10). Both commit, OR one commits
-      // and the other comes back as a GENERIC 500 — `apiHandler` has no branch
-      // for P2034, so the wire never names the deadlock. Anything else (a 409,
-      // a 400, two 500s) is a real defect.
+      // THE OUTCOME ENVELOPE (pack REV-14 PKb-10, widened by REV-22 F3). Both
+      // commit, OR one commits and the other comes back rolled back. Two wire
+      // codes are legal for that second case and the gate accepts either: the
+      // GENERIC 500 the pre-F3 ladder produced (`apiHandler` had no branch for
+      // P2034, so the wire never named the deadlock) and the typed 503 `BUSY`
+      // F3 adds for P2028/P2034. Which one a run lands on is F3's business, not
+      // this gate's — but SOMETHING has to be asserted, and either way the
+      // classification below is what makes the branch cost something. Anything
+      // else (a 409, a 400, two failures) is a real defect.
       const statuses = [deduct.status, adjust.status].sort();
       const bothCommitted = statuses[0] === 200 && statuses[1] === 200;
-      const oneRolledBack = statuses[0] === 200 && statuses[1] === 500;
+      const oneRolledBack =
+        statuses[0] === 200 && (statuses[1] === 500 || statuses[1] === 503);
       expect(bothCommitted || oneRolledBack).toBe(true);
 
       if (oneRolledBack) {
-        const failed = answers.find((answer) => answer.status === 500);
-        // The generic body, verbatim: no code, no P2034, nothing an operator
-        // could act on — which is exactly why the report above prints the
-        // engine's own deadlock section instead.
-        expect(failed?.body).toEqual({ error: "Internal server error" });
+        const failed = answers.find((answer) => answer.status !== 200);
+        if (failed?.status === 503) {
+          // F3's typed branch: the CODE is the contract, the sentence is F3's
+          // copy and is not re-spelled here.
+          expect(failed.body).toMatchObject({ code: "BUSY" });
+        } else {
+          // The generic body, verbatim: no code, no P2034, nothing an operator
+          // could act on — which is exactly why the report above prints the
+          // engine's own deadlock section instead.
+          expect(failed?.body).toEqual({ error: "Internal server error" });
+        }
+
+        // AND WHICH DEADLOCK IT WAS (pack REV-22 F9). This branch is tolerated
+        // for ONE named reason, so it has to NAME it: the accepted `products`
+        // residual passes (recorded), a `product_locations` AB/BA cycle fails
+        // with the engine's own trace, and a rollback the section cannot
+        // account for fails too rather than borrowing the residual's licence.
+        // (The section is global and holds only the LATEST cycle: if a race
+        // ever deadlocked twice, this classifies the last one — the printed
+        // trace is the evidence either way.)
+        const verdict = classifyDeadlock(deadlockFresh ? deadlockAfter : null);
+        console.log(
+          `[scenario 13] the rolled-back branch fired — deadlock shape: ${verdict.shape}; ` +
+            `${verdict.why}`,
+        );
+        if (verdict.shape !== "products-residual") {
+          throw new Error(
+            [
+              "scenario 13: a request rolled back, and the engine's deadlock section does NOT " +
+                "say it was the accepted `products` residual.",
+              `shape: ${verdict.shape} — ${verdict.why}`,
+              `waits parsed: ${
+                verdict.waits.map((wait) => `${wait.table}.${wait.index}`).join(" | ") || "(none)"
+              }`,
+              `a NEW deadlock was detected during this race: ${deadlockFresh}`,
+              "LATEST DETECTED DEADLOCK:",
+              deadlockAfter ?? "(the engine has recorded none)",
+            ].join("\n"),
+          );
+        }
       }
 
       if (deduct.status === 200) {

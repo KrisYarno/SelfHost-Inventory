@@ -312,6 +312,18 @@ describe('createInventoryAdjustment — the lock order (B1a-i.2)', () => {
 
     expect(mockTx.product_locations.upsert).toHaveBeenCalledTimes(1);
   });
+
+  it('spends the covered writers\' transaction budget (REV-22 F3)', async () => {
+    // Prisma's interactive defaults (maxWait 2 s / timeout 5 s) are reachable
+    // now that these transactions queue on each other's prelocked rows; the
+    // budget is explicit, and the same one every covered writer spends.
+    await createInventoryAdjustment(1, 7, 2, 5);
+
+    expect((mockPrisma.$transaction as jest.Mock).mock.calls[0][1]).toEqual({
+      maxWait: 5000,
+      timeout: 30000,
+    });
+  });
 });
 
 describe('centsFromCostPrice — ER-C2 money conversion (never lie)', () => {

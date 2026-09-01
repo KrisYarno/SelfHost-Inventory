@@ -297,6 +297,14 @@ function makeStore(seed: {
         const row = products.get(where.id);
         return row ? { name: row.name } : null;
       },
+      // The candidate-existence read the simple-path prelock runs before it
+      // builds its keys (pack REV-22 F2) — answered from the same fixture map,
+      // so an id this fake does not know contributes NO prelock key and its
+      // item still fails item-locally on the `findUnique` above.
+      findMany: async ({ where }: any) => {
+        const ids: number[] = where?.id?.in ?? [];
+        return ids.filter((id) => products.has(id)).map((id) => ({ id }));
+      },
     },
     product_locations: {
       findUnique: async ({ where }: any) => {
@@ -780,5 +788,75 @@ describe('B1a-ii — the simple-path prelock', () => {
 
     // One key named twice is prelocked ONCE (prelockProductLocations dedupes).
     expect(prelockInsert()!.values).toEqual([10, 1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REV-22 F2 — THE CANDIDATE-EXISTENCE READ. A manual override is a raw number
+// from the request. Before this fix the prelock materialized a
+// `product_locations` row for it, and the INSERT's foreign key killed the WHOLE
+// transaction — every sibling item's committed work with it — over one bad id.
+// Now the id is checked first: it contributes no key, and its own item fails
+// ITEM-LOCALLY on the loop's `findUnique`, exactly as it did before the prelock
+// existed.
+// ---------------------------------------------------------------------------
+describe('REV-22 F2 — a missing override product stays ITEM-LOCAL', () => {
+  it('the valid sibling commits, the missing id fails alone, and the prelock carries one key', async () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const store = makeStore({
+      order: order([singleLine(), singleLine({ id: 'item-2', quantity: 1 })]),
+      products: [{ id: 10, name: 'Widget A', quantity: 100 }],
+      productLocations: [{ productId: 10, locationId: 1, quantity: 100, version: 1 }],
+    });
+    drive(store);
+
+    const result = await fulfillExternalOrder(
+      ORDER_ID,
+      1,
+      [
+        { itemId: 'item-1', quantity: 5 },
+        // A manual override naming a product that does not exist.
+        { itemId: 'item-2', quantity: 1, productId: 999 },
+      ],
+      42
+    );
+
+    // No request-wide failure: the sibling committed its deduction.
+    expect(result.fulfilled.map((f) => f.itemId)).toEqual(['item-1']);
+    expect(store.productLocation(10, 1)).toMatchObject({ quantity: 95, version: 2 });
+    // The bad id is one FAILED item, with the loop's own error.
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]).toMatchObject({
+      itemId: 'item-2',
+      error: 'Product with ID 999 not found',
+    });
+    // …and 999 never reached the prelock's VALUES: no row was materialized for
+    // it, so the ledger insert's foreign key never had the chance to fire.
+    expect(prelockInsert()!.values).toEqual([10, 1]);
+    expect(store.productLocation(999, 1)).toBeUndefined();
+    errSpy.mockRestore();
+  });
+
+  it('an ALL-MISSING request prelocks nothing and still answers per item', async () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const store = makeStore({
+      order: order([singleLine()]),
+      products: [{ id: 10, name: 'Widget A', quantity: 100 }],
+      productLocations: [{ productId: 10, locationId: 1, quantity: 100, version: 1 }],
+    });
+    drive(store);
+
+    const result = await fulfillExternalOrder(
+      ORDER_ID,
+      1,
+      [{ itemId: 'item-1', quantity: 5, productId: 999 }],
+      42
+    );
+
+    expect(result.failed.map((f) => f.itemId)).toEqual(['item-1']);
+    // No key survived the existence read, so the prelock spent NO statement.
+    expect(prelockInsert()).toBeUndefined();
+    expect(rawCalls.filter((c) => isPrelockSelect(c.sql))).toHaveLength(0);
+    errSpy.mockRestore();
   });
 });

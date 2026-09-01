@@ -59,6 +59,21 @@ export function StockInTransferDialog({
   const [locations, setLocations] = React.useState<LocationTransferState[]>([]);
   const [isLoading, setIsLoading] = React.useState(false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  /**
+   * The DESTINATION's own quantity, out of the same payload as the sources
+   * (reconciliation Part 2, pack REV-22 F6). Null until the first read answers,
+   * and only then does the header stop quoting the `product` prop — a snapshot
+   * taken by whatever screen opened this dialog, which after a partial transfer
+   * is a number nothing on the wire still agrees with.
+   */
+  const [destinationQuantity, setDestinationQuantity] = React.useState<number | null>(null);
+  /**
+   * Raised when a re-read FAILS after stock has moved (pack REV-22 F6b): every
+   * `expectedVersion` this dialog holds is then unverifiable, so the retry is
+   * refused until a read succeeds. The rows keep their safe values meanwhile —
+   * the operator's work is not thrown away, it is just not sendable.
+   */
+  const [needsFreshVersions, setNeedsFreshVersions] = React.useState(false);
 
   /**
    * Read the per-location availability AND VERSIONS this dialog submits with.
@@ -70,12 +85,16 @@ export function StockInTransferDialog({
    * refuses. `carry` is what a retry keeps — a failed transfer's requested
    * quantity, RE-CLAMPED against what the refreshed read says is available, so
    * the retry can never ask for stock that has since gone.
+   *
+   * Returns whether the read succeeded: the caller after a 207 needs to know,
+   * because a failed re-read is what arms `needsFreshVersions`.
    */
   const refetchLocations = React.useCallback(
-    async (carry: Record<number, number> = {}) => {
+    async (carry: Record<number, number> = {}): Promise<boolean> => {
       if (!product) {
         setLocations([]);
-        return;
+        setDestinationQuantity(null);
+        return false;
       }
 
       setIsLoading(true);
@@ -83,6 +102,14 @@ export function StockInTransferDialog({
         const res = await fetch(`/api/inventory/product/${product.productId}/locations`);
         if (!res.ok) throw new Error("Failed to fetch locations");
         const data: { locations: ProductLocationQuantity[] } = await res.json();
+        // The DESTINATION row, out of the same payload (pack REV-22 F6). The
+        // route answers with every location, so this is normally present; when
+        // it is not, the header keeps saying what it already said rather than
+        // inventing a zero.
+        const destination = data.locations.find(
+          (loc) => loc.locationId === destinationLocationId
+        );
+        if (destination) setDestinationQuantity(destination.quantity);
         // Filter out the destination location and sort by available quantity (highest first)
         const otherLocations = data.locations
           .filter((loc) => loc.locationId !== destinationLocationId)
@@ -95,9 +122,13 @@ export function StockInTransferDialog({
             quantity: Math.min(Math.max(0, carry[loc.locationId] ?? 0), loc.quantity),
           }));
         setLocations(otherLocations);
+        // Fresh versions are in hand again — whatever refused before is retryable.
+        setNeedsFreshVersions(false);
+        return true;
       } catch (err) {
         console.error("Error fetching product locations:", err);
         toast.error("Failed to load available stock from other locations");
+        return false;
       } finally {
         setIsLoading(false);
       }
@@ -109,6 +140,8 @@ export function StockInTransferDialog({
   React.useEffect(() => {
     if (!open || !product) {
       setLocations([]);
+      setDestinationQuantity(null);
+      setNeedsFreshVersions(false);
       return;
     }
     void refetchLocations();
@@ -116,13 +149,20 @@ export function StockInTransferDialog({
 
   if (!product) return null;
 
-  // Calculate totals
+  // Calculate totals. Current/Shortage/Projected all hang off the DESTINATION's
+  // fresh quantity when one has been read, and off the opening prop until then
+  // (pack REV-22 F6) — never a mix of the two.
+  const currentQuantity = destinationQuantity ?? product.quantity;
+  const shortage =
+    destinationQuantity === null
+      ? product.shortage
+      : Math.max(0, product.minQuantity - destinationQuantity);
   const totalToTransfer = locations.reduce((sum, loc) => sum + loc.quantity, 0);
-  const projectedQuantity = product.quantity + totalToTransfer;
+  const projectedQuantity = currentQuantity + totalToTransfer;
   const locationsWithStock = locations.filter((loc) => loc.available > 0);
   const locationsWithTransfer = locations.filter((loc) => loc.quantity > 0);
 
-  const canSubmit = totalToTransfer > 0 && !isSubmitting;
+  const canSubmit = totalToTransfer > 0 && !isSubmitting && !needsFreshVersions;
 
   const handleQuantityChange = (locationId: number, value: string) => {
     const numValue = parseInt(value, 10);
@@ -217,14 +257,35 @@ export function StockInTransferDialog({
         invalidateInventoryCaches(queryClient, product.productId);
         onSuccess?.(); // Still refresh data
 
-        // Re-read availability AND versions: the succeeded rows come back at
-        // zero, the failed ones keep what was asked for, re-clamped — so a
-        // retry submits fresh `expectedVersion`s for exactly what is left.
+        // THE SAFE STATE FIRST, THE RE-READ SECOND (pack REV-22 F6b).
+        //
+        // Zero what moved and re-clamp what refused BEFORE awaiting anything:
+        // between the 207 and the re-read the dialog otherwise still holds the
+        // request that just half-failed, and that request is the one thing the
+        // operator must never send again. The re-clamp here is against what
+        // this dialog already knew was available; the read that follows
+        // replaces both numbers with the truth.
         const carry: Record<number, number> = {};
         failed.forEach((result) => {
           carry[result.fromLocationId] = result.quantity;
         });
-        await refetchLocations(carry);
+        const succeededIds = succeeded.map((result) => result.fromLocationId);
+        setLocations((prev) =>
+          prev.map((loc) => {
+            if (succeededIds.indexOf(loc.locationId) !== -1) return { ...loc, quantity: 0 };
+            const asked = carry[loc.locationId];
+            if (asked === undefined) return loc;
+            return { ...loc, quantity: Math.min(Math.max(0, asked), loc.available) };
+          })
+        );
+
+        // Re-read availability AND versions: the succeeded rows come back at
+        // zero, the failed ones keep what was asked for, re-clamped — so a
+        // retry submits fresh `expectedVersion`s for exactly what is left. If
+        // that read FAILS, the safe state above stands and the retry is barred
+        // until a later read succeeds: every version in hand is now unverifiable.
+        const refreshed = await refetchLocations(carry);
+        if (!refreshed) setNeedsFreshVersions(true);
       } else {
         const errorMessage =
           (data as unknown as { error?: string }).error || "Failed to complete transfers";
@@ -266,16 +327,16 @@ export function StockInTransferDialog({
                   {destinationLocationName}
                 </ContextTag>
                 <ValueChip
-                  tone={product.quantity > 0 ? "neutral" : "negative"}
+                  tone={currentQuantity > 0 ? "neutral" : "negative"}
                   className="text-[10px]"
                 >
-                  Current: {product.quantity}
+                  Current: {currentQuantity}
                 </ValueChip>
                 <ValueChip tone="neutral" className="text-[10px]">
                   Min: {product.minQuantity}
                 </ValueChip>
-                <ValueChip tone="negative" className="text-[10px]">
-                  Shortage: {product.shortage}
+                <ValueChip tone={shortage > 0 ? "negative" : "positive"} className="text-[10px]">
+                  Shortage: {shortage}
                 </ValueChip>
               </div>
             </div>
@@ -396,6 +457,20 @@ export function StockInTransferDialog({
                   {projectedQuantity} units
                 </ValueChip>
               </div>
+            </div>
+          )}
+
+          {/* Why the button is dead (pack REV-22 F6b) — a disabled control with
+              no sentence beside it is just a broken screen. */}
+          {needsFreshVersions && (
+            <div
+              className="rounded-lg border border-destructive/50 bg-destructive/10 px-3 py-2.5"
+              role="alert"
+            >
+              <p className="text-sm text-destructive">
+                Some stock moved, but the re-read failed — close and reopen Stock In to get
+                current quantities before transferring the rest.
+              </p>
             </div>
           )}
 

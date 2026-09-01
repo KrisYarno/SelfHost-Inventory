@@ -258,3 +258,21 @@ test('availability reads the PRELOCKED source quantity', async () => {
   expect(mockTx.product.findUnique).toHaveBeenCalledTimes(1);
   expect(mockTx.inventory_logs.create).not.toHaveBeenCalled();
 });
+
+test("spends the covered writers' transaction budget (REV-22 F3)", async () => {
+  // Explicit maxWait/timeout on every covered writer: with the prelock in place
+  // these transactions QUEUE on each other's rows, so Prisma's 2 s/5 s defaults
+  // are reachable in normal operation.
+  await createInventoryTransfer({
+    userId: 1,
+    productId: 7,
+    fromLocationId: 2,
+    toLocationId: 3,
+    quantity: 5,
+  });
+
+  expect((mockPrisma.$transaction as jest.Mock).mock.calls[0][1]).toEqual({
+    maxWait: 5000,
+    timeout: 30000,
+  });
+});
