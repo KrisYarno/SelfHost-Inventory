@@ -69,6 +69,11 @@ const PRODUCTS = [
 
 /** The version `/api/inventory/current-fast` is currently answering with. */
 let liveVersion = 3;
+/**
+ * Whether `/api/products` is answering at all. Flipped to false to close the
+ * window the post-409 refetch has to land in (F5's failure half, FDb-6).
+ */
+let productsOk = true;
 /** Queued answers for the batch-adjust POST, oldest first. */
 let batchResponses: Array<{ status: number; body: unknown }>;
 let fetchMock: jest.Mock;
@@ -77,12 +82,16 @@ beforeEach(() => {
   toastError.mockClear();
   toastSuccess.mockClear();
   liveVersion = 3;
+  productsOk = true;
   batchResponses = [];
   useJournalStore.getState().clearAllAdjustments();
 
   fetchMock = jest.fn(async (url: unknown) => {
     const href = String(url);
     if (href.includes("/api/products")) {
+      if (!productsOk) {
+        return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
+      }
       return { ok: true, json: async () => ({ products: PRODUCTS }) } as unknown as Response;
     }
     if (href.includes("/api/inventory/current-fast")) {
@@ -169,7 +178,7 @@ describe("Journal page — the 409 recovery re-seeds the persisted cart (F5)", (
     });
     expect(toastError).toHaveBeenCalled();
 
-    // The refresh runs on a 1s delay, and the CART is re-seeded from it.
+    // The refresh runs IMMEDIATELY (the 1s delay died in FDb-5), and the CART is re-seeded from it.
     await waitFor(
       () => expect(useJournalStore.getState().adjustments[1].version).toBe(4),
       { timeout: 4000 }
@@ -189,6 +198,77 @@ describe("Journal page — the 409 recovery re-seeds the persisted cart (F5)", (
       expectedVersion: 4,
     });
     expect(toastSuccess).toHaveBeenCalledWith("Successfully submitted 1 adjustments");
+  }, 15000);
+});
+
+// ---------------------------------------------------------------------------
+// THE 409 WHOSE REFRESH FAILS (F5's other half — FDb-6 / FDc-4, gap FDc-3).
+//
+// The re-seed is only sound when FRESH rows actually arrived: react-query keeps
+// the previous array as placeholder data, so a failed read leaves the screen
+// looking live while every version on it is the losing one. Re-seeding from
+// that would overwrite the cart with the same stale numbers and arm a silent
+// second 409 — with the operator told nothing at all.
+//
+// So the failed read re-seeds NOTHING, says so, and — the part that matters
+// most — leaves the page usable: `versionRecoveryInFlight` comes back down, or
+// every submit for the life of the mount is refused by a guard that will never
+// clear.
+// ---------------------------------------------------------------------------
+describe("Journal page — a 409 whose refresh FAILS (F5 / FDb-6)", () => {
+  it("does not re-seed, says the refresh failed, and still reaches the server on retry", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    useJournalStore.getState().addAdjustment({ productId: 1, quantityChange: 5, version: 3 });
+
+    const conflict = {
+      status: 409,
+      body: {
+        error: "Inventory was modified by another user",
+        code: "OPTIMISTIC_LOCK_ERROR",
+        currentVersion: 4,
+        expectedVersion: 3,
+      },
+    };
+    // Both attempts lose: nothing has told this cart a newer version, so the
+    // second request is honestly the same one.
+    batchResponses = [conflict, conflict];
+
+    renderJournal();
+    await waitFor(() => expect(screen.getAllByText("Widget A").length).toBeGreaterThan(0));
+
+    // Whoever won the race left version 4 behind — and the read that would have
+    // told this page so is down.
+    liveVersion = 4;
+    productsOk = false;
+    await openReviewAndConfirm(user);
+
+    await waitFor(() => expect(submittedBatches()).toHaveLength(1));
+    expect(submittedBatches()[0].adjustments[0].expectedVersion).toBe(3);
+
+    // The operator is told the refresh did not happen…
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(
+        expect.stringContaining("Couldn't refresh inventory versions")
+      )
+    );
+    // …and the cart still holds exactly what it held: the STALE version (the
+    // placeholder rows are not fresh rows), and the operator's own count.
+    expect(useJournalStore.getState().adjustments[1].version).toBe(3);
+    expect(useJournalStore.getState().adjustments[1].quantityChange).toBe(5);
+
+    // NOT A BRICK (FDc-4): a later Confirm still reaches the server. It sends
+    // the same version, because that is the only version anything told this
+    // page — the request is honest, and it is the server that refuses it.
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: /confirm and submit adjustments/i }));
+    });
+    await waitFor(() => expect(submittedBatches()).toHaveLength(2));
+    expect(submittedBatches()[1].adjustments[0]).toEqual({
+      productId: 1,
+      locationId: 1,
+      delta: 5,
+      expectedVersion: 3,
+    });
   }, 15000);
 });
 

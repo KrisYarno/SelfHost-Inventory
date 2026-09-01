@@ -2,7 +2,9 @@
  * @jest-environment node
  */
 import { NextRequest } from 'next/server'
+import { Prisma } from '@prisma/client'
 import { POST } from '@/app/api/inventory/batch-adjust/route'
+import { TX_BUSY_MESSAGE } from '@/lib/api-utils'
 import { getServerSession } from 'next-auth'
 import prisma from '@/lib/prisma'
 
@@ -1018,6 +1020,71 @@ describe('/api/inventory/batch-adjust', () => {
         maxWait: 5000,
         timeout: 30000,
       })
+    })
+
+    // -----------------------------------------------------------------------
+    // FIX-DELTA FDc-1 (coverage gap FDc-3): the WRITE LOOP's catch.
+    //
+    // Every guard passes and the transaction is already writing when the lane's
+    // one OBSERVED deadlock site — the location-1 `Product.quantity` mirror,
+    // which every covered writer touches last — loses the race. That catch wraps
+    // an unrecognised failure into a plain `Error` naming the product, and a
+    // plain Error is a rung apiHandler answers with a generic 500: the operator
+    // is told the system broke when nothing broke and nothing was written.
+    // The transient class is rethrown untouched so it reaches the 503 BUSY rung.
+    // -----------------------------------------------------------------------
+    it('FDc-1: a deadlock INSIDE the write loop answers 503 BUSY, not a generic 500', async () => {
+      const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined)
+      const deadlock = new Prisma.PrismaClientKnownRequestError(
+        'Transaction failed due to a write conflict or a deadlock. Please retry your transaction',
+        { code: 'P2034', clientVersion: 'test' }
+      )
+      let capturedTx: any
+
+      ;(prisma.product.findMany as jest.Mock).mockResolvedValue([{ id: 1, name: 'Product 1' }])
+      ;(prisma.$transaction as jest.Mock).mockImplementation(async (callback) => {
+        capturedTx = {
+          product_locations: {
+            findFirst: jest.fn(),
+            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 60, version: 2 }),
+          },
+          // applyStockDelta's third statement, for location 1 only.
+          product: { update: jest.fn().mockRejectedValue(deadlock) },
+          inventory_logs: { create: jest.fn().mockResolvedValue({ id: 1, delta: 10 }) },
+        }
+        return callback(
+          withRecordingRaw(capturedTx, [{ productId: 1, locationId: 1, quantity: 50, version: 1 }])
+        )
+      })
+
+      const request = new NextRequest('http://localhost:3000/api/inventory/batch-adjust', {
+        method: 'POST',
+        body: JSON.stringify({
+          // The guards PASS: version 1 is what the prelock returned, and +10 is
+          // no deduction at all. Nothing here is a refusal.
+          adjustments: [{ productId: 1, locationId: 1, delta: 10, expectedVersion: 1 }],
+        }),
+      })
+
+      const response = await POST(request)
+      const data = await response.json()
+
+      expect(response.status).toBe(503)
+      expect(data.code).toBe('BUSY')
+      expect(data.error).toBe(TX_BUSY_MESSAGE)
+      // Not the wrapped sentence the generic rung would have produced, and not
+      // Prisma's own text either.
+      expect(data.error).not.toMatch(/Product 1|deadlock|Internal server error/i)
+      // The failure is genuinely in the WRITE: the loop had already reached the
+      // ledger insert and the upsert for this item.
+      expect(capturedTx.inventory_logs.create).toHaveBeenCalledTimes(1)
+      expect(capturedTx.product_locations.upsert).toHaveBeenCalledTimes(1)
+      expect(capturedTx.product.update).toHaveBeenCalledTimes(1)
+      // The operator gets "busy"; the REAL cause stays diagnosable in the log —
+      // which is the trade the pack accepted for this rung (FDc-8).
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('deadlock'))
+
+      errSpy.mockRestore()
     })
   })
 })

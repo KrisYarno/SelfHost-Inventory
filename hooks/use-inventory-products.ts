@@ -66,15 +66,19 @@ export function useInventoryProducts(options: UseInventoryProductsOptions) {
    * data that looks live. The journal's 409 version re-seed must not run on it.
    */
   const refetch = async (): Promise<boolean> => {
+    // `invalidateQueries` PREFIX-matches; `getQueryState` wants THIS hook's
+    // exact key — the prefix alone names no query and would answer undefined.
+    const exactKey = ["inventory-products", locationId, sortBy, sortOrder];
+    // FDc-2: `status === "success"` alone lies for a PAUSED query (offline:
+    // react-query substitutes a resolved promise and never fetches, leaving the
+    // PRIOR success in place) and for a disabled one. "Fresh rows arrived"
+    // means the data timestamp ADVANCED past this call's start.
+    const before = queryClient.getQueryState(exactKey)?.dataUpdatedAt ?? 0;
     await queryClient.invalidateQueries({
       queryKey: ["inventory-products", locationId],
     });
-    // `invalidateQueries` PREFIX-matches; `getQueryState` wants THIS hook's
-    // exact key — the prefix alone names no query and would answer undefined.
-    return (
-      queryClient.getQueryState(["inventory-products", locationId, sortBy, sortOrder])
-        ?.status === "success"
-    );
+    const state = queryClient.getQueryState(exactKey);
+    return state?.status === "success" && (state?.dataUpdatedAt ?? 0) > before;
   };
 
   return { ...query, refetch };

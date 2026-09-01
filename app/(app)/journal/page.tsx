@@ -288,16 +288,27 @@ export default function JournalPage() {
           // silent second 409.
           setPendingVersionReseed(false);
           setVersionRecoveryInFlight(true);
-          void refetchProducts().then((fresh) => {
-            if (fresh) {
-              setPendingVersionReseed(true);
-            } else {
+          void refetchProducts()
+            .then((fresh) => {
+              if (fresh) {
+                setPendingVersionReseed(true);
+              } else {
+                setVersionRecoveryInFlight(false);
+                toast.error(
+                  "Couldn't refresh inventory versions — check your connection and reopen the review before retrying."
+                );
+              }
+            })
+            // FDc-4: react-query's invalidate cannot reject TODAY, but that is
+            // its implementation detail, not ours — an unhandled rejection here
+            // would leave versionRecoveryInFlight TRUE and brick every submit
+            // for the life of the mount.
+            .catch(() => {
               setVersionRecoveryInFlight(false);
               toast.error(
                 "Couldn't refresh inventory versions — check your connection and reopen the review before retrying."
               );
-            }
-          });
+            });
           return;
         }
 
@@ -593,7 +604,10 @@ export default function JournalPage() {
         adjustments={adjustments}
         products={products}
         onConfirm={handleSubmitAdjustments}
-        isSubmitting={isSubmitting}
+        // FDc-5: the 409 recovery window counts as "submitting" — Confirm goes
+        // dead for the second the versions refresh instead of inviting a click
+        // the handler guard would only refuse with a second toast.
+        isSubmitting={isSubmitting || versionRecoveryInFlight}
       />
     </div>
   );

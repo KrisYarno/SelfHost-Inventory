@@ -16,7 +16,12 @@ import prisma from '@/lib/prisma';
  * defect that will then read as "busy"; errorLogger keeps it diagnosable, and
  * that trade is ACCEPTED in the pack rather than parsing message text);
  * P2024 = the connection pool timed out, which the 30 s budgets make reachable
- * when writers queue. One sentence, exported so the 207-emitting batch-transfer
+ * when writers queue — and ALSO what sustained pool exhaustion (a connection
+ * leak, an under-sized pool) looks like: under THAT failure every operator sees
+ * "busy" indefinitely, and the errorLogger line is the discriminator between
+ * contention and outage (FDc-8, same trade as P2028's). NOTE: outside dev the
+ * logger prints name + MESSAGE only, never the Prisma code — grep the message
+ * texts ("connection pool", "write conflict or a deadlock"), not "P2024". One sentence, exported so the 207-emitting batch-transfer
  * route can say the same thing per transfer instead of leaking Prisma's own text.
  */
 export const TRANSIENT_TX_ERROR_CODES: ReadonlySet<string> = new Set(['P2028', 'P2034', 'P2024']);

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Prisma, type inventory_logs } from "@prisma/client";
-import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF, TRANSIENT_TX_ERROR_CODES } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { recordAttributionAttempt } from "@/lib/attribution/attempts";
@@ -162,8 +162,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
         auditUpdates.push({
           productId: adjustment.productId,
           // The fallback is DEAD (fix-delta FDb-11): the pre-tx check above
-          // guarantees every id is in the map; kept only for type narrowing.
-          productName: productMap.get(adjustment.productId) || "Unknown Product",
+          // guarantees every id is in the map. `??` not `||` (FDc-7): an
+          // empty-string product name is a real name and must not be rewritten
+          // as "Unknown Product" in an audit record.
+          productName: productMap.get(adjustment.productId) ?? "Unknown Product",
           delta: adjustment.delta,
         });
       } catch (error) {
@@ -172,6 +174,16 @@ export const POST = apiHandler(async (request: NextRequest) => {
         // Same reason, for the typed refusals: apiHandler maps an AppError to
         // its own code + status, and the message already names the product.
         if (error instanceof AppError) throw error;
+        // And the TRANSIENT class (fix-delta FDc-1): a deadlock/budget loss
+        // inside applyStockDelta — the loc-1 mirror is the lane's one OBSERVED
+        // deadlock site — must reach apiHandler's 503 BUSY, not be destroyed
+        // into a plain Error that reads as a generic 500.
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          TRANSIENT_TX_ERROR_CODES.has(error.code)
+        ) {
+          throw error;
+        }
         throw new Error(
           `Product ${adjustment.productId}: ${error instanceof Error ? error.message : "Unknown error"}`
         );

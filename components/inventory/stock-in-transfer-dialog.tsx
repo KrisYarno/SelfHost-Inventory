@@ -32,6 +32,14 @@ export interface StockInProduct {
 interface StockInTransferDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * PROPS CONTRACT (fix-delta FDc-6): `product` must be REFERENTIALLY STABLE
+   * while the dialog is open, and `onSuccess` must not change it — the mount
+   * effect clears rows/header/`needsFreshVersions` on a product-identity change
+   * (FDb-7), so an identity churn mid-207 would blank the operator's safe retry
+   * state and un-disable submit on unverifiable versions. The one caller today
+   * (stocker/page.tsx) holds it in state and satisfies this.
+   */
   product: StockInProduct | null;
   destinationLocationId: number;
   destinationLocationName: string;

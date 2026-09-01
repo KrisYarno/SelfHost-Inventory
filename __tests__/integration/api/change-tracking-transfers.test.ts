@@ -15,7 +15,7 @@
  */
 
 import { mockDeep, type DeepMockProxy } from "jest-mock-extended";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 jest.mock("@/lib/api-utils", () => ({
   ...jest.requireActual("@/lib/api-utils"),
@@ -34,7 +34,7 @@ jest.mock("@/lib/prisma", () => {
 
 import { NextRequest } from "next/server";
 import prisma from "@/lib/prisma";
-import { requireApproved } from "@/lib/api-utils";
+import { requireApproved, TX_BUSY_MESSAGE } from "@/lib/api-utils";
 import { POST as TRANSFER } from "@/app/api/inventory/transfer/route";
 import { POST as TRANSFER_BATCH } from "@/app/api/inventory/transfer/batch/route";
 
@@ -135,6 +135,30 @@ function makeTx() {
 
 function driveTxWith(tx: ReturnType<typeof makeTx>) {
   (db.$transaction as unknown as jest.Mock).mockImplementation(async (cb: any) => cb(tx));
+}
+
+/** A synthesized deadlock — the class + code the wire maps to BUSY. */
+function busy(): Prisma.PrismaClientKnownRequestError {
+  return new Prisma.PrismaClientKnownRequestError(
+    "\nInvalid `prisma.$queryRaw()` invocation:\n\nTransaction failed due to a write conflict or a deadlock. Please retry your transaction",
+    { code: "P2034", clientVersion: "test" }
+  );
+}
+
+/**
+ * The Nth prelock SELECT of this request (1-based) loses a deadlock; every other
+ * statement answers exactly as `prelocked(STOCKED)` does. The returning locking
+ * read is where a deadlock victim actually finds out, and ONE prelock pair runs
+ * per transfer — so `n = 2` is the second transfer of a batch, and only it.
+ */
+function busyOnPrelock(n: number): void {
+  let seen = 0;
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) => {
+    if (!isPrelockSelect(sqlTextOf(args[0]))) return [];
+    seen += 1;
+    if (seen === n) throw busy();
+    return STOCKED;
+  });
 }
 
 beforeEach(() => {
@@ -238,5 +262,63 @@ describe("transfer/batch — per-transfer results expose transferId; one shared 
     expect(batchId).toMatch(UUID_RE);
     for (const leg of legs) expect(leg.batchId).toBe(batchId);
     for (const e of events) expect(e.batchId).toBe(batchId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE TRANSFER THAT LOSES A DEADLOCK (fix-delta FDb-1, coverage gap FDc-3).
+//
+// The covered writers queue on each other's prelocked rows, so one transfer of a
+// batch can lose its transaction to a write conflict while its siblings commit.
+// The route's per-transfer catch is BELOW apiHandler, so nothing above it can
+// type that failure: without the transient branch the 207's failed result would
+// carry Prisma's own multi-line invocation dump — "Invalid `prisma.$queryRaw()`
+// invocation … write conflict or a deadlock" — verbatim into a stocker's toast.
+// ---------------------------------------------------------------------------
+describe("transfer/batch — a transfer that loses a deadlock (FDb-1)", () => {
+  it("gives the failed result the shared BUSY sentence, never Prisma's own text", async () => {
+    const tx = makeTx();
+    driveTxWith(tx);
+    // The SECOND transfer's returning locking read is the deadlock victim.
+    busyOnPrelock(2);
+    db.product.findFirst.mockResolvedValue({ id: 5, name: "Widget" } as any);
+    db.location.findUnique.mockResolvedValue({ id: 9, name: "Dest" } as any);
+    db.location.findMany.mockResolvedValue([
+      { id: 2, name: "Src A" },
+      { id: 3, name: "Src B" },
+    ] as any);
+
+    const res = await TRANSFER_BATCH(
+      post("http://x/api/inventory/transfer/batch", {
+        productId: 5,
+        toLocationId: 9,
+        transfers: [
+          { fromLocationId: 2, quantity: 4 },
+          { fromLocationId: 3, quantity: 6 },
+        ],
+      })
+    );
+
+    // One moved, one lost the race: the partial-success envelope.
+    expect(res.status).toBe(207);
+    const body = await res.json();
+    expect(body.success).toBe(false);
+    expect(body.totalTransferred).toBe(4);
+    expect(body.results).toHaveLength(2);
+
+    expect(body.results[0]).toMatchObject({ fromLocationId: 2, success: true });
+    expect(body.results[1]).toMatchObject({ fromLocationId: 3, success: false });
+
+    // THE PIN: the one sentence apiHandler would have answered with, shared from
+    // @/lib/api-utils rather than re-spelled here — and no Prisma text anywhere.
+    expect(body.results[1].error).toBe(TX_BUSY_MESSAGE);
+    expect(body.results[1].error).not.toMatch(/P2034|deadlock|prisma/i);
+
+    // The transfer that DID commit is untouched by its sibling's loss: both legs
+    // and its event are on the wire with the request's batchId.
+    const legs = tx.inventory_logs.create.mock.calls.map((c) => (c[0] as any).data);
+    expect(legs).toHaveLength(2);
+    for (const leg of legs) expect(leg.batchId).toBe(body.batchId);
+    expect(tx.auditLog.create).toHaveBeenCalledTimes(1);
   });
 });

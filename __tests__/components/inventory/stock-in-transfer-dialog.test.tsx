@@ -373,6 +373,112 @@ describe("Stock-In transfer dialog — a 207 whose refetch fails", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// THE PRODUCT SWAP (fix-delta FDb-7, coverage gap FDc-3).
+//
+// The caller can hand this dialog a DIFFERENT product without closing it. The
+// read effect re-runs, but a read is not instant — and until it answers, every
+// piece of state in here still belongs to the product before it: the source rows
+// (with whatever the operator typed into them, submittable), the destination
+// quantity in the header, and `needsFreshVersions`. On screen that is product
+// B's name over product A's numbers, with a live button offering to move A's
+// stock. The effect therefore CLEARS before it reads.
+// ---------------------------------------------------------------------------
+const PRODUCT_B = {
+  productId: 6,
+  productName: "Widget B",
+  quantity: 3,
+  minQuantity: 10,
+  shortage: 7,
+};
+
+/** What product B's read answers with: a different destination, a different source. */
+const LOCATIONS_PRODUCT_B = [
+  { locationId: 1, locationName: "Main", quantity: 9, version: 5 },
+  { locationId: 4, locationName: "Annex", quantity: 12, version: 1 },
+];
+
+/** The dialog rendered so the `product` prop can be swapped without a remount. */
+function renderSwappable() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const onOpenChange = jest.fn();
+  const view = (product: typeof PRODUCT) => (
+    <QueryClientProvider client={queryClient}>
+      <StockInTransferDialog
+        open
+        onOpenChange={onOpenChange}
+        product={product}
+        destinationLocationId={1}
+        destinationLocationName="Main"
+      />
+    </QueryClientProvider>
+  );
+  const { rerender } = render(view(PRODUCT));
+  return { swapTo: (product: typeof PRODUCT) => rerender(view(product)) };
+}
+
+describe("Stock-In transfer dialog — a product SWAP while it is open", () => {
+  it("clears A's rows and header the moment B arrives, before B's read answers", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    locationsPayloads = [LOCATIONS_BEFORE, LOCATIONS_PRODUCT_B];
+
+    // B's read is HELD, so the window between the swap and its answer — which is
+    // the whole of what this pins — is a state the test can stand still in.
+    let releaseB: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseB = resolve;
+    });
+    let holding = false;
+    const inner = fetchMock;
+    global.fetch = jest.fn(async (...args: unknown[]) => {
+      if (holding && String(args[0]).includes("/locations")) await held;
+      return inner(...args);
+    }) as unknown as typeof fetch;
+
+    const { swapTo } = renderSwappable();
+    await waitFor(() => expect(quantityInputs()).toHaveLength(2));
+    expect(screen.getByText("Current: 4")).toBeInTheDocument();
+
+    // The operator has already asked for 5 units out of Warehouse.
+    await askFor(user, [5]);
+    expect(screen.getByRole("button", { name: /Stock In 5 units/ })).toBeEnabled();
+
+    holding = true;
+    await act(async () => {
+      swapTo(PRODUCT_B);
+    });
+
+    // The dialog is product B's now, and it claims NOTHING it has not read: no
+    // source rows, and no ask carried over from A.
+    expect(screen.getByText("Widget B")).toBeInTheDocument();
+    expect(screen.queryAllByPlaceholderText("0")).toHaveLength(0);
+    expect(screen.queryByText("Total to transfer:")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stock In" })).toBeDisabled();
+    // The header falls back to B's OPENING PROP — not A's fetched destination
+    // quantity (4), which is a number about a different product entirely.
+    expect(screen.getByText("Current: 3")).toBeInTheDocument();
+    expect(screen.getByText("Shortage: 7")).toBeInTheDocument();
+    expect(screen.queryByText("Current: 4")).not.toBeInTheDocument();
+
+    // …and once B's read lands, the header and the rows are B's.
+    await act(async () => {
+      releaseB();
+      await held;
+    });
+    await waitFor(() => expect(screen.getByText("Current: 9")).toBeInTheDocument());
+    expect(screen.getByText("Shortage: 1")).toBeInTheDocument();
+    await waitFor(() => expect(quantityInputs()).toHaveLength(1));
+    expect(screen.getByText("Annex")).toBeInTheDocument();
+
+    // The second read asked about product 6, not product 5.
+    const locationCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes("/locations"));
+    expect(locationCalls).toHaveLength(2);
+    expect(String(locationCalls[1][0])).toContain("/api/inventory/product/6/locations");
+  });
+});
+
 describe("Stock-In transfer dialog — the versions it submits", () => {
   it("sends the version it READ per source location (what the prelock now enforces)", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
