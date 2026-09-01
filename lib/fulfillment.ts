@@ -1,9 +1,14 @@
 import prisma from '@/lib/prisma';
 import { Prisma, inventory_logs_logType } from '@prisma/client';
 import { createInventoryLog } from '@/lib/inventory';
-import { isTransientTxError, TX_BUSY_MESSAGE } from '@/lib/inventory/tx-errors';
-import { prelockProductLocations } from '@/lib/inventory/prelock';
-import { ProductNotFoundError } from '@/lib/error-handling';
+import {
+  MAX_PRELOCK_KEYS,
+  prelockKey,
+  prelockProductLocations,
+  type PrelockKeyInput,
+  type PrelockedRow,
+} from '@/lib/inventory/prelock';
+import { AppError, ProductNotFoundError } from '@/lib/error-handling';
 import {
   BUNDLE_SENTINEL_PRODUCT_ID,
   BUNDLE_SENTINEL_INVENTORY_LOG_ID,
@@ -44,6 +49,12 @@ export interface FulfillmentResult {
       | 'insufficient_stock'
       | 'user_skipped'
       | 'already_fulfilled'
+      /**
+       * NEVER produced from P2-B1.5 on: every key a fulfil writes is X-held
+       * from the prelock to commit, so there is no race left to report. The
+       * member stays because removing it would be a type change for a consumer
+       * that switches on it.
+       */
       | 'concurrent_modification'
       | 'malformed_snapshot';
     details?: string;
@@ -343,6 +354,168 @@ export async function validateOrderFulfillment(
 }
 
 /**
+ * ONE item that SURVIVED pass 1 — decided, and owed exactly the stock it names
+ * (pack CB1.5a-i.2; the unfulfill idiom, `unfulfill/route.ts`).
+ *
+ * Discriminated because the two branches spend different things: a single
+ * mapping deducts its own product, a bundle deducts one row per COMPONENT (and
+ * answers with the sentinel entry the public shape expects). Every quantity is
+ * computed in pass 1, so the prelock between the passes can be built from the
+ * survivors alone.
+ *
+ * EXPORTED for `planPass2`'s pins (the planner is module-internal otherwise).
+ */
+export type Survivor =
+  | {
+      kind: 'single';
+      itemId: string;
+      locationId: number;
+      /** min(asked, remaining) — the over-fulfil clamp lives in pass 1. */
+      productId: number;
+      quantity: number;
+    }
+  | {
+      kind: 'bundle';
+      itemId: string;
+      locationId: number;
+      orderItemName: string;
+      quantity: number;
+      /** `deductQty` = component.quantity × quantity; component order kept. */
+      components: Array<{ productId: number; deductQty: number }>;
+    };
+
+/** A survivor whose guard PASSED in pass 2a — carrying the name its result entry needs. */
+export type Winner = Survivor & { productName: string };
+
+/**
+ * I0 — ONE LINE, ONCE (pack CB1.5a-i.1). Pass 1 computes `remaining` from the
+ * ONE order this transaction loaded and pass 2b's `fulfilledQty` increment is
+ * unconditional, so a request naming the same line twice would over-fulfil it.
+ * Refused before the transaction opens: zero statements. Neither dialog can send
+ * one (both map over unique order lines) — this is a library contract, not a UI
+ * case, and the schema does not require uniqueness.
+ */
+function assertNoDuplicateItemIds(items: FulfillmentItem[]): void {
+  const seen = new Set<string>();
+  items.forEach((item) => {
+    if (seen.has(item.itemId)) {
+      throw new AppError(
+        'the same order line appears more than once in the request',
+        'DUPLICATE_ITEM',
+        400
+      );
+    }
+    seen.add(item.itemId);
+  });
+}
+
+/**
+ * A key the prelock materialized is never absent from what it returns, so this
+ * is a belt, never a branch a test can reach (the `lib/inventory.ts` spelling of
+ * the same rule — module-private there, so it is spelled once more here rather
+ * than widening that module's surface).
+ */
+const NEVER_STOCKED = { quantity: 0, version: 0 };
+
+/**
+ * PASS 2a — THE GUARDS, over a SIMULATION of the within-tx tally (pack
+ * CB1.5a-i.2; the two-loop idiom of `createInventoryTransaction` and
+ * batch-adjust, with ONE stated difference: those THROW on a refusal, fulfil
+ * SKIPS the refused survivor and lets the winners proceed).
+ *
+ * Pure, and EXPORTED so the shape can be pinned directly: guards issue no
+ * statements, so a statement-order pin cannot tell this two-loop from an
+ * interleaved decide-then-write. It has exactly ONE call site (pinned).
+ *
+ * The tally is seeded from the prelock's returned rows — the values every guard
+ * compares against (spec REV-13 §2.7(3), for BOTH fulfil paths now) — and is
+ * advanced per PASSED survivor, so a later survivor naming the same key is
+ * guarded against what an earlier one WILL write. A refusal quotes that locked,
+ * current number (QB-9) and spends nothing.
+ */
+export function planPass2(
+  survivors: Survivor[],
+  locked: ReadonlyMap<string, PrelockedRow>,
+  namesById: ReadonlyMap<number, string>
+): { winners: Winner[]; skipped: FulfillmentResult['skipped'] } {
+  const tally = new Map<string, { quantity: number; version: number }>();
+  locked.forEach((row, key) => tally.set(key, { quantity: row.quantity, version: row.version }));
+
+  const winners: Winner[] = [];
+  const skipped: FulfillmentResult['skipped'] = [];
+
+  survivors.forEach((survivor) => {
+    // The units this survivor REQUIRES per key: one entry for a single, and for
+    // a bundle one per component — SUMMED, because a bundle naming one product
+    // in two components spends that key twice.
+    const keys: string[] = [];
+    const units = new Map<string, number>();
+    const productIdByKey = new Map<string, number>();
+    const requireUnits = (productId: number, quantity: number) => {
+      const key = prelockKey(productId, survivor.locationId);
+      if (!units.has(key)) {
+        keys.push(key);
+        units.set(key, 0);
+        productIdByKey.set(key, productId);
+      }
+      units.set(key, units.get(key)! + quantity);
+    };
+    if (survivor.kind === 'bundle') {
+      survivor.components.forEach((component) =>
+        requireUnits(component.productId, component.deductQty)
+      );
+    } else {
+      requireUnits(survivor.productId, survivor.quantity);
+    }
+
+    let refusal: string | null = null;
+    for (const key of keys) {
+      const current = tally.get(key) ?? NEVER_STOCKED;
+      const needed = units.get(key)!;
+      if (current.quantity < needed) {
+        // Today's texts; the NUMBER is the tally's, which is the locked truth.
+        refusal =
+          survivor.kind === 'bundle'
+            ? `Insufficient stock for bundle component (productId: ${productIdByKey.get(key)}). Available: ${current.quantity}, Requested: ${needed}`
+            : `Insufficient stock for ${namesById.get(survivor.productId) ?? ''}. Available: ${current.quantity}, Requested: ${needed}`;
+        break; // the FIRST short key wins
+      }
+    }
+
+    if (refusal !== null) {
+      // NO stock / ledger / fulfilledQty statement is spent on a refusal.
+      skipped.push({
+        itemId: survivor.itemId,
+        reason: 'insufficient_stock',
+        details: refusal,
+      });
+      return;
+    }
+
+    keys.forEach((key) => {
+      const current = tally.get(key) ?? NEVER_STOCKED;
+      tally.set(key, {
+        quantity: current.quantity - units.get(key)!,
+        version: current.version + 1,
+      });
+    });
+
+    winners.push({
+      ...survivor,
+      // A bundle names its ORDER LINE; a single carries the name the batched
+      // `products` read returned (the `??` is the same belt as above — every
+      // survivor whose id that read did not answer was already dropped).
+      productName:
+        survivor.kind === 'bundle'
+          ? survivor.orderItemName
+          : namesById.get(survivor.productId) ?? '',
+    });
+  });
+
+  return { winners, skipped };
+}
+
+/**
  * Fulfills an external order by deducting inventory and updating order status
  */
 export async function fulfillExternalOrder(
@@ -393,6 +566,8 @@ export async function fulfillExternalOrder(
   // which is O(M*C^2) overall (M items × C components × O(C) includes scan).
   const affectedComponentIdSet = new Set<number>();
 
+  assertNoDuplicateItemIds(items);
+
   return await prisma.$transaction(
     async (tx) => {
       // The order lock is statement 1 — before the order read below, which is
@@ -434,379 +609,127 @@ export async function fulfillExternalOrder(
       result.integrationId = order.integrationId;
       result.integrationPlatform = order.integration.platform;
 
-      // THE SIMPLE-PATH PRELOCK (spec §2.7(3), pack CB1a-ii.1). Unlike the stock
-      // primitives, this transaction already has a read view — the order read
-      // above opened it — so the prelock's job here is the OTHER half of the
-      // discipline: take every `product_locations` row this request will X-lock,
-      // once, in the canonical order, before the first item touches one. Two
-      // requests that name the same two rows in opposite item order can then no
-      // longer take them in opposite orders.
+      // ---------------------------------------------------------------------
+      // PASS 1 — DECIDE (pack CB1.5a-i.2). Every refusal that does not depend on
+      // stock happens here, from the order this transaction loaded behind the
+      // order lock, and NOTHING is written to `product_locations`. The one write
+      // pass 1 makes is the bundle snapshot freeze (FIX B) — a write to
+      // `external_order_items`, which does not disturb the lock order (unfulfill
+      // writes the same table before ITS prelock).
       //
-      // The key set is exactly what the loop's own skip ladder will send down
-      // the simple path: the order item must EXIST, have remaining quantity, and
-      // not be the bundle branch (which wins over a manual override), and it
-      // must resolve a product — the override if one was sent, else the mapped
-      // internal product. An unmapped item without an override contributes
-      // nothing because it deducts nothing.
-      //
-      // The BUNDLE path is deliberately excluded (the named deferred residual):
-      // its per-item savepoints roll components back individually, which is a
-      // different lock shape than one prelock over the whole request.
-      //
-      // The returned rows are NOT read here. This path's guard is the atomic
-      // conditional UPDATE below — the write IS the guard (spec REV-11) — and
-      // its refusal diagnostic re-reads the row under the lock, because the
-      // prelocked snapshot goes stale as soon as an earlier item in this same
-      // request deducts the same key.
-      const prelockCandidates: Array<{ productId: number; locationId: number }> = [];
-      items.forEach((fulfillmentItem) => {
+      // What comes out is the SURVIVORS, and with them the complete key set the
+      // prelock has to cover — bundle COMPONENTS included, which is what retires
+      // the B1 bundle-path exception (spec REV-13 §2.7(3)).
+      // ---------------------------------------------------------------------
+      const survivors: Survivor[] = [];
+
+      for (const fulfillmentItem of items) {
         const orderItem = order.items.find(
           (item) => item.id === fulfillmentItem.itemId
         );
-        if (!orderItem) return;
-        if (orderItem.quantity - orderItem.fulfilledQty <= 0) return;
-        if (orderItem.isMapped && orderItem.productLink?.isBundle) return;
+
+        if (!orderItem) {
+          result.failed.push({
+            itemId: fulfillmentItem.itemId,
+            error: 'Item not found in order',
+          });
+          continue;
+        }
+
+        // Check if already fully fulfilled
+        const remainingQty = orderItem.quantity - orderItem.fulfilledQty;
+        if (remainingQty <= 0) {
+          result.skipped.push({
+            itemId: fulfillmentItem.itemId,
+            reason: 'already_fulfilled',
+            details: 'Item is already fully fulfilled',
+          });
+          continue;
+        }
+
+        // Ensure we don't over-fulfill
+        const quantityToFulfill = Math.min(
+          fulfillmentItem.quantity,
+          remainingQty
+        );
+
+        // Bundle path: isBundle=true → expand into per-component deductions (D7).
+        // The bundle branch WINS over a manual override, as it always has.
+        if (orderItem.isMapped && orderItem.productLink?.isBundle) {
+          // FIX G: shared helper handles snapshot Zod parse + normalize + fallback.
+          const resolved = resolveBundleComponents(
+            orderItem.bundleComponentSnapshot,
+            orderItem.productLink.bundleComponents,
+          );
+
+          if (!resolved.ok) {
+            if (resolved.reason === 'malformed_snapshot') {
+              result.skipped.push({
+                itemId: fulfillmentItem.itemId,
+                reason: 'malformed_snapshot',
+                details: `Bundle item ${orderItem.id} has malformed bundleComponentSnapshot: ${resolved.detail}`,
+              });
+            } else {
+              // 'empty' — no components in snapshot OR live mapping
+              result.failed.push({
+                itemId: fulfillmentItem.itemId,
+                error: `Bundle item ${orderItem.id} has no components in snapshot or live mapping`,
+              });
+            }
+            continue;
+          }
+
+          const components = resolved.components;
+
+          // FIX B (P0): D7 invariant — every fulfilled bundle item must have a
+          // frozen snapshot so unfulfill reads a stable composition. For legacy
+          // items where the snapshot is null and we're falling back to the live
+          // join rows, freeze the current composition NOW. Without this, a
+          // bundle's components could be PATCHed between fulfill and unfulfill —
+          // unfulfill would restore stock for components that were never
+          // deducted.
+          //
+          // It PERSISTS across a pass-2a stock refusal (designed — W2S-1 kept it
+          // on a SKIP too) and is rolled back by an abort, because the whole
+          // request is one transaction now.
+          if (resolved.source === 'live') {
+            await tx.externalOrderItem.update({
+              where: { id: orderItem.id },
+              data: { bundleComponentSnapshot: components as unknown as Prisma.InputJsonValue },
+            });
+          }
+
+          survivors.push({
+            kind: 'bundle',
+            itemId: fulfillmentItem.itemId,
+            locationId,
+            orderItemName: orderItem.name,
+            quantity: quantityToFulfill,
+            components: components.map((component) => ({
+              productId: component.internalProductId,
+              deductQty: component.quantity * quantityToFulfill,
+            })),
+          });
+
+          continue; // Skip the single-mapping path below
+        }
+
+        // Determine which product to use: the manual override if one was sent,
+        // else the mapped internal product.
         const productId = fulfillmentItem.productId
           ? fulfillmentItem.productId
           : orderItem.isMapped && orderItem.productLink?.internalProduct
             ? orderItem.productLink.internalProduct.id
             : undefined;
-        if (productId === undefined) return;
-        prelockCandidates.push({ productId, locationId });
-      });
 
-      // A candidate id must name a real product before it may be prelocked
-      // (pack REV-22 F2). A manual override is a raw number from the request:
-      // the prelock would happily materialize a `product_locations` row for an
-      // id no product answers to, and the INSERT's foreign key would then kill
-      // the WHOLE transaction — taking every sibling item's committed work with
-      // it, over one bad id. One read decides it; a candidate that is not
-      // returned contributes NO key and its item still fails ITEM-LOCALLY on the
-      // loop's own `findUnique` below, exactly as it does today (a ProductNot-
-      // FoundError inside the item's try -> `failed`, its savepoint rolled back,
-      // its siblings committed).
-      const candidateProductIds: number[] = [];
-      const seenCandidate = new Set<number>();
-      prelockCandidates.forEach((candidate) => {
-        if (seenCandidate.has(candidate.productId)) return;
-        seenCandidate.add(candidate.productId);
-        candidateProductIds.push(candidate.productId);
-      });
-      // No candidates, no statement — the same rule the prelock itself keeps for
-      // an empty key set, so the bundle-only and all-unmapped paths still spend
-      // nothing here.
-      const existingProducts =
-        candidateProductIds.length > 0
-          ? await tx.product.findMany({
-              where: { id: { in: candidateProductIds } },
-              select: { id: true },
-            })
-          : [];
-      const existingProductIds = new Set(existingProducts.map((p) => p.id));
-      const prelockKeys = prelockCandidates.filter((candidate) =>
-        existingProductIds.has(candidate.productId)
-      );
-      // `prelockProductLocations` owns the dedupe and the canonical sort (one
-      // owner per invariant), so the keys ride in as the request named them.
-      await prelockProductLocations(tx, prelockKeys);
-
-      // FDf-3: when a transient KILLS the transaction, the item catch stores it
-      // here so the savepoint-settle failure can rethrow the REAL error instead
-      // of its follow-on. Null while nothing transient has fired.
-      let txTransient: unknown = null;
-
-      // Process each fulfillment item
-      for (const fulfillmentItem of items) {
-        // W2S-1 (codex W2 dual seam check, HIGH): EVERY write this item makes —
-        // stock decrement, loc-1 mirror, the stamped SALE row, the fulfilledQty
-        // update — lives inside this item's SAVEPOINT. The per-item catch below
-        // swallows the error and the OUTER transaction goes on to commit; before
-        // this savepoint a LATE failure (the fulfilledQty update, after the
-        // deduction and the ledger row) therefore committed a SALE row naming an
-        // order whose item was reported `failed`. A rollback to this savepoint
-        // undoes the whole item and nothing else: the established per-item
-        // partial semantics are unchanged, other items in the same request still
-        // succeed. (This is NOT T8R-1's whole-transaction abort — a different
-        // rule for a different surface.)
-        //
-        // Taken LAZILY, at the item's first write, so the paths that decline an
-        // item without touching anything (unmapped, already fulfilled, pre-flight
-        // short, malformed snapshot) still issue no statement at all. The bundle
-        // path keeps its own inner savepoint: that one exists for the concurrent-
-        // race SKIP, which must roll back the item's components while the item's
-        // own outer savepoint is released normally.
-        const itemSavepoint = `item_${fulfillmentItem.itemId.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        let itemSavepointOpen = false;
-        const openItemSavepoint = async () => {
-          if (itemSavepointOpen) return;
-          await tx.$executeRawUnsafe(`SAVEPOINT ${itemSavepoint}`);
-          itemSavepointOpen = true;
-        };
-        // What the result looked like before this item touched it. A rolled-back
-        // item must not leave entries behind either: the reported outcome has to
-        // describe what actually committed.
-        const resultMark = {
-          fulfilled: result.fulfilled.length,
-          skipped: result.skipped.length,
-          inventoryLogIds: result.inventoryLogIds.length,
-          componentIds: Array.from(affectedComponentIdSet),
-        };
-        let itemFailed = false;
-
-        try {
-          // Find the order item
-          const orderItem = order.items.find(
-            (item) => item.id === fulfillmentItem.itemId
-          );
-
-          if (!orderItem) {
-            result.failed.push({
-              itemId: fulfillmentItem.itemId,
-              error: 'Item not found in order',
-            });
-            continue;
-          }
-
-          // Check if already fully fulfilled
-          const remainingQty = orderItem.quantity - orderItem.fulfilledQty;
-          if (remainingQty <= 0) {
-            result.skipped.push({
-              itemId: fulfillmentItem.itemId,
-              reason: 'already_fulfilled',
-              details: 'Item is already fully fulfilled',
-            });
-            continue;
-          }
-
-          // Ensure we don't over-fulfill
-          const quantityToFulfill = Math.min(
-            fulfillmentItem.quantity,
-            remainingQty
-          );
-
-          // Bundle path: isBundle=true → expand into per-component deductions (D7)
-          if (orderItem.isMapped && orderItem.productLink?.isBundle) {
-            // FIX G: shared helper handles snapshot Zod parse + normalize + fallback.
-            const resolved = resolveBundleComponents(
-              orderItem.bundleComponentSnapshot,
-              orderItem.productLink.bundleComponents,
-            );
-
-            if (!resolved.ok) {
-              if (resolved.reason === 'malformed_snapshot') {
-                result.skipped.push({
-                  itemId: fulfillmentItem.itemId,
-                  reason: 'malformed_snapshot',
-                  details: `Bundle item ${orderItem.id} has malformed bundleComponentSnapshot: ${resolved.detail}`,
-                });
-              } else {
-                // 'empty' — no components in snapshot OR live mapping
-                result.failed.push({
-                  itemId: fulfillmentItem.itemId,
-                  error: `Bundle item ${orderItem.id} has no components in snapshot or live mapping`,
-                });
-              }
-              continue;
-            }
-
-            // FIX F: dead `!components` guard removed — resolved.components is
-            // a non-null array by construction when resolved.ok is true, and
-            // the empty case is handled by the !resolved.ok branch above.
-            const components = resolved.components;
-            const snapshotSource = resolved.source;
-
-            // FIX B (P0): D7 invariant — every fulfilled bundle item must have a
-            // frozen snapshot so unfulfill reads a stable composition. For legacy
-            // items where the snapshot is null and we're falling back to the live
-            // join rows, freeze the current composition NOW (before pre-flight, so
-            // it persists even on retry). Without this, a bundle's components could
-            // be PATCHed between fulfill and unfulfill — unfulfill would restore
-            // stock for components that were never deducted.
-            if (snapshotSource === 'live') {
-              // W2S-1: the freeze is a WRITE, so the item's savepoint opens here.
-              // It still persists across every SKIP path below (a released
-              // savepoint keeps its work) — only an item FAILURE undoes it, and a
-              // failed item must leave nothing behind.
-              await openItemSavepoint();
-              await tx.externalOrderItem.update({
-                where: { id: orderItem.id },
-                data: { bundleComponentSnapshot: components as unknown as Prisma.InputJsonValue },
-              });
-            }
-
-            // Pre-flight stock check: verify ALL components have sufficient stock
-            // before making any deductions. This prevents partial deductions where
-            // the first N-1 components succeed and component N fails, leaving
-            // inventory permanently decremented with no way to recover without a
-            // manual correction.
-            //
-            // FIX D (P1 #4): Batch the per-component stock reads into a single
-            // findMany. Previously this was N round-trips (findUnique per
-            // component). Now: 1 query for the whole bundle.
-            const componentIds = components.map((c) => c.internalProductId);
-            const stockRows = await tx.product_locations.findMany({
-              where: { productId: { in: componentIds }, locationId },
-              select: { productId: true, quantity: true },
-            });
-            const stockByProductId = new Map<number, number>(
-              stockRows.map((r: { productId: number; quantity: number }) =>
-                [r.productId, r.quantity] as [number, number]
-              )
-            );
-
-            let preflightFailed = false;
-            for (const component of components) {
-              const deductQty = component.quantity * quantityToFulfill;
-              const available = stockByProductId.get(component.internalProductId) ?? 0;
-              if (available < deductQty) {
-                result.skipped.push({
-                  itemId: fulfillmentItem.itemId,
-                  reason: 'insufficient_stock',
-                  details: `Insufficient stock for bundle component (productId: ${component.internalProductId}). Available: ${available}, Requested: ${deductQty}`,
-                });
-                preflightFailed = true;
-                break;
-              }
-            }
-
-            if (preflightFailed) continue;
-
-            // FIX A (P0): Per-bundle SAVEPOINT for concurrent-deduct safety.
-            // Pre-flight read passes lock-free, so under concurrency two fulfills
-            // can both pass pre-flight yet only ONE can win the atomic UPDATE
-            // (the WHERE quantity >= deductQty clause is evaluated at UPDATE
-            // time against the committed row). The loser's $executeRaw returns
-            // 0 — silently, until now. Without savepoint protection, prior
-            // component deductions for THIS item have already mutated the
-            // transaction state and would be committed when the outer tx
-            // commits, while fulfilledQty would not be incremented (we'd skip
-            // and continue), leaving inventory deducted with no order tracking
-            // its consumption.
-            //
-            // The savepoint surrounds JUST this bundle item's deductions. If
-            // any component's $executeRaw returns 0, we ROLLBACK TO the
-            // savepoint — undoing this item's partial work — push to
-            // result.skipped, and continue with the next item. The outer
-            // transaction continues for other items unaffected.
-            const savepoint = `bundle_${orderItem.id.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-            await openItemSavepoint(); // W2S-1: the item's savepoint encloses this one
-            await tx.$executeRawUnsafe(`SAVEPOINT ${savepoint}`);
-
-            let concurrentRace: { productId: number; deductQty: number } | null = null;
-
-            for (const component of components) {
-              const deductQty = component.quantity * quantityToFulfill;
-
-              const compAffected = await tx.$executeRaw(Prisma.sql`
-                UPDATE product_locations
-                SET quantity = quantity - ${deductQty},
-                    version = version + 1,
-                    updatedAt = NOW()
-                WHERE productId = ${component.internalProductId}
-                  AND locationId = ${locationId}
-                  AND quantity >= ${deductQty}
-              `);
-
-              if (compAffected === 0) {
-                // Pre-flight passed but the atomic guard failed — another
-                // transaction deducted between the two reads. Roll back this
-                // bundle item's partial deductions and mark as skipped.
-                concurrentRace = {
-                  productId: component.internalProductId,
-                  deductQty,
-                };
-                break;
-              }
-
-              await createInventoryLog(
-                {
-                  userId,
-                  productId: component.internalProductId,
-                  locationId,
-                  delta: -deductQty,
-                  // Phase C (P-C2): a bundle-component deduction is a SALE, not a
-                  // neutral adjustment; batchId joins the row to the audit event.
-                  logType: inventory_logs_logType.SALE,
-                  batchId,
-                  // W2-1 (pack T7 stamping): every component row names the order
-                  // it went out against. `order.id` is the row this transaction
-                  // LOADED from the path parameter, already membership-checked by
-                  // the route — never a body field, so there is nothing to forge.
-                  orderRecordId: order.id,
-                },
-                tx
-              );
-
-              // Legacy products.quantity mirror for location 1
-              if (locationId === 1) {
-                await tx.$executeRaw(Prisma.sql`
-                  UPDATE products
-                  SET quantity = quantity - ${deductQty}
-                  WHERE id = ${component.internalProductId}
-                `);
-              }
-            }
-
-            if (concurrentRace) {
-              await tx.$executeRawUnsafe(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-              result.skipped.push({
-                itemId: fulfillmentItem.itemId,
-                reason: 'concurrent_modification',
-                details: `Bundle component ${concurrentRace.productId} stock changed during fulfillment (concurrent deduction). Item rolled back — please retry.`,
-              });
-              continue;
-            }
-
-            // All components deducted successfully — release the savepoint so
-            // the outer transaction can commit this item's work.
-            await tx.$executeRawUnsafe(`RELEASE SAVEPOINT ${savepoint}`);
-
-            // Update ExternalOrderItem.fulfilledQty
-            await tx.externalOrderItem.update({
-              where: { id: fulfillmentItem.itemId },
-              data: { fulfilledQty: { increment: quantityToFulfill } },
-            });
-
-            // Per-item component IDs for clean public response (Fix C P0 #6)
-            const itemComponentIds = components.map((c) => c.internalProductId);
-
-            result.fulfilled.push({
-              itemId: fulfillmentItem.itemId,
-              productId: BUNDLE_SENTINEL_PRODUCT_ID,
-              productName: orderItem.name,
-              quantity: quantityToFulfill,
-              inventoryLogId: BUNDLE_SENTINEL_INVENTORY_LOG_ID,
-              isBundle: true,
-              componentIds: itemComponentIds,
-            });
-
-            // P0-3 + FIX H: Accumulate component IDs into a Set scoped to this
-            // call so the route can push bundle WC stock — O(1) per id, O(N)
-            // total instead of O(N^2) includes scans.
-            for (const component of components) {
-              affectedComponentIdSet.add(component.internalProductId);
-            }
-
-            continue; // Skip the single-mapping path below
-          }
-
-          // Determine which product to use
-          let productId: number | undefined;
-
-          if (fulfillmentItem.productId) {
-            // Manual override provided
-            productId = fulfillmentItem.productId;
-          } else if (orderItem.isMapped && orderItem.productLink?.internalProduct) {
-            // Use mapped product — internalProduct is non-null in this (non-bundle) branch
-            productId = orderItem.productLink.internalProduct!.id;
-          } else if (fulfillmentItem.skipUnmapped) {
+        if (productId === undefined) {
+          if (fulfillmentItem.skipUnmapped) {
             // User chose to skip this unmapped item
             result.skipped.push({
               itemId: fulfillmentItem.itemId,
               reason: 'user_skipped',
               details: 'Item is unmapped and user chose to skip',
             });
-            continue;
           } else {
             // Not mapped and no override
             result.skipped.push({
@@ -814,70 +737,184 @@ export async function fulfillExternalOrder(
               reason: 'unmapped',
               details: 'Item is not mapped to an internal product',
             });
-            continue;
           }
+          continue;
+        }
 
-          // Get product info first (for error messages and existence check)
-          const product = await tx.product.findUnique({
-            where: { id: productId },
-            select: { name: true },
+        survivors.push({
+          kind: 'single',
+          itemId: fulfillmentItem.itemId,
+          locationId,
+          productId,
+          quantity: quantityToFulfill,
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // THE PRODUCT READ — ONE consistent read of `products` (the named residual
+      // outside the canonical order, spec §2.7), over every survivor id: a
+      // single's product, and every bundle component.
+      //
+      // Why it exists at all: a manual override is a raw number from the request
+      // and the prelock INSERT's foreign key would kill the WHOLE transaction
+      // over one bad id (pack REV-22 F2). So the ids are proved first, and an id
+      // this read does not return fails its item ITEM-LOCALLY — a `failed.push`,
+      // never a throw: a throw here would 404 the whole request through the
+      // ladder and discard the siblings. The message is CONSTRUCTED from the
+      // class, never re-spelled.
+      //
+      // It also supplies the NAMES the result entries and the refusal texts
+      // carry — the per-item `product.findUnique` retired with it.
+      // ---------------------------------------------------------------------
+      const survivorProductIds: number[] = [];
+      const seenProductId = new Set<number>();
+      const noteId = (productId: number) => {
+        if (seenProductId.has(productId)) return;
+        seenProductId.add(productId);
+        survivorProductIds.push(productId);
+      };
+      survivors.forEach((survivor) => {
+        if (survivor.kind === 'bundle') {
+          survivor.components.forEach((component) => noteId(component.productId));
+        } else {
+          noteId(survivor.productId);
+        }
+      });
+
+      // Zero survivors, no statement — the same rule the prelock keeps for an
+      // empty key set, so an all-refused request still spends nothing.
+      const existingProducts =
+        survivorProductIds.length > 0
+          ? await tx.product.findMany({
+              where: { id: { in: survivorProductIds } },
+              select: { id: true, name: true },
+            })
+          : [];
+      const namesById = new Map<number, string>();
+      existingProducts.forEach((product) => namesById.set(product.id, product.name));
+
+      const provenSurvivors: Survivor[] = [];
+      survivors.forEach((survivor) => {
+        // For a bundle, the FIRST absent component id names the whole item.
+        const missing =
+          survivor.kind === 'bundle'
+            ? survivor.components
+                .map((component) => component.productId)
+                .find((productId) => !namesById.has(productId))
+            : namesById.has(survivor.productId)
+              ? undefined
+              : survivor.productId;
+        if (missing !== undefined) {
+          result.failed.push({
+            itemId: survivor.itemId,
+            error: new ProductNotFoundError(missing).message,
           });
+          return;
+        }
+        provenSurvivors.push(survivor);
+      });
 
-          if (!product) {
-            throw new ProductNotFoundError(productId);
-          }
+      // ---------------------------------------------------------------------
+      // THE PRELOCK — every remaining survivor's keys, bundle COMPONENT keys
+      // included, in the canonical order, before the first `product_locations`
+      // X lock this request takes. Two requests naming the same rows in opposite
+      // item order can no longer take them in opposite orders.
+      // ---------------------------------------------------------------------
+      const keys: PrelockKeyInput[] = [];
+      provenSurvivors.forEach((survivor) => {
+        if (survivor.kind === 'bundle') {
+          survivor.components.forEach((component) =>
+            keys.push({ productId: component.productId, locationId: survivor.locationId })
+          );
+        } else {
+          keys.push({ productId: survivor.productId, locationId: survivor.locationId });
+        }
+      });
 
-          // Atomic decrement with stock check. This single UPDATE both validates
-          // that sufficient stock exists and decrements it in one statement.
-          // Race-safe: two concurrent transactions cannot both succeed because
-          // the WHERE clause is evaluated against the committed row at UPDATE time.
-          //
-          // W2S-1: the item's first write on this path — savepoint opens here, so
-          // the decrement, the ledger row, the mirror and the fulfilledQty update
-          // that follow are one unit that survives or vanishes together.
-          await openItemSavepoint();
+      // A bundle multiplies keys past the request's item count, so the request
+      // schema's cap of 100 items does not bound this set on its own: the count
+      // is checked here, against the prelock's own cap, and refused as a 400
+      // rather than reaching the library's RangeError (an unhelpful 500). The
+      // refusal aborts the transaction atomically — pass 1's freezes included.
+      // The sentence is fulfil's OWN: no dialog can split a fulfil, so "split it"
+      // would name a remedy that does not exist.
+      const distinctKeys = new Set(
+        keys.map((key) => prelockKey(key.productId, key.locationId))
+      );
+      if (distinctKeys.size > MAX_PRELOCK_KEYS) {
+        throw new AppError(
+          'this order needs more than 200 stock rows in one request and cannot be fulfilled in one pass',
+          'TOO_MANY_KEYS',
+          400
+        );
+      }
+
+      // `prelockProductLocations` owns the dedupe and the canonical sort (one
+      // owner per invariant), so the keys ride in as the survivors named them.
+      // Empty keys → no statement (the prelock's own rule).
+      const locked = await prelockProductLocations(tx, keys);
+
+      // ---------------------------------------------------------------------
+      // PASS 2a — THE GUARDS. Every survivor is decided against the within-tx
+      // tally before this transaction writes any stock at all; the planner owns
+      // the tally (it is built from `locked`, never by this caller).
+      // ---------------------------------------------------------------------
+      const { winners, skipped: stockRefusals } = planPass2(
+        provenSurvivors,
+        locked,
+        namesById
+      );
+      // `skipped[]` is therefore in PASS order — pass-1 refusals first, stock
+      // refusals after. The order is NOT contractual; envelope consumers select
+      // by priority, never by index.
+      stockRefusals.forEach((refusal) => result.skipped.push(refusal));
+
+      // ---------------------------------------------------------------------
+      // PASS 2b — THE WRITES, winners only, in request order. UNGUARDED by
+      // design: every one follows its item's complete guard, and a throw here
+      // (or anywhere after statement 1) propagates out of `$transaction` and
+      // aborts the request. There is no per-item catch: a committed SALE row and
+      // its item's `fulfilledQty` increment are ONE transaction by construction
+      // (W2S-1's property, now structural).
+      // ---------------------------------------------------------------------
+      for (const winner of winners) {
+        const deductions =
+          winner.kind === 'bundle'
+            ? winner.components.map((component) => ({
+                productId: component.productId,
+                units: component.deductQty,
+              }))
+            : [{ productId: winner.productId, units: winner.quantity }];
+
+        let firstLogId = 0;
+        for (const deduction of deductions) {
           const affectedRows = await tx.$executeRaw(Prisma.sql`
             UPDATE product_locations
-            SET quantity = quantity - ${quantityToFulfill},
+            SET quantity = quantity - ${deduction.units},
                 version = version + 1,
                 updatedAt = NOW()
-            WHERE productId = ${productId}
-              AND locationId = ${locationId}
-              AND quantity >= ${quantityToFulfill}
+            WHERE productId = ${deduction.productId}
+              AND locationId = ${winner.locationId}
+              AND quantity >= ${deduction.units}
           `);
 
-          if (affectedRows === 0) {
-            // The stock was insufficient (the row itself exists — the prelock
-            // materialized it). Read the current quantity for the message.
-            //
-            // B1a-ii: a LOCKING re-read, not the retired consistent findUnique
-            // and not the prelocked snapshot. The consistent read would answer
-            // from a view that predates the prelock, and the snapshot goes stale
-            // the moment an earlier item in this request deducts the same key —
-            // both would print a number nobody can act on. The row is already
-            // X-held by this transaction, so FOR UPDATE here blocks nothing; it
-            // costs one extra statement on the refusal path only.
-            const currentRows = await tx.$queryRaw<Array<{ quantity: number }>>(Prisma.sql`
-              SELECT quantity FROM product_locations
-              WHERE productId = ${productId} AND locationId = ${locationId}
-              FOR UPDATE
-            `);
-
-            result.skipped.push({
-              itemId: fulfillmentItem.itemId,
-              reason: 'insufficient_stock',
-              details: `Insufficient stock for ${product.name}. Available: ${currentRows[0]?.quantity ?? 0}, Requested: ${quantityToFulfill}`,
-            });
-            continue;
+          // THE BACKSTOP. The `quantity >=` clause stays, but it is no longer
+          // the guard: the row has been X-held since the prelock and the tally
+          // said "enough", so 0 rows here is an impossibility (a zero-unit
+          // component still bumps `version`, so 1 row is always reported), and a
+          // 500 is the honest answer to one.
+          if (affectedRows !== 1) {
+            throw new Error(
+              `fulfil invariant: locked row ${deduction.productId}:${winner.locationId} moved under the tally`
+            );
           }
 
-          // Create inventory log (deduction) — only after the atomic UPDATE succeeded
           const log = await createInventoryLog(
             {
               userId,
-              productId,
-              locationId,
-              delta: -quantityToFulfill,
+              productId: deduction.productId,
+              locationId: winner.locationId,
+              delta: -deduction.units,
               // Phase C (P-C2): a fulfillment deduction is a SALE; batchId joins
               // the row to the fulfillment audit event.
               logType: inventory_logs_logType.SALE,
@@ -889,107 +926,63 @@ export async function fulfillExternalOrder(
             },
             tx
           );
+          if (firstLogId === 0) firstLogId = log.id;
 
           // Legacy product.quantity mirror for location 1. This is a derived
           // value that should track product_locations[productId, 1].quantity.
-          // No stock guard here: the authoritative check already happened in
-          // the product_locations UPDATE above, and the mirror must track
-          // the source of truth even if that means going temporarily negative
-          // during a concurrent race. Removing the guard also prevents silent
-          // desync when another code path has already decremented the mirror.
-          if (locationId === 1) {
+          // No stock guard here: the authoritative check already happened, and
+          // the mirror must track the source of truth.
+          if (winner.locationId === 1) {
             await tx.$executeRaw(Prisma.sql`
               UPDATE products
-              SET quantity = quantity - ${quantityToFulfill}
-              WHERE id = ${productId}
+              SET quantity = quantity - ${deduction.units}
+              WHERE id = ${deduction.productId}
             `);
           }
+        }
 
-          // Update ExternalOrderItem.fulfilledQty
-          await tx.externalOrderItem.update({
-            where: { id: fulfillmentItem.itemId },
-            data: {
-              fulfilledQty: {
-                increment: quantityToFulfill,
-              },
+        // Update ExternalOrderItem.fulfilledQty. UNCONDITIONAL: the order lock
+        // serializes every fulfil/unfulfill of this order ACROSS transactions,
+        // and the DUPLICATE_ITEM guard makes each line appear once WITHIN this
+        // request, so the loaded fulfilledQty is current for every increment. A
+        // second guard AFTER the stock writes is exactly the late-failure shape
+        // W2S-1 warned about.
+        await tx.externalOrderItem.update({
+          where: { id: winner.itemId },
+          data: {
+            fulfilledQty: {
+              increment: winner.quantity,
             },
-          });
+          },
+        });
 
+        if (winner.kind === 'bundle') {
+          // Per-item component IDs for clean public response (Fix C P0 #6)
           result.fulfilled.push({
-            itemId: fulfillmentItem.itemId,
-            productId,
-            productName: product.name,
-            quantity: quantityToFulfill,
-            inventoryLogId: log.id,
+            itemId: winner.itemId,
+            productId: BUNDLE_SENTINEL_PRODUCT_ID,
+            productName: winner.productName,
+            quantity: winner.quantity,
+            inventoryLogId: BUNDLE_SENTINEL_INVENTORY_LOG_ID,
+            isBundle: true,
+            componentIds: winner.components.map((component) => component.productId),
           });
 
-          result.inventoryLogIds.push(log.id);
-        } catch (error) {
-          itemFailed = true;
-          console.error(
-            `Error fulfilling item ${fulfillmentItem.itemId}:`,
-            error
+          // P0-3 + FIX H: accumulate component IDs into a Set scoped to this
+          // call so the route can push bundle WC stock — O(1) per id.
+          winner.components.forEach((component) =>
+            affectedComponentIdSet.add(component.productId)
           );
-          // W2S-1: discard whatever this item recorded before it failed, so the
-          // reported result and the committed rows say the same thing.
-          result.fulfilled.length = resultMark.fulfilled;
-          result.skipped.length = resultMark.skipped;
-          result.inventoryLogIds.length = resultMark.inventoryLogIds;
-          affectedComponentIdSet.clear();
-          for (const id of resultMark.componentIds) {
-            affectedComponentIdSet.add(id);
-          }
-          result.failed.push({
-            itemId: fulfillmentItem.itemId,
-            // FDd-4: a STATEMENT-only transient (a lock-wait/pool timeout that
-            // leaves the transaction alive) lands here with the item cleanly
-            // rolled back — the honest per-item answer is the busy sentence,
-            // never the engine's own multi-line text on a 200's failed[] entry.
-            // The classifier matches codes OR the engine sentence (FDe-1: raw
-            // statements can deadlock without a P-code). TX-KILLED case: the
-            // transient is CAPTURED below (FDf-3), so if the tx died with this
-            // error, the settle/post-loop failure rethrows the CLASSIFIED
-            // transient deterministically — the wire answers 503 BUSY, never a
-            // follow-on error's generic 500.
-            error: (() => {
-              const transient = isTransientTxError(error);
-              if (transient) txTransient = error;
-              return transient
-                ? TX_BUSY_MESSAGE
-                : error instanceof Error
-                  ? error.message
-                  : 'Unknown error occurred';
-            })(),
+        } else {
+          result.fulfilled.push({
+            itemId: winner.itemId,
+            productId: winner.productId,
+            productName: winner.productName,
+            quantity: winner.quantity,
+            inventoryLogId: firstLogId,
           });
-        } finally {
-          // W2S-1: `continue` inside the try runs this block before it takes
-          // effect, so every exit path settles the savepoint exactly once. A
-          // failure rolls the item back; anything else releases it and lets the
-          // outer transaction commit the item's work. If the settling statement
-          // itself throws, the whole transaction aborts — fail-closed is the
-          // only safe direction here — and it rethrows the CAPTURED transient
-          // when one killed the tx (FDf-3): after a tx-killing deadlock MySQL
-          // has dropped the savepoints, so the settle fails with a FOLLOW-ON
-          // error (SAVEPOINT ... does not exist) that no classifier should ever
-          // have to recognise; the error that reaches the wire is the real one.
-          if (itemSavepointOpen) {
-            try {
-              await tx.$executeRawUnsafe(
-                itemFailed
-                  ? `ROLLBACK TO SAVEPOINT ${itemSavepoint}`
-                  : `RELEASE SAVEPOINT ${itemSavepoint}`
-              );
-              // The settle SUCCEEDED — the transaction is alive, so a transient
-              // captured by THIS item was statement-only and must not hijack a
-              // later, unrelated settle failure (FDg-4).
-              txTransient = null;
-            } catch (settleError) {
-              // The discarded error must not vanish (FDg-4): when the captured
-              // transient is rethrown, this line is the settle error's only trace.
-              console.error('savepoint settle failed:', settleError);
-              throw txTransient ?? settleError;
-            }
-          }
+
+          result.inventoryLogIds.push(firstLogId);
         }
       }
 

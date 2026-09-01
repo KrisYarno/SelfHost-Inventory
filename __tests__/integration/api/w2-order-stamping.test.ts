@@ -67,8 +67,10 @@ function post(url: string, body: unknown): NextRequest {
 // Two layers: the OUTER fn always records and then delegates to an INNER
 // behaviour fn (`rawBehavior`), which is what a test configures — so an
 // override can never silently switch the recording off. The suite's existing
-// `$executeRaw`/`$executeRawUnsafe` stubs (the fulfil/unfulfill paths' atomic
-// UPDATEs and savepoints) are kept as exactly that: inner behaviours.
+// `$executeRaw`/`$executeRawUnsafe` stubs are kept as exactly that: inner
+// behaviours. B1.5: fulfil issues NO unsafe statement any more (the per-item
+// savepoints never worked on MySQL — ER 1295), so that stub is dead weight on
+// the fulfil path; it stays because other paths on this tx may still use it.
 // ---------------------------------------------------------------------------
 type RawCall = { kind: "query" | "execute" | "executeUnsafe"; sql: string; at: number };
 
@@ -166,10 +168,11 @@ function makeTx() {
   ] as any);
   tx.inventory_logs.create.mockResolvedValue({ id: 777, products: { name: "Widget A" } } as any);
   tx.product.findUnique.mockResolvedValue({ id: 10, name: "Widget A", deletedAt: null } as any);
-  // The candidate-existence read the simple-path prelock runs before it builds
-  // its keys (pack REV-22 F2): every asked id is a real product here.
+  // B1.5 (pack CB1.5a-i.2): the ONE batched `products` read — it proves every
+  // survivor id AND supplies the name the result entry carries, so it answers
+  // { id, name }. The per-item `product.findUnique` retired with it.
   (tx.product.findMany as unknown as jest.Mock).mockImplementation(async (args: any) =>
-    ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id }))
+    ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id, name: `Product ${id}` }))
   );
   tx.product.update.mockResolvedValue({} as any);
   tx.auditLog.create.mockResolvedValue({ id: 1 } as any);
@@ -177,7 +180,8 @@ function makeTx() {
   tx.externalOrderItem.update.mockResolvedValue({} as any);
   tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 2, fulfilledQty: 2 }] as any);
   // Kept verbatim, now as INNER behaviours: the fulfil/unfulfill paths read
-  // these as their atomic UPDATEs' affected-row counts.
+  // these as their atomic UPDATEs' affected-row counts. (The unsafe stub is
+  // DEAD for fulfil since B1.5 — see the note above.)
   rawBehavior.$executeRaw.mockResolvedValue(1 as any);
   rawBehavior.$executeRawUnsafe.mockResolvedValue(1 as any);
   return tx;

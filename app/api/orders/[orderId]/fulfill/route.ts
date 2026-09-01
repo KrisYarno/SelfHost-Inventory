@@ -144,15 +144,17 @@ export const POST = apiHandler(async (
       : 'none';
 
   // Push fulfillment status to external platform (best-effort, never fails the fulfillment).
-  // P1-6: Only push when every requested item succeeded. If any item hit the catch
-  // branch inside fulfillExternalOrder, the internal DB state may not match what we'd
-  // send to WC, so skip the push and log for manual follow-up.
-  if (
-    result.integrationId &&
-    result.externalId &&
-    fulfilledCount > 0 &&
-    result.failed.length === 0
-  ) {
+  //
+  // B1.5 (pack CB1.5a-i.5, PKc-3): the push follows COMMITTED TOTALS. P1-6's
+  // extra `failed.length === 0` condition rested on the premise "if any item hit
+  // the catch branch, the internal DB state may not match what we'd send to WC"
+  // — and B1.5 makes that premise false: there is no per-item catch any more.
+  // Every `failed[]` entry is a PRE-WRITE refusal (not in the order, an empty
+  // bundle, a product id nothing answers to), the committed siblings are
+  // transactionally consistent, and a late write failure aborts the whole
+  // request instead of committing half of it. An insufficient-stock sibling is
+  // `skipped`, and that already pushed today.
+  if (result.integrationId && result.externalId && fulfilledCount > 0) {
     try {
       // LANE 6: the `if (integration.fulfillmentPushEnabled)` check that used to
       // live HERE is gone — deliberately.
@@ -199,8 +201,9 @@ export const POST = apiHandler(async (
       // Don't fail the fulfillment. Log for manual follow-up.
     }
   } else if (result.failed.length > 0) {
-    console.warn(
-      `Skipping external push for order ${params.orderId}: ${result.failed.length} items failed during fulfillment`
+    // Not a fault: nothing was committed to push (every entry is a refusal).
+    console.log(
+      `No order-status push for order ${params.orderId}: nothing was fulfilled (${result.failed.length} items refused)`
     );
   }
 

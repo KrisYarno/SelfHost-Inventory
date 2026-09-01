@@ -114,19 +114,34 @@ function recordingRaw(): Record<string, jest.Mock> {
     out[method] = recording;
   };
   // The fulfil path reads $executeRaw as its atomic UPDATE's affected-row count,
-  // so 1 (the row moved) is this stand-in's happy path; the prelock's returning
-  // SELECT is unread on that path and answers empty.
+  // so 1 (the row moved) is this stand-in's happy path.
   install('query', '$queryRaw', []);
   install('execute', '$executeRaw', 1);
   install('executeUnsafe', '$executeRawUnsafe', 0);
   // B1b: the ORDER LOCK is statement 1 of both routes' transactions now, and a
   // lock that finds nothing answers 409 ORDER_GONE — so the order these tests
-  // drive has to come back from it. Everything else still answers empty.
-  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) =>
-    isOrderLockSelect(sqlTextOf(args[0])) ? LOCKED_ORDERS : []
-  );
+  // drive has to come back from it. B1.5: fulfil's guard is the pass-2a TALLY,
+  // seeded from the PRELOCK's returning SELECT, so that read has to answer with
+  // stocked rows too — `[]` would read as never-stocked { 0, 0 } and every item
+  // would refuse. Everything else still answers empty.
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) => {
+    const sql = sqlTextOf(args[0]);
+    if (isOrderLockSelect(sql)) return LOCKED_ORDERS;
+    return isPrelockSelect(sql) ? PRELOCKED : [];
+  });
   return out;
 }
+
+/** The prelock's returning SELECT (lib/inventory/prelock.ts), by its text. */
+function isPrelockSelect(sql: string): boolean {
+  return sql.includes('FROM product_locations') && sql.includes('(productId, locationId) IN');
+}
+
+/**
+ * Every prelocked key the fulfil tests here touch: the single line's (10, 5),
+ * stocked, at version 1 — the values the pass-2a tally compares against.
+ */
+const PRELOCKED = [{ productId: 10, locationId: 5, quantity: 100, version: 1 }];
 
 /** The order lock's SELECT (lib/inventory/order-lock.ts), by its text. */
 function isOrderLockSelect(sql: string): boolean {
@@ -195,22 +210,21 @@ function makeFulfillTx() {
     },
     product: {
       findUnique: jest.fn().mockResolvedValue({ name: 'Widget A' }),
-      // REV-22 F2: the simple-path prelock pre-validates its candidate ids
-      // against `products` — every id this fixture names is a real product.
+      // B1.5: the ONE batched `products` read — it proves every survivor id AND
+      // supplies the name the result entry carries, so it answers { id, name }.
       findMany: jest.fn(async (args: any) =>
-        ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id }))
+        ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id, name: 'Widget A' }))
       ),
     },
     externalOrderItem: {
       update: jest.fn().mockResolvedValue({}),
       findMany: jest.fn().mockResolvedValue([{ quantity: 2, fulfilledQty: 2 }]),
     },
-    // W2S-1: fulfillment brackets each item's writes in a SAVEPOINT, issued
-    // through $executeRawUnsafe. This stand-in only ever takes the happy path,
-    // so the statements are accepted and ignored — the savepoint's own semantics
-    // are pinned in fulfillment.item-savepoint.test.ts against a store that
-    // actually models them. B1a-ii added the prelock's two statements ahead of
-    // the loop, so the whole trio rides here now.
+    // B1.5: fulfillment issues NO unsafe raw statement any more — the per-item
+    // savepoints never worked on MySQL (ER 1295) and are gone. What rides here
+    // is the prelock's statement pair ahead of the writes and the writes
+    // themselves; the two-pass semantics are pinned in
+    // fulfillment.two-pass.test.ts against a store that models them.
     ...recordingRaw(),
     auditLog: { create: jest.fn().mockResolvedValue({ id: 1 }) },
     // Reconciliation lane R-A: the fulfill closure now writes its attribution

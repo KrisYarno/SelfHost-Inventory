@@ -42,7 +42,7 @@ jest.mock('@/lib/prisma', () => {
   const txMock: any = {
     externalOrder: { findUnique: jest.fn(), update: jest.fn() },
     externalOrderItem: { update: jest.fn(), findMany: jest.fn() },
-    product: { findUnique: jest.fn() },
+    product: { findUnique: jest.fn(), findMany: jest.fn() },
     product_locations: {
       findUnique: jest.fn(),
       findFirst: jest.fn(),
@@ -90,6 +90,58 @@ function getRaw(): {
 }
 
 // --- Helpers ---
+
+function sqlTextOf(arg: unknown): string {
+  return arg && typeof arg === 'object' && typeof (arg as { sql?: unknown }).sql === 'string'
+    ? (arg as { sql: string }).sql
+    : String(arg);
+}
+
+/** The prelock's returning SELECT (lib/inventory/prelock.ts), by its text. */
+function isPrelockSelect(sql: string): boolean {
+  return sql.includes('FROM product_locations') && sql.includes('(productId, locationId) IN');
+}
+
+/**
+ * What the prelock's returning SELECT hands back (pack CB1.5a-i): the rows the
+ * pass-2a TALLY compares against. B1.5 puts bundle COMPONENT keys inside the
+ * prelock, so the suite's `[]` default would read as never-stocked `{ 0, 0 }`
+ * and refuse every bundle item. `quantities` names the short ones; everything
+ * else answers ample.
+ */
+/**
+ * The ONE `products` read B1.5 runs over every survivor id (pack CB1.5a-i.2):
+ * every id this suite names is a real product, and its name comes back with it.
+ */
+function productsExist(): void {
+  (getTx().product.findMany as jest.Mock).mockImplementation(async (args: any) =>
+    ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id, name: `Product ${id}` }))
+  );
+}
+
+function prelockedStock(quantities: Record<number, number> = {}, ample = 9999): void {
+  getRaw().rawBehavior.$queryRaw.mockImplementation(async (...args: any[]) => {
+    const sql = sqlTextOf(args[0]);
+    if (!isPrelockSelect(sql)) return [];
+    const values = ((args[0] as any)?.values ?? []) as number[];
+    const rows: Array<{ productId: number; locationId: number; quantity: number; version: number }> = [];
+    for (let i = 0; i < values.length; i += 2) {
+      const productId = values[i];
+      rows.push({
+        productId,
+        locationId: values[i + 1],
+        quantity: quantities[productId] ?? ample,
+        version: 1,
+      });
+    }
+    return rows;
+  });
+}
+
+/** Every `UPDATE product_locations` this test spent, in call order. */
+function stockUpdates(): RawCall[] {
+  return getRaw().rawCalls.filter((c) => /UPDATE product_locations/.test(c.sql));
+}
 
 function buildBundleOrder(opts: {
   snapshot: unknown[] | null;
@@ -146,8 +198,13 @@ function setupSuccessfulMocks(orderQty: number) {
   // $executeRaw returns 1 (row updated) for all calls — kept verbatim, now as
   // the INNER behaviour (the outer fn is the recorder).
   rawBehavior.$executeRaw.mockResolvedValue(1);
-  // SAVEPOINT / ROLLBACK / RELEASE — Prisma returns 0 for DDL, harmless for tests
+  // B1.5: the path issues no unsafe statement at all any more; the stub stays so
+  // the pins can say "never called" about something that exists.
   rawBehavior.$executeRawUnsafe.mockResolvedValue(0);
+  // B1.5 (OCc-2): the ONE batched `products` read — it proves every component id
+  // AND supplies the names, so it must answer { id, name }.
+  productsExist();
+  prelockedStock();
   tx.externalOrderItem.update.mockResolvedValue({});
   tx.externalOrderItem.findMany.mockResolvedValue([
     { quantity: orderQty, fulfilledQty: orderQty },
@@ -192,8 +249,11 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
 
     // 3 components, each gets a $executeRaw deduction + legacy mirror at locationId=1
-    // 3 product_locations + 3 products.quantity mirror = 6 total
-    expect(tx.$executeRaw).toHaveBeenCalledTimes(6);
+    // 3 product_locations + 3 products.quantity mirror = 6, plus the canonical
+    // prelock's materialize INSERT ahead of them (B1.5: bundle component keys
+    // are INSIDE the prelock now) = 7 total.
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(7);
+    expect(getRaw().rawCalls[0].sql).toContain('INSERT INTO product_locations');
     // createInventoryLog called once per component
     expect(createInventoryLog).toHaveBeenCalledTimes(3);
 
@@ -309,11 +369,11 @@ describe('fulfillExternalOrder — bundle expansion', () => {
 
     getRaw().rawBehavior.$executeRaw.mockResolvedValue(1);
     getRaw().rawBehavior.$executeRawUnsafe.mockResolvedValue(0);
+    productsExist();
+    prelockedStock();
     tx.externalOrderItem.update.mockResolvedValue({});
     tx.externalOrderItem.findMany.mockResolvedValue([{ quantity: 1, fulfilledQty: 0 }]);
     tx.externalOrder.update.mockResolvedValue({});
-    tx.product_locations.findUnique.mockResolvedValue({ quantity: 9999 });
-    tx.product_locations.findMany.mockResolvedValue([]);
 
     const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
 
@@ -323,19 +383,20 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     expect(result.skipped[0].details).toMatch(/malformed/i);
     expect(result.fulfilled).toHaveLength(0);
 
-    // No deduction SQL must have been executed
+    // Nothing at all was spent: a pass-1 refusal contributes no survivor, so
+    // there is no product read, no prelock and no deduction.
     expect(tx.$executeRaw).not.toHaveBeenCalled();
-    // No SAVEPOINT was needed (we never entered the deduction block)
     expect(tx.$executeRawUnsafe).not.toHaveBeenCalled();
+    expect(tx.product.findMany).not.toHaveBeenCalled();
     // No inventory logs must have been created
     expect(createInventoryLog).not.toHaveBeenCalled();
   });
 
-  it('rolls back partial deductions when a later component is short (P0)', async () => {
+  it('refuses a bundle short on its LAST component BEFORE any component write (B1.5)', async () => {
     // 3-component bundle. Components 1 and 2 have ample stock; component 3 has 0.
-    // The pre-flight check must catch this and skip the item BEFORE making any
-    // deduction — so $executeRaw (deduct) and createInventoryLog are never called,
-    // and the result reflects the failure.
+    // The pass-2a TALLY (seeded from the prelock's returned rows) catches it and
+    // skips the item before pass 2b writes anything — so there is nothing to roll
+    // back, which is what retired the savepoint this test used to be about.
     const tx = getTx();
     const order = buildBundleOrder({
       snapshot: [
@@ -350,18 +411,15 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     // Base fulfillment mocks (status update at end)
     getRaw().rawBehavior.$executeRaw.mockResolvedValue(1);
     getRaw().rawBehavior.$executeRawUnsafe.mockResolvedValue(0);
+    productsExist();
     tx.externalOrderItem.update.mockResolvedValue({});
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 1, fulfilledQty: 0 },
     ]);
     tx.externalOrder.update.mockResolvedValue({});
 
-    // FIX D: batched findMany returns one row per component — last one is SHORT
-    tx.product_locations.findMany.mockResolvedValue([
-      { productId: 10, quantity: 10 },
-      { productId: 11, quantity: 10 },
-      { productId: 12, quantity: 0 },
-    ]);
+    // The prelock returns one row per component — the LAST one is SHORT.
+    prelockedStock({ 12: 0 });
 
     const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
 
@@ -369,11 +427,14 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     expect(result.skipped).toHaveLength(1);
     expect(result.skipped[0].itemId).toBe('oi1');
     expect(result.skipped[0].reason).toBe('insufficient_stock');
+    // QB-9: the number is the LOCKED one, and it names the short component.
+    expect(result.skipped[0].details).toBe(
+      'Insufficient stock for bundle component (productId: 12). Available: 0, Requested: 1'
+    );
     expect(result.fulfilled).toHaveLength(0);
 
-    // No deduction SQL must have been executed (pre-flight aborted before any UPDATE)
-    expect(tx.$executeRaw).not.toHaveBeenCalled();
-    // No SAVEPOINT was needed (pre-flight short-circuits before the savepoint block)
+    // NO deduction was executed: the only statements are the prelock's pair.
+    expect(stockUpdates()).toHaveLength(0);
     expect(tx.$executeRawUnsafe).not.toHaveBeenCalled();
 
     // No inventory logs must have been created
@@ -383,15 +444,11 @@ describe('fulfillExternalOrder — bundle expansion', () => {
     expect(tx.externalOrderItem.update).not.toHaveBeenCalled();
   });
 
-  // FIX A (P0): concurrent-deduct race detection via savepoint
-  it('treats $executeRaw=0 mid-bundle as concurrent_modification and rolls back the item', async () => {
-    // 3-component bundle. Pre-flight passes (ample stock for all 3).
-    // First two component deductions succeed ($executeRaw returns 1 each).
-    // Third deduction returns 0 — simulating a concurrent fulfill that beat us
-    // to the atomic UPDATE between pre-flight and our own UPDATE.
-    // Expect: SAVEPOINT was opened, then ROLLBACK TO SAVEPOINT was issued,
-    // item is in skipped with reason='concurrent_modification',
-    // and fulfilledQty was NOT incremented.
+  // B1.5 (pack CB1.5a-i): the concurrent-deduct race this block used to model is
+  // GONE — every key a bundle writes is X-held from the prelock to commit, so a
+  // 0-row UPDATE under a passing tally is not a race, it is an invariant
+  // violation, and the honest answer is a whole-request abort.
+  it('treats a 0-row UPDATE under a PASSING tally as the invariant violation it is', async () => {
     const tx = getTx();
     const order = buildBundleOrder({
       snapshot: [
@@ -402,64 +459,32 @@ describe('fulfillExternalOrder — bundle expansion', () => {
       itemQuantity: 1,
     });
     tx.externalOrder.findUnique.mockResolvedValue(order);
+    setupSuccessfulMocks(1);
 
-    // FIX D: pre-flight passes for all 3 via batched findMany
-    tx.product_locations.findMany.mockResolvedValue([
-      { productId: 10, quantity: 9999 },
-      { productId: 11, quantity: 9999 },
-      { productId: 12, quantity: 9999 },
-    ]);
+    // The tally passes for all 3 (ample prelocked stock), but the engine reports
+    // 0 rows for component 12's decrement.
+    getRaw().rawBehavior.$executeRaw.mockImplementation(async (...args: any[]) => {
+      const q = args[0] as any;
+      const values = (q?.values ?? []) as number[];
+      if (/UPDATE product_locations/.test(sqlTextOf(q)) && values[1] === 12) return 0;
+      return 1;
+    });
 
-    // Deduction sequence: 1, 1, 0  (third one — concurrent race lost)
-    // Note: when locationId === 1 the loop also does a products.quantity mirror
-    // UPDATE per component, so the actual $executeRaw call interleaving for
-    // 3 components is: [deduct1, mirror1, deduct2, mirror2, deduct3] — break
-    // happens before mirror3 fires.
-    getRaw()
-      .rawBehavior.$executeRaw.mockResolvedValueOnce(1)  // component 10 deduct — success
-      .mockResolvedValueOnce(1)  // component 10 legacy mirror — success
-      .mockResolvedValueOnce(1)  // component 11 deduct — success
-      .mockResolvedValueOnce(1)  // component 11 legacy mirror — success
-      .mockResolvedValueOnce(0); // component 12 deduct — RACE LOST
+    await expect(
+      fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42)
+    ).rejects.toThrow('fulfil invariant: locked row 12:1 moved under the tally');
 
-    getRaw().rawBehavior.$executeRawUnsafe.mockResolvedValue(0);
-    tx.externalOrderItem.update.mockResolvedValue({});
-    tx.externalOrderItem.findMany.mockResolvedValue([
-      { quantity: 1, fulfilledQty: 0 },
-    ]);
-    tx.externalOrder.update.mockResolvedValue({});
-
-    const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
-
-    // Item is in skipped with the right reason
-    expect(result.skipped).toHaveLength(1);
-    expect(result.skipped[0].itemId).toBe('oi1');
-    expect(result.skipped[0].reason).toBe('concurrent_modification');
-    expect(result.skipped[0].details).toMatch(/concurrent/i);
-    expect(result.fulfilled).toHaveLength(0);
-
-    // The BUNDLE savepoint was opened AND rolled back (RELEASE never fires on
-    // the loser path). W2S-1 added an ITEM savepoint around the whole item; on
-    // this SKIP path it releases normally — the bundle rollback has already
-    // undone the components, and a skipped item is not a failed one — so the
-    // assertions name the savepoint they are about.
-    const unsafeCalls = (tx.$executeRawUnsafe as jest.Mock).mock.calls.map(
-      (c: any[]) => c[0] as string
-    );
-    expect(unsafeCalls.some((s) => /^SAVEPOINT bundle_/.test(s))).toBe(true);
-    expect(unsafeCalls.some((s) => /^ROLLBACK TO SAVEPOINT bundle_/.test(s))).toBe(true);
-    expect(unsafeCalls.some((s) => /^RELEASE SAVEPOINT bundle_/.test(s))).toBe(false);
-    expect(unsafeCalls.some((s) => /^RELEASE SAVEPOINT item_/.test(s))).toBe(true);
-    expect(unsafeCalls.some((s) => /^ROLLBACK TO SAVEPOINT item_/.test(s))).toBe(false);
-
-    // fulfilledQty must NOT have been incremented
-    expect(tx.externalOrderItem.update).not.toHaveBeenCalled();
-
-    // affectedComponentIds must NOT contain the bundle's components
-    expect(result.affectedComponentIds ?? []).toEqual([]);
+    // The whole request aborts: fulfilledQty is never incremented, and no unsafe
+    // statement was issued on the way (the savepoints are gone).
+    expect(
+      (tx.externalOrderItem.update as jest.Mock).mock.calls.filter(
+        (c: any[]) => c[0]?.data?.fulfilledQty !== undefined
+      )
+    ).toHaveLength(0);
+    expect(tx.$executeRawUnsafe).not.toHaveBeenCalled();
   });
 
-  it('releases the savepoint on the happy path (no rollback)', async () => {
+  it('issues NO unsafe raw statement on the happy path (the savepoints retired)', async () => {
     const tx = getTx();
     const order = buildBundleOrder({
       snapshot: [
@@ -473,12 +498,7 @@ describe('fulfillExternalOrder — bundle expansion', () => {
 
     await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
 
-    const unsafeCalls = (tx.$executeRawUnsafe as jest.Mock).mock.calls.map(
-      (c: any[]) => c[0] as string
-    );
-    expect(unsafeCalls.some((s) => /^SAVEPOINT /.test(s))).toBe(true);
-    expect(unsafeCalls.some((s) => /^RELEASE SAVEPOINT /.test(s))).toBe(true);
-    expect(unsafeCalls.some((s) => /^ROLLBACK TO SAVEPOINT /.test(s))).toBe(false);
+    expect(tx.$executeRawUnsafe).not.toHaveBeenCalled();
   });
 
   // FIX B (P0): snapshot frozen at first-fulfill for legacy items
@@ -572,8 +592,10 @@ describe('fulfillExternalOrder — bundle expansion', () => {
 });
 
 // ---------------------------------------------------------------------------
-// B1a-ii (reconciliation Part 2, spec §2.7(1)/(3), pack CB1a-ii.1) — the order
-// hook, and what the BUNDLE path contributes to the prelock: nothing.
+// B1.5 (pack CB1.5a-i.2) — what the BUNDLE path contributes to the prelock:
+// every one of its COMPONENT keys. The order-lock hook's own pins live in
+// fulfillment.two-pass.test.ts (TP-12); what stays here is the bundle-shaped
+// half, which INVERTED with this wave.
 // ---------------------------------------------------------------------------
 
 describe('fulfillExternalOrder — the order lock hook (opts.lockFirst)', () => {
@@ -614,7 +636,7 @@ describe('fulfillExternalOrder — the order lock hook (opts.lockFirst)', () => 
     );
   });
 
-  it('costs NOTHING when no hook is supplied — existing callers are unchanged', async () => {
+  it('WITHOUT a hook the only $queryRaw is the prelock SELECT', async () => {
     const tx = getTx();
     const order = buildBundleOrder({
       snapshot: [
@@ -627,10 +649,12 @@ describe('fulfillExternalOrder — the order lock hook (opts.lockFirst)', () => 
 
     await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
 
-    expect(getRaw().rawFns.$queryRaw).not.toHaveBeenCalled();
+    const queries = getRaw().rawCalls.filter((c) => c.kind === 'query');
+    expect(queries).toHaveLength(1);
+    expect(isPrelockSelect(queries[0].sql)).toBe(true);
   });
 
-  it('a BUNDLE-only request contributes NO prelock key (the deferred residual)', async () => {
+  it('a BUNDLE-only request PRELOCKS its component keys (the B1 residual retires)', async () => {
     const tx = getTx();
     const order = buildBundleOrder({
       snapshot: [
@@ -642,11 +666,16 @@ describe('fulfillExternalOrder — the order lock hook (opts.lockFirst)', () => 
     setupSuccessfulMocks(1);
 
     // A manual override on a bundle line does NOT make it a simple-path item:
-    // the bundle branch wins, so the key set stays empty.
+    // the bundle branch still wins — and its COMPONENT is what gets locked.
     await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1, productId: 77 }], 42);
 
     const { rawCalls } = getRaw();
-    expect(rawCalls.some((c) => /INSERT INTO product_locations/.test(c.sql))).toBe(false);
-    expect(rawCalls.some((c) => c.kind === 'query')).toBe(false);
+    const insert = rawCalls.find((c) => /INSERT INTO product_locations/.test(c.sql));
+    expect(insert).toBeDefined();
+    const insertCall = getRaw().rawFns.$executeRaw.mock.calls.find((c: any[]) =>
+      /INSERT INTO product_locations/.test(sqlTextOf(c[0]))
+    );
+    expect((insertCall![0] as any).values).toEqual([1, 1]);
+    expect((insertCall![0] as any).values).not.toContain(77);
   });
 });

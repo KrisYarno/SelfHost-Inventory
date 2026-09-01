@@ -1,5 +1,9 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import {
+  CAP_COUNTER_FROM,
+  MAX_BATCH_ADJUST_ITEMS,
+} from '@/lib/inventory/request-limits';
 
 export interface JournalAdjustment {
   productId: number;
@@ -10,18 +14,23 @@ export interface JournalAdjustment {
 /**
  * THE REQUEST CAP, CLIENT-SIDE (reconciliation Part 2, pack REV-22 F4).
  *
- * `/api/inventory/batch-adjust` refuses more than 100 adjustments in one
- * request (`lib/validation/inventory.ts`: "at most 100 items per request"), and
- * B1's prelock caps the key set for the same reason. The journal's cart has no
+ * `/api/inventory/batch-adjust` refuses more than `MAX_BATCH_ADJUST_ITEMS`
+ * adjustments in one request (`lib/validation/inventory.ts`, via `capMessage`),
+ * and B1's prelock caps the key set for the same reason. The cart has no
  * such limit, so a stocker could spend an hour on 140 rows and learn about the
  * cap only from a 400 — with the whole batch refused and nothing to tell them
  * which half to cut. These three constants are what the cart counts against;
  * the copy is shared so the action bar and the review dialog say ONE sentence.
+ *
+ * B1.5 (pack CB1.5a-i.6, seam S-B10): the NUMBERS moved to
+ * `lib/inventory/request-limits.ts`, the one owner of every request cap — the
+ * journal posts to batch-adjust, so its cap IS that cap. These three names stay
+ * exactly where every importer already looks for them.
  */
-export const MAX_JOURNAL_ITEMS = 100;
+export const MAX_JOURNAL_ITEMS = MAX_BATCH_ADJUST_ITEMS;
 
 /** The counter becomes visible from here on — before the cap, not at it. */
-export const JOURNAL_COUNTER_FROM = 80;
+export const JOURNAL_COUNTER_FROM = CAP_COUNTER_FROM;
 
 export const JOURNAL_CAP_MESSAGE = `at most ${MAX_JOURNAL_ITEMS} items per request — split this batch`;
 

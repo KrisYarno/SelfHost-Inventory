@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { WORKBENCH_INTENTS } from '@/lib/inventory/intent';
+import { MAX_SIMPLE_DEDUCT_ITEMS, capMessage } from '@/lib/inventory/request-limits';
 
 const positiveInt = z.number().int().positive();
 
@@ -23,7 +24,7 @@ export const SimpleDeductSchema = z.object({
   items: z
     .array(WorkbenchItemSchema)
     .min(1, 'At least one item is required')
-    .max(100, 'at most 100 items per request'),
+    .max(MAX_SIMPLE_DEDUCT_ITEMS, capMessage(MAX_SIMPLE_DEDUCT_ITEMS, 'items')),
   orderReference: z.string().trim().max(255).optional(),
   notes: z.string().trim().max(1000).optional(),
   // Phase 0b-2 (spec REV-2 / OC-1): the external order the packer had selected,

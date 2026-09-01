@@ -167,6 +167,9 @@ const STOCKED = [
   // B1a-ii: batch-adjust prelocks its whole request, so its second product is a
   // key now too. A missing row would read the { 0, 0 } floor and refuse.
   { productId: 6, locationId: 2, quantity: 100, version: 1 },
+  // B1.5 (PKc-7): fulfil's guard is the pass-2a TALLY, seeded from the prelock's
+  // returned rows — so the key its fulfil case deducts has to be here too.
+  { productId: 10, locationId: 5, quantity: 100, version: 1 },
 ];
 
 /** A fresh deep-mocked TransactionClient with the reads every path here needs. */
@@ -185,10 +188,11 @@ function makeTx() {
     products: { name: "Widget" },
   } as any);
   tx.product.update.mockResolvedValue({} as any);
-  // The candidate-existence read the simple-path prelock runs before it builds
-  // its keys (pack REV-22 F2): every asked id is a real product here.
+  // B1.5 (pack CB1.5a-i.2): the ONE batched `products` read — it proves every
+  // survivor id AND supplies the name the result entry carries, so it answers
+  // { id, name }.
   (tx.product.findMany as unknown as jest.Mock).mockImplementation(async (args: any) =>
-    ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id }))
+    ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id, name: `Product ${id}` }))
   );
   tx.auditLog.create.mockResolvedValue({ id: 1 } as any);
   // Kept verbatim, now as the INNER behaviour: the fulfil path reads this as

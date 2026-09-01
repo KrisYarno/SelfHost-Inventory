@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_UNFULFILL_ITEMS, capMessage } from '@/lib/inventory/request-limits';
 
 /**
  * Schema for a single unfulfillment item
@@ -21,7 +22,7 @@ export const UnfulfillRequestSchema = z.object({
   items: z
     .array(UnfulfillItemSchema)
     .min(1, 'At least one item is required')
-    .max(100, 'at most 100 items per request'),
+    .max(MAX_UNFULFILL_ITEMS, capMessage(MAX_UNFULFILL_ITEMS, 'items')),
   notes: z.string().trim().max(1000).optional(),
 });
 

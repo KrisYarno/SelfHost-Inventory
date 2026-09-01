@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MAX_FULFILLMENT_ITEMS, capMessage } from '@/lib/inventory/request-limits';
 
 const positiveInt = z.number().int().positive();
 
@@ -23,7 +24,7 @@ export const FulfillmentRequestSchema = z.object({
   items: z
     .array(FulfillmentItemSchema)
     .min(1, 'At least one item is required')
-    .max(100, 'at most 100 items per request'),
+    .max(MAX_FULFILLMENT_ITEMS, capMessage(MAX_FULFILLMENT_ITEMS, 'items')),
   notes: z.string().trim().max(1000).optional(),
 });
 

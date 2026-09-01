@@ -126,25 +126,42 @@ function updateAffectedRows(...counts: number[]): void {
 }
 
 /**
- * What the refusal diagnostic's locking re-read finds — `null` for a row that
- * holds nothing. (It replaces the `product_locations.findUnique` these tests
- * used to seed; the prelock's own SELECT is not what the message reads.)
+ * What the PRELOCK's returning SELECT hands back — the rows the pass-2a tally
+ * compares against (pack CB1.5a-i.2). B1.5 retired the refusal diagnostic's
+ * locking re-read: the tally IS the locked truth, so the number an operator
+ * reads comes from here.
  */
-function currentQuantity(quantity: number | null): void {
-  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) =>
-    isPrelockSelect(sqlTextOf(args[0])) || quantity === null ? [] : [{ quantity }]
-  )
+function prelockedStock(quantities: Record<number, number> = {}, ample = 100): void {
+  rawBehavior.$queryRaw.mockImplementation(async (...args: unknown[]) => {
+    const query = args[0] as { values?: unknown[] }
+    if (!isPrelockSelect(sqlTextOf(query))) return []
+    const values = (query?.values ?? []) as number[]
+    const rows: Array<{ productId: number; locationId: number; quantity: number; version: number }> = []
+    for (let i = 0; i < values.length; i += 2) {
+      const productId = values[i]
+      rows.push({
+        productId,
+        locationId: values[i + 1],
+        quantity: quantities[productId] ?? ample,
+        version: 1,
+      })
+    }
+    return rows
+  })
 }
 
 /**
- * The candidate-existence read the simple-path prelock now runs (pack REV-22
- * F2): every asked id answers as a real product unless a test says otherwise.
- * A candidate the read does NOT return contributes no prelock key and its item
- * fails item-locally on the loop's own `findUnique`.
+ * The ONE batched `products` read (pack CB1.5a-i.2): it proves every survivor id
+ * AND supplies the name the result entry and the refusal text carry — the
+ * per-item `product.findUnique` retired with it.
  */
 function productsExist(tx: DeepMockProxy<PrismaClient>): void {
-  ;(tx.product.findMany as unknown as jest.Mock).mockImplementation(
-    async (args: any) => ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id }))
+  const NAMES: Record<number, string> = { 10: 'Widget A', 20: 'Widget B' }
+  ;(tx.product.findMany as unknown as jest.Mock).mockImplementation(async (args: any) =>
+    ((args?.where?.id?.in ?? []) as number[]).map((id) => ({
+      id,
+      name: NAMES[id] ?? `Product ${id}`,
+    }))
   )
 }
 
@@ -153,7 +170,7 @@ function setupTransaction() {
   installRecordingRaw(mockTx as unknown as Record<string, unknown>)
   // Default: atomic UPDATE affects 1 row (success)
   updateAffectedRows(1)
-  currentQuantity(null)
+  prelockedStock()
   productsExist(mockTx)
   getMockPrisma().$transaction.mockImplementation(async (cb: any, _opts?: any) => {
     return cb(mockTx)
@@ -174,7 +191,6 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     const order = buildOrder()
 
     tx.externalOrder.findUnique.mockResolvedValue(order as any)
-    tx.product.findUnique.mockResolvedValue({ name: 'Widget A' } as any)
     tx.externalOrderItem.update.mockResolvedValue({} as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 5 },
@@ -193,7 +209,9 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     expect(result.failed).toHaveLength(0)
 
     // The two deduction statements this pin is about:
-    //   1. product_locations decrement with WHERE quantity >= ?
+    //   1. product_locations decrement with WHERE quantity >= ? — B1.5: the
+    //      clause stays as the BACKSTOP (the guard is the pass-2a tally), and a
+    //      0-row answer under a passing tally is an invariant violation.
     //   2. products.quantity legacy mirror (locationId === 1)
     const executes = rawCalls.filter((c) => c.kind === 'execute')
     const decrements = executes.filter((c) => /UPDATE product_locations/.test(c.sql))
@@ -209,15 +227,14 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     expect(tx.product_locations.upsert).not.toHaveBeenCalled()
   })
 
-  it('P0-1: skips item as insufficient_stock when atomic UPDATE affects 0 rows', async () => {
+  it('B1.5: the TALLY refuses insufficient stock — no UPDATE is issued at all', async () => {
     const tx = setupTransaction()
     const order = buildOrder()
 
     tx.externalOrder.findUnique.mockResolvedValue(order as any)
-    tx.product.findUnique.mockResolvedValue({ name: 'Widget A' } as any)
-    // The product_locations UPDATE returns 0 → stock WHERE clause rejected
-    updateAffectedRows(0)
-    currentQuantity(2)
+    // The prelock's returning SELECT is what the guard reads (pack CB1.5a-i.2):
+    // the row holds 2, the item asks for 5.
+    prelockedStock({ 10: 2 })
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 0 },
     ] as any)
@@ -233,10 +250,32 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     expect(result.fulfilled).toHaveLength(0)
     expect(result.skipped).toHaveLength(1)
     expect(result.skipped[0].reason).toBe('insufficient_stock')
-    expect(result.skipped[0].details).toContain('Available: 2')
-    expect(result.skipped[0].details).toContain('Requested: 5')
+    expect(result.skipped[0].details).toBe(
+      'Insufficient stock for Widget A. Available: 2, Requested: 5'
+    )
 
-    // fulfilledQty must NOT be incremented when stock is insufficient
+    // The refusal spends NO product_locations statement past the prelock, and
+    // fulfilledQty is not incremented.
+    expect(rawCalls.filter((c) => /UPDATE product_locations/.test(c.sql))).toHaveLength(0)
+    expect(tx.externalOrderItem.update).not.toHaveBeenCalled()
+  })
+
+  it('B1.5: a 0-row UPDATE under a PASSING tally aborts the whole request', async () => {
+    const tx = setupTransaction()
+    const order = buildOrder()
+
+    tx.externalOrder.findUnique.mockResolvedValue(order as any)
+    // Ample prelocked stock — the tally passes — but the engine reports 0 rows.
+    updateAffectedRows(0)
+    tx.externalOrderItem.findMany.mockResolvedValue([
+      { quantity: 5, fulfilledQty: 0 },
+    ] as any)
+    tx.externalOrder.update.mockResolvedValue({} as any)
+
+    await expect(
+      fulfillExternalOrder('order-1', 1, [{ itemId: 'item-1', quantity: 5 }], 42)
+    ).rejects.toThrow('fulfil invariant: locked row 10:1 moved under the tally')
+
     expect(tx.externalOrderItem.update).not.toHaveBeenCalled()
   })
 
@@ -249,11 +288,9 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     const order = buildOrder()
 
     tx.externalOrder.findUnique.mockResolvedValue(order as any)
-    tx.product.findUnique.mockResolvedValue({ name: 'Widget A' } as any)
-    // UPDATE affects 0 rows because the row holds nothing (post-materialize it
-    // exists at { 0, 0 }, which the WHERE quantity >= guard rejects all the same)
-    updateAffectedRows(0)
-    currentQuantity(null)
+    // The row holds nothing: post-materialize it exists at { 0, 0 }, which the
+    // pass-2a tally refuses before any UPDATE is issued.
+    prelockedStock({ 10: 0 })
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 0 },
     ] as any)
@@ -282,7 +319,6 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     const order = buildOrder()
 
     tx.externalOrder.findUnique.mockResolvedValue(order as any)
-    tx.product.findUnique.mockResolvedValue({ name: 'Widget A' } as any)
     tx.externalOrderItem.update.mockResolvedValue({} as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 5 },
@@ -336,14 +372,11 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     }
 
     tx.externalOrder.findUnique.mockResolvedValue(order as any)
-    tx.product.findUnique
-      .mockResolvedValueOnce({ name: 'Widget A' } as any)
-      .mockResolvedValueOnce({ name: 'Widget B' } as any)
 
-    // First item: UPDATE succeeds (1). Second item: UPDATE fails (0) —
-    // insufficient stock. (The mirror and the prelock report 1 either way.)
-    updateAffectedRows(1, 0)
-    currentQuantity(1)
+    // First item: ample stock, so it writes. Second item: the prelocked row
+    // holds 1 against a request for 3, so the TALLY refuses it — B1.5 moved the
+    // decision off the UPDATE's affected-row count.
+    prelockedStock({ 10: 100, 20: 1 })
     tx.externalOrderItem.update.mockResolvedValue({} as any)
     tx.externalOrderItem.findMany.mockResolvedValue([
       { quantity: 5, fulfilledQty: 5 },
@@ -366,5 +399,8 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     expect(result.skipped).toHaveLength(1)
     expect(result.skipped[0].itemId).toBe('item-2')
     expect(result.skipped[0].reason).toBe('insufficient_stock')
+    expect(result.skipped[0].details).toBe(
+      'Insufficient stock for Widget B. Available: 1, Requested: 3'
+    )
   })
 })

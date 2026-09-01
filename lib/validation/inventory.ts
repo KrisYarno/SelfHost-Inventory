@@ -1,6 +1,11 @@
 import { z } from 'zod';
 import { inventory_logs_logType } from '@prisma/client';
 import { DEDUCTION_INTENTS } from '@/lib/inventory/intent';
+import {
+  MAX_BATCH_ADJUST_ITEMS,
+  MAX_BATCH_TRANSFERS,
+  capMessage,
+} from '@/lib/inventory/request-limits';
 
 const positiveInt = z.number().int().positive();
 
@@ -87,7 +92,7 @@ export const BatchInventoryAdjustmentSchema = z.object({
   adjustments: z
     .array(InventoryAdjustmentSchema)
     .min(1, 'At least one adjustment is required')
-    .max(100, 'at most 100 items per request'),
+    .max(MAX_BATCH_ADJUST_ITEMS, capMessage(MAX_BATCH_ADJUST_ITEMS, 'items')),
   type: z.string().trim().optional(),
 });
 
@@ -127,7 +132,7 @@ export const BatchTransferSchema = z.object({
     .min(1, "At least one transfer is required")
     // QB-9: the one covered-writer feeding schema that had no request-size
     // maximum — and this route runs one full transaction PER transfer.
-    .max(100, "at most 100 transfers per request"),
+    .max(MAX_BATCH_TRANSFERS, capMessage(MAX_BATCH_TRANSFERS, "transfers")),
 });
 
 // Admin bulk mass-update (POST /api/admin/inventory/mass-update).
