@@ -199,16 +199,48 @@ export async function validateOrderFulfillment(
 
       const components = resolved.components;
 
+      // FD2-1: the soft-delete belt covers BUNDLES too. Component stock below
+      // is read from `product_locations`, whose rows a soft delete leaves in
+      // place, and the names come from the snapshot — so nothing on this path
+      // ever consulted `deletedAt`, and a bundle with a soft-deleted component
+      // rendered "ready" off live stock. The fulfil pass reads its survivors
+      // `deletedAt: null` (OC-5 below), so that bundle comes back in `failed[]`
+      // — the same refusal FD1-6 closed on the SINGLE path, through the other
+      // door. One read per bundle item, alongside the batched stock read.
+      const componentIds = components.map((c) => c.internalProductId);
+      const aliveComponents = await prisma.product.findMany({
+        where: { id: { in: componentIds }, deletedAt: null },
+        select: { id: true },
+      });
+      const aliveComponentIds = new Set(aliveComponents.map((p) => p.id));
+      if (componentIds.some((id) => !aliveComponentIds.has(id))) {
+        issues.push('Bundle component no longer exists');
+        hasStockIssues = true;
+        validationItems.push({
+          itemId: item.id,
+          name: item.name,
+          variantName: item.variantName ?? null,
+          sku: item.sku,
+          requestedQty: item.quantity,
+          remainingQty,
+          fulfilledQty: item.fulfilledQty,
+          isMapped: item.isMapped,
+          mapping: undefined,
+          issues,
+          bundleShortages: undefined,
+        });
+        continue;
+      }
+
       const shortages: BundleShortage[] = [];
 
       // FIX D (P1 #4): Batch component stock reads into a single query per item.
       // Previously this loop did N round-trips (findFirst/findMany per component).
-      const itemComponentIds = components.map((c) => c.internalProductId);
       const stockByProductId = new Map<number, number>();
 
       if (locationId) {
         const rows = await prisma.product_locations.findMany({
-          where: { productId: { in: itemComponentIds }, locationId },
+          where: { productId: { in: componentIds }, locationId },
           select: { productId: true, quantity: true },
         });
         for (const r of rows) {
@@ -217,7 +249,7 @@ export async function validateOrderFulfillment(
       } else {
         // Sum across all locations per product.
         const rows = await prisma.product_locations.findMany({
-          where: { productId: { in: itemComponentIds } },
+          where: { productId: { in: componentIds } },
           select: { productId: true, quantity: true },
         });
         for (const r of rows) {

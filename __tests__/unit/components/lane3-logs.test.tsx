@@ -268,6 +268,25 @@ describe("BatchDrawer", () => {
     expect(line.textContent).not.toMatch(/·\s*·/);
   });
 
+  it("FD2-4: a summary missing its NUMBERS renders without spelling \"undefined\"", async () => {
+    // The three arrays got the version-skew belt; the two NUMBERS did not, so a
+    // body that carried neither rendered "undefined products · undefined units"
+    // — a line an operator reads as data. A missing number has no segment.
+    mockFetchBatch(
+      withSummary({
+        rowCount: 2,
+        logTypes: ["SALE"],
+        actors: ["derek"],
+        orders: [{ id: "ord_1", orderNumber: "23716" }],
+      })
+    );
+    renderWithClient(<BatchDrawer batchId={BATCH_UUID} onOpenChange={jest.fn()} />);
+
+    const line = await screen.findByText(/order #23716/);
+    expect(line).toHaveTextContent("Sale · derek · order #23716");
+    expect(line.textContent).not.toMatch(/undefined/);
+  });
+
   it("hides the summary line entirely for an events-only batch (rowCount 0)", async () => {
     mockFetchBatch({
       ...batchResponse,

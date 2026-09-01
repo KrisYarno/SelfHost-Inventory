@@ -97,8 +97,14 @@ function summaryLine(summary: BatchSummary): string {
     // getInventoryLogTone's second argument is a per-ROW delta that only steers the
     // tone; the LABEL is what is read here, so a fixed 0 is correct.
     logTypes.map((t) => getInventoryLogTone(t, 0).label).join(" / "),
-    `${summary.productCount} product${summary.productCount === 1 ? "" : "s"}`,
-    `${formatDelta(summary.netUnits)} units`,
+    // FD2-4: the two NUMBERS get the same version-skew belt the arrays got. An
+    // absent count used to render "undefined products · undefined units" — a
+    // segment an operator reads as data. No number, no segment (the
+    // `filter(Boolean)` below drops the empty string, separator and all).
+    typeof summary.productCount === "number"
+      ? `${summary.productCount} product${summary.productCount === 1 ? "" : "s"}`
+      : "",
+    typeof summary.netUnits === "number" ? `${formatDelta(summary.netUnits)} units` : "",
     actors.join(", "),
   ];
   if (orders.length > 0) {

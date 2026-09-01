@@ -1324,6 +1324,96 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
     expect(text).toContain("Re-select the order to rebuild the cart from its current state.");
   });
 
+  it("FD2-2: an entry with NO quantity is dropped from the Undo details, and named", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    // A FULL success by both halves of the gate: one line, one entry, and the
+    // unit sum falls back to the cart's number so nothing is refused. The
+    // entry still carries no quantity of its own — and the Undo posts these
+    // numbers to unfulfill, which is the door FD1-4 closed on the rollback
+    // body. Restoring the cart's number here would credit units the server
+    // never said it took.
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-q",
+          summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+          results: {
+            fulfilled: [{ itemId: "it-0", productId: 600 }],
+            skipped: [],
+            failed: [],
+          },
+        }),
+      }),
+    });
+    seedWcCart(1, 2);
+    // A manual line rides along: it has no entry to read and keeps the cart's
+    // number, so this pin sees the WC line DROPPED, not the whole array lost.
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    const details = onSuccess.mock.calls[0][0].items as Array<{
+      productId: number;
+      quantity: number;
+      fulfillmentItemId?: string;
+    }>;
+    expect(details.find((detail) => detail.fulfillmentItemId === "it-0")).toBeUndefined();
+    expect(details).toEqual([
+      expect.objectContaining({ productId: 777, quantity: 1, fulfillmentItemId: undefined }),
+    ]);
+    expect(warn.mock.calls.map((call) => call.join(" ")).join(" | ")).toContain("it-0");
+    warn.mockRestore();
+  });
+
+  it("FD2-3: a NEGATIVE count with no entries never claims the lines were put back", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    // A skewed body: the summary counts fewer than zero fulfilled lines and
+    // names no entries. Nothing is rolled back — so the refusal must be the
+    // NOT_STARTED one. `restoredFully` starting life as `true` used to make
+    // this the REFUSED copy, which promises a rollback that never ran.
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: null,
+          summary: { total: 2, fulfilled: -1, skipped: 2, failed: 0 },
+          results: {
+            fulfilled: [],
+            skipped: [
+              {
+                itemId: "it-1",
+                reason: "insufficient_stock",
+                details: "Insufficient stock for Line 1. Available: 0, Requested: 1",
+              },
+            ],
+            failed: [],
+          },
+        }),
+      }),
+    });
+    seedWcCart(2);
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    expect(calls("/unfulfill")).toHaveLength(0);
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("Nothing was sent to WooCommerce. Fix the issue and try again.");
+    expect(text).not.toContain("were put back");
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
   // -------------------------------------------------------------------------
   // THE CAP GUARD (QB-3 / seam S-B10). Each leg counts against its own route's
   // cap, and the over-cap sentence renders at the `Total Items:` row — the one

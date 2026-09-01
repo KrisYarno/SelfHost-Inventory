@@ -519,8 +519,16 @@ export function CompleteOrderDialog({
           //   - entries absent with a positive count: the helper's zero-entries
           //     belt, which sends nothing and names the incident;
           //   - neither: nothing was fulfilled, so the leg IS clean.
+          //
+          // FD2-3: the two facts are SEPARATE. `restoredFully` answers "did
+          // everything come back?", which only means anything once a rollback
+          // ran — and initialized `true` it also answered for the paths where
+          // none did. `rolledBack` is the second fact, and the code below keys
+          // the NOT_STARTED/REFUSED split on it.
+          let rolledBack = false;
           let restoredFully = true;
           if (fulfilledEntries.length > 0 || fulfilledCount > 0) {
+            rolledBack = true;
             restoredFully = await rollbackWcLeg(fulfilledEntries);
             if (restoredFully) wcFulfilled = false;
             else raiseRollbackIncident();
@@ -564,7 +572,14 @@ export function CompleteOrderDialog({
           // FD1-3: "nothing was fulfilled" means NEITHER reader saw a deduction.
           // A zero count with entries present DID run a rollback, and must not
           // claim that nothing was ever sent to WooCommerce.
-          if (fulfilledCount === 0 && fulfilledEntries.length === 0) {
+          //
+          // FD2-3: and it is asked as "did a rollback RUN?", not spelled as the
+          // one envelope shape that means it did not. A skewed body — a
+          // NEGATIVE `summary.fulfilled` with no entries — is neither `=== 0`
+          // nor a rollback, and used to fall through to REFUSED, whose action
+          // tells the operator lines "were put back" when nothing was ever
+          // sent. The gate above owns the enumeration; this reads its answer.
+          if (!rolledBack) {
             (error as any).code = "FULFILMENT_NOT_STARTED";
           } else if (restoredFully) {
             (error as any).code = "FULFILMENT_REFUSED";
@@ -640,25 +655,43 @@ export function CompleteOrderDialog({
       // fulfilled — unfulfill's `fulfilledQty >= q` guard reads the line's
       // TOTAL, so it would pass. Manual lines keep the cart's number: the
       // deduct-simple leg has no clamp.
-      const deductionDetails: DeductionDetail[] = orderItems.map((item) => {
+      const deductionDetails: DeductionDetail[] = orderItems.flatMap((item) => {
         const entry = item.fulfillmentItemId
           ? fulfilledEntries.find((candidate) => candidate.itemId === item.fulfillmentItemId)
           : undefined;
-        return {
-          // FD1-2: the SERVER'S product id when the entry names one — the same
-          // belt, and the same preference order, the rollback body keeps. The
-          // Undo posts what was actually deducted, so a line the server resolved
-          // to a different product than the cart holds is restored where the
-          // stock went, not where the cart thought it would go.
-          productId:
-            entry && typeof entry.productId === "number" && entry.productId > 0
-              ? entry.productId
-              : item.product.id,
-          productName: item.product.name,
-          quantity: entry ? serverQuantityOf(entry) : item.quantity,
-          locationId: selectedLocationId!,
-          fulfillmentItemId: item.fulfillmentItemId,
-        };
+        // FD2-2: the Undo body follows the ROLLBACK body's strict rule (FD1-4).
+        // These quantities are posted to unfulfill by the Undo toast, so an
+        // entry the server never numbered must not be restored out of the
+        // CART'S number — that is the same over-restore, one door along. The
+        // line is dropped and named instead. Belt-class: today's route always
+        // sends the field, and a matched entry that lacks it is unreachable.
+        if (entry && !(typeof entry.quantity === "number" && entry.quantity > 0)) {
+          console.warn(
+            `Undo details: dropping line ${item.fulfillmentItemId} — the fulfil response named no quantity for it`
+          );
+          return [];
+        }
+        return [
+          {
+            // FD1-2: the SERVER'S product id when the entry names one — the same
+            // belt, and the same preference order, the rollback body keeps. The
+            // Undo posts what was actually deducted, so a line the server resolved
+            // to a different product than the cart holds is restored where the
+            // stock went, not where the cart thought it would go.
+            productId:
+              entry && typeof entry.productId === "number" && entry.productId > 0
+                ? entry.productId
+                : item.product.id,
+            productName: item.product.name,
+            // No entry at all keeps the cart's number: that is the tolerated
+            // skew FD1-3 pinned (a summary that counts the line the envelope
+            // does not name), where refusing to restore would strand the
+            // deduction with no Undo at all.
+            quantity: entry ? serverQuantityOf(entry) : item.quantity,
+            locationId: selectedLocationId!,
+            fulfillmentItemId: item.fulfillmentItemId,
+          },
+        ];
       });
       const completedOrderRef = orderReference;
       const externalOrderId = selectedExternalOrder?.id;

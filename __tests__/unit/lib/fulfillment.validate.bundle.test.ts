@@ -12,6 +12,7 @@
 jest.mock('@/lib/prisma', () => {
   const mock: any = {
     externalOrder: { findUnique: jest.fn() },
+    product: { findMany: jest.fn() },
     product_locations: {
       findFirst: jest.fn(),
       findMany: jest.fn(),
@@ -29,6 +30,11 @@ function getMock(): any {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // FD2-1: every bundle component is ALIVE unless a pin says otherwise — the
+  // belt's read answers with exactly the ids it was handed.
+  getMock().product.findMany.mockImplementation(async (args: any) =>
+    ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id }))
+  );
 });
 
 /** Build a minimal order with one bundle item and a given snapshot. */
@@ -325,5 +331,71 @@ describe('validateOrderFulfillment — a soft-deleted mapped product', () => {
       availableByLocation: [{ locationId: 1, locationName: 'Main', available: 99 }],
     });
     expect(result.canFulfill).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FD2-1 — the soft-delete belt covers BUNDLES too.
+//
+// Component stock is read from `product_locations`, whose rows a soft-delete
+// leaves in place, and the component NAMES come from the snapshot — so nothing
+// on the bundle path ever consulted `deletedAt`. The bundle rendered "ready"
+// off live stock and then failed at fulfil, whose survivor read is
+// `deletedAt: null` (OC-5). The preview has to refuse it first.
+// ---------------------------------------------------------------------------
+
+describe('validateOrderFulfillment — a bundle with a soft-deleted component', () => {
+  it('FD2-1: refuses the bundle instead of rendering it ready off component stock', async () => {
+    const mock = getMock();
+    mock.externalOrder.findUnique.mockResolvedValue(
+      buildBundleOrder({
+        snapshot: [
+          { internalProductId: 10, quantity: 1, internalProductName: 'BPC-157' },
+          { internalProductId: 20, quantity: 1, internalProductName: 'TB-500' },
+        ],
+      })
+    );
+    // 20 is soft-deleted: the alive read simply does not name it.
+    mock.product.findMany.mockResolvedValue([{ id: 10 }]);
+    // Ample stock on BOTH rows — a soft delete leaves product_locations alone,
+    // which is exactly why the stock read cannot answer this question.
+    mock.product_locations.findMany.mockResolvedValue([
+      { productId: 10, quantity: 99 },
+      { productId: 20, quantity: 99 },
+    ]);
+
+    const result = await validateOrderFulfillment('ord-val-1', 1);
+
+    const item = result.items[0];
+    expect(item.issues).toContain('Bundle component no longer exists');
+    expect(item.bundleShortages).toBeUndefined();
+    expect(item.mapping).toBeUndefined();
+    expect(result.canFulfill).toBe(false);
+    expect(result.requiresAttention).toBe(true);
+    // The stock read is SKIPPED — there is no component left to have stock AT.
+    expect(mock.product_locations.findMany).not.toHaveBeenCalled();
+  });
+
+  it('FD2-1: an all-alive bundle is untouched by the belt', async () => {
+    const mock = getMock();
+    mock.externalOrder.findUnique.mockResolvedValue(
+      buildBundleOrder({
+        snapshot: [
+          { internalProductId: 10, quantity: 1, internalProductName: 'BPC-157' },
+          { internalProductId: 20, quantity: 1, internalProductName: 'TB-500' },
+        ],
+      })
+    );
+    mock.product_locations.findMany.mockResolvedValue([
+      { productId: 10, quantity: 99 },
+      { productId: 20, quantity: 99 },
+    ]);
+
+    const result = await validateOrderFulfillment('ord-val-1', 1);
+
+    expect(result.items[0].issues).not.toContain('Bundle component no longer exists');
+    expect(result.canFulfill).toBe(true);
+    // ONE alive read per bundle item, alongside the one batched stock read.
+    expect(mock.product.findMany).toHaveBeenCalledTimes(1);
   });
 });
