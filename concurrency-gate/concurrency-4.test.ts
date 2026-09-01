@@ -12,7 +12,7 @@
  * key set in (productId, locationId) ascending order, taken before the
  * transaction has pinned a read view.
  *
- * Three claims live or die on a real InnoDB engine, and nowhere else:
+ * Four claims live or die on a real InnoDB engine, and nowhere else:
  *
  *   9c  TWO WRITERS ASKING IN OPPOSITE ORDER TAKE THE ROWS IN THE SAME ORDER.
  *       Session A locks order 1 and asks for [P1, P2]; session B locks order 2
@@ -45,6 +45,19 @@
  *       `jest.resetModules()`d dynamic import, mocked auth) — because the
  *       envelope, the batch id, the audit row and the attempt row are route
  *       contracts, and calling the cores directly would prove none of them.
+ *
+ *   14  FULFIL AND UNFULFILL, ON A REAL ENGINE, FOR THE FIRST TIME.
+ *       Reconciliation Part 2 B1.5, pack CB1.5a-ii. Until this scenario, no
+ *       gate scenario had ever driven either route against InnoDB — and that
+ *       blind spot is exactly how a fulfil whose per-item SAVEPOINT could never
+ *       execute (MySQL ER 1295: `SAVEPOINT` is not supported in the prepared
+ *       statement protocol) reached production. Four sub-cases: A the two-pass
+ *       fulfil of a single line plus a BUNDLE line (red against the old file);
+ *       B the locked shortfall, quoting the number the tally actually holds;
+ *       C two concurrent fulfils of one order, serialized by the ORDER lock;
+ *       D the unfulfill round trip, self-contained. It runs at LOCATION 1 on
+ *       purpose: the first real-engine exercise of the `products` compatibility
+ *       mirror on a bundle, which is where the named FK S->X residual lives.
  *
  * THE DEADLOCK REPORT IS RECORDED, NEVER ASSERTED AWAY (pack REV-14 PKb-10).
  * MySQL exposes no `Innodb_deadlocks` status counter, so the only truthful
@@ -108,6 +121,7 @@ import {
   GATE_ADMIN_ID,
   GATE_EXT_ORDER_2_ID,
   GATE_EXT_ORDER_ID,
+  GATE_INTEGRATION_ID,
   LOCATION_MAIN,
   LOCATION_SECOND,
   P_APPROVED,
@@ -147,17 +161,57 @@ jest.mock("@/lib/rateLimit", () => ({
   enforceRateLimit: jest.fn(() => ({})),
 }));
 
+// EGRESS IS MOCKED, AND IT HAS TO BE (pack CB1.5a-ii, PKc-5/OCc-22). Scenario 14
+// drives the fulfil and unfulfill routes, and both of them reach for the
+// platform on the way out. A push that BLOCKS is not a no-op: the egress layer
+// commits a durable `platform_write_attempts` row AND a `PLATFORM_WRITE_ATTEMPT`
+// audit row on `entityType: "INTEGRATION"` (`lib/platforms/egress/index.ts:440`,
+// `egress/audit.ts:98, :135`) that NO reset clause in `seed.ts` names — so it
+// would survive every reset and break `concurrency.test.ts` scenario 2's
+// ABSOLUTE `auditLog.count()` from the outside. And `pushStockForProducts(...)`
+// is fire-and-forget (`fulfill/route.ts:221`) on the singleton this file's
+// `afterAll` disconnects.
+//
+// This gate's concern is the DATABASE, not the wire. The real functions are
+// covered by their own suites; here they are replaced by the two answers the
+// routes have to survive: a blocked order-status push and a resolved stock push.
+// The belt that proves the mock actually held is scenario 14's `afterAll`.
+jest.mock("@/lib/external-orders/shared", () => ({
+  ...jest.requireActual("@/lib/external-orders/shared"),
+  pushOrderStatusToExternal: jest.fn(async () => ({
+    success: false,
+    blockedReason: "gate",
+  })),
+}));
+
+jest.mock("@/lib/external-orders/stock-sync", () => ({
+  ...jest.requireActual("@/lib/external-orders/stock-sync"),
+  pushStockForProducts: jest.fn(async () => undefined),
+}));
+
 // --------------------------------------------------------------------------
 // The dynamically-loaded production modules
 // --------------------------------------------------------------------------
 
 type SingleArgRoute = { POST: (request: NextRequest) => Promise<Response> };
 
+/**
+ * The App Router's TWO-argument handler shape (pack CB1.5a-ii, OCc-15). Fulfil
+ * and unfulfill are addressed by a path parameter — `POST(request, { params:
+ * { orderId } })` — so `SingleArgRoute` above does not fit them, and the
+ * `concurrency-3.test.ts:106-108` idiom is spelled once more here.
+ */
+type ParamRoute = {
+  POST: (request: NextRequest, ctx: { params: { orderId: string } }) => Promise<Response>;
+};
+
 let prelock: typeof import("@/lib/inventory/prelock");
 let orderLock: typeof import("@/lib/inventory/order-lock");
 let inventory: typeof import("@/lib/inventory");
 let deductSimpleRoute: SingleArgRoute;
 let batchAdjustRoute: SingleArgRoute;
+let fulfillRoute: ParamRoute;
+let unfulfillRoute: ParamRoute;
 let singleton: PrismaClient;
 
 // --------------------------------------------------------------------------
@@ -208,10 +262,38 @@ const NEVER_STOCKED_KEY: PrelockKeyInput = {
   locationId: LOCATION_SECOND,
 };
 
+/**
+ * SCENARIO 14's OWN FIXTURE, by explicit id (pack CB1.5a-ii). Declared here,
+ * beside the keys, because `resetAll` below has to name the two order items:
+ * the B1.5 reset clauses that put `fulfilledQty`, the frozen bundle snapshot and
+ * the order's stocked-out stamps back are SCOPED BY ID, and this file's own
+ * `afterAll` is what hands the whole fixture to receiving scenario 2.
+ *
+ * The rows themselves are created and deleted by scenario 14's own bracket, NOT
+ * by `seedGateDatabase` — receiving scenario 2 pins absolute table-wide counts
+ * (`concurrency.test.ts:260-267`), so a permanently seeded row would fail a
+ * scenario that has nothing to do with this lane (the `installReconAuditEvent`
+ * precedent, `seed.ts:449-490`).
+ */
+const GATE_LINK_SINGLE = "gate-link-single";
+const GATE_LINK_BUNDLE = "gate-link-bundle";
+const GATE_ITEM_SINGLE = "gate-item-single";
+const GATE_ITEM_BUNDLE = "gate-item-bundle";
+
 /** The whole seeded fixture, before and after every scenario — the
  *  `concurrency-3.test.ts` shape. */
 async function resetAll(): Promise<void> {
-  await resetGateFixtures({ lineIds: SEED_LINE_IDS, productIds: SEED_PRODUCT_IDS });
+  await resetGateFixtures({
+    lineIds: SEED_LINE_IDS,
+    productIds: SEED_PRODUCT_IDS,
+    // B1.5 (pack CB1.5a-ii, OCc-4b): scenario 14's two order lines and the order
+    // they hang off. Widened for the WHOLE file on purpose — every reset in here,
+    // the file's own `afterAll` included, must put `fulfilledQty`, the frozen
+    // snapshot and the stocked-out stamps back. An id that does not exist yet
+    // (nothing before scenario 14 creates one) is a no-op, never a throw (S-B13).
+    externalOrderItemIds: [GATE_ITEM_SINGLE, GATE_ITEM_BUNDLE],
+    externalOrderIds: [GATE_EXT_ORDER_ID],
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -605,6 +687,27 @@ async function callRoute(
   return { status: response.status, body: (await response.json()) as Record<string, unknown> };
 }
 
+/**
+ * The same request, for a route that takes the App Router's SECOND argument
+ * (pack CB1.5a-ii, OCc-15). Kept beside `callRoute` rather than folded into it:
+ * the two handler shapes are different types, and a single function taking an
+ * optional `params` would type-erase which one it was handed.
+ */
+async function callParamRoute(
+  route: ParamRoute,
+  path: string,
+  params: { orderId: string },
+  body: unknown,
+): Promise<RouteAnswer> {
+  const request = new NextRequest(`http://concurrency-gate.invalid${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const response = await route.POST(request, { params });
+  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+}
+
 type DeductItem = { productId: number; quantity: number };
 type Adjustment = { productId: number; locationId: number; delta: number };
 
@@ -614,6 +717,26 @@ function deductSimple(locationId: number, items: DeductItem[]): Promise<RouteAns
 
 function batchAdjust(adjustments: Adjustment[]): Promise<RouteAnswer> {
   return callRoute(batchAdjustRoute, "/api/inventory/batch-adjust", { adjustments });
+}
+
+/** The two order-scoped routes scenario 14 drives, always at the gate's own
+ *  external order (the path parameter IS the id the audit row names). */
+function fulfillOrder(body: unknown): Promise<RouteAnswer> {
+  return callParamRoute(
+    fulfillRoute,
+    `/api/orders/${GATE_EXT_ORDER_ID}/fulfill`,
+    { orderId: GATE_EXT_ORDER_ID },
+    body,
+  );
+}
+
+function unfulfillOrder(body: unknown): Promise<RouteAnswer> {
+  return callParamRoute(
+    unfulfillRoute,
+    `/api/orders/${GATE_EXT_ORDER_ID}/unfulfill`,
+    { orderId: GATE_EXT_ORDER_ID },
+    body,
+  );
 }
 
 // --------------------------------------------------------------------------
@@ -680,6 +803,14 @@ beforeAll(async () => {
   batchAdjustRoute = (await import(
     "@/app/api/inventory/batch-adjust/route"
   )) as unknown as SingleArgRoute;
+  // B1.5 (pack CB1.5a-ii): the first time either of these runs against a real
+  // engine. Same registry, same singleton, same fail-closed schema proof below.
+  fulfillRoute = (await import(
+    "@/app/api/orders/[orderId]/fulfill/route"
+  )) as unknown as ParamRoute;
+  unfulfillRoute = (await import(
+    "@/app/api/orders/[orderId]/unfulfill/route"
+  )) as unknown as ParamRoute;
 
   singleton = (await import("@/lib/prisma")).default;
 
@@ -1427,5 +1558,575 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       await dropHoldTrigger();
       await Promise.all([probe.$disconnect(), stocker.$disconnect()]);
     }
+  });
+});
+
+// --------------------------------------------------------------------------
+// Scenario 14's oracles — mysql2 raw, like every other oracle in this file
+// --------------------------------------------------------------------------
+
+type LedgerRow = {
+  productId: number;
+  delta: number;
+  logType: string;
+  locationId: number | null;
+  orderRecordId: string | null;
+};
+
+/** Every ledger row a route wrote under ONE batch, in write order. `id ASC` is
+ *  the write order because the rows are inserted one statement at a time. */
+async function ledgerRowsForBatch(batchId: string): Promise<LedgerRow[]> {
+  const rows = await rawRows<LedgerRow>(
+    `SELECT productId, delta, logType, locationId, orderRecordId
+       FROM inventory_logs
+      WHERE batchId = ?
+      ORDER BY id`,
+    [batchId],
+  );
+  return rows.map((row) => ({
+    ...row,
+    productId: Number(row.productId),
+    delta: Number(row.delta),
+    logType: String(row.logType),
+    locationId: row.locationId === null ? null : Number(row.locationId),
+  }));
+}
+
+type AuditRow = { actionType: string; entityType: string; entityId: string | null };
+
+async function auditRowsForBatch(batchId: string): Promise<AuditRow[]> {
+  return rawRows<AuditRow>(
+    `SELECT actionType, entityType, entityId FROM audit_logs WHERE batchId = ? ORDER BY id`,
+    [batchId],
+  );
+}
+
+async function attemptCountForBatch(batchId: string): Promise<number> {
+  const rows = await rawRows<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM order_attribution_attempts WHERE batchId = ?",
+    [batchId],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** The two order-line columns fulfil and unfulfill move. `hasSnapshot` rather
+ *  than the JSON itself: whether the FIX B freeze committed is the question, and
+ *  a driver that hands JSON back as a string must not change the answer. */
+type OrderItemRow = { id: string; fulfilledQty: number; hasSnapshot: boolean };
+
+async function orderItemRows(): Promise<OrderItemRow[]> {
+  const rows = await rawRows<{ id: string; fulfilledQty: number; hasSnapshot: number }>(
+    `SELECT id, fulfilledQty, (bundleComponentSnapshot IS NOT NULL) AS hasSnapshot
+       FROM external_order_items
+      WHERE id IN (?, ?)
+      ORDER BY id`,
+    [GATE_ITEM_BUNDLE, GATE_ITEM_SINGLE],
+  );
+  return rows.map((row) => ({
+    id: String(row.id),
+    fulfilledQty: Number(row.fulfilledQty),
+    hasSnapshot: Number(row.hasSnapshot) === 1,
+  }));
+}
+
+async function orderStockedOut(): Promise<boolean> {
+  const rows = await rawRows<{ stockedOut: number }>(
+    "SELECT stockedOut FROM external_orders WHERE id = ?",
+    [GATE_EXT_ORDER_ID],
+  );
+  return Number(rows[0]?.stockedOut ?? 0) === 1;
+}
+
+/** BOTH tables, in ONE assertable object (pack CB1.5a-ii, PKc-4): scenario 14
+ *  runs at location 1, so `products.quantity` is a second source of truth that
+ *  has to move with `product_locations` — asserting only one of them would let
+ *  the mirror drift silently, which is the exact class of bug this lane exists
+ *  to kill. */
+async function stockIn(productId: number): Promise<{ row: number | null; mirror: number }> {
+  const row = await locationRow({ productId, locationId: LOCATION_MAIN });
+  return { row: row?.quantity ?? null, mirror: await mirroredQuantity(productId) };
+}
+
+/** Arrange, through BOTH tables — the same pair every assertion reads back. */
+async function setStock(productId: number, quantity: number): Promise<void> {
+  await singleton.product_locations.updateMany({
+    where: { productId, locationId: LOCATION_MAIN },
+    data: { quantity },
+  });
+  await singleton.product.update({ where: { id: productId }, data: { quantity } });
+}
+
+/** The gate's own external order, as the fulfil dialog would send it: the
+ *  single line first, then the bundle line. */
+function fulfilRequest(): {
+  locationId: number;
+  items: Array<{ itemId: string; quantity: number }>;
+} {
+  return {
+    locationId: LOCATION_MAIN,
+    items: [
+      { itemId: GATE_ITEM_SINGLE, quantity: 2 },
+      { itemId: GATE_ITEM_BUNDLE, quantity: 1 },
+    ],
+  };
+}
+
+type FulfilResults = {
+  fulfilled: Array<Record<string, unknown>>;
+  skipped: Array<{ itemId: string; reason: string; details?: string }>;
+  failed: Array<{ itemId: string; error: string }>;
+};
+
+function resultsOf(answer: RouteAnswer): FulfilResults {
+  return answer.body.results as FulfilResults;
+}
+
+describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)", () => {
+  jest.setTimeout(120_000);
+
+  /**
+   * THE FIXTURE, OWNED BY THIS SCENARIO.
+   *
+   * `P_APPROVED` and `P_APPROVED_2` are the pack's `P_A` and `P_B` (OCc-4): both
+   * are in `SEED_PRODUCT_IDS`, so every SALE and CORRECTION row these sub-cases
+   * write carries a SCOPED `productId`, the reset's `routeBatchIds` derivation
+   * (`seed.ts`) finds the batches those rows were written under, and the new
+   * ORDER-audit clause plus the attempt delete take the residue back. The
+   * reconciliation pattern's dedicated products would NOT be derived by any
+   * other scenario's reset, and its `productOracle` reason does not apply here:
+   * these sub-cases move stock THROUGH the routes, which the oracle expects.
+   *
+   * `LOCATION_MAIN` is deliberate (OCc-11): the first real-engine exercise of
+   * the location-1 `products` mirror on a BUNDLE — the lane's one observed
+   * deadlock site.
+   *
+   * The bundle line's `bundleComponentSnapshot` is left NULL so that fulfil
+   * takes the LIVE fallback and its FIX B freeze really runs on a real engine.
+   */
+  beforeAll(async () => {
+    await resetAll();
+
+    await singleton.productLink.createMany({
+      data: [
+        {
+          id: GATE_LINK_SINGLE,
+          integrationId: GATE_INTEGRATION_ID,
+          externalProductId: "gate-fulfil-single",
+          internalProductId: P_APPROVED,
+        },
+        {
+          id: GATE_LINK_BUNDLE,
+          integrationId: GATE_INTEGRATION_ID,
+          externalProductId: "gate-fulfil-bundle",
+          internalProductId: null,
+          isBundle: true,
+        },
+      ],
+    });
+
+    // One unit of P_A and TWO of P_B per bundle: a component multiplier that is
+    // not 1 is what makes "the bundle deducted the right amount" a real claim.
+    await singleton.bundleComponent.createMany({
+      data: [
+        {
+          productLinkId: GATE_LINK_BUNDLE,
+          internalProductId: P_APPROVED,
+          quantity: 1,
+          sortOrder: 0,
+        },
+        {
+          productLinkId: GATE_LINK_BUNDLE,
+          internalProductId: P_APPROVED_2,
+          quantity: 2,
+          sortOrder: 1,
+        },
+      ],
+    });
+
+    await singleton.externalOrderItem.createMany({
+      data: [
+        {
+          id: GATE_ITEM_SINGLE,
+          orderId: GATE_EXT_ORDER_ID,
+          externalItemId: "gfs-1",
+          externalProductId: "gate-fulfil-single",
+          name: "Gate single",
+          quantity: 2,
+          price: 0,
+          productLinkId: GATE_LINK_SINGLE,
+          isMapped: true,
+        },
+        {
+          id: GATE_ITEM_BUNDLE,
+          orderId: GATE_EXT_ORDER_ID,
+          externalItemId: "gfb-1",
+          externalProductId: "gate-fulfil-bundle",
+          name: "Gate bundle",
+          quantity: 1,
+          price: 0,
+          productLinkId: GATE_LINK_BUNDLE,
+          isMapped: true,
+        },
+      ],
+    });
+  });
+
+  afterAll(async () => {
+    // THE BELT (pack CB1.5a-ii, PKc-5/OCc-22). The egress mock at the top of the
+    // file is what keeps a BLOCKED push from committing a durable attempt row
+    // and its INTEGRATION audit row — rows no reset clause names. Asserted ZERO
+    // BEFORE the delete, ON PURPOSE: a bypassed mock has to be a RED here, not a
+    // silent cleanup that hands the failure to `concurrency.test.ts` scenario 2.
+    const attempts = await rawRows<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM platform_write_attempts WHERE integrationId = ?",
+      [GATE_INTEGRATION_ID],
+    );
+    const attemptAudits = await rawRows<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM audit_logs
+        WHERE actionType = 'PLATFORM_WRITE_ATTEMPT' AND entityId = ?`,
+      [GATE_INTEGRATION_ID],
+    );
+    console.log(
+      `[scenario 14] egress belt — platform_write_attempts: ${Number(attempts[0]?.n ?? 0)}; ` +
+        `PLATFORM_WRITE_ATTEMPT audit rows: ${Number(attemptAudits[0]?.n ?? 0)}`,
+    );
+    expect(Number(attempts[0]?.n ?? 0)).toBe(0);
+    expect(Number(attemptAudits[0]?.n ?? 0)).toBe(0);
+
+    await withRaw(async (conn) => {
+      await conn.query("DELETE FROM platform_write_attempts WHERE integrationId = ?", [
+        GATE_INTEGRATION_ID,
+      ]);
+      await conn.query(
+        "DELETE FROM audit_logs WHERE actionType = 'PLATFORM_WRITE_ATTEMPT' AND entityId = ?",
+        [GATE_INTEGRATION_ID],
+      );
+    });
+
+    // The fixture goes back the way it came: the order lines, then the links
+    // (their `BundleComponent`s cascade), then the whole seeded fixture.
+    await singleton.externalOrderItem.deleteMany({
+      where: { id: { in: [GATE_ITEM_SINGLE, GATE_ITEM_BUNDLE] } },
+    });
+    await singleton.productLink.deleteMany({
+      where: { id: { in: [GATE_LINK_SINGLE, GATE_LINK_BUNDLE] } },
+    });
+    await resetAll();
+  });
+
+  test("scenario 14A: one single line and one BUNDLE line fulfil in ONE transaction — the DR-1 pin on a real engine", async () => {
+    await resetAll();
+    await setStock(P_APPROVED, 10);
+    await setStock(P_APPROVED_2, 10);
+
+    // The location-1 mirror on a bundle is the named `products` FK S->X residual
+    // site, so the engine's own deadlock section is sampled around the request
+    // and PRINTED — reported, never asserted (pack REV-14 PKb-10).
+    const { value: answer } = await reportDeadlocks("scenario 14A", () =>
+      fulfillOrder(fulfilRequest()),
+    );
+
+    expect(answer.status).toBe(200);
+    const results = resultsOf(answer);
+
+    // THE DR-1 PIN. Against `4671fc7:lib/fulfillment.ts` this array carries two
+    // entries, each holding MySQL's ER 1295 text ("This command is not supported
+    // in the prepared statement protocol yet") — the per-item SAVEPOINT that
+    // could never execute — and NOTHING below this line is true.
+    expect(results.failed).toEqual([]);
+    expect(results.skipped).toEqual([]);
+    expect(results.fulfilled).toHaveLength(2);
+    expect(results.fulfilled[0]).toMatchObject({
+      itemId: GATE_ITEM_SINGLE,
+      productId: P_APPROVED,
+      quantity: 2,
+    });
+    // The bundle entry is the public shape: no sentinel productId, the component
+    // ids instead (FIX C).
+    expect(results.fulfilled[1]).toMatchObject({
+      itemId: GATE_ITEM_BUNDLE,
+      isBundle: true,
+      componentIds: [P_APPROVED, P_APPROVED_2],
+      quantity: 1,
+    });
+    expect(answer.body.summary).toEqual({ total: 2, fulfilled: 2, skipped: 0, failed: 0 });
+
+    const batchId = answer.body.batchId;
+    expect(typeof batchId).toBe("string");
+    expect(String(batchId).length).toBeGreaterThan(0);
+
+    // THREE SALE rows under that batch — the single's 2, then the bundle's two
+    // components (1 x P_A, 2 x P_B) — every one of them stamped with the order
+    // the request was addressed to.
+    expect(await ledgerRowsForBatch(String(batchId))).toEqual([
+      {
+        productId: P_APPROVED,
+        delta: -2,
+        logType: "SALE",
+        locationId: LOCATION_MAIN,
+        orderRecordId: GATE_EXT_ORDER_ID,
+      },
+      {
+        productId: P_APPROVED,
+        delta: -1,
+        logType: "SALE",
+        locationId: LOCATION_MAIN,
+        orderRecordId: GATE_EXT_ORDER_ID,
+      },
+      {
+        productId: P_APPROVED_2,
+        delta: -2,
+        logType: "SALE",
+        locationId: LOCATION_MAIN,
+        orderRecordId: GATE_EXT_ORDER_ID,
+      },
+    ]);
+
+    // The lines: 2 of 2 and 1 of 1 — and the bundle's composition FROZEN (FIX B
+    // ran on the live fallback, inside the one transaction).
+    expect(await orderItemRows()).toEqual([
+      { id: GATE_ITEM_BUNDLE, fulfilledQty: 1, hasSnapshot: true },
+      { id: GATE_ITEM_SINGLE, fulfilledQty: 2, hasSnapshot: false },
+    ]);
+
+    // BOTH TABLES. 10 - 2 - 1 and 10 - 2.
+    expect(await stockIn(P_APPROVED)).toEqual({ row: 7, mirror: 7 });
+    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 8, mirror: 8 });
+
+    // The route's own contracts: the ORDER change event and the attribution
+    // attempt, both filed under this request's batch.
+    expect(await auditRowsForBatch(String(batchId))).toEqual([
+      {
+        actionType: "EXTERNAL_ORDER_FULFILLMENT",
+        entityType: "ORDER",
+        entityId: GATE_EXT_ORDER_ID,
+      },
+    ]);
+    expect(await attemptCountForBatch(String(batchId))).toBe(1);
+
+    expect(await orderStockedOut()).toBe(true);
+  });
+
+  test("scenario 14B: the bundle is refused with the EXACT number the tally holds — Available: 0, Requested: 1", async () => {
+    await resetAll();
+    // Exactly enough for the single line and nothing left for the bundle's P_A
+    // component: the shortfall the bundle sees is the one the SINGLE created,
+    // inside the same transaction, on a row nobody else can touch.
+    await setStock(P_APPROVED, 2);
+    await setStock(P_APPROVED_2, 10);
+
+    const answer = await fulfillOrder(fulfilRequest());
+    expect(answer.status).toBe(200);
+    const results = resultsOf(answer);
+
+    expect(results.failed).toEqual([]);
+    expect(results.fulfilled).toHaveLength(1);
+    expect(results.fulfilled[0]).toMatchObject({
+      itemId: GATE_ITEM_SINGLE,
+      productId: P_APPROVED,
+      quantity: 2,
+    });
+
+    // QB-9 ON A REAL ENGINE: the refusal quotes the LOCKED, CURRENT number — 0,
+    // the tally after the single line spent it — not the 2 the transaction read
+    // before it decided anything.
+    expect(results.skipped).toHaveLength(1);
+    expect(results.skipped[0]).toMatchObject({
+      itemId: GATE_ITEM_BUNDLE,
+      reason: "insufficient_stock",
+    });
+    // ENDS with it (pack CB1.5a-ii): the sentence's opening half is the library's
+    // existing copy, the trailing numbers are the contract.
+    expect(results.skipped[0].details).toMatch(/Available: 0, Requested: 1$/);
+
+    // ONE ledger row: a refusal spends no statement at all.
+    const batchId = String(answer.body.batchId);
+    expect(await ledgerRowsForBatch(batchId)).toEqual([
+      {
+        productId: P_APPROVED,
+        delta: -2,
+        logType: "SALE",
+        locationId: LOCATION_MAIN,
+        orderRecordId: GATE_EXT_ORDER_ID,
+      },
+    ]);
+
+    // The bundle's snapshot is frozen ANYWAY — FIX B runs in pass 1, before the
+    // guards, and survives a stock refusal by design (W2S-1 kept it on a skip).
+    expect(await orderItemRows()).toEqual([
+      { id: GATE_ITEM_BUNDLE, fulfilledQty: 0, hasSnapshot: true },
+      { id: GATE_ITEM_SINGLE, fulfilledQty: 2, hasSnapshot: false },
+    ]);
+
+    expect(await stockIn(P_APPROVED)).toEqual({ row: 0, mirror: 0 });
+    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 10, mirror: 10 });
+
+    // Partial, but stocked out: something was deducted.
+    expect(await orderStockedOut()).toBe(true);
+  });
+
+  test("scenario 14C: two concurrent fulfils of ONE order — the order lock serializes them, and the second sees the first's committed fulfilledQty", async () => {
+    await resetAll();
+    await setStock(P_APPROVED, 10);
+    await setStock(P_APPROVED_2, 10);
+
+    const probe = openClient();
+    let blocked = false;
+
+    try {
+      // The hold point, inside the WINNER's transaction and after its order lock
+      // and prelock: the ledger insert for P_A sleeps, so the winner holds the
+      // order row for >= 2s and the loser is unambiguously BLOCKED on it rather
+      // than merely late (`concurrency-3.test.ts`'s instrument, PKc-6).
+      await installHoldTrigger([P_APPROVED], 2);
+
+      const single = {
+        locationId: LOCATION_MAIN,
+        items: [{ itemId: GATE_ITEM_SINGLE, quantity: 2 }],
+      };
+
+      const { value: answers } = await reportDeadlocks("scenario 14C", async () => {
+        const inFlight: Promise<RouteAnswer>[] = [];
+        inFlight.push(fulfillOrder(single));
+        // A beat, so which request reaches the order lock first follows the
+        // launch order rather than a coin flip. Nothing below asserts WHO won.
+        await sleep(80);
+        inFlight.push(fulfillOrder(single));
+        blocked = await waitForLockWait(probe);
+        return Promise.all(inFlight);
+      });
+
+      console.log(`[scenario 14C] lock wait observed: ${blocked}`);
+      // THE RACE REALLY HAPPENED — one request was parked on the other's order
+      // row. Without this, two requests that never met would pass.
+      expect(blocked).toBe(true);
+      expect(answers.map((answer) => answer.status)).toEqual([200, 200]);
+
+      /** One request's outcome, as a comparable word. */
+      const outcomeOf = (answer: RouteAnswer): string => {
+        const results = resultsOf(answer);
+        if (results.fulfilled.length === 1 && results.skipped.length === 0) {
+          return `fulfilled(${String(results.fulfilled[0].quantity)})`;
+        }
+        if (results.skipped.length === 1 && results.fulfilled.length === 0) {
+          return `skipped ${results.skipped[0].reason}`;
+        }
+        return `unexpected ${JSON.stringify(answer.body)}`;
+      };
+
+      // UNORDERED: the loser's order read waited on the lock and then saw
+      // fulfilledQty = 2, so its line was already fully fulfilled. WHICH request
+      // won is REPORTED, never asserted — that is an InnoDB scheduling accident.
+      const outcomes = answers.map(outcomeOf).sort();
+      console.log(
+        `[scenario 14C] request 1 -> ${outcomeOf(answers[0])}; ` +
+          `request 2 -> ${outcomeOf(answers[1])}`,
+      );
+      expect(outcomes).toEqual(["fulfilled(2)", "skipped already_fulfilled"]);
+
+      // ONE deduction, never two: 2 units, not 4, and the stock says so in both
+      // tables.
+      const rows = await rawRows<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM inventory_logs
+          WHERE logType = 'SALE' AND orderRecordId = ?`,
+        [GATE_EXT_ORDER_ID],
+      );
+      expect(Number(rows[0]?.n ?? 0)).toBe(1);
+      expect(await orderItemRows()).toEqual([
+        { id: GATE_ITEM_BUNDLE, fulfilledQty: 0, hasSnapshot: false },
+        { id: GATE_ITEM_SINGLE, fulfilledQty: 2, hasSnapshot: false },
+      ]);
+      expect(await stockIn(P_APPROVED)).toEqual({ row: 8, mirror: 8 });
+      expect(await stockIn(P_APPROVED_2)).toEqual({ row: 10, mirror: 10 });
+    } finally {
+      await dropHoldTrigger();
+      await probe.$disconnect();
+    }
+  });
+
+  test("scenario 14D: the unfulfill round trip — three CORRECTION rows put back exactly what the fulfil took", async () => {
+    // SELF-CONTAINED (PKc-4): D arranges its own state, A's request included, so
+    // it never depends on another sub-case having run (or on jest's order).
+    await resetAll();
+    await setStock(P_APPROVED, 10);
+    await setStock(P_APPROVED_2, 10);
+
+    const fulfilled = await fulfillOrder(fulfilRequest());
+    expect(fulfilled.status).toBe(200);
+    expect(resultsOf(fulfilled).failed).toEqual([]);
+    expect(await stockIn(P_APPROVED)).toEqual({ row: 7, mirror: 7 });
+    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 8, mirror: 8 });
+
+    const answer = await unfulfillOrder({
+      items: [
+        {
+          itemId: GATE_ITEM_SINGLE,
+          productId: P_APPROVED,
+          quantity: 2,
+          locationId: LOCATION_MAIN,
+        },
+        {
+          // The bundle line's `productId` is ANY positive int — the schema
+          // requires one (`validation/unfulfill.ts:9`) and the bundle branch
+          // ignores it entirely (`unfulfill/route.ts:183-265`, OCc-14).
+          itemId: GATE_ITEM_BUNDLE,
+          productId: P_APPROVED,
+          quantity: 1,
+          locationId: LOCATION_MAIN,
+        },
+      ],
+    });
+
+    expect(answer.status).toBe(200);
+    const restored = answer.body.restored as Array<Record<string, unknown>>;
+    expect(restored).toHaveLength(2);
+    expect(answer.body.skipped).toEqual([]);
+
+    // The unfulfill route answers with no batch id, so the batch is taken from
+    // the change event it filed — which pins that event's existence too.
+    const unfulfilBatches = await rawRows<{ batchId: string }>(
+      `SELECT batchId FROM audit_logs
+        WHERE actionType = 'EXTERNAL_ORDER_UNFULFILLMENT' AND entityId = ?`,
+      [GATE_EXT_ORDER_ID],
+    );
+    expect(unfulfilBatches).toHaveLength(1);
+    const unfulfilBatch = String(unfulfilBatches[0].batchId);
+
+    // +2 for the single line, then the bundle's components (+1 P_A, +2 P_B) —
+    // the exact reversal of A's three SALE rows, stamped with the same order.
+    expect(await ledgerRowsForBatch(unfulfilBatch)).toEqual([
+      {
+        productId: P_APPROVED,
+        delta: 2,
+        logType: "CORRECTION",
+        locationId: LOCATION_MAIN,
+        orderRecordId: GATE_EXT_ORDER_ID,
+      },
+      {
+        productId: P_APPROVED,
+        delta: 1,
+        logType: "CORRECTION",
+        locationId: LOCATION_MAIN,
+        orderRecordId: GATE_EXT_ORDER_ID,
+      },
+      {
+        productId: P_APPROVED_2,
+        delta: 2,
+        logType: "CORRECTION",
+        locationId: LOCATION_MAIN,
+        orderRecordId: GATE_EXT_ORDER_ID,
+      },
+    ]);
+
+    expect(await orderItemRows()).toEqual([
+      { id: GATE_ITEM_BUNDLE, fulfilledQty: 0, hasSnapshot: true },
+      { id: GATE_ITEM_SINGLE, fulfilledQty: 0, hasSnapshot: false },
+    ]);
+
+    // Back where it started, in both tables — and the order is no longer stocked
+    // out, because nothing of it is fulfilled any more.
+    expect(await stockIn(P_APPROVED)).toEqual({ row: 10, mirror: 10 });
+    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 10, mirror: 10 });
+    expect(await orderStockedOut()).toBe(false);
   });
 });

@@ -29,6 +29,7 @@
 import {
   InboundShipmentStatus,
   inventory_logs_logType,
+  Prisma,
   PrismaClient,
   ProductApprovalStatus,
   StagingItemStatus,
@@ -596,6 +597,19 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
 export type GateScope = {
   lineIds: readonly number[];
   productIds: readonly number[];
+  /**
+   * B1.5 OWNS THESE TWO (reconciliation Part 2, pack CB1.5a-ii). Scenario 14
+   * drives the REAL fulfil and unfulfill routes, which move `fulfilledQty`, the
+   * frozen `bundleComponentSnapshot` and the order's stocked-out stamps —
+   * columns no other clause in this reset names.
+   *
+   * BOTH OPTIONAL: every scope written before B1.5 compiles and behaves exactly
+   * as it did. The clauses VALIDATE NOTHING (there is no snapshot to look up,
+   * unlike the line and product clauses below): an unknown id is a no-op, never
+   * a throw (seam S-B13).
+   */
+  externalOrderItemIds?: readonly string[];
+  externalOrderIds?: readonly string[];
 };
 
 const exceptionKeysFor = (scope: GateScope): string[] => [
@@ -674,6 +688,31 @@ export async function resetGateFixtures(scope: GateScope): Promise<void> {
         where: { id: { in: [...RECON_LEDGER_IDS] } },
         data: { orderRecordId: null },
       });
+      // B1.5 OWNS THESE TWO (reconciliation Part 2, pack CB1.5a-ii). A fulfil
+      // increments `fulfilledQty` and freezes `bundleComponentSnapshot`; an
+      // unfulfill decrements it again — and either one stamps the order's
+      // stocked-out / fulfilled columns. Nothing above puts any of that back, so
+      // scenario 14's fixture would carry its last sub-case's state into the
+      // next one (and into receiving scenario 2's absolute counts).
+      //
+      // THE `?? []` IS LOAD-BEARING (OCc-12): an `undefined` `in` is NO
+      // condition at all, and the updateMany would then run TABLE-WIDE. An empty
+      // list matches nothing, which is the intended no-op for every scope that
+      // names neither.
+      await tx.externalOrderItem.updateMany({
+        where: { id: { in: [...(scope.externalOrderItemIds ?? [])] } },
+        data: { fulfilledQty: 0, bundleComponentSnapshot: Prisma.DbNull },
+      });
+      await tx.externalOrder.updateMany({
+        where: { id: { in: [...(scope.externalOrderIds ?? [])] } },
+        data: {
+          stockedOut: false,
+          stockedOutAt: null,
+          stockedOutBy: null,
+          fulfilledAt: null,
+          fulfilledBy: null,
+        },
+      });
       await tx.inventoryException.deleteMany({ where: { key: { in: exceptionKeysFor(scope) } } });
       // Reconciliation lane (pack C1a.4 / C6.1): attempt rows are append-only in
       // app/ lib/ scripts/ — the static gate scans THOSE roots, and
@@ -702,6 +741,12 @@ export async function resetGateFixtures(scope: GateScope): Promise<void> {
             // filed under its own minted batchId — scoped by that id, so the
             // fixture's summary row (RECON_BATCH_ID, excluded above) is safe.
             { entityType: "INVENTORY", batchId: { in: routeBatchIds } },
+            // B1.5 (pack CB1.5a-ii): fulfil and unfulfill file their change
+            // event under `entityType: "ORDER"` with the ROUTE's minted batchId
+            // — the B1 clause above names INVENTORY only, so scenario 14's audit
+            // rows used to survive the reset. Same derivation, same scoping:
+            // every batch id here came off a ledger row this reset owns.
+            { entityType: "ORDER", batchId: { in: routeBatchIds } },
           ],
         },
       });
