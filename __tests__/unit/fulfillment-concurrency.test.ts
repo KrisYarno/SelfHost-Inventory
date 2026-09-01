@@ -172,6 +172,10 @@ function setupTransaction() {
   updateAffectedRows(1)
   prelockedStock()
   productsExist(mockTx)
+  // OC-4: the location the prelock's INSERT names in `fk_pl_location`.
+  ;(mockTx.location.findUnique as unknown as jest.Mock).mockImplementation(async (args: any) => ({
+    id: args?.where?.id,
+  }))
   getMockPrisma().$transaction.mockImplementation(async (cb: any, _opts?: any) => {
     return cb(mockTx)
   })

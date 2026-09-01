@@ -242,6 +242,34 @@ export function CompleteOrderDialog({
     let fulfilledEntries: FulfilledEntry[] = [];
 
     /**
+     * The cart line one server entry belongs to, matched BY ITEM ID (DCc-11) —
+     * never positionally: `results.fulfilled` is not the cart, and an
+     * index-matched fallback would name whichever product sat at that offset.
+     * ONE spelling of the match rule, for every reader of the envelope below.
+     */
+    const cartLineFor = (entry: FulfilledEntry) =>
+      wcItems.find((item) => item.fulfillmentItemId === entry.itemId);
+
+    /**
+     * The units the SERVER says it moved for one entry (OC-1). `lib/fulfillment.ts`
+     * clamps every line to `min(asked, remaining)`, so on a partial fulfil this is
+     * NOT the cart's number — and the all-or-nothing gate, the rollback body and
+     * the Undo all have to read the same one. A non-number falls back to the
+     * cart's: today's route always sends the field, and reading an absence as 0
+     * would refuse a leg that may well have moved exactly what was asked.
+     */
+    const serverQuantityOf = (entry: FulfilledEntry): number =>
+      typeof entry.quantity === "number" ? entry.quantity : (cartLineFor(entry)?.quantity ?? 0);
+
+    /**
+     * What the last rollback attempt learned, for the ONE owner of the incident
+     * toast (G2s-5). `rollbackWcLeg` answers the QUESTION — did every entry come
+     * back? — and records what it saw; the CALLER raises the toast on every
+     * `false`, so a guard-path failure can no longer be console output only.
+     */
+    let rollbackOutcome = { restoredCount: 0, owed: 0, unresolved: [] as string[] };
+
+    /**
      * Put the WC leg back (pack CB1.5c, seam S-B15). SINGLES-ONLY by contract:
      * the workbench cart cannot hold a bundle line (`use-workbench.ts`,
      * `lib/workbench/skipped-lines.ts`), so every entry here is a single with a
@@ -254,17 +282,21 @@ export function CompleteOrderDialog({
      * error code turns on this answer.
      */
     const rollbackWcLeg = async (entries: FulfilledEntry[]): Promise<boolean> => {
-      if (!selectedExternalOrder || !selectedLocationId || !csrfToken) return false;
+      if (!selectedExternalOrder || !selectedLocationId || !csrfToken) {
+        rollbackOutcome = { restoredCount: 0, owed: entries.length, unresolved: [] };
+        return false;
+      }
 
       // Nothing to send is NOT a rollback: `restored.length === entries.length`
       // would read 0 === 0 and claim a full restoration of a leg still
-      // deducted. Unreachable on today's wire — the route always sends
-      // `results.fulfilled`, and a zero-fulfilled leg never gets here — so this
-      // is a belt, and it fails to the uncoded (honest) branch.
+      // deducted. Reachable only on a body whose summary counts a line its
+      // `results.fulfilled` does not name — so this is a belt, and it fails to
+      // the uncoded (honest) branch WITH the caller's critical toast (G2s-5).
       if (entries.length === 0) {
         console.error(
           `CRITICAL: WC rollback had no fulfilled entries to restore for order ${selectedExternalOrder.id}`
         );
+        rollbackOutcome = { restoredCount: 0, owed: 0, unresolved: [] };
         return false;
       }
 
@@ -277,22 +309,29 @@ export function CompleteOrderDialog({
       }> = [];
 
       entries.forEach((entry) => {
-        // DCc-11: matched BY ITEM ID, never positionally — `results.fulfilled`
-        // is not the cart, and an index-matched fallback would restore stock to
-        // whichever product happened to sit at that offset.
-        const cartLine = wcItems.find((item) => item.fulfillmentItemId === entry.itemId);
+        const cartLine = cartLineFor(entry);
         const productId =
           typeof entry.productId === "number" && entry.productId > 0
             ? entry.productId
             : cartLine?.product.id;
-        if (!entry.itemId || typeof productId !== "number" || productId <= 0) {
+        // G2s-4: the QUANTITY belt matches the productId belt. An entry with a
+        // good product but an unresolvable quantity used to ship `quantity: 0`,
+        // which the unfulfill schema refuses on `positive()` — 400ing the whole
+        // body and taking its resolvable siblings down with it. Skip-and-name.
+        const quantity = serverQuantityOf(entry);
+        if (
+          !entry.itemId ||
+          typeof productId !== "number" ||
+          productId <= 0 ||
+          !(quantity > 0)
+        ) {
           unresolved.push(cartLine?.product.name ?? entry.itemId ?? "an unnamed line");
           return;
         }
         items.push({
           itemId: entry.itemId,
           productId,
-          quantity: typeof entry.quantity === "number" ? entry.quantity : (cartLine?.quantity ?? 0),
+          quantity,
           locationId: selectedLocationId,
         });
       });
@@ -322,8 +361,8 @@ export function CompleteOrderDialog({
             `CRITICAL: WC rollback restored ${restoredCount} of ${entries.length} lines for order ${selectedExternalOrder.id}`
           );
         } else {
-          // Rollback failed — this is a data-integrity incident. Surface it
-          // to the user with the order ID so they can investigate manually.
+          // Rollback failed — a data-integrity incident. The console names it
+          // with the order id; the CALLER raises the operator-facing toast.
           const rollbackError = await rollbackResponse.json().catch(() => ({}));
           console.error(
             `CRITICAL: WC rollback failed for order ${selectedExternalOrder.id}:`,
@@ -337,21 +376,31 @@ export function CompleteOrderDialog({
         );
       }
 
+      rollbackOutcome = { restoredCount, owed: entries.length, unresolved };
+      return false;
+    };
+
+    /**
+     * The 15s data-integrity toast — raised by the CALLER on EVERY failed
+     * rollback (G2s-5), so the guard paths above are as loud as a wire failure
+     * instead of failing to the console alone. One owner, one spelling.
+     */
+    const raiseRollbackIncident = () => {
+      if (!selectedExternalOrder) return;
       toast.error(
         <div className="space-y-1">
           <p className="font-medium">Rollback failed</p>
           <p className="text-sm">
-            {`WC order #${selectedExternalOrder.orderNumber} was fulfilled but the completion could not finish, and the rollback restored only ${restoredCount} of ${entries.length} lines. Please check inventory manually for order ${selectedExternalOrder.id}.`}
+            {`WC order #${selectedExternalOrder.orderNumber} was fulfilled but the completion could not finish, and the rollback restored only ${rollbackOutcome.restoredCount} of ${rollbackOutcome.owed} lines. Please check inventory manually for order ${selectedExternalOrder.id}.`}
           </p>
-          {unresolved.length > 0 && (
+          {rollbackOutcome.unresolved.length > 0 && (
             <p className="text-sm">
-              {`Not sent for restoration (no product id): ${unresolved.join(", ")}.`}
+              {`Not sent for restoration (no product id or quantity): ${rollbackOutcome.unresolved.join(", ")}.`}
             </p>
           )}
         </div>,
         { duration: 15000 }
       );
-      return false;
     };
 
     // Reconciliation Part 2 (pack CB1b.6): the batch each leg wrote under, read
@@ -418,24 +467,59 @@ export function CompleteOrderDialog({
             ? (fulfillBody.summary.fulfilled as number)
             : null;
 
-        if (fulfilledCount !== null && fulfilledCount < wcItems.length) {
+        // OC-1: the LINE count is not the whole all-or-nothing promise.
+        // `lib/fulfillment.ts` clamps every line to `min(asked, remaining)`, so a
+        // line can come back FULFILLED at a shorter quantity and still be
+        // counted here — while the Undo that follows restores by quantity
+        // against the line's TOTAL `fulfilledQty`, i.e. out of whatever another
+        // operator fulfilled. So the gate compares the UNITS too: only a leg
+        // that moved exactly what this cart asked for is allowed to stand.
+        const askedUnits = wcItems.reduce((total, item) => total + item.quantity, 0);
+        const serverUnits = fulfilledEntries.reduce(
+          (total, entry) => total + serverQuantityOf(entry),
+          0
+        );
+
+        if (
+          fulfilledCount !== null &&
+          (fulfilledCount < wcItems.length || serverUnits !== askedUnits)
+        ) {
           // Nothing fulfilled => nothing to put back, so the leg IS clean.
           let restoredFully = true;
           if (fulfilledCount > 0) {
             restoredFully = await rollbackWcLeg(fulfilledEntries);
             if (restoredFully) wcFulfilled = false;
+            else raiseRollbackIncident();
           }
 
+          // OC-8: a stale cart — built once at selection — refuses with
+          // `already_fulfilled` on EVERY retry, and each retry fulfils and rolls
+          // back real stock. "Fix the issue and try again" names no exit, so the
+          // one that exists is spelled. Read off the FIRST refusal entry (the
+          // one a retry hits again), not through the priority reader, which is
+          // choosing the most ACTIONABLE sentence rather than the looping reason.
+          const refusals = Array.isArray(fulfillBody?.results?.skipped)
+            ? (fulfillBody.results.skipped as Array<{ reason?: string }>)
+            : [];
+          const staleCart = refusals[0]?.reason === "already_fulfilled";
+
           const error = new Error(
-            primaryRefusal(fulfillBody?.results) ?? "the order could not be fulfilled"
+            (primaryRefusal(fulfillBody?.results) ?? "the order could not be fulfilled") +
+              (staleCart
+                ? " Re-select the order to rebuild the cart from its current state."
+                : "")
           );
-          // DCc-4: the code is CONDITIONAL. `FULFILMENT_REFUSED` promises the
-          // WC lines were put back — true when none were fulfilled or the
-          // rollback fully restored. A partial rollback throws UNCODED: the
-          // critical toast above already told the truth, and a second toast
-          // claiming the lines "were put back" would contradict it on the one
-          // path where the data really is inconsistent.
-          if (fulfilledCount === 0 || restoredFully) {
+          // DCc-4 + G2s-2: the code is CONDITIONAL, and the two coded branches
+          // are DIFFERENT facts. Nothing fulfilled => no rollback ever ran =>
+          // `FULFILMENT_NOT_STARTED`, whose action must not claim lines "were put
+          // back". A rollback that FULLY restored => `FULFILMENT_REFUSED`, which
+          // may. A partial rollback throws UNCODED: the critical toast above
+          // already told the truth, and a second toast claiming the lines were
+          // put back would contradict it on the one path where the data really
+          // is inconsistent.
+          if (fulfilledCount === 0) {
+            (error as any).code = "FULFILMENT_NOT_STARTED";
+          } else if (restoredFully) {
             (error as any).code = "FULFILMENT_REFUSED";
           }
           throw error;
@@ -481,6 +565,7 @@ export function CompleteOrderDialog({
           if (wcFulfilled && selectedExternalOrder) {
             const restoredFully = await rollbackWcLeg(fulfilledEntries);
             if (restoredFully) wcFulfilled = false;
+            else raiseRollbackIncident();
           }
 
           // Same shared reader on the deduct leg (pack REV-22 F7): a 400
@@ -500,13 +585,26 @@ export function CompleteOrderDialog({
       }
 
       // Capture deduction details BEFORE clearing (includes fulfillmentItemId for undo)
-      const deductionDetails: DeductionDetail[] = orderItems.map((item) => ({
-        productId: item.product.id,
-        productName: item.product.name,
-        quantity: item.quantity,
-        locationId: selectedLocationId!,
-        fulfillmentItemId: item.fulfillmentItemId,
-      }));
+      //
+      // OC-1: a WC line's quantity here is the SERVER'S, read off the entry the
+      // fulfil route said it deducted (matched by item id, never positionally).
+      // The cart's number is what was ASKED; a clamped line moved less, and an
+      // Undo posting the asked number would restore units another operator
+      // fulfilled — unfulfill's `fulfilledQty >= q` guard reads the line's
+      // TOTAL, so it would pass. Manual lines keep the cart's number: the
+      // deduct-simple leg has no clamp.
+      const deductionDetails: DeductionDetail[] = orderItems.map((item) => {
+        const entry = item.fulfillmentItemId
+          ? fulfilledEntries.find((candidate) => candidate.itemId === item.fulfillmentItemId)
+          : undefined;
+        return {
+          productId: item.product.id,
+          productName: item.product.name,
+          quantity: entry ? serverQuantityOf(entry) : item.quantity,
+          locationId: selectedLocationId!,
+          fulfillmentItemId: item.fulfillmentItemId,
+        };
+      });
       const completedOrderRef = orderReference;
       const externalOrderId = selectedExternalOrder?.id;
 

@@ -220,6 +220,9 @@ function makeFulfillTx() {
       update: jest.fn().mockResolvedValue({}),
       findMany: jest.fn().mockResolvedValue([{ quantity: 2, fulfilledQty: 2 }]),
     },
+  // OC-4: the location the prelock's INSERT names in `fk_pl_location`, proved
+  // beside the products. Absent = the whole request is a 400.
+    location: { findUnique: jest.fn(async ({ where }: any) => ({ id: where.id })) },
     // B1.5: fulfillment issues NO unsafe raw statement any more — the per-item
     // savepoints never worked on MySQL (ER 1295) and are gone. What rides here
     // is the prelock's statement pair ahead of the writes and the writes

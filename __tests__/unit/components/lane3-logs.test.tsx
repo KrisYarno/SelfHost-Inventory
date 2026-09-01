@@ -226,6 +226,26 @@ describe("BatchDrawer", () => {
     expect(line.textContent).not.toMatch(/order/);
   });
 
+  it("G2s-9: a summary missing an array renders without it, instead of taking the drawer down", async () => {
+    // A version-skewed body: `orders` never arrived. The caller's `data?.summary`
+    // belt lets it through, so the guard has to live one level deeper — an
+    // unguarded `.map` here would throw in render and blank the whole drawer.
+    mockFetchBatch(
+      withSummary({
+        rowCount: 2,
+        productCount: 1,
+        netUnits: -2,
+        logTypes: ["SALE"],
+        actors: ["derek"],
+      })
+    );
+    renderWithClient(<BatchDrawer batchId={BATCH_UUID} onOpenChange={jest.fn()} />);
+
+    const line = await screen.findByText(/1 product/);
+    expect(line).toHaveTextContent("Sale · 1 product · -2 units · derek");
+    expect(line.textContent).not.toMatch(/order/);
+  });
+
   it("hides the summary line entirely for an events-only batch (rowCount 0)", async () => {
     mockFetchBatch({
       ...batchResponse,

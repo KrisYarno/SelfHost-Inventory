@@ -786,12 +786,37 @@ export async function fulfillExternalOrder(
       const existingProducts =
         survivorProductIds.length > 0
           ? await tx.product.findMany({
-              where: { id: { in: survivorProductIds } },
+              // OC-5: `deletedAt: null`, because UNFULFILL refuses to restore a
+              // soft-deleted product (`unfulfill/route.ts`, "not found or deleted
+              // — stock not restored"). Without the filter fulfil deducts what no
+              // undo can put back, and the workbench's all-or-nothing promise
+              // breaks with no path home. A soft-deleted id is simply absent from
+              // this answer, so its item takes the item-local `failed[]` path
+              // below — the same sentence an unknown id gets, no new vocabulary.
+              where: { id: { in: survivorProductIds }, deletedAt: null },
               select: { id: true, name: true },
             })
           : [];
       const namesById = new Map<number, string>();
       existingProducts.forEach((product) => namesById.set(product.id, product.name));
+
+      // THE LOCATION, PROVED THE SAME WAY (OC-4). The prelock's INSERT fires
+      // `fk_pl_location` as well as `fk_pl_product`, so an unknown `locationId`
+      // — a raw number off the request, like a manual override — would die as
+      // MySQL 1452 and take the WHOLE transaction with it, pass 1's snapshot
+      // freezes included, reaching the wire as a generic 500. Unlike a product
+      // id this is REQUEST-scoped: one location covers every item, so an absent
+      // one refuses the whole request rather than failing an item. Zero
+      // survivors, no statement — the rule the product read and the prelock keep.
+      if (survivors.length > 0) {
+        const location = await tx.location.findUnique({
+          where: { id: locationId },
+          select: { id: true },
+        });
+        if (!location) {
+          throw new AppError(`Location ${locationId} not found`, 'LOCATION_NOT_FOUND', 400);
+        }
+      }
 
       const provenSurvivors: Survivor[] = [];
       survivors.forEach((survivor) => {

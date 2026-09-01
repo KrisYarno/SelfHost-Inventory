@@ -129,8 +129,15 @@ const plKey = (productId: number, locationId: number) => `${productId}:${locatio
 function makeStore(seed: {
   /** The order `fulfillExternalOrder` loads inside its transaction. */
   order: any;
-  products: Array<{ id: number; name: string; quantity: number }>;
+  /**
+   * The `products` rows this store knows. `deletedAt` is honoured by the batched
+   * read exactly as the engine honours it (OC-5): a soft-deleted row is simply
+   * absent from the answer, because unfulfill refuses to restore one.
+   */
+  products: Array<{ id: number; name: string; quantity: number; deletedAt?: Date | null }>;
   productLocations: PlRow[];
+  /** The location ids `tx.location.findUnique` will answer for (OC-4). */
+  locations?: number[];
   /**
    * Fault injection, called with the args BEFORE `externalOrderItem.update`
    * applies them. Throwing here models a statement-level failure of a winner's
@@ -151,8 +158,12 @@ function makeStore(seed: {
     units: number;
   }) => number | void;
 }) {
-  const products = new Map<number, { id: number; name: string; quantity: number }>();
+  const products = new Map<
+    number,
+    { id: number; name: string; quantity: number; deletedAt?: Date | null }
+  >();
   seed.products.forEach((p) => products.set(p.id, { ...p }));
+  const locations = new Set<number>(seed.locations ?? [1]);
   const productLocations = new Map<string, PlRow>();
   seed.productLocations.forEach((r) => productLocations.set(plKey(r.productId, r.locationId), { ...r }));
   const orderItems = new Map<string, ItemRow>();
@@ -168,7 +179,7 @@ function makeStore(seed: {
   const statements: string[] = [];
 
   type Snap = {
-    products: Map<number, { id: number; name: string; quantity: number }>;
+    products: Map<number, { id: number; name: string; quantity: number; deletedAt?: Date | null }>;
     productLocations: Map<string, PlRow>;
     orderItems: Map<string, ItemRow>;
     logs: LogRow[];
@@ -177,7 +188,10 @@ function makeStore(seed: {
   // (Map#forEach rather than spread/for-of: this repo's tsc target predates
   // downlevel Map iteration — same note as the T8R-1 harness.)
   function snapshot(): Snap {
-    const p = new Map<number, { id: number; name: string; quantity: number }>();
+    const p = new Map<
+      number,
+      { id: number; name: string; quantity: number; deletedAt?: Date | null }
+    >();
     products.forEach((row, key) => p.set(key, { ...row }));
     const pl = new Map<string, PlRow>();
     productLocations.forEach((row, key) => pl.set(key, { ...row }));
@@ -308,10 +322,22 @@ function makeStore(seed: {
       // ITEM-LOCALLY.
       findMany: jest.fn(async ({ where }: any) => {
         const ids: number[] = where?.id?.in ?? [];
+        const softDeleteFiltered = where?.deletedAt === null;
         return ids
-          .filter((id) => products.has(id))
+          .filter((id) => {
+            const row = products.get(id);
+            if (!row) return false;
+            // The `deletedAt: null` clause, honoured (OC-5).
+            return !(softDeleteFiltered && row.deletedAt);
+          })
           .map((id) => ({ id, name: products.get(id)!.name }));
       }),
+    },
+    // The location the prelock's INSERT will name in `fk_pl_location` (OC-4).
+    location: {
+      findUnique: jest.fn(async ({ where }: any) =>
+        locations.has(where.id) ? { id: where.id } : null
+      ),
     },
   };
 
@@ -657,6 +683,121 @@ describe('TP-2 — pass 1 decides without touching stock', () => {
 });
 
 // ---------------------------------------------------------------------------
+// TP-2d — the LOCATION is proved the way the products are (OC-4). The prelock's
+// INSERT fires `fk_pl_location` too, so an unknown id would die as MySQL 1452
+// and take the whole transaction — pass 1's freezes included — to a bare 500.
+// ---------------------------------------------------------------------------
+
+describe('TP-2d — the location guard', () => {
+  function twoLineStore() {
+    return makeStore({
+      order: order([
+        singleLine(),
+        // A LIVE bundle: pass 1 freezes its snapshot, so the rollback is visible.
+        liveBundleLine([{ internalProductId: 21, quantity: 1 }]),
+      ]),
+      products: [
+        { id: 10, name: 'Widget A', quantity: 100 },
+        { id: 21, name: 'Alpha', quantity: 100 },
+      ],
+      productLocations: [
+        { productId: 10, locationId: 1, quantity: 100, version: 1 },
+        { productId: 21, locationId: 1, quantity: 100, version: 1 },
+      ],
+      // The store knows location 1 only; the request below names 99.
+      locations: [1],
+    });
+  }
+
+  it('TP-2d: an unknown location refuses the WHOLE request before the prelock', async () => {
+    const store = twoLineStore();
+    drive(store);
+
+    const error = await fulfillExternalOrder(
+      ORDER_ID,
+      99,
+      [
+        { itemId: 'item-1', quantity: 5 },
+        { itemId: 'item-b', quantity: 1 },
+      ],
+      42
+    ).catch((e) => e);
+
+    expect(error).toBeInstanceOf(AppError);
+    expect(error.code).toBe('LOCATION_NOT_FOUND');
+    expect(error.statusCode).toBe(400);
+    expect(error.message).toBe('Location 99 not found');
+
+    // The whole request, not one item: no survivor reached the prelock, so the
+    // foreign key never had the chance to abort the transaction itself.
+    expect(rawCalls.filter((c) => /product_locations/.test(c.sql))).toHaveLength(0);
+    // ...and pass 1's snapshot freeze went with the aborted transaction.
+    expect(store.orderItem('item-b').bundleComponentSnapshot).toBeNull();
+  });
+
+  it('TP-2d: zero survivors spend NO location statement', async () => {
+    const store = makeStore({
+      order: order([singleLine({ id: 'item-done', quantity: 2, fulfilledQty: 2 })]),
+      products: [{ id: 10, name: 'Widget A', quantity: 100 }],
+      productLocations: [{ productId: 10, locationId: 1, quantity: 100, version: 1 }],
+    });
+    drive(store);
+
+    const result = await fulfillExternalOrder(ORDER_ID, 1, [{ itemId: 'item-done', quantity: 2 }], 42);
+
+    expect(result.skipped.map((s) => s.reason)).toEqual(['already_fulfilled']);
+    // The same rule the product read and the prelock keep: an all-refused
+    // request spends nothing.
+    expect(store.tx.location.findUnique).not.toHaveBeenCalled();
+    expect(store.tx.product.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TP-2e — fulfil and unfulfill agree about SOFT-DELETED products (OC-5).
+// Unfulfill refuses to restore one ("not found or deleted — stock not
+// restored"), so a fulfil that deducted it would have no undo path at all.
+// ---------------------------------------------------------------------------
+
+describe('TP-2e — the soft-delete filter', () => {
+  it('TP-2e: a soft-deleted product fails ITEM-LOCALLY and its sibling commits', async () => {
+    const store = makeStore({
+      order: order([singleLine(), singleLine({ id: 'item-2', quantity: 1 })]),
+      products: [
+        { id: 10, name: 'Widget A', quantity: 100 },
+        { id: 11, name: 'Retired', quantity: 100, deletedAt: new Date('2026-08-01T00:00:00Z') },
+      ],
+      productLocations: [
+        { productId: 10, locationId: 1, quantity: 100, version: 1 },
+        { productId: 11, locationId: 1, quantity: 100, version: 1 },
+      ],
+    });
+    drive(store);
+
+    const result = await fulfillExternalOrder(
+      ORDER_ID,
+      1,
+      [
+        { itemId: 'item-1', quantity: 5 },
+        // The override names the soft-deleted product.
+        { itemId: 'item-2', quantity: 1, productId: 11 },
+      ],
+      42
+    );
+
+    // The EXISTING absent-id path, reused verbatim — no new vocabulary.
+    expect(result.failed).toEqual([
+      { itemId: 'item-2', error: new ProductNotFoundError(11).message },
+    ]);
+    expect(result.fulfilled.map((f) => f.itemId)).toEqual(['item-1']);
+    // 11 never reached the prelock's VALUES, and never lost a unit.
+    expect(prelockInsert()!.values).toEqual([10, 1]);
+    expect(store.logsFor(11)).toHaveLength(0);
+    expect(store.productLocation(11, 1)).toMatchObject({ quantity: 100 });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // TP-3 — the prelock covers bundle COMPONENT keys (the B1 residual retires).
 // ---------------------------------------------------------------------------
 
@@ -924,11 +1065,14 @@ describe('TP-4b — planPass2, the exported pure planner', () => {
   });
 
   it('TP-4b (source): planPass2 has exactly ONE call site in lib/fulfillment.ts', () => {
-    const lines = fs.readFileSync(FULFILLMENT_SOURCE, 'utf8').split('\n');
-    const callSites = lines.filter(
-      (line) => line.includes('planPass2(') && !line.includes('export function planPass2(')
-    );
-    expect(callSites).toHaveLength(1);
+    const source = fs.readFileSync(FULFILLMENT_SOURCE, 'utf8');
+    // OCCURRENCES, not lines (G2s-6): a line filter reads two calls on one line
+    // as one. Two occurrences = the declaration + the one call, the TP-10 idiom.
+    expect(source.split('planPass2(').length - 1).toBe(2);
+    // ...and nothing BINDS the planner to a second name, which a source count
+    // alone cannot see. The one real call site is itself a destructuring
+    // assignment, so what is refused is `= planPass2` NOT followed by a call.
+    expect(/=\s*planPass2(?!\()/.test(source)).toBe(false);
   });
 });
 

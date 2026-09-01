@@ -1,14 +1,17 @@
 import { z } from 'zod';
 import { MAX_UNFULFILL_ITEMS, capMessage } from '@/lib/inventory/request-limits';
 
+/** The INT32 ceiling every id column here sits under — see the fulfilment schema's note. */
+const INT32_MAX = 2147483647;
+
 /**
  * Schema for a single unfulfillment item
  */
 export const UnfulfillItemSchema = z.object({
   itemId: z.string().min(1, 'Item ID is required'),
-  productId: z.number().int().positive('Product ID must be a positive integer'),
+  productId: z.number().int().positive('Product ID must be a positive integer').max(INT32_MAX),
   quantity: z.number().int().positive('Quantity must be positive'),
-  locationId: z.number().int().positive('Location ID must be a positive integer'),
+  locationId: z.number().int().positive('Location ID must be a positive integer').max(INT32_MAX),
 });
 
 /**

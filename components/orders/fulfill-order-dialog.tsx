@@ -165,10 +165,29 @@ export function FulfillOrderDialog({
       // weeks. From B1.5 a partial 200 (a short line lands in `skipped`) is
       // reachable in production, so the toast tiers by what actually happened.
       // ---------------------------------------------------------------------
-      const summary = result.summary;
-      const refusal = primaryRefusal(result.results);
+      const summary = result?.summary;
+      const refusal = primaryRefusal(result?.results);
 
-      if (summary.fulfilled === 0) {
+      // THE GUARDED READ (OC-2 / G2s-1). `use-orders.ts` resolves a 200 whose
+      // body fails to parse as `{}`, and a `summary` without a numeric
+      // `fulfilled` used to fall through BOTH comparisons below into the success
+      // branch as "undefined fulfilled" — the exact false success this block
+      // exists to delete. A body this dialog cannot read is not a refusal
+      // either: the fulfil is COMMITTED by the time it answers, and reporting it
+      // as a failure sends the operator back to retry a done fulfilment. So an
+      // unreadable envelope is assumed to have worked, and says nothing it
+      // cannot stand behind — no counts.
+      const fulfilled = typeof summary?.fulfilled === "number" ? summary.fulfilled : null;
+
+      /** The success title — ONE spelling, for both success tiers below. */
+      const processedTitle = (
+        <div className="flex items-center gap-2">
+          <CheckCircle className="h-4 w-4" />
+          <span>Order {order.orderNumber} processed</span>
+        </div>
+      );
+
+      if (fulfilled === 0) {
         // Nothing moved. The dialog STAYS OPEN and onSuccess is NOT called:
         // there is no new state to refresh into, and closing would tell the
         // operator the order was dealt with.
@@ -185,12 +204,15 @@ export function FulfillOrderDialog({
         return;
       }
 
-      const counts = `${summary.fulfilled} fulfilled, ${summary.skipped} skipped, ${summary.failed} failed`;
-
-      if (summary.fulfilled < items.length) {
+      if (fulfilled === null) {
+        // The unreadable envelope: today's success toast, with no counts.
+        toast.success(processedTitle);
+      } else if (fulfilled < items.length) {
         // Legitimate state: part of the order IS fulfilled, and the validation
         // step already showed which lines had issues. Close and refresh — but
-        // never call it "processed".
+        // never call it "processed". The counts are spelled only here, where
+        // there is a readable summary to spell them from.
+        const counts = `${fulfilled} fulfilled, ${summary.skipped} skipped, ${summary.failed} failed`;
         toast.warning(
           <div className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4" />
@@ -202,18 +224,12 @@ export function FulfillOrderDialog({
           }
         );
       } else {
-        toast.success(
-          <div className="flex items-center gap-2">
-            <CheckCircle className="h-4 w-4" />
-            <span>Order {order.orderNumber} processed</span>
-          </div>,
-          {
-            description:
-              `${summary.fulfilled} fulfilled` +
-              (summary.skipped > 0 ? `, ${summary.skipped} skipped` : "") +
-              (summary.failed > 0 ? `, ${summary.failed} failed` : ""),
-          }
-        );
+        toast.success(processedTitle, {
+          description:
+            `${fulfilled} fulfilled` +
+            (summary.skipped > 0 ? `, ${summary.skipped} skipped` : "") +
+            (summary.failed > 0 ? `, ${summary.failed} failed` : ""),
+        });
       }
 
       // Close dialog and refresh

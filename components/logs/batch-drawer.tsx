@@ -86,19 +86,26 @@ interface BatchResponse {
  * adjustment batch never grows a dangling separator.
  */
 function summaryLine(summary: BatchSummary): string {
+  // G2s-9: the three arrays are `?? []`-guarded HERE, one level deeper than the
+  // caller's `data?.summary` belt. A version-skewed body that carries a summary
+  // without one of them would otherwise throw inside render and take the whole
+  // drawer down — the opposite of what the belt is for.
+  const logTypes = summary.logTypes ?? [];
+  const actors = summary.actors ?? [];
+  const orders = summary.orders ?? [];
   const segments = [
     // getInventoryLogTone's second argument is a per-ROW delta that only steers the
     // tone; the LABEL is what is read here, so a fixed 0 is correct.
-    summary.logTypes.map((t) => getInventoryLogTone(t, 0).label).join(" / "),
+    logTypes.map((t) => getInventoryLogTone(t, 0).label).join(" / "),
     `${summary.productCount} product${summary.productCount === 1 ? "" : "s"}`,
     `${formatDelta(summary.netUnits)} units`,
-    summary.actors.join(", "),
+    actors.join(", "),
   ];
-  if (summary.orders.length > 0) {
+  if (orders.length > 0) {
     segments.push(
-      summary.orders.length === 1
-        ? `order #${summary.orders[0].orderNumber}`
-        : `orders ${summary.orders.map((o) => `#${o.orderNumber}`).join(", ")}`
+      orders.length === 1
+        ? `order #${orders[0].orderNumber}`
+        : `orders ${orders.map((o) => `#${o.orderNumber}`).join(", ")}`
     );
   }
   return segments.join(" · ");

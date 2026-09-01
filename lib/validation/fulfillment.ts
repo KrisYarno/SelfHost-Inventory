@@ -1,7 +1,14 @@
 import { z } from 'zod';
 import { MAX_FULFILLMENT_ITEMS, capMessage } from '@/lib/inventory/request-limits';
 
-const positiveInt = z.number().int().positive();
+/**
+ * Reconciliation Part 2 (G2s-3): bounded to INT32, not merely positive. Every id
+ * this schema carries lands in an INT column (`Product.id`, `Location.id`), and
+ * an out-of-range override throws out of Prisma BEFORE the fulfil path's own
+ * product/location guards can refuse it — a 500 for a 400-class input. Refused
+ * here it is an ordinary ZodError through the existing ladder.
+ */
+const positiveInt = z.number().int().positive().max(2147483647);
 
 /**
  * Schema for a single fulfillment item

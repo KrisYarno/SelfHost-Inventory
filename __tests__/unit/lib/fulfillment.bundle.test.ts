@@ -43,6 +43,8 @@ jest.mock('@/lib/prisma', () => {
     externalOrder: { findUnique: jest.fn(), update: jest.fn() },
     externalOrderItem: { update: jest.fn(), findMany: jest.fn() },
     product: { findUnique: jest.fn(), findMany: jest.fn() },
+    // OC-4: the location the prelock's INSERT names in `fk_pl_location`.
+    location: { findUnique: jest.fn(async ({ where }: any) => ({ id: where.id })) },
     product_locations: {
       findUnique: jest.fn(),
       findFirst: jest.fn(),

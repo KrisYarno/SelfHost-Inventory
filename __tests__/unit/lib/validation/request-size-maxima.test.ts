@@ -93,6 +93,53 @@ describe('the four feeding schemas cap their item arrays at 100', () => {
     expect(MAX_ITEMS).toBeLessThan(MAX_PRELOCK_KEYS);
   });
 });
+describe('the id fields are bounded to INT32 (G2s-3)', () => {
+  // `Product.id` / `Location.id` are INT columns. An id past 2147483647 throws
+  // out of Prisma BEFORE the fulfil path's own product/location guards can
+  // refuse it — a 500 for what is plainly a 400-class input. Bounded in the
+  // schema it is an ordinary ZodError through the existing ladder.
+  const INT32_MAX = 2147483647;
+
+  it('FulfillmentRequestSchema: the boundary passes, one past it is refused', () => {
+    const item = { itemId: 'item-1', quantity: 1 };
+    expect(
+      FulfillmentRequestSchema.safeParse({
+        locationId: INT32_MAX,
+        items: [{ ...item, productId: INT32_MAX }],
+      }).success
+    ).toBe(true);
+
+    expect(
+      FulfillmentRequestSchema.safeParse({
+        locationId: INT32_MAX + 1,
+        items: [item],
+      }).success
+    ).toBe(false);
+    expect(
+      FulfillmentRequestSchema.safeParse({
+        locationId: 5,
+        items: [{ ...item, productId: INT32_MAX + 1 }],
+      }).success
+    ).toBe(false);
+  });
+
+  it('UnfulfillRequestSchema: the boundary passes, one past it is refused', () => {
+    const item = { itemId: 'item-1', productId: 1, quantity: 1, locationId: 1 };
+    expect(
+      UnfulfillRequestSchema.safeParse({
+        items: [{ ...item, productId: INT32_MAX, locationId: INT32_MAX }],
+      }).success
+    ).toBe(true);
+
+    expect(
+      UnfulfillRequestSchema.safeParse({ items: [{ ...item, productId: INT32_MAX + 1 }] }).success
+    ).toBe(false);
+    expect(
+      UnfulfillRequestSchema.safeParse({ items: [{ ...item, locationId: INT32_MAX + 1 }] }).success
+    ).toBe(false);
+  });
+});
+
 describe("BatchTransferSchema.transfers (QB-9)", () => {
   const { BatchTransferSchema } = jest.requireActual("@/lib/validation/inventory");
   const transfer = (i: number) => ({ fromLocationId: i + 2, quantity: 1 });

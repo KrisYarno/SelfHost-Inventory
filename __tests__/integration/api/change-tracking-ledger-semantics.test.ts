@@ -194,6 +194,11 @@ function makeTx() {
   (tx.product.findMany as unknown as jest.Mock).mockImplementation(async (args: any) =>
     ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id, name: `Product ${id}` }))
   );
+  // OC-4: the location the prelock's INSERT names in `fk_pl_location`, proved
+  // beside the products. Absent = the whole request is a 400.
+  (tx.location.findUnique as unknown as jest.Mock).mockImplementation(async (args: any) => ({
+    id: args?.where?.id,
+  }));
   tx.auditLog.create.mockResolvedValue({ id: 1 } as any);
   // Kept verbatim, now as the INNER behaviour: the fulfil path reads this as
   // its atomic UPDATE's affected-row count.

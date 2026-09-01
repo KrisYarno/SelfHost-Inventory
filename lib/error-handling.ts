@@ -96,8 +96,11 @@ export function getUserFriendlyMessage(error: Error): UserFriendlyError {
       // again", and nothing was committed either way.
       case 'BUSY':
         return {
+          // G2s-7: the description is the SERVER'S sentence, and a coded error
+          // that arrived without one must not render an empty paragraph under
+          // the title.
           title: 'The system was busy',
-          description: error.message,
+          description: error.message || 'The system was busy with another change.',
           action: 'Try again in a moment.'
         };
       // FVc-5. The workbench throws this when a fulfil answered 200 but refused
@@ -108,8 +111,19 @@ export function getUserFriendlyMessage(error: Error): UserFriendlyError {
       case 'FULFILMENT_REFUSED':
         return {
           title: 'Nothing was deducted',
-          description: error.message,
+          description: error.message || 'the order could not be fulfilled',
           action: 'Any fulfilled WooCommerce lines were put back. Fix the issue and try again.'
+        };
+      // G2s-2. The SAME refusal, on the branch where the WC leg never moved at
+      // all: nothing was fulfilled, so no rollback ran, and the copy above would
+      // claim a restoration that never happened — which on the retry-after-a-
+      // failed-rollback path contradicts the critical toast the operator is
+      // still reading. Same title, different promise.
+      case 'FULFILMENT_NOT_STARTED':
+        return {
+          title: 'Nothing was deducted',
+          description: error.message || 'the order could not be fulfilled',
+          action: 'Nothing was sent to WooCommerce. Fix the issue and try again.'
         };
       default:
         break;

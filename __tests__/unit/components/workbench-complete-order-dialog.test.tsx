@@ -547,7 +547,7 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
   });
 
   /** N mapped WC lines the store will put straight into the cart. */
-  function wcOrderOf(count: number) {
+  function wcOrderOf(count: number, quantity = 1) {
     const products = Array.from({ length: count }, (_, idx) => ({
       id: 600 + idx,
       name: `Line ${idx}`,
@@ -557,7 +557,7 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
       orderItem({
         id: `it-${idx}`,
         name: `Line ${idx}`,
-        quantity: 1,
+        quantity,
         isMapped: true,
         productLinkId: `pl-${idx}`,
         productLink: {
@@ -577,8 +577,8 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
     return { items, products };
   }
 
-  function seedWcCart(count: number) {
-    const { items, products } = wcOrderOf(count);
+  function seedWcCart(count: number, quantity = 1) {
+    const { items, products } = wcOrderOf(count, quantity);
     act(() => {
       useWorkbench.getState().selectExternalOrder(makeOrder(items), products);
     });
@@ -674,7 +674,10 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
     // The refusal is chosen by PRIORITY: the short line, not the pass-1 skip
     // that precedes it in the array.
     expect(text).toContain("Insufficient stock for Line 1. Available: 0, Requested: 1");
-    expect(text).toContain("Any fulfilled WooCommerce lines were put back.");
+    // G2s-2: nothing was fulfilled, so no rollback ran — the action must not
+    // claim one. `FULFILMENT_NOT_STARTED` copy, not `FULFILMENT_REFUSED`'s.
+    expect(text).toContain("Nothing was sent to WooCommerce. Fix the issue and try again.");
+    expect(text).not.toContain("were put back");
     expect(onSuccess).not.toHaveBeenCalled();
   });
 
@@ -725,6 +728,10 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
     const text = toastText(toast.error as jest.Mock);
     expect(text).toContain("Nothing was deducted");
     expect(text).toContain("Insufficient stock for Line 1. Available: 0, Requested: 1");
+    // G2s-2, the OTHER branch: a rollback DID run and fully restored, so this
+    // copy — and only this copy — may promise the lines came back.
+    expect(text).toContain("Any fulfilled WooCommerce lines were put back. Fix the issue and try again.");
+    expect(text).not.toContain("Nothing was sent to WooCommerce");
     expect(onSuccess).not.toHaveBeenCalled();
   });
 
@@ -895,6 +902,203 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
     expect(text).toContain("The system was busy");
     expect(text).toContain("the system was busy with another change — try again");
     expect(text).toContain("Try again in a moment.");
+  });
+
+  // -------------------------------------------------------------------------
+  // THE CLAMP (OC-1). `lib/fulfillment.ts` fulfils `min(asked, remaining)`, so a
+  // line can come back FULFILLED at a shorter quantity — counted by the line
+  // gate, invisible to it. The Undo that follows restores by QUANTITY against
+  // the line's total `fulfilledQty`, so a cart-quantity Undo after a clamped
+  // fulfil takes units out of whatever another operator fulfilled.
+  // -------------------------------------------------------------------------
+
+  it("OC-1: a CLAMPED line is a refusal — the units are gated, not just the line count", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-c",
+          // EVERY line "fulfilled" — the line count says the leg is whole...
+          summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+          // ...and the entry says only 2 of the 5 asked units moved.
+          results: {
+            fulfilled: [{ itemId: "it-0", productId: 600, quantity: 2 }],
+            skipped: [],
+            failed: [],
+          },
+        }),
+      }),
+      unfulfill: () => ({ ok: true, json: async () => ({ restored: [{ itemId: "it-0" }] }) }),
+    });
+    seedWcCart(1, 5);
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    // The leg is put back — the SERVER'S 2 units, not the cart's 5.
+    const rollbacks = calls("/unfulfill");
+    expect(rollbacks).toHaveLength(1);
+    expect(bodyOf(rollbacks[0]).items).toEqual([
+      { itemId: "it-0", productId: 600, quantity: 2, locationId: 1 },
+    ]);
+    // ...the completion stops, so nothing is announced and no Undo is armed.
+    expect(calls("/api/inventory/deduct-simple")).toHaveLength(0);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(toastText(toast.error as jest.Mock)).toContain("Nothing was deducted");
+  });
+
+  it("OC-1: a FULL leg's deduction details carry the SERVER'S quantities, by item id", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    // A PROBE shape: the server's per-line numbers are deliberately not the
+    // cart's (2/3 asked, 3/2 answered) while the SUM still matches, which is the
+    // only way to see which of the two the Undo copies. A real clamp only ever
+    // shortens — and is refused by the pin above.
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-f",
+          summary: { total: 2, fulfilled: 2, skipped: 0, failed: 0 },
+          results: {
+            fulfilled: [
+              { itemId: "it-0", productId: 600, quantity: 3 },
+              { itemId: "it-1", productId: 601, quantity: 2 },
+            ],
+            skipped: [],
+            failed: [],
+          },
+        }),
+      }),
+    });
+    seedWcCart(2, 2);
+    act(() => {
+      useWorkbench.getState().updateItemQuantity(601, 3, "it-1");
+    });
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    const details = onSuccess.mock.calls[0][0].items as Array<{
+      fulfillmentItemId?: string;
+      quantity: number;
+    }>;
+    const quantityFor = (itemId: string) =>
+      details.find((detail) => detail.fulfillmentItemId === itemId)?.quantity;
+    expect(quantityFor("it-0")).toBe(3);
+    expect(quantityFor("it-1")).toBe(2);
+  });
+
+  it("OC-8: an already_fulfilled refusal names the way out of the retry loop", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: null,
+          summary: { total: 1, fulfilled: 0, skipped: 1, failed: 0 },
+          results: {
+            fulfilled: [],
+            skipped: [
+              {
+                itemId: "it-0",
+                reason: "already_fulfilled",
+                details: "Item is already fully fulfilled",
+              },
+            ],
+            failed: [],
+          },
+        }),
+      }),
+    });
+    seedWcCart(1);
+    renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("Item is already fully fulfilled");
+    // Without this sentence "Fix the issue and try again" is a loop: the cart is
+    // built once at selection, so every retry refuses the same way.
+    expect(text).toContain("Re-select the order to rebuild the cart from its current state.");
+  });
+
+  it("G2s-4: an entry whose quantity cannot be resolved is skipped from the body and NAMED", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-q",
+          summary: { total: 2, fulfilled: 1, skipped: 1, failed: 0 },
+          results: {
+            fulfilled: [
+              { itemId: "it-0", productId: 600, quantity: 1 },
+              // A good product id, no quantity, and no cart line to fall back
+              // to: shipping this as `quantity: 0` 400s the WHOLE rollback body
+              // on the schema's `positive()`, taking its resolvable sibling with it.
+              { itemId: "it-ghost", productId: 601 },
+            ],
+            skipped: [{ itemId: "it-1", reason: "unmapped", details: "Item is not mapped" }],
+            failed: [],
+          },
+        }),
+      }),
+      unfulfill: () => ({ ok: true, json: async () => ({ restored: [{ itemId: "it-0" }] }) }),
+    });
+    seedWcCart(2);
+    renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const rollbacks = calls("/unfulfill");
+    expect(rollbacks).toHaveLength(1);
+    expect(bodyOf(rollbacks[0]).items).toEqual([
+      { itemId: "it-0", productId: 600, quantity: 1, locationId: 1 },
+    ]);
+
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("Not sent for restoration (no product id or quantity): it-ghost.");
+  });
+
+  it("G2s-5: a rollback that failed at a GUARD path still raises the critical toast", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-g",
+          // The summary says a line moved; the envelope names NO entry to put
+          // back. The zero-entries belt used to fail to the console alone.
+          summary: { total: 2, fulfilled: 1, skipped: 1, failed: 0 },
+          results: {
+            fulfilled: [],
+            skipped: [{ itemId: "it-1", reason: "unmapped", details: "Item is not mapped" }],
+            failed: [],
+          },
+        }),
+      }),
+    });
+    seedWcCart(2);
+    renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    // Nothing could be sent, so no request was made — and the operator is told.
+    expect(calls("/unfulfill")).toHaveLength(0);
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("Rollback failed");
+    expect(text).toContain("Please check inventory manually for order ord-1.");
   });
 
   // -------------------------------------------------------------------------

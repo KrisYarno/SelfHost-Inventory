@@ -141,7 +141,13 @@ beforeEach(() => {
     async () =>
       ({ ok: true, json: async () => [{ id: 1, name: "Main" }] }) as unknown as Response
   ) as unknown as typeof fetch;
-  mutateAsync = jest.fn(async () => ({ summary: {}, results: {} }));
+  // A REAL full envelope (G2s-1): the old `{ summary: {}, results: {} }` default
+  // was the very near-miss shape that fell through to the success branch as
+  // "undefined fulfilled", so every cap pin exercised it silently.
+  mutateAsync = jest.fn(async () => ({
+    summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+    results: { fulfilled: [{ itemId: "it-0", productId: 501, quantity: 2 }], skipped: [], failed: [] },
+  }));
   (useFulfillOrder as jest.Mock).mockReturnValue({ mutateAsync, isPending: false });
 });
 
@@ -279,6 +285,51 @@ describe("fulfill dialog — the toast tiers by what the server actually did", (
     expect(toastOptions(toast.success as jest.Mock).description).toBe("2 fulfilled");
     expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(onSuccess).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE UNREADABLE ENVELOPE (OC-2 / G2s-1). `use-orders.ts` resolves a 200 whose
+// body fails to parse as `{}` (json-before-ok), and a `summary` without a
+// numeric `fulfilled` used to fall through both comparisons into the SUCCESS
+// branch spelling "undefined fulfilled". The fulfil is COMMITTED by the time
+// either shape arrives, so neither may be reported as a failure — and neither
+// may quote counts the dialog cannot read.
+// ---------------------------------------------------------------------------
+
+describe("fulfill dialog — a body it cannot read is not a refusal", () => {
+  it("a bodyless 200 (`{}`): the success toast, close + onSuccess, never a failure", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    mutateAsync.mockResolvedValue({});
+    const { onOpenChange, onSuccess } = await renderDialog(openOrder(2));
+
+    await user.click(confirmButton());
+    await waitFor(() => expect(toast.success as jest.Mock).toHaveBeenCalled());
+
+    expect(toastTitle(toast.success as jest.Mock)).toContain("Order 9001 processed");
+    // No counts: nothing was read, so nothing is claimed.
+    expect(toastOptions(toast.success as jest.Mock)).toBeUndefined();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onSuccess).toHaveBeenCalled();
+    expect(toast.error as jest.Mock).not.toHaveBeenCalled();
+    expect(toast.warning as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it("the NEAR MISS (`{ summary: {} }`): the same, and never 'undefined fulfilled'", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    mutateAsync.mockResolvedValue({ summary: {}, results: {} });
+    const { onOpenChange, onSuccess } = await renderDialog(openOrder(2));
+
+    await user.click(confirmButton());
+    await waitFor(() => expect(toast.success as jest.Mock).toHaveBeenCalled());
+
+    const title = toastTitle(toast.success as jest.Mock);
+    expect(title).toContain("Order 9001 processed");
+    expect(title).not.toContain("undefined");
+    expect(toastOptions(toast.success as jest.Mock)).toBeUndefined();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onSuccess).toHaveBeenCalled();
+    expect(toast.error as jest.Mock).not.toHaveBeenCalled();
   });
 });
 

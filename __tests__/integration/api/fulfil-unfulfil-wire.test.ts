@@ -126,12 +126,15 @@ const knobs: {
   stockUpdateAffected: number;
   stockUpdateError: Error | null;
   knownProductIds: number[] | null;
+  /** null = every location exists (OC-4). */
+  knownLocationIds: number[] | null;
 } = {
   lockedOrders: [],
   stock: 100,
   stockUpdateAffected: 1,
   stockUpdateError: null,
   knownProductIds: null,
+  knownLocationIds: null,
 };
 
 function makeTx(order: any) {
@@ -185,6 +188,13 @@ function makeTx(order: any) {
         ((where?.id?.in ?? []) as number[])
           .filter((id) => (knobs.knownProductIds ? knobs.knownProductIds.indexOf(id) !== -1 : true))
           .map((id) => ({ id, name: `Product ${id}` }))
+      ),
+    },
+    location: {
+      findUnique: jest.fn(async ({ where }: any) =>
+        knobs.knownLocationIds && knobs.knownLocationIds.indexOf(where.id) === -1
+          ? null
+          : { id: where.id }
       ),
     },
     auditLog: { create: jest.fn(async () => ({ id: 1 })) },
@@ -309,6 +319,7 @@ beforeEach(() => {
   knobs.stockUpdateAffected = 1;
   knobs.stockUpdateError = null;
   knobs.knownProductIds = null;
+  knobs.knownLocationIds = null;
   (getServerSession as jest.Mock).mockResolvedValue(SESSION);
   db.externalOrder.findUnique.mockResolvedValue({ companyId: COMPANY_ID });
 });
@@ -390,6 +401,23 @@ describe('fulfil — the refusals this wave adds', () => {
       { itemId: 'item-2', error: 'Product with ID 999 not found' },
     ]);
     expect(res.body.results.fulfilled.map((f: any) => f.itemId)).toEqual(['item-1']);
+  });
+
+  it('LOCATION_NOT_FOUND: an unknown location is a 400, never a foreign-key 500', async () => {
+    // The prelock's INSERT fires `fk_pl_location` as well as `fk_pl_product`, so
+    // before OC-4 an unknown location — any authenticated caller can send one —
+    // reached MySQL as a 1452 and the wire as a bare 500 (OC-4).
+    knobs.knownLocationIds = [LOCATION_ID];
+    driveWith(orderWith([singleLine()]));
+
+    const res = await callParamRoute(FULFILL, {
+      locationId: 4242,
+      items: [{ itemId: 'item-1', quantity: 2 }],
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('LOCATION_NOT_FOUND');
+    expect(res.body.error).toBe('Location 4242 not found');
   });
 
   it('a transient inside the transaction is a whole-request 503 BUSY, never a 200', async () => {

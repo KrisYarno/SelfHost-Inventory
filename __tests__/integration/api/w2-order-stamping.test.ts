@@ -175,6 +175,11 @@ function makeTx() {
     ((args?.where?.id?.in ?? []) as number[]).map((id) => ({ id, name: `Product ${id}` }))
   );
   tx.product.update.mockResolvedValue({} as any);
+  // OC-4: the location the prelock's INSERT names in `fk_pl_location`, proved
+  // beside the products. Absent = the whole request is a 400.
+  (tx.location.findUnique as unknown as jest.Mock).mockImplementation(async (args: any) => ({
+    id: args?.where?.id,
+  }));
   tx.auditLog.create.mockResolvedValue({ id: 1 } as any);
   tx.externalOrder.update.mockResolvedValue({} as any);
   tx.externalOrderItem.update.mockResolvedValue({} as any);
