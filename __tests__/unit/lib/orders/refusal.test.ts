@@ -96,3 +96,38 @@ describe("primaryRefusal — the four priority tiers", () => {
     expect(refusal).toBe("insufficient_stock");
   });
 });
+
+// ---------------------------------------------------------------------------
+// QA-2 — a NON-ARRAY `skipped`/`failed` is not a refusal either.
+//
+// The reader guarded null (`?? []`) but not SHAPE, so a version-skewed or
+// proxied body carrying `skipped: "boom"` threw `.find is not a function`
+// INSIDE the dialog's try — turning a COMMITTED fulfil into "Fulfillment
+// Failed" and sending the operator back to re-run a fulfilment that already
+// moved stock. The leaf answers "no refusal named" instead.
+// ---------------------------------------------------------------------------
+
+/** The wire is untyped at runtime; these fixtures are what a skewed body sends. */
+const asEnvelope = (body: unknown) => body as Parameters<typeof primaryRefusal>[0];
+
+describe("primaryRefusal — a mis-shaped envelope answers null, never throws", () => {
+  it("a string `skipped` is ignored rather than iterated", () => {
+    expect(() => primaryRefusal(asEnvelope({ skipped: "boom" }))).not.toThrow();
+    expect(primaryRefusal(asEnvelope({ skipped: "boom" }))).toBeNull();
+  });
+
+  it("a number `failed` is ignored rather than iterated", () => {
+    expect(() => primaryRefusal(asEnvelope({ failed: 42 }))).not.toThrow();
+    expect(primaryRefusal(asEnvelope({ failed: 42 }))).toBeNull();
+  });
+
+  it("an object `skipped` does not shadow a readable `failed`", () => {
+    // The two guards are independent: one bad half must not cost the sentence
+    // the other half really carries.
+    const refusal = primaryRefusal(
+      asEnvelope({ skipped: { reason: "insufficient_stock" }, failed: [{ error: "Item not found in order" }] })
+    );
+
+    expect(refusal).toBe("Item not found in order");
+  });
+});

@@ -296,8 +296,16 @@ export async function validateOrderFulfillment(
       // the operator confirms, and it comes back in `failed[]`: a refusal this
       // surface promised would not happen. No availability block either: there
       // is no product left for stock to be available AT.
-      issues.push('Product no longer exists');
-      hasStockIssues = true;
+      //
+      // QA-5: and it agrees in the OTHER direction too — the same gate FD3-1
+      // put on the bundle belt. The fulfil pass skips a line with nothing
+      // outstanding before it ever reads a product, so refusing one here
+      // (canFulfill false) would refuse an order the pass would simply skip.
+      // The 'already fully fulfilled' issue below is the whole truth about it.
+      if (remainingQty > 0) {
+        issues.push('Product no longer exists');
+        hasStockIssues = true;
+      }
     } else if (item.isMapped && item.productLink?.internalProduct) {
       const product = item.productLink.internalProduct;
 

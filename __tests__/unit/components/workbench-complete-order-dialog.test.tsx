@@ -215,7 +215,14 @@ function renderDialog() {
     </QueryClientProvider>
   );
   const view = render(ui(true));
-  return { onOpenChange, onSuccess, setOpen: (open: boolean) => view.rerender(ui(open)) };
+  // QA-6b: the client is handed back so a pin can watch what a refusal path
+  // invalidates — the real `invalidateInventoryCaches` still runs.
+  return {
+    onOpenChange,
+    onSuccess,
+    queryClient,
+    setOpen: (open: boolean) => view.rerender(ui(open)),
+  };
 }
 
 const completeButton = () => screen.getByRole("button", { name: "Complete & Fulfill" });
@@ -877,6 +884,92 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
     const text = toastText(toast.error as jest.Mock);
     expect(text).toContain("Rollback failed");
     expect(text).toContain("restored only 0 of 1 lines");
+  });
+
+  it("QA-3: a manual-leg failure with NO entries owes the SUMMARY's count, never '0 of 0'", async () => {
+    // The tolerated skew (FD1-3): the summary counts a line `results.fulfilled`
+    // does not name, so the leg passes the all-or-nothing gate and the manual
+    // leg runs. When THAT fails, the rollback has no entries to send — and the
+    // incident toast used to tell the operator it "restored only 0 of 0 lines",
+    // a sentence that reads as "nothing was owed". The gate site already passes
+    // the hint; this is the second call site.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-7",
+          summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+          // The skew: counted, but not named.
+          results: { fulfilled: [], skipped: [], failed: [] },
+        }),
+      }),
+      deduct: () => ({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: "Failed to process order", code: "INSUFFICIENT_STOCK" }),
+      }),
+    });
+    seedWcCart(1);
+    act(() => {
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("Rollback failed");
+    expect(text).toContain("restored only 0 of 1 lines");
+    expect(text).not.toContain("0 of 0");
+    // Nothing was sendable, so no unfulfill request was made at all.
+    expect(calls("/unfulfill")).toHaveLength(0);
+  });
+
+  it("QA-6b: a refusal that rolled back still refreshes the inventory caches", async () => {
+    // Stock genuinely MOVED on this path (a line was deducted, then credited
+    // back), and the completion throws instead of reaching the success block
+    // that invalidates. /inventory kept its pre-fulfil numbers until the next
+    // manual refresh — the operator reads a page the server disagrees with.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-8",
+          summary: { total: 2, fulfilled: 1, skipped: 1, failed: 0 },
+          results: {
+            fulfilled: [{ itemId: "it-0", productId: 600, quantity: 1 }],
+            skipped: [
+              {
+                itemId: "it-1",
+                reason: "insufficient_stock",
+                details: "Insufficient stock for Line 1. Available: 0, Requested: 1",
+              },
+            ],
+            failed: [],
+          },
+        }),
+      }),
+      unfulfill: () => ({ ok: true, json: async () => ({ restored: [{ itemId: "it-0" }] }) }),
+    });
+    seedWcCart(2);
+    const { queryClient } = renderDialog();
+    const invalidateQueries = jest.spyOn(queryClient, "invalidateQueries");
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const keys = invalidateQueries.mock.calls.map(
+      (call) => (call[0] as { queryKey?: unknown } | undefined)?.queryKey
+    );
+    expect(keys).toContainEqual(["inventory-products"]);
+    expect(keys).toContainEqual(["dashboard-metrics"]);
   });
 
   it("a 503 BUSY from the fulfil leg names itself as busy (OCc-20)", async () => {

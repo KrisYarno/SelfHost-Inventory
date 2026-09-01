@@ -313,6 +313,31 @@ describe('validateOrderFulfillment — a soft-deleted mapped product', () => {
     expect(result.requiresAttention).toBe(true);
   });
 
+  it('QA-5: a FULLY FULFILLED line keeps only its already-fulfilled issue', async () => {
+    // The belt asserts a refusal ('Product no longer exists', canFulfill false)
+    // on a line the FULFIL pass would never touch: it skips an item with
+    // nothing outstanding before any product read. Preview and pass have to
+    // agree in BOTH directions — the same gate FD3-1 put on the bundle half.
+    const mock = getMock();
+    const order = buildDeletedMappingOrder();
+    order.items[0].fulfilledQty = 2; // quantity 2 -> remainingQty 0
+    mock.externalOrder.findUnique.mockResolvedValue(order);
+    mock.product_locations.findMany.mockResolvedValue([
+      { productId: 900, locationId: 1, quantity: 99, locations: { id: 1, name: 'Main' } },
+    ]);
+
+    const result = await validateOrderFulfillment('ord-del-1', 1);
+
+    const item = result.items[0];
+    expect(item.issues).toEqual(['Item is already fully fulfilled']);
+    expect(result.canFulfill).toBe(true);
+    expect(result.requiresAttention).toBe(false);
+    // Still no availability block, and still no read for it: there is no
+    // product left to be available AT, fulfilled line or not.
+    expect(item.mapping).toBeUndefined();
+    expect(mock.product_locations.findMany).not.toHaveBeenCalled();
+  });
+
   it('FD1-6: a LIVE mapped product is untouched by the belt', async () => {
     const mock = getMock();
     const order = buildDeletedMappingOrder();
@@ -374,6 +399,34 @@ describe('validateOrderFulfillment — a bundle with a soft-deleted component', 
     expect(result.requiresAttention).toBe(true);
     // The stock read is SKIPPED — there is no component left to have stock AT.
     expect(mock.product_locations.findMany).not.toHaveBeenCalled();
+  });
+
+  it('FD3-1: a FULLY FULFILLED bundle never consults the belt at all', async () => {
+    // The regression net for the micro round: reverting the `remainingQty > 0`
+    // gate makes a dead component refuse a line the fulfil pass only SKIPS —
+    // and costs a product read per already-fulfilled bundle line.
+    const mock = getMock();
+    mock.externalOrder.findUnique.mockResolvedValue(
+      buildBundleOrder({
+        snapshot: [
+          { internalProductId: 10, quantity: 1, internalProductName: 'BPC-157' },
+          { internalProductId: 20, quantity: 1, internalProductName: 'TB-500' },
+        ],
+        fulfilledQty: 2, // itemQuantity defaults to 2 -> remainingQty 0
+      })
+    );
+    // 20 is soft-deleted. If the belt ran, this line would refuse.
+    mock.product.findMany.mockResolvedValue([{ id: 10 }]);
+    mock.product_locations.findMany.mockResolvedValue([
+      { productId: 10, quantity: 99 },
+      { productId: 20, quantity: 99 },
+    ]);
+
+    const result = await validateOrderFulfillment('ord-val-1', 1);
+
+    expect(result.items[0].issues).toEqual(['Item is already fully fulfilled']);
+    expect(result.canFulfill).toBe(true);
+    expect(mock.product.findMany).not.toHaveBeenCalled();
   });
 
   it('FD3-3: the alive read FILTERS deletedAt: null (the belt is the where clause)', async () => {

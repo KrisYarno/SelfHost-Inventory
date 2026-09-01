@@ -96,6 +96,14 @@ export function useFulfillOrder() {
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ["external-orders"] });
       queryClient.invalidateQueries({ queryKey: ["external-order", variables.orderId] });
+      // QA-1: the pre-fulfil VALIDATION moved too. A partial fulfil changes the
+      // remaining quantities and the stock this query answers from, so a cached
+      // answer describes the order as it was before the deduction. Scoped by
+      // orderId — the key's third segment is the location, and every location's
+      // answer for this order is now stale.
+      queryClient.invalidateQueries({
+        queryKey: ["fulfillment-validation", variables.orderId],
+      });
       invalidateInventoryCaches(queryClient);
     },
   });

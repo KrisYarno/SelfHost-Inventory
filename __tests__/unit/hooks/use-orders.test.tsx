@@ -101,6 +101,49 @@ describe("useFulfillOrder — the refusal it hands the dialog", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// QA-1 — what a fulfil INVALIDATES.
+//
+// A partial fulfil moves the same numbers the pre-fulfil validation was read
+// from (remaining quantities, per-location stock), so leaving that query cached
+// hands the next reader of the dialog a strip that describes the order as it
+// was BEFORE the deduction. It is scoped by orderId — the third key segment is
+// the location, and every location's answer for this order is now stale.
+// ---------------------------------------------------------------------------
+
+describe("useFulfillOrder — the caches it invalidates on success", () => {
+  it("includes this order's fulfillment-validation, alongside orders + inventory", async () => {
+    answerWith(200, {
+      success: true,
+      summary: { total: 2, fulfilled: 1, skipped: 1, failed: 0 },
+      results: {
+        fulfilled: [{ itemId: "fi-1", productId: 501, quantity: 1 }],
+        skipped: [{ itemId: "fi-2", reason: "insufficient_stock", details: "short" }],
+        failed: [],
+      },
+    });
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const invalidateQueries = jest.spyOn(qc, "invalidateQueries");
+    const scoped = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useFulfillOrder(), { wrapper: scoped });
+
+    await result.current.mutateAsync(FULFIL_INPUT);
+
+    const keys = invalidateQueries.mock.calls.map(
+      (call) => (call[0] as { queryKey?: unknown } | undefined)?.queryKey
+    );
+    expect(keys).toContainEqual(["fulfillment-validation", "ord-1"]);
+    // The pre-existing three are still there — this is an addition, not a swap.
+    expect(keys).toContainEqual(["external-orders"]);
+    expect(keys).toContainEqual(["external-order", "ord-1"]);
+    expect(keys).toContainEqual(["inventory-products"]);
+  });
+});
+
 describe("useFulfillmentValidation — the refusal it surfaces", () => {
   it("shows the validate route's own FLAT sentence", async () => {
     answerWith(400, { error: "locationId is required", code: "VALIDATION_ERROR" });

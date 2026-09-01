@@ -204,6 +204,12 @@ export function FulfillOrderDialog({
             duration: 5000,
           }
         );
+        // QA-1: and the strip BEHIND the toast is re-read. It was rendered from
+        // the pre-fulfil validation, so on the one tier that keeps the dialog
+        // open it still says the line is ready with the confirm enabled —
+        // contradicting the refusal the operator was just handed, and inviting
+        // the same tap again. Same idiom the mapping dialog uses on its return.
+        await validationQuery.refetch();
         return;
       }
 

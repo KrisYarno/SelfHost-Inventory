@@ -153,12 +153,15 @@ beforeEach(() => {
 
 /** Render the dialog for `order`, with validation already resolved. */
 async function renderDialog(order: ExternalOrder) {
+  // QA-1: the refetch is OBSERVABLE — the stays-open tier has to refresh the
+  // strip it leaves the operator looking at.
+  const refetch = jest.fn();
   (useFulfillmentValidation as jest.Mock).mockReturnValue({
     data: validationFor(order),
     isFetching: false,
     isError: false,
     error: null,
-    refetch: jest.fn(),
+    refetch,
   });
 
   const queryClient = new QueryClient({
@@ -181,7 +184,7 @@ async function renderDialog(order: ExternalOrder) {
   // The location auto-selects once /api/locations resolves; the confirm stays
   // disabled until it does.
   await waitFor(() => expect(confirmButton()).toBeEnabled());
-  return { onOpenChange, onSuccess };
+  return { onOpenChange, onSuccess, refetch };
 }
 
 const confirmButton = () =>
@@ -235,6 +238,36 @@ describe("fulfill dialog — the toast tiers by what the server actually did", (
     expect(onSuccess).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(toast.success as jest.Mock).not.toHaveBeenCalled();
+  });
+
+  it("QA-1: NOTHING fulfilled re-validates, so the strip the operator keeps looking at is not stale", async () => {
+    // The dialog stays OPEN on this tier, which leaves the validation strip on
+    // screen — and it was rendered BEFORE the fulfil. It still says "1 ready"
+    // with the confirm enabled while the toast says nothing was fulfilled, so
+    // the operator's next tap re-runs the same refusal. Re-read it.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    mutateAsync.mockResolvedValue({
+      summary: { total: 1, fulfilled: 0, skipped: 1, failed: 0 },
+      results: {
+        fulfilled: [],
+        skipped: [
+          {
+            itemId: "it-0",
+            reason: "insufficient_stock",
+            details: "Insufficient stock for Widget. Available: 0, Requested: 2",
+          },
+        ],
+        failed: [],
+      },
+    });
+    const { refetch, onOpenChange } = await renderDialog(openOrder(1));
+
+    await user.click(confirmButton());
+    await waitFor(() => expect(refetch).toHaveBeenCalled());
+
+    // ...and it is still the same dialog: the refresh is what the tier does
+    // INSTEAD of closing, not on the way out.
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 
   it("PARTIAL: a warning toast with the counts and the refusal, then close + onSuccess", async () => {

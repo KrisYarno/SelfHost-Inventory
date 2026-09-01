@@ -59,8 +59,13 @@ function sentence(value: unknown): string | null {
  * refusal at all, so a caller can spell its own fallback with `??`.
  */
 export function primaryRefusal(results: RefusalEnvelope | null | undefined): string | null {
-  const skipped = results?.skipped ?? [];
-  const failed = results?.failed ?? [];
+  // QA-2: SHAPE, not just absence. `?? []` answered null and undefined, and a
+  // body carrying a non-array `skipped` (a version skew, a proxied envelope)
+  // reached `.find` and threw INSIDE the caller's try — the fulfil dialog then
+  // reported a COMMITTED fulfilment as "Fulfillment Failed". A half this reader
+  // cannot iterate names no refusal; the other half is still read.
+  const skipped = Array.isArray(results?.skipped) ? results.skipped : [];
+  const failed = Array.isArray(results?.failed) ? results.failed : [];
 
   // 1. The short line, with the exact locked quantity the engine reported.
   const shortLine = skipped.find(

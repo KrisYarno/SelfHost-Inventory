@@ -536,6 +536,13 @@ export function CompleteOrderDialog({
             else raiseRollbackIncident();
           }
 
+          // QA-6b: stock really MOVED on this path — lines were deducted and
+          // (usually) credited back — and the throw below skips the success
+          // block that tells react-query about it. Without this /inventory, the
+          // dashboard and the journal keep their pre-fulfil numbers until
+          // something else happens to refetch them.
+          invalidateInventoryCaches(queryClient);
+
           // OC-8: a stale cart — built once at selection — refuses with
           // `already_fulfilled` on EVERY retry, and each retry fulfils and rolls
           // back real stock. "Fix the issue and try again" names no exit, so the
@@ -627,9 +634,20 @@ export function CompleteOrderDialog({
           // restored nothing as a rollback. Still best-effort at the wire, but
           // a rollback that did not restore every line now says so, loudly.
           if (wcFulfilled && selectedExternalOrder) {
-            const restoredFully = await rollbackWcLeg(fulfilledEntries);
+            // QA-3: with the owed hint the gate site already passes. A leg that
+            // reached this point cleared the all-or-nothing gate, so what is
+            // owed back is the cart's WC lines — and a zero-entries body would
+            // otherwise put "restored only 0 of 0 lines" in the incident toast,
+            // which reads as "nothing was owed". (`fulfilledCount` is scoped to
+            // the fulfil block above; the cart's count is the same number on
+            // every path that reaches here.)
+            const restoredFully = await rollbackWcLeg(fulfilledEntries, wcItems.length);
             if (restoredFully) wcFulfilled = false;
             else raiseRollbackIncident();
+            // QA-6b: same reason as the gate branch — the deduction and its
+            // rollback both moved stock, and the throw below never reaches the
+            // success block's invalidation.
+            invalidateInventoryCaches(queryClient);
           }
 
           // Same shared reader on the deduct leg (pack REV-22 F7): a 400

@@ -287,6 +287,30 @@ describe("BatchDrawer", () => {
     expect(line.textContent).not.toMatch(/undefined/);
   });
 
+  it("QA-4: a NaN-shaped count renders no segment (the guard is isFinite, not typeof)", async () => {
+    // `typeof NaN === "number"`, so the earlier shape of the FD2-4 belt let a
+    // NaN through and the line read "NaN products" — the same "a number an
+    // operator reads as data" the belt exists to stop, one shape along. The
+    // fetch stub answers with the object as-is, which is how a client-side
+    // computed count (a subtraction over a missing field) actually arrives.
+    mockFetchBatch(
+      withSummary({
+        rowCount: 2,
+        productCount: NaN,
+        netUnits: -2,
+        logTypes: ["SALE"],
+        actors: ["derek"],
+        orders: [{ id: "ord_1", orderNumber: "23716" }],
+      })
+    );
+    renderWithClient(<BatchDrawer batchId={BATCH_UUID} onOpenChange={jest.fn()} />);
+
+    const line = await screen.findByText(/order #23716/);
+    expect(line).toHaveTextContent("Sale · -2 units · derek · order #23716");
+    expect(line.textContent).not.toMatch(/NaN/);
+    expect(line.textContent).not.toMatch(/products?/);
+  });
+
   it("hides the summary line entirely for an events-only batch (rowCount 0)", async () => {
     mockFetchBatch({
       ...batchResponse,
