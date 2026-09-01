@@ -1,6 +1,5 @@
 import { getSession } from '@/lib/auth';
 import { NextRequest, NextResponse } from 'next/server';
-import { Prisma } from '@prisma/client';
 
 import { AppError, errorLogger } from '@/lib/error-handling';
 import { validateCSRFToken } from '@/lib/csrf';

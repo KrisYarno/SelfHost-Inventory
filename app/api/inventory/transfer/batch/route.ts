@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Prisma } from "@prisma/client";
 import { requireApproved, apiHandler, requireCSRF, TX_BUSY_MESSAGE } from "@/lib/api-utils";
 import { isTransientTxError } from "@/lib/inventory/tx-errors";
 import prisma from "@/lib/prisma";
