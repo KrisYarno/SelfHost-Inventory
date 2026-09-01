@@ -376,6 +376,33 @@ describe('validateOrderFulfillment — a bundle with a soft-deleted component', 
     expect(mock.product_locations.findMany).not.toHaveBeenCalled();
   });
 
+  it('FD3-3: the alive read FILTERS deletedAt: null (the belt is the where clause)', async () => {
+    const mock = getMock();
+    mock.externalOrder.findUnique.mockResolvedValue(
+      buildBundleOrder({
+        snapshot: [
+          { internalProductId: 10, quantity: 1, internalProductName: 'BPC-157' },
+          { internalProductId: 20, quantity: 1, internalProductName: 'TB-500' },
+        ],
+      })
+    );
+    mock.product_locations.findMany.mockResolvedValue([
+      { productId: 10, quantity: 99 },
+      { productId: 20, quantity: 99 },
+    ]);
+
+    await validateOrderFulfillment('ord-val-1', 1);
+
+    // The default echo mock ignores its where clause, so without THIS pin a
+    // future edit could drop `deletedAt: null` (re-breaking FD2-1) with every
+    // other pin still green (FD3-3).
+    expect(mock.product.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ deletedAt: null, id: { in: [10, 20] } }),
+      })
+    );
+  });
+
   it('FD2-1: an all-alive bundle is untouched by the belt', async () => {
     const mock = getMock();
     mock.externalOrder.findUnique.mockResolvedValue(

@@ -208,12 +208,22 @@ export async function validateOrderFulfillment(
       // — the same refusal FD1-6 closed on the SINGLE path, through the other
       // door. One read per bundle item, alongside the batched stock read.
       const componentIds = components.map((c) => c.internalProductId);
-      const aliveComponents = await prisma.product.findMany({
-        where: { id: { in: componentIds }, deletedAt: null },
-        select: { id: true },
-      });
-      const aliveComponentIds = new Set(aliveComponents.map((p) => p.id));
-      if (componentIds.some((id) => !aliveComponentIds.has(id))) {
+      // FD3-1: only a line with something OUTSTANDING consults the belt — the
+      // fulfil pass skips already-fulfilled items before any product read, and
+      // a fully-fulfilled line must keep its 'already fully fulfilled' issue
+      // below (this branch `continue`s; the single-path belt does not).
+      const aliveComponentIds =
+        remainingQty > 0
+          ? new Set(
+              (
+                await prisma.product.findMany({
+                  where: { id: { in: componentIds }, deletedAt: null },
+                  select: { id: true },
+                })
+              ).map((p) => p.id)
+            )
+          : null;
+      if (aliveComponentIds !== null && componentIds.some((id) => !aliveComponentIds.has(id))) {
         issues.push('Bundle component no longer exists');
         hasStockIssues = true;
         validationItems.push({

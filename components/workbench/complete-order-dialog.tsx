@@ -290,7 +290,7 @@ export function CompleteOrderDialog({
      * a 2xx with `restored: []` is not a rollback, and the caller's choice of
      * error code turns on this answer.
      */
-    const rollbackWcLeg = async (entries: FulfilledEntry[]): Promise<boolean> => {
+    const rollbackWcLeg = async (entries: FulfilledEntry[], owedHint?: number): Promise<boolean> => {
       if (!selectedExternalOrder || !selectedLocationId || !csrfToken) {
         rollbackOutcome = { restoredCount: 0, owed: entries.length, unresolved: [] };
         return false;
@@ -305,7 +305,9 @@ export function CompleteOrderDialog({
         console.error(
           `CRITICAL: WC rollback had no fulfilled entries to restore for order ${selectedExternalOrder.id}`
         );
-        rollbackOutcome = { restoredCount: 0, owed: 0, unresolved: [] };
+        // FD3-5: the summary claimed `owedHint` lines and the evidence names
+        // none — the incident toast should say 'restored only 0 of N', not '0 of 0'.
+        rollbackOutcome = { restoredCount: 0, owed: owedHint ?? 0, unresolved: [] };
         return false;
       }
 
@@ -529,7 +531,7 @@ export function CompleteOrderDialog({
           let restoredFully = true;
           if (fulfilledEntries.length > 0 || fulfilledCount > 0) {
             rolledBack = true;
-            restoredFully = await rollbackWcLeg(fulfilledEntries);
+            restoredFully = await rollbackWcLeg(fulfilledEntries, fulfilledCount ?? undefined);
             if (restoredFully) wcFulfilled = false;
             else raiseRollbackIncident();
           }
