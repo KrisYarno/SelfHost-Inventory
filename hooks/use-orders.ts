@@ -103,6 +103,11 @@ export function useFulfillOrder() {
       // answer for this order is now stale.
       queryClient.invalidateQueries({
         queryKey: ["fulfillment-validation", variables.orderId],
+        // FQ-1: mark stale, never refetch — on the three closing tiers the
+        // dialog is being dismissed and an active refetch that failed would
+        // toast "Failed to validate order" over the success toast. staleTime 0
+        // refreshes on the next open; the zero tier refetches explicitly.
+        refetchType: "none",
       });
       invalidateInventoryCaches(queryClient);
     },

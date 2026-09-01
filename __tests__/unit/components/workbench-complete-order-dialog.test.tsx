@@ -917,7 +917,8 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
         .getState()
         .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
     });
-    renderDialog();
+    const { queryClient } = renderDialog();
+    const invalidateSpy = jest.spyOn(queryClient, "invalidateQueries");
 
     await user.click(completeButton());
     await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
@@ -928,6 +929,12 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
     expect(text).not.toContain("0 of 0");
     // Nothing was sendable, so no unfulfill request was made at all.
     expect(calls("/unfulfill")).toHaveLength(0);
+    // FQ-2a: the DEDUCT-site QA-6b invalidation has its own net — stock moved
+    // (the WC leg deducted; nothing came back), so the caches must go stale.
+    const invalidatedRoots = invalidateSpy.mock.calls
+      .map((call) => (call[0] as { queryKey?: unknown[] } | undefined)?.queryKey?.[0])
+      .filter((root): root is string => typeof root === "string");
+    expect(invalidatedRoots).toContain("products");
   });
 
   it("QA-6b: a refusal that rolled back still refreshes the inventory caches", async () => {
