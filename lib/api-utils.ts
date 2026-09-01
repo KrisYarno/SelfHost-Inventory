@@ -12,7 +12,7 @@ import prisma from '@/lib/prisma';
 // The transient tx-error contract lives in lib/inventory.ts (Next-free, FDd-4);
 // imported for apiHandler's own 503 branch and re-exported for the route-layer
 // consumers that already import it from here.
-import { TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE } from '@/lib/inventory';
+import { isTransientTxError, TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE } from '@/lib/inventory/tx-errors';
 export { TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE };
 
 // --- Auth guard types ---
@@ -139,11 +139,10 @@ export function apiHandler(handler: RouteHandler): RouteHandler {
       // budget running out (P2028). Both mean "someone else was writing the same
       // rows", and neither is an internal fault: a generic 500 would tell the
       // operator nothing and read as data loss. Nothing else in the ladder moves.
-      if (
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        TRANSIENT_TX_ERROR_CODES.has(error.code)
-      ) {
-        errorLogger.log(error);
+      // Codes OR the engine's own sentence (FDe-1): a raw-statement deadlock
+      // can arrive without a P-code, and fulfil/prelock statements are all raw.
+      if (isTransientTxError(error)) {
+        errorLogger.log(error as Error);
         return errorResponse(TX_BUSY_MESSAGE, 503, 'BUSY');
       }
 

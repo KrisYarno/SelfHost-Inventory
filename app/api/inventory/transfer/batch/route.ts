@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
-import { requireApproved, apiHandler, requireCSRF, TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF, TX_BUSY_MESSAGE } from "@/lib/api-utils";
+import { isTransientTxError } from "@/lib/inventory/tx-errors";
 import prisma from "@/lib/prisma";
 import {
   createInventoryTransfer,
@@ -167,8 +168,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
       // this one; batch-adjust's write loop (rethrows — FDc-1); fulfil's item
       // catch (per-item busy sentence — FDd-4).
       const errorMessage =
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        TRANSIENT_TX_ERROR_CODES.has(error.code)
+        isTransientTxError(error)
           ? TX_BUSY_MESSAGE
           : error instanceof OptimisticLockError
             ? "Inventory was modified by another user"

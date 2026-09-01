@@ -27,10 +27,12 @@ const fetchMock = jest.fn(async (url: unknown) => {
   return { ok: true, json: async () => INVENTORY } as unknown as Response;
 });
 
+let lastClient: QueryClient | null = null;
 function makeWrapper() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  lastClient = queryClient;
   const Wrapper = ({ children }: { children: React.ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
@@ -44,7 +46,12 @@ beforeEach(() => {
   onlineManager.setOnline(true);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // FDe-5: a PAUSED fetch is abandoned, not cancelled — going back online would
+  // RESUME it against a discarded client and land a stray fetchMock call in a
+  // later test. Cancel first, then restore the online state.
+  await lastClient?.cancelQueries();
+  lastClient?.clear();
   onlineManager.setOnline(true);
 });
 

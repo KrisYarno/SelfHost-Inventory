@@ -38,21 +38,9 @@ const NEVER_STOCKED = { quantity: 0, version: 0 };
  */
 export const STOCK_TX_OPTIONS = { maxWait: 5000, timeout: 30000 };
 
-/**
- * The transient transaction-error contract (pack REV-22 F3; rounds 2-4).
- * P2034 = a write conflict / deadlock; P2028 = the interactive-transaction
- * budget (Prisma also raises it for a misused tx client — a code defect that
- * will then read as "busy"; the error log keeps it diagnosable, an ACCEPTED
- * trade); P2024 = the connection pool timed out — reachable contention under
- * the 30 s budgets, and ALSO what sustained pool exhaustion looks like (the
- * log line is the discriminator; it prints name + MESSAGE only outside dev,
- * so grep the message texts, never the code).
- * They live HERE — the covered writers' own Next-free module — so lib code
- * (fulfil's per-item catch) can consume them without importing next/server
- * through api-utils (FDd-4).
- */
-export const TRANSIENT_TX_ERROR_CODES: ReadonlySet<string> = new Set(['P2028', 'P2034', 'P2024']);
-export const TX_BUSY_MESSAGE = 'the system was busy with another change — try again';
+// The transient tx-error contract lives in ./inventory/tx-errors (a LEAF nothing
+// mocks — FDe-4); re-exported here for the api-utils/route consumers.
+export { TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE, isTransientTxError } from '@/lib/inventory/tx-errors';
 
 
 /**

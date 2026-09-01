@@ -137,6 +137,21 @@ describe('apiHandler — Prisma P2028/P2034 -> 503 BUSY', () => {
       clientVersion: 'test',
     })
 
+  // FDe-1: a RAW-statement deadlock can arrive with no P-code at all — only
+  // the engine's sentence. The classifier matches the message, per the house
+  // precedent (withDeadlockRetry, the booking retry).
+  it('maps a code-less raw deadlock (the engine sentence alone) to 503 BUSY', async () => {
+    const handler = apiHandler(async () => {
+      throw new Error(
+        'Raw query failed. Code: `1213`. Message: `Deadlock found when trying to get lock; try restarting transaction`'
+      )
+    })
+    const res = await handler(req(), {} as never)
+    expect(res.status).toBe(503)
+    const body = await res.json()
+    expect(body.code).toBe('BUSY')
+  })
+
   // P2024 joined in fix-delta FDb-3: the pool timing out under queued writers
   // is the same operator fact — someone else was writing.
   it.each(['P2028', 'P2034', 'P2024'])('maps %s to a 503 BUSY the operator can act on', async (code) => {

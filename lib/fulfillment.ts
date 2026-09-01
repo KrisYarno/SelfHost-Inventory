@@ -1,6 +1,7 @@
 import prisma from '@/lib/prisma';
 import { Prisma, inventory_logs_logType } from '@prisma/client';
-import { createInventoryLog, TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE } from '@/lib/inventory';
+import { createInventoryLog } from '@/lib/inventory';
+import { isTransientTxError, TX_BUSY_MESSAGE } from '@/lib/inventory/tx-errors';
 import { prelockProductLocations } from '@/lib/inventory/prelock';
 import { ProductNotFoundError } from '@/lib/error-handling';
 import {
@@ -938,17 +939,20 @@ export async function fulfillExternalOrder(
             // FDd-4: a STATEMENT-only transient (a lock-wait/pool timeout that
             // leaves the transaction alive) lands here with the item cleanly
             // rolled back — the honest per-item answer is the busy sentence,
-            // never Prisma's own multi-line text on a 200's failed[] entry.
-            // (A tx-KILLING deadlock never reaches this push: the savepoint
-            // settle in the finally throws and the whole request aborts to
-            // apiHandler's 503 — the fail-closed path REV-25 audited.)
-            error:
-              error instanceof Prisma.PrismaClientKnownRequestError &&
-              TRANSIENT_TX_ERROR_CODES.has(error.code)
-                ? TX_BUSY_MESSAGE
-                : error instanceof Error
-                  ? error.message
-                  : 'Unknown error occurred',
+            // never the engine's own multi-line text on a 200's failed[] entry.
+            // The classifier matches codes OR the engine sentence (FDe-1: raw
+            // statements can deadlock without a P-code). TX-KILLED case (FDe-2,
+            // stated truthfully): a pre-first-write failure pushes here and
+            // continues with no savepoint open; fail-closed is delivered by the
+            // UNCONDITIONAL post-loop statements, which throw on a dead tx —
+            // and what then escapes is the FOLLOW-ON statement's error (e.g.
+            // the savepoint settle's), whose wire class is probed at the wave
+            // close, not assumed.
+            error: isTransientTxError(error)
+              ? TX_BUSY_MESSAGE
+              : error instanceof Error
+                ? error.message
+                : 'Unknown error occurred',
           });
         } finally {
           // W2S-1: `continue` inside the try runs this block before it takes

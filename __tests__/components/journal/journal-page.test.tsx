@@ -74,6 +74,9 @@ let liveVersion = 3;
  * window the post-409 refetch has to land in (F5's failure half, FDb-6).
  */
 let productsOk = true;
+// FDe-3: when set, the /api/products read BLOCKS until released — the recovery
+// window (the 409 -> reseed interval) becomes assertable instead of instant.
+let productsHold: Promise<void> | null = null;
 /** Queued answers for the batch-adjust POST, oldest first. */
 let batchResponses: Array<{ status: number; body: unknown }>;
 let fetchMock: jest.Mock;
@@ -83,12 +86,14 @@ beforeEach(() => {
   toastSuccess.mockClear();
   liveVersion = 3;
   productsOk = true;
+  productsHold = null;
   batchResponses = [];
   useJournalStore.getState().clearAllAdjustments();
 
   fetchMock = jest.fn(async (url: unknown) => {
     const href = String(url);
     if (href.includes("/api/products")) {
+      if (productsHold) await productsHold;
       if (!productsOk) {
         return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
       }
@@ -215,6 +220,65 @@ describe("Journal page — the 409 recovery re-seeds the persisted cart (F5)", (
 // every submit for the life of the mount is refused by a guard that will never
 // clear.
 // ---------------------------------------------------------------------------
+describe("Journal page — the recovery WINDOW itself (FDd-1 / FDe-3)", () => {
+  it("Confirm is dead WITH the reason on screen and Cancel live, until the re-seed lands", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    useJournalStore.getState().addAdjustment({ productId: 1, quantityChange: 5, version: 3 });
+
+    batchResponses = [
+      {
+        status: 409,
+        body: {
+          error: "Inventory was modified by another user",
+          code: "OPTIMISTIC_LOCK_ERROR",
+          currentVersion: 4,
+          expectedVersion: 3,
+        },
+      },
+    ];
+
+    renderJournal();
+    await waitFor(() => expect(screen.getAllByText("Widget A").length).toBeGreaterThan(0));
+
+    liveVersion = 4;
+    // Arm the hold: the post-409 refetch will block until we release it.
+    let release!: () => void;
+    productsHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await openReviewAndConfirm(user);
+    await waitFor(() => expect(submittedBatches()).toHaveLength(1));
+
+    // THE WINDOW: the reason is on screen, Confirm is dead, Cancel is live —
+    // and the label does NOT claim "Submitting..." for a non-submit.
+    await waitFor(() =>
+      expect(
+        screen.getByText("Refreshing inventory versions after a conflict — one moment.")
+      ).toBeInTheDocument()
+    );
+    const confirm = screen.getByRole("button", { name: /confirm and submit adjustments/i });
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveTextContent("Confirm Adjustments");
+    expect(screen.getByRole("button", { name: /cancel and close dialog/i })).toBeEnabled();
+
+    // Release: the re-seed lands, the window closes, Confirm comes back.
+    productsHold = null;
+    release();
+    await waitFor(() => expect(useJournalStore.getState().adjustments[1].version).toBe(4));
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Refreshing inventory versions after a conflict — one moment.")
+      ).not.toBeInTheDocument()
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /confirm and submit adjustments/i })
+      ).toBeEnabled()
+    );
+  });
+});
+
 describe("Journal page — a 409 whose refresh FAILS (F5 / FDb-6)", () => {
   it("does not re-seed, says the refresh failed, and still reaches the server on retry", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });

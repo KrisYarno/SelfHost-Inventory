@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Prisma, type inventory_logs } from "@prisma/client";
-import { requireApproved, apiHandler, requireCSRF, TRANSIENT_TX_ERROR_CODES } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
+import { isTransientTxError } from "@/lib/inventory/tx-errors";
 import prisma from "@/lib/prisma";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { recordAttributionAttempt } from "@/lib/attribution/attempts";
@@ -178,10 +179,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
         // inside applyStockDelta — the loc-1 mirror is the lane's one OBSERVED
         // deadlock site — must reach apiHandler's 503 BUSY, not be destroyed
         // into a plain Error that reads as a generic 500.
-        if (
-          error instanceof Prisma.PrismaClientKnownRequestError &&
-          TRANSIENT_TX_ERROR_CODES.has(error.code)
-        ) {
+        if (isTransientTxError(error)) {
           throw error;
         }
         throw new Error(

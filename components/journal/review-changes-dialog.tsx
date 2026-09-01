@@ -232,16 +232,24 @@ export function ReviewChangesDialog({
         </div>
 
         <DialogFooter>
-          {busyReason && (
-            <p id="busy-reason" className="self-center text-sm text-muted-foreground" role="status">
-              {busyReason}
-            </p>
-          )}
+          {/* Rendered UNCONDITIONALLY (FDe-6): a live region announces CHANGES,
+              so it must pre-exist empty; and the described control goes disabled
+              (blurred), so the description also rides the still-focusable
+              Cancel button below. */}
+          <p
+            id="busy-reason"
+            className="self-center text-sm text-muted-foreground"
+            role="status"
+            aria-live="polite"
+          >
+            {busyReason ?? ""}
+          </p>
           <Button
             variant="outline"
             onClick={() => onOpenChange(false)}
             disabled={isSubmitting}
             aria-label="Cancel and close dialog"
+            aria-describedby={busyReason ? "busy-reason" : undefined}
           >
             Cancel
           </Button>
