@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
+import { Prisma } from "@prisma/client";
+import { requireApproved, apiHandler, requireCSRF, TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
 import {
   createInventoryTransfer,
@@ -159,12 +160,19 @@ export const POST = apiHandler(async (request: NextRequest) => {
       });
       totalTransferred += transfer.quantity;
     } catch (error) {
+      // Fix-delta FDb-1: this per-transfer catch is the ONE place the covered
+      // writers' contention errors bypass apiHandler's typed 503 — without this
+      // branch a deadlock/budget loss would put Prisma's own multi-line message
+      // verbatim into the stocker's per-transfer toast.
       const errorMessage =
-        error instanceof OptimisticLockError
-          ? "Inventory was modified by another user"
-          : error instanceof Error
-            ? error.message
-            : "Unknown error";
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        TRANSIENT_TX_ERROR_CODES.has(error.code)
+          ? TX_BUSY_MESSAGE
+          : error instanceof OptimisticLockError
+            ? "Inventory was modified by another user"
+            : error instanceof Error
+              ? error.message
+              : "Unknown error";
 
       results.push({
         fromLocationId: transfer.fromLocationId,

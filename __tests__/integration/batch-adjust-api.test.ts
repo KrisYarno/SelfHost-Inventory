@@ -962,7 +962,7 @@ describe('/api/inventory/batch-adjust', () => {
       expect(capturedTx.inventory_logs.create).not.toHaveBeenCalled()
     })
 
-    it('F10: an unknown productId is a 400 PRODUCT_NOT_FOUND, before the transaction', async () => {
+    it('F10: an unknown productId is a 404 PRODUCT_NOT_FOUND (the house class), before the transaction', async () => {
       // The pre-read that feeds the audit line already knows: product 42 is not
       // a product. Letting it through materialized a row for it and killed the
       // whole transaction on the ledger row's foreign key — a generic 500.
@@ -981,9 +981,11 @@ describe('/api/inventory/batch-adjust', () => {
       const response = await POST(request)
       const data = await response.json()
 
-      expect(response.status).toBe(400)
+      // Fix-delta FDb-2: ProductNotFoundError — the code already means 404 +
+      // this sentence on stock-in; one code must not carry two statuses.
+      expect(response.status).toBe(404)
       expect(data.code).toBe('PRODUCT_NOT_FOUND')
-      expect(data.error).toBe('Product 42 not found')
+      expect(data.error).toBe('Product with ID 42 not found')
       expect(prisma.$transaction).not.toHaveBeenCalled()
     })
 

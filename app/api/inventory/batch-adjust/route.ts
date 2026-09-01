@@ -6,7 +6,7 @@ import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { recordAttributionAttempt } from "@/lib/attribution/attempts";
 import { applyStockDelta, OptimisticLockError, STOCK_TX_OPTIONS } from "@/lib/inventory";
 import { prelockKey, prelockProductLocations } from "@/lib/inventory/prelock";
-import { AppError } from "@/lib/error-handling";
+import { AppError, ProductNotFoundError } from "@/lib/error-handling";
 import { BatchInventoryAdjustmentSchema } from "@/lib/validation/inventory";
 import { enforceRateLimit, applyRateLimitHeaders } from "@/lib/rateLimit";
 
@@ -37,11 +37,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // answer to a hand-built request is a 400 that names the id.
   for (const adjustment of adjustments) {
     if (!productMap.has(adjustment.productId)) {
-      throw new AppError(
-        `Product ${adjustment.productId} not found`,
-        "PRODUCT_NOT_FOUND",
-        400
-      );
+      // Fix-delta FDb-2: the HOUSE class, not a hand-rolled AppError —
+      // `PRODUCT_NOT_FOUND` already means 404 + this exact sentence on two other
+      // routes, and one code must not carry two statuses/wordings.
+      throw new ProductNotFoundError(adjustment.productId);
     }
   }
 
@@ -162,6 +161,8 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
         auditUpdates.push({
           productId: adjustment.productId,
+          // The fallback is DEAD (fix-delta FDb-11): the pre-tx check above
+          // guarantees every id is in the map; kept only for type narrowing.
           productName: productMap.get(adjustment.productId) || "Unknown Product",
           delta: adjustment.delta,
         });

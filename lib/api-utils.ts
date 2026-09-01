@@ -1,12 +1,26 @@
 import { getSession } from '@/lib/auth';
 import { NextRequest, NextResponse } from 'next/server';
 import { Prisma } from '@prisma/client';
+
 import { AppError, errorLogger } from '@/lib/error-handling';
 import { validateCSRFToken } from '@/lib/csrf';
 import { ZodError } from 'zod';
 import { RateLimitError } from '@/lib/rateLimit';
 import { OptimisticLockError } from '@/lib/inventory';
 import prisma from '@/lib/prisma';
+
+/**
+ * The transaction-contention answer (pack REV-22 F3, fix-delta FDb-1/FDb-3).
+ * P2034 = a write conflict / deadlock; P2028 = the interactive-transaction
+ * budget (Prisma also raises P2028 for a misused transaction client — a code
+ * defect that will then read as "busy"; errorLogger keeps it diagnosable, and
+ * that trade is ACCEPTED in the pack rather than parsing message text);
+ * P2024 = the connection pool timed out, which the 30 s budgets make reachable
+ * when writers queue. One sentence, exported so the 207-emitting batch-transfer
+ * route can say the same thing per transfer instead of leaking Prisma's own text.
+ */
+export const TRANSIENT_TX_ERROR_CODES: ReadonlySet<string> = new Set(['P2028', 'P2034', 'P2024']);
+export const TX_BUSY_MESSAGE = 'the system was busy with another change — try again';
 
 // --- Auth guard types ---
 
@@ -134,14 +148,10 @@ export function apiHandler(handler: RouteHandler): RouteHandler {
       // operator nothing and read as data loss. Nothing else in the ladder moves.
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
-        (error.code === 'P2028' || error.code === 'P2034')
+        TRANSIENT_TX_ERROR_CODES.has(error.code)
       ) {
         errorLogger.log(error);
-        return errorResponse(
-          'the system was busy with another change — try again',
-          503,
-          'BUSY'
-        );
+        return errorResponse(TX_BUSY_MESSAGE, 503, 'BUSY');
       }
 
       console.error('Unhandled API error:', error);

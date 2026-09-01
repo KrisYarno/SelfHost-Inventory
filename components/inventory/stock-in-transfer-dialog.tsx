@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { ValueChip } from "@/components/ui/value-chip";
 import { ContextTag } from "@/components/ui/context-tag";
 import type { ProductLocationQuantity, BatchTransferResult } from "@/types/inventory";
+import { readApiError } from "@/lib/api-error";
 
 export interface StockInProduct {
   productId: number;
@@ -136,7 +137,11 @@ export function StockInTransferDialog({
     [product, destinationLocationId]
   );
 
-  // Fetch available quantities at all locations when dialog opens
+  // Fetch available quantities at all locations when dialog opens — and CLEAR
+  // the previous product's rows/header first (fix-delta FDb-7): this effect
+  // re-runs when `product` changes while the dialog is open, and without the
+  // clears the header would quote product A's destination quantity under
+  // product B's name for the duration of the read, with A's rows submittable.
   React.useEffect(() => {
     if (!open || !product) {
       setLocations([]);
@@ -144,6 +149,9 @@ export function StockInTransferDialog({
       setNeedsFreshVersions(false);
       return;
     }
+    setLocations([]);
+    setDestinationQuantity(null);
+    setNeedsFreshVersions(false);
     void refetchLocations();
   }, [open, product, refetchLocations]);
 
@@ -287,9 +295,11 @@ export function StockInTransferDialog({
         const refreshed = await refetchLocations(carry);
         if (!refreshed) setNeedsFreshVersions(true);
       } else {
-        const errorMessage =
-          (data as unknown as { error?: string }).error || "Failed to complete transfers";
-        toast.error(errorMessage);
+        // The shared reader (fix-delta FDb-12): this was the one surface reading
+        // a covered writer's errors by hand after F7 converted the other four —
+        // and the batch route can now answer with the flat BUSY/refusal shapes.
+        const { message } = readApiError(data);
+        toast.error(message || "Failed to complete transfers");
       }
     } catch (error) {
       console.error("Error performing batch transfer:", error);

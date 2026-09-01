@@ -58,11 +58,24 @@ export function useInventoryProducts(options: UseInventoryProductsOptions) {
     placeholderData: (prev) => prev,
   });
 
-  /** Imperatively refetch (e.g. after a mutation). */
-  const refetch = () =>
-    queryClient.invalidateQueries({
+  /**
+   * Imperatively refetch (e.g. after a mutation). Returns whether FRESH rows
+   * actually arrived (fix-delta FDb-6): `invalidateQueries` resolves after the
+   * active refetch settles — success or failure alike — and with
+   * `placeholderData` keeping the previous array, a failed read leaves STALE
+   * data that looks live. The journal's 409 version re-seed must not run on it.
+   */
+  const refetch = async (): Promise<boolean> => {
+    await queryClient.invalidateQueries({
       queryKey: ["inventory-products", locationId],
     });
+    // `invalidateQueries` PREFIX-matches; `getQueryState` wants THIS hook's
+    // exact key — the prefix alone names no query and would answer undefined.
+    return (
+      queryClient.getQueryState(["inventory-products", locationId, sortBy, sortOrder])
+        ?.status === "success"
+    );
+  };
 
   return { ...query, refetch };
 }

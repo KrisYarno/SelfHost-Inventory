@@ -1271,8 +1271,10 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       // while it holds every prelocked row.
       // 0.3s per ledger row: wide enough that the loser is unambiguously
       // blocked, small enough that its whole transaction (its wait plus its own
-      // two held inserts) stays far inside the routes' DEFAULT 5s Prisma
-      // budget — a blown budget closes the connection and the route 500s for a
+      // two held inserts) stays far inside the routes' transaction budget —
+      // STOCK_TX_OPTIONS' maxWait 5s / timeout 30s since fix round 1 (the "5s
+      // Prisma default" this comment once cited is gone; fix-delta FDb-9). A
+      // blown budget closes the connection and the route answers 503 BUSY for a
       // reason that has nothing to do with the race.
       await installHoldTrigger([KEY_1.productId, KEY_2.productId], 0.3);
 

@@ -63,6 +63,10 @@ export default function JournalPage() {
   // `invalidateQueries` (it resolves with nothing) — the fresh rows arrive as
   // the hook's next `products`, and THAT is what the cart re-seeds from.
   const [pendingVersionReseed, setPendingVersionReseed] = useState(false);
+  // Fix-delta FDb-5: TRUE from the 409 until the re-seed lands (or the refresh
+  // fails) — the submit guard refuses meanwhile, so no window exists in which a
+  // quick operator re-sends the losing versions.
+  const [versionRecoveryInFlight, setVersionRecoveryInFlight] = useState(false);
   const [filters, setFilters] = useState<JournalFilterState>({
     showWithChanges: true,
     showWithoutChanges: true,
@@ -103,6 +107,7 @@ export default function JournalPage() {
     if (!pendingVersionReseed) return;
     reseedVersions(products);
     setPendingVersionReseed(false);
+    setVersionRecoveryInFlight(false);
   }, [pendingVersionReseed, products, reseedVersions]);
 
   // Filter + sort products based on the search term and the advanced filter panel.
@@ -201,6 +206,14 @@ export default function JournalPage() {
       return;
     }
 
+    // Fix-delta FDb-5: a 409 recovery is refreshing this cart's versions right
+    // now — a submit in this window is GUARANTEED to lose again with the same
+    // stale versions, so it waits the second or two instead.
+    if (versionRecoveryInFlight) {
+      toast.error("Refreshing inventory versions after a conflict — retry in a moment.");
+      return;
+    }
+
     setIsSubmitting(true);
 
     // Announce submission start
@@ -262,16 +275,29 @@ export default function JournalPage() {
             </div>,
             { duration: 6000 }
           );
-          // Automatically refresh after a short delay — and RE-SEED the cart's
-          // versions from what comes back (pack REV-22 F5). The cart is
-          // persisted with the version each row was typed against; without this
-          // the refetch only updated the SCREEN, the retry re-sent the same
-          // losing `expectedVersion`, and the operator sat in a 409 loop with no
-          // way out but discarding their work. Quantities are their intent and
-          // are untouched; only versions move.
-          setTimeout(() => {
-            void refetchProducts().then(() => setPendingVersionReseed(true));
-          }, 1000);
+          // Refresh IMMEDIATELY — and RE-SEED the cart's versions from what
+          // comes back (pack REV-22 F5; fix-delta FDb-5 dropped the old 1 s
+          // delay, which left Confirm live with the losing versions for a
+          // window a quick operator could hit). The cart is persisted with the
+          // version each row was typed against; without the re-seed the refetch
+          // only updated the SCREEN and the retry re-sent the same losing
+          // `expectedVersion` forever. Quantities are their intent and are
+          // untouched; only versions move. FDb-6: `refetchProducts` now says
+          // whether FRESH rows arrived — a failed read must not re-seed from
+          // the stale placeholder data, and must say so instead of arming a
+          // silent second 409.
+          setPendingVersionReseed(false);
+          setVersionRecoveryInFlight(true);
+          void refetchProducts().then((fresh) => {
+            if (fresh) {
+              setPendingVersionReseed(true);
+            } else {
+              setVersionRecoveryInFlight(false);
+              toast.error(
+                "Couldn't refresh inventory versions — check your connection and reopen the review before retrying."
+              );
+            }
+          });
           return;
         }
 

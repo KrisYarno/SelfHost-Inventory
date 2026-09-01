@@ -137,7 +137,9 @@ describe('apiHandler — Prisma P2028/P2034 -> 503 BUSY', () => {
       clientVersion: 'test',
     })
 
-  it.each(['P2028', 'P2034'])('maps %s to a 503 BUSY the operator can act on', async (code) => {
+  // P2024 joined in fix-delta FDb-3: the pool timing out under queued writers
+  // is the same operator fact — someone else was writing.
+  it.each(['P2028', 'P2034', 'P2024'])('maps %s to a 503 BUSY the operator can act on', async (code) => {
     const handler = apiHandler(async () => {
       throw known(code)
     })
