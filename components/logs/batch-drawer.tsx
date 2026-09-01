@@ -21,7 +21,8 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { ChangeDiffList } from "@/components/history/change-diff-list";
 import { LedgerRowLine } from "@/components/history/ledger-row-line";
 import { ActorChip } from "@/components/history/actor-chip";
-import { formatDateTime } from "@/lib/utils";
+import { getInventoryLogTone } from "@/components/logs/log-style";
+import { formatDateTime, formatDelta } from "@/lib/utils";
 import type { ActionGroup, ActionMeta } from "@/lib/change-tracking/taxonomy";
 import type { ChangePair } from "@/lib/change-tracking/extract-changes";
 import type { RenderableLedgerRow } from "@/lib/history/union-timeline";
@@ -62,9 +63,45 @@ interface Paged<T> {
   offset: number;
 }
 
+/** The TOTAL shape of the batch (P2-B1.5b) — never the section page's slice. */
+interface BatchSummary {
+  rowCount: number;
+  productCount: number;
+  netUnits: number;
+  logTypes: string[];
+  actors: string[];
+  orders: Array<{ id: string; orderNumber: string }>;
+}
+
 interface BatchResponse {
   events: Paged<BatchEvent>;
   ledgerRows: Paged<BatchLedgerRow>;
+  summary: BatchSummary;
+}
+
+/**
+ * The header's one-line answer to "what did this whole batch do?" (P2-B1.5b) —
+ * "Sale · 2 products · -4 units · derek · order #23716". The order segment is
+ * present ONLY when the batch's rows are stamped with an order, so a count or an
+ * adjustment batch never grows a dangling separator.
+ */
+function summaryLine(summary: BatchSummary): string {
+  const segments = [
+    // getInventoryLogTone's second argument is a per-ROW delta that only steers the
+    // tone; the LABEL is what is read here, so a fixed 0 is correct.
+    summary.logTypes.map((t) => getInventoryLogTone(t, 0).label).join(" / "),
+    `${summary.productCount} product${summary.productCount === 1 ? "" : "s"}`,
+    `${formatDelta(summary.netUnits)} units`,
+    summary.actors.join(", "),
+  ];
+  if (summary.orders.length > 0) {
+    segments.push(
+      summary.orders.length === 1
+        ? `order #${summary.orders[0].orderNumber}`
+        : `orders ${summary.orders.map((o) => `#${o.orderNumber}`).join(", ")}`
+    );
+  }
+  return segments.join(" · ");
 }
 
 function toRenderableRow(r: BatchLedgerRow): RenderableLedgerRow {
@@ -258,6 +295,11 @@ export function BatchDrawer({
               {data.events.total} event{data.events.total === 1 ? "" : "s"} ·{" "}
               {data.ledgerRows.total} movement{data.ledgerRows.total === 1 ? "" : "s"}
             </p>
+          )}
+          {/* Hidden entirely for an events-only batch — the counts line above has
+              already said there are no movements to summarise. */}
+          {data?.summary && data.summary.rowCount > 0 && (
+            <p className="mt-1 text-xs text-muted-foreground">{summaryLine(data.summary)}</p>
           )}
         </div>
 

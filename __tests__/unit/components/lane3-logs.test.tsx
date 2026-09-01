@@ -27,6 +27,7 @@ jest.mock("sonner", () => ({ toast: { success: jest.fn(), error: jest.fn() } }))
 
 import { BatchDrawer } from "@/components/logs/batch-drawer";
 import { AuditLogTab } from "@/components/logs/audit-log-tab";
+import { ChangeLogTab } from "@/components/logs/change-log-tab";
 import { TransferLogTable } from "@/components/inventory/transfer-log-table";
 import { ReviewChangesDialog } from "@/components/journal/review-changes-dialog";
 import { useSession } from "next-auth/react";
@@ -95,6 +96,15 @@ const batchResponse = {
     limit: 25,
     offset: 0,
   },
+  // P2-B1.5b — the TOTAL summary, independent of the two section pages above.
+  summary: {
+    rowCount: 1,
+    productCount: 1,
+    netUnits: 3,
+    logTypes: ["ADJUSTMENT"],
+    actors: ["kris"],
+    orders: [],
+  },
 };
 
 function mockFetchBatch(resp: unknown = batchResponse, ok = true) {
@@ -141,6 +151,7 @@ describe("BatchDrawer", () => {
     mockFetchBatch({
       events: { items: [], total: 0, limit: 25, offset: 0 },
       ledgerRows: { items: [], total: 0, limit: 25, offset: 0 },
+      summary: { rowCount: 0, productCount: 0, netUnits: 0, logTypes: [], actors: [], orders: [] },
     });
     renderWithClient(<BatchDrawer batchId={BATCH_UUID} onOpenChange={jest.fn()} />);
     await waitFor(() =>
@@ -164,6 +175,68 @@ describe("BatchDrawer", () => {
     await user.click(screen.getByRole("button", { name: /copy batch id/i }));
     // userEvent.setup() installs its own clipboard stub — read it back.
     expect(await navigator.clipboard.readText()).toBe(BATCH_UUID);
+  });
+
+  // -- P2-B1.5b: the header summary line ------------------------------------
+
+  function withSummary(summary: Record<string, unknown>) {
+    return {
+      ...batchResponse,
+      ledgerRows: { ...batchResponse.ledgerRows, total: summary.rowCount as number },
+      summary,
+    };
+  }
+
+  it("renders the whole-batch summary line under the counts", async () => {
+    mockFetchBatch(
+      withSummary({
+        rowCount: 4,
+        productCount: 2,
+        netUnits: -4,
+        logTypes: ["SALE"],
+        actors: ["derek"],
+        orders: [{ id: "ord_1", orderNumber: "23716" }],
+      })
+    );
+    renderWithClient(<BatchDrawer batchId={BATCH_UUID} onOpenChange={jest.fn()} />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Sale · 2 products · -4 units · derek · order #23716")
+      ).toBeInTheDocument()
+    );
+  });
+
+  it("omits the order segment entirely (no trailing separator) when nothing is stamped", async () => {
+    mockFetchBatch(
+      withSummary({
+        rowCount: 3,
+        productCount: 3,
+        netUnits: 6,
+        logTypes: ["COUNT"],
+        actors: ["derek", "kris"],
+        orders: [],
+      })
+    );
+    renderWithClient(<BatchDrawer batchId={BATCH_UUID} onOpenChange={jest.fn()} />);
+
+    const line = await screen.findByText(/3 products/);
+    expect(line).toHaveTextContent("Count · 3 products · +6 units · derek, kris");
+    expect(line.textContent).not.toMatch(/·\s*$/);
+    expect(line.textContent).not.toMatch(/order/);
+  });
+
+  it("hides the summary line entirely for an events-only batch (rowCount 0)", async () => {
+    mockFetchBatch({
+      ...batchResponse,
+      ledgerRows: { items: [], total: 0, limit: 25, offset: 0 },
+      summary: { rowCount: 0, productCount: 0, netUnits: 0, logTypes: [], actors: [], orders: [] },
+    });
+    renderWithClient(<BatchDrawer batchId={BATCH_UUID} onOpenChange={jest.fn()} />);
+
+    await waitFor(() => expect(screen.getByText("Events")).toBeInTheDocument());
+    expect(screen.queryByText(/products?/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/units/)).not.toBeInTheDocument();
   });
 });
 
@@ -237,6 +310,57 @@ describe("AuditLogTab", () => {
     expect((global as any).fetch).toHaveBeenCalledWith(
       expect.stringContaining(`/api/admin/batch/${BATCH_UUID}?`)
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ChangeLogTab — the batch chip carries the batch's row count (P2-B1.5b)
+// ---------------------------------------------------------------------------
+
+describe("ChangeLogTab batch chip", () => {
+  const inventoryLog = {
+    id: 9,
+    timestamp: "2026-07-10T10:00:01.000Z",
+    productName: "BPC 5mg",
+    userName: "derek",
+    locationName: "Main",
+    delta: -1,
+    logType: "SALE",
+    reasonCode: null,
+    unitCostCents: null,
+    batchId: BATCH_UUID,
+    batchRowCount: 4 as number | null,
+  };
+
+  function mockLogsPage(over: Partial<typeof inventoryLog> = {}) {
+    // The filters query is a plain fetch; let it fail harmlessly.
+    (global as any).fetch = jest.fn(async () => ({ ok: false, json: async () => ({}) }));
+    (usePaginatedLogs as jest.Mock).mockReturnValue({
+      data: { logs: [{ ...inventoryLog, ...over }], total: 1, page: 1, pageSize: 20, totalPages: 1 },
+      isLoading: false,
+      isRefreshing: false,
+      error: null,
+      refresh: jest.fn(),
+    });
+  }
+
+  it("renders 'Batch · 4' and the counted aria-label on BOTH the mobile card and the desktop cell", async () => {
+    mockLogsPage();
+    renderWithClient(<ChangeLogTab active />);
+
+    const chips = await screen.findAllByRole("button", { name: "View batch (4 rows)" });
+    expect(chips).toHaveLength(2);
+    chips.forEach((chip) => expect(chip).toHaveTextContent("Batch · 4"));
+  });
+
+  it("falls back to a bare 'Batch' chip when the row carries no count", async () => {
+    mockLogsPage({ batchRowCount: null });
+    renderWithClient(<ChangeLogTab active />);
+
+    const chips = await screen.findAllByRole("button", { name: "View batch" });
+    expect(chips).toHaveLength(2);
+    chips.forEach((chip) => expect(chip).toHaveTextContent(/^Batch$/));
+    expect(screen.queryByText(/Batch ·/)).not.toBeInTheDocument();
   });
 });
 

@@ -38,6 +38,8 @@ interface InventoryLog {
   reasonCode: string | null;
   unitCostCents: number | null;
   batchId: string | null;
+  // P2-B1.5b: the batch's TOTAL row count (null iff batchId is null).
+  batchRowCount: number | null;
   notes?: string;
 }
 
@@ -55,17 +57,19 @@ function formatCents(cents: number | null): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
-function BatchChip({ onClick }: { onClick: () => void }) {
+// P2-B1.5b: the count makes the row's context visible without opening the drawer —
+// a -1 row reads "Batch · 4", so it is plainly one movement of a four-row event.
+function BatchChip({ onClick, count }: { onClick: () => void; count: number | null }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      aria-label="View batch"
+      aria-label={count != null ? `View batch (${count} rows)` : "View batch"}
       className="inline-flex min-h-[44px] items-center rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       <StatusBadge tone="neutral" className="cursor-pointer gap-1">
         <Layers className="h-3 w-3" aria-hidden />
-        Batch
+        {count != null ? `Batch · ${count}` : "Batch"}
       </StatusBadge>
     </button>
   );
@@ -361,7 +365,12 @@ export function ChangeLogTab({ active }: { active: boolean }) {
                       {log.unitCostCents != null && (
                         <span className="tabular-nums">{formatCents(log.unitCostCents)}</span>
                       )}
-                      {log.batchId && <BatchChip onClick={() => setDrawerBatchId(log.batchId!)} />}
+                      {log.batchId && (
+                        <BatchChip
+                          onClick={() => setDrawerBatchId(log.batchId!)}
+                          count={log.batchRowCount}
+                        />
+                      )}
                     </div>
                     <div className="mt-1 text-xs text-muted-foreground">
                       {log.locationName} · {log.userName}
@@ -422,7 +431,12 @@ export function ChangeLogTab({ active }: { active: boolean }) {
                         {formatNumber(log.delta)}
                       </td>
                       <td className="p-4">
-                        {log.batchId && <BatchChip onClick={() => setDrawerBatchId(log.batchId!)} />}
+                        {log.batchId && (
+                          <BatchChip
+                            onClick={() => setDrawerBatchId(log.batchId!)}
+                            count={log.batchRowCount}
+                          />
+                        )}
                       </td>
                     </tr>
                   );

@@ -76,6 +76,27 @@ export const GET = apiHandler(async (request: NextRequest) => {
     take: pageSize,
   });
 
+  // P2-B1.5b: each row carries its batch's TOTAL row count, so a -1 row visibly
+  // belongs to (say) a 4-row event. ONE extra statement per page, over the page's
+  // DISTINCT non-null batchIds (<= pageSize), index-served by
+  // idx_inventory_logs_batch. The count is over the WHOLE batch, UNFILTERED — the
+  // chip says "this row is one of N in its batch", so the page's own filters must
+  // not shrink N. Zero ids => no statement at all.
+  const pageBatchIds = Array.from(
+    new Set(logs.map((log) => log.batchId).filter((id): id is string => id != null))
+  );
+  const batchRowCounts = new Map<string, number>();
+  if (pageBatchIds.length > 0) {
+    const batchGroups = await prisma.inventory_logs.groupBy({
+      by: ["batchId"],
+      where: { batchId: { in: pageBatchIds } },
+      _count: { _all: true },
+    });
+    batchGroups.forEach((g) => {
+      if (g.batchId != null) batchRowCounts.set(g.batchId, g._count._all);
+    });
+  }
+
   // Transform data
   const transformedLogs = logs.map((log) => ({
     id: log.id,
@@ -88,6 +109,10 @@ export const GET = apiHandler(async (request: NextRequest) => {
     logType: log.logType,
     // Phase C ledger semantics exposed to the read path.
     batchId: log.batchId,
+    // null iff the row has no batch. A batched row whose group is missing can only
+    // mean the row was deleted between the two statements — the chip then falls back
+    // to its bare "Batch" text rather than printing a count nobody can stand behind.
+    batchRowCount: log.batchId != null ? batchRowCounts.get(log.batchId) ?? null : null,
     reasonCode: log.reasonCode,
     unitCostCents: log.unitCostCents,
   }));
