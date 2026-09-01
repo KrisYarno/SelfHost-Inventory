@@ -42,6 +42,9 @@ export function openLines(items: OrderLine[]): OrderLine[] {
   return items.filter((item) => item.quantity - item.fulfilledQty > 0);
 }
 
+/** A count the envelope may simply not carry (FD1-9) — absent reads as 0. */
+const asCount = (v: unknown) => (typeof v === "number" ? v : 0);
+
 interface FulfillOrderDialogProps {
   order: ExternalOrder | null;
   open: boolean;
@@ -212,7 +215,11 @@ export function FulfillOrderDialog({
         // step already showed which lines had issues. Close and refresh — but
         // never call it "processed". The counts are spelled only here, where
         // there is a readable summary to spell them from.
-        const counts = `${fulfilled} fulfilled, ${summary.skipped} skipped, ${summary.failed} failed`;
+        // FD1-9: the other two counts are guarded the way `fulfilled` already
+        // is. A body carrying a numeric `fulfilled` and nothing else reaches
+        // here, and reading the pair raw spelled "undefined skipped, undefined
+        // failed" at the one tier that quotes counts at all.
+        const counts = `${fulfilled} fulfilled, ${asCount(summary.skipped)} skipped, ${asCount(summary.failed)} failed`;
         toast.warning(
           <div className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4" />

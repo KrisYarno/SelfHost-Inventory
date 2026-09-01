@@ -246,6 +246,16 @@ export async function validateOrderFulfillment(
         bundleShortages = shortages;
         hasStockIssues = true;
       }
+    } else if (item.isMapped && item.productLink?.internalProduct?.deletedAt != null) {
+      // FD1-6: the PREVIEW agrees with the FULFIL about a soft-deleted product.
+      // The include above is unfiltered, while the fulfil pass reads products
+      // `deletedAt: null` (OC-5 below) so unfulfill can always put back what
+      // fulfil took — so without this the line renders "ready" off live stock,
+      // the operator confirms, and it comes back in `failed[]`: a refusal this
+      // surface promised would not happen. No availability block either: there
+      // is no product left for stock to be available AT.
+      issues.push('Product no longer exists');
+      hasStockIssues = true;
     } else if (item.isMapped && item.productLink?.internalProduct) {
       const product = item.productLink.internalProduct;
 

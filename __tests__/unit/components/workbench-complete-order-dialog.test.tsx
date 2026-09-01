@@ -1102,6 +1102,229 @@ describe("complete-order dialog — a 200 that refused lines is a refusal", () =
   });
 
   // -------------------------------------------------------------------------
+  // THE SHAPE SKEWS (FD1-1..FD1-4, FD1-7). The gate reads TWO facts — the
+  // summary's line count and the `results.fulfilled` entries' units — and a
+  // skewed body can make them disagree. These pin which fact wins on each
+  // asymmetry, and what the operator is told when it does.
+  // -------------------------------------------------------------------------
+
+  it("FD1-1: the units-only refusal names both numbers and the way out", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-u",
+          // Every line "fulfilled", nothing skipped and nothing failed: the
+          // envelope names no refusal at all, so the priority reader has
+          // nothing to surface and the operator used to get the bare fallback.
+          summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+          results: {
+            fulfilled: [{ itemId: "it-0", productId: 600, quantity: 2 }],
+            skipped: [],
+            failed: [],
+          },
+        }),
+      }),
+      unfulfill: () => ({ ok: true, json: async () => ({ restored: [{ itemId: "it-0" }] }) }),
+    });
+    seedWcCart(1, 5);
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const text = toastText(toast.error as jest.Mock);
+    // BOTH numbers — what moved and what was asked — and the exit that exists.
+    expect(text).toContain("The order had 2 of the 5 units this cart asked for.");
+    expect(text).toContain("Re-select the order to rebuild the cart from its current state.");
+    expect(text).not.toContain("the order could not be fulfilled");
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("FD1-2: the Undo's productId is the SERVER'S when the entry names one", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    // A PROBE shape: the cart line's product is 600 and the server says it
+    // deducted 977. Only one of the two can be what the Undo posts, and the
+    // rollback body already prefers the server's — the Undo has to agree.
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-p",
+          summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+          results: {
+            fulfilled: [{ itemId: "it-0", productId: 977, quantity: 2 }],
+            skipped: [],
+            failed: [],
+          },
+        }),
+      }),
+    });
+    seedWcCart(1, 2);
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    const details = onSuccess.mock.calls[0][0].items as Array<{
+      productId: number;
+      fulfillmentItemId?: string;
+    }>;
+    expect(details.find((detail) => detail.fulfillmentItemId === "it-0")?.productId).toBe(977);
+  });
+
+  it("FD1-3: a FULL line count with NO entries is not a unit verdict", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-n",
+          // The summary says the leg is whole; the envelope names no entries.
+          // With no evidence there is no unit verdict to reach — summing an
+          // absent array to 0 would refuse (and try to roll back) a leg that
+          // moved exactly what was asked.
+          summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+          results: { fulfilled: [], skipped: [], failed: [] },
+        }),
+      }),
+    });
+    seedWcCart(1, 2);
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    expect(calls("/unfulfill")).toHaveLength(0);
+    expect(toast.error as jest.Mock).not.toHaveBeenCalled();
+    // ...and with no entry to read, the Undo keeps the cart's number.
+    const details = onSuccess.mock.calls[0][0].items as Array<{ quantity: number }>;
+    expect(details[0].quantity).toBe(2);
+  });
+
+  it("FD1-3: a ZERO count with entries PRESENT rolls the entries back — evidence wins", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-z",
+          // The summary contradicts its own evidence: 0 fulfilled, one entry
+          // the server says it deducted. Believing the count leaves that line
+          // deducted forever under copy claiming nothing was sent.
+          summary: { total: 2, fulfilled: 0, skipped: 1, failed: 0 },
+          results: {
+            fulfilled: [{ itemId: "it-0", productId: 600, quantity: 1 }],
+            skipped: [{ itemId: "it-1", reason: "unmapped", details: "Item is not mapped" }],
+            failed: [],
+          },
+        }),
+      }),
+      unfulfill: () => ({ ok: true, json: async () => ({ restored: [{ itemId: "it-0" }] }) }),
+    });
+    seedWcCart(2);
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const rollbacks = calls("/unfulfill");
+    expect(rollbacks).toHaveLength(1);
+    expect(bodyOf(rollbacks[0]).items).toEqual([
+      { itemId: "it-0", productId: 600, quantity: 1, locationId: 1 },
+    ]);
+
+    const text = toastText(toast.error as jest.Mock);
+    // The rollback ran and fully restored, so this is the REFUSED copy — never
+    // the NOT_STARTED copy, which would claim nothing was ever sent.
+    expect(text).toContain("Any fulfilled WooCommerce lines were put back. Fix the issue and try again.");
+    expect(text).not.toContain("Nothing was sent to WooCommerce");
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
+
+  it("FD1-4: the rollback never ships the CART'S number for an entry that lacks one", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: "fulfil-batch-m",
+          summary: { total: 3, fulfilled: 2, skipped: 1, failed: 0 },
+          results: {
+            fulfilled: [
+              { itemId: "it-0", productId: 600, quantity: 1 },
+              // MATCHED to a cart line (it-1), but the entry names no quantity.
+              // Substituting the cart's 1 restores units the server never says
+              // it took — an over-restore out of another operator's fulfilment.
+              { itemId: "it-1", productId: 601 },
+            ],
+            skipped: [{ itemId: "it-2", reason: "unmapped", details: "Item is not mapped" }],
+            failed: [],
+          },
+        }),
+      }),
+      unfulfill: () => ({ ok: true, json: async () => ({ restored: [{ itemId: "it-0" }] }) }),
+    });
+    seedWcCart(3);
+    renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const rollbacks = calls("/unfulfill");
+    expect(rollbacks).toHaveLength(1);
+    expect(bodyOf(rollbacks[0]).items).toEqual([
+      { itemId: "it-0", productId: 600, quantity: 1, locationId: 1 },
+    ]);
+
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("Not sent for restoration (no product id or quantity): Line 1.");
+  });
+
+  it("FD1-7: the re-select sentence fires on a MIXED refusal set", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respond({
+      fulfill: () => ({
+        ok: true,
+        json: async () => ({
+          success: true,
+          batchId: null,
+          summary: { total: 2, fulfilled: 0, skipped: 2, failed: 0 },
+          results: {
+            fulfilled: [],
+            // The looping reason is SECOND: a `skipped[0]` read misses it, and
+            // the retry it causes refuses identically every time.
+            skipped: [
+              { itemId: "it-0", reason: "unmapped", details: "Item is not mapped" },
+              {
+                itemId: "it-1",
+                reason: "already_fulfilled",
+                details: "Item is already fully fulfilled",
+              },
+            ],
+            failed: [],
+          },
+        }),
+      }),
+    });
+    seedWcCart(2);
+    renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(toast.error as jest.Mock).toHaveBeenCalled());
+
+    const text = toastText(toast.error as jest.Mock);
+    expect(text).toContain("Item is not mapped");
+    expect(text).toContain("Re-select the order to rebuild the cart from its current state.");
+  });
+
+  // -------------------------------------------------------------------------
   // THE CAP GUARD (QB-3 / seam S-B10). Each leg counts against its own route's
   // cap, and the over-cap sentence renders at the `Total Items:` row — the one
   // row BOTH the WC and the non-WC paths render (OCc-7).

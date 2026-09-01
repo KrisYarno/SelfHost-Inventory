@@ -108,7 +108,11 @@ function summaryLine(summary: BatchSummary): string {
         : `orders ${orders.map((o) => `#${o.orderNumber}`).join(", ")}`
     );
   }
-  return segments.join(" · ");
+  // FD1-8: the order segment's discipline, extended to ALL of them. An empty
+  // `logTypes` or `actors` joins to "" and used to render as a dangling " · " —
+  // the same trailing separator the order segment was written to avoid, just at
+  // the front and in the middle of the line.
+  return segments.filter(Boolean).join(" · ");
 }
 
 function toRenderableRow(r: BatchLedgerRow): RenderableLedgerRow {

@@ -246,6 +246,28 @@ describe("BatchDrawer", () => {
     expect(line.textContent).not.toMatch(/order/);
   });
 
+  it("FD1-8: an empty always-present segment leaves no dangling separator", async () => {
+    // `logTypes` empty (a batch whose rows carry no log type the API could
+    // name) used to render as an empty first segment — the line opened with
+    // " · 1 product". Same for an actorless batch in the middle of the line.
+    mockFetchBatch(
+      withSummary({
+        rowCount: 2,
+        productCount: 1,
+        netUnits: -2,
+        logTypes: [],
+        actors: [],
+        orders: [{ id: "ord_1", orderNumber: "23716" }],
+      })
+    );
+    renderWithClient(<BatchDrawer batchId={BATCH_UUID} onOpenChange={jest.fn()} />);
+
+    const line = await screen.findByText(/1 product/);
+    expect(line).toHaveTextContent("1 product · -2 units · order #23716");
+    expect(line.textContent).not.toMatch(/^\s*·/);
+    expect(line.textContent).not.toMatch(/·\s*·/);
+  });
+
   it("hides the summary line entirely for an events-only batch (rowCount 0)", async () => {
     mockFetchBatch({
       ...batchResponse,

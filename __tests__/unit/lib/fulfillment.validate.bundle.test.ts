@@ -245,3 +245,85 @@ describe('validateOrderFulfillment — bundle component shortages', () => {
     expect(item.issues.some((i) => /no components/i.test(i))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// FD1-6 — the PREVIEW agrees with the FULFIL about a soft-deleted product.
+//
+// The validation read includes `internalProduct` unfiltered, while the fulfil
+// pass reads products with `deletedAt: null` (OC-5, lib/fulfillment.ts) so that
+// unfulfill can always put back what fulfil took. Without this the preview
+// renders a soft-deleted line "ready", the operator confirms, and the line
+// comes back in `failed[]` — a refusal the surface said would not happen.
+// ---------------------------------------------------------------------------
+
+/** One order, one SINGLE-mapped item, whose mapped product is soft-deleted. */
+function buildDeletedMappingOrder() {
+  return {
+    id: 'ord-del-1',
+    items: [
+      {
+        id: 'oi-del-1',
+        orderId: 'ord-del-1',
+        name: 'Ghost Vial',
+        variantName: null,
+        sku: 'GV-1',
+        quantity: 2,
+        fulfilledQty: 0,
+        isMapped: true,
+        productLinkId: 'pl-del',
+        bundleComponentSnapshot: null,
+        productLink: {
+          id: 'pl-del',
+          isBundle: false,
+          internalProductId: 900,
+          internalProduct: {
+            id: 900,
+            name: 'Ghost Vial',
+            deletedAt: new Date('2026-08-01T00:00:00Z'),
+          },
+          bundleComponents: [],
+        },
+      },
+    ],
+  };
+}
+
+describe('validateOrderFulfillment — a soft-deleted mapped product', () => {
+  it('FD1-6: refuses the line instead of rendering it ready off ample stock', async () => {
+    const mock = getMock();
+    mock.externalOrder.findUnique.mockResolvedValue(buildDeletedMappingOrder());
+    // Stock the line would otherwise pass on: 99 available against 2 needed.
+    mock.product_locations.findMany.mockResolvedValue([
+      { productId: 900, locationId: 1, quantity: 99, locations: { id: 1, name: 'Main' } },
+    ]);
+
+    const result = await validateOrderFulfillment('ord-del-1', 1);
+
+    const item = result.items[0];
+    expect(item.issues).toContain('Product no longer exists');
+    // No availability block: there is no product left to be available.
+    expect(item.mapping).toBeUndefined();
+    expect(result.canFulfill).toBe(false);
+    expect(result.requiresAttention).toBe(true);
+  });
+
+  it('FD1-6: a LIVE mapped product is untouched by the belt', async () => {
+    const mock = getMock();
+    const order = buildDeletedMappingOrder();
+    order.items[0].productLink.internalProduct.deletedAt = null as unknown as Date;
+    mock.externalOrder.findUnique.mockResolvedValue(order);
+    mock.product_locations.findMany.mockResolvedValue([
+      { productId: 900, locationId: 1, quantity: 99, locations: { id: 1, name: 'Main' } },
+    ]);
+
+    const result = await validateOrderFulfillment('ord-del-1', 1);
+
+    expect(result.items[0].issues).not.toContain('Product no longer exists');
+    expect(result.items[0].mapping).toEqual({
+      productId: 900,
+      productName: 'Ghost Vial',
+      availableByLocation: [{ locationId: 1, locationName: 'Main', available: 99 }],
+    });
+    expect(result.canFulfill).toBe(true);
+  });
+});

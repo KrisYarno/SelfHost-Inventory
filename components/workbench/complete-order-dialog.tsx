@@ -46,6 +46,15 @@ import type { WorkbenchIntent } from "@/lib/inventory/intent";
 // same array's story two different ways (the registered W0.5-a divergence).
 // ---------------------------------------------------------------------------
 
+/**
+ * The way OUT of a cart that refuses the same way on every retry (OC-8), in ONE
+ * spelling. Two refusals append it — the `already_fulfilled` skip and the
+ * units-only shortfall (FD1-1) — and two spellings of one instruction is how
+ * one of them goes stale against the other.
+ */
+const RE_SELECT_SENTENCE =
+  "Re-select the order to rebuild the cart from its current state.";
+
 export interface DeductionDetail {
   productId: number;
   productName: string;
@@ -318,12 +327,19 @@ export function CompleteOrderDialog({
         // good product but an unresolvable quantity used to ship `quantity: 0`,
         // which the unfulfill schema refuses on `positive()` — 400ing the whole
         // body and taking its resolvable siblings down with it. Skip-and-name.
-        const quantity = serverQuantityOf(entry);
+        //
+        // FD1-4: and it reads the entry's OWN number, never the cart's. The two
+        // readers err in OPPOSITE directions on purpose — the sum gate below
+        // falls back to the cart (erring toward REFUSING a leg it cannot verify),
+        // while a rollback that guessed would err toward RESTORING units the
+        // server never said it took, out of another operator's fulfilment.
+        const quantity =
+          typeof entry.quantity === "number" && entry.quantity > 0 ? entry.quantity : null;
         if (
           !entry.itemId ||
           typeof productId !== "number" ||
           productId <= 0 ||
-          !(quantity > 0)
+          quantity === null
         ) {
           unresolved.push(cartLine?.product.name ?? entry.itemId ?? "an unnamed line");
           return;
@@ -386,12 +402,20 @@ export function CompleteOrderDialog({
      * instead of failing to the console alone. One owner, one spelling.
      */
     const raiseRollbackIncident = () => {
-      if (!selectedExternalOrder) return;
+      // FD1-5: no early return. This is the loudest thing the dialog can say,
+      // and swallowing it because the order went unreadable would leave the
+      // operator with deducted stock and silence. The same sentence renders
+      // id-less — "this order" where the number would go — rather than not at
+      // all. One copy string, two substituted spans.
+      const orderLabel = selectedExternalOrder
+        ? `WC order #${selectedExternalOrder.orderNumber}`
+        : "This order";
+      const orderRef = selectedExternalOrder ? `order ${selectedExternalOrder.id}` : "this order";
       toast.error(
         <div className="space-y-1">
           <p className="font-medium">Rollback failed</p>
           <p className="text-sm">
-            {`WC order #${selectedExternalOrder.orderNumber} was fulfilled but the completion could not finish, and the rollback restored only ${rollbackOutcome.restoredCount} of ${rollbackOutcome.owed} lines. Please check inventory manually for order ${selectedExternalOrder.id}.`}
+            {`${orderLabel} was fulfilled but the completion could not finish, and the rollback restored only ${rollbackOutcome.restoredCount} of ${rollbackOutcome.owed} lines. Please check inventory manually for ${orderRef}.`}
           </p>
           {rollbackOutcome.unresolved.length > 0 && (
             <p className="text-sm">
@@ -480,13 +504,23 @@ export function CompleteOrderDialog({
           0
         );
 
-        if (
-          fulfilledCount !== null &&
-          (fulfilledCount < wcItems.length || serverUnits !== askedUnits)
-        ) {
-          // Nothing fulfilled => nothing to put back, so the leg IS clean.
+        // FD1-3(a): the UNIT half keys on EVIDENCE, not on the summary alone. An
+        // envelope that names no entries sums to 0 units, which against any
+        // non-empty cart reads as "short" — refusing, and trying to roll back, a
+        // leg the summary says moved everything. No entries, no unit verdict.
+        const linesShort = fulfilledCount !== null && fulfilledCount < wcItems.length;
+        const unitsShort = fulfilledEntries.length > 0 && serverUnits !== askedUnits;
+
+        if (fulfilledCount !== null && (linesShort || unitsShort)) {
+          // FD1-3(b): the rollback is driven by the ENTRIES, not by the count.
+          //   - entries present: put exactly those back — even when the summary
+          //     claims 0 fulfilled, because a count that contradicts its own
+          //     evidence would otherwise leave that line deducted forever;
+          //   - entries absent with a positive count: the helper's zero-entries
+          //     belt, which sends nothing and names the incident;
+          //   - neither: nothing was fulfilled, so the leg IS clean.
           let restoredFully = true;
-          if (fulfilledCount > 0) {
+          if (fulfilledEntries.length > 0 || fulfilledCount > 0) {
             restoredFully = await rollbackWcLeg(fulfilledEntries);
             if (restoredFully) wcFulfilled = false;
             else raiseRollbackIncident();
@@ -495,20 +529,29 @@ export function CompleteOrderDialog({
           // OC-8: a stale cart — built once at selection — refuses with
           // `already_fulfilled` on EVERY retry, and each retry fulfils and rolls
           // back real stock. "Fix the issue and try again" names no exit, so the
-          // one that exists is spelled. Read off the FIRST refusal entry (the
-          // one a retry hits again), not through the priority reader, which is
-          // choosing the most ACTIONABLE sentence rather than the looping reason.
+          // one that exists is spelled. Read off ANY refusal entry (FD1-7): on a
+          // MIXED set the looping reason is rarely `skipped[0]`, and the reader
+          // that picks the surfaced sentence is choosing the most ACTIONABLE
+          // one — a different question from "will a retry loop?".
           const refusals = Array.isArray(fulfillBody?.results?.skipped)
-            ? (fulfillBody.results.skipped as Array<{ reason?: string }>)
+            ? (fulfillBody.results.skipped as Array<{ reason?: string } | null>)
             : [];
-          const staleCart = refusals[0]?.reason === "already_fulfilled";
+          const staleCart = refusals.some((refusal) => refusal?.reason === "already_fulfilled");
 
-          const error = new Error(
-            (primaryRefusal(fulfillBody?.results) ?? "the order could not be fulfilled") +
-              (staleCart
-                ? " Re-select the order to rebuild the cart from its current state."
-                : "")
-          );
+          // FD1-1: the units-only refusal — every line back, fewer units than
+          // the cart asked for — carries NO skipped/failed entry, so the
+          // priority reader returns null and this used to land on the bare
+          // fallback with no reason and no remedy. Reachable when another
+          // operator partially fulfils between cart-build and Complete, and
+          // through the cart's own `+` (it caps a WC line by stock, not by the
+          // order's remaining). Say it in the server's numbers, and name the
+          // same exit the stale cart gets.
+          const message =
+            unitsShort && fulfilledCount === wcItems.length
+              ? `The order had ${serverUnits} of the ${askedUnits} units this cart asked for. ${RE_SELECT_SENTENCE}`
+              : (primaryRefusal(fulfillBody?.results) ?? "the order could not be fulfilled") +
+                (staleCart ? ` ${RE_SELECT_SENTENCE}` : "");
+          const error = new Error(message);
           // DCc-4 + G2s-2: the code is CONDITIONAL, and the two coded branches
           // are DIFFERENT facts. Nothing fulfilled => no rollback ever ran =>
           // `FULFILMENT_NOT_STARTED`, whose action must not claim lines "were put
@@ -517,7 +560,11 @@ export function CompleteOrderDialog({
           // already told the truth, and a second toast claiming the lines were
           // put back would contradict it on the one path where the data really
           // is inconsistent.
-          if (fulfilledCount === 0) {
+          //
+          // FD1-3: "nothing was fulfilled" means NEITHER reader saw a deduction.
+          // A zero count with entries present DID run a rollback, and must not
+          // claim that nothing was ever sent to WooCommerce.
+          if (fulfilledCount === 0 && fulfilledEntries.length === 0) {
             (error as any).code = "FULFILMENT_NOT_STARTED";
           } else if (restoredFully) {
             (error as any).code = "FULFILMENT_REFUSED";
@@ -598,7 +645,15 @@ export function CompleteOrderDialog({
           ? fulfilledEntries.find((candidate) => candidate.itemId === item.fulfillmentItemId)
           : undefined;
         return {
-          productId: item.product.id,
+          // FD1-2: the SERVER'S product id when the entry names one — the same
+          // belt, and the same preference order, the rollback body keeps. The
+          // Undo posts what was actually deducted, so a line the server resolved
+          // to a different product than the cart holds is restored where the
+          // stock went, not where the cart thought it would go.
+          productId:
+            entry && typeof entry.productId === "number" && entry.productId > 0
+              ? entry.productId
+              : item.product.id,
           productName: item.product.name,
           quantity: entry ? serverQuantityOf(entry) : item.quantity,
           locationId: selectedLocationId!,

@@ -331,6 +331,27 @@ describe("fulfill dialog — a body it cannot read is not a refusal", () => {
     expect(onSuccess).toHaveBeenCalled();
     expect(toast.error as jest.Mock).not.toHaveBeenCalled();
   });
+
+  it("FD1-9: a PARTIAL body with no skipped/failed counts never spells 'undefined'", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    // The half-read envelope: a numeric `fulfilled` (so the counts ARE spelled)
+    // with the other two absent. Reading them raw put "undefined skipped,
+    // undefined failed" in front of the operator.
+    mutateAsync.mockResolvedValue({
+      summary: { fulfilled: 1 },
+      results: { fulfilled: [{ itemId: "it-0" }], skipped: [], failed: [] },
+    });
+    const { onOpenChange, onSuccess } = await renderDialog(openOrder(2));
+
+    await user.click(confirmButton());
+    await waitFor(() => expect(toast.warning as jest.Mock).toHaveBeenCalled());
+
+    const description = toastOptions(toast.warning as jest.Mock).description;
+    expect(description).toBe("1 fulfilled, 0 skipped, 0 failed");
+    expect(description).not.toContain("undefined");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onSuccess).toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
