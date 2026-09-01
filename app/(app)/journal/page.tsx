@@ -295,7 +295,7 @@ export default function JournalPage() {
               } else {
                 setVersionRecoveryInFlight(false);
                 toast.error(
-                  "Couldn't refresh inventory versions — check your connection and reopen the review before retrying."
+                  "Couldn't refresh inventory versions — check your connection, then retry: the retry re-attempts the refresh."
                 );
               }
             })
@@ -306,7 +306,7 @@ export default function JournalPage() {
             .catch(() => {
               setVersionRecoveryInFlight(false);
               toast.error(
-                "Couldn't refresh inventory versions — check your connection and reopen the review before retrying."
+                "Couldn't refresh inventory versions — check your connection, then retry: the retry re-attempts the refresh."
               );
             });
           return;
@@ -604,10 +604,15 @@ export default function JournalPage() {
         adjustments={adjustments}
         products={products}
         onConfirm={handleSubmitAdjustments}
-        // FDc-5: the 409 recovery window counts as "submitting" — Confirm goes
-        // dead for the second the versions refresh instead of inviting a click
-        // the handler guard would only refuse with a second toast.
-        isSubmitting={isSubmitting || versionRecoveryInFlight}
+        isSubmitting={isSubmitting}
+        // FDc-5 / FDd-1: the 409 recovery window kills Confirm WITH ITS REASON
+        // on screen (never the "Submitting..." label for work that is not a
+        // submit); Cancel stays live.
+        busyReason={
+          versionRecoveryInFlight
+            ? "Refreshing inventory versions after a conflict — one moment."
+            : undefined
+        }
       />
     </div>
   );

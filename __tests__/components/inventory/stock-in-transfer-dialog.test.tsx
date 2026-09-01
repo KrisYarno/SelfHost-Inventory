@@ -453,7 +453,9 @@ describe("Stock-In transfer dialog — a product SWAP while it is open", () => {
     // The dialog is product B's now, and it claims NOTHING it has not read: no
     // source rows, and no ask carried over from A.
     expect(screen.getByText("Widget B")).toBeInTheDocument();
-    expect(screen.queryAllByPlaceholderText("0")).toHaveLength(0);
+    // (Row-list absence is DESCRIPTIVE only, not asserted: `isLoading` swaps the
+    // rows for a spinner either way — FDd-7. The load-bearing pins are the
+    // summary block, the button name, and the header values below/above.)
     expect(screen.queryByText("Total to transfer:")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stock In" })).toBeDisabled();
     // The header falls back to B's OPENING PROP — not A's fetched destination

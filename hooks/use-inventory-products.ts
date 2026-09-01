@@ -72,13 +72,15 @@ export function useInventoryProducts(options: UseInventoryProductsOptions) {
     // FDc-2: `status === "success"` alone lies for a PAUSED query (offline:
     // react-query substitutes a resolved promise and never fetches, leaving the
     // PRIOR success in place) and for a disabled one. "Fresh rows arrived"
-    // means the data timestamp ADVANCED past this call's start.
-    const before = queryClient.getQueryState(exactKey)?.dataUpdatedAt ?? 0;
+    // means the success COUNTER advanced — `dataUpdateCount` is monotonic and,
+    // unlike `dataUpdatedAt` (FDd-5), immune to a backwards clock step and to
+    // fake timers freezing Date.now().
+    const before = queryClient.getQueryState(exactKey)?.dataUpdateCount ?? 0;
     await queryClient.invalidateQueries({
       queryKey: ["inventory-products", locationId],
     });
     const state = queryClient.getQueryState(exactKey);
-    return state?.status === "success" && (state?.dataUpdatedAt ?? 0) > before;
+    return state?.status === "success" && (state?.dataUpdateCount ?? 0) > before;
   };
 
   return { ...query, refetch };

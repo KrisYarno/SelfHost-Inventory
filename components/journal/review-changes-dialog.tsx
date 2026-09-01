@@ -28,6 +28,12 @@ interface ReviewChangesDialogProps {
   products: ProductWithQuantity[];
   onConfirm: () => void;
   isSubmitting?: boolean;
+  /**
+   * FDd-1: a NON-submitting reason Confirm is dead (e.g. the journal's 409
+   * version refresh). Renders beside the button and keeps Cancel LIVE — the
+   * button never claims "Submitting..." for work that is not a submit.
+   */
+  busyReason?: string;
 }
 
 export function ReviewChangesDialog({
@@ -37,6 +43,7 @@ export function ReviewChangesDialog({
   products,
   onConfirm,
   isSubmitting = false,
+  busyReason,
 }: ReviewChangesDialogProps) {
   const adjustmentList = Object.values(adjustments);
   const productMap = new Map(products.map((p) => [p.id, p]));
@@ -225,6 +232,11 @@ export function ReviewChangesDialog({
         </div>
 
         <DialogFooter>
+          {busyReason && (
+            <p id="busy-reason" className="self-center text-sm text-muted-foreground" role="status">
+              {busyReason}
+            </p>
+          )}
           <Button
             variant="outline"
             onClick={() => onOpenChange(false)}
@@ -235,14 +247,16 @@ export function ReviewChangesDialog({
           </Button>
           <Button
             onClick={onConfirm}
-            disabled={isSubmitting || negativeStockWarnings.length > 0 || overItemCap}
+            disabled={isSubmitting || Boolean(busyReason) || negativeStockWarnings.length > 0 || overItemCap}
             aria-label={isSubmitting ? "Submitting adjustments" : "Confirm and submit adjustments"}
             aria-describedby={
-              overItemCap
-                ? "item-cap-warning"
-                : negativeStockWarnings.length > 0
-                  ? "negative-stock-warning"
-                  : undefined
+              busyReason
+                ? "busy-reason"
+                : overItemCap
+                  ? "item-cap-warning"
+                  : negativeStockWarnings.length > 0
+                    ? "negative-stock-warning"
+                    : undefined
             }
           >
             {isSubmitting ? "Submitting..." : "Confirm Adjustments"}

@@ -160,11 +160,12 @@ export const POST = apiHandler(async (request: NextRequest) => {
       });
       totalTransferred += transfer.quantity;
     } catch (error) {
-      // Fix-delta FDb-1: a per-transfer catch swallows what apiHandler would
-      // have typed as 503 BUSY — without this branch a deadlock/budget loss
-      // would put Prisma's own multi-line message verbatim into the stocker's
-      // per-transfer toast. (batch-adjust's write-loop catch is the OTHER such
-      // site; it rethrows the transient class — FDc-1.)
+      // Fix-delta FDb-1: a per-item catch swallows what apiHandler would have
+      // typed as 503 BUSY — without this branch a deadlock/budget loss would put
+      // Prisma's own multi-line message verbatim into the stocker's per-transfer
+      // toast. THREE such catches exist on the covered writers, each mapped:
+      // this one; batch-adjust's write loop (rethrows — FDc-1); fulfil's item
+      // catch (per-item busy sentence — FDd-4).
       const errorMessage =
         error instanceof Prisma.PrismaClientKnownRequestError &&
         TRANSIENT_TX_ERROR_CODES.has(error.code)

@@ -9,23 +9,11 @@ import { RateLimitError } from '@/lib/rateLimit';
 import { OptimisticLockError } from '@/lib/inventory';
 import prisma from '@/lib/prisma';
 
-/**
- * The transaction-contention answer (pack REV-22 F3, fix-delta FDb-1/FDb-3).
- * P2034 = a write conflict / deadlock; P2028 = the interactive-transaction
- * budget (Prisma also raises P2028 for a misused transaction client — a code
- * defect that will then read as "busy"; errorLogger keeps it diagnosable, and
- * that trade is ACCEPTED in the pack rather than parsing message text);
- * P2024 = the connection pool timed out, which the 30 s budgets make reachable
- * when writers queue — and ALSO what sustained pool exhaustion (a connection
- * leak, an under-sized pool) looks like: under THAT failure every operator sees
- * "busy" indefinitely, and the errorLogger line is the discriminator between
- * contention and outage (FDc-8, same trade as P2028's). NOTE: outside dev the
- * logger prints name + MESSAGE only, never the Prisma code — grep the message
- * texts ("connection pool", "write conflict or a deadlock"), not "P2024". One sentence, exported so the 207-emitting batch-transfer
- * route can say the same thing per transfer instead of leaking Prisma's own text.
- */
-export const TRANSIENT_TX_ERROR_CODES: ReadonlySet<string> = new Set(['P2028', 'P2034', 'P2024']);
-export const TX_BUSY_MESSAGE = 'the system was busy with another change — try again';
+// The transient tx-error contract lives in lib/inventory.ts (Next-free, FDd-4);
+// imported for apiHandler's own 503 branch and re-exported for the route-layer
+// consumers that already import it from here.
+import { TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE } from '@/lib/inventory';
+export { TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE };
 
 // --- Auth guard types ---
 
