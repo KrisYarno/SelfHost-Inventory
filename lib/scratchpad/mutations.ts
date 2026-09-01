@@ -1,5 +1,5 @@
 import prisma from "@/lib/prisma";
-import { OptimisticLockError } from "@/lib/inventory";
+import { OptimisticLockError } from "@/lib/inventory/tx-errors";
 import { AppError } from "@/lib/error-handling";
 import type { Prisma } from "@prisma/client";
 

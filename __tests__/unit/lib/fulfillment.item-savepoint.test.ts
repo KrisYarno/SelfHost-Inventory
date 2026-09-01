@@ -37,6 +37,7 @@ jest.mock('@/lib/inventory', () => ({
 
 import prisma from '@/lib/prisma';
 import { fulfillExternalOrder } from '@/lib/fulfillment';
+import { TX_BUSY_MESSAGE } from '@/lib/inventory/tx-errors';
 
 const ORDER_ID = 'ord-1';
 
@@ -121,6 +122,12 @@ function makeStore(seed: {
    * W2S-1 shape: an error that is not transaction-fatal, arriving late.
    */
   onOrderItemUpdate?: (args: { where: any; data: any }) => void;
+  /**
+   * FDg-1: models a TX-KILLING failure (MySQL 1213 rolls back the whole
+   * transaction and DROPS every savepoint). When this answers true, the
+   * savepoint settle statements raise 1305 exactly as the dead engine would.
+   */
+  isTxDead?: () => boolean;
 }) {
   const products = new Map<number, { id: number; name: string; quantity: number }>();
   seed.products.forEach((p) => products.set(p.id, { ...p }));
@@ -183,6 +190,7 @@ function makeStore(seed: {
       }
       m = /^ROLLBACK TO SAVEPOINT (\w+)$/.exec(statement);
       if (m) {
+        if (seed.isTxDead?.()) throw new Error(`SAVEPOINT ${m[1]} does not exist`);
         const idx = savepoints.map((s) => s.name).lastIndexOf(m[1]);
         // MySQL raises 1305 for an unknown savepoint. A stand-in that silently
         // accepted it would hide exactly the bug this file is about.
@@ -194,6 +202,7 @@ function makeStore(seed: {
       }
       m = /^RELEASE SAVEPOINT (\w+)$/.exec(statement);
       if (m) {
+        if (seed.isTxDead?.()) throw new Error(`SAVEPOINT ${m[1]} does not exist`);
         const idx = savepoints.map((s) => s.name).lastIndexOf(m[1]);
         if (idx === -1) throw new Error(`SAVEPOINT ${m[1]} does not exist`);
         savepoints.length = idx;
@@ -858,5 +867,101 @@ describe('REV-22 F2 — a missing override product stays ITEM-LOCAL', () => {
     expect(prelockInsert()).toBeUndefined();
     expect(rawCalls.filter((c) => isPrelockSelect(c.sql))).toHaveLength(0);
     errSpy.mockRestore();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// FDg-1 — the transient contract at the item boundary, both tx fates.
+// ---------------------------------------------------------------------------
+
+describe('FDg-1 — transients at the item catch', () => {
+  const p2034 = () =>
+    new Prisma.PrismaClientKnownRequestError(
+      'Transaction failed due to a write conflict or a deadlock. Please retry your transaction',
+      { code: 'P2034', clientVersion: 'test' } as never
+    );
+
+  const twoSingles = () =>
+    order([
+      singleLine(),
+      singleLine({
+        id: 'item-2',
+        quantity: 3,
+        productLink: {
+          isBundle: false,
+          internalProduct: { id: 20, name: 'Widget B' },
+          bundleComponents: [],
+        },
+      }),
+    ]);
+
+  const seedRows = {
+    products: [
+      { id: 10, name: 'Widget A', quantity: 100 },
+      { id: 20, name: 'Widget B', quantity: 100 },
+    ],
+    productLocations: [
+      { productId: 10, locationId: 1, quantity: 100, version: 1 },
+      { productId: 20, locationId: 1, quantity: 100, version: 1 },
+    ],
+  };
+
+  it('TX-ALIVE: a statement-only transient reads as the busy sentence per item, siblings commit', async () => {
+    const store = makeStore({
+      order: twoSingles(),
+      ...seedRows,
+      onOrderItemUpdate: ({ where }) => {
+        if (where.id === 'item-1') throw p2034();
+      },
+    });
+    drive(store);
+
+    const result = await fulfillExternalOrder(
+      ORDER_ID,
+      1,
+      [
+        { itemId: 'item-1', quantity: 5 },
+        { itemId: 'item-2', quantity: 3 },
+      ],
+      42
+    );
+
+    // The failed entry carries the HONEST sentence, never the engine text.
+    expect(result.failed).toEqual([{ itemId: 'item-1', error: TX_BUSY_MESSAGE }]);
+    expect(result.fulfilled.map((f) => f.itemId)).toEqual(['item-2']);
+  });
+
+  it('TX-KILLED: the settle failure rethrows the CAPTURED transient, never the follow-on 1305', async () => {
+    let dead = false;
+    const error = p2034();
+    const store = makeStore({
+      order: twoSingles(),
+      ...seedRows,
+      onOrderItemUpdate: ({ where }) => {
+        if (where.id === 'item-1') {
+          dead = true; // MySQL 1213: the tx rolled back, savepoints dropped
+          throw error;
+        }
+      },
+      isTxDead: () => dead,
+    });
+    drive(store);
+
+    // The rejection is the P2034 INSTANCE — apiHandler's ladder then answers
+    // 503 BUSY deterministically. Without the capture (throw settleError) this
+    // would reject with `SAVEPOINT item_item_1 does not exist`, a shape no
+    // classifier should ever have to recognise.
+    await expect(
+      fulfillExternalOrder(
+        ORDER_ID,
+        1,
+        [
+          { itemId: 'item-1', quantity: 5 },
+          { itemId: 'item-2', quantity: 3 },
+        ],
+        42
+      )
+    ).rejects.toBe(error);
   });
 });

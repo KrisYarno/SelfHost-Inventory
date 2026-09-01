@@ -1,12 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireApproved, apiHandler, requireCSRF, TX_BUSY_MESSAGE } from "@/lib/api-utils";
+import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
 import { AppError } from "@/lib/error-handling";
-import { isTransientTxError } from "@/lib/inventory/tx-errors";
+import { isTransientTxError, OptimisticLockError, TX_BUSY_MESSAGE } from "@/lib/inventory/tx-errors";
 import prisma from "@/lib/prisma";
 import {
   createInventoryTransfer,
   validateStockAvailability,
-  OptimisticLockError,
 } from "@/lib/inventory";
 import { BatchTransferSchema } from "@/lib/validation/inventory";
 import { recordChange, newBatchId } from "@/lib/change-tracking";

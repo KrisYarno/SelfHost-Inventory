@@ -951,13 +951,16 @@ export async function fulfillExternalOrder(
             // error, the settle/post-loop failure rethrows the CLASSIFIED
             // transient deterministically — the wire answers 503 BUSY, never a
             // follow-on error's generic 500.
-            error: isTransientTxError(error)
-              ? TX_BUSY_MESSAGE
-              : error instanceof Error
-                ? error.message
-                : 'Unknown error occurred',
+            error: (() => {
+              const transient = isTransientTxError(error);
+              if (transient) txTransient = error;
+              return transient
+                ? TX_BUSY_MESSAGE
+                : error instanceof Error
+                  ? error.message
+                  : 'Unknown error occurred';
+            })(),
           });
-          if (isTransientTxError(error)) txTransient = error;
         } finally {
           // W2S-1: `continue` inside the try runs this block before it takes
           // effect, so every exit path settles the savepoint exactly once. A
@@ -976,7 +979,14 @@ export async function fulfillExternalOrder(
                   ? `ROLLBACK TO SAVEPOINT ${itemSavepoint}`
                   : `RELEASE SAVEPOINT ${itemSavepoint}`
               );
+              // The settle SUCCEEDED — the transaction is alive, so a transient
+              // captured by THIS item was statement-only and must not hijack a
+              // later, unrelated settle failure (FDg-4).
+              txTransient = null;
             } catch (settleError) {
+              // The discarded error must not vanish (FDg-4): when the captured
+              // transient is rethrown, this line is the settle error's only trace.
+              console.error('savepoint settle failed:', settleError);
               throw txTransient ?? settleError;
             }
           }

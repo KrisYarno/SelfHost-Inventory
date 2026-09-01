@@ -40,7 +40,8 @@ export const STOCK_TX_OPTIONS = { maxWait: 5000, timeout: 30000 };
 
 // The transient tx-error contract lives in ./inventory/tx-errors (a LEAF nothing
 // mocks — FDe-4); re-exported here for the api-utils/route consumers.
-export { TX_BUSY_MESSAGE, isTransientTxError } from '@/lib/inventory/tx-errors';
+// (TX_BUSY_MESSAGE / isTransientTxError have no importers via this module —
+// consumers take the leaf or api-utils; re-export surface trimmed, FDg notes.)
 
 
 /**

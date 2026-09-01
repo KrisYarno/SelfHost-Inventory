@@ -140,6 +140,33 @@ describe('apiHandler — Prisma P2028/P2034 -> 503 BUSY', () => {
   // FDe-1: a RAW-statement deadlock can arrive with no P-code at all — only
   // the engine's sentence. The classifier matches the message, per the house
   // precedent (withDeadlockRetry, the booking retry).
+  // FDg-2: the PRODUCTION code-less shape — default errorFormat prefixes the
+  // invocation preamble, so `^Raw query failed` never matches; the instanceof
+  // clause is what carries it. This pin makes deleting that clause red.
+  it('maps a PrismaClientUnknownRequestError carrying the invocation preamble + deadlock text to 503 BUSY', async () => {
+    const handler = apiHandler(async () => {
+      throw new Prisma.PrismaClientUnknownRequestError(
+        '\nInvalid `prisma.$executeRaw()` invocation:\n\nDeadlock found when trying to get lock; try restarting transaction',
+        { clientVersion: 'test' }
+      )
+    })
+    const res = await handler(req(), {} as never)
+    expect(res.status).toBe(503)
+    expect((await res.json()).code).toBe('BUSY')
+  })
+
+  // FDg-2 negative (the FDf-2 spoof lock): a JSON-parse SyntaxError echoing the
+  // request's own bytes must NEVER read as contention.
+  it('does NOT map a body-echoing SyntaxError to BUSY — a malformed body is a 500, not contention', async () => {
+    const handler = apiHandler(async () => {
+      JSON.parse('{deadlock lock wait timeout')
+      return undefined as never
+    })
+    const res = await handler(req(), {} as never)
+    expect(res.status).toBe(500)
+    expect((await res.json()).code).not.toBe('BUSY')
+  })
+
   it('maps a code-less raw deadlock (the engine sentence alone) to 503 BUSY', async () => {
     const handler = apiHandler(async () => {
       throw new Error(

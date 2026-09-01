@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Prisma, type inventory_logs } from "@prisma/client";
 import { requireApproved, apiHandler, requireCSRF } from "@/lib/api-utils";
-import { isTransientTxError } from "@/lib/inventory/tx-errors";
+import { isTransientTxError, OptimisticLockError } from "@/lib/inventory/tx-errors";
 import prisma from "@/lib/prisma";
 import { recordChange, newBatchId } from "@/lib/change-tracking";
 import { recordAttributionAttempt } from "@/lib/attribution/attempts";
-import { applyStockDelta, OptimisticLockError, STOCK_TX_OPTIONS } from "@/lib/inventory";
+import { applyStockDelta, STOCK_TX_OPTIONS } from "@/lib/inventory";
 import { prelockKey, prelockProductLocations } from "@/lib/inventory/prelock";
 import { AppError, ProductNotFoundError } from "@/lib/error-handling";
 import { BatchInventoryAdjustmentSchema } from "@/lib/validation/inventory";
