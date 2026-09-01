@@ -36,6 +36,22 @@ export const TX_BUSY_MESSAGE = 'the system was busy with another change — try 
 /** The engine sentences a raw-statement transient carries when no P-code does. */
 const TRANSIENT_MESSAGE = /deadlock|lock wait timeout|write conflict|connection pool/i;
 
+/**
+ * The message branch is gated to ENGINE-SHAPED errors (FDf-2): a bare
+ * `instanceof Error` test would also match a JSON-parse SyntaxError, whose V8
+ * message ECHOES ~30 bytes of the request body verbatim — a client POSTing the
+ * word "deadlock" in a malformed body could spoof a 503 BUSY and poison the
+ * contention signal. Engine-shaped = a Prisma client error object, or the raw
+ * executor's own "Raw query failed. Code: `1213`. …" wrapping.
+ */
+function isEngineShaped(error: Error): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError ||
+    error instanceof Prisma.PrismaClientUnknownRequestError ||
+    /^Raw query failed/.test(error.message)
+  );
+}
+
 export function isTransientTxError(error: unknown): boolean {
   if (
     error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -43,5 +59,25 @@ export function isTransientTxError(error: unknown): boolean {
   ) {
     return true;
   }
-  return error instanceof Error && TRANSIENT_MESSAGE.test(error.message);
+  return (
+    error instanceof Error && isEngineShaped(error) && TRANSIENT_MESSAGE.test(error.message)
+  );
+}
+
+/**
+ * The optimistic-version conflict (moved here from lib/inventory.ts — FDf-4:
+ * apiHandler's ladder tests it two rungs above the transient branch, and the
+ * ladder must be mock-immune end-to-end; `@/lib/inventory` is the repo's
+ * most-mocked module). Re-exported from lib/inventory.ts, so every existing
+ * importer keeps the SAME class identity.
+ */
+export class OptimisticLockError extends Error {
+  constructor(
+    message: string,
+    public currentVersion: number,
+    public expectedVersion: number
+  ) {
+    super(message);
+    this.name = 'OptimisticLockError';
+  }
 }

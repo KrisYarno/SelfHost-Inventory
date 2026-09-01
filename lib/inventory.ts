@@ -40,7 +40,7 @@ export const STOCK_TX_OPTIONS = { maxWait: 5000, timeout: 30000 };
 
 // The transient tx-error contract lives in ./inventory/tx-errors (a LEAF nothing
 // mocks — FDe-4); re-exported here for the api-utils/route consumers.
-export { TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE, isTransientTxError } from '@/lib/inventory/tx-errors';
+export { TX_BUSY_MESSAGE, isTransientTxError } from '@/lib/inventory/tx-errors';
 
 
 /**
@@ -717,16 +717,11 @@ export async function createInventoryTransfer(options: {
 /**
  * Custom error class for optimistic lock violations
  */
-export class OptimisticLockError extends Error {
-  constructor(
-    message: string,
-    public currentVersion: number,
-    public expectedVersion: number
-  ) {
-    super(message);
-    this.name = 'OptimisticLockError';
-  }
-}
+// OptimisticLockError lives in ./inventory/tx-errors (the mock-immune leaf —
+// FDf-4); imported for the primitives' own throws and re-exported so every
+// existing importer keeps the same class.
+import { OptimisticLockError } from '@/lib/inventory/tx-errors';
+export { OptimisticLockError };
 
 /**
  * Simplified transaction creation for compatibility with optimistic locking support

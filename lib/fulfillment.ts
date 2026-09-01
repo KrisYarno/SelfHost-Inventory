@@ -510,6 +510,11 @@ export async function fulfillExternalOrder(
       // owner per invariant), so the keys ride in as the request named them.
       await prelockProductLocations(tx, prelockKeys);
 
+      // FDf-3: when a transient KILLS the transaction, the item catch stores it
+      // here so the savepoint-settle failure can rethrow the REAL error instead
+      // of its follow-on. Null while nothing transient has fired.
+      let txTransient: unknown = null;
+
       // Process each fulfillment item
       for (const fulfillmentItem of items) {
         // W2S-1 (codex W2 dual seam check, HIGH): EVERY write this item makes —
@@ -941,32 +946,39 @@ export async function fulfillExternalOrder(
             // rolled back — the honest per-item answer is the busy sentence,
             // never the engine's own multi-line text on a 200's failed[] entry.
             // The classifier matches codes OR the engine sentence (FDe-1: raw
-            // statements can deadlock without a P-code). TX-KILLED case (FDe-2,
-            // stated truthfully): a pre-first-write failure pushes here and
-            // continues with no savepoint open; fail-closed is delivered by the
-            // UNCONDITIONAL post-loop statements, which throw on a dead tx —
-            // and what then escapes is the FOLLOW-ON statement's error (e.g.
-            // the savepoint settle's), whose wire class is probed at the wave
-            // close, not assumed.
+            // statements can deadlock without a P-code). TX-KILLED case: the
+            // transient is CAPTURED below (FDf-3), so if the tx died with this
+            // error, the settle/post-loop failure rethrows the CLASSIFIED
+            // transient deterministically — the wire answers 503 BUSY, never a
+            // follow-on error's generic 500.
             error: isTransientTxError(error)
               ? TX_BUSY_MESSAGE
               : error instanceof Error
                 ? error.message
                 : 'Unknown error occurred',
           });
+          if (isTransientTxError(error)) txTransient = error;
         } finally {
           // W2S-1: `continue` inside the try runs this block before it takes
           // effect, so every exit path settles the savepoint exactly once. A
           // failure rolls the item back; anything else releases it and lets the
           // outer transaction commit the item's work. If the settling statement
-          // itself throws, it escapes the loop and the whole transaction aborts —
-          // fail-closed is the only safe direction here.
+          // itself throws, the whole transaction aborts — fail-closed is the
+          // only safe direction here — and it rethrows the CAPTURED transient
+          // when one killed the tx (FDf-3): after a tx-killing deadlock MySQL
+          // has dropped the savepoints, so the settle fails with a FOLLOW-ON
+          // error (SAVEPOINT ... does not exist) that no classifier should ever
+          // have to recognise; the error that reaches the wire is the real one.
           if (itemSavepointOpen) {
-            await tx.$executeRawUnsafe(
-              itemFailed
-                ? `ROLLBACK TO SAVEPOINT ${itemSavepoint}`
-                : `RELEASE SAVEPOINT ${itemSavepoint}`
-            );
+            try {
+              await tx.$executeRawUnsafe(
+                itemFailed
+                  ? `ROLLBACK TO SAVEPOINT ${itemSavepoint}`
+                  : `RELEASE SAVEPOINT ${itemSavepoint}`
+              );
+            } catch (settleError) {
+              throw txTransient ?? settleError;
+            }
           }
         }
       }

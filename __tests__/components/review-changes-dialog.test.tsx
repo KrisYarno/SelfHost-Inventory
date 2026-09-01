@@ -47,6 +47,48 @@ const mockAdjustments: Record<number, JournalAdjustment> = {
   3: { productId: 3, quantityChange: -15 }, // This will cause negative stock
 }
 
+describe("busyReason (FDd-1 / FDf-6)", () => {
+  const baseProps = () => ({
+    open: true,
+    onOpenChange: jest.fn(),
+    adjustments: { 1: { productId: 1, quantityChange: 5, version: 3 } },
+    products: [
+      { id: 1, name: "Widget A", currentQuantity: 10, version: 3 } as never,
+    ],
+    onConfirm: jest.fn(),
+  });
+
+  it("kills Confirm with the sentence on screen, keeps Cancel live, and never claims Submitting", () => {
+    render(
+      <ReviewChangesDialog
+        {...baseProps()}
+        isSubmitting={false}
+        busyReason="Refreshing inventory versions after a conflict — one moment."
+      />
+    );
+    const confirm = screen.getByRole("button", { name: /confirm and submit adjustments/i });
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveTextContent("Confirm Adjustments");
+    expect(confirm).toHaveAttribute("aria-describedby", "busy-reason");
+    const cancel = screen.getByRole("button", { name: /cancel and close dialog/i });
+    expect(cancel).toBeEnabled();
+    expect(cancel).toHaveAttribute("aria-describedby", "busy-reason");
+    // The dialog carries a second role="status" (the counter) — target by id.
+    expect(document.getElementById("busy-reason")).toHaveTextContent(
+      "Refreshing inventory versions after a conflict — one moment."
+    );
+  });
+
+  it("pre-exists EMPTY when idle (the live region announces changes) and Confirm is live", () => {
+    render(<ReviewChangesDialog {...baseProps()} isSubmitting={false} />);
+    expect(document.getElementById("busy-reason")).toBeInTheDocument();
+    expect(document.getElementById("busy-reason")).toHaveTextContent("");
+    expect(
+      screen.getByRole("button", { name: /confirm and submit adjustments/i })
+    ).toBeEnabled();
+  });
+});
+
 describe('ReviewChangesDialog', () => {
   const defaultProps = {
     open: true,

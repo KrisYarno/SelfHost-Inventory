@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApproved, apiHandler, requireCSRF, TX_BUSY_MESSAGE } from "@/lib/api-utils";
+import { AppError } from "@/lib/error-handling";
 import { isTransientTxError } from "@/lib/inventory/tx-errors";
 import prisma from "@/lib/prisma";
 import {
@@ -166,14 +167,20 @@ export const POST = apiHandler(async (request: NextRequest) => {
       // toast. THREE such catches exist on the covered writers, each mapped:
       // this one; batch-adjust's write loop (rethrows — FDc-1); fulfil's item
       // catch (per-item busy sentence — FDd-4).
+      // TYPED classes outrank the transient test (FDf-1) — the same order as
+      // apiHandler's ladder and batch-adjust's catch: InsufficientStockError's
+      // message interpolates a product NAME, and a product literally named
+      // "deadlock" must read as a shortfall, never as contention.
       const errorMessage =
-        isTransientTxError(error)
-          ? TX_BUSY_MESSAGE
-          : error instanceof OptimisticLockError
-            ? "Inventory was modified by another user"
-            : error instanceof Error
-              ? error.message
-              : "Unknown error";
+        error instanceof OptimisticLockError
+          ? "Inventory was modified by another user"
+          : error instanceof AppError
+            ? error.message
+            : isTransientTxError(error)
+              ? TX_BUSY_MESSAGE
+              : error instanceof Error
+                ? error.message
+                : "Unknown error";
 
       results.push({
         fromLocationId: transfer.fromLocationId,

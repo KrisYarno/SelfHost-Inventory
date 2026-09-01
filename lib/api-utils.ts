@@ -5,14 +5,14 @@ import { AppError, errorLogger } from '@/lib/error-handling';
 import { validateCSRFToken } from '@/lib/csrf';
 import { ZodError } from 'zod';
 import { RateLimitError } from '@/lib/rateLimit';
-import { OptimisticLockError } from '@/lib/inventory';
+import { OptimisticLockError } from '@/lib/inventory/tx-errors';
 import prisma from '@/lib/prisma';
 
 // The transient tx-error contract lives in lib/inventory.ts (Next-free, FDd-4);
 // imported for apiHandler's own 503 branch and re-exported for the route-layer
 // consumers that already import it from here.
-import { isTransientTxError, TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE } from '@/lib/inventory/tx-errors';
-export { TRANSIENT_TX_ERROR_CODES, TX_BUSY_MESSAGE };
+import { isTransientTxError, TX_BUSY_MESSAGE } from '@/lib/inventory/tx-errors';
+export { TX_BUSY_MESSAGE };
 
 // --- Auth guard types ---
 

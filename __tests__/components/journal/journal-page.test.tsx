@@ -77,6 +77,15 @@ let productsOk = true;
 // FDe-3: when set, the /api/products read BLOCKS until released — the recovery
 // window (the 409 -> reseed interval) becomes assertable instead of instant.
 let productsHold: Promise<void> | null = null;
+let releaseHold: (() => void) | null = null;
+
+afterEach(() => {
+  // FDf-5: a red assertion inside the window must not leave a queryFn pending
+  // forever against a discarded client — release the hold on the way out.
+  productsHold = null;
+  releaseHold?.();
+  releaseHold = null;
+});
 /** Queued answers for the batch-adjust POST, oldest first. */
 let batchResponses: Array<{ status: number; body: unknown }>;
 let fetchMock: jest.Mock;
@@ -246,6 +255,7 @@ describe("Journal page — the recovery WINDOW itself (FDd-1 / FDe-3)", () => {
     productsHold = new Promise<void>((resolve) => {
       release = resolve;
     });
+    releaseHold = release;
 
     await openReviewAndConfirm(user);
     await waitFor(() => expect(submittedBatches()).toHaveLength(1));

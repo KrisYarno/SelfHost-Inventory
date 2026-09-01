@@ -233,9 +233,11 @@ export function ReviewChangesDialog({
 
         <DialogFooter>
           {/* Rendered UNCONDITIONALLY (FDe-6): a live region announces CHANGES,
-              so it must pre-exist empty; and the described control goes disabled
-              (blurred), so the description also rides the still-focusable
-              Cancel button below. */}
+              so it must pre-exist empty for the mid-open transition. On a
+              RE-OPEN during the window Radix mounts this fresh WITH content —
+              most SRs then announce nothing (FDf-6) — so the load-bearing half
+              for that path is the aria-describedby on the still-focusable
+              Cancel button below, not the live region. */}
           <p
             id="busy-reason"
             className="self-center text-sm text-muted-foreground"
