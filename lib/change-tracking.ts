@@ -141,7 +141,16 @@ export type AuditActionType =
   // or order-state movement. Addressed to the INVENTORY entity with the LEDGER
   // batchId as entityId; the event's own batchId is a freshly minted one, per
   // the house rule that every request mints its own.
-  | 'INVENTORY_ATTRIBUTE';
+  | 'INVENTORY_ATTRIBUTE'
+  // --- Reconciliation lane Part 2 (spec §2.5/§2.6): the three restoring acts.
+  // INVENTORY_CORRECTION books an attributable positive fix; INVENTORY_BATCH_REVERSE
+  // puts a whole batch's remainder back; INVENTORY_BATCH_MOVE reclassifies a batch
+  // to the location its stock physically left from. All three are addressed to the
+  // INVENTORY entity with the REVERSED/MOVED ledger batchId as entityId, while the
+  // event's own batchId is the freshly minted one the writer wrote under.
+  | 'INVENTORY_CORRECTION'
+  | 'INVENTORY_BATCH_REVERSE'
+  | 'INVENTORY_BATCH_MOVE';
 
 export type EntityType =
   | 'USER'

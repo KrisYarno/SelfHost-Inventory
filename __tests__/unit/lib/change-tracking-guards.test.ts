@@ -228,6 +228,13 @@ const KNOWN_VERBS: readonly string[] = [
   // Reconciliation lane: INVENTORY_ATTRIBUTE -- an admin attributed (or
   // re-attributed) an outbound batch to an order.
   'ATTRIBUTE',
+  // Reconciliation lane Part 2: INVENTORY_CORRECTION (an attributable positive
+  // fix), INVENTORY_BATCH_REVERSE (a whole batch put back) and
+  // INVENTORY_BATCH_MOVE (the wrong-location reclassification). No existing
+  // member ends in _CORRECTION / _REVERSE / _MOVE.
+  'CORRECTION',
+  'REVERSE',
+  'MOVE',
 ];
 
 /**

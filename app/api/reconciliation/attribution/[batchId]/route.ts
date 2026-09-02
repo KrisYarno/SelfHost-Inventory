@@ -10,15 +10,7 @@ import { applyRateLimitHeaders, enforceRateLimit } from '@/lib/rateLimit';
 import { recordAttributionAttempt } from '@/lib/attribution/attempts';
 import { getBatchDetail } from '@/lib/reconciliation/attribution';
 import { attributeBatch } from '@/lib/reconciliation/attribute-batch';
-import {
-  BatchMovedRefusal,
-  FulfilledBatchRefusal,
-  MixedStampsRefusal,
-  NotAttributableRefusal,
-  PartiallyStampedRefusal,
-  R2bOtherTargetRefusal,
-  TooManyRowsRefusal,
-} from '@/lib/reconciliation/refusals';
+import { refusalResponse } from '@/lib/reconciliation/refusal-response';
 
 export const dynamic = 'force-dynamic';
 
@@ -69,77 +61,6 @@ const AttributeSchema = z.object({
   expectPreviousOrderRecordId: z.string().min(1).nullable(),
   reason: z.string().trim().max(500).optional(),
 });
-
-/**
- * The frozen 409 envelopes (pack C2b.1). Assembled HERE, from the refusal's own
- * fields, because `apiHandler` renders an `AppError` as `{ error, code }` and
- * every one of these has something further to name.
- */
-function refusalResponse(err: unknown): NextResponse | null {
-  if (err instanceof NotAttributableRefusal) {
-    return NextResponse.json(
-      { error: err.message, code: err.code, batchId: err.batchId },
-      { status: 409 },
-    );
-  }
-  if (err instanceof TooManyRowsRefusal) {
-    return NextResponse.json(
-      {
-        error: err.message,
-        code: err.code,
-        rowCount: err.rowCount,
-        productCount: err.productCount,
-        limit: err.limit,
-      },
-      { status: 409 },
-    );
-  }
-  if (err instanceof MixedStampsRefusal) {
-    return NextResponse.json(
-      { error: err.message, code: err.code, orderRecordIds: err.orderRecordIds },
-      { status: 409 },
-    );
-  }
-  if (err instanceof BatchMovedRefusal) {
-    return NextResponse.json(
-      {
-        error: err.message,
-        code: err.code,
-        currentOrderRecordId: err.currentOrderRecordId,
-        expected: err.expected,
-      },
-      { status: 409 },
-    );
-  }
-  if (err instanceof PartiallyStampedRefusal) {
-    return NextResponse.json(
-      { error: err.message, code: err.code, stamped: err.stamped, unstamped: err.unstamped },
-      { status: 409 },
-    );
-  }
-  if (err instanceof FulfilledBatchRefusal) {
-    return NextResponse.json(
-      {
-        error: err.message,
-        code: err.code,
-        orderRecordId: err.orderRecordId,
-        orderNumber: err.orderNumber,
-      },
-      { status: 409 },
-    );
-  }
-  if (err instanceof R2bOtherTargetRefusal) {
-    return NextResponse.json(
-      {
-        error: err.message,
-        code: err.code,
-        fulfillmentOrderRecordId: err.fulfillmentOrderRecordId,
-      },
-      { status: 409 },
-    );
-  }
-  return null;
-}
 
 /**
  * POST /api/reconciliation/attribution/[batchId] — MANUAL ATTRIBUTION (spec
@@ -275,7 +196,10 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     if (err instanceof AppError && err.code === ORDER_GONE) {
       throw new AppError('unknown order', 'NOT_FOUND', 404);
     }
-    const refusal = refusalResponse(err);
+    // The ONE mapper (pack CB2a.3), shared with the reverse and move routes.
+    // `isAdmin` is REQUIRED and true here: this handler is admin-only, so the
+    // BATCH_MOVED / MIXED_STAMPS envelopes keep every id they always carried.
+    const refusal = refusalResponse(err, { isAdmin: true });
     if (refusal) {
       return refusal;
     }

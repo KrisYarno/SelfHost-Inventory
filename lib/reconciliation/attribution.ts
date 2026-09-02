@@ -53,6 +53,7 @@ import {
   ATTRIBUTABLE_DEFINITION,
   ATTRIBUTABLE_PREDICATE,
   batchEvidence,
+  fulfillmentFact,
   FULFILLMENT_ACTION_TYPE_LIST,
   renderRowWhereSql,
   rowWhere,
@@ -847,9 +848,10 @@ function classifyBatch(facts: BatchFacts, recordingSince: Date | null): Classifi
   // own event OR the latest attempt's evidence — in BOTH branches below. Keying
   // it on the attempt alone let a MANUAL attempt recorded after an R2b
   // completion re-open the Attribute… control on a batch the core refuses,
-  // because the manual row displaced the fulfillment one.
-  const fulfillment =
-    evidence.fulfillmentEvent !== null || facts.attempt?.evidence === 'fulfillment';
+  // because the manual row displaced the fulfillment one. ONE spelling, in the
+  // population module, so "the core reads it this way" is enforced rather than
+  // asserted (pack CB2a.1).
+  const fulfillment = fulfillmentFact(evidence, facts.attempt);
 
   const recordedKey =
     facts.attempt === null

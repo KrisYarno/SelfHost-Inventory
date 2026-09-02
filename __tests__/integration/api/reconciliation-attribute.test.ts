@@ -86,6 +86,18 @@ const DEDUCT_EVENT: AuditRow = {
   details: { intent: 'order' },
 };
 
+/**
+ * A RESTORATION event, as the ledger read selects it (pack CB2a.2): filed
+ * against the reversed batch as its ENTITY, under one of the three restoring
+ * action types.
+ */
+type RestorationEvent = {
+  id: number;
+  actionType: string;
+  details: Record<string, unknown> | null;
+  createdAt: Date;
+};
+
 function fulfillmentEvent(orderId: string | null): AuditRow {
   return {
     id: 4,
@@ -100,6 +112,12 @@ interface TxFixture {
   locked?: LockedRow[];
   /** Audit rows under the ledger batchId. */
   auditEvents?: AuditRow[];
+  /**
+   * The RESTORATION ledger's events for this batch (pack CB2a.2). The same
+   * delegate as `auditEvents` under a DIFFERENT where-clause, so the fixture
+   * branches on it; empty by default, which is what every pre-B2 batch reads.
+   */
+  restorationEvents?: RestorationEvent[];
   /** The latest attempt row, or null. */
   latestAttempt?: { evidence: string | null } | null;
   /** The target order the route locks FOR UPDATE — null = it no longer exists. */
@@ -136,10 +154,19 @@ function makeTx(fixture: TxFixture) {
     trace.push('lock batch rows FOR UPDATE');
     return locked;
   });
-  (tx.auditLog.findMany as unknown as jest.Mock).mockImplementation(async () => {
-    trace.push('auditLog.findMany');
-    return fixture.auditEvents ?? [DEDUCT_EVENT];
-  });
+  // ONE delegate, TWO reads: the batch's EVIDENCE (`where.batchId`) and the
+  // RESTORATION ledger (`where.entityId` + the three restoring action types).
+  // The fixture branches on the where-clause rather than answering both with
+  // the same rows, which would feed deduction events to the ledger validator.
+  (tx.auditLog.findMany as unknown as jest.Mock).mockImplementation(
+    async (args: { where?: { batchId?: string; entityId?: string } }) => {
+      trace.push('auditLog.findMany');
+      if (args?.where?.entityId !== undefined) {
+        return fixture.restorationEvents ?? [];
+      }
+      return fixture.auditEvents ?? [DEDUCT_EVENT];
+    },
+  );
   (tx.orderAttributionAttempt.findFirst as unknown as jest.Mock).mockImplementation(async () => {
     trace.push('orderAttributionAttempt.findFirst');
     return fixture.latestAttempt ?? null;
@@ -386,11 +413,13 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
     const res = await attribute({ orderRecordId: 'ord-9', expectPreviousOrderRecordId: null });
 
     expect((await res.json()).code).toBe('BATCH_MOVED');
-    // Nothing beyond the two reads ran: no attempt read, no write.
+    // Nothing beyond the shared preamble ran: no restoration read, no write.
+    // (The attempt read is the preamble's own last statement — pack CB2a.1.)
     expect(trace).toEqual([
       'lock orders FOR UPDATE',
       'lock batch rows FOR UPDATE',
       'auditLog.findMany',
+      'orderAttributionAttempt.findFirst',
     ]);
   });
 
@@ -422,11 +451,12 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
       unstamped: 2,
     });
     // BEFORE the same-id short circuit and before the write: nothing beyond the
-    // two reads ran.
+    // shared preamble ran.
     expect(trace).toEqual([
       'lock orders FOR UPDATE',
       'lock batch rows FOR UPDATE',
       'auditLog.findMany',
+      'orderAttributionAttempt.findFirst',
     ]);
     expect(tx.inventory_logs.updateMany).not.toHaveBeenCalled();
   });
@@ -456,6 +486,133 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
     // NOT `changed:false` — half this batch is still unattributed.
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe('PARTIALLY_STAMPED');
+  });
+
+  // 6b (pack CB2a.1): the restoration ledger. Once a batch's units have been put
+  // back or relocated, the guarded write below would move ONLY the population
+  // rows — the CORRECTION/TRANSFER rows carry their own batch id and would keep
+  // the OLD stamp, so one batch's truth would end up split across two orders.
+  it('6b. BATCH_RESTORED — a prior CORRECTION event refuses the re-attribution, with NO stamp change', async () => {
+    const { tx, trace } = makeTx({
+      locked: rows({ orderRecordId: 'ord-1' }),
+      restorationEvents: [
+        {
+          id: 41,
+          actionType: 'INVENTORY_CORRECTION',
+          details: {
+            rows: [
+              { productId: 9, locationId: 3, delta: 4 },
+              { productId: 10, locationId: 3, delta: 2 },
+            ],
+          },
+          createdAt: new Date('2026-09-02T14:31:22.000Z'),
+        },
+      ],
+    });
+    const res = await attribute({
+      orderRecordId: 'ord-9',
+      expectPreviousOrderRecordId: 'ord-1',
+      reason: 'the packer picked the wrong order',
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error:
+        'This batch has already been put back (6 units) — it can no longer be re-attributed or moved',
+      code: 'BATCH_RESTORED',
+      restoredUnits: 6,
+    });
+    expect(trace).toEqual([
+      'lock orders FOR UPDATE',
+      'lock batch rows FOR UPDATE',
+      'auditLog.findMany',
+      'orderAttributionAttempt.findFirst',
+      'auditLog.findMany',
+    ]);
+    expect(tx.inventory_logs.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('6b. BATCH_RESTORED outranks the FULFILLMENT rules', async () => {
+    makeTx({
+      locked: rows({ orderRecordId: 'ord-1' }),
+      auditEvents: [fulfillmentEvent('ord-1')],
+      restorationEvents: [
+        {
+          id: 42,
+          actionType: 'INVENTORY_BATCH_REVERSE',
+          details: { rows: [{ productId: 9, locationId: 3, delta: 7 }] },
+          createdAt: new Date('2026-09-02T14:31:22.000Z'),
+        },
+      ],
+    });
+    const res = await attribute({
+      orderRecordId: 'ord-9',
+      expectPreviousOrderRecordId: 'ord-1',
+      reason: 'the packer picked the wrong order',
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('BATCH_RESTORED');
+  });
+
+  it('6b. ALREADY_MOVED — a prior MOVE event names the location and the minute', async () => {
+    const { tx } = makeTx({
+      locked: rows({ orderRecordId: 'ord-1' }),
+      restorationEvents: [
+        {
+          id: 43,
+          actionType: 'INVENTORY_BATCH_MOVE',
+          details: {
+            ledgerLocationId: 3,
+            physicalLocationId: 7,
+            rows: [
+              { productId: 9, locationId: 7, delta: -4 },
+              { productId: 9, locationId: 3, delta: 4 },
+            ],
+          },
+          createdAt: new Date('2026-09-02T14:31:22.000Z'),
+        },
+      ],
+    });
+    const res = await attribute({
+      orderRecordId: 'ord-9',
+      expectPreviousOrderRecordId: 'ord-1',
+      reason: 'the packer picked the wrong order',
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error:
+        'This batch was moved to location 7 on 2026-09-02 14:31 UTC — it can no longer be re-attributed or moved again',
+      code: 'ALREADY_MOVED',
+      physicalLocationId: 7,
+      at: '2026-09-02T14:31:22.000Z',
+    });
+    expect(tx.inventory_logs.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('6b. the same-id short circuit still answers FIRST — the ledger is never read', async () => {
+    const { trace } = makeTx({
+      locked: rows({ orderRecordId: 'ord-9' }),
+      restorationEvents: [
+        {
+          id: 44,
+          actionType: 'INVENTORY_CORRECTION',
+          details: { rows: [{ productId: 9, locationId: 3, delta: 4 }] },
+          createdAt: new Date('2026-09-02T14:31:22.000Z'),
+        },
+      ],
+    });
+    const res = await attribute({ orderRecordId: 'ord-9', expectPreviousOrderRecordId: 'ord-9' });
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).changed).toBe(false);
+    expect(trace).toEqual([
+      'lock orders FOR UPDATE',
+      'lock batch rows FOR UPDATE',
+      'auditLog.findMany',
+      'orderAttributionAttempt.findFirst',
+    ]);
   });
 
   it('7. FULFILLED_BATCH — a STAMPED batch whose evidence is a fulfillment event', async () => {
@@ -573,7 +730,7 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
 // ---------------------------------------------------------------------------
 
 describe('already attributed to the same order', () => {
-  it('answers changed:false and issues ZERO further statements', async () => {
+  it('answers changed:false and issues no WRITE', async () => {
     const { tx, trace } = makeTx({ locked: rows({ orderRecordId: 'ord-9' }) });
     const res = await attribute({ orderRecordId: 'ord-9', expectPreviousOrderRecordId: 'ord-9' });
 
@@ -590,8 +747,8 @@ describe('already attributed to the same order', () => {
       'lock orders FOR UPDATE',
       'lock batch rows FOR UPDATE',
       'auditLog.findMany',
+      'orderAttributionAttempt.findFirst',
     ]);
-    expect(tx.orderAttributionAttempt.findFirst).not.toHaveBeenCalled();
     expect(tx.inventory_logs.updateMany).not.toHaveBeenCalled();
     expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
     expect(tx.auditLog.create).not.toHaveBeenCalled();
@@ -625,7 +782,7 @@ describe('the write path', () => {
     });
   });
 
-  it('touches exactly the four statements D4 allows, in order', async () => {
+  it('touches exactly the statements D4 allows, in order', async () => {
     const { tx, trace } = makeTx({});
     await attribute(CLEAN_BODY);
 
@@ -634,6 +791,9 @@ describe('the write path', () => {
       'lock batch rows FOR UPDATE',
       'auditLog.findMany',
       'orderAttributionAttempt.findFirst',
+      // The RESTORATION ledger (pack CB2a.2) — the same delegate, the other
+      // filter, between the preamble and the guarded write.
+      'auditLog.findMany',
       'inventory_logs.updateMany',
       'orderAttributionAttempt.create',
       'auditLog.create',

@@ -59,9 +59,14 @@ describe('taxonomy completeness (writer-exhaustive)', () => {
     // away — they were in the union all along (63). W1-3a added
     // GRADUATE_OVERRIDE (64). The Receiving/Labeling overhaul adds the verify,
     // the batch stock-in and the exception resolution (67). The reconciliation
-    // lane adds INVENTORY_ATTRIBUTE (68).
-    expect(unionMembers.length).toBe(68);
+    // lane adds INVENTORY_ATTRIBUTE (68); its Part 2 adds the three restoring
+    // acts — INVENTORY_CORRECTION, INVENTORY_BATCH_REVERSE and
+    // INVENTORY_BATCH_MOVE (71).
+    expect(unionMembers.length).toBe(71);
     expect(unionMembers).toContain('INVENTORY_ATTRIBUTE');
+    expect(unionMembers).toContain('INVENTORY_CORRECTION');
+    expect(unionMembers).toContain('INVENTORY_BATCH_REVERSE');
+    expect(unionMembers).toContain('INVENTORY_BATCH_MOVE');
     expect(unionMembers).toContain('GRADUATE_OVERRIDE');
     expect(unionMembers).toContain('STAGING_VERIFY');
     expect(unionMembers).toContain('STAGING_STOCK_IN');

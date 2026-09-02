@@ -20,9 +20,27 @@
  *   FULFILLED_BATCH    `{ error, code, orderRecordId, orderNumber }`
  *   R2B_OTHER_TARGET   `{ error, code, fulfillmentOrderRecordId }`
  *
+ * Part 2's reverse and move (pack CB2a.3) add eight more, on the same terms —
+ * every one of them names the numbers an operator then acts on:
+ *
+ *   ALREADY_REVERSED     `{ error, code, previouslyRestored, totalUnits }`
+ *   ALREADY_MOVED        `{ error, code, physicalLocationId, at }`
+ *   BATCH_RESTORED       `{ error, code, restoredUnits }`
+ *   MULTI_LOCATION       `{ error, code, locationIds }`
+ *   NULL_LOCATION_ROW    `{ error, code, rowId }`
+ *   UNATTRIBUTED         `{ error, code }`                       403
+ *   SAME_LOCATION        `{ error, code, locationId }`            400
+ *   INSUFFICIENT_AT_SOURCE `{ error, code, productId, locationId, onBook, needed }`
+ *
  * The two that name nothing beyond their sentence stay `AppError` and travel
  * through `apiHandler` untouched: `ReasonRequired` (400) and `CountMismatch`
  * (409 CONFLICT).
+ *
+ * The ENVELOPES themselves are assembled by the one mapper in
+ * `refusal-response.ts` beside this file, which is the only Next-bound module in
+ * this directory. It lives there and not here because this file is value-
+ * imported by the report, and the report is bundled into the MCP sidecar, which
+ * has no `next/*` to reach for.
  *
  * Next-free and Prisma-free (the `lib/supply-orders/refusals.ts` idiom): the
  * core is TX-SCOPED, and these ride out of it into route code that has no
@@ -56,6 +74,10 @@ export class NotAttributableRefusal extends Error {
  * inside a transaction that holds next-key locks on the batch's rows — and
  * because an attribution nobody can eyeball before confirming is not a manual
  * correction, it is a bulk update wearing one.
+ *
+ * TWO SENTENCES, because the same bound now guards three acts (pack CB2a.3).
+ * The reverse/move arm names the act it refused and the limit it read — never a
+ * literal 50, and never the batch id, which the request path already names.
  */
 export class TooManyRowsRefusal extends Error {
   readonly code = 'TOO_MANY_ROWS';
@@ -64,9 +86,12 @@ export class TooManyRowsRefusal extends Error {
     public readonly rowCount: number,
     public readonly productCount: number,
     public readonly limit: number = MANUAL_ATTRIBUTION_ROW_LIMIT,
+    action: 'attribution' | 'reverse' | 'move' = 'attribution',
   ) {
     super(
-      `This batch has ${rowCount} outbound rows across ${productCount} products — above the ${limit}-row manual attribution limit`,
+      action === 'attribution'
+        ? `This batch has ${rowCount} outbound rows across ${productCount} products — above the ${limit}-row manual attribution limit`
+        : `This batch has ${rowCount} rows across ${productCount} products — above the ${limit}-row limit for a ${action}`,
     );
     this.name = 'TooManyRowsRefusal';
   }
@@ -119,16 +144,23 @@ export class BatchMovedRefusal extends Error {
  *
  * `orderNumber` is `null` from the core (which never reads `external_orders`);
  * the field exists so the route or a later caller can fill in the human number.
+ *
+ * `orderRecordId` is NULLABLE from Part 2 (pack CB2a.3): the reverse and the
+ * move refuse a fulfilment-evidenced batch whether or not the ledger was ever
+ * stamped, and "Fulfilled against #null" reads as an order called null. The null
+ * arm says what actually happened and where the repair lives.
  */
 export class FulfilledBatchRefusal extends Error {
   readonly code = 'FULFILLED_BATCH';
 
   constructor(
-    public readonly orderRecordId: string,
+    public readonly orderRecordId: string | null,
     public readonly orderNumber: string | null,
   ) {
     super(
-      `Fulfilled against #${orderNumber ?? orderRecordId} — change it via unfulfill/refulfill, not here`,
+      orderRecordId === null
+        ? 'This fulfilled batch names no order — repair via unfulfill/refulfill'
+        : `Fulfilled against #${orderNumber ?? orderRecordId} — change it via unfulfill/refulfill, not here`,
     );
     this.name = 'FulfilledBatchRefusal';
   }
@@ -213,7 +245,154 @@ export class CountMismatch extends AppError {
   }
 }
 
-/** Every refusal the ROUTE renders as a structured 409 envelope. */
+// ---------------------------------------------------------------------------
+// PART 2 — the reverse, the move, and the restoration ledger's gates
+// (pack CB2a.3; spec §2.5 / §2.6). Every sentence below is rendered to an
+// OPERATOR verbatim, and every one of them names ids, numbers and location ids
+// — never a customer, never a name.
+// ---------------------------------------------------------------------------
+
+/**
+ * Nothing is owed on any key: this batch's units have already been put back by
+ * an earlier correction or reverse. Both figures ride out because "already
+ * reversed" without them reads as a refusal to try, rather than as the ledger
+ * stating what it already did.
+ */
+export class AlreadyReversedRefusal extends Error {
+  readonly code = 'ALREADY_REVERSED';
+
+  constructor(
+    public readonly previouslyRestored: number,
+    public readonly totalUnits: number,
+  ) {
+    super(
+      `This batch was already reversed — ${previouslyRestored} of ${totalUnits} units were put back`,
+    );
+    this.name = 'AlreadyReversedRefusal';
+  }
+}
+
+/**
+ * A prior MOVE relocated this batch's stock, so it is neither re-attributable
+ * nor movable a second time: two moves are two disagreeing accounts of where the
+ * units are. The timestamp is rendered to the minute in UTC — a raw ISO string
+ * is not a sentence an operator reads.
+ */
+export class AlreadyMovedRefusal extends Error {
+  readonly code = 'ALREADY_MOVED';
+
+  constructor(
+    public readonly physicalLocationId: number,
+    public readonly at: string,
+  ) {
+    super(
+      `This batch was moved to location ${physicalLocationId} on ${at.slice(0, 16).replace('T', ' ')} UTC — it can no longer be re-attributed or moved again`,
+    );
+    this.name = 'AlreadyMovedRefusal';
+  }
+}
+
+/**
+ * Units have already been restored for this batch, so neither a move nor a
+ * re-attribution may proceed: the restoring rows carry their OWN batch id, and a
+ * re-stamp would split one batch's truth across two order ids.
+ */
+export class BatchRestoredRefusal extends Error {
+  readonly code = 'BATCH_RESTORED';
+
+  constructor(public readonly restoredUnits: number) {
+    super(
+      `This batch has already been put back (${restoredUnits} units) — it can no longer be re-attributed or moved`,
+    );
+    this.name = 'BatchRestoredRefusal';
+  }
+}
+
+/**
+ * A move reclassifies ONE location's stock into another. A batch whose rows sit
+ * at several locations has no single source to move from, and picking one would
+ * be guessing which half of the ledger was wrong.
+ */
+export class MultiLocationRefusal extends Error {
+  readonly code = 'MULTI_LOCATION';
+
+  constructor(public readonly locationIds: number[]) {
+    super(
+      `This batch spans ${locationIds.length} locations (${locationIds.join(', ')}) and cannot be moved as one`,
+    );
+    this.name = 'MultiLocationRefusal';
+  }
+}
+
+/**
+ * `inventory_logs.locationId` is nullable, and both the write core and the
+ * prelock take a NON-NULL location. A row that names none cannot be restored or
+ * reclassified anywhere, so the batch is refused with the row to repair.
+ */
+export class NullLocationRowRefusal extends Error {
+  readonly code = 'NULL_LOCATION_ROW';
+
+  constructor(public readonly rowId: number) {
+    super(
+      `Ledger row ${rowId} names no location — this batch cannot be reversed or moved until it is repaired`,
+    );
+    this.name = 'NullLocationRowRefusal';
+  }
+}
+
+/**
+ * The trust boundary for an UNSTAMPED batch (spec REV-9 CX6-20): with no order
+ * on the rows there is no company to check membership against, so the only
+ * people who may change it are its PROVABLE actor and an admin. A 403 rather
+ * than a 409 — this is an authorisation answer, not a state conflict.
+ */
+export class UnattributedRefusal extends Error {
+  readonly code = 'UNATTRIBUTED';
+
+  constructor() {
+    super(
+      'This batch is not attributed to an order — only the person who recorded it or an admin can change it',
+    );
+    this.name = 'UnattributedRefusal';
+  }
+}
+
+/**
+ * The move's destination IS the batch's ledger location, so there is nothing to
+ * reclassify. A 400: the operator can fix it by choosing another location, which
+ * is exactly what the sentence asks for.
+ */
+export class SameLocationRefusal extends Error {
+  readonly code = 'SAME_LOCATION';
+
+  constructor(public readonly locationId: number) {
+    super(`Location ${locationId} is already this batch's ledger location — choose a different one`);
+    this.name = 'SameLocationRefusal';
+  }
+}
+
+/**
+ * The LOCKED physical row holds fewer units than the batch took. Moving anyway
+ * would book a negative on-hand at the source, so both figures ride out and the
+ * operator decides what the real story is.
+ */
+export class InsufficientAtSourceRefusal extends Error {
+  readonly code = 'INSUFFICIENT_AT_SOURCE';
+
+  constructor(
+    public readonly productId: number,
+    public readonly locationId: number,
+    public readonly onBook: number,
+    public readonly needed: number,
+  ) {
+    super(
+      `Location ${locationId} has ${onBook} of product ${productId} on the books — ${needed} needed to move this batch`,
+    );
+    this.name = 'InsufficientAtSourceRefusal';
+  }
+}
+
+/** Every refusal the ROUTE renders as a structured envelope. */
 export type AttributionRefusal =
   | NotAttributableRefusal
   | TooManyRowsRefusal
@@ -221,4 +400,12 @@ export type AttributionRefusal =
   | BatchMovedRefusal
   | PartiallyStampedRefusal
   | FulfilledBatchRefusal
-  | R2bOtherTargetRefusal;
+  | R2bOtherTargetRefusal
+  | AlreadyReversedRefusal
+  | AlreadyMovedRefusal
+  | BatchRestoredRefusal
+  | MultiLocationRefusal
+  | NullLocationRowRefusal
+  | UnattributedRefusal
+  | SameLocationRefusal
+  | InsufficientAtSourceRefusal;

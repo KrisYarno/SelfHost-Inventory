@@ -73,6 +73,10 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   CANCEL: 'negative', // Inventory-accuracy lane (T4): SHIPMENT_CANCEL
   // warning
   ADJUSTMENT: 'warning',
+  // Reconciliation Part 2: both UNDO a decision somebody already made and
+  // recorded — a correction of the books, and a whole batch put back.
+  CORRECTION: 'warning',
+  REVERSE: 'warning',
   BULK_UPDATE: 'warning',
   UNFULFILLMENT: 'warning',
   // Lane 6: an outbound platform write was attempted. Warning tone by design —
@@ -108,6 +112,9 @@ const VERB_TONE: Readonly<Record<string, ActionTone>> = {
   // Nothing moved — not stock, not the order's state — so any tone with a
   // direction in it would read as an act the event did not perform.
   ATTRIBUTE: 'neutral',
+  // Reconciliation Part 2: a MOVE is an accounting reclassification — the same
+  // units, the location corrected — so it reads like a transfer, not a judgement.
+  MOVE: 'neutral',
   CHANGE: 'neutral',
   MAINTENANCE: 'neutral',
   UNKNOWN: 'neutral',
@@ -127,6 +134,9 @@ const KNOWN_VERBS: readonly string[] = [
   'UNFULFILLMENT',
   'FULFILLMENT',
   'ADJUSTMENT',
+  // Reconciliation Part 2: INVENTORY_CORRECTION. Nothing shorter is a suffix of
+  // it, so it sits with the other ten-letter verbs.
+  'CORRECTION',
   'DEDUCTION',
   'ATTEMPT',
   'APPROVAL',
@@ -164,11 +174,18 @@ const KNOWN_VERBS: readonly string[] = [
   // and it is a suffix of no member, so its position is immaterial — it sits
   // ahead of the six-letter verbs to keep the list roughly longest-first.
   'ATTRIBUTE',
+  // Reconciliation Part 2: INVENTORY_BATCH_REVERSE. No shorter verb is a suffix
+  // of it, and it is a suffix of no member.
+  'REVERSE',
   // Receiving/Labeling overhaul: STAGING_VERIFY. Nothing shorter is a suffix of
   // it either; it sits with the other six-letter verbs.
   'VERIFY',
   'CLOSE',
   'LINK',
+  // Reconciliation Part 2: INVENTORY_BATCH_MOVE. A REMOVE-class member could
+  // never collide — `parseVerb` matches `_${verb}`, and 'X_REMOVE' does not end
+  // in '_MOVE'.
+  'MOVE',
   'SYNC',
   'SENT',
 ];
@@ -259,6 +276,12 @@ const LABEL_OVERRIDES: Readonly<Record<string, string>> = {
   // Reconciliation lane: Title Case would read "Inventory Attribute", which
   // names a column rather than the act. This says what the admin did.
   INVENTORY_ATTRIBUTE: 'Batch attributed to order',
+  // Reconciliation lane Part 2: Title Case would name the columns rather than
+  // the acts. The MOVE label says WHY it happened — the operator reading the
+  // feed needs to know the stock was somewhere else, not that a field changed.
+  INVENTORY_CORRECTION: 'Inventory correction',
+  INVENTORY_BATCH_REVERSE: 'Batch reversed',
+  INVENTORY_BATCH_MOVE: 'Batch moved (wrong location)',
 };
 
 function titleCase(actionType: string): string {
@@ -396,6 +419,11 @@ export const ALL_ACTION_TYPES: readonly AuditActionType[] = [
   'EXCEPTION_RESOLVE',
   // Reconciliation lane (spec REV-7 D4): the manual batch attribution.
   'INVENTORY_ATTRIBUTE',
+  // Reconciliation lane Part 2 (spec §2.5/§2.6): the attributable correction,
+  // the atomic batch reverse and the wrong-location move.
+  'INVENTORY_CORRECTION',
+  'INVENTORY_BATCH_REVERSE',
+  'INVENTORY_BATCH_MOVE',
 ];
 
 // Display order + labels for the non-UNKNOWN groups.

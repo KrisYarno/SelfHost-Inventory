@@ -369,3 +369,24 @@ export function batchEvidence(
     earliest: auditEvents[0] ?? null,
   };
 }
+
+/**
+ * THE FULFILMENT FACT — one spelling, for the report row and for the writers.
+ *
+ * "Did a fulfilment move this stock?" is answered by the batch's own event OR by
+ * the LATEST attempt row saying so. Both halves matter: a pre-lane batch can
+ * carry attempt evidence with no event, and keying on the attempt alone let a
+ * manual attempt recorded after a completion re-open a control the writers
+ * refuse (OC-1). The quantifier is LATEST, deliberately — the same one the
+ * report's statement and the writers' rules have always used.
+ *
+ * Structural on `{ evidence }` rather than a Prisma model type, so this module
+ * keeps its read-path posture and every caller can hand over whatever row shape
+ * it selected.
+ */
+export function fulfillmentFact(
+  evidence: BatchEvidence,
+  attempt: { evidence: string | null } | null | undefined
+): boolean {
+  return evidence.fulfillmentEvent !== null || attempt?.evidence === 'fulfillment';
+}
