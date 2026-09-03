@@ -516,10 +516,21 @@ export function CompleteOrderDialog({
         // is dropped WITH a warning, and the Undo names the drop in its toast.
         fulfilledForUndo = [];
         fulfilledEntries.forEach((entry) => {
+          // F29: INTEGERS, because that is what the unfulfill schema requires
+          // (`z.number().int()` on both). A fractional quantity would be posted
+          // straight into a 400 the page provoked, and a fractional product id
+          // names no row at all — both are malformed, and a malformed entry is
+          // omitted-and-named like every other one here.
           const productId =
-            typeof entry.productId === "number" && entry.productId > 0 ? entry.productId : null;
+            typeof entry.productId === "number" &&
+            Number.isInteger(entry.productId) &&
+            entry.productId > 0
+              ? entry.productId
+              : null;
           const quantity =
-            typeof entry.quantity === "number" && Number.isFinite(entry.quantity) && entry.quantity > 0
+            typeof entry.quantity === "number" &&
+            Number.isInteger(entry.quantity) &&
+            entry.quantity > 0
               ? entry.quantity
               : null;
           if (!entry.itemId || productId === null || quantity === null) {

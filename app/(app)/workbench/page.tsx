@@ -72,6 +72,18 @@ export default function WorkbenchPage() {
    * the move has succeeded: a dismissed Undo is never resurrected.
    */
   const reissueUndoToastRef = useRef<((duration: number) => void) | null>(null);
+  /**
+   * THE ID THE COMPLETION TOAST IS LIVE UNDER (F25). The re-issue closure can
+   * only re-raise it; the unmount cleanup has to DISMISS it, and sonner needs
+   * the id for that. Null whenever there is nothing on screen to dismiss.
+   */
+  const liveUndoToastIdRef = useRef<string | null>(null);
+  /**
+   * `moveTarget`, readable from an unmount cleanup (F25). A cleanup registered
+   * with an empty dep list closes over the FIRST render's state, so the dialog's
+   * openness is mirrored here rather than read from the closure.
+   */
+  const moveTargetRef = useRef<MoveTarget | null>(null);
 
   // `selectedLocation` rides beside the id (R7-14): the toast names the LEDGER
   // location the completion deducted at, and a name read inside a callback would
@@ -80,7 +92,6 @@ export default function WorkbenchPage() {
   const { token: csrfToken } = useCSRF();
   const lowStockDefault = useLowStockDefault();
   const queryClient = useQueryClient();
-  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMobile = useIsMobile();
   const { data: products = [], isLoading: loading, refetch: refetchProducts } = useInventoryProducts({
     locationId: selectedLocationId,
@@ -117,12 +128,33 @@ export default function WorkbenchPage() {
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
-  // Clean up undo timer on unmount. Snapshot the ref into a local so the cleanup
-  // closes over a stable value (satisfies react-hooks/exhaustive-deps).
+  // The dialog's openness, mirrored into a ref for the unmount cleanup below.
   useEffect(() => {
-    const timer = undoTimerRef;
+    moveTargetRef.current = moveTarget;
+  }, [moveTarget]);
+
+  /**
+   * THE COMPLETION TOAST DOES NOT OUTLIVE THIS PAGE (F25).
+   *
+   * Opening the move dialog re-issues the toast with `duration: Infinity`, and
+   * sonner's provider lives in the app shell — so navigating away mid-decision
+   * left an Undo on screen forever, wired to callbacks belonging to a tree React
+   * had already thrown away. On unmount the live toast goes with the page, and
+   * the re-issue closure is nulled so nothing can bring it back.
+   *
+   * Snapshot the refs into locals: the cleanup must close over stable values
+   * (react-hooks/exhaustive-deps).
+   */
+  useEffect(() => {
+    const liveId = liveUndoToastIdRef;
+    const reissue = reissueUndoToastRef;
+    const target = moveTargetRef;
     return () => {
-      if (timer.current) clearTimeout(timer.current);
+      if (liveId.current !== null && (target.current !== null || reissue.current !== null)) {
+        toast.dismiss(liveId.current);
+      }
+      reissue.current = null;
+      liveId.current = null;
     };
   }, []);
 
@@ -165,6 +197,14 @@ export default function WorkbenchPage() {
       const manualItems = items.filter((item) => !item.fulfillmentItemId);
 
       let movedStock = false;
+      /**
+       * F23 (QA-1): a 200 the page cannot READ is still a 200. The reverse route
+       * only answers one once the restoration is committed, so stock HAS moved —
+       * it is the SIZE that is unknown. Nothing is claimed in a toast on this
+       * evidence, but the caches are told, because a stale /inventory beside a
+       * moved ledger would be the second untruth.
+       */
+      let stockMayHaveMoved = false;
 
       /** Pack REV-22 F7: the SERVER's sentence, or the old fallback. */
       const refusalSentence = (body: unknown): string => {
@@ -203,8 +243,23 @@ export default function WorkbenchPage() {
           const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
 
           if (response.ok) {
+            // F23 (QA-1), the move dialog's F20 shape: a body with no numeric
+            // `restoredUnits` is a restoration whose size this page cannot
+            // state. `0 units restored` would be a number about the ledger it
+            // cannot stand behind — and a SUCCESS toast on top of it.
+            if (typeof body.restoredUnits !== "number" || !Number.isFinite(body.restoredUnits)) {
+              stockMayHaveMoved = true;
+              console.warn(
+                `Undo: order ${orderRef} — the reverse answered 200 without a numeric restoredUnits, so the units restored cannot be stated`
+              );
+              toast.warning(
+                `Order ${orderRef}: the reverse answered without a number — check the ledger`,
+                { id: `undo-manual-${orderRef}` }
+              );
+              return;
+            }
             movedStock = true;
-            const units = typeof body.restoredUnits === "number" ? body.restoredUnits : 0;
+            const units = body.restoredUnits;
             toast.success(
               `Undone for order ${orderRef}: ${units} unit${units !== 1 ? "s" : ""} restored`,
               { id: `undo-manual-${orderRef}` }
@@ -217,8 +272,22 @@ export default function WorkbenchPage() {
             // why. A success toast here would claim a restoration that the
             // ledger already accounted for.
             const previouslyRestored =
-              typeof body.previouslyRestored === "number" ? body.previouslyRestored : 0;
-            const totalUnits = typeof body.totalUnits === "number" ? body.totalUnits : 0;
+              typeof body.previouslyRestored === "number" ? body.previouslyRestored : null;
+            const totalUnits = typeof body.totalUnits === "number" ? body.totalUnits : null;
+            if (previouslyRestored === null || totalUnits === null) {
+              // F24 (QA-2): `0 of 0` is a PAIR of numbers this page invented —
+              // and it reads as "nothing was ever put back", which is the one
+              // thing an ALREADY_REVERSED refusal disproves. The F7 rule stands
+              // in for the composed line: the server's own sentence, verbatim.
+              toast.warning(
+                apiErrorMessage(
+                  body,
+                  `Order ${orderRef} was already reversed — check the ledger for what was put back.`
+                ),
+                { id: `undo-manual-${orderRef}` }
+              );
+              return;
+            }
             toast.warning(
               `Order ${orderRef} was already reversed — ${previouslyRestored} of ${totalUnits} units were put back earlier.`,
               { id: `undo-manual-${orderRef}` }
@@ -304,9 +373,11 @@ export default function WorkbenchPage() {
       // INDEPENDENT: a refusal on one leg never stops the other from answering.
       await Promise.all([manualLeg(), wcLeg()]);
 
-      if (movedStock) {
+      if (movedStock || stockMayHaveMoved) {
         // Stock moved through raw fetch, so the react-query caches every other
-        // page reads (/inventory, dashboard, journal) have to be told.
+        // page reads (/inventory, dashboard, journal) have to be told. F23: a
+        // 200 whose number could not be read counts here — the books moved even
+        // though the toast could not say by how much.
         invalidateInventoryCaches(queryClient);
       }
     },
@@ -410,8 +481,10 @@ export default function WorkbenchPage() {
       };
 
       // The re-issue closure for THIS completion (last one wins — the dialog is
-      // modal at page level, so only one completion's decision is ever open).
+      // modal at page level, so only one completion's decision is ever open),
+      // and the id it is live under (F25).
       reissueUndoToastRef.current = issue;
+      liveUndoToastIdRef.current = `undo-${orderRef}`;
       issue(10000);
     },
     [handleUndoDeduction, selectedLocationId, selectedLocation]
@@ -451,6 +524,9 @@ export default function WorkbenchPage() {
         // afterwards — the closure goes with it.
         if (moveTarget !== null) toast.dismiss(`undo-${moveTarget.orderRef}`);
         reissueUndoToastRef.current = null;
+        // F25: nothing is live under that id any more, so the unmount cleanup
+        // has nothing left to dismiss.
+        liveUndoToastIdRef.current = null;
         return body as unknown as MoveResponse;
       } catch (err) {
         // F15: a REFUSAL (or a dead network) leaves the batch exactly where it

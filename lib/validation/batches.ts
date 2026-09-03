@@ -26,7 +26,15 @@ export const MoveBatchSchema = z.object({
  *
  * NOT for the attribution route, whose ladder answers legacy and non-uuid batch
  * ids on their own terms.
+ *
+ * LOWERCASED after the shape check (F26). `newBatchId()` mints lowercase, and a
+ * uuid is case-insensitive on the wire — but the id the caller typed is the id
+ * that then rides into the discovery SQL's `batchId = ?`, the audit event's
+ * `entityId`, its `action` sentence and the 200 body. On a case-sensitive
+ * collation `3F25…` finds nothing; on a case-INsensitive one it finds the rows
+ * and then STAMPS the ledger with a spelling no other record uses. One spelling,
+ * the ledger's, from the edge inwards.
  */
-export const BatchIdParamSchema = z.string().uuid();
+export const BatchIdParamSchema = z.string().uuid().transform((value) => value.toLowerCase());
 
 export type MoveBatchRequest = z.infer<typeof MoveBatchSchema>;

@@ -2384,7 +2384,12 @@ describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
       // else. Both product ids: same-product batches would serialise at the
       // prelock's `product_locations` X lock and could never be observed in
       // `User sleep` together, and the claim is about the restoration READ.
-      await installLedgerHold([P_APPROVED, P_APPROVED_2], 1);
+      // THREE seconds, 11a-iii's and 11c's value (F28): this scenario's whole
+      // claim is that BOTH sessions are inside the sleep at once, and one second
+      // is not enough window for the second session's launch and
+      // `waitForSleepingSessions`' own poll to land inside it on a loaded box —
+      // the hold would expire and the overlap go unobserved.
+      await installLedgerHold([P_APPROVED, P_APPROVED_2], 3);
 
       const { value: answers, fresh } = await reportDeadlocks("scenario 11a-i", async () => {
         const inFlight = [reverseBatchRoute(batchA), reverseBatchRoute(batchB)];
@@ -2447,7 +2452,11 @@ describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
     const probe = openClient();
     try {
       await warmUp(probe);
-      await installLedgerHold([P_APPROVED], 1);
+      // THREE seconds, 11a-iii's and 11c's value (F28): the loser has to be
+      // OBSERVED queueing on the winner's row locks, and one second leaves the
+      // second session's launch and `waitForLockWait`'s poll racing the hold's
+      // own expiry on a loaded box.
+      await installLedgerHold([P_APPROVED], 3);
 
       const first = reverseBatchRoute(batch);
       // The loser queues on the batch rows the winner holds `FOR UPDATE`.

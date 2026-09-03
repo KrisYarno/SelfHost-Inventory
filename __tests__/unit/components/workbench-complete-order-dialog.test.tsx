@@ -96,6 +96,24 @@ const CART_ITEM = orderItem({
   },
 });
 
+// A SECOND cart line (F29): the all-or-nothing gate compares SUMS, so two
+// fractional entries can add up to exactly what the cart asked for and sail
+// through it. The Undo body's own filter is what has to catch them.
+const CART_ITEM_2 = orderItem({
+  id: "it-cart-2",
+  name: "Widget Also In Stock",
+  quantity: 3,
+  isMapped: true,
+  productLinkId: "pl-4",
+  productLink: {
+    id: "pl-4",
+    internalProductId: 503,
+    externalSku: null,
+    externalTitle: null,
+    internalProduct: { id: 503, name: "Widget Also In Stock", baseName: null, variant: null },
+  },
+});
+
 // Mapped, but the link is a BUNDLE -> class 3, no tap.
 const BUNDLE_ITEM = orderItem({
   id: "it-bundle",
@@ -179,6 +197,7 @@ const makeOrder = (items: ExternalItem[]): ExternalOrder => ({
 // id / name / currentQuantity, so the fixture casts at this seam.
 const LOADED_PRODUCTS = [
   { id: 501, name: "Widget In Stock", currentQuantity: 10 },
+  { id: 503, name: "Widget Also In Stock", currentQuantity: 10 },
 ] as unknown as ProductWithQuantity[];
 
 // ---------------------------------------------------------------------------
@@ -463,6 +482,73 @@ describe("complete-order dialog — the completion names the batches it wrote", 
               success: true,
               batchId: "fulfil-batch-1",
               results: { fulfilled: [{ itemId: "it-cart", productId: 501 }] },
+              summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+            }
+          : { success: true, batchId: "deduct-batch-1" },
+    } as unknown as Response));
+    seedOrder([CART_ITEM]);
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    expect(onSuccess.mock.calls[0][0].fulfilledForUndo).toEqual([]);
+    expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining("it-cart"));
+    consoleWarn.mockRestore();
+  });
+
+  // F29: `UnfulfillItemSchema` requires `z.number().int()` on BOTH numbers. A
+  // fractional quantity would be posted straight into a 400 this page provoked —
+  // and silently: the operator would be told the undo failed without ever being
+  // told which line the server could not name. Malformed is malformed, so it is
+  // omitted and named like every other one.
+  it("a FRACTIONAL quantity is omitted and NAMED — the schema wants an integer", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const consoleWarn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    // 2.5 + 2.5 = the 5 units this cart asked for, so the all-or-nothing gate —
+    // which compares SUMS — sees nothing wrong and the completion stands. The
+    // Undo body is where the fractions have to be caught.
+    fetchMock.mockImplementation(async (url: unknown) => ({
+      ok: true,
+      json: async () =>
+        String(url).includes("/fulfill")
+          ? {
+              success: true,
+              batchId: "fulfil-batch-1",
+              results: {
+                fulfilled: [
+                  { itemId: "it-cart", productId: 501, quantity: 2.5 },
+                  { itemId: "it-cart-2", productId: 503, quantity: 2.5 },
+                ],
+              },
+              summary: { total: 2, fulfilled: 2, skipped: 0, failed: 0 },
+            }
+          : { success: true, batchId: "deduct-batch-1" },
+    } as unknown as Response));
+    seedOrder([CART_ITEM, CART_ITEM_2]);
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    expect(onSuccess.mock.calls[0][0].fulfilledForUndo).toEqual([]);
+    const warned = consoleWarn.mock.calls.map((call) => String(call[0]));
+    expect(warned.some((line) => line.includes("it-cart"))).toBe(true);
+    expect(warned.some((line) => line.includes("it-cart-2"))).toBe(true);
+    consoleWarn.mockRestore();
+  });
+
+  it("a FRACTIONAL productId is omitted too — it names no row", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const consoleWarn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    fetchMock.mockImplementation(async (url: unknown) => ({
+      ok: true,
+      json: async () =>
+        String(url).includes("/fulfill")
+          ? {
+              success: true,
+              batchId: "fulfil-batch-1",
+              results: { fulfilled: [{ itemId: "it-cart", productId: 501.5, quantity: 2 }] },
               summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
             }
           : { success: true, batchId: "deduct-batch-1" },

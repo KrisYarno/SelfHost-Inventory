@@ -865,6 +865,30 @@ describe('POST .../reverse — the answer and the audit event', () => {
     });
   });
 
+  // F26: a uuid is case-insensitive on the wire and MySQL's default collation is
+  // case-INsensitive too, so `3F25…` finds the rows — and then stamped the audit
+  // ledger with a spelling no other record of that batch uses, which is exactly
+  // the kind of near-duplicate that makes a ledger unreadable. The schema
+  // lowercases at the edge, so every reader and writer downstream sees one id.
+  it('a MIXED-CASE batch id reads and writes the LEDGER spelling, everywhere', async () => {
+    const { tx } = makeDb({ locked: [row({ orderRecordId: 'ord-9' })] });
+    const res = await reverse(BATCH.toUpperCase());
+
+    expect(res.status).toBe(200);
+    // The DISCOVERY read.
+    const query = (db.$queryRaw as unknown as jest.Mock).mock.calls[0][0] as Prisma.Sql;
+    expect(query.values[0]).toBe(BATCH);
+    // The EVENT — its entity, its sentence and its details.
+    const event = (tx.auditLog.create as unknown as jest.Mock).mock.calls[0][0].data;
+    expect(event.entityId).toBe(BATCH);
+    expect(event.action).toBe(`Reversed batch ${BATCH}: restored 4 of 4 units`);
+    expect(event.details).toMatchObject({ reversedBatchId: BATCH });
+    // And the 200 the operator's page reads back.
+    const body = await res.json();
+    expect(body.reversedBatchId).toBe(BATCH);
+    expect(body.message).toBe('reversed 4 of 4 units');
+  });
+
   it('an UNSTAMPED batch files the event with NO companyId', async () => {
     const { tx } = makeDb({ locked: [row()] });
     await reverse();

@@ -400,6 +400,30 @@ describe("workbench undo — the react-query caches after a moved-stock undo", (
     await waitFor(() => expect(invalidateInventoryCachesMock).toHaveBeenCalledTimes(1));
   });
 
+  // F23 (QA-1): the toast could not state a number, but the reverse route only
+  // answers 200 once the restoration is COMMITTED. Stock moved; only its size is
+  // unknown — so a stale /inventory beside a moved ledger is not the answer.
+  // MANUAL-ONLY, so the invalidation can only be the numberless 200's doing.
+  it("invalidates on a NUMBERLESS 200 too — the books moved, the number did not arrive", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const consoleWarn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    reverseAnswer = { status: 200, body: { reversedBatchId: MANUAL_BATCH } };
+
+    await completeThenUndo(
+      user,
+      completion({
+        items: [{ productId: 777, productName: "Manual Widget", quantity: 3, locationId: 1 }],
+        batchIds: { deductSimpleBatchId: MANUAL_BATCH, fulfilBatchId: null },
+        fulfilledForUndo: [],
+        externalOrderId: undefined,
+      } as unknown as Partial<CompletionArgs>)
+    );
+
+    await waitFor(() => expect(invalidateInventoryCachesMock).toHaveBeenCalledTimes(1));
+    expect(callsTo("/unfulfill")).toHaveLength(0);
+    consoleWarn.mockRestore();
+  });
+
   it("does NOT invalidate when BOTH legs refused — nothing moved", async () => {
     reverseAnswer = {
       status: 409,
@@ -507,6 +531,96 @@ describe("workbench undo — a failed restore says what the server said", () => 
       expect.objectContaining({ id: "undo-manual-ORD-1" })
     );
     expect(mockToastError).not.toHaveBeenCalled();
+  });
+
+  // F24 (QA-2): the composed sentence needs BOTH of the server's numbers. A 409
+  // that carries neither used to read "0 of 0 units were put back earlier" — a
+  // pair of invented numbers that say the opposite of what an ALREADY_REVERSED
+  // refusal means. The F7 rule stands in: the server's own sentence, verbatim.
+  it("a NUMBERLESS ALREADY_REVERSED renders the SERVER's sentence, never '0 of 0'", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    reverseAnswer = {
+      status: 409,
+      body: {
+        error: "This batch was already reversed",
+        code: "ALREADY_REVERSED",
+      },
+    };
+
+    await completeThenUndo(user);
+
+    await waitFor(() => expect(mockToastWarning).toHaveBeenCalled());
+    expect(mockToastWarning).toHaveBeenCalledWith(
+      "This batch was already reversed",
+      expect.objectContaining({ id: "undo-manual-ORD-1" })
+    );
+    const said = mockToastWarning.mock.calls.map((call) => String(call[0]));
+    expect(said.some((sentence) => sentence.includes("0 of 0"))).toBe(false);
+  });
+
+  it("HALF the numbers is still numberless — one missing figure falls to the sentence", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    reverseAnswer = {
+      status: 409,
+      body: {
+        error: "This batch was already reversed — 4 units were put back",
+        code: "ALREADY_REVERSED",
+        previouslyRestored: 4,
+      },
+    };
+
+    await completeThenUndo(user);
+
+    await waitFor(() => expect(mockToastWarning).toHaveBeenCalled());
+    expect(mockToastWarning).toHaveBeenCalledWith(
+      "This batch was already reversed — 4 units were put back",
+      expect.objectContaining({ id: "undo-manual-ORD-1" })
+    );
+  });
+
+  // F23 (QA-1): a 200 the page cannot READ is not a success sentence. The route
+  // always sends `restoredUnits` today, but a proxy, a truncated body or a
+  // future shape change lands here — and "0 units restored" is a claim about the
+  // ledger, made in the affirmative, on no evidence at all.
+  it("a NUMBERLESS 200 warns and claims nothing — never '0 units restored'", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const consoleWarn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    reverseAnswer = {
+      status: 200,
+      body: { reversedBatchId: MANUAL_BATCH, batchId: "new-batch" },
+    };
+
+    await completeThenUndo(user);
+
+    await waitFor(() => expect(mockToastWarning).toHaveBeenCalled());
+    expect(mockToastWarning).toHaveBeenCalledWith(
+      "Order ORD-1: the reverse answered without a number — check the ledger",
+      expect.objectContaining({ id: "undo-manual-ORD-1" })
+    );
+    // The MANUAL leg claims nothing. (The WC leg's own success still stands —
+    // the two are independent.)
+    const successIds = mockToastSuccess.mock.calls.map((call) => call[1]?.id);
+    expect(successIds).not.toContain("undo-manual-ORD-1");
+    expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining("ORD-1"));
+    consoleWarn.mockRestore();
+  });
+
+  it("a non-finite restoredUnits is numberless too — NaN is not a figure", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const consoleWarn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    reverseAnswer = {
+      status: 200,
+      body: { reversedBatchId: MANUAL_BATCH, restoredUnits: Number.NaN },
+    };
+
+    await completeThenUndo(user);
+
+    await waitFor(() => expect(mockToastWarning).toHaveBeenCalled());
+    expect(mockToastWarning).toHaveBeenCalledWith(
+      "Order ORD-1: the reverse answered without a number — check the ledger",
+      expect.objectContaining({ id: "undo-manual-ORD-1" })
+    );
+    consoleWarn.mockRestore();
   });
 
   it("QB-4: a WC 200 that restored NOTHING warns instead of claiming success", async () => {

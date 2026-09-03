@@ -419,6 +419,93 @@ describe("the workbench toast — the Wrong location control", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// F25 (QA-3): THE HELD-OPEN TOAST DOES NOT OUTLIVE THE PAGE.
+//
+// Opening the dialog re-issues the completion toast with `duration: Infinity`,
+// and sonner's provider lives in the app shell — so navigating away mid-decision
+// left an Undo on screen with no clock at all, wired to callbacks belonging to a
+// tree React had already thrown away. The page takes its toast with it.
+// ---------------------------------------------------------------------------
+
+describe("the workbench toast — unmount takes the live Undo with it (F25)", () => {
+  /** Render the page and complete an order, handing back BOTH render results. */
+  async function completeOnMountedPage(args: CompletionArgs = completion()) {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const page = render(
+      <QueryClientProvider client={queryClient}>
+        <WorkbenchPage />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(completionProps.onSuccess).toBeDefined());
+    await act(async () => {
+      completionProps.onSuccess!(args);
+    });
+    await waitFor(() => expect(mockToast).toHaveBeenCalled());
+    render(<>{lastToastNode()}</>);
+    return page;
+  }
+
+  it("unmounting with the move dialog OPEN dismisses the held-open toast", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const page = await completeOnMountedPage();
+
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    // No clock at all — sonner would never retire this one on its own.
+    expect(lastToastOptions()).toMatchObject({ id: "undo-ORD-1", duration: Infinity });
+    expect(mockToastDismiss).not.toHaveBeenCalled();
+
+    await act(async () => {
+      page.unmount();
+    });
+
+    expect(mockToastDismiss).toHaveBeenCalledWith("undo-ORD-1");
+  });
+
+  it("unmounting with NOTHING open dismisses nothing", async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const page = render(
+      <QueryClientProvider client={queryClient}>
+        <WorkbenchPage />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(completionProps.onSuccess).toBeDefined());
+
+    await act(async () => {
+      page.unmount();
+    });
+
+    expect(mockToastDismiss).not.toHaveBeenCalled();
+  });
+
+  // A SETTLED move already dismissed the toast and nulled the closure, so the
+  // cleanup has nothing left to do — a second dismiss would be a dismissal of
+  // whatever sonner is showing under that id NEXT.
+  it("unmounting after a CONFIRMED move dismisses exactly once, not twice", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const page = await completeOnMountedPage();
+
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+    await waitFor(() => expect(mockToastDismiss).toHaveBeenCalledWith("undo-ORD-1"));
+
+    await act(async () => {
+      page.unmount();
+    });
+
+    expect(mockToastDismiss).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("the workbench move — ONE POST, for the manual batch (PK-1)", () => {
   async function openAndConfirm(args: CompletionArgs = completion()) {
     const user = userEvent.setup({ pointerEventsCheck: 0 });

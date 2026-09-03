@@ -996,6 +996,22 @@ describe("the Move… control", () => {
     );
   });
 
+  // F27: the click handler dereferences `ledgerRows[0]`. An EMPTY ledger passes
+  // both the null-location and the multi-location gates vacuously, so without
+  // its own clause the control renders and the first click throws. The detail
+  // route 404s a batch with no rows, so this is unreachable today and carries no
+  // sentence — the gate holds by its own property, not a neighbour's behaviour.
+  it("is HIDDEN on an EMPTY ledger, and the panel renders without throwing", () => {
+    setDetail(makeDetail({ ledgerRows: [] }));
+    renderRow();
+
+    expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
+    // No sentence for this arm, and no crash: the rest of the panel is intact.
+    expect(screen.getByTestId("reverse-drilldown-batch-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("drilldown-move-null-location")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("drilldown-move-multi-location")).not.toBeInTheDocument();
+  });
+
   it("is HIDDEN while the detail is loading, and while it is in error", () => {
     useBatchDetailMock.mockReturnValue({ data: undefined, isLoading: true, isError: false });
     const { unmount } = render(

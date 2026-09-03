@@ -48,6 +48,25 @@ describe('BatchIdParamSchema', () => {
     expect(BatchIdParamSchema.safeParse('').success).toBe(false);
   });
 
+  // F26: a uuid is case-insensitive on the wire, but `newBatchId()` mints
+  // lowercase and the parsed value is what rides into the discovery SQL, the
+  // audit event's `entityId`, its `action` sentence and the 200 body. One
+  // spelling — the ledger's — from the edge inwards.
+  it('LOWERCASES a mixed-case uuid rather than carrying the caller spelling', () => {
+    expect(BatchIdParamSchema.parse('3F2504E0-4F89-41D3-9A0C-0305E82C3301')).toBe(
+      '3f2504e0-4f89-41d3-9a0c-0305e82c3301',
+    );
+    expect(BatchIdParamSchema.parse('3f2504e0-4F89-41d3-9A0c-0305e82c3301')).toBe(
+      '3f2504e0-4f89-41d3-9a0c-0305e82c3301',
+    );
+  });
+
+  it('leaves an already-lowercase uuid exactly as it was', () => {
+    expect(BatchIdParamSchema.parse('3f2504e0-4f89-41d3-9a0c-0305e82c3301')).toBe(
+      '3f2504e0-4f89-41d3-9a0c-0305e82c3301',
+    );
+  });
+
   it('refuses with a plain zod message — apiHandler renders it as VALIDATION_ERROR', () => {
     const parsed = BatchIdParamSchema.safeParse('not-a-uuid');
     expect(parsed.success).toBe(false);

@@ -490,7 +490,11 @@ export function AttributionDrilldown({
           {/* THE MOVE, beside the reverse — the SAME admissible set (the move
               refuses a fulfilment-evidenced batch too), narrowed by the two
               shapes it cannot reclassify. */}
-          {writable && !anyNullLocation && !spansManyLocations && (
+          {/* F27: and at least ONE row — the handler below reads `ledgerRows[0]`.
+              The detail route 404s a batch with no ledger rows, so this arm is
+              unreachable today and gets no sentence; the gate is safe by its own
+              property rather than by a neighbour route's behaviour. */}
+          {writable && !anyNullLocation && !spansManyLocations && ledgerRows.length > 0 && (
             <Button
               size="sm"
               variant="outline"
