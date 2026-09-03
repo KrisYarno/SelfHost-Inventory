@@ -57,12 +57,27 @@ export type RestorationRow = { productId: number; locationId: number; delta: num
 export type PriorRestorations = {
   /** `prelockKey(productId, locationId)` -> units already put back there. */
   restoredByKey: Map<string, number>;
+  /**
+   * The LAST event that put units on each key of `restoredByKey` (pack CB2b.1
+   * rung 9). The belt that refuses a ledger disagreeing with the batch has to
+   * NAME the event it refuses on, and a sum cannot be traced back to one without
+   * this — an id we could not attribute would be a sentence we cannot stand
+   * behind. Same key set as `restoredByKey`, always.
+   */
+  eventIdByKey: Map<string, number>;
   /** The MOVE event's metadata, or null. NEVER units. */
   move: {
     ledgerLocationId: number;
     physicalLocationId: number;
     eventId: number;
     at: string;
+    /**
+     * The products the MOVE's legs name, ascending and deduped (pack CB2b.1
+     * rung 8, G7-1). MEMBERSHIP is the consumer's cross-check — it holds the
+     * batch's rows and this module does not — so the consumer is handed the
+     * list this module already validated rather than a second read of its own.
+     */
+    productIds: number[];
   } | null;
 };
 
@@ -145,6 +160,7 @@ function moveOf(
   }
 
   const legsByProduct = new Map<number, RestorationRow[]>();
+
   rowsOf(eventId, details).forEach((raw) => {
     const row = rowOf(eventId, raw, false);
     const legs = legsByProduct.get(row.productId);
@@ -172,10 +188,15 @@ function moveOf(
     }
   });
 
+  const productIds: number[] = [];
+  legsByProduct.forEach((_legs, productId) => productIds.push(productId));
+  productIds.sort((a, b) => a - b);
+
   return {
     ledgerLocationId,
     physicalLocationId,
     eventId,
+    productIds,
     // An ISO string, never a Date: nothing downstream of this module should be
     // deciding how a timestamp renders.
     at: createdAt.toISOString(),
@@ -202,6 +223,7 @@ export async function priorRestorations(
   });
 
   const restoredByKey = new Map<string, number>();
+  const eventIdByKey = new Map<string, number>();
   let move: PriorRestorations['move'] = null;
 
   for (let i = 0; i < events.length; i += 1) {
@@ -231,8 +253,9 @@ export async function priorRestorations(
       const row = rowOf(event.id, raw, true);
       const key = prelockKey(row.productId, row.locationId);
       restoredByKey.set(key, (restoredByKey.get(key) ?? 0) + row.delta);
+      eventIdByKey.set(key, event.id);
     });
   }
 
-  return { restoredByKey, move };
+  return { restoredByKey, eventIdByKey, move };
 }

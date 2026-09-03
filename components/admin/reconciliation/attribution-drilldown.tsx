@@ -32,6 +32,7 @@
  * had no opinion about.
  */
 
+import * as React from "react";
 import Link from "next/link";
 import {
   Sheet,
@@ -44,6 +45,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useBatchDetail } from "@/hooks/use-admin";
+import { ReverseConfirm } from "@/components/admin/reconciliation/reverse-confirm";
 import {
   FLAGGED_MATCH_CLASSES,
   MATCH_DEFINITIONS,
@@ -347,6 +349,14 @@ function OrderMatchSection({
   );
 }
 
+/**
+ * VERBATIM (pack CB2b.4, the OC-1 rule): a fulfilled batch is put back through
+ * unfulfill, so the control that would always be refused is not offered — and
+ * the sentence says where the repair actually lives.
+ */
+export const REVERSE_USE_UNFULFILL_COPY =
+  "This batch was fulfilled — put it back through unfulfill, not here.";
+
 export function AttributionDrilldown({
   row,
   open,
@@ -360,6 +370,9 @@ export function AttributionDrilldown({
 }) {
   const detail = useBatchDetail(open ? row.batchId : null);
   const data = detail.data;
+  // The confirm panel is this component's own state (pack CB2b.4): the tab hands
+  // no prop for it, the way `AttributeConfirm` is reached through the picker.
+  const [confirmingReverse, setConfirmingReverse] = React.useState(false);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -396,6 +409,44 @@ export function AttributionDrilldown({
             >
               Attribute…
             </Button>
+          )}
+
+          {/* THE REVERSE (Part 2, pack CB2b.4). Both writer controls wait for
+              the DETAIL: until it loads there are no location facts to gate on
+              and no evidence to read, and a control offered over a Skeleton is a
+              control offered over nothing (R6-5).
+
+              STATED EXCEPTION to OC-1, B2b only: a batch carrying a
+              NULL-location row still shows this button and answers
+              NULL_LOCATION_ROW verbatim — the detail carries no location until
+              B2c, which is where the gate learns to read it. */}
+          {!detail.isLoading && !detail.isError && row.canAttribute && !row.fulfilled && (
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid={`reverse-drilldown-${row.batchId}`}
+              onClick={() => setConfirmingReverse(true)}
+            >
+              Reverse…
+            </Button>
+          )}
+
+          {!detail.isLoading && !detail.isError && row.fulfilled && (
+            <p
+              className="text-body-sm text-muted-foreground"
+              data-testid="drilldown-reverse-unavailable"
+            >
+              {REVERSE_USE_UNFULFILL_COPY}
+            </p>
+          )}
+
+          {confirmingReverse && (
+            <ReverseConfirm
+              batchId={row.batchId}
+              units={row.units}
+              productCount={row.productCount}
+              onDone={() => setConfirmingReverse(false)}
+            />
           )}
 
           {detail.isLoading && <Skeleton className="h-24 w-full" />}

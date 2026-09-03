@@ -6,6 +6,13 @@ import { decryptValue, isEncrypted } from "@/lib/encryption";
 import { upsertOrderWithItems } from "@/lib/external-orders/shared";
 import { persistFulfillmentHint } from "@/lib/external-orders/fulfillment-observations";
 import { recordIngestion } from "@/lib/change-tracking";
+// Reconciliation Part 2 (spec §2.7(1), pack CB2b.5 / register OC-7): the ORDER
+// LOCK. A delete decides `protected` vs `deleted` from `stockedOut`, and a
+// concurrent fulfil flips that column under the order's X lock — so this handler
+// takes the same lock as statement 1 or races it.
+import { AppError } from "@/lib/error-handling";
+import { STOCK_TX_OPTIONS } from "@/lib/inventory";
+import { ORDER_GONE, withOrderLock } from "@/lib/inventory/order-lock";
 import type { PlatformType } from "@/lib/platforms/core/types";
 import type { Prisma } from "@prisma/client";
 import { createHash, createHmac } from "crypto";
@@ -320,43 +327,84 @@ export const POST = apiHandler(async (
         // trail intact. The inventory was already deducted — we need the order
         // row to explain why. The WC side is now divergent; the operator must
         // decide whether to unfulfill + delete manually, or accept divergence.
-        const deleteResult = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-          // R-D11: capture the FULL order + items snapshot inside the tx BEFORE
-          // deleting — destroyed state is otherwise unrecoverable.
-          const existing = await tx.externalOrder.findUnique({
-            where: {
-              integrationId_externalId: {
-                integrationId: integration.id,
-                externalId,
-              },
+        // The id, resolved OUTSIDE the transaction (pack CB2b.5): the lock takes
+        // ids, and the natural key is `(integrationId, externalId)`. An order
+        // that was never here is `not_found` exactly as before — nothing is
+        // locked for it.
+        const resolved = await prisma.externalOrder.findUnique({
+          where: {
+            integrationId_externalId: {
+              integrationId: integration.id,
+              externalId,
             },
-            include: { items: true },
-          });
-
-          if (!existing) {
-            return { action: "not_found" as const };
-          }
-
-          // stockedOut separation: one clean boolean check replaces the old
-          // fulfilledQty-arithmetic + internalStatus dual check.
-          if (existing.stockedOut) {
-            // Protected — keep the order, keep its items, keep the audit trail.
-            return {
-              action: "protected" as const,
-              orderNumber: existing.orderNumber,
-            };
-          }
-
-          // Safe to delete — no fulfillment work to preserve
-          await tx.externalOrderItem.deleteMany({ where: { orderId: existing.id } });
-          await tx.externalOrder.delete({ where: { id: existing.id } });
-          return {
-            action: "deleted" as const,
-            orderId: existing.id,
-            orderNumber: existing.orderNumber,
-            snapshot: existing,
-          };
+          },
+          select: { id: true },
         });
+
+        const runDelete = (orderId: string) =>
+          withOrderLock(
+            prisma,
+            { required: [orderId] },
+            async (tx: Prisma.TransactionClient) => {
+              // R-D11: capture the FULL order + items snapshot inside the tx
+              // BEFORE deleting — destroyed state is otherwise unrecoverable.
+              // Re-read UNDER THE LOCK: the snapshot that decides `protected` is
+              // only trustworthy once the fulfil that would change it has either
+              // committed or is waiting behind us.
+              const existing = await tx.externalOrder.findUnique({
+                where: { id: orderId },
+                include: { items: true },
+              });
+
+              if (!existing) {
+                return { action: "not_found" as const };
+              }
+
+              // stockedOut separation: one clean boolean check replaces the old
+              // fulfilledQty-arithmetic + internalStatus dual check.
+              if (existing.stockedOut) {
+                // Protected — keep the order, its items and the audit trail.
+                return {
+                  action: "protected" as const,
+                  orderNumber: existing.orderNumber,
+                };
+              }
+
+              // Safe to delete — no fulfillment work to preserve
+              await tx.externalOrderItem.deleteMany({ where: { orderId: existing.id } });
+              await tx.externalOrder.delete({ where: { id: existing.id } });
+              return {
+                action: "deleted" as const,
+                orderId: existing.id,
+                orderNumber: existing.orderNumber,
+                snapshot: existing,
+              };
+            },
+            // The budget is LOAD BEARING: this handler now WAITS on the order
+            // lock behind a fulfil that spends 30 s, so Prisma's 5 s default
+            // would turn a `protected`/`deleted` answer into a P2028. A delete
+            // that waits past this answers the EXISTING failure path — the claim
+            // finalises FAILED and the provider retries.
+            STOCK_TX_OPTIONS,
+          );
+
+        let deleteResult: Awaited<ReturnType<typeof runDelete>>;
+        if (!resolved) {
+          deleteResult = { action: "not_found" as const };
+        } else {
+          try {
+            deleteResult = await runDelete(resolved.id);
+          } catch (err) {
+            // The order vanished between the resolution and the lock — the same
+            // answer as never having had it (idempotent, as this path has
+            // always been).
+            if (err instanceof AppError && err.code === ORDER_GONE) {
+              deleteResult = { action: "not_found" as const };
+            } else {
+              throw err;
+            }
+          }
+        }
 
         // Phase 7c.3: all three delete outcomes count as successful webhook
         // deliveries (signature passed, we processed the event). Record health.

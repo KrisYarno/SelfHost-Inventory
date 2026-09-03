@@ -80,6 +80,25 @@ export type CompletionBatchIds = {
 };
 
 /**
+ * Reconciliation Part 2 (pack CB2b.3 / seam S-B17, G2s-8 CLOSED LITERALLY): the
+ * WC lines the SERVER said it deducted, in the shape the unfulfill route takes.
+ *
+ * The Undo's WC body is built from THIS and from nothing else. The cart is what
+ * was ASKED for; `results.fulfilled` is what MOVED, and the two differ whenever
+ * a line was clamped, skipped or refused — so a body built from the cart
+ * restores units out of somebody else's fulfilment. An entry the fulfil envelope
+ * did not fully name is OMITTED here and NAMED in the Undo's toast, rather than
+ * completed from the cart: this is the one seam where a plausible guess writes
+ * stock nobody asked to move.
+ */
+export type FulfilledForUndo = {
+  itemId: string;
+  productId: number;
+  quantity: number;
+  locationId: number;
+};
+
+/**
  * One entry of the fulfil route's `results.fulfilled[]` (pack CB1.5c, seam
  * S-B15) — the lines the server says it ACTUALLY deducted, which is what a
  * rollback must be built from. Every field is optional at this seam because it
@@ -98,6 +117,8 @@ interface CompleteOrderDialogProps {
     orderReference: string;
     items: DeductionDetail[];
     batchIds: CompletionBatchIds;
+    /** What the fulfil envelope named — the Undo's WC body, verbatim (S-B17). */
+    fulfilledForUndo: FulfilledForUndo[];
     externalOrderId?: string;
   }) => void;
 }
@@ -249,6 +270,11 @@ export function CompleteOrderDialog({
     // built from THESE, never from the cart — sending every requested line back
     // would credit stock for lines the server refused.
     let fulfilledEntries: FulfilledEntry[] = [];
+
+    // ...and the SERIALIZED body the Undo will post, built from those entries
+    // alone (pack CB2b.3). Empty when the WC leg never ran, which is exactly how
+    // the Undo reads "this cart had no WC lines".
+    let fulfilledForUndo: FulfilledForUndo[] = [];
 
     /**
      * The cart line one server entry belongs to, matched BY ITEM ID (DCc-11) —
@@ -485,6 +511,32 @@ export function CompleteOrderDialog({
         fulfilledEntries = Array.isArray(fulfillBody?.results?.fulfilled)
           ? (fulfillBody.results.fulfilled as FulfilledEntry[])
           : [];
+        // THE UNDO'S BODY, from the envelope and nothing else (pack CB2b.3).
+        // Every field is proved before it is used; an entry missing any of them
+        // is dropped WITH a warning, and the Undo names the drop in its toast.
+        fulfilledForUndo = [];
+        fulfilledEntries.forEach((entry) => {
+          const productId =
+            typeof entry.productId === "number" && entry.productId > 0 ? entry.productId : null;
+          const quantity =
+            typeof entry.quantity === "number" && Number.isFinite(entry.quantity) && entry.quantity > 0
+              ? entry.quantity
+              : null;
+          if (!entry.itemId || productId === null || quantity === null || !selectedLocationId) {
+            console.warn(
+              `Undo body: dropping fulfilled entry ${entry.itemId ?? "(unnamed)"} — the fulfil response did not name both a product and a quantity for it`
+            );
+            return;
+          }
+          fulfilledForUndo.push({
+            itemId: entry.itemId,
+            productId,
+            quantity,
+            // The location this REQUEST fulfilled at — the fulfil route's own.
+            locationId: selectedLocationId,
+          });
+        });
+
         // A body with no readable summary is NOT read as a refusal: it would
         // roll back a leg that may well have succeeded and then tell the
         // operator nothing was deducted. Today's route always sends one.
@@ -735,6 +787,8 @@ export function CompleteOrderDialog({
           // Pack CB1b.6: the pair travels INTACT — the Undo names the movements
           // this completion made, instead of inferring them from the items.
           batchIds,
+          // S-B17: the Undo's WC body, built from `results.fulfilled` only.
+          fulfilledForUndo,
           externalOrderId,
         });
       }

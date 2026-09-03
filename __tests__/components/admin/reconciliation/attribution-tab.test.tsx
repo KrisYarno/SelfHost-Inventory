@@ -126,6 +126,8 @@ function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
       externalCreatedAt: "2026-08-19T09:00:00.000Z",
     },
     canAttribute: true,
+    // B2b (pack CB2b.4): the fulfilment fact the reverse ladder refuses on.
+    fulfilled: false,
     attributeLock: null,
     fulfilledAgainst: null,
     fulfillmentTargetMissing: false,

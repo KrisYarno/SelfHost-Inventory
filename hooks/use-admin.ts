@@ -2,6 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
+import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import type { User } from "@/components/admin/user-table";
 import type {
   AttributionClassKey,
@@ -907,6 +908,53 @@ export function useAttributeBatch(batchId: string) {
     },
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: ["admin", "reconciliation"] }),
+  });
+}
+
+/**
+ * The reverse route's answer (reconciliation Part 2, seam S-B17). `restoredUnits`
+ * is what THIS call put back; `previouslyRestored` is what earlier corrections
+ * already had. The panel prints the server's own `message`, numbers and all.
+ */
+export interface ReverseBatchResult {
+  reversedBatchId: string;
+  batchId: string;
+  orderRecordId: string | null;
+  rows: Array<{ productId: number; locationId: number; delta: number }>;
+  restoredUnits: number;
+  previouslyRestored: number;
+  totalUnits: number;
+  physicalLocationId: number | null;
+  message: string;
+}
+
+/**
+ * THE ATOMIC REVERSE (pack CB2b.4). `onSettled`, like its sibling: a REFUSED
+ * reverse is exactly when the client's picture is known to be wrong.
+ *
+ * It invalidates TWO worlds, because it moves stock as well as attribution
+ * truth: the reconciliation surface (the report AND the drill-down share the
+ * prefix) and the inventory caches every other page reads.
+ */
+export function useReverseBatch(batchId: string) {
+  const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
+  return useMutation<ReverseBatchResult, ReconciliationError, void>({
+    mutationFn: async () => {
+      const res = await fetch(
+        `/api/inventory/batches/${encodeURIComponent(batchId)}/reverse`,
+        { method: "POST", headers: withCSRFHeaders({}, csrfToken) },
+      );
+      const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok) {
+        throw readReconciliationError(res, json);
+      }
+      return json as unknown as ReverseBatchResult;
+    },
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["admin", "reconciliation"] });
+      await invalidateInventoryCaches(queryClient);
+    },
   });
 }
 

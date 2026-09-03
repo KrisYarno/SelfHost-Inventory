@@ -113,12 +113,14 @@
  */
 
 import type { PrismaClient } from "@prisma/client";
+import { createHmac } from "crypto";
 import mysql from "mysql2/promise";
 import { NextRequest } from "next/server";
 import type { PrelockKeyInput, PrelockedRow } from "@/lib/inventory/prelock";
 import { openClient } from "./clients";
 import {
   GATE_ADMIN_ID,
+  GATE_COMPANY_ID,
   GATE_EXT_ORDER_2_ID,
   GATE_EXT_ORDER_ID,
   GATE_INTEGRATION_ID,
@@ -151,6 +153,10 @@ const mockApprovedSession = {
 jest.mock("@/lib/api-utils", () => ({
   ...jest.requireActual("@/lib/api-utils"),
   requireApproved: jest.fn(async () => ({ user: mockApprovedSession })),
+  // B2b (pack CB2b.6): scenario 11a-iii drives the ADMIN-ONLY manual attribution
+  // beside the reverse. `requireCompanyMembership` stays REAL — the gate's
+  // batches are unstamped, so the reverse route never reaches it.
+  requireAdmin: jest.fn(async () => ({ user: mockApprovedSession })),
   requireCSRF: jest.fn(async () => undefined),
 }));
 
@@ -201,17 +207,28 @@ type SingleArgRoute = { POST: (request: NextRequest) => Promise<Response> };
  * { orderId } })` — so `SingleArgRoute` above does not fit them, and the
  * `concurrency-3.test.ts:106-108` idiom is spelled once more here.
  */
-type ParamRoute = {
-  POST: (request: NextRequest, ctx: { params: { orderId: string } }) => Promise<Response>;
+type ParamRoute<P> = {
+  POST: (request: NextRequest, ctx: { params: P }) => Promise<Response>;
 };
+
+/** The params objects this file's routes are addressed by. B2b generifies the
+ *  caller because the reverse is addressed by BATCH, not by order. */
+type OrderParams = { orderId: string };
+type BatchParams = { batchId: string };
 
 let prelock: typeof import("@/lib/inventory/prelock");
 let orderLock: typeof import("@/lib/inventory/order-lock");
 let inventory: typeof import("@/lib/inventory");
 let deductSimpleRoute: SingleArgRoute;
 let batchAdjustRoute: SingleArgRoute;
-let fulfillRoute: ParamRoute;
-let unfulfillRoute: ParamRoute;
+let fulfillRoute: ParamRoute<OrderParams>;
+let unfulfillRoute: ParamRoute<OrderParams>;
+/** B2b (pack CB2b.6): the reverse, driven with `{ batchId }` and NO JSON body. */
+let reverseRoute: ParamRoute<BatchParams>;
+/** B2b 11a-iii: the manual attribution, raced against the reverse. */
+let attributionRoute: ParamRoute<BatchParams>;
+/** B2b 11c: the webhook receiver, driven with a REALLY signed body. */
+let webhookRoute: ParamRoute<{ integrationId: string }>;
 let singleton: PrismaClient;
 
 // --------------------------------------------------------------------------
@@ -627,43 +644,121 @@ async function waitForLockWait(probe: PrismaClient, timeoutMs = 5_000): Promise<
   return false;
 }
 
+/** The B1 ledger hold's name. B2b's two holds live under their own names and
+ *  install/drop independently of it. */
+/**
+ * B2b's RENDEZVOUS (pack CB2b.6). `waitForLockWait` cannot see this one: 11a-i's
+ * two reverses touch DISJOINT keys and neither ever blocks, so there is no lock
+ * wait to observe — and the claim the scenario makes is that their restoration
+ * READS overlapped, which is exactly what a plain read on an empty range is
+ * supposed to allow.
+ *
+ * The `DO SLEEP` hold has no release, so the observable is the engine's own
+ * process list: block until N sessions of the gate database are sitting in
+ * `User sleep` AT THE SAME INSTANT. Two 200s alone do not qualify — the gate's
+ * doctrine is that simultaneity is OBSERVED, never inferred.
+ */
+async function waitForSleepingSessions(
+  probe: PrismaClient,
+  parties: number,
+  timeoutMs = 10_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const rows = await probe.$queryRawUnsafe<{ sleeping: bigint | number }[]>(
+      `SELECT COUNT(*) AS sleeping FROM information_schema.PROCESSLIST
+        WHERE STATE = 'User sleep' AND DB = ?`,
+      GATE_DB_NAME,
+    );
+    if (Number(rows[0]?.sleeping ?? 0) >= parties) return true;
+    await sleep(10);
+  }
+  return false;
+}
+
 const HOLD_TRIGGER = "b1_prelock_hold";
 
+/** A bare SQL identifier this module is willing to inline into a trigger body. */
+const SAFE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** A string id (a cuid, a uuid) this module is willing to single-quote. */
+const SAFE_STRING_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+type HoldTrigger = {
+  /** The trigger's own name — the three holds coexist and drop independently. */
+  name: string;
+  table: string;
+  timing: "BEFORE INSERT" | "BEFORE DELETE";
+  /** `NEW` for an INSERT hold, `OLD` for a DELETE one. */
+  rowAlias: "NEW" | "OLD";
+  guardColumn: string;
+  ids: readonly number[] | readonly string[];
+  seconds: number;
+};
+
 /**
- * The hold point for the ROUTE race, in the database, because a route exposes
- * no callback to put one in and inventing one would be changing app code to
- * make a test pass (`concurrency-3.test.ts`'s doctrine).
+ * The hold point for a ROUTE race, in the database, because a route exposes no
+ * callback to put one in and inventing one would be changing app code to make a
+ * test pass (`concurrency-3.test.ts`'s doctrine).
  *
- * `BEFORE INSERT` on `inventory_logs`, guarded on this file's own product ids:
- * it fires for the winner's ledger writes and for nothing else this gate does
- * while it is installed. The guard is built from integers this module owns —
- * a trigger body takes no parameters, so the values are checked before they go
- * anywhere near the server.
+ * A row trigger that SLEEPS while the winner holds its locks, guarded on ids
+ * this module owns. B2b generalises it over the tuple because the lane now has
+ * THREE hold sites: the ledger INSERT (B1 / 11a), the attempts INSERT (11a-iii)
+ * and the order-item DELETE (11c). A trigger body takes no parameters, so every
+ * inlined value is validated first — numbers as safe integers, strings against a
+ * conservative character class and then single-quoted.
  */
-async function installHoldTrigger(productIds: readonly number[], seconds: number): Promise<void> {
-  productIds.forEach((id) => {
-    if (!Number.isSafeInteger(id)) throw new Error(`concurrency-4: refusing to inline "${id}"`);
+async function installHoldTrigger(hold: HoldTrigger): Promise<void> {
+  for (const identifier of [hold.name, hold.table, hold.guardColumn]) {
+    if (!SAFE_IDENTIFIER.test(identifier)) {
+      throw new Error(`concurrency-4: refusing to inline identifier "${identifier}"`);
+    }
+  }
+  const values = hold.ids.map((id) => {
+    if (typeof id === "number") {
+      if (!Number.isSafeInteger(id)) throw new Error(`concurrency-4: refusing to inline "${id}"`);
+      return String(id);
+    }
+    if (!SAFE_STRING_ID.test(id)) throw new Error(`concurrency-4: refusing to inline "${id}"`);
+    return `'${id}'`;
   });
-  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 5) {
-    throw new Error(`concurrency-4: refusing a hold of ${seconds}s`);
+  if (values.length === 0) throw new Error("concurrency-4: a hold trigger needs at least one id");
+  if (!Number.isFinite(hold.seconds) || hold.seconds <= 0 || hold.seconds > 5) {
+    throw new Error(`concurrency-4: refusing a hold of ${hold.seconds}s`);
   }
   await withRaw(async (conn) => {
-    await conn.query(`DROP TRIGGER IF EXISTS ${HOLD_TRIGGER}`);
+    await conn.query(`DROP TRIGGER IF EXISTS ${hold.name}`);
     await conn.query(
-      `CREATE TRIGGER ${HOLD_TRIGGER} BEFORE INSERT ON inventory_logs
+      `CREATE TRIGGER ${hold.name} ${hold.timing} ON ${hold.table}
        FOR EACH ROW
        BEGIN
-         IF NEW.productId IN (${productIds.join(", ")}) THEN
-           DO SLEEP(${seconds});
+         IF ${hold.rowAlias}.${hold.guardColumn} IN (${values.join(", ")}) THEN
+           DO SLEEP(${hold.seconds});
          END IF;
        END`,
     );
   });
 }
 
-async function dropHoldTrigger(): Promise<void> {
+/** The B1 ledger hold, by its own name — the shape every pre-B2 caller used. */
+function installLedgerHold(productIds: readonly number[], seconds: number): Promise<void> {
+  return installHoldTrigger({
+    name: HOLD_TRIGGER,
+    table: "inventory_logs",
+    timing: "BEFORE INSERT",
+    rowAlias: "NEW",
+    guardColumn: "productId",
+    ids: productIds,
+    seconds,
+  });
+}
+
+async function dropHoldTrigger(name: string = HOLD_TRIGGER): Promise<void> {
+  if (!SAFE_IDENTIFIER.test(name)) {
+    throw new Error(`concurrency-4: refusing to inline identifier "${name}"`);
+  }
   await withRaw(async (conn) => {
-    await conn.query(`DROP TRIGGER IF EXISTS ${HOLD_TRIGGER}`);
+    await conn.query(`DROP TRIGGER IF EXISTS ${name}`);
   });
 }
 
@@ -693,17 +788,25 @@ async function callRoute(
  * the two handler shapes are different types, and a single function taking an
  * optional `params` would type-erase which one it was handed.
  */
-async function callParamRoute(
-  route: ParamRoute,
+async function callParamRoute<P>(
+  route: ParamRoute<P>,
   path: string,
-  params: { orderId: string },
-  body: unknown,
+  params: P,
+  body?: unknown,
 ): Promise<RouteAnswer> {
-  const request = new NextRequest(`http://concurrency-gate.invalid${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // B2b: `body === undefined` sends NO body and NO content-type — the reverse
+  // route parses none, and a JSON body it never reads is not the request the
+  // client makes.
+  const request = new NextRequest(
+    `http://concurrency-gate.invalid${path}`,
+    body === undefined
+      ? { method: "POST" }
+      : {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+  );
   const response = await route.POST(request, { params });
   return { status: response.status, body: (await response.json()) as Record<string, unknown> };
 }
@@ -807,10 +910,21 @@ beforeAll(async () => {
   // engine. Same registry, same singleton, same fail-closed schema proof below.
   fulfillRoute = (await import(
     "@/app/api/orders/[orderId]/fulfill/route"
-  )) as unknown as ParamRoute;
+  )) as unknown as ParamRoute<OrderParams>;
   unfulfillRoute = (await import(
     "@/app/api/orders/[orderId]/unfulfill/route"
-  )) as unknown as ParamRoute;
+  )) as unknown as ParamRoute<OrderParams>;
+  // B2b (pack CB2b.6): the three routes scenarios 11a and 11c drive. Same
+  // registry, same singleton, same fail-closed schema proof below.
+  reverseRoute = (await import(
+    "@/app/api/inventory/batches/[batchId]/reverse/route"
+  )) as unknown as ParamRoute<BatchParams>;
+  attributionRoute = (await import(
+    "@/app/api/reconciliation/attribution/[batchId]/route"
+  )) as unknown as ParamRoute<BatchParams>;
+  webhookRoute = (await import(
+    "@/app/api/webhooks/[integrationId]/route"
+  )) as unknown as ParamRoute<{ integrationId: string }>;
 
   singleton = (await import("@/lib/prisma")).default;
 
@@ -1169,7 +1283,7 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       // The hold point: the winner's ledger writes sleep while it holds BOTH
       // materialized rows, so the loser is unambiguously blocked on the
       // prelock rather than merely late.
-      await installHoldTrigger([OFF_MIRROR_1.productId, OFF_MIRROR_2.productId], 0.3);
+      await installLedgerHold([OFF_MIRROR_1.productId, OFF_MIRROR_2.productId], 0.3);
 
       const arrive = makeBarrier(2);
       let blocked = false;
@@ -1290,7 +1404,7 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       // materialized row, so the loser is unambiguously BLOCKED on the ODKU
       // rather than merely late. Location 2 carries no `products.quantity`
       // mirror, so the only contention here is the key itself.
-      await installHoldTrigger([NEVER_STOCKED_KEY.productId], 0.5);
+      await installLedgerHold([NEVER_STOCKED_KEY.productId], 0.5);
 
       const arrive = makeBarrier(2);
       let blocked = false;
@@ -1407,7 +1521,7 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       // Prisma default" this comment once cited is gone; fix-delta FDb-9). A
       // blown budget closes the connection and the route answers 503 BUSY for a
       // reason that has nothing to do with the race.
-      await installHoldTrigger([KEY_1.productId, KEY_2.productId], 0.3);
+      await installLedgerHold([KEY_1.productId, KEY_2.productId], 0.3);
 
       let blocked = false;
       const {
@@ -1978,7 +2092,7 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
       // and prelock: the ledger insert for P_A sleeps, so the winner holds the
       // order row for >= 2s and the loser is unambiguously BLOCKED on it rather
       // than merely late (`concurrency-3.test.ts`'s instrument, PKc-6).
-      await installHoldTrigger([P_APPROVED], 2);
+      await installLedgerHold([P_APPROVED], 2);
 
       const single = {
         locationId: LOCATION_MAIN,
@@ -2130,3 +2244,574 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
     expect(await orderStockedOut()).toBe(false);
   });
 });
+
+// ==========================================================================
+// SCENARIO 11 — THE REVERSE, ON A REAL ENGINE (pack CB2b.6)
+//
+// B2b's writer is the first one in this lane whose correctness depends on a
+// PLAIN read taken inside a locked transaction: `priorRestorations` deliberately
+// does NOT lock, because a locking read over an EMPTY range gap-locks, and two
+// first-restorations of two DIFFERENT batches would then deadlock against each
+// other (spec §2.7(4)). That claim is unfalsifiable off a real InnoDB engine —
+// a unit test with a stand-in client would pass whichever way the module read.
+//
+//   11a-i    TWO CONCURRENT REVERSES OF DIFFERENT BATCHES BOTH COMMIT, with the
+//            overlap OBSERVED rather than inferred. `waitForLockWait` cannot see
+//            this one (neither session ever blocks — that IS the claim), so the
+//            rendezvous is the engine's process list: both sessions sitting in
+//            `User sleep` inside the hold trigger at the same instant.
+//   11a-ii   TWO CONCURRENT REVERSES OF ONE BATCH produce exactly one 200 and
+//            one ALREADY_REVERSED. The loser waits on the batch rows, and its
+//            restoration read — opened AFTER that lock — sees the winner's
+//            committed event. Stock moves ONCE.
+//   11a-iii  THE ATTRIBUTION AND THE REVERSE, IN BOTH ACQUISITION ORDERS
+//            (PK-2). Restoration-first: the attribution refuses BATCH_RESTORED
+//            and no stamp moves. Attribution-first: the reverse refuses
+//            BATCH_MOVED and no CORRECTION row exists.
+//
+// THE RESET IS PART OF THE SCENARIO. Every batch here is minted by a ROUTE, so
+// its id cannot be named in advance — `seed.ts` derives it from the scoped
+// ledger rows, and 11a-iii's `INVENTORY_ATTRIBUTE` event needed a new arm
+// (FR-5). The scenario asserts the derivation works rather than trusting it.
+// ==========================================================================
+
+/** The gate's hold on the attempts INSERT (11a-iii, attribution-first). */
+const ATTEMPT_HOLD = "b2_attempt_hold";
+
+type ReverseRows = Array<{
+  batchId: string | null;
+  productId: number;
+  delta: number;
+  logType: string;
+  locationId: number | null;
+  orderRecordId: string | null;
+}>;
+
+/** Every CORRECTION row on the scope, whatever batch it was written under. */
+async function correctionRows(): Promise<ReverseRows> {
+  const rows = await rawRows<ReverseRows[number]>(
+    `SELECT batchId, productId, delta, logType, locationId, orderRecordId
+       FROM inventory_logs
+      WHERE logType = 'CORRECTION' AND productId IN (?, ?)
+      ORDER BY id`,
+    [P_APPROVED, P_APPROVED_2],
+  );
+  return rows.map((row) => ({
+    ...row,
+    productId: Number(row.productId),
+    delta: Number(row.delta),
+    logType: String(row.logType),
+    locationId: row.locationId === null ? null : Number(row.locationId),
+  }));
+}
+
+/** The stamps a batch's rows carry — the 11a-iii "nothing moved" oracle. */
+async function stampsForBatch(batchId: string): Promise<Array<string | null>> {
+  const rows = await rawRows<{ orderRecordId: string | null }>(
+    "SELECT orderRecordId FROM inventory_logs WHERE batchId = ? ORDER BY id",
+    [batchId],
+  );
+  return rows.map((row) => row.orderRecordId);
+}
+
+async function eventsOfType(actionType: string): Promise<
+  Array<{ entityId: string | null; batchId: string | null; affectedCount: number }>
+> {
+  const rows = await rawRows<{
+    entityId: string | null;
+    batchId: string | null;
+    affectedCount: number;
+  }>(
+    "SELECT entityId, batchId, affectedCount FROM audit_logs WHERE actionType = ? ORDER BY id",
+    [actionType],
+  );
+  return rows.map((row) => ({ ...row, affectedCount: Number(row.affectedCount) }));
+}
+
+/** Mint an attributable batch THROUGH the real deduct-simple route. */
+async function mintBatch(productId: number, quantity: number): Promise<string> {
+  const answer = await deductSimple(LOCATION_MAIN, [{ productId, quantity }]);
+  expect(answer.status).toBe(200);
+  expect(typeof answer.body.batchId).toBe("string");
+  return String(answer.body.batchId);
+}
+
+function reverseBatchRoute(batchId: string): Promise<RouteAnswer> {
+  // NO body: the reverse route parses none (pack CB2b.2 step 1).
+  return callParamRoute(reverseRoute, `/api/inventory/batches/${batchId}/reverse`, { batchId });
+}
+
+function attributeBatchRoute(batchId: string, orderRecordId: string): Promise<RouteAnswer> {
+  return callParamRoute(
+    attributionRoute,
+    `/api/reconciliation/attribution/${batchId}`,
+    { batchId },
+    { orderRecordId, expectPreviousOrderRecordId: null },
+  );
+}
+
+describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
+  jest.setTimeout(120_000);
+
+  const OPENING = 10;
+
+  beforeEach(async () => {
+    await resetAll();
+    await setStock(P_APPROVED, OPENING);
+    await setStock(P_APPROVED_2, OPENING);
+  });
+
+  afterAll(async () => {
+    await dropHoldTrigger();
+    await dropHoldTrigger(ATTEMPT_HOLD);
+    await resetAll();
+  });
+
+  test("11a-i: two reverses of DIFFERENT batches overlap and BOTH commit", async () => {
+    const opening = await countSnapshot();
+    const batchA = await mintBatch(P_APPROVED, 4);
+    const batchB = await mintBatch(P_APPROVED_2, 3);
+
+    const probe = openClient();
+    try {
+      await warmUp(probe);
+      // Installed AFTER the mints, so it holds the two RESTORATIONS and nothing
+      // else. Both product ids: same-product batches would serialise at the
+      // prelock's `product_locations` X lock and could never be observed in
+      // `User sleep` together, and the claim is about the restoration READ.
+      await installLedgerHold([P_APPROVED, P_APPROVED_2], 1);
+
+      const { value: answers, fresh } = await reportDeadlocks("scenario 11a-i", async () => {
+        const inFlight = [reverseBatchRoute(batchA), reverseBatchRoute(batchB)];
+        // THE OVERLAP, OBSERVED. Two 200s alone would not qualify.
+        const overlapped = await waitForSleepingSessions(probe, 2);
+        const settled = await Promise.all(inFlight);
+        return { overlapped, settled };
+      });
+
+      expect(answers.overlapped).toBe(true);
+      const [a, b] = answers.settled;
+      expect(a.status).toBe(200);
+      expect(b.status).toBe(200);
+      if (fresh) {
+        console.log(
+          "[scenario 11a-i] a deadlock was detected during this race — the run is REPORTED, " +
+            "and the two 200s above are what the scenario asserts (a retried green counts).",
+        );
+      }
+
+      // The stock oracle, exact: each product back where it started.
+      expect(await stockIn(P_APPROVED)).toEqual({ row: OPENING, mirror: OPENING });
+      expect(await stockIn(P_APPROVED_2)).toEqual({ row: OPENING, mirror: OPENING });
+
+      // TWO CORRECTION rows, under TWO new batch ids — never the reversed ones.
+      const corrections = await correctionRows();
+      expect(corrections).toHaveLength(2);
+      expect(corrections.map((row) => row.productId).sort()).toEqual(
+        [P_APPROVED, P_APPROVED_2].sort(),
+      );
+      expect(corrections.every((row) => row.locationId === LOCATION_MAIN)).toBe(true);
+      expect(corrections.every((row) => row.orderRecordId === null)).toBe(true);
+      const newBatches = corrections.map((row) => String(row.batchId));
+      expect(new Set(newBatches).size).toBe(2);
+      expect(newBatches).not.toContain(batchA);
+      expect(newBatches).not.toContain(batchB);
+
+      // I-R5: the ENTITY is the reversed batch, the event's own batchId is the new one.
+      const events = await eventsOfType("INVENTORY_BATCH_REVERSE");
+      expect(events).toHaveLength(2);
+      expect(events.map((event) => event.entityId).sort()).toEqual([batchA, batchB].sort());
+      expect(events.map((event) => String(event.batchId)).sort()).toEqual([...newBatches].sort());
+      // NO attempt row: a reverse is not an attribution.
+      expect(await attemptCountForBatch(batchA)).toBe(0);
+      expect(await attemptCountForBatch(batchB)).toBe(0);
+
+      await resetAll();
+      // ...and the reset's derivation reaches the reverse's rows AND its events.
+      expect(await countSnapshot()).toEqual(opening);
+      expect(await correctionRows()).toEqual([]);
+      expect(await eventsOfType("INVENTORY_BATCH_REVERSE")).toEqual([]);
+    } finally {
+      await dropHoldTrigger();
+      await probe.$disconnect();
+    }
+  });
+
+  test("11a-ii: two reverses of ONE batch — one 200, one ALREADY_REVERSED, stock moves once", async () => {
+    const batch = await mintBatch(P_APPROVED, 4);
+    const probe = openClient();
+    try {
+      await warmUp(probe);
+      await installLedgerHold([P_APPROVED], 1);
+
+      const first = reverseBatchRoute(batch);
+      // The loser queues on the batch rows the winner holds `FOR UPDATE`.
+      const waited = waitForLockWait(probe, 10_000);
+      const second = reverseBatchRoute(batch);
+      const [a, b, observed] = await Promise.all([first, second, waited]);
+
+      expect(observed).toBe(true);
+      const statuses = [a.status, b.status].sort();
+      expect(statuses).toEqual([200, 409]);
+      const refused = a.status === 409 ? a : b;
+      expect(refused.body.code).toBe("ALREADY_REVERSED");
+      expect(refused.body.previouslyRestored).toBe(4);
+      expect(refused.body.totalUnits).toBe(4);
+
+      // ONCE. Not twice, and not zero.
+      expect(await stockIn(P_APPROVED)).toEqual({ row: OPENING, mirror: OPENING });
+      const corrections = await correctionRows();
+      expect(corrections).toHaveLength(1);
+      expect(corrections[0].delta).toBe(4);
+      expect(await eventsOfType("INVENTORY_BATCH_REVERSE")).toHaveLength(1);
+    } finally {
+      await dropHoldTrigger();
+      await probe.$disconnect();
+    }
+  });
+
+  test("11a-iii RESTORATION-FIRST: the attribution refuses BATCH_RESTORED and no stamp moves", async () => {
+    const batch = await mintBatch(P_APPROVED, 4);
+    const probe = openClient();
+    try {
+      await warmUp(probe);
+      // The reverse is held at its CORRECTION insert while the attribution
+      // queues on the batch rows it already holds `FOR UPDATE`.
+      await installLedgerHold([P_APPROVED], 1);
+
+      const reversing = reverseBatchRoute(batch);
+      const waited = waitForLockWait(probe, 10_000);
+      const attributing = attributeBatchRoute(batch, GATE_EXT_ORDER_ID);
+      const [reversed, attributed, observed] = await Promise.all([
+        reversing,
+        attributing,
+        waited,
+      ]);
+
+      expect(observed).toBe(true);
+      expect(reversed.status).toBe(200);
+      expect(attributed.status).toBe(409);
+      expect(attributed.body.code).toBe("BATCH_RESTORED");
+      expect(attributed.body.restoredUnits).toBe(4);
+
+      // NOTHING was stamped — the ledger is the oracle, not the envelope.
+      expect(await stampsForBatch(batch)).toEqual([null]);
+      expect(await eventsOfType("INVENTORY_ATTRIBUTE")).toEqual([]);
+    } finally {
+      await dropHoldTrigger();
+      await probe.$disconnect();
+    }
+  });
+
+  test("11a-iii ATTRIBUTION-FIRST: the reverse refuses BATCH_MOVED and writes no CORRECTION row", async () => {
+    const batch = await mintBatch(P_APPROVED, 4);
+    const probe = openClient();
+    try {
+      await warmUp(probe);
+      // The attribution core writes NO ledger row — one `updateMany` — and its
+      // attempt row is inserted by the route's `onRecord` inside the SAME
+      // transaction, so THAT insert is where this direction's hold belongs
+      // (the `concurrency-3.test.ts:294` idiom).
+      await installHoldTrigger({
+        name: ATTEMPT_HOLD,
+        table: "order_attribution_attempts",
+        timing: "BEFORE INSERT",
+        rowAlias: "NEW",
+        guardColumn: "batchId",
+        ids: [batch],
+        seconds: 1,
+      });
+
+      const attributing = attributeBatchRoute(batch, GATE_EXT_ORDER_ID);
+      const waited = waitForLockWait(probe, 10_000);
+      const reversing = reverseBatchRoute(batch);
+      const [attributed, reversed, observed] = await Promise.all([
+        attributing,
+        reversing,
+        waited,
+      ]);
+
+      expect(observed).toBe(true);
+      expect(attributed.status).toBe(200);
+      expect(reversed.status).toBe(409);
+      expect(reversed.body.code).toBe("BATCH_MOVED");
+      // The discovery read the batch UNSTAMPED; the locked rows disagree.
+      expect(reversed.body.currentOrderRecordId).toBe(GATE_EXT_ORDER_ID);
+      expect(reversed.body.expected).toBeNull();
+
+      expect(await stampsForBatch(batch)).toEqual([GATE_EXT_ORDER_ID]);
+      expect(await correctionRows()).toEqual([]);
+      expect(await eventsOfType("INVENTORY_BATCH_REVERSE")).toEqual([]);
+
+      // FR-5: the reset arm that reaches an INVENTORY_ATTRIBUTE event whose
+      // entity is a ROUTE-MINTED batch (never RECON_BATCH_ID).
+      expect(await eventsOfType("INVENTORY_ATTRIBUTE")).toHaveLength(1);
+      await resetAll();
+      expect(await eventsOfType("INVENTORY_ATTRIBUTE")).toEqual([]);
+    } finally {
+      await dropHoldTrigger(ATTEMPT_HOLD);
+      await probe.$disconnect();
+    }
+  });
+});
+
+// ==========================================================================
+// SCENARIO 11c — THE WC ORDER-DELETE WEBHOOK vs THE FULFIL (pack CB2b.5/CB2b.6,
+// register OC-7)
+//
+// The delete decides `protected` vs `deleted` from `stockedOut`, and a fulfil
+// flips that column while holding the order's X lock. Before B2b the delete read
+// that snapshot inside a bare `$transaction` with no order lock, so a fulfil
+// could commit between the read and the delete — leaving fulfilled ledger rows
+// pointing at an order that no longer exists. The fix is one lock; the proof has
+// to be a real engine, in BOTH acquisition orders.
+//
+// THE FIXTURE IS THIS SCENARIO'S OWN, and it is rebuilt PER DIRECTION:
+//   * `lane5-webhook-dedup.test.ts` MOCKS the adapter registry wholesale, so
+//     there is no HMAC idiom in this repo to copy — the body here is signed
+//     against the REAL WooCommerce adapter's `verifyWebhook`.
+//   * the gate's seeded integration has no webhook secret, so one is stored
+//     PLAIN (`resolveWebhookSecret` accepts both shapes; no ENCRYPTION_KEY).
+//   * the order is SCENARIO-LOCAL. `GATE_EXT_ORDER_ID`/`_2` are created ONCE by
+//     the seed and only `updateMany`d by the reset, so a deleted seed order
+//     would be gone for the rest of the serial run (the REV-36 trap).
+//   * direction one DESTROYS the order and direction two leaves it alive as
+//     `protected`, so each direction re-creates it DELETE-then-CREATE, deletes
+//     the dedup claim (the key is `sha256(rawBody)` — a replayed body would
+//     answer `duplicate: true`) and the ingestion audit row, and restores the
+//     four integration health fields a successful delete mutates.
+// ==========================================================================
+
+const GATE_WEBHOOK_ORDER_ID = "concurrencygatewh0001";
+const GATE_WH_EXTERNAL_ID = "770001";
+const GATE_WH_LINK = "gate-link-webhook";
+const GATE_WH_ITEM = "gate-item-webhook";
+const GATE_WH_SECRET = "gate-webhook-secret";
+const WH_DELETE_HOLD = "b2_wh_delete_hold";
+
+/** ONE immutable raw body, signed once — the dedup key is its own sha256. */
+const WH_RAW_BODY = JSON.stringify({ id: Number(GATE_WH_EXTERNAL_ID) });
+
+describe("scenario 11c — the order-delete webhook takes the ORDER LOCK (pack CB2b.5)", () => {
+  jest.setTimeout(120_000);
+
+  /** Base64 HMAC-SHA256, exactly as WooCommerce signs a delivery — verified by
+   *  the REAL adapter (`verifyWooCommerceWebhook`), never a mocked one. */
+  function webhookSignature(): string {
+    return createHmac("sha256", GATE_WH_SECRET).update(WH_RAW_BODY).digest("base64");
+  }
+
+  async function postDeleteWebhook(): Promise<RouteAnswer> {
+    const request = new NextRequest(
+      `http://concurrency-gate.invalid/api/webhooks/${GATE_INTEGRATION_ID}`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "X-WC-Webhook-Signature": webhookSignature(),
+          "X-WC-Webhook-Topic": "order.deleted",
+          "X-WC-Webhook-ID": "gate-wh-delivery-1",
+        },
+        body: WH_RAW_BODY,
+      },
+    );
+    const response = await webhookRoute.POST(request, {
+      params: { integrationId: GATE_INTEGRATION_ID },
+    });
+    return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  }
+
+  function fulfilScenarioOrder(): Promise<RouteAnswer> {
+    return callParamRoute(
+      fulfillRoute,
+      `/api/orders/${GATE_WEBHOOK_ORDER_ID}/fulfill`,
+      { orderId: GATE_WEBHOOK_ORDER_ID },
+      { locationId: LOCATION_MAIN, items: [{ itemId: GATE_WH_ITEM, quantity: 1 }] },
+    );
+  }
+
+  /** DELETE-then-CREATE, idempotent, plus every trace either direction leaves. */
+  async function rebuildFixture(): Promise<void> {
+    await singleton.externalOrderItem.deleteMany({
+      where: { orderId: GATE_WEBHOOK_ORDER_ID },
+    });
+    await singleton.externalOrder.deleteMany({ where: { id: GATE_WEBHOOK_ORDER_ID } });
+    await singleton.externalOrder.create({
+      data: {
+        id: GATE_WEBHOOK_ORDER_ID,
+        companyId: GATE_COMPANY_ID,
+        integrationId: GATE_INTEGRATION_ID,
+        externalId: GATE_WH_EXTERNAL_ID,
+        orderNumber: "77001",
+        nativeStatus: "processing",
+        total: 0,
+        rawPayload: {},
+      },
+    });
+    await singleton.externalOrderItem.create({
+      data: {
+        id: GATE_WH_ITEM,
+        orderId: GATE_WEBHOOK_ORDER_ID,
+        externalItemId: "gwh-1",
+        externalProductId: "gate-webhook-single",
+        name: "Gate webhook single",
+        quantity: 1,
+        price: 0,
+        productLinkId: GATE_WH_LINK,
+        isMapped: true,
+        fulfilledQty: 0,
+      },
+    });
+    // At 0 the fulfil skips the line and the ledger hold never fires.
+    await setStock(P_APPROVED, 10);
+    // The replay claim (keyed on sha256 of the body) and the ingestion row.
+    await singleton.webhookDelivery.deleteMany({ where: { integrationId: GATE_INTEGRATION_ID } });
+    await singleton.auditLog.deleteMany({
+      where: { entityType: "ORDER", entityId: GATE_WEBHOOK_ORDER_ID },
+    });
+    // The four health fields a successful delivery mutates, plus the secret.
+    await singleton.integration.update({
+      where: { id: GATE_INTEGRATION_ID },
+      data: {
+        webhookSecret: GATE_WH_SECRET,
+        lastSyncAt: null,
+        lastWebhookReceivedAt: null,
+        lastWebhookError: null,
+        webhookFailureCount: 0,
+      },
+    });
+  }
+
+  beforeAll(async () => {
+    await resetAll();
+    // Scenario 14's links are created and deleted by ITS bracket, so this
+    // scenario owns one of its own.
+    await singleton.productLink.deleteMany({ where: { id: GATE_WH_LINK } });
+    await singleton.productLink.create({
+      data: {
+        id: GATE_WH_LINK,
+        integrationId: GATE_INTEGRATION_ID,
+        externalProductId: "gate-webhook-single",
+        internalProductId: P_APPROVED,
+      },
+    });
+  });
+
+  afterAll(async () => {
+    await dropHoldTrigger();
+    await dropHoldTrigger(WH_DELETE_HOLD);
+    // NOTHING in `seed.ts` owns this order, so this bracket takes it away —
+    // otherwise `concurrency.test.ts` scenario 2's ABSOLUTE `auditLog.count()`
+    // fails in another file of the same serial run.
+    await singleton.externalOrderItem.deleteMany({
+      where: { orderId: GATE_WEBHOOK_ORDER_ID },
+    });
+    await singleton.externalOrder.deleteMany({ where: { id: GATE_WEBHOOK_ORDER_ID } });
+    await singleton.productLink.deleteMany({ where: { id: GATE_WH_LINK } });
+    await singleton.webhookDelivery.deleteMany({ where: { integrationId: GATE_INTEGRATION_ID } });
+    await singleton.auditLog.deleteMany({
+      where: { entityType: "ORDER", entityId: GATE_WEBHOOK_ORDER_ID },
+    });
+    await singleton.integration.update({
+      where: { id: GATE_INTEGRATION_ID },
+      data: {
+        webhookSecret: null,
+        lastSyncAt: null,
+        lastWebhookReceivedAt: null,
+        lastWebhookError: null,
+        webhookFailureCount: 0,
+      },
+    });
+    await resetAll();
+  });
+
+  test("11c DELETE-FIRST: the fulfil waits in lockFirst and answers ORDER_GONE", async () => {
+    await rebuildFixture();
+    const probe = openClient();
+    try {
+      await warmUp(probe);
+      // The webhook deletes the items EXPLICITLY, so a per-ROW `BEFORE DELETE`
+      // trigger fires — guarded on the ORDER id, which the per-direction
+      // re-create preserves (the item's own cuid is fresh each time).
+      await installHoldTrigger({
+        name: WH_DELETE_HOLD,
+        table: "external_order_items",
+        timing: "BEFORE DELETE",
+        rowAlias: "OLD",
+        guardColumn: "orderId",
+        ids: [GATE_WEBHOOK_ORDER_ID],
+        seconds: 3,
+      });
+
+      const deleting = postDeleteWebhook();
+      // The webhook holds the order's X lock while it sleeps in the trigger.
+      expect(await waitForSleepingSessions(probe, 1)).toBe(true);
+      const fulfilling = fulfilScenarioOrder();
+      const waited = waitForLockWait(probe, 15_000);
+      const [deleted, fulfilled, observed] = await Promise.all([deleting, fulfilling, waited]);
+
+      expect(observed).toBe(true);
+      expect(deleted.status).toBe(200);
+      expect(deleted.body).toMatchObject({ success: true, deleted: true });
+      // The order vanished under the fulfil — its REQUIRED lock says so.
+      expect(fulfilled.status).toBe(409);
+      expect(fulfilled.body.code).toBe("ORDER_GONE");
+
+      // ...and it wrote nothing: the stock is untouched and the order is gone.
+      expect(await stockIn(P_APPROVED)).toEqual({ row: 10, mirror: 10 });
+      const survivors = await rawRows<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM external_orders WHERE id = ?",
+        [GATE_WEBHOOK_ORDER_ID],
+      );
+      expect(Number(survivors[0]?.n ?? 0)).toBe(0);
+    } finally {
+      await dropHoldTrigger(WH_DELETE_HOLD);
+      await probe.$disconnect();
+    }
+  });
+
+  test("11c FULFIL-FIRST: the webhook waits on the order lock and answers protected", async () => {
+    await rebuildFixture();
+    const probe = openClient();
+    try {
+      await warmUp(probe);
+      // The EXISTING ledger hold: the fulfil sleeps at its own `inventory_logs`
+      // INSERT, inside the transaction that already holds the order's X lock.
+      await installLedgerHold([P_APPROVED], 3);
+
+      const fulfilling = fulfilScenarioOrder();
+      expect(await waitForSleepingSessions(probe, 1)).toBe(true);
+      const deleting = postDeleteWebhook();
+      const waited = waitForLockWait(probe, 15_000);
+      const [fulfilled, deleted, observed] = await Promise.all([fulfilling, deleting, waited]);
+
+      expect(observed).toBe(true);
+      expect(fulfilled.status).toBe(200);
+      expect(deleted.status).toBe(200);
+      // The snapshot the delete decided from was read UNDER the lock, so it saw
+      // the fulfil's committed `stockedOut` — which is the whole point.
+      expect(deleted.body).toMatchObject({ success: true, protected: true });
+
+      // The order SURVIVES, with its row, and the deduction stands.
+      const rows = await rawRows<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM external_order_items WHERE orderId = ?",
+        [GATE_WEBHOOK_ORDER_ID],
+      );
+      expect(Number(rows[0]?.n ?? 0)).toBe(1);
+      expect(await orderStockedOutFor(GATE_WEBHOOK_ORDER_ID)).toBe(true);
+      expect(await stockIn(P_APPROVED)).toEqual({ row: 9, mirror: 9 });
+    } finally {
+      await dropHoldTrigger();
+      await probe.$disconnect();
+    }
+  });
+});
+
+/** `stockedOut` for ANY order id — scenario 14's oracle is fixed to its own. */
+async function orderStockedOutFor(orderId: string): Promise<boolean> {
+  const rows = await rawRows<{ stockedOut: number }>(
+    "SELECT stockedOut FROM external_orders WHERE id = ?",
+    [orderId],
+  );
+  return Number(rows[0]?.stockedOut ?? 0) === 1;
+}

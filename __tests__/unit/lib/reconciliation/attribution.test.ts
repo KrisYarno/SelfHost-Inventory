@@ -1273,6 +1273,30 @@ describe('the manual-attribution predicate', () => {
     expect(report.rows[0].fulfillmentTargetMissing).toBe(false);
   });
 
+  // B2b (pack CB2b.4 / seam S-A6 amended). `fulfilled` is the fulfilment FACT —
+  // the same predicate the reverse and the move refuse on — and it is NOT
+  // `canAttribute`'s complement: an R2b batch is attributable AND fulfilled, and
+  // the drill-down's Reverse… control turns on the difference.
+  it('the row carries the fulfilment FACT, and it is not canAttribute inverted', async () => {
+    expect((await oneRow({})).rows[0].fulfilled).toBe(false);
+
+    const r2b = await oneRow({
+      auditId: 6,
+      auditActionType: 'EXTERNAL_ORDER_PARTIAL_FULFILLMENT',
+      auditEntityId: 'ord-7',
+    });
+    expect(r2b.rows[0].fulfilled).toBe(true);
+    expect(r2b.rows[0].canAttribute).toBe(true);
+
+    const attemptOnly = await oneRow({
+      attemptId: 9,
+      attemptOutcome: 'attributed',
+      attemptEvidence: 'fulfillment',
+      attemptSource: 'fulfillment',
+    });
+    expect(attemptOnly.rows[0].fulfilled).toBe(true);
+  });
+
   it('a STAMPED fulfillment cannot — it names the order to change it through', async () => {
     const report = await oneRow({
       distinctStamps: 1,

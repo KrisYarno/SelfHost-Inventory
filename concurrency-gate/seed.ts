@@ -741,6 +741,19 @@ export async function resetGateFixtures(scope: GateScope): Promise<void> {
             // filed under its own minted batchId — scoped by that id, so the
             // fixture's summary row (RECON_BATCH_ID, excluded above) is safe.
             { entityType: "INVENTORY", batchId: { in: routeBatchIds } },
+            // B2b (pack CB2b.6, FR-5): scenario 11a-iii drives the REAL manual
+            // attribution against a ROUTE-MINTED batch, so its
+            // `INVENTORY_ATTRIBUTE` event names an `entityId` this file cannot
+            // know in advance and a fresh audit `batchId` that no inventory row
+            // carries — neither the clause above (which keys on the FIXTURE's
+            // batch) nor the one below it would take that row back.
+            //
+            // The REVERSE and MOVE events need no clause of their own: the event
+            // filed by either one carries the NEW batch as its own `batchId`, and
+            // that batch's CORRECTION/TRANSFER rows carry the scope's productIds
+            // — so `routeBatchIds` above already contains it and the INVENTORY
+            // clause already deletes it.
+            { actionType: "INVENTORY_ATTRIBUTE", entityId: { in: routeBatchIds } },
             // B1.5 (pack CB1.5a-ii): fulfil and unfulfill file their change
             // event under `entityType: "ORDER"` with the ROUTE's minted batchId
             // — the B1 clause above names INVENTORY only, so scenario 14's audit

@@ -67,6 +67,8 @@ function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
     productCount: 2,
     order: null,
     canAttribute: true,
+    // B2b (pack CB2b.4): the fulfilment fact the reverse ladder refuses on.
+    fulfilled: false,
     attributeLock: null,
     fulfilledAgainst: null,
     fulfillmentTargetMissing: false,

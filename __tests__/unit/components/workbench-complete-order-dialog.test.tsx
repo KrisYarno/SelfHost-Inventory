@@ -416,6 +416,85 @@ describe("complete-order dialog — the completion names the batches it wrote", 
     expect(String(fetchMock.mock.calls[1][0])).toContain("/api/inventory/deduct-simple");
   });
 
+  // -------------------------------------------------------------------------
+  // THE UNDO'S WC BODY (reconciliation Part 2, pack CB2b.3 / seam S-B17).
+  //
+  // `fulfilledForUndo` is built from `results.fulfilled` and from NOTHING else.
+  // The cart is what was ASKED for; the envelope is what MOVED. A body built
+  // from the cart restores units out of another operator's fulfilment, which is
+  // the one class of guess this seam exists to make impossible.
+  // -------------------------------------------------------------------------
+
+  it("fulfilledForUndo is built from results.fulfilled — the SERVER's ids, not the cart's", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    fetchMock.mockImplementation(async (url: unknown) => ({
+      ok: true,
+      json: async () =>
+        String(url).includes("/fulfill")
+          ? {
+              success: true,
+              batchId: "fulfil-batch-1",
+              // The cart's line maps to product 501; the SERVER says it deducted
+              // 999. The Undo has to put the units back where they came FROM.
+              results: { fulfilled: [{ itemId: "it-cart", productId: 999, quantity: 2 }] },
+              summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+            }
+          : { success: true, batchId: "deduct-batch-1" },
+    } as unknown as Response));
+    seedOrder([CART_ITEM]);
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    expect(onSuccess.mock.calls[0][0].fulfilledForUndo).toEqual([
+      { itemId: "it-cart", productId: 999, quantity: 2, locationId: 1 },
+    ]);
+  });
+
+  it("an entry the envelope did not fully name is OMITTED, with a warning — never completed from the cart", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const consoleWarn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    fetchMock.mockImplementation(async (url: unknown) => ({
+      ok: true,
+      json: async () =>
+        String(url).includes("/fulfill")
+          ? {
+              success: true,
+              batchId: "fulfil-batch-1",
+              results: { fulfilled: [{ itemId: "it-cart", productId: 501 }] },
+              summary: { total: 1, fulfilled: 1, skipped: 0, failed: 0 },
+            }
+          : { success: true, batchId: "deduct-batch-1" },
+    } as unknown as Response));
+    seedOrder([CART_ITEM]);
+    const { onSuccess } = renderDialog();
+
+    await user.click(completeButton());
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    expect(onSuccess.mock.calls[0][0].fulfilledForUndo).toEqual([]);
+    expect(consoleWarn).toHaveBeenCalledWith(expect.stringContaining("it-cart"));
+    consoleWarn.mockRestore();
+  });
+
+  it("a MANUAL-ONLY cart carries fulfilledForUndo: [] — the key EXISTS", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    respondWithBatches(null, "deduct-batch-3");
+    act(() => {
+      useWorkbench.getState().setOrderReference("manual-ref");
+      useWorkbench
+        .getState()
+        .addItem({ id: 777, name: "Manual Vial", currentQuantity: 9 } as unknown as ProductWithQuantity, 1);
+    });
+    const { onSuccess } = renderDialog();
+
+    await user.click(screen.getByRole("button", { name: "Complete Order" }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+
+    expect(onSuccess.mock.calls[0][0].fulfilledForUndo).toEqual([]);
+  });
+
   it("a MANUAL-ONLY cart carries fulfilBatchId: null — never undefined", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     respondWithBatches(null, "deduct-batch-2");

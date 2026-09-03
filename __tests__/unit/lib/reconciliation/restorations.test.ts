@@ -165,7 +165,44 @@ describe('priorRestorations — the sum', () => {
       physicalLocationId: 7,
       eventId: 43,
       at: '2026-09-02T14:31:22.000Z',
+      // B2b (pack CB2b.1 rung 8, G7-1): the products the legs name, so the
+      // consumer that holds the batch's rows can cross-check membership without
+      // a second read of its own.
+      productIds: [9],
     });
+  });
+
+  it('the move names its products, ascending and deduped (rung 8 membership)', async () => {
+    const prior = await priorRestorations(
+      makeTx([
+        moveEvent({
+          details: {
+            ledgerLocationId: 3,
+            physicalLocationId: 7,
+            rows: [
+              { productId: 11, locationId: 7, delta: -4 },
+              { productId: 11, locationId: 3, delta: 4 },
+              { productId: 9, locationId: 7, delta: -1 },
+              { productId: 9, locationId: 3, delta: 1 },
+            ],
+          },
+        }),
+      ]),
+      BATCH,
+    );
+    expect(prior.move?.productIds).toEqual([9, 11]);
+  });
+
+  it('names the LAST event that put units on each key (rung 9 attributes its refusal)', async () => {
+    const prior = await priorRestorations(
+      makeTx([correction({ id: 51 }), correction({ id: 52 })]),
+      BATCH,
+    );
+    expect(prior.restoredByKey.get(prelockKey(9, 3))).toBe(8);
+    expect(prior.eventIdByKey.get(prelockKey(9, 3))).toBe(52);
+    expect(Array.from(prior.eventIdByKey.keys())).toEqual(
+      Array.from(prior.restoredByKey.keys()),
+    );
   });
 
   it('`at` is an ISO STRING — no Date ever leaves the module', async () => {

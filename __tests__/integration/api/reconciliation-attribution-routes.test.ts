@@ -155,7 +155,34 @@ describe('GET /api/reconciliation/attribution', () => {
       order: { orderNumber: '#1001' },
       actor: { id: 7, username: 'kris' },
       fulfillmentTargetMissing: false,
+      // Part 2 B2b (pack CB2b.4 / seam S-A6 amended): the fulfilment fact the
+      // reverse and the move refuse on, so the drill-down can hide a control
+      // the ladder would always refuse.
+      fulfilled: false,
     });
+    // The envelope pin above covers the TOP LEVEL only, so the ROW shape gets
+    // its own exact assertion — a field added to the wire without a pin is a
+    // contract nobody agreed to.
+    expect(Object.keys(body.rows[0]).sort()).toEqual(
+      [
+        'actor',
+        'at',
+        'attributeLock',
+        'batchId',
+        'canAttribute',
+        'fulfilled',
+        'fulfilledAgainst',
+        'fulfillmentTargetMissing',
+        'how',
+        'logTypes',
+        'match',
+        'matchUnavailable',
+        'order',
+        'productCount',
+        'source',
+        'units',
+      ].sort(),
+    );
     expect(body.coverage.orderFilterScope).toBe('all orders');
     expect(body.count).toBe(1);
     expect(body.moreCount).toBe(0);

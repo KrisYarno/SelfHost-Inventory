@@ -430,16 +430,32 @@ describe('webhook route — R-D4 create/update ingestion', () => {
 });
 
 describe('webhook route — ER-B4 delete branch', () => {
-  function deleteTx(existing: any) {
+  /**
+   * Reconciliation Part 2 (pack CB2b.5 / register OC-7): the delete now takes
+   * the ORDER LOCK as statement 1 and re-reads its snapshot under it, so the
+   * transaction client answers TWO reads — the lock's raw `SELECT … FOR UPDATE`
+   * and the snapshot — and the trace says which came first.
+   */
+  function deleteTx(existing: any, lockedOrders: any[] = [{ id: ORDER_ID, orderNumber: '#1001' }]) {
     const tx = mockDeep<PrismaClient>();
-    tx.externalOrder.findUnique.mockResolvedValue(existing);
+    const trace: string[] = [];
+    (tx.$queryRaw as unknown as jest.Mock).mockImplementation(async () => {
+      trace.push('lock orders FOR UPDATE');
+      return lockedOrders;
+    });
+    tx.externalOrder.findUnique.mockImplementation((async () => {
+      trace.push('snapshot read');
+      return existing;
+    }) as any);
     tx.externalOrderItem.deleteMany.mockResolvedValue({ count: 1 } as any);
     tx.externalOrder.delete.mockResolvedValue({} as any);
-    return tx;
+    return Object.assign(tx, { __trace: trace });
   }
 
   beforeEach(() => {
     db.integration.findUnique.mockResolvedValue(wooIntegration());
+    // The id resolution OUTSIDE the transaction — the lock takes ids.
+    db.externalOrder.findUnique.mockResolvedValue({ id: ORDER_ID });
     fakeAdapter.extractWebhookHeaders.mockReturnValue({
       topic: 'order.deleted',
       signature: 'sig',
@@ -489,7 +505,8 @@ describe('webhook route — ER-B4 delete branch', () => {
     expect(tx.externalOrder.delete).not.toHaveBeenCalled();
   });
 
-  it('missing order no-op → NO event', async () => {
+  it('missing order no-op → NO event, and nothing is locked', async () => {
+    db.externalOrder.findUnique.mockResolvedValue(null);
     db.$transaction.mockImplementation(async (cb: any) => cb(deleteTx(null)));
 
     const res = await WEBHOOK_POST(webhookRequest({ id: 'ext-1' }), {
@@ -497,6 +514,63 @@ describe('webhook route — ER-B4 delete branch', () => {
     } as any);
 
     expect(res.status).toBe(200);
+    expect(db.auditLog.create).not.toHaveBeenCalled();
+    // An order this system never had costs a transaction and a lock: neither.
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // THE ORDER LOCK (reconciliation Part 2, pack CB2b.5 / register OC-7).
+  //
+  // The delete decides `protected` vs `deleted` from `stockedOut`, and a
+  // concurrent fulfil flips that column while holding the order's X lock. On a
+  // plain read the fulfil could commit between this snapshot and the delete,
+  // leaving fulfilled ledger rows pointing at an order that no longer exists.
+  // -------------------------------------------------------------------------
+
+  it('LOCKS the order before it reads the snapshot it decides from', async () => {
+    const existing = { id: ORDER_ID, orderNumber: '#1001', stockedOut: false, items: [] };
+    const tx = deleteTx(existing);
+    db.$transaction.mockImplementation(async (cb: any) => cb(tx));
+
+    await WEBHOOK_POST(webhookRequest({ id: 'ext-1' }), {
+      params: { integrationId: 'int-1' },
+    } as any);
+
+    const query = (tx.$queryRaw as unknown as jest.Mock).mock.calls[0][0];
+    expect(String(query.sql)).toContain('FROM external_orders');
+    expect(String(query.sql)).toContain('FOR UPDATE');
+    expect((tx as any).__trace).toEqual(['lock orders FOR UPDATE', 'snapshot read']);
+    // The snapshot is re-read BY ID under the lock, not by the natural key.
+    expect(tx.externalOrder.findUnique.mock.calls[0][0]).toEqual({
+      where: { id: ORDER_ID },
+      include: { items: true },
+    });
+  });
+
+  it('spends the covered writers’ budget — the webhook now WAITS behind a fulfil', async () => {
+    db.$transaction.mockImplementation(async (cb: any) => cb(deleteTx(null)));
+
+    await WEBHOOK_POST(webhookRequest({ id: 'ext-1' }), {
+      params: { integrationId: 'int-1' },
+    } as any);
+
+    // The LITERAL, never the imported constant: a suite that mocked
+    // `@/lib/inventory` would see the constant as `undefined` and pass vacuously.
+    expect(db.$transaction.mock.calls[0][1]).toEqual({ maxWait: 5000, timeout: 30000 });
+  });
+
+  it('ORDER_GONE (the order vanished between the resolution and the lock) → not_found', async () => {
+    // The lock reads back NOTHING for a REQUIRED id.
+    db.$transaction.mockImplementation(async (cb: any) => cb(deleteTx(null, [])));
+
+    const res = await WEBHOOK_POST(webhookRequest({ id: 'ext-1' }), {
+      params: { integrationId: 'int-1' },
+    } as any);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ success: true, ignored: true });
     expect(db.auditLog.create).not.toHaveBeenCalled();
   });
 });

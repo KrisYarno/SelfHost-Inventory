@@ -33,12 +33,27 @@ import type {
 import { MATCH_NOT_COMPUTED_COPY } from "@/components/admin/reconciliation/attribution-row";
 
 const useBatchDetailMock = jest.fn();
+// B2b (pack CB2b.4): the inline `ReverseConfirm` owns its own mutation, exactly
+// the way `AttributeConfirm` owns `useAttributeBatch` — so this wholesale mock
+// has to answer for it too.
+const reverseMutateAsync = jest.fn();
+const useReverseBatchMock = jest.fn(() => ({
+  mutateAsync: reverseMutateAsync,
+  isPending: false,
+}));
 
 jest.mock("@/hooks/use-admin", () => ({
   useBatchDetail: (...args: unknown[]) => useBatchDetailMock(...args),
+  useReverseBatch: (...args: unknown[]) => useReverseBatchMock(...(args as [])),
 }));
 
-import { AttributionDrilldown } from "@/components/admin/reconciliation/attribution-drilldown";
+const toastSuccess = jest.fn();
+jest.mock("sonner", () => ({ toast: { success: (...a: unknown[]) => toastSuccess(...a) } }));
+
+import {
+  AttributionDrilldown,
+  REVERSE_USE_UNFULFILL_COPY,
+} from "@/components/admin/reconciliation/attribution-drilldown";
 
 function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
   return {
@@ -56,6 +71,8 @@ function makeRow(over: Partial<AttributionRow> = {}): AttributionRow {
     productCount: 2,
     order: null,
     canAttribute: true,
+    // B2b (pack CB2b.4): the fulfilment fact the reverse ladder refuses on.
+    fulfilled: false,
     attributeLock: null,
     fulfilledAgainst: null,
     fulfillmentTargetMissing: false,
@@ -129,6 +146,8 @@ function setDetail(detail: BatchDetail) {
 beforeEach(() => {
   jest.clearAllMocks();
   setDetail(makeDetail());
+  useReverseBatchMock.mockReturnValue({ mutateAsync: reverseMutateAsync, isPending: false });
+  reverseMutateAsync.mockResolvedValue({ message: "reversed 3 of 3 units" });
 });
 
 it("labels the operator's free text as the audit event's, and shows all three fields", () => {
@@ -639,5 +658,126 @@ describe("the This order panel (pack CA3)", () => {
     expect(cards.className).toContain("md:hidden");
     expect(screen.getByTestId("order-match-products").className).toContain("hidden md:block");
     expect(screen.getByTestId("order-match-product-card-3").className).toContain("bg-surface");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE REVERSE AFFORDANCE (Part 2, pack CB2b.4)
+// ---------------------------------------------------------------------------
+
+describe("the Reverse… control", () => {
+  function renderRow(row: Partial<AttributionRow> = {}) {
+    render(
+      <AttributionDrilldown
+        row={makeRow(row)}
+        open
+        onOpenChange={jest.fn()}
+        onAttribute={jest.fn()}
+      />,
+    );
+  }
+
+  it("offers Reverse… on a plain attributable batch, beside Attribute…", () => {
+    renderRow();
+    expect(screen.getByTestId("reverse-drilldown-batch-1")).toBeInTheDocument();
+    expect(screen.getByTestId("attribute-drilldown-batch-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("drilldown-reverse-unavailable")).not.toBeInTheDocument();
+  });
+
+  // OC-1: a control whose only outcome is a 409 is not an affordance. `fulfilled`
+  // is the SAME predicate rung 6 of the reverse ladder refuses on.
+  it("hides it on a FULFILLED batch and says where the repair lives", () => {
+    renderRow({ fulfilled: true, canAttribute: false });
+    expect(screen.queryByTestId("reverse-drilldown-batch-1")).not.toBeInTheDocument();
+    expect(screen.getByTestId("drilldown-reverse-unavailable")).toHaveTextContent(
+      REVERSE_USE_UNFULFILL_COPY,
+    );
+  });
+
+  // An R2b row is the case the two predicates DISAGREE about: it is attributable
+  // (its own event's stamp may be completed) and it is fulfilled.
+  it("an R2b row can be Attributed and can NOT be Reversed", () => {
+    renderRow({
+      fulfilled: true,
+      canAttribute: true,
+      attributeLock: { orderRecordId: "ord-7", reason: "r2b-completion" },
+    });
+    expect(screen.getByTestId("attribute-drilldown-batch-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("reverse-drilldown-batch-1")).not.toBeInTheDocument();
+    expect(screen.getByTestId("drilldown-reverse-unavailable")).toBeInTheDocument();
+  });
+
+  it("is HIDDEN while the detail is loading, and while it is in error", () => {
+    useBatchDetailMock.mockReturnValue({ data: undefined, isLoading: true, isError: false });
+    const { unmount } = render(
+      <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
+    );
+    expect(screen.queryByTestId("reverse-drilldown-batch-1")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("drilldown-reverse-unavailable")).not.toBeInTheDocument();
+    unmount();
+
+    useBatchDetailMock.mockReturnValue({ data: undefined, isLoading: false, isError: true });
+    render(
+      <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
+    );
+    expect(screen.queryByTestId("reverse-drilldown-batch-1")).not.toBeInTheDocument();
+  });
+
+  it("opens an INLINE panel naming the batch's own numbers, then POSTs and toasts", async () => {
+    const user = userEvent.setup();
+    renderRow({ units: 3, productCount: 2 });
+
+    await user.click(screen.getByTestId("reverse-drilldown-batch-1"));
+    expect(screen.getByTestId("reverse-scope")).toHaveTextContent(
+      "Reverse this batch — restores up to 3 units across 2 product(s)",
+    );
+    expect(screen.getByTestId("reverse-remainder")).toHaveTextContent(
+      "Restores only what has not been put back through this action",
+    );
+
+    await user.click(screen.getByTestId("reverse-confirm-submit"));
+    expect(useReverseBatchMock).toHaveBeenCalledWith("batch-1");
+    expect(reverseMutateAsync).toHaveBeenCalledTimes(1);
+    // The SERVER's sentence, never a recomputed one.
+    expect(toastSuccess).toHaveBeenCalledWith("reversed 3 of 3 units");
+    expect(screen.queryByTestId("reverse-scope")).not.toBeInTheDocument();
+  });
+
+  it("renders a refusal VERBATIM and keeps the panel open (the F7 rule)", async () => {
+    const user = userEvent.setup();
+    const refusal = Object.assign(
+      new Error("This batch was already reversed — 4 of 10 units were put back"),
+      { code: "ALREADY_REVERSED", status: 409 },
+    );
+    reverseMutateAsync.mockRejectedValue(refusal);
+    renderRow();
+
+    await user.click(screen.getByTestId("reverse-drilldown-batch-1"));
+    await user.click(screen.getByTestId("reverse-confirm-submit"));
+
+    expect(screen.getByTestId("reverse-refusal")).toHaveTextContent(
+      "This batch was already reversed — 4 of 10 units were put back",
+    );
+    expect(toastSuccess).not.toHaveBeenCalled();
+  });
+
+  // STATED EXCEPTION to OC-1, B2b only (R5-10): the drill-down carries no
+  // location facts until B2c, so a null-location batch still shows the control
+  // and gets the server's own sentence.
+  it("still offers Reverse… on a batch whose rows may name no location", async () => {
+    const user = userEvent.setup();
+    reverseMutateAsync.mockRejectedValue(
+      Object.assign(
+        new Error(
+          "Ledger row 502 names no location — this batch cannot be reversed or moved until it is repaired",
+        ),
+        { code: "NULL_LOCATION_ROW", status: 409 },
+      ),
+    );
+    renderRow();
+
+    await user.click(screen.getByTestId("reverse-drilldown-batch-1"));
+    await user.click(screen.getByTestId("reverse-confirm-submit"));
+    expect(screen.getByTestId("reverse-refusal")).toHaveTextContent("Ledger row 502 names no location");
   });
 });

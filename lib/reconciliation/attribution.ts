@@ -163,6 +163,18 @@ export type AttributionRow = {
   productCount: number;
   order: OrderRef | null;
   canAttribute: boolean;
+  /**
+   * THE FULFILMENT FACT (Part 2, pack CB2b.4) — the same predicate the reverse
+   * and the move refuse on, so a surface can hide a control the ladder would
+   * always refuse instead of offering it and rendering the 409. It is NOT
+   * re-derived here: `classifyBatch` computes it ONCE, through the one spelling
+   * in `population.ts`, and this row carries that value.
+   *
+   * `canAttribute` is a DIFFERENT question: it still admits an R2b batch (an
+   * unstamped fulfilment may complete its own event's stamp), which the reverse
+   * ladder's rung 6 refuses.
+   */
+  fulfilled: boolean;
   attributeLock: { orderRecordId: string; reason: 'r2b-completion' } | null;
   fulfilledAgainst: { orderRecordId: string; orderNumber: string | null } | null;
   /**
@@ -1068,6 +1080,7 @@ function buildRow(
     productCount: batch.productCount,
     order,
     canAttribute,
+    fulfilled: batch.fulfillment,
     // THE LOCK IS THE FACT, never the rule id (OC-1). An UNSTAMPED batch whose
     // fulfillment event names an order may only COMPLETE that stamp — which is
     // what the core enforces, whether or not the derivation is what classified

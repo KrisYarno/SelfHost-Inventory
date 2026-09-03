@@ -15,6 +15,7 @@ import {
   CompleteOrderDialog,
   type CompletionBatchIds,
   type DeductionDetail,
+  type FulfilledForUndo,
 } from "@/components/workbench/complete-order-dialog";
 import { WCOrderSelector } from "@/components/workbench/wc-order-selector";
 import { UnmappedItemsAlert } from "@/components/workbench/unmapped-items-alert";
@@ -100,115 +101,188 @@ export default function WorkbenchPage() {
     };
   }, []);
 
-  // Amendment 7: Undo handler with unfulfill API for WC orders.
-  //
-  // Reconciliation Part 2 (pack CB1b.6 / seam S-B5): `batchIds` names the two
-  // movements the completion made — REQUIRED, and placed before the optional
-  // `externalOrderId` (a required parameter cannot follow an optional one). The
-  // WRITER is unchanged here: the manual leg is still N positive adjusts. What
-  // the ids buy is the next milestone's one-call reverse, and they are threaded
-  // now so the thread is proven before anything depends on it.
+  /**
+   * THE UNDO (reconciliation Part 2, pack CB2b.3; spec §2.5).
+   *
+   * A completion is up to TWO movements, so an undo is up to two calls — and
+   * from B2b each of them NAMES what it is undoing:
+   *
+   *   THE MANUAL LEG is ONE reverse of the batch deduct-simple wrote. It used to
+   *   be N positive adjusts that named nothing: no link to the batch, no bound on
+   *   restoring the same units twice, and a report that read them as fresh
+   *   corrections. The batch id has been threaded here since B1 for exactly this.
+   *
+   *   THE WC LEG stays unfulfill — the line-level `fulfilledQty` bookkeeping
+   *   lives there — but its body is built from `fulfilledForUndo`, i.e. from the
+   *   fulfil envelope's own `results.fulfilled`, never from the cart. What was
+   *   asked for and what moved are different numbers whenever a line was clamped
+   *   or skipped, and restoring the asked number takes units out of somebody
+   *   else's fulfilment.
+   *
+   * TWO TOASTS, never one joined sentence: the legs count different things
+   * (units restored vs order lines put back), they are independent requests, and
+   * a refusal on one must not swallow the other's answer.
+   */
   const handleUndoDeduction = useCallback(
     async (
       items: DeductionDetail[],
       orderRef: string,
       batchIds: CompletionBatchIds,
-      externalOrderId?: string
+      opts: { fulfilledForUndo: FulfilledForUndo[]; externalOrderId?: string }
     ) => {
-      // Threaded, not yet consumed: the ONE-reverse writer is the next milestone.
-      void batchIds;
       if (!csrfToken) {
         toast.error("Session expired. Cannot undo.");
         return;
       }
 
-      try {
-        const wcItems = items.filter((item) => item.fulfillmentItemId);
-        const manualItems = items.filter((item) => !item.fulfillmentItemId);
+      const { fulfilledForUndo, externalOrderId } = opts;
+      const wcItems = items.filter((item) => item.fulfillmentItemId);
+      const manualItems = items.filter((item) => !item.fulfillmentItemId);
 
-        const promises: Promise<Response>[] = [];
+      let movedStock = false;
 
-        // Undo WC fulfillment via unfulfill API
-        if (externalOrderId && wcItems.length > 0) {
-          promises.push(
-            fetch(`/api/orders/${externalOrderId}/unfulfill`, {
-              method: "POST",
-              headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-              body: JSON.stringify({
-                items: wcItems.map((item) => ({
-                  itemId: item.fulfillmentItemId,
-                  productId: item.productId,
-                  quantity: item.quantity,
-                  locationId: item.locationId,
-                })),
-              }),
-            })
-          );
-        }
+      /** Pack REV-22 F7: the SERVER's sentence, or the old fallback. */
+      const refusalSentence = (body: unknown): string => {
+        const detail = apiErrorMessage(body, "");
+        return detail
+          ? `Some items could not be restored: ${detail}`
+          : "Some items could not be restored. Check inventory manually.";
+      };
 
-        // Undo manual deductions via adjust API (same as existing)
-        for (const item of manualItems) {
-          promises.push(
-            fetch("/api/inventory/adjust", {
-              method: "POST",
-              headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-              body: JSON.stringify({
-                productId: item.productId,
-                locationId: item.locationId,
-                delta: item.quantity, // positive delta to add back
-                logType: "ADJUSTMENT",
-              }),
-            })
-          );
-        }
-
-        const results = await Promise.all(promises);
-        const failedResponse = results.find((r) => !r.ok);
-        if (!failedResponse) {
-          // QB-4 (truthful data): a 200 from unfulfill can carry `restored: []`
-          // — every item hit a pass-1 guard (already reversed, concurrent
-          // change). "Undone" would be a number nobody can stand behind; read
-          // what actually moved and say that.
-          let restoredCount = manualItems.length;
-          if (externalOrderId && wcItems.length > 0) {
-            const unfulfillBody = (await results[0]
-              .json()
-              .catch(() => null)) as { restored?: unknown[] } | null;
-            restoredCount += unfulfillBody?.restored?.length ?? 0;
-          }
-          if (restoredCount === 0) {
-            toast.warning(
-              `Nothing was restored for order ${orderRef} — the items were already reversed or changed by someone else.`
+      const manualLeg = async () => {
+        if (batchIds.deductSimpleBatchId === null) {
+          // S-B5's contract makes this impossible when there ARE manual lines:
+          // the leg that wrote them minted the id this undo needs. It gets its
+          // OWN sentence — the QB-4 copy states a reason ("already reversed or
+          // changed by someone else") that is false here.
+          if (manualItems.length > 0) {
+            console.error(
+              `Undo: order ${orderRef} has ${manualItems.length} manual line(s) but the completion named no deduct-simple batch`
             );
-          } else {
+            toast.error(
+              `Order ${orderRef} could not be undone: the completion did not name the batch it wrote. Adjust inventory manually.`,
+              { id: `undo-manual-${orderRef}` }
+            );
+          }
+          return;
+        }
+
+        try {
+          const response = await fetch(
+            `/api/inventory/batches/${batchIds.deductSimpleBatchId}/reverse`,
+            {
+              method: "POST",
+              headers: withCSRFHeaders({}, csrfToken),
+            }
+          );
+          const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+
+          if (response.ok) {
+            movedStock = true;
+            const units = typeof body.restoredUnits === "number" ? body.restoredUnits : 0;
             toast.success(
-              `Undone: ${restoredCount} item${restoredCount !== 1 ? "s" : ""} restored for order ${orderRef}`
+              `Undone for order ${orderRef}: ${units} unit${units !== 1 ? "s" : ""} restored`,
+              { id: `undo-manual-${orderRef}` }
             );
+            return;
           }
-          // The undo restored inventory via unfulfill/adjust — flush the full
-          // inventory cache set (not just this page) so /inventory, dashboard,
-          // and journal stay coherent, matching the deduct path.
-          invalidateInventoryCaches(queryClient);
-        } else {
-          // Pack REV-22 F7: SAY WHY. The undo calls unfulfill and adjust, both of
-          // which now refuse with a named code — `ORDER_GONE` when the order
-          // vanished under the operator, `TOO_MANY_KEYS` when the restoration
-          // set is too wide to lock in one request, `INSUFFICIENT_STOCK` when
-          // the stock it would restore from has moved. The old copy told the
-          // operator to go and check inventory without telling them what
-          // happened; the server's sentence rides along now (the first refusal —
-          // the legs are independent, and one reason is what a toast can hold).
-          const failedBody = await failedResponse.json().catch(() => ({}));
-          const detail = apiErrorMessage(failedBody, "");
-          toast.error(
-            detail
-              ? `Some items could not be restored: ${detail}`
-              : "Some items could not be restored. Check inventory manually."
-          );
+
+          if (body.code === "ALREADY_REVERSED") {
+            // The QB-4 class: nothing moved, and the server's own numbers say
+            // why. A success toast here would claim a restoration that the
+            // ledger already accounted for.
+            const previouslyRestored =
+              typeof body.previouslyRestored === "number" ? body.previouslyRestored : 0;
+            const totalUnits = typeof body.totalUnits === "number" ? body.totalUnits : 0;
+            toast.warning(
+              `Order ${orderRef} was already reversed — ${previouslyRestored} of ${totalUnits} units were put back earlier.`,
+              { id: `undo-manual-${orderRef}` }
+            );
+            return;
+          }
+
+          toast.error(refusalSentence(body), { id: `undo-manual-${orderRef}` });
+        } catch (err) {
+          console.error("Undo reverse error:", err);
+          toast.error("Failed to undo deduction. Please adjust inventory manually.", {
+            id: `undo-manual-${orderRef}`,
+          });
         }
-      } catch (err) {
-        console.error("Undo deduction error:", err);
-        toast.error("Failed to undo deduction. Please adjust inventory manually.");
+      };
+
+      const wcLeg = async () => {
+        if (!externalOrderId || wcItems.length === 0) return;
+
+        // The lines the fulfil envelope never named. They are NOT completed from
+        // the cart (FD1-3's tolerated skew is retired from this path on purpose)
+        // — they are left out of the body and said out loud.
+        const named = new Set(fulfilledForUndo.map((entry) => entry.itemId));
+        const omitted = wcItems.filter(
+          (item) => !item.fulfillmentItemId || !named.has(item.fulfillmentItemId)
+        ).length;
+        const omittedSentence =
+          omitted > 0
+            ? ` ${omitted} line(s) were not restored — the fulfil response never named them.`
+            : "";
+
+        if (fulfilledForUndo.length === 0) {
+          // `UnfulfillRequestSchema.items` is `.min(1)`, so there is no request
+          // to make — and the operator is told the reason rather than shown a
+          // 400 the page provoked.
+          console.error(
+            `Undo: order ${orderRef} has ${wcItems.length} WC line(s) but the fulfil response named none of them`
+          );
+          toast.warning(
+            `Nothing was restored for order ${orderRef} — the fulfil response never named the lines it deducted.`,
+            { id: `undo-wc-${orderRef}` }
+          );
+          return;
+        }
+
+        try {
+          const response = await fetch(`/api/orders/${externalOrderId}/unfulfill`, {
+            method: "POST",
+            headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+            body: JSON.stringify({ items: fulfilledForUndo }),
+          });
+          const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+
+          if (!response.ok) {
+            toast.error(refusalSentence(body), { id: `undo-wc-${orderRef}` });
+            return;
+          }
+
+          // QB-4 (truthful data): a 200 can carry `restored: []` — every line hit
+          // a pass-1 guard. Read what actually moved and say that.
+          const restored = Array.isArray(body.restored) ? body.restored.length : 0;
+          if (restored === 0) {
+            toast.warning(
+              `Nothing was restored for order ${orderRef} — the items were already reversed or changed by someone else.${omittedSentence}`,
+              { id: `undo-wc-${orderRef}` }
+            );
+            return;
+          }
+
+          movedStock = true;
+          toast.success(
+            `Order ${orderRef}: ${restored} order line${restored !== 1 ? "s" : ""} put back.${omittedSentence}`,
+            { id: `undo-wc-${orderRef}` }
+          );
+        } catch (err) {
+          console.error("Undo unfulfill error:", err);
+          toast.error("Failed to undo deduction. Please adjust inventory manually.", {
+            id: `undo-wc-${orderRef}`,
+          });
+        }
+      };
+
+      // INDEPENDENT: a refusal on one leg never stops the other from answering.
+      await Promise.all([manualLeg(), wcLeg()]);
+
+      if (movedStock) {
+        // Stock moved through raw fetch, so the react-query caches every other
+        // page reads (/inventory, dashboard, journal) have to be told.
+        invalidateInventoryCaches(queryClient);
       }
     },
     [csrfToken, queryClient]
@@ -219,9 +293,9 @@ export default function WorkbenchPage() {
       orderRef: string,
       items: DeductionDetail[],
       batchIds: CompletionBatchIds,
-      externalOrderId?: string
+      opts: { fulfilledForUndo: FulfilledForUndo[]; externalOrderId?: string }
     ) => {
-      const message = externalOrderId
+      const message = opts.externalOrderId
         ? `Order ${orderRef} fulfilled.`
         : `Order ${orderRef} completed.`;
 
@@ -235,7 +309,7 @@ export default function WorkbenchPage() {
             className="inline-flex items-center gap-1.5 rounded-md bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:bg-foreground/90 transition-colors shrink-0"
             onClick={() => {
               toast.dismiss(`undo-${orderRef}`);
-              handleUndoDeduction(items, orderRef, batchIds, externalOrderId);
+              handleUndoDeduction(items, orderRef, batchIds, opts);
             }}
           >
             <Undo2 className="h-3 w-3" />
@@ -716,12 +790,16 @@ export default function WorkbenchPage() {
           orderReference: completedRef,
           items: deductedItems,
           batchIds,
+          fulfilledForUndo,
           externalOrderId,
         }) => {
           refetchProducts();
           setMobileCartOpen(false);
           // Show undo toast for 10 seconds (Amendment 7: includes unfulfill for WC orders)
-          showUndoToast(completedRef, deductedItems, batchIds, externalOrderId);
+          showUndoToast(completedRef, deductedItems, batchIds, {
+            fulfilledForUndo,
+            externalOrderId,
+          });
           // Advance to the next order in the queue (Amendment 6: forces manual mode)
           const next = advanceQueue();
           if (next) {
