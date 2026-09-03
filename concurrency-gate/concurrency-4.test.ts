@@ -2485,6 +2485,11 @@ describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
       await installLedgerHold([P_APPROVED], 1);
 
       const reversing = reverseBatchRoute(batch);
+      // F9 (GX-1): the SECOND party starts only once the FIRST is proven to be
+      // inside the trigger — i.e. holding the batch's rows `FOR UPDATE`. Without
+      // this the attribution could win the batch lock outright and the scenario
+      // would assert a race it never ran (11c's idiom, `:3101`).
+      expect(await waitForSleepingSessions(probe, 1)).toBe(true);
       const waited = waitForLockWait(probe, 10_000);
       const attributing = attributeBatchRoute(batch, GATE_EXT_ORDER_ID);
       const [reversed, attributed, observed] = await Promise.all([
@@ -2528,6 +2533,10 @@ describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
       });
 
       const attributing = attributeBatchRoute(batch, GATE_EXT_ORDER_ID);
+      // F9 (GX-1): the same rendezvous the other way round — the attribution is
+      // proven to be inside its attempts-INSERT hold, with the batch's rows
+      // already locked, before the reverse is launched at it.
+      expect(await waitForSleepingSessions(probe, 1)).toBe(true);
       const waited = waitForLockWait(probe, 10_000);
       const reversing = reverseBatchRoute(batch);
       const [attributed, reversed, observed] = await Promise.all([

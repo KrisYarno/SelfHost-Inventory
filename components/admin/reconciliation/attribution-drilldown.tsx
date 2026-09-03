@@ -375,11 +375,19 @@ export const REVERSE_USE_UNFULFILL_COPY =
 export const MOVE_USE_REFULFIL_COPY =
   "This batch was fulfilled — unfulfill + refulfil at the correct location.";
 
-export const MOVE_MULTI_LOCATION_COPY =
-  "This batch's rows sit at more than one location — a move has no single source to reclassify from.";
+/**
+ * F2 (OC-2): A HIDDEN CONTROL LEAVES ONLY THE SENTENCE, so the sentence names
+ * the facts the admin then acts on. "More than one location" sends them back to
+ * the ledger to find out WHICH; the ids are already on screen, and the component
+ * has already computed both sets to decide the gate.
+ */
+export const MOVE_MULTI_LOCATION_COPY = (locationIds: number[]): string =>
+  `This batch's rows sit at ${locationIds.length} locations (${locationIds.join(', ')}) — ` +
+  `it cannot be moved as one`;
 
-export const MOVE_NULL_LOCATION_COPY =
-  "A ledger row in this batch names no location — it cannot be reversed or moved until that row is repaired.";
+export const MOVE_NULL_LOCATION_COPY = (rowIds: number[]): string =>
+  `Ledger row ${rowIds.join(', ')} names no location — ` +
+  `this batch cannot be reversed or moved until it is repaired`;
 
 export function AttributionDrilldown({
   row,
@@ -407,13 +415,20 @@ export function AttributionDrilldown({
   // row set IS the batch and "spans one location" is a fact rather than a guess.
   const ledgerRows = data?.ledgerRows ?? [];
   const detailReady = !detail.isLoading && !detail.isError && data !== undefined;
-  const anyNullLocation = ledgerRows.some((ledgerRow) => ledgerRow.locationId === null);
-  const spansManyLocations =
+  // THE IDS, not just the counts (F2): the sentences below name them, so the gate
+  // and the copy read the same two sets.
+  const nullLocationRowIds = ledgerRows
+    .filter((ledgerRow) => ledgerRow.locationId === null)
+    .map((ledgerRow) => ledgerRow.id);
+  const distinctLocationIds = Array.from(
     new Set(
       ledgerRows
         .map((ledgerRow) => ledgerRow.locationId)
         .filter((locationId): locationId is number => locationId !== null),
-    ).size > 1;
+    ),
+  ).sort((a, b) => a - b);
+  const anyNullLocation = nullLocationRowIds.length > 0;
+  const spansManyLocations = distinctLocationIds.length > 1;
   const writable = detailReady && row.canAttribute && !row.fulfilled;
 
   return (
@@ -475,13 +490,17 @@ export function AttributionDrilldown({
           {/* THE MOVE, beside the reverse — the SAME admissible set (the move
               refuses a fulfilment-evidenced batch too), narrowed by the two
               shapes it cannot reclassify. */}
-          {writable && !anyNullLocation && !spansManyLocations && ledgerRows.length > 0 && (
+          {writable && !anyNullLocation && !spansManyLocations && (
             <Button
               size="sm"
               variant="outline"
               data-testid={`move-drilldown-${row.batchId}`}
               onClick={() => {
                 const ledgerLocationId = ledgerRows[0].locationId as number;
+                // The row's order is a discriminated union: only one arm names a
+                // number, and the other two are a redaction and a tombstone.
+                const order = row.order;
+                const namesOrder = order !== null && "orderNumber" in order;
                 setMovingTarget({
                   // The drill-down looks at ONE batch, and it is a manual one by
                   // the gate above: `fulfilBatchId: null` suppresses the dialog's
@@ -492,10 +511,10 @@ export function AttributionDrilldown({
                   // The batch's outbound Σ as the REPORT read it — the SERVER's
                   // `pairs` decide what actually moved.
                   units: row.units,
-                  orderRef:
-                    row.order !== null && "orderNumber" in row.order
-                      ? row.order.orderNumber
-                      : row.batchId,
+                  orderRef: namesOrder ? order.orderNumber : row.batchId,
+                  // F13: a uuid introduced as `Order …` is a claim this surface
+                  // cannot support — the dialog's header reads the KIND.
+                  refKind: namesOrder ? "order" : "batch",
                   caller: "drilldown",
                 });
               }}
@@ -526,7 +545,7 @@ export function AttributionDrilldown({
               className="text-body-sm text-muted-foreground"
               data-testid="drilldown-move-null-location"
             >
-              {MOVE_NULL_LOCATION_COPY}
+              {MOVE_NULL_LOCATION_COPY(nullLocationRowIds)}
             </p>
           )}
 
@@ -535,7 +554,7 @@ export function AttributionDrilldown({
               className="text-body-sm text-muted-foreground"
               data-testid="drilldown-move-multi-location"
             >
-              {MOVE_MULTI_LOCATION_COPY}
+              {MOVE_MULTI_LOCATION_COPY(distinctLocationIds)}
             </p>
           )}
 

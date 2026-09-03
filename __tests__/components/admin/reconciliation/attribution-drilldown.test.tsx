@@ -18,7 +18,7 @@
  */
 
 import * as React from "react";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   MATCH_DEFINITIONS,
@@ -780,6 +780,53 @@ describe("the Reverse… control", () => {
     expect(screen.queryByTestId("reverse-scope")).not.toBeInTheDocument();
   });
 
+  // F5 (OC-5): `AttributeConfirm` leans on react-query's `isPending`, which is
+  // set ASYNCHRONOUSLY — two clicks inside one tick both see `false` and both
+  // POST. A reverse posted twice is a second restoration attempt on a ledger the
+  // first one is still writing, so the latch is SYNCHRONOUS, exactly as
+  // `MoveBatchDialog` does it.
+  it("a DOUBLE CLICK issues exactly ONE request", async () => {
+    const user = userEvent.setup();
+    let release: (value: { message: string }) => void = () => undefined;
+    reverseMutateAsync.mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    renderRow();
+
+    await user.click(screen.getByTestId("reverse-drilldown-batch-1"));
+    const submit = screen.getByTestId("reverse-confirm-submit");
+    await user.click(submit);
+    await user.click(submit);
+
+    expect(reverseMutateAsync).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      release({ message: "reversed 3 of 3 units" });
+    });
+  });
+
+  it("a SETTLED reverse cannot be run again from the same panel", async () => {
+    const user = userEvent.setup();
+    renderRow();
+
+    await user.click(screen.getByTestId("reverse-drilldown-batch-1"));
+    await user.click(screen.getByTestId("reverse-confirm-submit"));
+    // `onDone` closed the panel on the 200 — there is nothing left to click.
+    expect(screen.queryByTestId("reverse-confirm-submit")).not.toBeInTheDocument();
+    expect(reverseMutateAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("CANCEL closes the panel and makes no request", async () => {
+    const user = userEvent.setup();
+    renderRow();
+
+    await user.click(screen.getByTestId("reverse-drilldown-batch-1"));
+    expect(screen.getByTestId("reverse-scope")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("reverse-confirm-cancel"));
+    expect(screen.queryByTestId("reverse-scope")).not.toBeInTheDocument();
+    expect(reverseMutateAsync).not.toHaveBeenCalled();
+  });
+
   it("renders a refusal VERBATIM and keeps the panel open (the F7 rule)", async () => {
     const user = userEvent.setup();
     const refusal = Object.assign(
@@ -823,7 +870,7 @@ describe("the Reverse… control", () => {
     expect(screen.queryByTestId("reverse-drilldown-batch-1")).not.toBeInTheDocument();
     expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
     expect(screen.getByTestId("drilldown-move-null-location")).toHaveTextContent(
-      MOVE_NULL_LOCATION_COPY,
+      MOVE_NULL_LOCATION_COPY([11]),
     );
   });
 });
@@ -887,7 +934,7 @@ describe("the Move… control", () => {
 
     expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
     expect(screen.getByTestId("drilldown-move-multi-location")).toHaveTextContent(
-      MOVE_MULTI_LOCATION_COPY,
+      MOVE_MULTI_LOCATION_COPY([3, 7]),
     );
     // The REVERSE is still offered: it restores per key and needs no one source.
     expect(screen.getByTestId("reverse-drilldown-batch-1")).toBeInTheDocument();
@@ -899,7 +946,28 @@ describe("the Move… control", () => {
 
     expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
     expect(screen.getByTestId("drilldown-move-null-location")).toHaveTextContent(
-      MOVE_NULL_LOCATION_COPY,
+      MOVE_NULL_LOCATION_COPY([12]),
+    );
+  });
+
+  // F2 (OC-2): a hidden control leaves the admin with only the sentence, so the
+  // sentence has to name the thing to repair. Every offending row id, not "a
+  // ledger row".
+  it("the null-location sentence NAMES every row that has no location", () => {
+    setDetail(makeDetail({ ledgerRows: rowsAt(3, null, null) }));
+    renderRow();
+
+    expect(screen.getByTestId("drilldown-move-null-location")).toHaveTextContent(
+      "Ledger row 12, 13 names no location — this batch cannot be reversed or moved until it is repaired",
+    );
+  });
+
+  it("the multi-location sentence NAMES the distinct locations, and counts them", () => {
+    setDetail(makeDetail({ ledgerRows: rowsAt(7, 3, 3, 9) }));
+    renderRow();
+
+    expect(screen.getByTestId("drilldown-move-multi-location")).toHaveTextContent(
+      "This batch's rows sit at 3 locations (3, 7, 9) — it cannot be moved as one",
     );
   });
 
@@ -939,7 +1007,7 @@ describe("the Move… control", () => {
 
     // The batch's own location, named — and excluded from the choices.
     expect(screen.getByTestId("move-consequence")).toHaveTextContent(
-      "Moves this batch's books (5 units asked) from Location 3 to the chosen location",
+      "Moves this batch's books (5 units on the ledger) from Location 3 to the chosen location",
     );
     const options = Array.from(
       (screen.getByTestId("move-dialog-location") as HTMLSelectElement).options,
@@ -974,6 +1042,52 @@ describe("the Move… control", () => {
     expect(screen.queryByTestId("move-result-manual")).not.toBeInTheDocument();
   });
 
+  // F13 (GX-8): the drill-down falls back to the BATCH id when the row names no
+  // order number — and a uuid introduced as `Order …` is a claim this surface
+  // cannot support.
+  it("heads the dialog with `Batch …` when the ref IS the batch id", async () => {
+    const user = userEvent.setup();
+    setDetail(makeDetail({ ledgerRows: rowsAt(3) }));
+    renderRow({ order: null });
+
+    await user.click(screen.getByTestId("move-drilldown-batch-1"));
+    expect(
+      screen.getByText("Batch batch-1 — where did this stock actually leave from?"),
+    ).toBeInTheDocument();
+  });
+
+  it("heads it with `Order …` when the row names one", async () => {
+    const user = userEvent.setup();
+    setDetail(makeDetail({ ledgerRows: rowsAt(3) }));
+    renderRow({
+      order: {
+        id: "ord-9",
+        orderNumber: "#1009",
+        internalStatus: "completed",
+        platform: "woocommerce",
+        externalCreatedAt: null,
+      },
+    });
+
+    await user.click(screen.getByTestId("move-drilldown-batch-1"));
+    expect(
+      screen.getByText("Order #1009 — where did this stock actually leave from?"),
+    ).toBeInTheDocument();
+  });
+
+  // F3 (OC-3): the drill-down's units come OFF THE LEDGER, not off a cart the
+  // operator just filled — and the sentence says so.
+  it("labels its units as the LEDGER's, never as `asked`", async () => {
+    const user = userEvent.setup();
+    setDetail(makeDetail({ ledgerRows: rowsAt(3) }));
+    renderRow({ units: 5 });
+
+    await user.click(screen.getByTestId("move-drilldown-batch-1"));
+    expect(screen.getByTestId("move-consequence")).toHaveTextContent(
+      "Moves this batch's books (5 units on the ledger) from Location 3 to the chosen location",
+    );
+  });
+
   it("names the location by ID when the join gave no name", async () => {
     const user = userEvent.setup();
     setDetail(
@@ -985,7 +1099,7 @@ describe("the Move… control", () => {
 
     await user.click(screen.getByTestId("move-drilldown-batch-1"));
     expect(screen.getByTestId("move-consequence")).toHaveTextContent(
-      "(4 units asked) from Location 3 to the chosen location",
+      "(4 units on the ledger) from Location 3 to the chosen location",
     );
   });
 });

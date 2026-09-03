@@ -20,6 +20,15 @@
  *
  * Every refusal renders VERBATIM (the F7 rule). `ALREADY_REVERSED` arrives with
  * its own numbers in its sentence, which is exactly what an admin needs.
+ *
+ * THE LATCH IS SYNCHRONOUS (F5/OC-5), the way `MoveBatchDialog` does it. React
+ * Query's `isPending` is set on a later tick, so two clicks inside one tick both
+ * read `false` and both POST — and a reverse posted twice is a second
+ * restoration attempt against a ledger the first one is still writing. The
+ * `pending` flag is set BEFORE the await, and `result` latches the settled case.
+ *
+ * AND THERE IS A WAY OUT. A confirm panel with no Cancel leaves the admin
+ * closing the whole Sheet to change their mind (OC-5).
  */
 
 import * as React from "react";
@@ -45,17 +54,26 @@ export function ReverseConfirm({
 }) {
   const reverse = useReverseBatch(batchId);
   const [refusal, setRefusal] = React.useState<string | null>(null);
+  const [pending, setPending] = React.useState(false);
+  const [result, setResult] = React.useState<string | null>(null);
 
   async function submit() {
+    // SYNCHRONOUS, before the await: a second click in the same tick would
+    // otherwise read a `isPending` react-query has not set yet.
+    if (pending || result !== null) return;
     setRefusal(null);
+    setPending(true);
     try {
-      const result = await reverse.mutateAsync();
+      const answer = await reverse.mutateAsync();
+      setResult(answer.message);
       // The SERVER's own sentence, numbers and all — this surface never
       // recomputes what was restored.
-      toast.success(result.message);
+      toast.success(answer.message);
       onDone();
     } catch (err) {
       setRefusal((err as ReconciliationError).message);
+    } finally {
+      setPending(false);
     }
   }
 
@@ -78,14 +96,25 @@ export function ReverseConfirm({
         </p>
       )}
 
-      <Button
-        type="button"
-        data-testid="reverse-confirm-submit"
-        onClick={submit}
-        disabled={reverse.isPending}
-      >
-        Reverse this batch
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          data-testid="reverse-confirm-submit"
+          onClick={submit}
+          disabled={pending || result !== null || reverse.isPending}
+        >
+          Reverse this batch
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          data-testid="reverse-confirm-cancel"
+          onClick={onDone}
+          disabled={pending}
+        >
+          Cancel
+        </Button>
+      </div>
     </div>
   );
 }

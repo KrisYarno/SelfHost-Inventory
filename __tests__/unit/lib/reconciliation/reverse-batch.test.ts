@@ -25,6 +25,7 @@ import {
   NotAttributableRefusal,
   NullLocationRowRefusal,
   PartiallyStampedRefusal,
+  RestoreLocationMissing,
   TooManyRowsRefusal,
   UnattributedRefusal,
 } from '@/lib/reconciliation/refusals';
@@ -143,6 +144,12 @@ function makeTx(fixture: TxFixture = {}) {
   (tx.product.update as unknown as jest.Mock).mockImplementation(async () => {
     trace.push('product.update');
     return {};
+  });
+  // F8 (OC-8): the moved-to location, proved before the prelock writes there.
+  // Present unless a test says otherwise — the read only happens after a MOVE.
+  (tx.location.findUnique as unknown as jest.Mock).mockImplementation(async () => {
+    trace.push('restore location proof');
+    return { id: 7 };
   });
 
   return { tx, trace };
@@ -492,6 +499,67 @@ describe('reverseBatch — a batch whose stock was MOVED', () => {
     const err = await run(tx).catch((e) => e);
     expect(err).toBeInstanceOf(RestorationLedgerCorrupt);
     expect(err.eventId).toBe(43);
+  });
+
+  // F12 (GX-4): the membership check is SYMMETRIC. A move that relocated only
+  // SOME of the batch's products would send the un-moved product's restoration
+  // to the physical location its units never reached.
+  it('rung 8: a MOVE that relocated FEWER products than the batch carries is CORRUPT', async () => {
+    const { tx } = makeTx({
+      locked: [
+        row({ productId: 9, locationId: 3, delta: -4 }),
+        row({ id: 502, productId: 12, locationId: 3, delta: -2 }),
+      ],
+      restorationEvents: [moveEvent(MOVE_LEGS)],
+    });
+    const err = await run(tx).catch((e) => e);
+    expect(err).toBeInstanceOf(RestorationLedgerCorrupt);
+    expect(err.eventId).toBe(43);
+  });
+
+  // F8 (OC-8): the move's destination is a location an admin can delete. The
+  // prelock's materialize INSERT would die on `fk_pl_location` and reach the
+  // wire as a bare 500; this rung answers with a sentence instead.
+  it('refuses RESTORE_LOCATION_MISSING when the moved-to location is gone', async () => {
+    const { tx } = makeTx({
+      locked: [row({ locationId: 3, delta: -4 })],
+      restorationEvents: [moveEvent(MOVE_LEGS)],
+    });
+    (tx.location.findUnique as unknown as jest.Mock).mockResolvedValue(null);
+
+    const err = await run(tx).catch((e) => e);
+    expect(err).toBeInstanceOf(RestoreLocationMissing);
+    expect(err.code).toBe('RESTORE_LOCATION_MISSING');
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toBe(
+      'The location this batch was moved to (7) no longer exists — repair the move before reversing',
+    );
+    // Nothing was written: the refusal precedes the prelock.
+    expect(tx.inventory_logs.create).not.toHaveBeenCalled();
+  });
+
+  it('proves the moved-to location BETWEEN the ledger read and the prelock', async () => {
+    const { tx, trace } = makeTx({
+      locked: [row({ locationId: 3, delta: -4 })],
+      restorationEvents: [moveEvent(MOVE_LEGS)],
+    });
+    await run(tx);
+
+    expect(trace).toEqual([
+      'lock batch rows FOR UPDATE',
+      'auditLog.findMany',
+      'orderAttributionAttempt.findFirst',
+      'restoration ledger read',
+      'restore location proof',
+      'prelock materialize',
+      'prelock SELECT FOR UPDATE',
+      'inventory_logs.create',
+      'product_locations.upsert',
+    ]);
+    expect(tx.location.findUnique).toHaveBeenCalledWith({
+      where: { id: 7 },
+      select: { id: true },
+    });
   });
 
   it('rung 8: a MOVE naming a product this batch never carried is CORRUPT', async () => {

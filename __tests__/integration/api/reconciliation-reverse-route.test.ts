@@ -332,10 +332,14 @@ describe('POST .../reverse — the trust boundary (step 4)', () => {
     expect(db.userCompany.findFirst).toHaveBeenCalledTimes(1);
   });
 
-  it('an ADVISORY stamp (the order is gone) is ADMIN-ONLY, answered by the same 404', async () => {
+  // F11 (GX-3): the ADVISORY arm admits an ADMIN **or** the batch's PROVABLE
+  // ACTOR. A stamp whose order was deleted derives no membership, but the actor
+  // columns the aggregate already carries prove the same thing CX6-20 proves for
+  // an unstamped batch — and refusing the person who recorded it strands them.
+  it('an ADVISORY stamp refuses a NON-ACTOR non-admin with the same 404', async () => {
     mockRequireApproved.mockResolvedValue({ user: { id: 7, isAdmin: false } });
     const { trace } = makeDb({
-      locked: [row({ orderRecordId: 'ord-9', userId: 7 })],
+      locked: [row({ orderRecordId: 'ord-9', userId: 8 })],
       orderCompany: null,
     });
 
@@ -343,6 +347,29 @@ describe('POST .../reverse — the trust boundary (step 4)', () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'Resource not found', code: 'NOT_FOUND' });
     expect(trace).toEqual(['discovery aggregate', 'externalOrder.findUnique']);
+  });
+
+  it('an ADVISORY stamp admits the batch’s PROVABLE ACTOR', async () => {
+    mockRequireApproved.mockResolvedValue({ user: { id: 7, isAdmin: false } });
+    makeDb({
+      locked: [row({ orderRecordId: 'ord-9', userId: 7 }), row({ id: 502, orderRecordId: 'ord-9', userId: 7 })],
+      orderCompany: null,
+    });
+
+    const res = await reverse();
+    expect(res.status).toBe(200);
+    // No membership was derivable and none was asked for.
+    expect(db.userCompany.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('an ADVISORY stamp refuses a PARTIAL actor set (a row with no actor at all)', async () => {
+    mockRequireApproved.mockResolvedValue({ user: { id: 7, isAdmin: false } });
+    makeDb({
+      locked: [row({ orderRecordId: 'ord-9', userId: 7 }), row({ id: 502, orderRecordId: 'ord-9', userId: null })],
+      orderCompany: null,
+    });
+
+    expect((await reverse()).status).toBe(404);
   });
 
   it('an ADVISORY stamp locks NO order for an admin, and still stamps the CORRECTION rows', async () => {
@@ -504,6 +531,62 @@ describe('POST .../reverse — the bound and what gets locked', () => {
     const res = await reverse();
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'Resource not found', code: 'NOT_FOUND' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F10 (GX-2): the DEADLOCK RETRY, pinned. The S4-4 residual is real — the batch
+// `FOR UPDATE` next-key-locks the gap after the batch's last row — so this route
+// wraps the whole transaction in `withDeadlockRetry`. Two things have to hold:
+// a retried attempt answers 200, and the operation's batch id is minted OUTSIDE
+// the retry, so both attempts write under the SAME id (a fresh mint per attempt
+// would leave the first attempt's rolled-back id in the event of a retry that
+// half-committed, and split one act across two batches).
+// ---------------------------------------------------------------------------
+
+describe('POST .../reverse — withDeadlockRetry', () => {
+  /** Make the first `$transaction` do the work and then deadlock at commit. */
+  function deadlockOnce() {
+    const runTx = (db.$transaction as unknown as jest.Mock).getMockImplementation()!;
+    let attempts = 0;
+    (db.$transaction as unknown as jest.Mock).mockImplementation(async (cb: unknown) => {
+      attempts += 1;
+      if (attempts === 1) {
+        await runTx(cb);
+        throw Object.assign(new Error('Deadlock found when trying to get lock'), {
+          code: 'P2034',
+        });
+      }
+      return runTx(cb);
+    });
+  }
+
+  it('retries a P2034 and answers 200, under ONE operation batch id', async () => {
+    const { tx } = makeDb();
+    deadlockOnce();
+
+    const res = await reverse();
+    expect(res.status).toBe(200);
+    expect(db.$transaction).toHaveBeenCalledTimes(2);
+
+    const written = (tx.inventory_logs.create as unknown as jest.Mock).mock.calls.map(
+      (call) => call[0].data.batchId,
+    );
+    expect(written).toHaveLength(2);
+    expect(new Set(written).size).toBe(1);
+    // The event carries the same id, and so does the answer.
+    const events = (tx.auditLog.create as unknown as jest.Mock).mock.calls.map(
+      (call) => call[0].data.batchId,
+    );
+    expect(new Set(events)).toEqual(new Set(written));
+    expect((await res.json()).batchId).toBe(written[0]);
+  });
+
+  it('does NOT retry a typed refusal — ORDER_GONE runs the transaction ONCE', async () => {
+    makeDb({ locked: [row({ orderRecordId: 'ord-9' })], lockedOrder: null });
+
+    expect((await reverse()).status).toBe(404);
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
   });
 });
 

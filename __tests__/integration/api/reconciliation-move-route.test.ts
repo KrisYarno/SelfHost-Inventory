@@ -113,8 +113,11 @@ interface Fixture {
   lockedOrder?: { id: string; orderNumber: string } | null;
   /** `userCompany.findFirst` — undefined = not a member. */
   membership?: { userId: number } | null;
-  /** What `location.findUnique` answers, call by call (the belt reads twice). */
-  locations?: Array<{ id: number } | null>;
+  /**
+   * What `location.findUnique` answers, call by call (the belt reads twice). An
+   * `Error` entry makes that read REJECT — the belt's own probe failing (F4).
+   */
+  locations?: Array<{ id: number } | null | Error>;
   /** `prelockKey` -> what the LOCKED `product_locations` row holds. */
   stock?: Record<string, number>;
   /** Thrown by the FIRST ledger insert — the belt's FK stand-in. */
@@ -166,6 +169,7 @@ function makeDb(fixture: Fixture = {}) {
     const answers = fixture.locations;
     const answer = answers === undefined ? { id: PHYSICAL } : (answers[locationReads] ?? null);
     locationReads += 1;
+    if (answer instanceof Error) throw answer;
     return answer;
   });
 
@@ -381,10 +385,13 @@ describe('POST .../move — the trust boundary (step 4)', () => {
     expect(db.userCompany.findFirst).toHaveBeenCalledTimes(1);
   });
 
-  it('an ADVISORY stamp (the order is gone) is ADMIN-ONLY, answered by the same 404', async () => {
+  // F11 (GX-3): the ADVISORY arm admits an ADMIN **or** the batch's PROVABLE
+  // ACTOR — the same columns the unstamped arm reads, asked of a stamp whose
+  // order is gone.
+  it('an ADVISORY stamp refuses a NON-ACTOR non-admin with the same 404', async () => {
     mockRequireApproved.mockResolvedValue({ user: { id: 7, isAdmin: false } });
     const { trace } = makeDb({
-      locked: [row({ orderRecordId: 'ord-9', userId: 7 })],
+      locked: [row({ orderRecordId: 'ord-9', userId: 8 })],
       orderCompany: null,
     });
 
@@ -392,6 +399,31 @@ describe('POST .../move — the trust boundary (step 4)', () => {
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: 'Resource not found', code: 'NOT_FOUND' });
     expect(trace).toEqual(['discovery aggregate', 'externalOrder.findUnique']);
+  });
+
+  it('an ADVISORY stamp admits the batch’s PROVABLE ACTOR', async () => {
+    mockRequireApproved.mockResolvedValue({ user: { id: 7, isAdmin: false } });
+    makeDb({
+      locked: [row({ orderRecordId: 'ord-9', userId: 7 })],
+      orderCompany: null,
+    });
+
+    const res = await move();
+    expect(res.status).toBe(200);
+    expect(db.userCompany.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('an ADVISORY stamp refuses a PARTIAL actor set (a row with no actor at all)', async () => {
+    mockRequireApproved.mockResolvedValue({ user: { id: 7, isAdmin: false } });
+    makeDb({
+      locked: [
+        row({ orderRecordId: 'ord-9', userId: 7 }),
+        row({ id: 502, orderRecordId: 'ord-9', userId: null }),
+      ],
+      orderCompany: null,
+    });
+
+    expect((await move()).status).toBe(404);
   });
 
   it('an ADVISORY stamp locks NO order for an admin, and still stamps the TRANSFER legs', async () => {
@@ -540,6 +572,60 @@ describe('POST .../move — the bound and what gets locked', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// F10 (GX-2): the DEADLOCK RETRY, pinned. The S4-4 gap-lock residual applies to
+// this route exactly as it does to the reverse, so the whole transaction is
+// wrapped in `withDeadlockRetry` — and the operation's batch id is minted
+// OUTSIDE it, so a retried act writes under ONE id rather than splitting itself
+// across two.
+// ---------------------------------------------------------------------------
+
+describe('POST .../move — withDeadlockRetry', () => {
+  /** Make the first `$transaction` do the work and then deadlock at commit. */
+  function deadlockOnce() {
+    const runTx = (db.$transaction as unknown as jest.Mock).getMockImplementation()!;
+    let attempts = 0;
+    (db.$transaction as unknown as jest.Mock).mockImplementation(async (cb: unknown) => {
+      attempts += 1;
+      if (attempts === 1) {
+        await runTx(cb);
+        throw Object.assign(new Error('Deadlock found when trying to get lock'), {
+          code: 'P2034',
+        });
+      }
+      return runTx(cb);
+    });
+  }
+
+  it('retries a P2034 and answers 200, under ONE operation batch id', async () => {
+    const { tx } = makeDb();
+    deadlockOnce();
+
+    const res = await move();
+    expect(res.status).toBe(200);
+    expect(db.$transaction).toHaveBeenCalledTimes(2);
+
+    // Two TRANSFER legs per attempt, all four under the same batch id.
+    const written = (tx.inventory_logs.create as unknown as jest.Mock).mock.calls.map(
+      (call) => call[0].data.batchId,
+    );
+    expect(written).toHaveLength(4);
+    expect(new Set(written).size).toBe(1);
+    const events = (tx.auditLog.create as unknown as jest.Mock).mock.calls.map(
+      (call) => call[0].data.batchId,
+    );
+    expect(new Set(events)).toEqual(new Set(written));
+    expect((await res.json()).batchId).toBe(written[0]);
+  });
+
+  it('does NOT retry a typed refusal — ORDER_GONE runs the transaction ONCE', async () => {
+    makeDb({ locked: [row({ orderRecordId: 'ord-9' })], lockedOrder: null });
+
+    expect((await move()).status).toBe(404);
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('POST .../move — the destination is PROVED, twice (PK-11)', () => {
   it('an unknown location is a 400 BEFORE the transaction, never an FK 500', async () => {
     const { trace } = makeDb({ locations: [null] });
@@ -602,6 +688,26 @@ describe('POST .../move — the destination is PROVED, twice (PK-11)', () => {
       needed: 4,
     });
     // THE EXTRA READ, COUNTED: the belt re-reads on the refusal path too.
+    expect(trace.filter((step) => step === 'location.findUnique')).toHaveLength(2);
+  });
+
+  // THE BELT, ARM 4 (F4/OC-4): the belt's OWN read can fail. A probe that throws
+  // proves nothing about the location, so what the outer catch must see is the
+  // ORIGINAL error — never the probe's, which would turn a 400 refusal into a
+  // 500 about a database blip.
+  it('a probe that ITSELF fails rethrows the ORIGINAL error, so the refusal still renders', async () => {
+    const { trace } = makeDb({
+      locked: [row({ locationId: LEDGER })],
+      locations: [{ id: LEDGER }, new Error('ECONNRESET while reading locations')],
+    });
+
+    const res = await move({ physicalLocationId: LEDGER });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "Location 3 is already this batch's ledger location — choose a different one",
+      code: 'SAME_LOCATION',
+      locationId: LEDGER,
+    });
     expect(trace.filter((step) => step === 'location.findUnique')).toHaveLength(2);
   });
 

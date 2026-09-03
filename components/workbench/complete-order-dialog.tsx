@@ -522,7 +522,7 @@ export function CompleteOrderDialog({
             typeof entry.quantity === "number" && Number.isFinite(entry.quantity) && entry.quantity > 0
               ? entry.quantity
               : null;
-          if (!entry.itemId || productId === null || quantity === null || !selectedLocationId) {
+          if (!entry.itemId || productId === null || quantity === null) {
             console.warn(
               `Undo body: dropping fulfilled entry ${entry.itemId ?? "(unnamed)"} — the fulfil response did not name both a product and a quantity for it`
             );

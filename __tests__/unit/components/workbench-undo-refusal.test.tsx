@@ -42,6 +42,14 @@ jest.mock("@/hooks/use-inventory-products", () => ({
 }));
 jest.mock("@/hooks/use-low-stock-default", () => ({ useLowStockDefault: () => 10 }));
 
+// F14 (GX-9): the Undo moves stock through a RAW FETCH, so nothing in
+// react-query knows the books changed unless this page says so.
+const invalidateInventoryCachesMock = jest.fn();
+jest.mock("@/hooks/use-inventory-mutations", () => ({
+  ...jest.requireActual("@/hooks/use-inventory-mutations"),
+  invalidateInventoryCaches: (...args: unknown[]) => invalidateInventoryCachesMock(...args),
+}));
+
 const mockToast = jest.fn();
 const mockToastError = jest.fn();
 const mockToastSuccess = jest.fn();
@@ -125,6 +133,7 @@ function bodyOf(call: [string, RequestInit | undefined]): Record<string, unknown
 }
 
 beforeEach(() => {
+  invalidateInventoryCachesMock.mockClear();
   mockToast.mockClear();
   mockToastError.mockClear();
   mockToastSuccess.mockClear();
@@ -378,6 +387,33 @@ describe("workbench undo — the WC body is the fulfil envelope's", () => {
 // ---------------------------------------------------------------------------
 // THE REFUSALS (pack REV-22 F7)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// F14 (GX-9): THE CACHES ARE TOLD WHEN, AND ONLY WHEN, STOCK MOVED
+// ---------------------------------------------------------------------------
+
+describe("workbench undo — the react-query caches after a moved-stock undo", () => {
+  it("invalidates the inventory caches once stock has actually gone back", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeThenUndo(user);
+
+    await waitFor(() => expect(invalidateInventoryCachesMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("does NOT invalidate when BOTH legs refused — nothing moved", async () => {
+    reverseAnswer = {
+      status: 409,
+      body: { error: "This batch was already reversed", code: "ALREADY_REVERSED" },
+    };
+    unfulfillAnswer = { status: 409, body: { error: "already restored" } };
+
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeThenUndo(user);
+
+    await waitFor(() => expect(callsTo("/reverse")).toHaveLength(1));
+    expect(invalidateInventoryCachesMock).not.toHaveBeenCalled();
+  });
+});
 
 describe("workbench undo — a failed restore says what the server said", () => {
   it("surfaces the ORDER_GONE copy instead of 'check inventory manually'", async () => {

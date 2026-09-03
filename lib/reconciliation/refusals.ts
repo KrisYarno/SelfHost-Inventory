@@ -392,6 +392,27 @@ export class InsufficientAtSourceRefusal extends Error {
   }
 }
 
+/**
+ * THE MOVED-TO LOCATION IS GONE (F8 / OC-8). A batch whose stock a prior MOVE
+ * reclassified is restored at the PHYSICAL location, and an admin can delete an
+ * unused location between that move and this reverse. Left alone, the prelock's
+ * materialize INSERT dies on `fk_pl_location` and the operator reads a bare 500
+ * about a repair they can actually make — so the reverse core proves the
+ * location before it prelocks and names it here.
+ *
+ * An `AppError`, so `apiHandler` renders it and the one refusal mapper needs no
+ * arm for it (`RestorationLedgerCorrupt`'s idiom, `restorations.ts:90`).
+ */
+export class RestoreLocationMissing extends AppError {
+  constructor(public readonly physicalLocationId: number) {
+    super(
+      `The location this batch was moved to (${physicalLocationId}) no longer exists — repair the move before reversing`,
+      'RESTORE_LOCATION_MISSING',
+      409,
+    );
+  }
+}
+
 /** Every refusal the ROUTE renders as a structured envelope. */
 export type AttributionRefusal =
   | NotAttributableRefusal

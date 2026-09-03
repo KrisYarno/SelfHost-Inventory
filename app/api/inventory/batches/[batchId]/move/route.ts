@@ -123,6 +123,11 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     throw new AppError('Resource not found', 'NOT_FOUND', 404);
   }
 
+  // THE PROVABLE ACTOR, off the aggregate: every population row carries an
+  // actor, they are all the same person, and that person is the caller. Read
+  // once — the unstamped arm and the advisory arm ask the same question.
+  const provableActor = actorCount === 1 && actorRows === rowCount && firstActor === user.id;
+
   /** The location, proved — one statement, the same shape in both places. */
   const locationExists = async (): Promise<boolean> =>
     (await prisma.location.findUnique({
@@ -141,15 +146,15 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
       });
       if (orderRow) {
         await requireCompanyMembership(user.id, orderRow.companyId, user.isAdmin);
-      } else if (!user.isAdmin) {
-        // The advisory case: no company to check against, so an admin only —
-        // and the same 404, because the alternative discloses the batch.
+      } else if (!user.isAdmin && !provableActor) {
+        // The ADVISORY case (F11/GX-3): the stamp names an order a sync deleted,
+        // so no membership can be derived — but the actor columns prove the same
+        // thing here that they prove for an unstamped batch (CX6-20). An admin
+        // or the person who recorded every row may act; anyone else gets the
+        // same 404, because the alternative discloses the batch.
         throw new AppError('Resource not found', 'NOT_FOUND', 404);
       }
-    } else if (
-      !user.isAdmin &&
-      !(actorCount === 1 && actorRows === rowCount && firstActor === user.id)
-    ) {
+    } else if (!user.isAdmin && !provableActor) {
       // The core's rung 2 stays the authority on the LOCKED rows; this is the
       // same question asked of the aggregate, before anything is locked.
       throw new UnattributedRefusal();
@@ -241,7 +246,17 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
         ),
       );
     } catch (err) {
-      if (!(await locationExists())) {
+      // THE BELT'S OWN READ CAN FAIL (F4/OC-4). A probe that throws proves
+      // NOTHING about the location, so the original error is what the outer
+      // catch must see — the probe's would turn somebody's SAME_LOCATION 400
+      // into a 500 about a database blip.
+      let stillThere: boolean;
+      try {
+        stillThere = await locationExists();
+      } catch {
+        throw err;
+      }
+      if (!stillThere) {
         throw new AppError(`Location ${physicalLocationId} not found`, 'LOCATION_NOT_FOUND', 400);
       }
       throw err;

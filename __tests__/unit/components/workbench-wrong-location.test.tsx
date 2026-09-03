@@ -213,7 +213,13 @@ describe("the workbench toast — the Wrong location control", () => {
     expect(screen.queryByTestId("wrong-location-ORD-1")).toBeNull();
   });
 
-  it("dismisses the completion toast before opening the dialog (R7-16)", async () => {
+  // F1 (OC-1) REPLACES the old "dismisses before opening" pin. Dismissing the
+  // completion toast on OPEN destroyed the Undo for anyone who then cancelled or
+  // was refused: the toast is the only place the Undo lives, and there is no way
+  // back to it. So the dismissal waits for the move to RESOLVE. While the dialog
+  // is open the toast stays behind it, running its own 10 s clock — stated, and
+  // the right side of the trade.
+  it("opening the dialog does NOT dismiss the completion toast", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     await completeAndShowToast();
 
@@ -221,8 +227,88 @@ describe("the workbench toast — the Wrong location control", () => {
       await user.click(screen.getByTestId("wrong-location-ORD-1"));
     });
 
-    expect(mockToastDismiss).toHaveBeenCalledWith("undo-ORD-1");
+    expect(mockToastDismiss).not.toHaveBeenCalled();
     expect(screen.getByTestId("move-dialog-location")).toBeInTheDocument();
+    // Still MOUNTED, behind the page-level modal — `getByRole` cannot see it
+    // while Radix has `aria-hidden` on the rest of the document, which is
+    // exactly the stated posture: the toast sits behind the dialog.
+    expect(screen.getByText("Undo")).toBeInTheDocument();
+  });
+
+  it("CANCELLING leaves the Undo reachable — nothing was dismissed", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    await act(async () => {
+      await user.keyboard("{Escape}");
+    });
+
+    expect(screen.queryByTestId("move-dialog-location")).toBeNull();
+    expect(mockToastDismiss).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /Undo/ })).toBeInTheDocument();
+    expect(callsTo("/move")).toHaveLength(0);
+    // The Undo still WORKS: clicking it reverses, exactly as it would have
+    // before the dialog was ever opened.
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: /Undo/ }));
+    });
+    await waitFor(() => expect(callsTo("/reverse")).toHaveLength(1));
+  });
+
+  it("a CONFIRMED move dismisses the completion toast — the decision is made", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+    await waitFor(() => expect(callsTo("/move")).toHaveLength(1));
+
+    await waitFor(() => expect(mockToastDismiss).toHaveBeenCalledWith("undo-ORD-1"));
+  });
+
+  it("a REFUSED move leaves the Undo standing", async () => {
+    moveAnswer = {
+      status: 409,
+      body: {
+        error: "This batch has already been put back (3 units)",
+        code: "BATCH_RESTORED",
+        restoredUnits: 3,
+      },
+    };
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+    await waitFor(() =>
+      expect(screen.getByTestId("move-dialog-refusal")).toBeInTheDocument(),
+    );
+
+    expect(mockToastDismiss).not.toHaveBeenCalled();
+    expect(screen.getByText("Undo")).toBeInTheDocument();
+  });
+
+  // F13 (GX-8): the workbench always hands over an ORDER reference.
+  it("heads the dialog with `Order …` — the workbench's ref is the order's", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+
+    expect(
+      screen.getByText("Order ORD-1 — where did this stock actually leave from?"),
+    ).toBeInTheDocument();
   });
 
   it("the dialog is mounted at PAGE level — it survives the toast node unmounting", async () => {

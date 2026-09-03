@@ -48,6 +48,7 @@ function target(over: Partial<MoveTarget> = {}): MoveTarget {
     ledgerLocationName: "Main",
     units: 5,
     orderRef: "ORD-1",
+    refKind: "order",
     caller: "workbench",
     ...over,
   };
@@ -113,12 +114,24 @@ describe("MoveBatchDialog — the select", () => {
   });
 });
 
-describe("MoveBatchDialog — the consequence line names the ASKED units", () => {
-  it("says whose number it is, and where the books are moving FROM", () => {
-    renderDialog({ units: 5, ledgerLocationName: "Main" });
+describe("MoveBatchDialog — the consequence line's units follow the CALLER (F3)", () => {
+  // The workbench's number is what the completion ASKED for, seconds ago, and
+  // the server may yet move less. The drill-down's is the batch's outbound Σ as
+  // the report READ it off the ledger. Two different facts, two labels — one
+  // number presented as the other is the untruthful half of this sentence.
+  it("the WORKBENCH's units are the ones it ASKED for", () => {
+    renderDialog({ units: 5, ledgerLocationName: "Main", caller: "workbench" });
 
     expect(screen.getByTestId("move-consequence")).toHaveTextContent(
       "Moves this batch's books (5 units asked) from Main to the chosen location — the order stays attributed",
+    );
+  });
+
+  it("the DRILL-DOWN's units are the ones ON THE LEDGER", () => {
+    renderDialog({ units: 5, ledgerLocationName: "Main", caller: "drilldown" });
+
+    expect(screen.getByTestId("move-consequence")).toHaveTextContent(
+      "Moves this batch's books (5 units on the ledger) from Main to the chosen location — the order stays attributed",
     );
   });
 
@@ -134,6 +147,27 @@ describe("MoveBatchDialog — the consequence line names the ASKED units", () =>
     expect(screen.getByTestId("move-result-manual")).toHaveTextContent(
       "manual leg: moved 4 units",
     );
+  });
+});
+
+describe("MoveBatchDialog — the header names what the ref actually IS (F13)", () => {
+  // The drill-down falls back to the BATCH id when the row names no order
+  // number, and a uuid introduced as `Order <uuid>` is a claim the surface
+  // cannot support. `refKind` says which of the two the caller handed over.
+  it("an ORDER ref reads `Order …`", () => {
+    renderDialog({ orderRef: "ORD-1", refKind: "order" });
+
+    expect(
+      screen.getByText("Order ORD-1 — where did this stock actually leave from?"),
+    ).toBeInTheDocument();
+  });
+
+  it("a BATCH ref reads `Batch …`", () => {
+    renderDialog({ orderRef: MANUAL_BATCH, refKind: "batch" });
+
+    expect(
+      screen.getByText(`Batch ${MANUAL_BATCH} — where did this stock actually leave from?`),
+    ).toBeInTheDocument();
   });
 });
 

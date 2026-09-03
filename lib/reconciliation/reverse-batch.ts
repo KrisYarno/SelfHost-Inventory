@@ -28,8 +28,9 @@
  *
  * THE STATEMENT ORDER IS THE CONTRACT (I-R1, spec §2.7(4)): the batch's rows
  * `FOR UPDATE` (inside the preamble) → the evidence → the latest attempt → the
- * restoration ledger (plain, and fresh because the lock precedes it) → the
- * canonical prelock → the writes, in `(productId, locationId)` ascending order.
+ * restoration ledger (plain, and fresh because the lock precedes it) → [after a
+ * MOVE only: the moved-to location, proved] → the canonical prelock → the
+ * writes, in `(productId, locationId)` ascending order.
  *
  * NO ATTEMPT ROW. A reverse is not an attribution and files none — the attempts
  * allow-list stays at five writers, and this module imports none of them.
@@ -51,6 +52,7 @@ import {
   FulfilledBatchRefusal,
   NullLocationRowRefusal,
   PartiallyStampedRefusal,
+  RestoreLocationMissing,
   UnattributedRefusal,
 } from '@/lib/reconciliation/refusals';
 
@@ -176,15 +178,19 @@ export async function reverseBatch(
 
   const move = prior.move;
   if (move !== null) {
-    // THE MOVE AND THE ROWS MUST DESCRIBE ONE BATCH (G6-3/G7-1). A move event
-    // whose ledger location is not where these rows sit, or which names a
-    // product this batch never carried, is not this batch's move — and a
-    // remainder computed from it would restore units at a location the stock
-    // never reached.
+    // THE MOVE AND THE ROWS MUST DESCRIBE ONE BATCH (G6-3/G7-1, F12/GX-4). A
+    // move event whose ledger location is not where these rows sit, or whose
+    // product set is not EXACTLY the one these rows carry, is not this batch's
+    // move — and a remainder computed from it would restore units at a location
+    // the stock never reached. The membership is checked BOTH ways: a move that
+    // relocated a product this batch never carried is as corrupt as one that
+    // relocated only some of the products it did.
     const carried = new Set(b.rows.map((r) => r.productId));
+    const moved = new Set(move.productIds);
     const mismatched =
       b.rows.some((r) => r.locationId !== move.ledgerLocationId) ||
-      move.productIds.some((productId) => !carried.has(productId));
+      move.productIds.some((productId) => !carried.has(productId)) ||
+      b.rows.some((r) => !moved.has(r.productId));
     if (mismatched) {
       throw new RestorationLedgerCorrupt(move.eventId);
     }
@@ -203,8 +209,18 @@ export async function reverseBatch(
   });
   prior.restoredByKey.forEach((units, key) => {
     const cap = expected.get(key);
-    if (cap === undefined || units < 0 || units > cap) {
-      throw new RestorationLedgerCorrupt(prior.eventIdByKey.get(key) ?? move?.eventId ?? 0);
+    if (cap === undefined || units > cap) {
+      // The event that PUT the units there — never a fabricated id. The two maps
+      // are built together over one key set (`restorations.ts:255-256`), so an
+      // absent key is this module's own bug and says so rather than sending an
+      // operator to look up event 0.
+      const eventId = prior.eventIdByKey.get(key);
+      if (eventId === undefined) {
+        throw new Error(
+          `reverseBatch: the restoration ledger named units at ${key} with no event — priorRestorations is inconsistent`,
+        );
+      }
+      throw new RestorationLedgerCorrupt(eventId);
     }
   });
 
@@ -230,6 +246,23 @@ export async function reverseBatch(
 
   if (groups.length === 0) {
     throw new AlreadyReversedRefusal(previouslyRestored, totalUnits);
+  }
+
+  // 10b. THE MOVED-TO LOCATION, PROVED (F8/OC-8). After a MOVE these units are
+  //      restored at the PHYSICAL location, and an admin can delete an unused
+  //      location between that move and now: the prelock's materialize INSERT
+  //      would die on `fk_pl_location` and reach the operator as a bare 500. ONE
+  //      cheap read, only on the moved path, and only once there is something to
+  //      write (an already-reversed batch answers ALREADY_REVERSED above and
+  //      needs no location at all).
+  if (move !== null) {
+    const restoreLocation = await tx.location.findUnique({
+      where: { id: move.physicalLocationId },
+      select: { id: true },
+    });
+    if (restoreLocation === null) {
+      throw new RestoreLocationMissing(move.physicalLocationId);
+    }
   }
 
   // 11. THE CANONICAL PRELOCK, over the keys this call will write. The rows it

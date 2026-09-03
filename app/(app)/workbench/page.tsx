@@ -352,10 +352,13 @@ export default function WorkbenchPage() {
                   data-testid={`wrong-location-${orderRef}`}
                   className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors shrink-0"
                   onClick={() => {
-                    // The completion toast must not stay live behind the dialog
-                    // (R7-16), and NOTHING else happens here: the decision is the
-                    // dialog's.
-                    toast.dismiss(`undo-${orderRef}`);
+                    // NOTHING but page state (F1/OC-1). Dismissing the completion
+                    // toast here destroyed the Undo for anyone who then cancelled
+                    // or was refused — the toast is the only place the Undo
+                    // lives. The dismissal waits for the move to RESOLVE
+                    // (`confirmMove`); until then the toast sits behind the
+                    // dialog running its own 10 s clock, which is the right side
+                    // of that trade.
                     setMoveTarget({
                       batchIds,
                       ledgerLocationId: selectedLocationId as number,
@@ -363,6 +366,8 @@ export default function WorkbenchPage() {
                         selectedLocation?.name ?? `Location ${selectedLocationId}`,
                       units: manualUnits,
                       orderRef,
+                      // The workbench's ref IS the order's (F13).
+                      refKind: "order",
                       caller: "workbench",
                     });
                   }}
@@ -418,6 +423,10 @@ export default function WorkbenchPage() {
       // Stock moved through a raw fetch, so the react-query caches every other
       // page reads have to be told.
       invalidateInventoryCaches(queryClient);
+      // F1: NOW the completion toast goes. The decision is made and the books
+      // have moved, so the Undo behind the dialog no longer describes anything
+      // the operator would want to click.
+      if (moveTarget !== null) toast.dismiss(`undo-${moveTarget.orderRef}`);
       return body as unknown as MoveResponse;
     },
     [moveTarget, csrfToken, queryClient]

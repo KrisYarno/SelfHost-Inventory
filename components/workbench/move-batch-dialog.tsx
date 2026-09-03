@@ -20,10 +20,12 @@
  * order leg gets a SENTENCE and no request — a control whose only outcome is a
  * server refusal is not an affordance.
  *
- * THE UNITS IN THE CONSEQUENCE LINE ARE THE CALLER'S, AND SAY SO. `units` is
- * what the completion ASKED for; the SERVER decides what actually moved and
- * answers with its own `pairs`. The result line prints the server's figure, and
- * the consequence line labels its own as asked (truthful data).
+ * THE UNITS IN THE CONSEQUENCE LINE ARE THE CALLER'S, AND SAY WHOSE (F3). From
+ * the workbench `units` is what the completion ASKED for; from the drill-down it
+ * is the batch's outbound Σ as the report read it OFF THE LEDGER. `caller`
+ * selects which of the two the sentence claims to hold. Either way the SERVER
+ * decides what actually moved and answers with its own `pairs`, and the result
+ * line prints that figure (truthful data).
  *
  * EVERY REFUSAL RENDERS VERBATIM (the F7 rule). `ALREADY_MOVED`,
  * `INSUFFICIENT_AT_SOURCE` and `SAME_LOCATION` all arrive with their own numbers
@@ -74,11 +76,29 @@ export type MoveTarget = {
   /** The location the batch's rows name — excluded from the select. */
   ledgerLocationId: number;
   ledgerLocationName: string;
-  /** The units the CALLER asked for, labelled as asked in the consequence line. */
+  /** The CALLER's units, labelled by `caller` in the consequence line. */
   units: number;
   orderRef: string;
+  /**
+   * WHAT `orderRef` ACTUALLY IS (F13). The drill-down falls back to the BATCH id
+   * when the row names no order number, and a uuid introduced as "Order …" is a
+   * claim this dialog is in no position to make.
+   */
+  refKind: "order" | "batch";
   caller: "workbench" | "drilldown";
 };
+
+/**
+ * WHOSE NUMBER THIS IS (F3). The workbench asks about a completion that happened
+ * seconds ago, so its figure is what the cart ASKED for and the server may still
+ * move less; the drill-down reads the batch's outbound Σ off the ledger. Two
+ * different facts, and the sentence says which one it is holding.
+ */
+function unitsLabel(target: MoveTarget): string {
+  return target.caller === "workbench"
+    ? `${target.units} units asked`
+    : `${target.units} units on the ledger`;
+}
 
 /** VERBATIM (pack CB2c.4, the OC-1 rule): where a fulfilment's repair lives. */
 export const MOVE_ORDER_LEG_SENTENCE =
@@ -150,14 +170,15 @@ export function MoveBatchDialog({
           <DialogDescription>
             {target === null
               ? ""
-              : `Order ${target.orderRef} — where did this stock actually leave from?`}
+              : `${target.refKind === "batch" ? "Batch" : "Order"} ${target.orderRef} — ` +
+                "where did this stock actually leave from?"}
           </DialogDescription>
         </DialogHeader>
 
         {target !== null && (
           <div className="space-y-3">
             <p className="text-body-sm text-muted-foreground" data-testid="move-consequence">
-              {`Moves this batch's books (${target.units} units asked) from ` +
+              {`Moves this batch's books (${unitsLabel(target)}) from ` +
                 `${target.ledgerLocationName} to the chosen location — the order stays attributed`}
             </p>
 
