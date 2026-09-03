@@ -62,7 +62,8 @@ type DiscoveryRow = {
  * row; the trust boundary runs BEFORE any refusal that could describe the batch;
  * the 50-row bound is absolute; a mixed batch locks no order and lets the
  * preamble answer from the locked rows; and ONE 404 sentence covers "no such
- * batch", "not a member" and "that stamp is advisory and you are not an admin".
+ * batch", "not a member" and "that stamp is advisory and you are neither an
+ * admin nor the batch's provable actor" (F11).
  *
  * TWO THINGS THIS ROUTE HAS THAT THE REVERSE DOES NOT:
  *

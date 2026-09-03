@@ -64,13 +64,15 @@ type DiscoveryRow = {
  *   STAMPED, and the order exists → per-company membership decides (a miss is
  *     the house 404, so a non-member cannot enumerate batches).
  *   STAMPED, and the order is GONE → the stamp is ADVISORY (spec §2.7(1)): no
- *     membership can be derived from it, so the act is admin-only, nothing is
- *     locked, and the CORRECTION rows still carry the soft reference.
+ *     membership can be derived from it, so the act is open to an admin OR the
+ *     batch's PROVABLE ACTOR (F11 — every row this batch's own, all carrying
+ *     this user's id), nothing is locked, and the CORRECTION rows still carry
+ *     the soft reference.
  *   UNSTAMPED → the batch's own rows name their actor: that person, or an admin.
  *
  * ONE 404 SENTENCE covers "no such batch", "not a member" and "an advisory stamp
- * and you are not an admin" — three different facts an outsider must not be able
- * to tell apart.
+ * on a batch you cannot prove is yours" — three different facts an outsider must
+ * not be able to tell apart.
  *
  * THE ROUTE IS NOT A DECISION SITE (spec REV-14). It discovers, authorises,
  * bounds, locks and records; the ladder lives in the core, and the exception

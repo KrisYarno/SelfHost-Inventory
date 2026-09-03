@@ -2481,8 +2481,11 @@ describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
     try {
       await warmUp(probe);
       // The reverse is held at its CORRECTION insert while the attribution
-      // queues on the batch rows it already holds `FOR UPDATE`.
-      await installLedgerHold([P_APPROVED], 1);
+      // queues on the batch rows it already holds `FOR UPDATE`. THREE seconds,
+      // 11c's value (F18): one is not enough window for the rendezvous, the
+      // second party's launch and `waitForLockWait`'s own poll to land inside
+      // it on a loaded box — the hold would expire and the race go unobserved.
+      await installLedgerHold([P_APPROVED], 3);
 
       const reversing = reverseBatchRoute(batch);
       // F9 (GX-1): the SECOND party starts only once the FIRST is proven to be
@@ -2529,7 +2532,8 @@ describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
         rowAlias: "NEW",
         guardColumn: "batchId",
         ids: [batch],
-        seconds: 1,
+        // 11c's three seconds, for the reason above (F18).
+        seconds: 3,
       });
 
       const attributing = attributeBatchRoute(batch, GATE_EXT_ORDER_ID);

@@ -17,7 +17,7 @@
 //   4. PARAPHRASING A REFUSAL. The server's sentence renders verbatim (F7).
 
 import * as React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 jest.mock("@/hooks/use-locations", () => ({
@@ -212,6 +212,32 @@ describe("MoveBatchDialog — ONE request, for the manual batch only (PK-1)", ()
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  // F16: A TRULY SYNCHRONOUS LATCH. React state is set on a LATER render, so two
+  // clicks dispatched inside ONE tick both read the old `pending` and both post;
+  // `disabled` is the same story, because it is only true after that render. The
+  // awaited pin below cannot see this — awaiting flushes the render between the
+  // two clicks. So the latch is a REF, written before the await.
+  it("two clicks in ONE tick still issue exactly ONE request", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    let release: (value: MoveResponse) => void = () => undefined;
+    const onConfirm = jest.fn(
+      () => new Promise<MoveResponse>((resolve) => { release = resolve; }),
+    );
+    renderDialog({}, onConfirm as unknown as jest.Mock);
+
+    await user.selectOptions(locationSelect(), "2");
+    const button = confirmButton();
+    await act(async () => {
+      button.click();
+      button.click();
+    });
+
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      release(answer());
+    });
+  });
+
   it("a second click cannot move the same batch twice", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     const { onConfirm } = renderDialog();
@@ -268,6 +294,27 @@ describe("MoveBatchDialog — refusals render VERBATIM (the F7 rule)", () => {
     );
     // A refused move can be retried at another location.
     expect(confirmButton()).toBeEnabled();
+  });
+
+  // F20 (GX-6): a 2xx whose body is not JSON resolves `{}` in the workbench's
+  // caller. `result.pairs.reduce` would then throw IN RENDER — after the move
+  // was made and the toast dismissed — leaving the operator with a blank dialog
+  // and no idea the stock had moved. The leg is stated WITHOUT a number the
+  // dialog cannot stand behind.
+  it("a 2xx with no `pairs` states the leg with NO number, and warns", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    const onConfirm = jest.fn(async () => ({}) as unknown as MoveResponse);
+    renderDialog({}, onConfirm as unknown as jest.Mock);
+
+    await user.selectOptions(locationSelect(), "2");
+    await user.click(confirmButton());
+
+    await waitFor(() => expect(screen.getByTestId("move-result-manual")).toBeInTheDocument());
+    expect(screen.getByTestId("move-result-manual")).toHaveTextContent("manual leg: moved");
+    expect(screen.getByTestId("move-result-manual").textContent).not.toMatch(/\d/);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("a rejection with no sentence still says something honest, never a blank", async () => {

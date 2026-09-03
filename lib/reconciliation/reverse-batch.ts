@@ -111,8 +111,12 @@ export async function reverseBatch(
   // 2. THE ACTOR RULE, FIRST among this core's own refusals (spec REV-9 CX6-20).
   //    Authorisation precedes every DATA-BEARING refusal: a caller who may not
   //    touch this batch must not learn its shape by being told why it refused.
-  //    Evaluated on the LOCKED rows — the route's aggregate decided the same
-  //    question a moment earlier, and this is the copy that holds a lock.
+  //    Evaluated on the LOCKED rows, and NOT the route's decision re-checked
+  //    (F22): this rung keys on `b.current === null`, so a STAMPED batch passes
+  //    it untested — the core cannot see that the stamped order is GONE, which
+  //    is the fact the route's ADVISORY arm turns on. So that arm is ROUTE-ONLY:
+  //    an IN-PROCESS caller (B3's `correctByReference`) must authorise a stamped
+  //    batch itself — membership, or the provable actor — before calling here.
   if (
     b.current === null &&
     !input.actor.isAdmin &&

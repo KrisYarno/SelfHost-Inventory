@@ -83,6 +83,24 @@ const DEDUCT_EVENT: AuditRow = {
   details: { intent: 'order' },
 };
 
+/**
+ * A PRIOR MOVE of the default batch: product 9 relocated from the ledger
+ * location 3 to the physical location 7, as its two TRANSFER legs recorded it.
+ */
+const MOVE_EVENT: RestorationEvent = {
+  id: 40,
+  actionType: 'INVENTORY_BATCH_MOVE',
+  details: {
+    ledgerLocationId: 3,
+    physicalLocationId: 7,
+    rows: [
+      { productId: 9, locationId: 7, delta: -4 },
+      { productId: 9, locationId: 3, delta: 4 },
+    ],
+  },
+  createdAt: new Date('2026-09-02T09:00:00.000Z'),
+};
+
 function row(over: Partial<LockedRow> = {}): LockedRow {
   return {
     id: 501,
@@ -109,6 +127,11 @@ interface Fixture {
   lockedOrder?: { id: string; orderNumber: string } | null;
   /** `userCompany.findFirst` — undefined = not a member. */
   membership?: { userId: number } | null;
+  /**
+   * `location.findUnique` on the MOVED-TO location (rung 10b). Undefined = the
+   * location exists; null = an admin deleted it after the move.
+   */
+  restoreLocation?: { id: number } | null;
 }
 
 function aggregate(locked: LockedRow[], over: Record<string, unknown> = {}) {
@@ -176,6 +199,15 @@ function makeDb(fixture: Fixture = {}) {
       }
       trace.push('auditLog.findMany');
       return fixture.auditEvents ?? [DEDUCT_EVENT];
+    },
+  );
+  // ALWAYS DEFINED (F17). A bare `mockDeep` resolves `undefined`, which is not
+  // `null` — the rung-10b proof would pass vacuously and its 409 would be
+  // unreachable from any test in this file.
+  (tx.location.findUnique as unknown as jest.Mock).mockImplementation(
+    async (args: { where: { id: number } }) => {
+      trace.push('location.findUnique');
+      return fixture.restoreLocation === undefined ? { id: args.where.id } : fixture.restoreLocation;
     },
   );
   (tx.orderAttributionAttempt.findFirst as unknown as jest.Mock).mockImplementation(async () => {
@@ -703,6 +735,46 @@ describe('POST .../reverse — the core’s refusals, through the ONE mapper', (
         'Restoration event 41 is malformed — the batch cannot be reversed or moved until it is repaired',
       code: 'RESTORATION_LEDGER_CORRUPT',
     });
+  });
+
+  // F17 (F8/OC-8 ON THE WIRE). The rung-10b proof was pinned in the core's own
+  // suite; this is the sentence an operator actually reads, through
+  // `refusalResponse` (which does not know this refusal), the rethrow, and
+  // `apiHandler`. Its sibling proves the pin is not vacuous: the SAME fixture
+  // with the location present reverses, at the moved-to location.
+  it('RESTORE_LOCATION_MISSING 409s when the moved-to location is gone', async () => {
+    const { trace } = makeDb({
+      locked: [row({ productId: 9, locationId: 3, delta: -4 })],
+      restorationEvents: [MOVE_EVENT],
+      restoreLocation: null,
+    });
+
+    const res = await reverse();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error:
+        'The location this batch was moved to (7) no longer exists — repair the move before reversing',
+      code: 'RESTORE_LOCATION_MISSING',
+    });
+    // The proof runs BEFORE the prelock — nothing was locked or written.
+    expect(trace).toContain('location.findUnique');
+    expect(trace).not.toContain('prelock SELECT FOR UPDATE');
+    expect(trace).not.toContain('inventory_logs.create');
+  });
+
+  it('restores at the MOVED-TO location when it is still there', async () => {
+    makeDb({
+      locked: [row({ productId: 9, locationId: 3, delta: -4 })],
+      restorationEvents: [MOVE_EVENT],
+      restoreLocation: { id: 7 },
+    });
+
+    const res = await reverse();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.physicalLocationId).toBe(7);
+    expect(body.rows).toEqual([{ productId: 9, locationId: 7, delta: 4 }]);
+    expect(body.restoredUnits).toBe(4);
   });
 });
 

@@ -21,11 +21,13 @@
  * Every refusal renders VERBATIM (the F7 rule). `ALREADY_REVERSED` arrives with
  * its own numbers in its sentence, which is exactly what an admin needs.
  *
- * THE LATCH IS SYNCHRONOUS (F5/OC-5), the way `MoveBatchDialog` does it. React
- * Query's `isPending` is set on a later tick, so two clicks inside one tick both
- * read `false` and both POST — and a reverse posted twice is a second
- * restoration attempt against a ledger the first one is still writing. The
- * `pending` flag is set BEFORE the await, and `result` latches the settled case.
+ * THE LATCH IS A REF (F5/OC-5, corrected by F16 — `MoveBatchDialog` had no latch
+ * of its own to copy, and now carries the same one). React Query's `isPending`
+ * is set on a later tick and so is React state, so two clicks inside ONE tick
+ * both read `false` and both POST — and a reverse posted twice is a second
+ * restoration attempt against a ledger the first one is still writing. A ref is
+ * written and read in the same statement, before the await; `result` latches the
+ * settled case.
  *
  * AND THERE IS A WAY OUT. A confirm panel with no Cancel leaves the admin
  * closing the whole Sheet to change their mind (OC-5).
@@ -55,12 +57,15 @@ export function ReverseConfirm({
   const reverse = useReverseBatch(batchId);
   const [refusal, setRefusal] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState(false);
+  /** The latch itself (F16). `pending` only drives the disabled attribute. */
+  const pendingRef = React.useRef(false);
   const [result, setResult] = React.useState<string | null>(null);
 
   async function submit() {
     // SYNCHRONOUS, before the await: a second click in the same tick would
-    // otherwise read a `isPending` react-query has not set yet.
-    if (pending || result !== null) return;
+    // otherwise read a `pending` neither react-query nor React has set yet.
+    if (pendingRef.current || result !== null) return;
+    pendingRef.current = true;
     setRefusal(null);
     setPending(true);
     try {
@@ -73,6 +78,7 @@ export function ReverseConfirm({
     } catch (err) {
       setRefusal((err as ReconciliationError).message);
     } finally {
+      pendingRef.current = false;
       setPending(false);
     }
   }

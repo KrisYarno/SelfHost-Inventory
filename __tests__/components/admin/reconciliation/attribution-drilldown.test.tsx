@@ -804,6 +804,31 @@ describe("the Reverse… control", () => {
     });
   });
 
+  // F16: the F5 latch was `useState`, which React sets on a LATER render — the
+  // pin above only passed because awaiting each click flushed that render in
+  // between. Two clicks dispatched inside ONE tick read the SAME closure, so the
+  // latch has to be a ref, written before the await.
+  it("two clicks in ONE tick still issue exactly ONE request", async () => {
+    const user = userEvent.setup();
+    let release: (value: { message: string }) => void = () => undefined;
+    reverseMutateAsync.mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    renderRow();
+
+    await user.click(screen.getByTestId("reverse-drilldown-batch-1"));
+    const submit = screen.getByTestId("reverse-confirm-submit");
+    await act(async () => {
+      submit.click();
+      submit.click();
+    });
+
+    expect(reverseMutateAsync).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      release({ message: "reversed 3 of 3 units" });
+    });
+  });
+
   it("a SETTLED reverse cannot be run again from the same panel", async () => {
     const user = userEvent.setup();
     renderRow();

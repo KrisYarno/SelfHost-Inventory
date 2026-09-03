@@ -62,6 +62,16 @@ export default function WorkbenchPage() {
    * dialog with it, mid-decision.
    */
   const [moveTarget, setMoveTarget] = useState<MoveTarget | null>(null);
+  /**
+   * THE COMPLETION TOAST'S OWN CLOCK (F15). Dismissal was never the only way to
+   * lose the Undo: the toast behind the dialog kept running its 10 s, so a slow
+   * decision or a late refusal destroyed it just as surely. This holds the
+   * CURRENT completion's re-issue closure — sonner updates a toast re-issued
+   * under its own id — so the move can stop that clock while the dialog is open
+   * and hand a fresh 10 s back when the decision goes the other way. Null once
+   * the move has succeeded: a dismissed Undo is never resurrected.
+   */
+  const reissueUndoToastRef = useRef<((duration: number) => void) | null>(null);
 
   // `selectedLocation` rides beside the id (R7-14): the toast names the LEDGER
   // location the completion deducted at, and a name read inside a callback would
@@ -328,70 +338,81 @@ export default function WorkbenchPage() {
       const orderLegOnly =
         batchIds.deductSimpleBatchId === null && batchIds.fulfilBatchId !== null;
 
-      toast(
-        <div className="flex w-full flex-col gap-2">
-          <div className="flex items-center justify-between w-full gap-3">
-            <span className="text-sm">
-              <span className="font-mono font-medium">{message}</span>
-            </span>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                className="inline-flex items-center gap-1.5 rounded-md bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:bg-foreground/90 transition-colors shrink-0"
-                onClick={() => {
-                  toast.dismiss(`undo-${orderRef}`);
-                  handleUndoDeduction(items, orderRef, batchIds, opts);
-                }}
-              >
-                <Undo2 className="h-3 w-3" />
-                Undo
-              </button>
-              {canMove && (
+      // ONE body, issued under ONE id, with the clock as its only variable
+      // (F15). Sonner treats a re-issue under a live id as an update.
+      const issue = (duration: number) => {
+        toast(
+          <div className="flex w-full flex-col gap-2">
+            <div className="flex items-center justify-between w-full gap-3">
+              <span className="text-sm">
+                <span className="font-mono font-medium">{message}</span>
+              </span>
+              <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
-                  data-testid={`wrong-location-${orderRef}`}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors shrink-0"
+                  className="inline-flex items-center gap-1.5 rounded-md bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:bg-foreground/90 transition-colors shrink-0"
                   onClick={() => {
-                    // NOTHING but page state (F1/OC-1). Dismissing the completion
-                    // toast here destroyed the Undo for anyone who then cancelled
-                    // or was refused — the toast is the only place the Undo
-                    // lives. The dismissal waits for the move to RESOLVE
-                    // (`confirmMove`); until then the toast sits behind the
-                    // dialog running its own 10 s clock, which is the right side
-                    // of that trade.
-                    setMoveTarget({
-                      batchIds,
-                      ledgerLocationId: selectedLocationId as number,
-                      ledgerLocationName:
-                        selectedLocation?.name ?? `Location ${selectedLocationId}`,
-                      units: manualUnits,
-                      orderRef,
-                      // The workbench's ref IS the order's (F13).
-                      refKind: "order",
-                      caller: "workbench",
-                    });
+                    toast.dismiss(`undo-${orderRef}`);
+                    handleUndoDeduction(items, orderRef, batchIds, opts);
                   }}
                 >
-                  Wrong location…
+                  <Undo2 className="h-3 w-3" />
+                  Undo
                 </button>
-              )}
+                {canMove && (
+                  <button
+                    type="button"
+                    data-testid={`wrong-location-${orderRef}`}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors shrink-0"
+                    onClick={() => {
+                      // NOTHING but page state (F1/OC-1). Dismissing the completion
+                      // toast here destroyed the Undo for anyone who then cancelled
+                      // or was refused — the toast is the only place the Undo
+                      // lives. The dismissal waits for the move to RESOLVE
+                      // (`confirmMove`).
+                      setMoveTarget({
+                        batchIds,
+                        ledgerLocationId: selectedLocationId as number,
+                        ledgerLocationName:
+                          selectedLocation?.name ?? `Location ${selectedLocationId}`,
+                        units: manualUnits,
+                        orderRef,
+                        // The workbench's ref IS the order's (F13).
+                        refKind: "order",
+                        caller: "workbench",
+                      });
+                      // F15: and the toast STOPS COUNTING while the decision is
+                      // being made. Behind the dialog it was still running its
+                      // 10 s, so a slow decision lost the Undo anyway.
+                      issue(Infinity);
+                    }}
+                  >
+                    Wrong location…
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-          {orderLegOnly && (
-            <span
-              className="text-xs text-muted-foreground"
-              data-testid={`order-leg-only-${orderRef}`}
-            >
-              {MOVE_ORDER_LEG_SENTENCE}
-            </span>
-          )}
-        </div>,
-        {
-          id: `undo-${orderRef}`,
-          duration: 10000,
-          dismissible: true,
-        }
-      );
+            {orderLegOnly && (
+              <span
+                className="text-xs text-muted-foreground"
+                data-testid={`order-leg-only-${orderRef}`}
+              >
+                {MOVE_ORDER_LEG_SENTENCE}
+              </span>
+            )}
+          </div>,
+          {
+            id: `undo-${orderRef}`,
+            duration,
+            dismissible: true,
+          },
+        );
+      };
+
+      // The re-issue closure for THIS completion (last one wins — the dialog is
+      // modal at page level, so only one completion's decision is ever open).
+      reissueUndoToastRef.current = issue;
+      issue(10000);
     },
     [handleUndoDeduction, selectedLocationId, selectedLocation]
   );
@@ -404,30 +425,40 @@ export default function WorkbenchPage() {
    */
   const confirmMove = useCallback(
     async (physicalLocationId: number): Promise<MoveResponse> => {
-      const batchId = moveTarget?.batchIds.deductSimpleBatchId;
-      if (!batchId) {
-        throw { error: "This completion did not name a batch to move.", code: "NO_BATCH" };
-      }
-      if (!csrfToken) {
-        throw { error: "Session expired. Cannot move this batch.", code: "CSRF_MISSING" };
-      }
+      try {
+        const batchId = moveTarget?.batchIds.deductSimpleBatchId;
+        if (!batchId) {
+          throw { error: "This completion did not name a batch to move.", code: "NO_BATCH" };
+        }
+        if (!csrfToken) {
+          throw { error: "Session expired. Cannot move this batch.", code: "CSRF_MISSING" };
+        }
 
-      const response = await fetch(`/api/inventory/batches/${batchId}/move`, {
-        method: "POST",
-        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-        body: JSON.stringify({ physicalLocationId }),
-      });
-      const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-      if (!response.ok) throw body;
+        const response = await fetch(`/api/inventory/batches/${batchId}/move`, {
+          method: "POST",
+          headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+          body: JSON.stringify({ physicalLocationId }),
+        });
+        const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+        if (!response.ok) throw body;
 
-      // Stock moved through a raw fetch, so the react-query caches every other
-      // page reads have to be told.
-      invalidateInventoryCaches(queryClient);
-      // F1: NOW the completion toast goes. The decision is made and the books
-      // have moved, so the Undo behind the dialog no longer describes anything
-      // the operator would want to click.
-      if (moveTarget !== null) toast.dismiss(`undo-${moveTarget.orderRef}`);
-      return body as unknown as MoveResponse;
+        // Stock moved through a raw fetch, so the react-query caches every other
+        // page reads have to be told.
+        invalidateInventoryCaches(queryClient);
+        // F1: NOW the completion toast goes. The decision is made and the books
+        // have moved, so the Undo behind the dialog no longer describes anything
+        // the operator would want to click. F15: and nothing may re-issue it
+        // afterwards — the closure goes with it.
+        if (moveTarget !== null) toast.dismiss(`undo-${moveTarget.orderRef}`);
+        reissueUndoToastRef.current = null;
+        return body as unknown as MoveResponse;
+      } catch (err) {
+        // F15: a REFUSAL (or a dead network) leaves the batch exactly where it
+        // was, so the Undo is still the right thing to click — with a fresh 10 s
+        // to click it in, because the decision is over.
+        reissueUndoToastRef.current?.(10000);
+        throw err;
+      }
     },
     [moveTarget, csrfToken, queryClient]
   );
@@ -920,7 +951,13 @@ export default function WorkbenchPage() {
       <MoveBatchDialog
         target={moveTarget}
         onOpenChange={(next) => {
-          if (!next) setMoveTarget(null);
+          if (next) return;
+          setMoveTarget(null);
+          // F15: the decision is over one way or the other, so the toast gets
+          // its clock back — a fresh 10 s on the Undo. After a move that
+          // SUCCEEDED there is no closure left to call: that Undo was dismissed
+          // on purpose and never comes back.
+          reissueUndoToastRef.current?.(10000);
         }}
         onConfirm={confirmMove}
       />

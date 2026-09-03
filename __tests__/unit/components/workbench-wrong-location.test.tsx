@@ -118,6 +118,17 @@ function response(a: Answer): Response {
   } as unknown as Response;
 }
 
+/** The options sonner was handed by the LAST `toast()` call (F15). */
+function lastToastOptions(): { id?: string; duration?: number } {
+  const call = mockToast.mock.calls[mockToast.mock.calls.length - 1];
+  return (call?.[1] ?? {}) as { id?: string; duration?: number };
+}
+
+/** The node of the LAST `toast()` call — what sonner is rendering under that id. */
+function lastToastNode(): React.ReactElement {
+  return mockToast.mock.calls[mockToast.mock.calls.length - 1][0] as React.ReactElement;
+}
+
 /** Every request the page made to a fragment, in order. */
 function callsTo(fragment: string): Array<[string, RequestInit | undefined]> {
   return fetchMock.mock.calls
@@ -235,6 +246,78 @@ describe("the workbench toast — the Wrong location control", () => {
     expect(screen.getByText("Undo")).toBeInTheDocument();
   });
 
+  // F15: DISMISSAL WAS NEVER THE ONLY CLOCK. The toast sitting behind the dialog
+  // kept running its own 10 s, so a slow decision — or a late refusal — lost the
+  // Undo just as surely as the old dismiss-on-open did. Opening the dialog
+  // RE-ISSUES the completion toast under its own id with no clock at all; the
+  // decision hands a fresh 10 s back, or dismisses it.
+  it("opening the dialog HOLDS the toast open — re-issued under its id with no clock", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+    expect(lastToastOptions()).toMatchObject({ id: "undo-ORD-1", duration: 10000 });
+
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+
+    expect(lastToastOptions()).toMatchObject({ id: "undo-ORD-1", duration: Infinity });
+    expect(mockToastDismiss).not.toHaveBeenCalled();
+  });
+
+  it("CANCELLING hands a fresh 10 s back, and the re-issued Undo still works", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const toastRender = await completeAndShowToast();
+
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    const heldOpen = mockToast.mock.calls.length;
+    await act(async () => {
+      await user.keyboard("{Escape}");
+    });
+
+    // A NEW issue under the same id — not the one the completion raised.
+    expect(mockToast.mock.calls.length).toBeGreaterThan(heldOpen);
+    expect(lastToastOptions()).toMatchObject({ id: "undo-ORD-1", duration: 10000 });
+    expect(mockToastDismiss).not.toHaveBeenCalled();
+
+    // Sonner replaces the node under that id, so the RE-ISSUED toast is the one
+    // the operator is now looking at — and its Undo is a real Undo.
+    toastRender.unmount();
+    render(<>{lastToastNode()}</>);
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: /Undo/ }));
+    });
+    await waitFor(() => expect(callsTo("/reverse")).toHaveLength(1));
+  });
+
+  it("a REFUSED move hands the 10 s window back too", async () => {
+    moveAnswer = {
+      status: 409,
+      body: {
+        error: "This batch has already been put back (3 units)",
+        code: "BATCH_RESTORED",
+        restoredUnits: 3,
+      },
+    };
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    const heldOpen = mockToast.mock.calls.length;
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+    await waitFor(() =>
+      expect(screen.getByTestId("move-dialog-refusal")).toBeInTheDocument(),
+    );
+
+    expect(mockToast.mock.calls.length).toBeGreaterThan(heldOpen);
+    expect(lastToastOptions()).toMatchObject({ id: "undo-ORD-1", duration: 10000 });
+    expect(mockToastDismiss).not.toHaveBeenCalled();
+  });
+
   it("CANCELLING leaves the Undo reachable — nothing was dismissed", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     await completeAndShowToast();
@@ -270,6 +353,15 @@ describe("the workbench toast — the Wrong location control", () => {
     await waitFor(() => expect(callsTo("/move")).toHaveLength(1));
 
     await waitFor(() => expect(mockToastDismiss).toHaveBeenCalledWith("undo-ORD-1"));
+    // F19: EXACTLY once — and never re-issued afterwards. Closing the dialog on
+    // a settled move must not bring a dismissed Undo back for a move that has
+    // already happened.
+    expect(mockToastDismiss).toHaveBeenCalledTimes(1);
+    const issuedSoFar = mockToast.mock.calls.length;
+    await act(async () => {
+      await user.keyboard("{Escape}");
+    });
+    expect(mockToast.mock.calls).toHaveLength(issuedSoFar);
   });
 
   it("a REFUSED move leaves the Undo standing", async () => {

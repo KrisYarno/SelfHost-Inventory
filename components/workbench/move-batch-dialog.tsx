@@ -117,6 +117,14 @@ export function MoveBatchDialog({
   const locations = useLocations(target !== null);
   const [choice, setChoice] = React.useState("");
   const [pending, setPending] = React.useState(false);
+  /**
+   * THE LATCH IS A REF, NOT STATE (F16). React state is set on a LATER render,
+   * so two clicks dispatched inside ONE tick both read `pending === false` and
+   * both post — and `disabled` is no better, being just as late. A move posted
+   * twice is a second reclassification against books the first one is still
+   * writing. This is written BEFORE the await and read on the same line.
+   */
+  const pendingRef = React.useRef(false);
   const [result, setResult] = React.useState<MoveResponse | null>(null);
   const [refusal, setRefusal] = React.useState<string | null>(null);
 
@@ -124,6 +132,7 @@ export function MoveBatchDialog({
   React.useEffect(() => {
     setChoice("");
     setPending(false);
+    pendingRef.current = false;
     setResult(null);
     setRefusal(null);
   }, [target]);
@@ -140,11 +149,23 @@ export function MoveBatchDialog({
     if (!Number.isFinite(physicalLocationId) || physicalLocationId <= 0) return;
     // PK-1: the ONE request this dialog makes, and only for the manual batch.
     if (target.batchIds.deductSimpleBatchId === null) return;
+    // F16, synchronously: the second click of a double click never gets past
+    // here, whatever React has or has not re-rendered.
+    if (pendingRef.current || result !== null) return;
+    pendingRef.current = true;
 
     setRefusal(null);
     setPending(true);
     try {
-      setResult(await onConfirm(physicalLocationId));
+      const answer = await onConfirm(physicalLocationId);
+      // F20 (GX-6): a 2xx that was not JSON resolves `{}` in the workbench's
+      // caller. The result line says so rather than throwing in render.
+      if (!Array.isArray(answer.pairs)) {
+        console.warn(
+          "MoveBatchDialog: the move answered without a `pairs` array — the moved units cannot be stated",
+        );
+      }
+      setResult(answer);
     } catch (err) {
       // The SERVER's sentence, verbatim — never a house paraphrase.
       const refused = err as { error?: unknown };
@@ -154,13 +175,17 @@ export function MoveBatchDialog({
           : "The move could not be completed.",
       );
     } finally {
+      pendingRef.current = false;
       setPending(false);
     }
   }
 
-  const movedUnits = result === null
-    ? 0
-    : result.pairs.reduce((sum, pair) => sum + pair.units, 0);
+  // NULL, never 0 (F20): a body with no `pairs` is a move whose units this
+  // dialog cannot state — and 0 would be a number it cannot stand behind.
+  const movedUnits =
+    result === null || !Array.isArray(result.pairs)
+      ? null
+      : result.pairs.reduce((sum, pair) => sum + pair.units, 0);
 
   return (
     <Dialog open={target !== null} onOpenChange={onOpenChange}>
@@ -211,7 +236,7 @@ export function MoveBatchDialog({
 
             {result !== null && (
               <p className="text-body-sm text-positive-foreground" data-testid="move-result-manual">
-                {`manual leg: moved ${movedUnits} units`}
+                {movedUnits === null ? "manual leg: moved" : `manual leg: moved ${movedUnits} units`}
               </p>
             )}
 
