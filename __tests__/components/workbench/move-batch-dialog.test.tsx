@@ -40,6 +40,7 @@ import {
 
 const MANUAL_BATCH = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 const FULFIL_BATCH = "9a1b7c22-1111-4d3d-8a0c-0305e82c3399";
+const OTHER_BATCH = "5b6c7d8e-2222-4e5f-9a0b-0305e82c3355";
 
 function target(over: Partial<MoveTarget> = {}): MoveTarget {
   return {
@@ -247,6 +248,106 @@ describe("MoveBatchDialog — ONE request, for the manual batch only (PK-1)", ()
     await waitFor(() => expect(screen.getByTestId("move-result-manual")).toBeInTheDocument());
 
     expect(confirmButton()).toBeDisabled();
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  // F31 (codex CX-4): a move IN FLIGHT holds the dialog. Three ways the old
+  // dialog could mislead: an Escape mid-write closed it (and a re-open posted
+  // again); a re-target cleared the latch and let the new target post while the
+  // old request was still writing; and the old request's settlement then
+  // rendered in the new target's dialog as if it were the new target's answer.
+  it("a close request while the move is IN FLIGHT is ignored: the decision cannot be abandoned mid-write", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    let release: (value: MoveResponse) => void = () => undefined;
+    const onConfirm = jest.fn(
+      () => new Promise<MoveResponse>((resolve) => { release = resolve; }),
+    );
+    const { onOpenChange } = renderDialog({}, onConfirm as unknown as jest.Mock);
+
+    await user.selectOptions(locationSelect(), "2");
+    await user.click(confirmButton());
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+
+    await act(async () => {
+      release(answer());
+    });
+    await waitFor(() => expect(screen.getByTestId("move-result-manual")).toBeInTheDocument());
+    await user.keyboard("{Escape}");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("a re-target while a move is IN FLIGHT: the latch holds, the stale RESULT never renders in the new target's dialog", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    let release: (value: MoveResponse) => void = () => undefined;
+    const onConfirm = jest.fn(
+      () => new Promise<MoveResponse>((resolve) => { release = resolve; }),
+    );
+    const onOpenChange = jest.fn();
+    const confirm = onConfirm as unknown as (id: number) => Promise<MoveResponse>;
+    const a = target({ orderRef: "ORD-A" });
+    const b = target({
+      orderRef: "ORD-B",
+      batchIds: { deductSimpleBatchId: OTHER_BATCH, fulfilBatchId: null },
+    });
+    const view = render(<MoveBatchDialog target={a} onOpenChange={onOpenChange} onConfirm={confirm} />);
+
+    await user.selectOptions(locationSelect(), "2");
+    await user.click(confirmButton());
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    view.rerender(<MoveBatchDialog target={b} onOpenChange={onOpenChange} onConfirm={confirm} />);
+    expect(screen.getByText(/Order ORD-B/)).toBeInTheDocument();
+    // B cannot post while A is still writing.
+    expect(locationSelect()).toBeDisabled();
+    expect(confirmButton()).toBeDisabled();
+
+    await act(async () => {
+      release(answer());
+    });
+    // A's answer is not B's answer.
+    expect(screen.queryByTestId("move-result-manual")).toBeNull();
+    // The latch is released by A's own settlement: B chooses and posts ONCE.
+    await waitFor(() => expect(locationSelect()).not.toBeDisabled());
+    await user.selectOptions(locationSelect(), "2");
+    await user.click(confirmButton());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      release(answer({ pairs: [{ productId: 9, units: 2, transferId: "t-2" }] }));
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("move-result-manual")).toHaveTextContent("manual leg: moved 2 units"),
+    );
+  });
+
+  it("a re-target while a move is IN FLIGHT: the stale REFUSAL never renders in the new target's dialog", async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    let refuse: (reason: unknown) => void = () => undefined;
+    const onConfirm = jest.fn(
+      () => new Promise<MoveResponse>((_resolve, reject) => { refuse = reject; }),
+    );
+    const onOpenChange = jest.fn();
+    const confirm = onConfirm as unknown as (id: number) => Promise<MoveResponse>;
+    const view = render(
+      <MoveBatchDialog target={target({ orderRef: "ORD-A" })} onOpenChange={onOpenChange} onConfirm={confirm} />,
+    );
+
+    await user.selectOptions(locationSelect(), "2");
+    await user.click(confirmButton());
+    view.rerender(
+      <MoveBatchDialog
+        target={target({ orderRef: "ORD-B", batchIds: { deductSimpleBatchId: OTHER_BATCH, fulfilBatchId: null } })}
+        onOpenChange={onOpenChange}
+        onConfirm={confirm}
+      />,
+    );
+    await act(async () => {
+      refuse({ error: "This batch was already moved to location 2", code: "ALREADY_MOVED" });
+    });
+    expect(screen.queryByTestId("move-dialog-refusal")).toBeNull();
+    await waitFor(() => expect(confirmButton()).toBeDisabled());
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 });

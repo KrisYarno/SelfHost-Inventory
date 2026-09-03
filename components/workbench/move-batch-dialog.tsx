@@ -128,14 +128,20 @@ export function MoveBatchDialog({
   const [result, setResult] = React.useState<MoveResponse | null>(null);
   const [refusal, setRefusal] = React.useState<string | null>(null);
 
-  // A new target is a new decision: nothing carries over from the last one.
+  // A new target is a new decision: nothing carries over from the last one —
+  // EXCEPT a request still in flight (F31, codex CX-4). The latch is released
+  // by that request's own `finally`, never by a re-target: clearing it here
+  // would let a second POST go out while the first is still writing, and the
+  // first's settlement would then land in the new target's dialog as if it
+  // were the new target's answer.
   React.useEffect(() => {
     setChoice("");
-    setPending(false);
-    pendingRef.current = false;
     setResult(null);
     setRefusal(null);
   }, [target]);
+  /** The target a settlement must still match to be rendered at all (F31). */
+  const targetRef = React.useRef<MoveTarget | null>(target);
+  targetRef.current = target;
 
   // THE LEDGER LOCATION IS NOT AN OPTION. Choosing it is `SAME_LOCATION`, and a
   // select that offers the one answer the server refuses is a trap.
@@ -153,11 +159,15 @@ export function MoveBatchDialog({
     // here, whatever React has or has not re-rendered.
     if (pendingRef.current || result !== null) return;
     pendingRef.current = true;
+    const mine = target;
 
     setRefusal(null);
     setPending(true);
     try {
       const answer = await onConfirm(physicalLocationId);
+      // F31: a settlement for a target this dialog no longer shows is not this
+      // dialog's answer. The latch still releases in `finally`.
+      if (targetRef.current !== mine) return;
       // F20 (GX-6): a 2xx that was not JSON resolves `{}` in the workbench's
       // caller. The result line says so rather than throwing in render.
       if (!Array.isArray(answer.pairs)) {
@@ -167,6 +177,7 @@ export function MoveBatchDialog({
       }
       setResult(answer);
     } catch (err) {
+      if (targetRef.current !== mine) return; // F31, the refusal arm
       // The SERVER's sentence, verbatim — never a house paraphrase.
       const refused = err as { error?: unknown };
       setRefusal(
@@ -188,7 +199,17 @@ export function MoveBatchDialog({
       : result.pairs.reduce((sum, pair) => sum + pair.units, 0);
 
   return (
-    <Dialog open={target !== null} onOpenChange={onOpenChange}>
+    <Dialog
+      open={target !== null}
+      onOpenChange={(next) => {
+        // F31 (codex CX-4): a decision IN FLIGHT cannot be abandoned — Escape,
+        // the X and an outside click are ignored until the request settles.
+        // Closing here would hand the operator a fresh dialog whose books the
+        // first request is still writing.
+        if (!next && pendingRef.current) return;
+        onOpenChange(next);
+      }}
+    >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Wrong location</DialogTitle>

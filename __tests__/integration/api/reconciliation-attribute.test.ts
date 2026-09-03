@@ -651,6 +651,27 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
     expect((await res.json()).code).toBe('FULFILLED_BATCH');
   });
 
+  it('7b. FULFILLED_BATCH — an UNSTAMPED batch whose LATEST attempt is evidence fulfillment and NO event exists (F30, codex CX-1)', async () => {
+    // The attempt-only shape: no stamp, no fulfilment event, the latest attempt
+    // says `fulfillment`. A manual stamp here would bury that attempt under a
+    // newer `manual` one and every later reader would call the batch
+    // unfulfilled. Refused fail-closed, id-less, and NOTHING is written.
+    const { tx } = makeTx({
+      locked: rows(),
+      auditEvents: [DEDUCT_EVENT],
+      latestAttempt: { evidence: 'fulfillment' },
+    });
+    const res = await attribute(CLEAN_BODY);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: 'This fulfilled batch names no order — repair via unfulfill/refulfill',
+      code: 'FULFILLED_BATCH',
+    });
+    expect(tx.inventory_logs.updateMany).not.toHaveBeenCalled();
+    expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
+  });
+
   it('7. R2B_OTHER_TARGET — an unstamped fulfillment batch may only complete ITS stamp', async () => {
     makeTx({ locked: rows(), auditEvents: [fulfillmentEvent('ord-7')] });
     const res = await attribute(CLEAN_BODY);

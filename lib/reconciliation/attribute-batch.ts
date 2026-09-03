@@ -199,6 +199,19 @@ export async function attributeBatch(
     completedFulfillment = true;
   }
 
+  // 7b. ATTEMPT-ONLY FULFILMENT (F30, codex CX-1): the fact says `fulfilled`,
+  //     but no event and no stamp say against which order. No live writer
+  //     produces this shape (the fulfil records its event and its attempt in
+  //     one flow; measured 0 of every attempt on the prod-dump, 2026-09-03) —
+  //     it is a pre-lane possibility. A manual stamp here would write a NEWER
+  //     `manual` attempt on top of the fulfilment one, and every later reader
+  //     of the latest attempt would call this batch unfulfilled: reversible,
+  //     movable, its `fulfilledQty` never unwound. Refused fail-closed; the
+  //     repair is unfulfill/refulfil.
+  if (current === null && fulfillmentEvent === null && fulfilled) {
+    throw new FulfilledBatchRefusal(null, null);
+  }
+
   // 8. MOVING A BATCH OFF AN EXISTING STAMP is a correction of an earlier
   //    decision, and it is recorded with its reason or not at all.
   if (current !== null && current !== input.orderRecordId && !input.reason?.trim()) {

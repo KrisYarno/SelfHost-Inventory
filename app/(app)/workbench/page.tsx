@@ -523,16 +523,26 @@ export default function WorkbenchPage() {
         // the operator would want to click. F15: and nothing may re-issue it
         // afterwards — the closure goes with it.
         if (moveTarget !== null) toast.dismiss(`undo-${moveTarget.orderRef}`);
-        reissueUndoToastRef.current = null;
-        // F25: nothing is live under that id any more, so the unmount cleanup
-        // has nothing left to dismiss.
-        liveUndoToastIdRef.current = null;
+        // F32 (codex CX-4): the two refs describe ONE live toast, by id. They
+        // are cleared only when that toast is the one this move belongs to — a
+        // later completion's toast keeps its re-issue closure and its unmount
+        // dismissal (the dialog is modal and holds its target while a request
+        // is in flight, so this is a belt).
+        if (moveTarget === null || liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`) {
+          reissueUndoToastRef.current = null;
+          // F25: nothing is live under that id any more, so the unmount cleanup
+          // has nothing left to dismiss.
+          liveUndoToastIdRef.current = null;
+        }
         return body as unknown as MoveResponse;
       } catch (err) {
         // F15: a REFUSAL (or a dead network) leaves the batch exactly where it
         // was, so the Undo is still the right thing to click — with a fresh 10 s
-        // to click it in, because the decision is over.
-        reissueUndoToastRef.current?.(10000);
+        // to click it in, because the decision is over. F32: only this move's
+        // own toast gets its clock back.
+        if (moveTarget === null || liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`) {
+          reissueUndoToastRef.current?.(10000);
+        }
         throw err;
       }
     },
