@@ -109,6 +109,12 @@ export function MoveBatchDialog({
   onOpenChange,
   onConfirm,
 }: {
+  /**
+   * Must be referentially STABLE (state, never an inline literal): a
+   * settlement renders only while the target it was posted for is still THIS
+   * object (F31). A caller passing a fresh literal each render would see every
+   * result silently dropped.
+   */
   target: MoveTarget | null;
   onOpenChange: (open: boolean) => void;
   /** RESOLVES with the 200 body; REJECTS with `{ error, code }` (R6-2). */
@@ -141,7 +147,9 @@ export function MoveBatchDialog({
   }, [target]);
   /** The target a settlement must still match to be rendered at all (F31). */
   const targetRef = React.useRef<MoveTarget | null>(target);
-  targetRef.current = target;
+  React.useLayoutEffect(() => {
+    targetRef.current = target;
+  }, [target]);
 
   // THE LEDGER LOCATION IS NOT AN OPTION. Choosing it is `SAME_LOCATION`, and a
   // select that offers the one answer the server refuses is a trap.
@@ -277,6 +285,7 @@ export function MoveBatchDialog({
           <Button
             type="button"
             data-testid="move-dialog-confirm"
+            aria-busy={pending}
             onClick={submit}
             disabled={
               target === null ||
@@ -286,7 +295,7 @@ export function MoveBatchDialog({
               target.batchIds.deductSimpleBatchId === null
             }
           >
-            Move this batch
+            {pending ? "Moving…" : "Move this batch"}
           </Button>
         </DialogFooter>
       </DialogContent>

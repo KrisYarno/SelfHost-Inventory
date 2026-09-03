@@ -267,6 +267,9 @@ describe("MoveBatchDialog — ONE request, for the manual batch only (PK-1)", ()
     await user.selectOptions(locationSelect(), "2");
     await user.click(confirmButton());
     expect(onConfirm).toHaveBeenCalledTimes(1);
+    // FD5-1: the operator is told a request is in flight, not just refused.
+    expect(confirmButton()).toHaveTextContent("Moving…");
+    expect(confirmButton()).toHaveAttribute("aria-busy", "true");
 
     await user.keyboard("{Escape}");
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
@@ -347,7 +350,9 @@ describe("MoveBatchDialog — ONE request, for the manual batch only (PK-1)", ()
       refuse({ error: "This batch was already moved to location 2", code: "ALREADY_MOVED" });
     });
     expect(screen.queryByTestId("move-dialog-refusal")).toBeNull();
-    await waitFor(() => expect(confirmButton()).toBeDisabled());
+    // The latch released with A's settlement: B's controls come back, and no
+    // request ever went out for B (FD5-4).
+    await waitFor(() => expect(locationSelect()).not.toBeDisabled());
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 });

@@ -664,9 +664,11 @@ describe('the refusal ladder (spec D4, evaluated in this order)', () => {
     const res = await attribute(CLEAN_BODY);
 
     expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({
+    expect(await res.json()).toEqual({
       error: 'This fulfilled batch names no order — repair via unfulfill/refulfill',
       code: 'FULFILLED_BATCH',
+      orderRecordId: null,
+      orderNumber: null,
     });
     expect(tx.inventory_logs.updateMany).not.toHaveBeenCalled();
     expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();

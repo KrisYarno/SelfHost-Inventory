@@ -528,7 +528,7 @@ export default function WorkbenchPage() {
         // later completion's toast keeps its re-issue closure and its unmount
         // dismissal (the dialog is modal and holds its target while a request
         // is in flight, so this is a belt).
-        if (moveTarget === null || liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`) {
+        if (moveTarget !== null && liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`) {
           reissueUndoToastRef.current = null;
           // F25: nothing is live under that id any more, so the unmount cleanup
           // has nothing left to dismiss.
@@ -540,7 +540,7 @@ export default function WorkbenchPage() {
         // was, so the Undo is still the right thing to click — with a fresh 10 s
         // to click it in, because the decision is over. F32: only this move's
         // own toast gets its clock back.
-        if (moveTarget === null || liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`) {
+        if (moveTarget !== null && liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`) {
           reissueUndoToastRef.current?.(10000);
         }
         throw err;
