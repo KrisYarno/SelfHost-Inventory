@@ -17,6 +17,12 @@ import {
   type DeductionDetail,
   type FulfilledForUndo,
 } from "@/components/workbench/complete-order-dialog";
+import {
+  MoveBatchDialog,
+  MOVE_ORDER_LEG_SENTENCE,
+  type MoveResponse,
+  type MoveTarget,
+} from "@/components/workbench/move-batch-dialog";
 import { WCOrderSelector } from "@/components/workbench/wc-order-selector";
 import { UnmappedItemsAlert } from "@/components/workbench/unmapped-items-alert";
 import { FloatingCartButton } from "@/components/workbench/floating-cart-button";
@@ -50,8 +56,17 @@ export default function WorkbenchPage() {
   const [stockFilter, setStockFilter] = useState<StockFilter>("all");
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
+  /**
+   * THE WRONG-LOCATION MOVE (reconciliation Part 2, pack CB2c.4). PAGE state,
+   * never the toast's: the sonner node unmounts at 10 s and would take the
+   * dialog with it, mid-decision.
+   */
+  const [moveTarget, setMoveTarget] = useState<MoveTarget | null>(null);
 
-  const { selectedLocationId } = useLocation();
+  // `selectedLocation` rides beside the id (R7-14): the toast names the LEDGER
+  // location the completion deducted at, and a name read inside a callback would
+  // be read from a render this callback no longer belongs to.
+  const { selectedLocationId, selectedLocation } = useLocation();
   const { token: csrfToken } = useCSRF();
   const lowStockDefault = useLowStockDefault();
   const queryClient = useQueryClient();
@@ -299,22 +314,72 @@ export default function WorkbenchPage() {
         ? `Order ${orderRef} fulfilled.`
         : `Order ${orderRef} completed.`;
 
+      // The MANUAL leg's ASKED units (pack CB2c.4). Labelled as asked in the
+      // dialog's consequence line and never presented as the server's figure —
+      // the 200's `pairs` are what the result line prints.
+      const manualUnits = items
+        .filter((item) => !item.fulfillmentItemId)
+        .reduce((total, item) => total + item.quantity, 0);
+
+      // OC-1: a control whose only outcome is a dead dialog is not offered. A
+      // WC-only cart wrote no movable batch, so the toast says where THAT repair
+      // lives instead.
+      const canMove = selectedLocationId !== null && batchIds.deductSimpleBatchId !== null;
+      const orderLegOnly =
+        batchIds.deductSimpleBatchId === null && batchIds.fulfilBatchId !== null;
+
       toast(
-        <div className="flex items-center justify-between w-full gap-3">
-          <span className="text-sm">
-            <span className="font-mono font-medium">{message}</span>
-          </span>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1.5 rounded-md bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:bg-foreground/90 transition-colors shrink-0"
-            onClick={() => {
-              toast.dismiss(`undo-${orderRef}`);
-              handleUndoDeduction(items, orderRef, batchIds, opts);
-            }}
-          >
-            <Undo2 className="h-3 w-3" />
-            Undo
-          </button>
+        <div className="flex w-full flex-col gap-2">
+          <div className="flex items-center justify-between w-full gap-3">
+            <span className="text-sm">
+              <span className="font-mono font-medium">{message}</span>
+            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded-md bg-foreground text-background px-3 py-1.5 text-xs font-medium hover:bg-foreground/90 transition-colors shrink-0"
+                onClick={() => {
+                  toast.dismiss(`undo-${orderRef}`);
+                  handleUndoDeduction(items, orderRef, batchIds, opts);
+                }}
+              >
+                <Undo2 className="h-3 w-3" />
+                Undo
+              </button>
+              {canMove && (
+                <button
+                  type="button"
+                  data-testid={`wrong-location-${orderRef}`}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors shrink-0"
+                  onClick={() => {
+                    // The completion toast must not stay live behind the dialog
+                    // (R7-16), and NOTHING else happens here: the decision is the
+                    // dialog's.
+                    toast.dismiss(`undo-${orderRef}`);
+                    setMoveTarget({
+                      batchIds,
+                      ledgerLocationId: selectedLocationId as number,
+                      ledgerLocationName:
+                        selectedLocation?.name ?? `Location ${selectedLocationId}`,
+                      units: manualUnits,
+                      orderRef,
+                      caller: "workbench",
+                    });
+                  }}
+                >
+                  Wrong location…
+                </button>
+              )}
+            </div>
+          </div>
+          {orderLegOnly && (
+            <span
+              className="text-xs text-muted-foreground"
+              data-testid={`order-leg-only-${orderRef}`}
+            >
+              {MOVE_ORDER_LEG_SENTENCE}
+            </span>
+          )}
         </div>,
         {
           id: `undo-${orderRef}`,
@@ -323,7 +388,39 @@ export default function WorkbenchPage() {
         }
       );
     },
-    [handleUndoDeduction]
+    [handleUndoDeduction, selectedLocationId, selectedLocation]
+  );
+
+  /**
+   * THE WORKBENCH'S OWN MOVE CALLER (pack CB2c.4). A raw fetch with this page's
+   * CSRF token, rejecting with the PARSED BODY — every refusal envelope carries
+   * `{ error, code }`, which is exactly what the shared dialog reads, so this
+   * caller and the drill-down's `useMoveBatch` reject identically.
+   */
+  const confirmMove = useCallback(
+    async (physicalLocationId: number): Promise<MoveResponse> => {
+      const batchId = moveTarget?.batchIds.deductSimpleBatchId;
+      if (!batchId) {
+        throw { error: "This completion did not name a batch to move.", code: "NO_BATCH" };
+      }
+      if (!csrfToken) {
+        throw { error: "Session expired. Cannot move this batch.", code: "CSRF_MISSING" };
+      }
+
+      const response = await fetch(`/api/inventory/batches/${batchId}/move`, {
+        method: "POST",
+        headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+        body: JSON.stringify({ physicalLocationId }),
+      });
+      const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!response.ok) throw body;
+
+      // Stock moved through a raw fetch, so the react-query caches every other
+      // page reads have to be told.
+      invalidateInventoryCaches(queryClient);
+      return body as unknown as MoveResponse;
+    },
+    [moveTarget, csrfToken, queryClient]
   );
 
   // Sync stock filter with checkboxes
@@ -806,6 +903,17 @@ export default function WorkbenchPage() {
             toast.info(`Loaded next order: ${next}`);
           }
         }}
+      />
+
+      {/* THE MOVE DIALOG, at PAGE level (pack CB2c.4) — never inside the sonner
+          toast node, which unmounts with the toast at 10 s and would take a
+          half-made decision with it. */}
+      <MoveBatchDialog
+        target={moveTarget}
+        onOpenChange={(next) => {
+          if (!next) setMoveTarget(null);
+        }}
+        onConfirm={confirmMove}
       />
     </div>
   );

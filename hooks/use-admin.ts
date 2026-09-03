@@ -4,6 +4,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { invalidateInventoryCaches } from "@/hooks/use-inventory-mutations";
 import type { User } from "@/components/admin/user-table";
+// Reconciliation Part 2 (seam S-B18): the move dialog OWNS the 200 body's shape,
+// because it is the one surface that renders it. TYPE-ONLY — nothing of the
+// component reaches this module at runtime.
+import type { MoveResponse } from "@/components/workbench/move-batch-dialog";
 import type {
   AttributionClassKey,
   AttributionReport,
@@ -950,6 +954,50 @@ export function useReverseBatch(batchId: string) {
         throw readReconciliationError(res, json);
       }
       return json as unknown as ReverseBatchResult;
+    },
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["admin", "reconciliation"] });
+      await invalidateInventoryCaches(queryClient);
+    },
+  });
+}
+
+/**
+ * THE WRONG-LOCATION MOVE (pack CB2c.3). `onSettled`, like its two siblings: a
+ * REFUSED move is exactly when the client's picture is known to be wrong, and it
+ * invalidates the same two worlds the reverse does — the reconciliation surface
+ * and the inventory caches every other page reads.
+ *
+ * IT REJECTS WITH A PLAIN `{ error, code }` OBJECT, deliberately (R7-10). The
+ * dialog is shared with the workbench, whose raw-fetch caller rejects with the
+ * PARSED BODY; mapping the house `ReconciliationError` here — it carries
+ * `.message`/`.code` and no `.error` — is what makes both callers reject
+ * identically, so the dialog has one way to read a refusal instead of two.
+ * `useReverseBatch` keeps the house class, because `reverse-confirm.tsx` reads
+ * `err.message`.
+ */
+export function useMoveBatch(batchId: string) {
+  const queryClient = useQueryClient();
+  const { token: csrfToken } = useCSRF();
+  return useMutation<MoveResponse, { error: string; code: string }, { physicalLocationId: number }>({
+    mutationFn: async (input) => {
+      const res = await fetch(
+        `/api/inventory/batches/${encodeURIComponent(batchId)}/move`,
+        {
+          method: "POST",
+          headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+          body: JSON.stringify(input),
+        },
+      );
+      const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok) {
+        // A PLAIN OBJECT, not an Error subclass: the workbench's raw-fetch
+        // caller rejects with the parsed body, and this is what makes the two
+        // rejections the same shape for the one dialog that reads them.
+        const refusal = readReconciliationError(res, json);
+        throw { error: refusal.message, code: refusal.code };
+      }
+      return json as unknown as MoveResponse;
     },
     onSettled: async () => {
       await queryClient.invalidateQueries({ queryKey: ["admin", "reconciliation"] });

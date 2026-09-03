@@ -42,9 +42,26 @@ const useReverseBatchMock = jest.fn(() => ({
   isPending: false,
 }));
 
+// B2c (pack CB2c.3): the Move's mutation is HOISTED to the component's top
+// level (rules of hooks), so this mock answers on every render, gated or not.
+const moveMutateAsync = jest.fn();
+const useMoveBatchMock = jest.fn(() => ({ mutateAsync: moveMutateAsync, isPending: false }));
+
 jest.mock("@/hooks/use-admin", () => ({
   useBatchDetail: (...args: unknown[]) => useBatchDetailMock(...args),
   useReverseBatch: (...args: unknown[]) => useReverseBatchMock(...(args as [])),
+  useMoveBatch: (...args: unknown[]) => useMoveBatchMock(...(args as [])),
+}));
+
+// The shared move dialog reads the ONE locations hook.
+jest.mock("@/hooks/use-locations", () => ({
+  useLocations: () => ({
+    data: [
+      { id: 3, name: "Main" },
+      { id: 7, name: "Overflow" },
+    ],
+    isLoading: false,
+  }),
 }));
 
 const toastSuccess = jest.fn();
@@ -52,6 +69,9 @@ jest.mock("sonner", () => ({ toast: { success: (...a: unknown[]) => toastSuccess
 
 import {
   AttributionDrilldown,
+  MOVE_MULTI_LOCATION_COPY,
+  MOVE_NULL_LOCATION_COPY,
+  MOVE_USE_REFULFIL_COPY,
   REVERSE_USE_UNFULFILL_COPY,
 } from "@/components/admin/reconciliation/attribution-drilldown";
 
@@ -97,6 +117,9 @@ function makeDetail(over: Partial<BatchDetail> = {}): BatchDetail {
         logType: "SALE",
         changeTime: "2026-08-20T10:00:00.000Z",
         orderRecordId: null,
+        // Part 2 (pack CB2c.3): the location the drill-down's Move gates on.
+        locationId: 3,
+        locationName: "Main",
       },
     ],
     auditEvent: null,
@@ -148,6 +171,20 @@ beforeEach(() => {
   setDetail(makeDetail());
   useReverseBatchMock.mockReturnValue({ mutateAsync: reverseMutateAsync, isPending: false });
   reverseMutateAsync.mockResolvedValue({ message: "reversed 3 of 3 units" });
+  useMoveBatchMock.mockReturnValue({ mutateAsync: moveMutateAsync, isPending: false });
+  moveMutateAsync.mockResolvedValue({
+    movedBatchId: "batch-1",
+    batchId: "new-batch",
+    orderRecordId: null,
+    ledgerLocationId: 3,
+    physicalLocationId: 7,
+    pairs: [{ productId: 3, units: 2, transferId: "t-1" }],
+    rows: [
+      { productId: 3, locationId: 7, delta: -2 },
+      { productId: 3, locationId: 3, delta: 2 },
+    ],
+    message: "moved 2 units from location 3 to 7",
+  });
 });
 
 it("labels the operator's free text as the audit event's, and shows all three fields", () => {
@@ -761,23 +798,194 @@ describe("the Reverse… control", () => {
     expect(toastSuccess).not.toHaveBeenCalled();
   });
 
-  // STATED EXCEPTION to OC-1, B2b only (R5-10): the drill-down carries no
-  // location facts until B2c, so a null-location batch still shows the control
-  // and gets the server's own sentence.
-  it("still offers Reverse… on a batch whose rows may name no location", async () => {
-    const user = userEvent.setup();
-    reverseMutateAsync.mockRejectedValue(
-      Object.assign(
-        new Error(
-          "Ledger row 502 names no location — this batch cannot be reversed or moved until it is repaired",
-        ),
-        { code: "NULL_LOCATION_ROW", status: 409 },
-      ),
+  // B2c CLOSES B2b's STATED EXCEPTION (pack CB2c.3). The detail now carries each
+  // row's location, so the gate reads it instead of letting the server answer.
+  it("is HIDDEN on a batch carrying a NULL-location row, with the sentence naming the repair", () => {
+    setDetail(
+      makeDetail({
+        ledgerRows: [
+          {
+            id: 11,
+            productId: 3,
+            productName: "Widget",
+            delta: -2,
+            logType: "SALE",
+            changeTime: "2026-08-20T10:00:00.000Z",
+            orderRecordId: null,
+            locationId: null,
+            locationName: null,
+          },
+        ],
+      }),
     );
     renderRow();
 
-    await user.click(screen.getByTestId("reverse-drilldown-batch-1"));
-    await user.click(screen.getByTestId("reverse-confirm-submit"));
-    expect(screen.getByTestId("reverse-refusal")).toHaveTextContent("Ledger row 502 names no location");
+    expect(screen.queryByTestId("reverse-drilldown-batch-1")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
+    expect(screen.getByTestId("drilldown-move-null-location")).toHaveTextContent(
+      MOVE_NULL_LOCATION_COPY,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE MOVE AFFORDANCE (Part 2, pack CB2c.3)
+// ---------------------------------------------------------------------------
+
+describe("the Move… control", () => {
+  function renderRow(row: Partial<AttributionRow> = {}) {
+    render(
+      <AttributionDrilldown
+        row={makeRow(row)}
+        open
+        onOpenChange={jest.fn()}
+        onAttribute={jest.fn()}
+      />,
+    );
+  }
+
+  /** N ledger rows, at the locations named. */
+  function rowsAt(...locations: Array<number | null>): BatchDetail["ledgerRows"] {
+    return locations.map((locationId, index) => ({
+      id: 11 + index,
+      productId: 3 + index,
+      productName: "Widget",
+      delta: -2,
+      logType: "SALE",
+      changeTime: "2026-08-20T10:00:00.000Z",
+      orderRecordId: null,
+      locationId,
+      locationName: locationId === null ? null : `Location ${locationId}`,
+    }));
+  }
+
+  it("offers Move… beside Reverse… on a plain single-location batch", () => {
+    setDetail(makeDetail({ ledgerRows: rowsAt(3, 3) }));
+    renderRow();
+
+    expect(screen.getByTestId("move-drilldown-batch-1")).toBeInTheDocument();
+    expect(screen.getByTestId("reverse-drilldown-batch-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("drilldown-move-unavailable")).not.toBeInTheDocument();
+  });
+
+  // OC-1 again: the move ladder's rung 7 refuses a fulfilment-evidenced batch
+  // every time, so the control is not offered — and the sentence names the two
+  // order-side dialogs that ARE the repair.
+  it("is HIDDEN on a FULFILLED batch, with the unfulfill + refulfil sentence", () => {
+    setDetail(makeDetail({ ledgerRows: rowsAt(3) }));
+    renderRow({ fulfilled: true, canAttribute: true });
+
+    expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
+    expect(screen.getByTestId("drilldown-move-unavailable")).toHaveTextContent(
+      MOVE_USE_REFULFIL_COPY,
+    );
+  });
+
+  it("is HIDDEN on a MULTI-LOCATION batch, with the sentence saying why", () => {
+    setDetail(makeDetail({ ledgerRows: rowsAt(3, 7) }));
+    renderRow();
+
+    expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
+    expect(screen.getByTestId("drilldown-move-multi-location")).toHaveTextContent(
+      MOVE_MULTI_LOCATION_COPY,
+    );
+    // The REVERSE is still offered: it restores per key and needs no one source.
+    expect(screen.getByTestId("reverse-drilldown-batch-1")).toBeInTheDocument();
+  });
+
+  it("is HIDDEN on a NULL-location batch, with the row-repair sentence", () => {
+    setDetail(makeDetail({ ledgerRows: rowsAt(3, null) }));
+    renderRow();
+
+    expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
+    expect(screen.getByTestId("drilldown-move-null-location")).toHaveTextContent(
+      MOVE_NULL_LOCATION_COPY,
+    );
+  });
+
+  it("is HIDDEN while the detail is loading, and while it is in error", () => {
+    useBatchDetailMock.mockReturnValue({ data: undefined, isLoading: true, isError: false });
+    const { unmount } = render(
+      <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
+    );
+    expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("drilldown-move-unavailable")).not.toBeInTheDocument();
+    unmount();
+
+    useBatchDetailMock.mockReturnValue({ data: undefined, isLoading: false, isError: true });
+    render(
+      <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
+    );
+    expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
+  });
+
+  // The hook is HOISTED (R6-2): it is called on EVERY render of this component,
+  // including the ones where the gate hides the control — which is the whole
+  // point, because a hook called conditionally is a hook order that changes.
+  it("declares the mutation for this batch whatever the gate decides", () => {
+    setDetail(makeDetail({ ledgerRows: rowsAt(3, 7) }));
+    renderRow();
+
+    expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
+    expect(useMoveBatchMock).toHaveBeenCalled();
+  });
+
+  it("opens the SHARED dialog, excludes the ledger location, and moves through the hook", async () => {
+    const user = userEvent.setup();
+    setDetail(makeDetail({ ledgerRows: rowsAt(3) }));
+    renderRow({ units: 5 });
+
+    await user.click(screen.getByTestId("move-drilldown-batch-1"));
+
+    // The batch's own location, named — and excluded from the choices.
+    expect(screen.getByTestId("move-consequence")).toHaveTextContent(
+      "Moves this batch's books (5 units asked) from Location 3 to the chosen location",
+    );
+    const options = Array.from(
+      (screen.getByTestId("move-dialog-location") as HTMLSelectElement).options,
+    ).map((option) => option.value);
+    expect(options).toEqual(["", "7"]);
+
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "7");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+
+    expect(moveMutateAsync).toHaveBeenCalledWith({ physicalLocationId: 7 });
+    expect(screen.getByTestId("move-result-manual")).toHaveTextContent("manual leg: moved 2 units");
+    // A drill-down batch has no order leg: there is no line to refulfil.
+    expect(screen.queryByTestId("move-result-order")).not.toBeInTheDocument();
+  });
+
+  it("renders a refusal VERBATIM — the hook rejects with `{ error, code }`", async () => {
+    const user = userEvent.setup();
+    moveMutateAsync.mockRejectedValue({
+      error: "Location 7 has 1 of product 3 on the books — 2 needed to move this batch",
+      code: "INSUFFICIENT_AT_SOURCE",
+    });
+    setDetail(makeDetail({ ledgerRows: rowsAt(3) }));
+    renderRow();
+
+    await user.click(screen.getByTestId("move-drilldown-batch-1"));
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "7");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+
+    expect(screen.getByTestId("move-dialog-refusal")).toHaveTextContent(
+      "Location 7 has 1 of product 3 on the books — 2 needed to move this batch",
+    );
+    expect(screen.queryByTestId("move-result-manual")).not.toBeInTheDocument();
+  });
+
+  it("names the location by ID when the join gave no name", async () => {
+    const user = userEvent.setup();
+    setDetail(
+      makeDetail({
+        ledgerRows: [{ ...rowsAt(3)[0], locationName: null }],
+      }),
+    );
+    renderRow({ units: 4 });
+
+    await user.click(screen.getByTestId("move-drilldown-batch-1"));
+    expect(screen.getByTestId("move-consequence")).toHaveTextContent(
+      "(4 units asked) from Location 3 to the chosen location",
+    );
   });
 });

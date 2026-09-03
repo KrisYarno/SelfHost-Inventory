@@ -225,6 +225,8 @@ let fulfillRoute: ParamRoute<OrderParams>;
 let unfulfillRoute: ParamRoute<OrderParams>;
 /** B2b (pack CB2b.6): the reverse, driven with `{ batchId }` and NO JSON body. */
 let reverseRoute: ParamRoute<BatchParams>;
+/** B2c (pack CB2c.5): the move, driven with `{ batchId }` and a ONE-field body. */
+let moveRoute: ParamRoute<BatchParams>;
 /** B2b 11a-iii: the manual attribution, raced against the reverse. */
 let attributionRoute: ParamRoute<BatchParams>;
 /** B2b 11c: the webhook receiver, driven with a REALLY signed body. */
@@ -918,6 +920,9 @@ beforeAll(async () => {
   // registry, same singleton, same fail-closed schema proof below.
   reverseRoute = (await import(
     "@/app/api/inventory/batches/[batchId]/reverse/route"
+  )) as unknown as ParamRoute<BatchParams>;
+  moveRoute = (await import(
+    "@/app/api/inventory/batches/[batchId]/move/route"
   )) as unknown as ParamRoute<BatchParams>;
   attributionRoute = (await import(
     "@/app/api/reconciliation/attribution/[batchId]/route"
@@ -2552,6 +2557,354 @@ describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
       await dropHoldTrigger(ATTEMPT_HOLD);
       await probe.$disconnect();
     }
+  });
+});
+
+// ==========================================================================
+// SCENARIO 11b — THE WRONG-LOCATION MOVE, ON A REAL ENGINE (pack CB2c.5)
+//
+// The move is the first writer in this lane that touches TWO `product_locations`
+// rows per product in ONE act, and the whole of its correctness is a claim about
+// what those two rows hold afterwards. So the oracle here is the books
+// themselves, read straight out of MySQL, at BOTH locations:
+//
+//   11b-i    TWO CONCURRENT MOVES OF ONE BATCH produce exactly one 200 and one
+//            ALREADY_MOVED. The loser waits on the batch rows the winner holds
+//            `FOR UPDATE`, and its restoration read — opened AFTER that lock —
+//            sees the winner's committed MOVE event. The stock moves ONCE.
+//   11b-ii   TWO MOVES OF DIFFERENT BATCHES ON DIFFERENT PRODUCTS both commit,
+//            with the overlap OBSERVED rather than inferred (the 11a-i
+//            rendezvous: neither session ever blocks, which IS the claim). Per
+//            product: the physical location loses the units, the ledger location
+//            gets them back, and the pair's two rows share ONE `transferId`.
+//   11b-iii  MOVE, THEN REVERSE. The CORRECTION lands at the PHYSICAL location —
+//            after a move the units are sitting THERE, and restoring at the
+//            ledger location would put stock back where it never was (spec REV-9
+//            CX6-2). A SECOND reverse answers ALREADY_REVERSED, never
+//            RESTORATION_LEDGER_CORRUPT: a legitimate move-then-reverse ledger
+//            must not trip the belt that reads it.
+//
+// THE PHYSICAL LOCATION HAS TO BE STOCKED FIRST. `resetGateFixtures` rebuilds
+// every scoped `product_locations` row at quantity 0 (`seed.ts:784-785`), and
+// `INSUFFICIENT_AT_SOURCE` reads the LOCKED row — so without this arrangement
+// the refusal is the only answer any of these sub-cases could produce.
+// ==========================================================================
+
+/** The gate's PHYSICAL location for the move — off the location-1 mirror. */
+const MOVE_PHYSICAL = LOCATION_SECOND;
+
+type MoveRow = {
+  batchId: string | null;
+  productId: number;
+  delta: number;
+  locationId: number | null;
+  transferId: string | null;
+  orderRecordId: string | null;
+};
+
+/** Every TRANSFER row on the scope, in write order. */
+async function transferRows(): Promise<MoveRow[]> {
+  const rows = await rawRows<MoveRow>(
+    `SELECT batchId, productId, delta, locationId, transferId, orderRecordId
+       FROM inventory_logs
+      WHERE logType = 'TRANSFER' AND productId IN (?, ?)
+      ORDER BY id`,
+    [P_APPROVED, P_APPROVED_2],
+  );
+  return rows.map((row) => ({
+    ...row,
+    productId: Number(row.productId),
+    delta: Number(row.delta),
+    locationId: row.locationId === null ? null : Number(row.locationId),
+  }));
+}
+
+/** One `product_locations` quantity, at whichever location is asked for. */
+async function quantityAt(productId: number, locationId: number): Promise<number | null> {
+  const row = await locationRow({ productId, locationId });
+  return row?.quantity ?? null;
+}
+
+/** Arrange the PHYSICAL location. Off the mirror, so `products.quantity` is
+ *  untouched — which is what makes the ledger leg's mirror bump observable. */
+async function setPhysicalStock(productId: number, quantity: number): Promise<void> {
+  await singleton.product_locations.updateMany({
+    where: { productId, locationId: MOVE_PHYSICAL },
+    data: { quantity },
+  });
+}
+
+function moveBatchRoute(batchId: string, physicalLocationId: number): Promise<RouteAnswer> {
+  return callParamRoute(
+    moveRoute,
+    `/api/inventory/batches/${batchId}/move`,
+    { batchId },
+    { physicalLocationId },
+  );
+}
+
+/**
+ * A FULFILMENT FACT on a route-minted batch, without standing up scenario 14's
+ * whole order fixture. The predicate the move's rung 7 refuses on is
+ * `batchEvidence`'s — the FIRST audit row under the batch id whose actionType is
+ * one of the two fulfilment names — so THIS is the same fact the report shows
+ * and the ladder reads, filed the way the fulfil route files it (`entityType:
+ * "ORDER"`, the order as its entity, the ledger batch as its own batchId).
+ *
+ * `details` carries NO `rows` key on purpose: `isAttributableBatch` reads that
+ * shape, and a blob with one would make the batch a mass update instead.
+ *
+ * The reset takes it back with no clause of its own — the batch id came off a
+ * scoped ledger row, so `routeBatchIds` contains it and the ORDER clause
+ * (`seed.ts`) names it. The sub-case ASSERTS that rather than trusting it.
+ */
+async function installFulfilmentEvidence(batchId: string): Promise<void> {
+  await singleton.auditLog.create({
+    data: {
+      userId: GATE_ADMIN_ID,
+      actionType: "EXTERNAL_ORDER_FULFILLMENT",
+      entityType: "ORDER",
+      entityId: GATE_EXT_ORDER_ID,
+      batchId,
+      action: "Fulfilled order for the gate's move scenario",
+      details: { orderId: GATE_EXT_ORDER_ID },
+      affectedCount: 1,
+    },
+  });
+}
+
+async function fulfilmentEvidenceCount(): Promise<number> {
+  const rows = await rawRows<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM audit_logs WHERE actionType = 'EXTERNAL_ORDER_FULFILLMENT'",
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+describe("scenario 11b — the wrong-location move on a REAL engine (pack CB2c.5)", () => {
+  jest.setTimeout(120_000);
+
+  /** What LOCATION_MAIN (the LEDGER end) holds before anything runs. */
+  const OPENING = 10;
+  /** What MOVE_PHYSICAL holds — enough to give the units up. */
+  const PHYSICAL_OPENING = 20;
+
+  beforeEach(async () => {
+    await resetAll();
+    await setStock(P_APPROVED, OPENING);
+    await setStock(P_APPROVED_2, OPENING);
+    // The reset leaves every scoped row at 0, so the source is stocked HERE or
+    // INSUFFICIENT_AT_SOURCE is the only answer this scenario can produce.
+    await setPhysicalStock(P_APPROVED, PHYSICAL_OPENING);
+    await setPhysicalStock(P_APPROVED_2, PHYSICAL_OPENING);
+  });
+
+  afterAll(async () => {
+    await dropHoldTrigger();
+    await resetAll();
+  });
+
+  test("11b-i: two moves of ONE batch — one 200, one ALREADY_MOVED, the books move once", async () => {
+    const batch = await mintBatch(P_APPROVED, 4);
+    const probe = openClient();
+    try {
+      await warmUp(probe);
+      // Installed AFTER the mint, so it holds the MOVE's own TRANSFER legs and
+      // nothing else. Both legs carry the same productId, so the winner sleeps
+      // twice — well inside the lane's 30 s budget.
+      await installLedgerHold([P_APPROVED], 1);
+
+      const first = moveBatchRoute(batch, MOVE_PHYSICAL);
+      // The loser queues on the batch rows the winner holds `FOR UPDATE`.
+      const waited = waitForLockWait(probe, 10_000);
+      const second = moveBatchRoute(batch, MOVE_PHYSICAL);
+      const [a, b, observed] = await Promise.all([first, second, waited]);
+
+      expect(observed).toBe(true);
+      const statuses = [a.status, b.status].sort();
+      expect(statuses).toEqual([200, 409]);
+      const refused = a.status === 409 ? a : b;
+      expect(refused.body.code).toBe("ALREADY_MOVED");
+      expect(refused.body.physicalLocationId).toBe(MOVE_PHYSICAL);
+
+      // ONCE. The deduction took 4 off the ledger location; the move gave those
+      // 4 back there and took them off the physical one.
+      expect(await quantityAt(P_APPROVED, LOCATION_MAIN)).toBe(OPENING);
+      expect(await mirroredQuantity(P_APPROVED)).toBe(OPENING);
+      expect(await quantityAt(P_APPROVED, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING - 4);
+
+      const legs = await transferRows();
+      expect(legs).toHaveLength(2);
+      expect(await eventsOfType("INVENTORY_BATCH_MOVE")).toHaveLength(1);
+    } finally {
+      await dropHoldTrigger();
+      await probe.$disconnect();
+    }
+  });
+
+  test("11b-ii: two moves of DIFFERENT batches on DIFFERENT products overlap and BOTH commit", async () => {
+    const opening = await countSnapshot();
+    const batchA = await mintBatch(P_APPROVED, 4);
+    const batchB = await mintBatch(P_APPROVED_2, 3);
+
+    const probe = openClient();
+    try {
+      await warmUp(probe);
+      // Both product ids: two moves of ONE product to ONE physical location share
+      // both prelock keys and could never be observed in `User sleep` together.
+      await installLedgerHold([P_APPROVED, P_APPROVED_2], 1);
+
+      const { value: answers, fresh } = await reportDeadlocks("scenario 11b-ii", async () => {
+        const inFlight = [
+          moveBatchRoute(batchA, MOVE_PHYSICAL),
+          moveBatchRoute(batchB, MOVE_PHYSICAL),
+        ];
+        // THE OVERLAP, OBSERVED. Two 200s alone would not qualify.
+        const overlapped = await waitForSleepingSessions(probe, 2);
+        const settled = await Promise.all(inFlight);
+        return { overlapped, settled };
+      });
+
+      expect(answers.overlapped).toBe(true);
+      const [a, b] = answers.settled;
+      expect(a.status).toBe(200);
+      expect(b.status).toBe(200);
+      if (fresh) {
+        console.log(
+          "[scenario 11b-ii] a deadlock was detected during this race — the run is REPORTED, " +
+            "and the two 200s above are what the scenario asserts (a retried green counts).",
+        );
+      }
+
+      // THE STOCK ORACLE, per product and per LOCATION: the ledger end is back
+      // where it started (deducted, then given back), the physical end is down
+      // by exactly what left it.
+      expect(await quantityAt(P_APPROVED, LOCATION_MAIN)).toBe(OPENING);
+      expect(await quantityAt(P_APPROVED, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING - 4);
+      expect(await quantityAt(P_APPROVED_2, LOCATION_MAIN)).toBe(OPENING);
+      expect(await quantityAt(P_APPROVED_2, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING - 3);
+      expect(await mirroredQuantity(P_APPROVED)).toBe(OPENING);
+      expect(await mirroredQuantity(P_APPROVED_2)).toBe(OPENING);
+
+      // FOUR legs: two per product, netting to zero, each pair under ONE
+      // transferId and ONE new batch id that is neither of the moved batches.
+      const legs = await transferRows();
+      expect(legs).toHaveLength(4);
+      [P_APPROVED, P_APPROVED_2].forEach((productId) => {
+        const pair = legs.filter((leg) => leg.productId === productId);
+        expect(pair).toHaveLength(2);
+        expect(pair[0].transferId).not.toBeNull();
+        expect(pair[0].transferId).toBe(pair[1].transferId);
+        expect(pair.reduce((sum, leg) => sum + leg.delta, 0)).toBe(0);
+        // The PHYSICAL leg is the negative one, and it is written first.
+        expect(pair[0].locationId).toBe(MOVE_PHYSICAL);
+        expect(pair[0].delta).toBeLessThan(0);
+        expect(pair[1].locationId).toBe(LOCATION_MAIN);
+        expect(pair[1].delta).toBeGreaterThan(0);
+        // The batch stayed unstamped, so its legs are unstamped too.
+        expect(pair[0].orderRecordId).toBeNull();
+      });
+      const newBatches = legs.map((leg) => String(leg.batchId));
+      expect(new Set(newBatches).size).toBe(2);
+      expect(newBatches).not.toContain(batchA);
+      expect(newBatches).not.toContain(batchB);
+
+      // The ENTITY is the moved batch; the event's own batchId is the new one.
+      const events = await eventsOfType("INVENTORY_BATCH_MOVE");
+      expect(events).toHaveLength(2);
+      expect(events.map((event) => event.entityId).sort()).toEqual([batchA, batchB].sort());
+      expect(events.map((event) => String(event.batchId)).sort()).toEqual(
+        Array.from(new Set(newBatches)).sort(),
+      );
+      // Two legs per product, so the event counts ROWS, not pairs.
+      expect(events.every((event) => event.affectedCount === 2)).toBe(true);
+      // NO attempt row: a move is not an attribution.
+      expect(await attemptCountForBatch(batchA)).toBe(0);
+      expect(await attemptCountForBatch(batchB)).toBe(0);
+
+      await resetAll();
+      // ...and the reset's derivation reaches the move's TRANSFER rows AND its
+      // events, with no clause of its own (the new batch's rows carry a scoped
+      // productId, so `routeBatchIds` already contains it).
+      expect(await countSnapshot()).toEqual(opening);
+      expect(await transferRows()).toEqual([]);
+      expect(await eventsOfType("INVENTORY_BATCH_MOVE")).toEqual([]);
+    } finally {
+      await dropHoldTrigger();
+      await probe.$disconnect();
+    }
+  });
+
+  test("11b-iii: move, then reverse — the CORRECTION lands at the PHYSICAL location", async () => {
+    const batch = await mintBatch(P_APPROVED, 4);
+
+    // After the deduction, before anything is moved.
+    expect(await quantityAt(P_APPROVED, LOCATION_MAIN)).toBe(OPENING - 4);
+    expect(await quantityAt(P_APPROVED, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING);
+
+    const moved = await moveBatchRoute(batch, MOVE_PHYSICAL);
+    expect(moved.status).toBe(200);
+    expect(moved.body.ledgerLocationId).toBe(LOCATION_MAIN);
+    expect(moved.body.physicalLocationId).toBe(MOVE_PHYSICAL);
+    expect(moved.body.message).toBe(
+      `moved 4 units from location ${LOCATION_MAIN} to ${MOVE_PHYSICAL}`,
+    );
+
+    // The ledger end is whole again; the physical end carries the loss.
+    expect(await quantityAt(P_APPROVED, LOCATION_MAIN)).toBe(OPENING);
+    expect(await quantityAt(P_APPROVED, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING - 4);
+
+    const reversed = await reverseBatchRoute(batch);
+    expect(reversed.status).toBe(200);
+    expect(reversed.body.restoredUnits).toBe(4);
+    // The reverse KNOWS where the units went (spec REV-9 CX6-2).
+    expect(reversed.body.physicalLocationId).toBe(MOVE_PHYSICAL);
+
+    const corrections = await correctionRows();
+    expect(corrections).toHaveLength(1);
+    expect(corrections[0].locationId).toBe(MOVE_PHYSICAL);
+    expect(corrections[0].delta).toBe(4);
+
+    // THE ORACLE, EXACT, at both ends: the physical location is back to where it
+    // started, and the ledger location never moved off its own opening once the
+    // move had given the deduction back.
+    expect(await quantityAt(P_APPROVED, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING);
+    expect(await quantityAt(P_APPROVED, LOCATION_MAIN)).toBe(OPENING);
+    expect(await mirroredQuantity(P_APPROVED)).toBe(OPENING);
+
+    // A SECOND reverse of a MOVED batch is ALREADY_REVERSED — never the corrupt
+    // refusal, which is what a belt that could not read a legitimate
+    // move-then-reverse ledger would answer (pack CB2b.1 rung 9).
+    const again = await reverseBatchRoute(batch);
+    expect(again.status).toBe(409);
+    expect(again.body.code).toBe("ALREADY_REVERSED");
+    expect(again.body.previouslyRestored).toBe(4);
+    expect(again.body.totalUnits).toBe(4);
+    expect(await correctionRows()).toHaveLength(1);
+  });
+
+  test("11b: a FULFILMENT-EVIDENCED batch is refused on the move path (rung 7)", async () => {
+    const batch = await mintBatch(P_APPROVED, 4);
+    await installFulfilmentEvidence(batch);
+
+    const refused = await moveBatchRoute(batch, MOVE_PHYSICAL);
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe("FULFILLED_BATCH");
+    expect(refused.body.error).toBe(
+      `Fulfilled against #${GATE_EXT_ORDER_ID} — change it via unfulfill/refulfill, not here`,
+    );
+
+    // NOTHING moved, at either end.
+    expect(await quantityAt(P_APPROVED, LOCATION_MAIN)).toBe(OPENING - 4);
+    expect(await quantityAt(P_APPROVED, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING);
+    expect(await transferRows()).toEqual([]);
+    expect(await eventsOfType("INVENTORY_BATCH_MOVE")).toEqual([]);
+
+    // The evidence row is the scenario's own, and the reset takes it back —
+    // asserted rather than trusted, because `concurrency.test.ts` scenario 2
+    // pins an ABSOLUTE table-wide audit count from the outside.
+    expect(await fulfilmentEvidenceCount()).toBe(1);
+    await resetAll();
+    expect(await fulfilmentEvidenceCount()).toBe(0);
   });
 });
 

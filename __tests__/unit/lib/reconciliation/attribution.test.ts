@@ -1596,6 +1596,10 @@ describe('getBatchDetail', () => {
     changeTime: new Date('2026-08-10T12:00:00.000Z'),
     orderRecordId: 'ord-1',
     products: { name: 'Widget' },
+    // Part 2 (pack CB2c.3): the detail's ledger read joins the location, so the
+    // drill-down's Move can gate on the batch's own locations.
+    locationId: 3,
+    locations: { name: 'Main' },
   };
 
   function wireDetail(over: { attempts?: unknown[]; audits?: unknown[]; attribution?: unknown[] } = {}) {
@@ -1656,6 +1660,8 @@ describe('getBatchDetail', () => {
         logType: 'SALE',
         changeTime: '2026-08-10T12:00:00.000Z',
         orderRecordId: 'ord-1',
+        locationId: 3,
+        locationName: 'Main',
       },
     ]);
     expect(detail!.auditEvent).toEqual({

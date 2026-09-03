@@ -306,7 +306,9 @@ describe('GET /api/reconciliation/attribution/[batchId]', () => {
         logType: 'SALE',
         changeTime: new Date('2026-08-10T12:00:00.000Z'),
         orderRecordId: 'ord-1',
+        locationId: 3,
         products: { name: 'Widget' },
+        locations: { name: 'Main' },
       },
     ] as never);
     db.auditLog.findMany.mockResolvedValue([] as never);
@@ -359,6 +361,31 @@ describe('GET /api/reconciliation/attribution/[batchId]', () => {
     expect(body.attemptsCount).toBe(0);
     expect(body.attributionEventsTruncated).toBe(false);
     expect(body.attributionEventsCount).toBe(0);
+  });
+
+  it('a LEDGER ROW names its location — the two fields the drill-down Move gates on', async () => {
+    const res = await detailGET(
+      new NextRequest('http://localhost/api/reconciliation/attribution/batch-1'),
+      { params: { batchId: 'batch-1' } },
+    );
+    const body = await res.json();
+
+    // Part 2 (pack CB2c.3): ADDITIVE and NESTED, so the envelope's own
+    // `Object.keys` pin above does not move. The row's shape gets its own.
+    expect(Object.keys(body.ledgerRows[0]).sort()).toEqual(
+      [
+        'changeTime',
+        'delta',
+        'id',
+        'locationId',
+        'locationName',
+        'logType',
+        'orderRecordId',
+        'productId',
+        'productName',
+      ].sort(),
+    );
+    expect(body.ledgerRows[0]).toMatchObject({ locationId: 3, locationName: 'Main' });
   });
 
   it('404s an unknown batch with the pack envelope', async () => {

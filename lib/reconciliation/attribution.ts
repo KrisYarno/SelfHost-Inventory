@@ -252,6 +252,18 @@ export type BatchDetail = {
     logType: string;
     changeTime: string;
     orderRecordId: string | null;
+    /**
+     * WHERE THE ROW SAYS THE STOCK LEFT (Part 2, pack CB2c.3). The move's whole
+     * subject is that this location can be wrong, so the surface that offers the
+     * move has to be able to name it — and to see when a batch spans several
+     * locations, or names none, which are the two shapes the move refuses.
+     *
+     * `locationId` is NULLABLE in the ledger and the join is a LEFT one, so a
+     * row whose location was deleted keeps a name of `null` rather than
+     * borrowing another row's.
+     */
+    locationId: number | null;
+    locationName: string | null;
   }>;
   auditEvent: {
     id: number;
@@ -1532,7 +1544,11 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
       logType: true,
       changeTime: true,
       orderRecordId: true,
+      locationId: true,
       products: { select: { name: true } },
+      // Part 2 (pack CB2c.3): the `fk_log_location` relation, so the drill-down
+      // can gate its Move on the batch's own locations instead of guessing.
+      locations: { select: { name: true } },
     },
   });
   if (ledger.length === 0) return null;
@@ -1708,6 +1724,8 @@ export async function getBatchDetail(batchId: string, viewer: Viewer): Promise<B
       logType: String(row.logType),
       changeTime: row.changeTime.toISOString(),
       orderRecordId: row.orderRecordId,
+      locationId: row.locationId,
+      locationName: row.locations?.name ?? null,
     })),
     auditEvent:
       earliest === undefined

@@ -44,8 +44,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useBatchDetail } from "@/hooks/use-admin";
+import { useBatchDetail, useMoveBatch } from "@/hooks/use-admin";
 import { ReverseConfirm } from "@/components/admin/reconciliation/reverse-confirm";
+import {
+  MoveBatchDialog,
+  type MoveTarget,
+} from "@/components/workbench/move-batch-dialog";
 import {
   FLAGGED_MATCH_CLASSES,
   MATCH_DEFINITIONS,
@@ -357,6 +361,26 @@ function OrderMatchSection({
 export const REVERSE_USE_UNFULFILL_COPY =
   "This batch was fulfilled — put it back through unfulfill, not here.";
 
+/**
+ * THE MOVE'S THREE "not this batch" SENTENCES (pack CB2c.3, the OC-1 rule).
+ *
+ * Every one of them names a rung the move ladder would refuse on, so the control
+ * is not offered at all — and the sentence says where the repair actually lives
+ * rather than leaving a blank an admin reads as "nothing to do here".
+ *
+ * The fulfilment one is the load-bearing one: a MOVE on either side of an
+ * unfulfill leaves one location short and the other over (spec §2.6 REV-14), so
+ * the wrong-location fix for a fulfilment is the two order-side dialogs.
+ */
+export const MOVE_USE_REFULFIL_COPY =
+  "This batch was fulfilled — unfulfill + refulfil at the correct location.";
+
+export const MOVE_MULTI_LOCATION_COPY =
+  "This batch's rows sit at more than one location — a move has no single source to reclassify from.";
+
+export const MOVE_NULL_LOCATION_COPY =
+  "A ledger row in this batch names no location — it cannot be reversed or moved until that row is repaired.";
+
 export function AttributionDrilldown({
   row,
   open,
@@ -373,6 +397,24 @@ export function AttributionDrilldown({
   // The confirm panel is this component's own state (pack CB2b.4): the tab hands
   // no prop for it, the way `AttributeConfirm` is reached through the picker.
   const [confirmingReverse, setConfirmingReverse] = React.useState(false);
+  const [movingTarget, setMovingTarget] = React.useState<MoveTarget | null>(null);
+  // HOISTED (rules of hooks, R6-2): the mutation is declared unconditionally,
+  // whatever the gate below decides to render.
+  const moveBatch = useMoveBatch(row.batchId);
+
+  // THE LOCATION FACTS, off the DETAIL (pack CB2c.3). `canAttribute` already
+  // implies the ledger read was not truncated (the same 50-row bound), so this
+  // row set IS the batch and "spans one location" is a fact rather than a guess.
+  const ledgerRows = data?.ledgerRows ?? [];
+  const detailReady = !detail.isLoading && !detail.isError && data !== undefined;
+  const anyNullLocation = ledgerRows.some((ledgerRow) => ledgerRow.locationId === null);
+  const spansManyLocations =
+    new Set(
+      ledgerRows
+        .map((ledgerRow) => ledgerRow.locationId)
+        .filter((locationId): locationId is number => locationId !== null),
+    ).size > 1;
+  const writable = detailReady && row.canAttribute && !row.fulfilled;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -411,16 +453,15 @@ export function AttributionDrilldown({
             </Button>
           )}
 
-          {/* THE REVERSE (Part 2, pack CB2b.4). Both writer controls wait for
-              the DETAIL: until it loads there are no location facts to gate on
-              and no evidence to read, and a control offered over a Skeleton is a
-              control offered over nothing (R6-5).
+          {/* THE REVERSE (Part 2, pack CB2b.4) and THE MOVE (pack CB2c.3). Both
+              writer controls wait for the DETAIL: until it loads there are no
+              location facts to gate on and no evidence to read, and a control
+              offered over a Skeleton is a control offered over nothing (R6-5).
 
-              STATED EXCEPTION to OC-1, B2b only: a batch carrying a
-              NULL-location row still shows this button and answers
-              NULL_LOCATION_ROW verbatim — the detail carries no location until
-              B2c, which is where the gate learns to read it. */}
-          {!detail.isLoading && !detail.isError && row.canAttribute && !row.fulfilled && (
+              B2c CLOSES B2b's STATED EXCEPTION: the detail now carries each
+              row's location, so a batch with a NULL-location row no longer shows
+              either control — it shows the sentence naming the row to repair. */}
+          {writable && !anyNullLocation && (
             <Button
               size="sm"
               variant="outline"
@@ -431,12 +472,70 @@ export function AttributionDrilldown({
             </Button>
           )}
 
-          {!detail.isLoading && !detail.isError && row.fulfilled && (
+          {/* THE MOVE, beside the reverse — the SAME admissible set (the move
+              refuses a fulfilment-evidenced batch too), narrowed by the two
+              shapes it cannot reclassify. */}
+          {writable && !anyNullLocation && !spansManyLocations && ledgerRows.length > 0 && (
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid={`move-drilldown-${row.batchId}`}
+              onClick={() => {
+                const ledgerLocationId = ledgerRows[0].locationId as number;
+                setMovingTarget({
+                  // The drill-down looks at ONE batch, and it is a manual one by
+                  // the gate above: `fulfilBatchId: null` suppresses the dialog's
+                  // order-leg line.
+                  batchIds: { deductSimpleBatchId: row.batchId, fulfilBatchId: null },
+                  ledgerLocationId,
+                  ledgerLocationName: ledgerRows[0].locationName ?? `Location ${ledgerLocationId}`,
+                  // The batch's outbound Σ as the REPORT read it — the SERVER's
+                  // `pairs` decide what actually moved.
+                  units: row.units,
+                  orderRef:
+                    row.order !== null && "orderNumber" in row.order
+                      ? row.order.orderNumber
+                      : row.batchId,
+                  caller: "drilldown",
+                });
+              }}
+            >
+              Move…
+            </Button>
+          )}
+
+          {detailReady && row.fulfilled && (
+            <>
+              <p
+                className="text-body-sm text-muted-foreground"
+                data-testid="drilldown-reverse-unavailable"
+              >
+                {REVERSE_USE_UNFULFILL_COPY}
+              </p>
+              <p
+                className="text-body-sm text-muted-foreground"
+                data-testid="drilldown-move-unavailable"
+              >
+                {MOVE_USE_REFULFIL_COPY}
+              </p>
+            </>
+          )}
+
+          {detailReady && !row.fulfilled && anyNullLocation && (
             <p
               className="text-body-sm text-muted-foreground"
-              data-testid="drilldown-reverse-unavailable"
+              data-testid="drilldown-move-null-location"
             >
-              {REVERSE_USE_UNFULFILL_COPY}
+              {MOVE_NULL_LOCATION_COPY}
+            </p>
+          )}
+
+          {detailReady && !row.fulfilled && !anyNullLocation && spansManyLocations && (
+            <p
+              className="text-body-sm text-muted-foreground"
+              data-testid="drilldown-move-multi-location"
+            >
+              {MOVE_MULTI_LOCATION_COPY}
             </p>
           )}
 
@@ -448,6 +547,18 @@ export function AttributionDrilldown({
               onDone={() => setConfirmingReverse(false)}
             />
           )}
+
+          {/* ONE dialog, two callers (pack CB2c.4). The drill-down goes through
+              react-query; the workbench passes its own raw-fetch caller. Both
+              reject with `{ error, code }`, so the dialog reads a refusal one
+              way. */}
+          <MoveBatchDialog
+            target={movingTarget}
+            onOpenChange={(next) => {
+              if (!next) setMovingTarget(null);
+            }}
+            onConfirm={(physicalLocationId) => moveBatch.mutateAsync({ physicalLocationId })}
+          />
 
           {detail.isLoading && <Skeleton className="h-24 w-full" />}
           {detail.isError && (

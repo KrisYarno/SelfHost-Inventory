@@ -93,6 +93,9 @@ function makeDetail(over: Partial<BatchDetail> = {}): BatchDetail {
         logType: "SALE",
         changeTime: "2026-08-20T10:00:00.000Z",
         orderRecordId: null,
+        // Part 2 (pack CB2c.3): the location the drill-down's Move gates on.
+        locationId: 3,
+        locationName: "Main",
       },
       {
         id: 12,
@@ -102,6 +105,8 @@ function makeDetail(over: Partial<BatchDetail> = {}): BatchDetail {
         logType: "SALE",
         changeTime: "2026-08-20T10:00:00.000Z",
         orderRecordId: null,
+        locationId: 3,
+        locationName: "Main",
       },
     ],
     auditEvent: null,
