@@ -81,9 +81,13 @@ import { GET as weeklyReportGET } from '@/app/api/cron/weekly-report/route';
 import { GET as adminProductsGET } from '@/app/api/admin/products/route';
 import { GET as lowStockGET } from '@/app/api/reports/low-stock/route';
 import { GET as optimizedGET } from '@/app/api/products/optimized/route';
-import { GET as productGET, PUT as productPUT } from '@/app/api/products/[id]/route';
+import { GET as productGET, PUT as productPUT, DELETE as productDELETE } from '@/app/api/products/[id]/route';
 import { GET as productsGET, POST as productsPOST } from '@/app/api/products/route';
 import { GET as variantsGET } from '@/app/api/inventory/variants/route';
+import { POST as adminRestorePOST } from '@/app/api/admin/products/[id]/restore/route';
+import { GET as adminDeletedGET } from '@/app/api/admin/products/deleted/route';
+import { GET as inventoryProductGET } from '@/app/api/inventory/product/[id]/route';
+import { GET as currentFastGET } from '@/app/api/inventory/current-fast/route';
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 const mockRequireApproved = requireApproved as jest.Mock;
@@ -311,7 +315,7 @@ describe('SHOW route: GET /api/inventory/variants does not exclude provisional',
 
 // ===========================================================================
 // THE WIRE: the RETIRED loc-1 `products.quantity` mirror never ships (pack
-// CB2.5b.1, amended B25-FR1/F1).
+// CB2.5b.1, amended B25-FR1/F1 and B25-FR2/FD1-2). ELEVEN routes in all.
 //
 // FOUR READ routes spread the raw Prisma product row onto the wire beside a
 // SEPARATELY computed `currentQuantity` — `/api/products/optimized`,
@@ -319,6 +323,21 @@ describe('SHOW route: GET /api/inventory/variants does not exclude provisional',
 // through `getProductsWithQuantities`, which spreads at BOTH of its map sites).
 // TWO WRITE responses hand the freshly created / updated row straight back:
 // POST `/api/products` (201) and PUT `/api/products/[id]` (200).
+//
+// FOUR MORE (B25-FR2) return the WHOLE row UNSPREAD: DELETE `/api/products/[id]`
+// and POST `/api/admin/products/[id]/restore` echo it as `{ message, product }`,
+// GET `/api/admin/products/deleted` lists the rows whole, and
+// GET `/api/inventory/product/[id]` nests it as `ProductInventoryHistory.product`
+// — a shape the `ProductWithQuantity` = `Omit<Product, 'quantity'>` guard never
+// reached, so that field is now `Omit<Product, 'quantity'>` too.
+//
+// The B25-FR2 sweep for `NextResponse.json(...)` bodies derived from a product
+// delegate turned up ONE MORE, outside the reviewer's four: GET
+// `/api/inventory/current-fast`, whose `CurrentInventoryLevel.product` carries the
+// whole row at BOTH of `getCurrentInventoryLevelsFast`'s map sites (the
+// `include: { products: true }` join read AND the zero-fill `product.findMany`).
+// Its type is narrowed the same way. The LEVEL's own `quantity` — the real one,
+// read from `product_locations` — is NOT the mirror and stays.
 //
 // The column they were leaking is dead (P2-B2.5) and its value is now whatever
 // it happened to hold when the last writer stopped — a number that looks
@@ -510,5 +529,135 @@ describe('the retired mirror never reaches the wire (pack CB2.5b.1)', () => {
 
     expect(Object.prototype.hasOwnProperty.call(body, 'quantity')).toBe(false);
     expect(body).toMatchObject({ id: 3, name: 'Widget' });
+  });
+
+  it('DELETE /api/products/[id]: the echoed `product` carries no `quantity`', async () => {
+    mockRequireAdmin.mockResolvedValue({ user: ADMIN_USER });
+    db.product.findUnique.mockResolvedValue({ id: 3, name: 'Widget', deletedAt: null } as any);
+    db.product_locations.findMany.mockResolvedValue([] as any);
+    db.product.update.mockResolvedValue({
+      id: 3,
+      name: 'Widget',
+      quantity: 949, // the stale mirror the soft-delete echoes back
+      deletedAt: new Date('2026-01-01T00:00:00.000Z'),
+    } as any);
+    db.$transaction.mockImplementation(async (cb: any) => cb(db));
+
+    const resp = await productDELETE(mkReq('http://t/api/products/3', { method: 'DELETE' }), {
+      params: { id: '3' },
+    });
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(Object.prototype.hasOwnProperty.call(body.product, 'quantity')).toBe(false);
+    expect(body.message).toBe('Product deleted successfully');
+    // The rest of the echoed row is untouched.
+    expect(body.product).toMatchObject({ id: 3, name: 'Widget' });
+  });
+
+  it('POST /api/admin/products/[id]/restore: the echoed `product` carries no `quantity`', async () => {
+    mockRequireAdmin.mockResolvedValue({ user: ADMIN_USER });
+    db.product.findUnique.mockResolvedValue({
+      id: 3,
+      name: 'Widget',
+      deletedAt: new Date('2026-01-01T00:00:00.000Z'),
+    } as any);
+    db.product_locations.findMany.mockResolvedValue([] as any);
+    db.product.update.mockResolvedValue({
+      id: 3,
+      name: 'Widget',
+      quantity: 949, // the stale mirror the restore echoes back
+      deletedAt: null,
+    } as any);
+    db.$transaction.mockImplementation(async (cb: any) => cb(db));
+
+    const resp = await adminRestorePOST(
+      mkReq('http://t/api/admin/products/3/restore', { method: 'POST' }),
+      { params: { id: '3' } }
+    );
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(Object.prototype.hasOwnProperty.call(body.product, 'quantity')).toBe(false);
+    expect(body.message).toBe('Product restored successfully');
+    expect(body.product).toMatchObject({ id: 3, name: 'Widget' });
+  });
+
+  it('GET /api/admin/products/deleted: no `quantity` on any listed row', async () => {
+    mockRequireAdmin.mockResolvedValue({ user: ADMIN_USER });
+    db.product.findMany.mockResolvedValue([
+      {
+        id: 3,
+        name: 'Widget',
+        quantity: 949,
+        deletedAt: new Date('2026-01-01T00:00:00.000Z'),
+        deletedByUser: { id: 1, username: 'admin', email: 'a@b.c' },
+      },
+    ] as any);
+
+    const resp = await adminDeletedGET(mkReq('http://t/api/admin/products/deleted'));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(body.products).toHaveLength(1);
+    expect(body.total).toBe(1);
+    expect(Object.prototype.hasOwnProperty.call(body.products[0], 'quantity')).toBe(false);
+    // The `include`d relation rides along untouched.
+    expect(body.products[0]).toMatchObject({
+      id: 3,
+      name: 'Widget',
+      deletedByUser: { id: 1, username: 'admin', email: 'a@b.c' },
+    });
+  });
+
+  it('GET /api/inventory/product/[id]: the nested `product` carries no `quantity`', async () => {
+    mockRequireApproved.mockResolvedValue({ user: APPROVED_USER });
+    db.product.findFirst.mockResolvedValue({ id: 3, name: 'Widget', quantity: 949 } as any);
+    db.location.findFirst.mockResolvedValue({ id: 1, name: 'Warehouse' } as any);
+    db.product_locations.findUnique.mockResolvedValue({ quantity: 4 } as any);
+    db.inventory_logs.findMany.mockResolvedValue([] as any);
+
+    const resp = await inventoryProductGET(mkReq('http://t/api/inventory/product/3'), {
+      params: { id: '3' },
+    });
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(Object.prototype.hasOwnProperty.call(body.product, 'quantity')).toBe(false);
+    expect(body.currentQuantity).toBe(4);
+    expect(body.product).toMatchObject({ id: 3, name: 'Widget' });
+    expect(body.location).toMatchObject({ id: 1, name: 'Warehouse' });
+  });
+
+  it('GET /api/inventory/current-fast: no `quantity` on either nested `product` (both map sites)', async () => {
+    mockRequireApproved.mockResolvedValue({ user: APPROVED_USER });
+    // Map site 1 — the join read hands the product row over whole.
+    db.product_locations.findMany.mockResolvedValue([
+      {
+        productId: 3,
+        locationId: 1,
+        quantity: 4,
+        version: 2,
+        products: { id: 3, name: 'Widget', quantity: 949 },
+        locations: { id: 1, name: 'Warehouse' },
+      },
+    ] as any);
+    // Map site 2 — the zero-fill branch reads the product delegate directly.
+    db.product.findMany.mockResolvedValue([{ id: 9, name: 'Gadget', quantity: 949 }] as any);
+    db.location.findUnique.mockResolvedValue({ id: 1, name: 'Warehouse' } as any);
+
+    const resp = await currentFastGET(mkReq('http://t/api/inventory/current-fast?locationId=1'));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(body.inventory).toHaveLength(2);
+    for (const level of body.inventory) {
+      expect(Object.prototype.hasOwnProperty.call(level.product, 'quantity')).toBe(false);
+    }
+    // The LEVEL's own quantity (from product_locations) is the real number and stays.
+    expect(body.inventory[0]).toMatchObject({ productId: 3, quantity: 4 });
+    expect(body.inventory[0].product).toMatchObject({ id: 3, name: 'Widget' });
+    expect(body.inventory[1]).toMatchObject({ productId: 9, quantity: 0 });
+    expect(body.inventory[1].product).toMatchObject({ id: 9, name: 'Gadget' });
   });
 });

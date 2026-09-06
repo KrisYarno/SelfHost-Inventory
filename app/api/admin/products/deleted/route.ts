@@ -29,8 +29,16 @@ export const GET = apiHandler(async (_request: NextRequest) => {
     },
   });
 
+  // The loc-1 `products.quantity` mirror is retired (B2.5) — strip it from every
+  // listed row so a dead column never reaches the wire. The `include` shape (and
+  // therefore `deletedByUser`) is untouched.
+  const products = deletedProducts.map((row) => {
+    const { quantity: _retiredMirror, ...product } = row;
+    return product;
+  });
+
   return NextResponse.json({
-    products: deletedProducts,
-    total: deletedProducts.length,
+    products,
+    total: products.length,
   });
 });

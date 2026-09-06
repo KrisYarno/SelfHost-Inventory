@@ -30,7 +30,9 @@ export type InventoryTransactionWithLogs = {
 // Current inventory level for a product at a location
 export type CurrentInventoryLevel = {
   productId: number;
-  product: Product;
+  // The loc-1 `products.quantity` mirror is retired (B2.5) and never ships; the
+  // `quantity` field BELOW is the real per-location number, not the mirror.
+  product: Omit<Product, "quantity">;
   locationId: number;
   location: Location;
   quantity: number;
@@ -80,7 +82,9 @@ export type CurrentInventoryResponse = {
 };
 
 export type ProductInventoryHistory = {
-  product: Product;
+  // The loc-1 `products.quantity` mirror is retired (B2.5) and never ships; the
+  // `ProductWithQuantity` guard does not reach this nested shape, so name it here.
+  product: Omit<Product, "quantity">;
   location: Location;
   currentQuantity: number;
   history: InventoryLogWithRelations[];

@@ -73,8 +73,13 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
     take: limit,
   });
 
+  // The loc-1 `products.quantity` mirror is retired (B2.5) — strip it so a dead
+  // column never reaches the wire (`ProductInventoryHistory.product` is typed
+  // `Omit<Product, "quantity">` to hold the line).
+  const { quantity: _retiredMirror, ...productRow } = product;
+
   const response: ProductInventoryHistory = {
-    product,
+    product: productRow,
     location,
     currentQuantity,
     history,

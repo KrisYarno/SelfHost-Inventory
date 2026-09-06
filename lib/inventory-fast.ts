@@ -23,16 +23,22 @@ export async function getCurrentInventoryLevelsFast(
     },
   });
   
-  // Map to inventory levels (without last update time)
-  const inventoryLevels: CurrentInventoryLevel[] = productLocations.map(pl => ({
-    productId: pl.productId,
-    product: pl.products,
-    locationId: pl.locationId,
-    location: pl.locations,
-    quantity: pl.quantity,
-    lastUpdated: new Date(0), // Default date, not fetched
-    version: pl.version,
-  }));
+  // Map to inventory levels (without last update time). The loc-1
+  // `products.quantity` mirror is retired (B2.5) — strip it off the joined row so
+  // a dead column never reaches the wire. `quantity` on the LEVEL is the real
+  // per-location number and stays.
+  const inventoryLevels: CurrentInventoryLevel[] = productLocations.map(pl => {
+    const { quantity: _retiredMirror, ...productRow } = pl.products;
+    return {
+      productId: pl.productId,
+      product: productRow,
+      locationId: pl.locationId,
+      location: pl.locations,
+      quantity: pl.quantity,
+      lastUpdated: new Date(0), // Default date, not fetched
+      version: pl.version,
+    };
+  });
   
   // If specific location requested, include products with 0 quantity
   if (locationId) {
@@ -51,9 +57,11 @@ export async function getCurrentInventoryLevelsFast(
     
     if (location) {
       for (const product of allProducts) {
+        // Same strip on the zero-fill branch's rows (B2.5).
+        const { quantity: _retiredMirror, ...productRow } = product;
         inventoryLevels.push({
           productId: product.id,
-          product,
+          product: productRow,
           locationId,
           location,
           quantity: 0,

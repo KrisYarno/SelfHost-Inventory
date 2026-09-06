@@ -67,8 +67,13 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     return restored;
   });
 
+  // The loc-1 `products.quantity` mirror is retired (B2.5) — strip it from the
+  // echoed row so a dead column never reaches the wire. The audit /
+  // `recordChange` work inside the transaction above is untouched.
+  const { quantity: _retiredMirror, ...productRow } = product;
+
   return NextResponse.json({
     message: "Product restored successfully",
-    product,
+    product: productRow,
   });
 });

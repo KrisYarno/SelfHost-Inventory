@@ -315,9 +315,14 @@ export const DELETE = apiHandler(async (request: NextRequest, { params }: RouteP
     return deleted;
   });
 
+  // The loc-1 `products.quantity` mirror is retired (B2.5) — strip it from the
+  // echoed row so a dead column never reaches the wire. The audit /
+  // `recordChange` work inside the transaction above is untouched.
+  const { quantity: _retiredMirror, ...productRow } = product;
+
   const response = NextResponse.json({
     message: "Product deleted successfully",
-    product,
+    product: productRow,
   });
   return applyRateLimitHeaders(response, rateLimitHeaders);
 });
