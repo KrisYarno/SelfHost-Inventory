@@ -67,9 +67,11 @@
  *     text, and a statement that only exists at runtime has no source line.
  *   - The ALIAS class (B25-FD1-1): `const p = tx.product; p.update(…)` and
  *     `tx['product'].update(…)` name no `.product.` chain and escape every rule.
- *     The delegate matchers ARE whitespace-tolerant (a line-broken
- *     `tx.product\n  .update(` is caught — self-tested below); an alias is a
+ *     The delegate matcher tolerates LAYOUT — whitespace around both dots and
+ *     before the paren, optional chaining (`?.`) and explicit type arguments
+ *     (`update<T>(`), all self-tested below (B25-FD2-1/2); an alias is a
  *     different spelling, not a different layout, and is stated, not chased.
+ *     `tx.product['update'](` and `.update.call(` are of the alias class.
  */
 
 import fs from 'node:fs';
@@ -86,18 +88,18 @@ const EXCLUDED_DIRS = ['scripts/diagnostics'];
 const SOURCE_EXTENSIONS = new Set(['.ts', '.js', '.tsx']);
 
 /**
- * The PRISMA DELEGATE spellings (`.product.update(` … `.product.upsert(`),
- * case-SENSITIVE: the repo writes them lower-case and nothing about a delegate
- * call is case-ambiguous. Matched by the ONE regex below, never by a literal.
+ * The ONE delegate matcher for the PRISMA DELEGATE spellings (`.product.update(`
+ * … `.product.upsert(`), case-SENSITIVE (the repo writes them lower-case and
+ * nothing about a delegate call is case-ambiguous) and LAYOUT-tolerant
+ * (B25-FD1-1, B25-FD2-1/2): whitespace around BOTH dots and before the paren,
+ * an optional-chaining method dot (`product?.update(`) and explicit type
+ * arguments (`update<Prisma.ProductUpdateArgs>(`) — because nothing normalises
+ * source before this scan (no prettier hook is wired) and every one of those is
+ * the same call. Shared by rule (i), rule (ii) and the per-file spellings so
+ * the three can never disagree about what a delegate write looks like.
  */
-/**
- * The ONE delegate matcher (B25-FD1-1): whitespace-tolerant around the dots and
- * before the paren, because nothing normalises source before this scan (no
- * prettier hook is wired) and a line-broken `tx.product\n  .update(` is the
- * same call. Shared by rule (i), rule (ii) and the per-file spellings so the
- * three can never disagree about what a delegate write looks like.
- */
-const DELEGATE_WRITE_CALL = /\.product\s*\.\s*(update|updateMany|create|createMany|upsert)\s*\(/g;
+const DELEGATE_WRITE_CALL =
+  /\.\s*product\s*\??\.\s*(update|updateMany|create|createMany|upsert)\s*(?:<[^(]*>)?\s*\(/g;
 
 /** EXPORTED FOR TEST. Every delegate write in `text`, with its canonical spelling label. */
 export function delegateWriteHits(text: string): Array<{ index: number; spelling: string; op: string }> {
@@ -174,11 +176,8 @@ export function sqlWriteHits(text: string): Array<{ index: number; spelling: str
   return hits.sort((a, b) => a.index - b.index);
 }
 
-/** The delegate calls rule (ii) opens and walks. */
-const WRITE_CALL = DELEGATE_WRITE_CALL;
-
-/** ANY delegate's write call — rule (iii) walks these looking for a NESTED relation write. */
-const ANY_WRITE_CALL = /\.\w+\s*\.\s*(update|updateMany|create|createMany|upsert)\s*\(/g;
+/** ANY delegate's write call — rule (iii) walks these looking for a NESTED relation write. Same layout tolerance as the delegate matcher. */
+const ANY_WRITE_CALL = /\.\s*\w+\s*\??\.\s*(update|updateMany|create|createMany|upsert)\s*(?:<[^(]*>)?\s*\(/g;
 
 /** The nested operations that WRITE the related row (`connect` and `set` only re-point an FK). */
 const NESTED_WRITE_OPS = 'update|upsert|updateMany|create|createMany|connectOrCreate';
@@ -447,13 +446,14 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
     const offenders: string[] = [];
     for (const source of sources) {
       if (!ALLOWED.has(source.path)) continue;
-      WRITE_CALL.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      while ((match = WRITE_CALL.exec(source.text)) !== null) {
-        const openParen = source.text.indexOf('(', match.index);
+      // The SAME matcher rule (i) uses, consumed as a list (B25-FD2-3: never two
+      // `exec` loops over one shared `g` regex object). `<T>` cannot contain `(`,
+      // so the first paren after the hit is the call's own.
+      for (const hit of delegateWriteHits(source.text)) {
+        const openParen = source.text.indexOf('(', hit.index);
         const window = callWindow(source.text, openParen);
         if (/\bquantity\b/.test(window)) {
-          offenders.push(`  ${source.path}:${lineOf(source.text, match.index)}  .product.${match[1]}(`);
+          offenders.push(`  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.spelling}`);
         }
       }
     }
@@ -565,6 +565,9 @@ describe('delegateWriteHits — the Prisma delegate matcher', () => {
     ['await tx.product.update({ where: { id }, data: { quantity: 1 } })', 'the plain chain'],
     ['await tx.product\n  .update({ where: { id }, data: { quantity: { increment: delta } } })', 'a line-broken chain (B25-FD1-1)'],
     ['prisma.product .updateMany ({ data: { quantity: 0 } })', 'spaces around the dot and before the paren'],
+    ['await tx.\n  product.update({ data: { quantity: 1 } })', 'a chain broken after the OBJECT dot (B25-FD2-1)'],
+    ['tx.product?.update({ data: { quantity: 1 } })', 'optional chaining (B25-FD2-2)'],
+    ['prisma.product.update<Prisma.ProductUpdateArgs>({ data: { quantity: 1 } })', 'explicit type arguments (B25-FD2-2)'],
     ['tx.product.upsert({ where: { id }, update: {}, create: { quantity: 0 } })', 'an upsert'],
   ])('catches %s (%s)', (fixture) => {
     expect(delegateWriteHits(fixture).length).toBeGreaterThan(0);
@@ -574,6 +577,7 @@ describe('delegateWriteHits — the Prisma delegate matcher', () => {
     ['await tx.product.findUnique({ where: { id } })', 'a read'],
     ['await tx.product_locations.update({ where: { id }, data: { quantity: 1 } })', 'the COVERED delegate'],
     ['await tx.productMapping.update({ where: { id }, data: {} })', 'another delegate whose name starts with product'],
+    ['await tx.productReorderConfig.upsert({ where: { id }, update: {}, create: {} })', 'the allowlisted reorder-config delegate'],
   ])('does NOT catch %s (%s)', (fixture) => {
     expect(delegateWriteHits(fixture)).toEqual([]);
   });
