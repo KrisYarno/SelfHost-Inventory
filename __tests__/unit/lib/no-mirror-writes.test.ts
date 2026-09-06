@@ -65,6 +65,8 @@
  *   - A raw SQL string ASSEMBLED FROM PARTS or passed as a variable
  *     (`$executeRawUnsafe(sql)`) is not seen: the scan reads literal source
  *     text, and a statement that only exists at runtime has no source line.
+ *     The multi-table belts (B25-QA-2) are keyword-case-SENSITIVE by decision,
+ *     so a lower-case multi-table statement is the same class.
  *   - The ALIAS class (B25-FD1-1): `const p = tx.product; p.update(…)` and
  *     `tx['product'].update(…)` name no `.product.` chain and escape every rule.
  *     The delegate matcher tolerates LAYOUT — whitespace around both dots and
@@ -130,6 +132,17 @@ const SQL_WRITE_PATTERNS = [
   // user-visible admin copy — a belt that rewrites UI strings to stay green is
   // the wrong belt. A lower-case statement is still caught by the UPDATE regex.
   { spelling: 'products SET', pattern: /\bproducts`?\s+SET\b/g },
+  // The MULTI-TABLE forms (B25-QA-2): MySQL's `UPDATE a JOIN products p ON … SET
+  // p.quantity = …` and `UPDATE a, products p SET …` put another table first, so
+  // none of the three belts above see them — and "resync the mirror from
+  // product_locations" is exactly the statement somebody would reach for.
+  // Keyword-case-SENSITIVE for the same reason as the belt above (an English
+  // "update the products list and set …" is prose, not a statement).
+  {
+    spelling: 'UPDATE … products … SET (multi-table)',
+    pattern: /\bUPDATE\b[^;]{0,300}?\bproducts`?\b[^;]{0,300}?\bSET\b/g,
+  },
+  { spelling: 'products <alias> SET', pattern: /\bproducts`?\s+\w+\s+SET\b/g },
 ] as const;
 
 /**
@@ -593,13 +606,20 @@ describe('sqlWriteHits — the raw-SQL matchers', () => {
     ['update products set quantity=quantity+1', 'all lower-case'],
     ['INSERT INTO inventory.products (id) VALUES (1)', 'a schema-qualified INSERT'],
     ['REPLACE INTO products (id, quantity) VALUES (1, 0)', 'REPLACE INTO'],
+    [
+      'UPDATE product_locations pl JOIN products p ON p.id = pl.productId SET p.quantity = pl.quantity WHERE pl.locationId = 1',
+      'a multi-table UPDATE with products second (B25-QA-2)',
+    ],
+    ['UPDATE inventory_logs il, products p SET p.quantity = 0 WHERE il.productId = p.id', 'the comma-join form (B25-QA-2)'],
   ])('catches %s (%s)', (fixture) => {
     expect(sqlWriteHits(fixture).length).toBeGreaterThan(0);
   });
 
   it.each([
     ['UPDATE product_locations SET quantity = 1', 'the COVERED table is the right one to write'],
+    ['UPDATE product_locations pl SET pl.quantity = 1 WHERE pl.productId = 2', 'an aliased covered-table UPDATE'],
     ['SELECT quantity FROM products', 'a read is not a write'],
+    ['// Update the products list first and then set the flag on each row', 'English prose with the three words in order'],
   ])('does NOT catch %s (%s)', (fixture) => {
     expect(sqlWriteHits(fixture)).toEqual([]);
   });

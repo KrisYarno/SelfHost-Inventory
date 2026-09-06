@@ -269,12 +269,13 @@ describe("PATCH thresholds — per-product PRODUCT_UPDATE events (R-L6)", () => 
   });
 
   it("X-locks the product rows in ASCENDING productId order, never the body's (pack CB2.5a.2)", async () => {
-    // THE LOCK-ORDER PIN. This route takes NO `product_locations` lock before
-    // its `products` X locks and it locks one row per iteration, so two
-    // concurrent PATCHes naming the same products in DIFFERENT body orders could
-    // cycle on `products.PRIMARY` — a deadlock the concurrency gate's classifier
-    // can only call `unattributable`. Sorting into the prelock's canonical
-    // ascending order is what makes that cycle impossible.
+    // THE LOCK-ORDER PIN. With `combinedMinimum` present this route X-locks the
+    // `products` row BEFORE that product's `product_locations` upserts and it
+    // locks one row per iteration, so two concurrent PATCHes naming the same
+    // products in DIFFERENT body orders could cycle on `products.PRIMARY` — a
+    // deadlock the concurrency gate's classifier can only call `unattributable`.
+    // Sorting into the prelock's canonical ascending order is what makes that
+    // cycle impossible. (The perLocation-only body is the NEXT pin.)
     tx.product.findMany.mockResolvedValue([
       { id: 10, name: "Alpha", lowStockThreshold: 5 },
       { id: 11, name: "Bravo", lowStockThreshold: 8 },
@@ -350,6 +351,41 @@ describe("PATCH thresholds — per-product PRODUCT_UPDATE events (R-L6)", () => 
     );
     const [row] = auditRows();
     expect(row.details.changes.lowStockThreshold).toEqual({ from: 7, to: null });
+  });
+
+  it("a perLocation-ONLY body takes NO `products` lock and upserts `product_locations` in ASCENDING locationId order (B25-QA-1)", async () => {
+    // THE OTHER LOCK-ORDER PIN. `combinedMinimum` is optional: a body that only
+    // carries per-location minimums takes ZERO `products` X locks, so its
+    // `product_locations` upserts are its FIRST locks on the pair. A covered
+    // writer's prelock takes the same keys in the canonical order inside one
+    // materialize statement; a PATCH taking them in the BODY's order would be
+    // an ABBA on `product_locations` — the classifier's `product-locations-cycle`.
+    tx.product.findMany.mockResolvedValue([{ id: 20, name: "Delta", lowStockThreshold: 0 }]);
+    tx.product_locations.findMany.mockResolvedValue([]);
+    tx.product.update.mockResolvedValue({});
+    tx.product_locations.upsert.mockResolvedValue({});
+
+    const resp = await thresholdsPATCH(
+      mkReq("http://t/api/admin/products/thresholds", "PATCH", {
+        updates: [
+          {
+            productId: 20,
+            perLocation: [
+              { locationId: 5, minQuantity: 1 },
+              { locationId: 2, minQuantity: 1 },
+              { locationId: 3, minQuantity: 1 },
+            ],
+          },
+        ],
+      })
+    );
+
+    expect(resp.status).toBe(200);
+    expect(tx.product.update).not.toHaveBeenCalled();
+    const upsertOrder = (tx.product_locations.upsert as unknown as jest.Mock).mock.calls.map(
+      (call: any[]) => call[0].where.productId_locationId.locationId
+    );
+    expect(upsertOrder).toEqual([2, 3, 5]);
   });
 
   it("upsert create-path from-value is null when the product_locations row is new", async () => {

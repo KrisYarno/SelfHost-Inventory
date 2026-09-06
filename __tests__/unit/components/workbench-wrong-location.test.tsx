@@ -794,6 +794,26 @@ describe("the workbench move — no answer means no outcome (CB2.5e.4 / B25-FR1)
     }
   });
 
+  // The house 500 backstop (`lib/api-utils.ts` `errorResponse('Internal server
+  // error', 500)`) carries `{ error }` and NO code — pack row 81 (B25-FD1-3)
+  // names it as an unknown door by hand; this is its pin (B25-QA-5).
+  it("a 500 with { error } but NO code is unanswered, not a refusal (the house backstop)", async () => {
+    moveAnswer = { status: 500, body: { error: "Internal server error" } };
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+    await waitFor(() => expect(screen.getByTestId("move-dialog-refusal")).toBeInTheDocument());
+
+    expect(screen.getByTestId("move-dialog-refusal")).toHaveTextContent(UNANSWERED_SENTENCE);
+    expect(mockToastDismiss).toHaveBeenCalledWith("undo-ORD-1");
+    expect(mockToastWarning).toHaveBeenCalledWith(UNANSWERED_WARNING);
+    expect(lastToastOptions().duration).not.toBe(10000);
+  });
+
   // The 503 the pack names by hand: BUSY is a DEFINITE rollback, so it re-arms
   // exactly like every other refusal. This is the contrast the two pins above
   // depend on — without it "never re-arm" would be a legal implementation.

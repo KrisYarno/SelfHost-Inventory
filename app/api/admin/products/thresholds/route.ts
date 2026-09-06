@@ -70,14 +70,25 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
   // Schema enforces >= 0 integers and a non-empty updates array.
   const { updates: requestedUpdates } = ThresholdsUpdateSchema.parse(body);
 
-  // B2.5 (pack CB2.5a.2): this route X-locks one `products` row per iteration,
-  // and it takes NO `product_locations` lock before them — so two concurrent
-  // PATCHes naming the same products in different body orders could cycle on
-  // `products.PRIMARY`, a deadlock the gate's classifier can only call
-  // `unattributable`. Lock in the prelock's canonical ASCENDING productId order
-  // instead of the body's. Nothing else is order-sensitive: `updatedCount` is a
-  // length, and each product's audit event is addressed to its own product.
-  const updates = requestedUpdates.slice().sort((a, b) => a.productId - b.productId);
+  // B2.5 (pack CB2.5a.2; B25-QA-1): this route locks in the PRELOCK'S CANONICAL
+  // ORDER — ascending productId, and within a product ascending locationId —
+  // never the body's. With `combinedMinimum` present a product's X lock on
+  // `products` comes BEFORE its `product_locations` upserts (the same P → PL
+  // direction as a covered writer's S(P) → X(PL)); a perLocation-ONLY update
+  // takes NO `products` lock at all, so its `product_locations` locks are its
+  // first locks on the pair and MUST follow the canonical order, or two PATCHes
+  // (or a PATCH and a covered writer's canonical prelock) could cycle on
+  // `product_locations` — a deadlock the gate's classifier calls
+  // `product-locations-cycle`. Nothing else is order-sensitive: `updatedCount`
+  // is a length, and each product's audit event is addressed to its own product.
+  const updates = requestedUpdates
+    .slice()
+    .sort((a, b) => a.productId - b.productId)
+    .map((u) =>
+      u.perLocation
+        ? { ...u, perLocation: u.perLocation.slice().sort((a, b) => a.locationId - b.locationId) }
+        : u
+    );
 
   const productIds = updates.map((u) => u.productId);
   const locationPairs = updates.flatMap((u) =>

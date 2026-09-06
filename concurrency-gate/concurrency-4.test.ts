@@ -711,7 +711,10 @@ async function observeRendezvous(
     }
     if (sleeping === 1) {
       const blocked = rows.some(
-        (r) => r.STATE !== "User sleep" && (r.INFO ?? "").startsWith("INSERT INTO product_locations"),
+        // B25-QA-4: the prelock's `Prisma.sql` template opens on a new line, so
+        // the statement the engine holds may begin with whitespace — trim it,
+        // or this branch never fires and the probe rests on `lockWait` alone.
+        (r) => r.STATE !== "User sleep" && (r.INFO ?? "").trimStart().startsWith("INSERT INTO product_locations"),
       );
       if (blocked) seen.blockedOnMaterialize = true;
       const waits = await probe.$queryRawUnsafe<{ n: bigint | number }[]>(
