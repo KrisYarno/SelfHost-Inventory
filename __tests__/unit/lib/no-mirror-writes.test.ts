@@ -52,17 +52,24 @@
  * A prose occurrence under the roots is therefore a rewrite, by design: the pack
  * would rather re-word a comment than carry a scanner that decides what code is.
  *
- * THREE RESIDUALS, STATED, NOT ENGINEERED AWAY:
+ * FIVE RESIDUALS, STATED, NOT ENGINEERED AWAY:
  *   - Rule (ii) reads the LITERAL argument window, so a `quantity` smuggled
  *     through a local `const data = …` inside an ALLOWLISTED file is not caught
  *     (B25-OC3-4). The allowlisted files carry that by decision; every other
  *     file is caught by rule (i) regardless of spelling.
- *   - The scan roots are stated, not universal. `launch-gate/` sits outside them
- *     (B25-OC4-5); its own seed dropped the mirror keys in the same wave, but
- *     this pin does not police that directory.
+ *   - Rule (iii) reads literal text the same way: a nested relation write
+ *     assembled through a variable (`data: nested`) is the same class.
+ *   - The scan roots are stated, not universal. `launch-gate/` and `prisma/`
+ *     sit outside them (B25-OC4-5; `prisma/seed-locations.ts` READS the column
+ *     and nothing runs it); this pin does not police those directories.
  *   - A raw SQL string ASSEMBLED FROM PARTS or passed as a variable
  *     (`$executeRawUnsafe(sql)`) is not seen: the scan reads literal source
  *     text, and a statement that only exists at runtime has no source line.
+ *   - The ALIAS class (B25-FD1-1): `const p = tx.product; p.update(…)` and
+ *     `tx['product'].update(…)` name no `.product.` chain and escape every rule.
+ *     The delegate matchers ARE whitespace-tolerant (a line-broken
+ *     `tx.product\n  .update(` is caught — self-tested below); an alias is a
+ *     different spelling, not a different layout, and is stated, not chased.
  */
 
 import fs from 'node:fs';
@@ -79,16 +86,29 @@ const EXCLUDED_DIRS = ['scripts/diagnostics'];
 const SOURCE_EXTENSIONS = new Set(['.ts', '.js', '.tsx']);
 
 /**
- * The PRISMA DELEGATE spellings, case-SENSITIVE: the repo writes them lower-case
- * and nothing about a delegate call is case-ambiguous.
+ * The PRISMA DELEGATE spellings (`.product.update(` … `.product.upsert(`),
+ * case-SENSITIVE: the repo writes them lower-case and nothing about a delegate
+ * call is case-ambiguous. Matched by the ONE regex below, never by a literal.
  */
-const DELEGATE_WRITE_PATTERNS = [
-  '.product.update(',
-  '.product.updateMany(',
-  '.product.create(',
-  '.product.createMany(',
-  '.product.upsert(',
-] as const;
+/**
+ * The ONE delegate matcher (B25-FD1-1): whitespace-tolerant around the dots and
+ * before the paren, because nothing normalises source before this scan (no
+ * prettier hook is wired) and a line-broken `tx.product\n  .update(` is the
+ * same call. Shared by rule (i), rule (ii) and the per-file spellings so the
+ * three can never disagree about what a delegate write looks like.
+ */
+const DELEGATE_WRITE_CALL = /\.product\s*\.\s*(update|updateMany|create|createMany|upsert)\s*\(/g;
+
+/** EXPORTED FOR TEST. Every delegate write in `text`, with its canonical spelling label. */
+export function delegateWriteHits(text: string): Array<{ index: number; spelling: string; op: string }> {
+  const hits: Array<{ index: number; spelling: string; op: string }> = [];
+  DELEGATE_WRITE_CALL.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = DELEGATE_WRITE_CALL.exec(text)) !== null) {
+    hits.push({ index: match.index, spelling: `.product.${match[1]}(`, op: match[1] });
+  }
+  return hits;
+}
 
 /**
  * The RAW SQL spellings, case-INSENSITIVE (B25-FR1/F4). `update products set` is
@@ -128,8 +148,8 @@ const TOLERATED_SQL_FIXTURE_LINES = [
 /** Every spelling of a `products` write, for the per-file pins below. */
 function productWriteSpellings(text: string): string[] {
   const found: string[] = [];
-  for (const pattern of DELEGATE_WRITE_PATTERNS) {
-    if (text.includes(pattern)) found.push(pattern);
+  for (const hit of delegateWriteHits(text)) {
+    if (!found.includes(hit.spelling)) found.push(hit.spelling);
   }
   for (const hit of sqlWriteHits(text)) {
     if (!found.includes(hit.spelling)) found.push(hit.spelling);
@@ -155,10 +175,10 @@ export function sqlWriteHits(text: string): Array<{ index: number; spelling: str
 }
 
 /** The delegate calls rule (ii) opens and walks. */
-const WRITE_CALL = /\.product\.(update|updateMany|create|createMany|upsert)\s*\(/g;
+const WRITE_CALL = DELEGATE_WRITE_CALL;
 
 /** ANY delegate's write call — rule (iii) walks these looking for a NESTED relation write. */
-const ANY_WRITE_CALL = /\.\w+\.(update|updateMany|create|createMany|upsert)\s*\(/g;
+const ANY_WRITE_CALL = /\.\w+\s*\.\s*(update|updateMany|create|createMany|upsert)\s*\(/g;
 
 /** The nested operations that WRITE the related row (`connect` and `set` only re-point an FK). */
 const NESTED_WRITE_OPS = 'update|upsert|updateMany|create|createMany|connectOrCreate';
@@ -398,12 +418,8 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
     const offenders: string[] = [];
     for (const source of sources) {
       if (ALLOWED.has(source.path)) continue;
-      for (const pattern of DELEGATE_WRITE_PATTERNS) {
-        let at = source.text.indexOf(pattern);
-        while (at !== -1) {
-          offenders.push(`  ${source.path}:${lineOf(source.text, at)}  ${pattern}`);
-          at = source.text.indexOf(pattern, at + pattern.length);
-        }
+      for (const hit of delegateWriteHits(source.text)) {
+        offenders.push(`  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.spelling}`);
       }
       for (const hit of sqlWriteHits(source.text)) {
         // The gate's captured engine trace is evidence of the RETIRED cycle, by
@@ -543,6 +559,29 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
 // as well with every pattern deleted. Each fixture is one spelling the rules
 // exist to catch, and one near-miss they must NOT catch.
 // ===========================================================================
+
+describe('delegateWriteHits — the Prisma delegate matcher', () => {
+  it.each([
+    ['await tx.product.update({ where: { id }, data: { quantity: 1 } })', 'the plain chain'],
+    ['await tx.product\n  .update({ where: { id }, data: { quantity: { increment: delta } } })', 'a line-broken chain (B25-FD1-1)'],
+    ['prisma.product .updateMany ({ data: { quantity: 0 } })', 'spaces around the dot and before the paren'],
+    ['tx.product.upsert({ where: { id }, update: {}, create: { quantity: 0 } })', 'an upsert'],
+  ])('catches %s (%s)', (fixture) => {
+    expect(delegateWriteHits(fixture).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['await tx.product.findUnique({ where: { id } })', 'a read'],
+    ['await tx.product_locations.update({ where: { id }, data: { quantity: 1 } })', 'the COVERED delegate'],
+    ['await tx.productMapping.update({ where: { id }, data: {} })', 'another delegate whose name starts with product'],
+  ])('does NOT catch %s (%s)', (fixture) => {
+    expect(delegateWriteHits(fixture)).toEqual([]);
+  });
+
+  it('labels every hit with the canonical spelling, whatever the layout', () => {
+    expect(delegateWriteHits('tx.product\n  .update(').map((h) => h.spelling)).toEqual(['.product.update(']);
+  });
+});
 
 describe('sqlWriteHits — the raw-SQL matchers', () => {
   it.each([
