@@ -66,7 +66,11 @@
  *     (`$executeRawUnsafe(sql)`) is not seen: the scan reads literal source
  *     text, and a statement that only exists at runtime has no source line.
  *     The multi-table belts (B25-QA-2) are keyword-case-SENSITIVE by decision,
- *     so a lower-case multi-table statement is the same class.
+ *     so a lower-case multi-table statement is the same class; their window is
+ *     300 chars with no `;` inside, so a JOIN whose ON clause outruns it, or a
+ *     literal `;` in the statement text, escapes (B25-FD3-5). By design they
+ *     also FLAG a multi-table UPDATE that merely JOINs `products` to filter a
+ *     `product_locations` write — a rewrite (join in a subquery), not a hole.
  *   - The ALIAS class (B25-FD1-1): `const p = tx.product; p.update(…)` and
  *     `tx['product'].update(…)` name no `.product.` chain and escape every rule.
  *     The delegate matcher tolerates LAYOUT — whitespace around both dots and
@@ -140,7 +144,11 @@ const SQL_WRITE_PATTERNS = [
   // "update the products list and set …" is prose, not a statement).
   {
     spelling: 'UPDATE … products … SET (multi-table)',
-    pattern: /\bUPDATE\b[^;]{0,300}?\bproducts`?\b[^;]{0,300}?\bSET\b/g,
+    // `(?<!\bFOR\s)`: the house prose writes `FOR UPDATE` in comments, and
+    // four such comments already sit within 300 chars of the word `products`
+    // (B25-FD3-4) — one upper-case SET added to any of them would have tripped
+    // an unanchored belt. A statement never starts with `FOR UPDATE`.
+    pattern: /(?<!\bFOR\s)\bUPDATE\b[^;]{0,300}?\bproducts`?\b[^;]{0,300}?\bSET\b/g,
   },
   { spelling: 'products <alias> SET', pattern: /\bproducts`?\s+\w+\s+SET\b/g },
 ] as const;
@@ -620,6 +628,11 @@ describe('sqlWriteHits — the raw-SQL matchers', () => {
     ['UPDATE product_locations pl SET pl.quantity = 1 WHERE pl.productId = 2', 'an aliased covered-table UPDATE'],
     ['SELECT quantity FROM products', 'a read is not a write'],
     ['// Update the products list first and then set the flag on each row', 'English prose with the three words in order'],
+    [
+      '// step 6b: `SELECT … FOR UPDATE` on the row; see lib/products/decline.ts — then SET the flag',
+      'house prose: FOR UPDATE near the word products and an upper-case SET (B25-FD3-4)',
+    ],
+    ['UPDATE product_locations SET quantity = 1 WHERE productId IN (SELECT id FROM products)', 'a covered-table UPDATE filtering on products'],
   ])('does NOT catch %s (%s)', (fixture) => {
     expect(sqlWriteHits(fixture)).toEqual([]);
   });

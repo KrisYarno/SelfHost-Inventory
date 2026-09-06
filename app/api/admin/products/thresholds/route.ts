@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdmin, apiHandler, requireCSRF } from "@/lib/api-utils";
+import { AppError } from "@/lib/error-handling";
 import prisma from "@/lib/prisma";
 import { ThresholdsUpdateSchema } from "@/lib/validation/admin";
 import { recordChange, newBatchId, type ChangeDiff } from "@/lib/change-tracking";
@@ -60,6 +61,21 @@ export const GET = apiHandler(async (_request: NextRequest) => {
   });
 });
 
+/** B25-FD3-1: one row per product, or the canonical lock order cannot be promised. */
+function assertNoDuplicateProductIds(updates: ReadonlyArray<{ productId: number }>): void {
+  const seen = new Set<number>();
+  for (const u of updates) {
+    if (seen.has(u.productId)) {
+      throw new AppError(
+        `Duplicate productId ${u.productId} in updates — send one row per product`,
+        "VALIDATION_ERROR",
+        400
+      );
+    }
+    seen.add(u.productId);
+  }
+}
+
 // PATCH /api/admin/products/thresholds - Bulk update thresholds
 export const PATCH = apiHandler(async (request: NextRequest) => {
   const { user } = await requireAdmin();
@@ -75,12 +91,18 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
   // never the body's. With `combinedMinimum` present a product's X lock on
   // `products` comes BEFORE its `product_locations` upserts (the same P → PL
   // direction as a covered writer's S(P) → X(PL)); a perLocation-ONLY update
-  // takes NO `products` lock at all, so its `product_locations` locks are its
-  // first locks on the pair and MUST follow the canonical order, or two PATCHes
-  // (or a PATCH and a covered writer's canonical prelock) could cycle on
-  // `product_locations` — a deadlock the gate's classifier calls
-  // `product-locations-cycle`. Nothing else is order-sensitive: `updatedCount`
-  // is a length, and each product's audit event is addressed to its own product.
+  // takes no X lock on `products` (its upsert's create path still takes the FK
+  // S lock — the covered direction), so its `product_locations` locks are its
+  // first X locks on the pair and MUST follow the canonical order, or two
+  // PATCHes (or a PATCH and a covered writer's canonical prelock) could cycle
+  // on `product_locations` — a deadlock the gate's classifier calls
+  // `product-locations-cycle`. A DUPLICATE productId in one body would defeat
+  // the sort (a stable sort keeps the body's order for equal keys, so
+  // `[{10, perLocation}, {10, combinedMinimum}]` would lock PL before P) — it
+  // is refused (B25-FD3-1; a post-parse assert, the house convention). Nothing
+  // else is order-sensitive: `updatedCount` is a length, and each product's
+  // audit event is addressed to its own product.
+  assertNoDuplicateProductIds(requestedUpdates);
   const updates = requestedUpdates
     .slice()
     .sort((a, b) => a.productId - b.productId)

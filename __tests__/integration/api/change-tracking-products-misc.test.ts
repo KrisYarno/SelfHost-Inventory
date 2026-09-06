@@ -388,6 +388,29 @@ describe("PATCH thresholds — per-product PRODUCT_UPDATE events (R-L6)", () => 
     expect(upsertOrder).toEqual([2, 3, 5]);
   });
 
+  it("refuses a body naming the same productId twice (B25-FD3-1: a stable sort would keep the body's PL-before-P order)", async () => {
+    tx.product.findMany.mockResolvedValue([{ id: 10, name: "Alpha", lowStockThreshold: 5 }]);
+    tx.product_locations.findMany.mockResolvedValue([]);
+    tx.product.update.mockResolvedValue({});
+    tx.product_locations.upsert.mockResolvedValue({});
+
+    const resp = await thresholdsPATCH(
+      mkReq("http://t/api/admin/products/thresholds", "PATCH", {
+        updates: [
+          { productId: 10, perLocation: [{ locationId: 2, minQuantity: 1 }] },
+          { productId: 10, combinedMinimum: 5 },
+        ],
+      })
+    );
+
+    expect(resp.status).toBe(400);
+    const body = await resp.json();
+    expect(body.error).toMatch(/Duplicate productId 10/);
+    expect(tx.product.update).not.toHaveBeenCalled();
+    expect(tx.product_locations.upsert).not.toHaveBeenCalled();
+    expect(auditRows()).toEqual([]);
+  });
+
   it("upsert create-path from-value is null when the product_locations row is new", async () => {
     tx.product.findMany.mockResolvedValue([{ id: 20, name: "Delta", lowStockThreshold: 0 }]);
     tx.product_locations.findMany.mockResolvedValue([]); // no existing row for the pair

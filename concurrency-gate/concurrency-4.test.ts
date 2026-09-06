@@ -700,7 +700,7 @@ async function observeRendezvous(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const rows = await probe.$queryRawUnsafe<{ STATE: string | null; INFO: string | null }[]>(
-      `SELECT STATE, LEFT(INFO, 40) AS INFO FROM information_schema.PROCESSLIST
+      `SELECT STATE, LEFT(INFO, 80) AS INFO FROM information_schema.PROCESSLIST
         WHERE DB = ? AND ID <> CONNECTION_ID() AND COMMAND <> 'Sleep'`,
       GATE_DB_NAME,
     );
