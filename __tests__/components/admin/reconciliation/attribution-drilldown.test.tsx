@@ -71,7 +71,6 @@ import {
   AttributionDrilldown,
   MOVE_MULTI_LOCATION_COPY,
   MOVE_NULL_LOCATION_COPY,
-  MOVE_USE_REFULFIL_COPY,
   REVERSE_USE_UNFULFILL_COPY,
 } from "@/components/admin/reconciliation/attribution-drilldown";
 
@@ -937,20 +936,26 @@ describe("the Move… control", () => {
 
     expect(screen.getByTestId("move-drilldown-batch-1")).toBeInTheDocument();
     expect(screen.getByTestId("reverse-drilldown-batch-1")).toBeInTheDocument();
-    expect(screen.queryByTestId("drilldown-move-unavailable")).not.toBeInTheDocument();
   });
 
   // OC-1 again: the move ladder's rung 7 refuses a fulfilment-evidenced batch
-  // every time, so the control is not offered — and the sentence names the two
-  // order-side dialogs that ARE the repair.
-  it("is HIDDEN on a FULFILLED batch, with the unfulfill + refulfil sentence", () => {
+  // every time, so the control is not offered. CB2.5e.3: it is ONE sentence, not
+  // two near-duplicates — a fulfilled batch used to be told twice, in two
+  // spellings, that unfulfill is the repair. The reverse sentence is the one
+  // that survives; the move side's own wording lives in the move dialog's
+  // `MOVE_ORDER_LEG_SENTENCE`, which is what operators actually meet.
+  it("is HIDDEN on a FULFILLED batch, and says it ONCE — no move-side duplicate", () => {
     setDetail(makeDetail({ ledgerRows: rowsAt(3) }));
     renderRow({ fulfilled: true, canAttribute: true });
 
     expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
-    expect(screen.getByTestId("drilldown-move-unavailable")).toHaveTextContent(
-      MOVE_USE_REFULFIL_COPY,
+    expect(screen.queryByTestId("drilldown-move-unavailable")).toBeNull();
+    expect(screen.getByTestId("drilldown-reverse-unavailable")).toHaveTextContent(
+      REVERSE_USE_UNFULFILL_COPY,
     );
+    // ONE sentence: the fulfilled arm renders a single paragraph, and nothing
+    // repeats "unfulfill" underneath it.
+    expect(screen.queryAllByText(/unfulfill/i)).toHaveLength(1);
   });
 
   it("is HIDDEN on a MULTI-LOCATION batch, with the sentence saying why", () => {
@@ -1018,7 +1023,6 @@ describe("the Move… control", () => {
       <AttributionDrilldown row={makeRow()} open onOpenChange={jest.fn()} onAttribute={jest.fn()} />,
     );
     expect(screen.queryByTestId("move-drilldown-batch-1")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("drilldown-move-unavailable")).not.toBeInTheDocument();
     unmount();
 
     useBatchDetailMock.mockReturnValue({ data: undefined, isLoading: false, isError: true });

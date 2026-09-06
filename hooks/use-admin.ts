@@ -963,6 +963,26 @@ export function useReverseBatch(batchId: string) {
 }
 
 /**
+ * CB2.5e.4 — THE MOVE'S OWN CLOCK, shared by this hook and the workbench's
+ * raw-fetch caller (which spells both constants itself: a value import from a
+ * hooks module into the workbench page would drag the whole admin surface into
+ * that bundle for two strings).
+ */
+const MOVE_TIMEOUT_MS = 60_000;
+const MOVE_TIMEOUT_SENTENCE =
+  "The move did not answer in time — check the batch before trying again";
+
+/**
+ * `AbortSignal.timeout` rejects the fetch with a `DOMException` NAMED
+ * `TimeoutError`. The name is what is checked rather than the class: a caller's
+ * abort can arrive from another realm, and a plain `AbortController` abort
+ * (name `AbortError`) is deliberately NOT this — nobody aborts a move by hand.
+ */
+function isTimeoutAbort(err: unknown): boolean {
+  return (err as { name?: unknown } | null)?.name === "TimeoutError";
+}
+
+/**
  * THE WRONG-LOCATION MOVE (pack CB2c.3). `onSettled`, like its two siblings: a
  * REFUSED move is exactly when the client's picture is known to be wrong, and it
  * invalidates the same two worlds the reverse does — the reconciliation surface
@@ -981,14 +1001,28 @@ export function useMoveBatch(batchId: string) {
   const { token: csrfToken } = useCSRF();
   return useMutation<MoveResponse, { error: string; code: string }, { physicalLocationId: number }>({
     mutationFn: async (input) => {
-      const res = await fetch(
-        `/api/inventory/batches/${encodeURIComponent(batchId)}/move`,
-        {
-          method: "POST",
-          headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-          body: JSON.stringify(input),
-        },
-      );
+      let res: Response;
+      try {
+        res = await fetch(
+          `/api/inventory/batches/${encodeURIComponent(batchId)}/move`,
+          {
+            method: "POST",
+            headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+            body: JSON.stringify(input),
+            // CB2.5e.4: the move holds row locks while it writes, and a caller
+            // that waits forever leaves the operator staring at a spinner with
+            // no way back. The server's own transaction budget is 30 s
+            // (`STOCK_TX_OPTIONS`), so 60 s is past every answer it can give.
+            signal: AbortSignal.timeout(MOVE_TIMEOUT_MS),
+          },
+        );
+      } catch (err) {
+        // The abort is not a refusal and not a network death: it is "we do not
+        // know". The SAME `{ error, code }` shape the refusals use, so the one
+        // shared dialog reads one thing.
+        if (isTimeoutAbort(err)) throw { error: MOVE_TIMEOUT_SENTENCE, code: "TIMEOUT" };
+        throw err;
+      }
       const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (!res.ok) {
         // A PLAIN OBJECT, not an Error subclass: the workbench's raw-fetch

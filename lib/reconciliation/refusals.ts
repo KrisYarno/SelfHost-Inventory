@@ -277,6 +277,17 @@ export class AlreadyReversedRefusal extends Error {
  * nor movable a second time: two moves are two disagreeing accounts of where the
  * units are. The timestamp is rendered to the minute in UTC — a raw ISO string
  * is not a sentence an operator reads.
+ *
+ * AND THE LOCATION IS NAMED (pack CB2.5e.2). "location 7" is a number the
+ * operator then has to go and look up; the name is what they navigate by. ONE
+ * template with a conditional segment, owned here rather than assembled by each
+ * thrower, and the id ALWAYS rides along beside the name because the ledger and
+ * the next request are keyed on it.
+ *
+ * `locationName` is NULLABLE and the null arm is the id-only sentence: the name
+ * is read on the refusal path (`locationNameForRefusal`, `restorations.ts`) and
+ * an admin can delete an unused location between the move and this refusal. A
+ * missing row degrades the sentence, never spells "undefined".
  */
 export class AlreadyMovedRefusal extends Error {
   readonly code = 'ALREADY_MOVED';
@@ -284,9 +295,12 @@ export class AlreadyMovedRefusal extends Error {
   constructor(
     public readonly physicalLocationId: number,
     public readonly at: string,
+    public readonly locationName: string | null,
   ) {
     super(
-      `This batch was moved to location ${physicalLocationId} on ${at.slice(0, 16).replace('T', ' ')} UTC — it can no longer be re-attributed or moved again`,
+      `This batch was moved to ${
+        locationName === null ? `location ${physicalLocationId}` : `${locationName} (location ${physicalLocationId})`
+      } on ${at.slice(0, 16).replace('T', ' ')} UTC — it can no longer be re-attributed or moved again`,
     );
     this.name = 'AlreadyMovedRefusal';
   }

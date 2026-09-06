@@ -43,7 +43,11 @@ import { v4 as uuidv4 } from 'uuid';
 import { applyStockDelta } from '@/lib/inventory';
 import { prelockKey, prelockProductLocations } from '@/lib/inventory/prelock';
 import { lockAttributableBatch, partiallyStamped } from '@/lib/reconciliation/lock-attributable-batch';
-import { priorRestorations, type RestorationRow } from '@/lib/reconciliation/restorations';
+import {
+  locationNameForRefusal,
+  priorRestorations,
+  type RestorationRow,
+} from '@/lib/reconciliation/restorations';
 import {
   AlreadyMovedRefusal,
   BatchMovedRefusal,
@@ -188,7 +192,10 @@ export async function moveBatch(
     throw new BatchRestoredRefusal(restoredUnits);
   }
   if (prior.move !== null) {
-    throw new AlreadyMovedRefusal(prior.move.physicalLocationId, prior.move.at);
+    // CB2.5e.2: the name, read HERE and nowhere else — a plain read on the
+    // refusal path only, after the batch lock, so the happy path is untouched.
+    const locationName = await locationNameForRefusal(tx, prior.move.physicalLocationId);
+    throw new AlreadyMovedRefusal(prior.move.physicalLocationId, prior.move.at, locationName);
   }
 
   // 10. THE UNITS, PER PRODUCT, and the 2P keys the pair will write. Every

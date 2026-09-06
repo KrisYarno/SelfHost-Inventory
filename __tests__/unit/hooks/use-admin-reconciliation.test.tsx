@@ -34,6 +34,7 @@ import {
   useBatchDetail,
   useOrderSearch,
   useAttributeBatch,
+  useMoveBatch,
 } from "@/hooks/use-admin";
 
 const mockFetch = jest.fn();
@@ -253,5 +254,67 @@ describe("useAttributeBatch", () => {
     await waitFor(() =>
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ["admin", "reconciliation"] }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CB2.5e.4 — the drill-down's move caller TIMES OUT
+// ---------------------------------------------------------------------------
+
+describe("useMoveBatch — the 60 s timeout", () => {
+  const TIMEOUT_SENTENCE =
+    "The move did not answer in time — check the batch before trying again";
+
+  it("posts with an abort signal", async () => {
+    mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ pairs: [] }) });
+    const { Wrapper } = harness();
+    const { result } = renderHook(() => useMoveBatch("batch-1"), { wrapper: Wrapper });
+
+    await result.current.mutateAsync({ physicalLocationId: 2 });
+
+    const init = mockFetch.mock.calls[0][1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  // A mocked fetch never reads the signal, so the abort is staged as the
+  // rejection `AbortSignal.timeout` actually produces: a TimeoutError
+  // DOMException. The hook maps it to the SAME `{ error, code }` shape the
+  // workbench's raw-fetch caller rejects with, so the one shared dialog reads
+  // one refusal shape.
+  it("maps a TimeoutError abort to the frozen TIMEOUT envelope, and asks ONCE", async () => {
+    mockFetch.mockRejectedValue(new DOMException("timeout", "TimeoutError"));
+    const { Wrapper } = harness();
+    const { result } = renderHook(() => useMoveBatch("batch-1"), { wrapper: Wrapper });
+
+    await expect(result.current.mutateAsync({ physicalLocationId: 2 })).rejects.toEqual({
+      error: TIMEOUT_SENTENCE,
+      code: "TIMEOUT",
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a plain network failure alone — a dead socket is not a timeout", async () => {
+    mockFetch.mockRejectedValue(new TypeError("Failed to fetch"));
+    const { Wrapper } = harness();
+    const { result } = renderHook(() => useMoveBatch("batch-1"), { wrapper: Wrapper });
+
+    await expect(result.current.mutateAsync({ physicalLocationId: 2 })).rejects.toBeInstanceOf(
+      TypeError,
+    );
+  });
+
+  it("a 409 still rejects with the SERVER's sentence and code", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ error: "This batch was already reversed", code: "ALREADY_REVERSED" }),
+    });
+    const { Wrapper } = harness();
+    const { result } = renderHook(() => useMoveBatch("batch-1"), { wrapper: Wrapper });
+
+    await expect(result.current.mutateAsync({ physicalLocationId: 2 })).rejects.toEqual({
+      error: "This batch was already reversed",
+      code: "ALREADY_REVERSED",
+    });
   });
 });

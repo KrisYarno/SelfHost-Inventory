@@ -56,12 +56,27 @@ describe('the eight new refusal sentences (rendered to operators verbatim)', () 
     );
   });
 
-  it('ALREADY_MOVED renders the timestamp to the minute in UTC, never a raw ISO string', () => {
-    const err = new AlreadyMovedRefusal(7, '2026-09-02T14:31:22.000Z');
+  // CB2.5e.2: "location 7" is a number the operator then has to look up. The
+  // NAME is what they navigate by, and the id still rides along because the
+  // ledger and the next request are keyed on it.
+  it('ALREADY_MOVED NAMES the location, and renders the timestamp to the minute in UTC', () => {
+    const err = new AlreadyMovedRefusal(7, '2026-09-02T14:31:22.000Z', 'Overflow');
+    expect(err.message).toBe(
+      'This batch was moved to Overflow (location 7) on 2026-09-02 14:31 UTC — it can no longer be re-attributed or moved again',
+    );
+    expect(err.message).not.toContain('T14:31');
+  });
+
+  // The name is read on the refusal path and the row can be GONE by then (an
+  // admin can delete an unused location). The id-only sentence is the honest
+  // fallback — never "undefined (location 7)", never a blank.
+  it('ALREADY_MOVED falls back to the id alone when the name is null', () => {
+    const err = new AlreadyMovedRefusal(7, '2026-09-02T14:31:22.000Z', null);
     expect(err.message).toBe(
       'This batch was moved to location 7 on 2026-09-02 14:31 UTC — it can no longer be re-attributed or moved again',
     );
-    expect(err.message).not.toContain('T14:31');
+    expect(err.message).not.toContain('undefined');
+    expect(err.message).not.toContain('null');
   });
 
   it('BATCH_RESTORED names the units', () => {
@@ -243,7 +258,7 @@ describe('refusalResponse — the non-admin arms redact order identity', () => {
       new FulfilledBatchRefusal('ord-9', null),
       new R2bOtherTargetRefusal('ord-9'),
       new AlreadyReversedRefusal(6, 10),
-      new AlreadyMovedRefusal(7, '2026-09-02T14:31:22.000Z'),
+      new AlreadyMovedRefusal(7, '2026-09-02T14:31:22.000Z', 'Overflow'),
       new BatchRestoredRefusal(6),
       new MultiLocationRefusal([3, 7]),
       new NullLocationRowRefusal(501),
@@ -266,8 +281,10 @@ describe('refusalResponse — the eight new envelopes and their statuses', () =>
     });
   });
 
+  // The envelope is UNCHANGED by CB2.5e.2: the name lives in the sentence the
+  // dialogs render verbatim, never as a second wire field nobody reads.
   it('ALREADY_MOVED 409 carries the raw ISO instant beside the rendered sentence', async () => {
-    const err = new AlreadyMovedRefusal(7, '2026-09-02T14:31:22.000Z');
+    const err = new AlreadyMovedRefusal(7, '2026-09-02T14:31:22.000Z', 'Overflow');
     expect(await render(err)).toEqual({
       status: 409,
       body: {

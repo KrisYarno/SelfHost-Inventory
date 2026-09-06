@@ -259,3 +259,32 @@ export async function priorRestorations(
 
   return { restoredByKey, eventIdByKey, move };
 }
+
+/**
+ * THE NAME OF THE LOCATION A MOVE PUT THIS BATCH AT (pack CB2.5e.2).
+ *
+ * `ALREADY_MOVED` used to say "location 7", which is an id the operator then has
+ * to go and look up somewhere else. This is the one read that turns it into a
+ * sentence they can act on — and it happens ONLY on the refusal path, after the
+ * caller has already locked the batch's rows, so the happy path's statement
+ * count is exactly what it was.
+ *
+ * A PLAIN read, like everything else in this module: the batch is held `FOR
+ * UPDATE` by the caller, so this view already postdates every committed move,
+ * and a locking read here would buy nothing but another lock to deadlock on.
+ *
+ * A MISSING ROW IS `null`, NOT AN ERROR. An admin can delete an unused location
+ * between the move and this refusal, and a 500 in place of a 409 would hide the
+ * refusal the operator actually needs to read. The refusal class owns the
+ * fallback sentence.
+ */
+export async function locationNameForRefusal(
+  tx: Prisma.TransactionClient,
+  locationId: number,
+): Promise<string | null> {
+  const location = await tx.location.findUnique({
+    where: { id: locationId },
+    select: { name: true },
+  });
+  return location?.name ?? null;
+}

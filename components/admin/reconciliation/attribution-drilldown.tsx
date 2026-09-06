@@ -362,20 +362,19 @@ export const REVERSE_USE_UNFULFILL_COPY =
   "This batch was fulfilled — put it back through unfulfill, not here.";
 
 /**
- * THE MOVE'S THREE "not this batch" SENTENCES (pack CB2c.3, the OC-1 rule).
+ * THE MOVE'S TWO "not this batch" SENTENCES (pack CB2c.3, the OC-1 rule —
+ * narrowed from three by CB2.5e.3).
  *
- * Every one of them names a rung the move ladder would refuse on, so the control
- * is not offered at all — and the sentence says where the repair actually lives
+ * Each of them names a rung the move ladder would refuse on, so the control is
+ * not offered at all — and the sentence says where the repair actually lives
  * rather than leaving a blank an admin reads as "nothing to do here".
  *
- * The fulfilment one is the load-bearing one: a MOVE on either side of an
- * unfulfill leaves one location short and the other over (spec §2.6 REV-14), so
- * the wrong-location fix for a fulfilment is the two order-side dialogs.
- */
-export const MOVE_USE_REFULFIL_COPY =
-  "This batch was fulfilled — unfulfill + refulfil at the correct location.";
-
-/**
+ * THERE IS NO FULFILMENT SENTENCE HERE ANY MORE. A fulfilled batch hides BOTH
+ * controls, and it used to be told twice, in two spellings, that unfulfill is
+ * the repair. `REVERSE_USE_UNFULFILL_COPY` says it once; the move side's own
+ * wording survives where operators actually meet it — the move dialog's
+ * `MOVE_ORDER_LEG_SENTENCE`.
+ *
  * F2 (OC-2): A HIDDEN CONTROL LEAVES ONLY THE SENTENCE, so the sentence names
  * the facts the admin then acts on. "More than one location" sends them back to
  * the ledger to find out WHICH; the ids are already on screen, and the component
@@ -527,21 +526,15 @@ export function AttributionDrilldown({
             </Button>
           )}
 
+          {/* CB2.5e.3: ONE sentence for a fulfilled batch, not two. Both controls
+              are hidden by the same fact, and it is stated once. */}
           {detailReady && row.fulfilled && (
-            <>
-              <p
-                className="text-body-sm text-muted-foreground"
-                data-testid="drilldown-reverse-unavailable"
-              >
-                {REVERSE_USE_UNFULFILL_COPY}
-              </p>
-              <p
-                className="text-body-sm text-muted-foreground"
-                data-testid="drilldown-move-unavailable"
-              >
-                {MOVE_USE_REFULFIL_COPY}
-              </p>
-            </>
+            <p
+              className="text-body-sm text-muted-foreground"
+              data-testid="drilldown-reverse-unavailable"
+            >
+              {REVERSE_USE_UNFULFILL_COPY}
+            </p>
           )}
 
           {detailReady && !row.fulfilled && anyNullLocation && (

@@ -24,6 +24,7 @@ import type { Prisma } from '@prisma/client';
 
 import { prelockKey } from '@/lib/inventory/prelock';
 import {
+  locationNameForRefusal,
   priorRestorations,
   RESTORATION_ACTION_TYPES,
   RestorationLedgerCorrupt,
@@ -403,5 +404,33 @@ describe('priorRestorations — fail closed on a malformed event', () => {
       [correction({ details: { pairs: [{ productId: 9, locationId: 3, delta: 4 }] } })],
       41,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CB2.5e.2 — the REFUSAL PATH's one extra read
+// ---------------------------------------------------------------------------
+
+describe('locationNameForRefusal — the name the ALREADY_MOVED sentence carries', () => {
+  it('reads the name by id and selects NOTHING else', async () => {
+    const tx = mockDeep<Prisma.TransactionClient>();
+    (tx.location.findUnique as unknown as jest.Mock).mockResolvedValue({ name: 'Overflow' });
+
+    await expect(locationNameForRefusal(tx, 7)).resolves.toBe('Overflow');
+    expect(tx.location.findUnique).toHaveBeenCalledTimes(1);
+    expect(tx.location.findUnique).toHaveBeenCalledWith({
+      where: { id: 7 },
+      select: { name: true },
+    });
+    // A PLAIN read: the caller has already taken the batch's rows FOR UPDATE,
+    // and a second locking read here would buy nothing but a lock to deadlock on.
+    expect(tx.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('answers NULL for a location that no longer exists — never throws, never a blank', async () => {
+    const tx = mockDeep<Prisma.TransactionClient>();
+    (tx.location.findUnique as unknown as jest.Mock).mockResolvedValue(null);
+
+    await expect(locationNameForRefusal(tx, 404)).resolves.toBeNull();
   });
 });

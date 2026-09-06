@@ -54,12 +54,13 @@ jest.mock("@/hooks/use-low-stock-default", () => ({ useLowStockDefault: () => 10
 
 const mockToast = jest.fn();
 const mockToastDismiss = jest.fn();
+const mockToastWarning = jest.fn();
 jest.mock("sonner", () => {
   const toast = (...args: unknown[]) => mockToast(...args);
   toast.error = jest.fn();
   toast.success = jest.fn();
   toast.info = jest.fn();
-  toast.warning = jest.fn();
+  toast.warning = (...args: unknown[]) => mockToastWarning(...args);
   toast.message = jest.fn();
   toast.dismiss = (...args: unknown[]) => mockToastDismiss(...args);
   return { toast };
@@ -109,6 +110,8 @@ type Answer = { status: number; body: unknown };
 
 let fetchMock: jest.Mock;
 let moveAnswer: Answer;
+/** When set, the move request REJECTS with this instead of answering (CB2.5e.4). */
+let moveRejection: unknown | null;
 
 function response(a: Answer): Response {
   return {
@@ -141,6 +144,8 @@ function callsTo(fragment: string): Array<[string, RequestInit | undefined]> {
 beforeEach(() => {
   mockToast.mockClear();
   mockToastDismiss.mockClear();
+  mockToastWarning.mockClear();
+  moveRejection = null;
   completionProps = {};
   locationContext = { selectedLocationId: 1, selectedLocation: { name: "Main" } };
   moveAnswer = {
@@ -162,7 +167,12 @@ beforeEach(() => {
 
   fetchMock = jest.fn(async (url: unknown) => {
     const href = String(url);
-    if (href.includes("/move")) return response(moveAnswer);
+    if (href.includes("/move")) {
+      // CB2.5e.4: a MOCKED fetch never reads the signal, so the abort is staged
+      // as the rejection `AbortSignal.timeout` actually produces.
+      if (moveRejection !== null) throw moveRejection;
+      return response(moveAnswer);
+    }
     return { ok: true, json: async () => ({}) } as unknown as Response;
   });
   global.fetch = fetchMock as unknown as typeof fetch;
@@ -602,5 +612,117 @@ describe("the workbench move — ONE POST, for the manual batch (PK-1)", () => {
       ),
     );
     expect(screen.queryByTestId("move-result-manual")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CB2.5e.4 — the caller TIMES OUT, and says so honestly
+// ---------------------------------------------------------------------------
+
+const TIMEOUT_SENTENCE =
+  "The move did not answer in time — check the batch before trying again";
+const TIMEOUT_WARNING =
+  "The move's outcome is unknown — check the batch in Admin → Reconciliation";
+
+describe("the workbench move — the 60 s timeout (CB2.5e.4)", () => {
+  async function timeOutAMove() {
+    moveRejection = new DOMException("timeout", "TimeoutError");
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+    await waitFor(() => expect(screen.getByTestId("move-dialog-refusal")).toBeInTheDocument());
+    return user;
+  }
+
+  async function confirmAMove() {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+    await waitFor(() => expect(callsTo("/move")).toHaveLength(1));
+  }
+
+  it("the request carries an abort signal — the 60 s clock the server never gets to run past", async () => {
+    await confirmAMove();
+    const [, init] = callsTo("/move")[0];
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("an ABORT renders the timeout sentence — never a bare 'could not be completed'", async () => {
+    await timeOutAMove();
+
+    expect(screen.getByTestId("move-dialog-refusal")).toHaveTextContent(TIMEOUT_SENTENCE);
+    expect(callsTo("/move")).toHaveLength(1);
+  });
+
+  // The latch is the dialog's, released by the request's own `finally` — a
+  // timeout that left it held would freeze the dialog on a decision the
+  // operator now has to make again somewhere else.
+  it("the LATCH releases: the select and the confirm come back", async () => {
+    await timeOutAMove();
+
+    expect(screen.getByTestId("move-dialog-location")).not.toBeDisabled();
+    expect(screen.getByTestId("move-dialog-confirm")).not.toBeDisabled();
+  });
+
+  // B25-G3-8: the move MAY have committed. An Undo re-armed here would restore
+  // at a location the toast never named, so the toast goes and a warning says
+  // where to look instead.
+  it("DISMISSES the Undo toast and warns — it does NOT re-arm the 10 s window", async () => {
+    await timeOutAMove();
+
+    expect(mockToastDismiss).toHaveBeenCalledWith("undo-ORD-1");
+    expect(mockToastWarning).toHaveBeenCalledWith(TIMEOUT_WARNING);
+    // NOT re-armed: the last toast issued is the held-open one from opening the
+    // dialog (no clock), never a fresh 10 s.
+    expect(lastToastOptions().duration).not.toBe(10000);
+  });
+
+  // The contrast that makes the arm above meaningful: a REFUSAL still hands the
+  // 10 s back, because a refused batch never moved.
+  it("a REFUSAL is untouched by this — it still hands the 10 s back and warns nothing", async () => {
+    moveAnswer = {
+      status: 409,
+      body: { error: "This batch spans 2 locations (3, 7) and cannot be moved as one", code: "MULTI_LOCATION" },
+    };
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+    await waitFor(() => expect(screen.getByTestId("move-dialog-refusal")).toBeInTheDocument());
+
+    expect(lastToastOptions()).toMatchObject({ id: "undo-ORD-1", duration: 10000 });
+    expect(mockToastDismiss).not.toHaveBeenCalled();
+    expect(mockToastWarning).not.toHaveBeenCalled();
+  });
+
+  // A dead network is NOT a timeout: it keeps today's behaviour (the Undo comes
+  // back), because nothing was ever sent.
+  it("a plain network failure is not relabelled TIMEOUT", async () => {
+    moveRejection = new TypeError("Failed to fetch");
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    await completeAndShowToast();
+    await act(async () => {
+      await user.click(screen.getByTestId("wrong-location-ORD-1"));
+    });
+    await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+    await user.click(screen.getByTestId("move-dialog-confirm"));
+    await waitFor(() => expect(screen.getByTestId("move-dialog-refusal")).toBeInTheDocument());
+
+    expect(screen.getByTestId("move-dialog-refusal")).toHaveTextContent(
+      "The move could not be completed.",
+    );
+    expect(mockToastWarning).not.toHaveBeenCalled();
+    expect(lastToastOptions()).toMatchObject({ id: "undo-ORD-1", duration: 10000 });
   });
 });

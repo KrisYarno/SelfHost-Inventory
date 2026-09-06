@@ -112,6 +112,11 @@ interface TxFixture {
   stock?: Record<string, number>;
   /** Everything the fixture does not name. Generous by default. */
   defaultStock?: number;
+  /**
+   * What `location.findUnique` answers on the ALREADY_MOVED path (CB2.5e.2).
+   * `null` = the moved-to location has since been deleted.
+   */
+  movedToLocation?: { name: string } | null;
 }
 
 /** A transaction client that answers the core's reads and RECORDS the order. */
@@ -175,6 +180,12 @@ function makeTx(fixture: TxFixture = {}) {
   (tx.product.update as unknown as jest.Mock).mockImplementation(async () => {
     trace.push('product.update');
     return {};
+  });
+  // CB2.5e.2: traced so the happy path's statement list PROVES the name is read
+  // only on the refusal path — an unnamed read here would show up in `trace`.
+  (tx.location.findUnique as unknown as jest.Mock).mockImplementation(async () => {
+    trace.push('location name read');
+    return fixture.movedToLocation === undefined ? { name: 'Overflow' } : fixture.movedToLocation;
   });
 
   return { tx, trace };
@@ -429,8 +440,8 @@ describe('moveBatch — rung 9: the restoration ledger (I-M2)', () => {
     expect(err.restoredUnits).toBe(6);
   });
 
-  it('a batch already moved is refused ALREADY_MOVED, naming the location and the minute', async () => {
-    const { tx } = makeTx({
+  it('a batch already moved is refused ALREADY_MOVED, NAMING the location and the minute', async () => {
+    const { tx, trace } = makeTx({
       locked: [row({ delta: -4 })],
       restorationEvents: [
         moveEvent([
@@ -444,8 +455,42 @@ describe('moveBatch — rung 9: the restoration ledger (I-M2)', () => {
     expect(err.physicalLocationId).toBe(PHYSICAL);
     expect(err.at).toBe('2026-09-02T14:31:22.000Z');
     expect(err.message).toBe(
+      'This batch was moved to Overflow (location 7) on 2026-09-02 14:31 UTC — it can no longer be re-attributed or moved again',
+    );
+    // CB2.5e.2: the name is read AFTER the batch lock and the ledger, on the
+    // refusal path only — never before the rows are held.
+    expect(tx.location.findUnique).toHaveBeenCalledWith({
+      where: { id: PHYSICAL },
+      select: { name: true },
+    });
+    expect(trace).toEqual([
+      'lock batch rows FOR UPDATE',
+      'auditLog.findMany',
+      'orderAttributionAttempt.findFirst',
+      'restoration ledger read',
+      'location name read',
+    ]);
+  });
+
+  // The admin can delete the moved-to location between the move and this
+  // attempt. The id-only sentence is what the operator gets, never "undefined".
+  it('a DELETED moved-to location degrades to the id-only sentence', async () => {
+    const { tx } = makeTx({
+      locked: [row({ delta: -4 })],
+      movedToLocation: null,
+      restorationEvents: [
+        moveEvent([
+          { productId: 9, locationId: PHYSICAL, delta: -4 },
+          { productId: 9, locationId: LEDGER, delta: 4 },
+        ]),
+      ],
+    });
+    const err = await run(tx, { physicalLocationId: 8 }).catch((e) => e);
+    expect(err).toBeInstanceOf(AlreadyMovedRefusal);
+    expect(err.message).toBe(
       'This batch was moved to location 7 on 2026-09-02 14:31 UTC — it can no longer be re-attributed or moved again',
     );
+    expect(err.message).not.toContain('undefined');
   });
 
   it('a MALFORMED restoration event is fail-closed, never a move on an unreadable ledger', async () => {
@@ -642,6 +687,8 @@ describe('moveBatch — rung 11: the TRANSFER pair', () => {
 // ---------------------------------------------------------------------------
 
 describe('moveBatch — the statement ORDER (I-M1) and the record', () => {
+  // The list is EXACT (`toEqual`), which is also CB2.5e.2's happy-path pin: the
+  // ALREADY_MOVED name read is absent because the refusal never fired.
   it('lock, evidence, attempt, restoration ledger, prelock, writes — in that order', async () => {
     const { tx, trace } = makeTx({ locked: [row()] });
     await run(tx);

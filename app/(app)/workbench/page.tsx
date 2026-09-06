@@ -46,6 +46,28 @@ import { PageHeader } from "@/components/layout/page-header";
 import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
 import { useLowStockDefault } from "@/hooks/use-low-stock-default";
 
+/**
+ * CB2.5e.4 — THE MOVE'S OWN CLOCK. Spelled here as well as in
+ * `hooks/use-admin.ts`'s `useMoveBatch`, deliberately: a value import from the
+ * admin hooks module would drag that whole surface into the workbench bundle
+ * for two strings. The two callers' suites pin the same literals.
+ */
+const MOVE_TIMEOUT_MS = 60_000;
+const MOVE_TIMEOUT_SENTENCE =
+  "The move did not answer in time — check the batch before trying again";
+const MOVE_TIMEOUT_WARNING =
+  "The move's outcome is unknown — check the batch in Admin → Reconciliation";
+
+/**
+ * `AbortSignal.timeout` rejects the fetch with a `DOMException` NAMED
+ * `TimeoutError`. The NAME is what is checked, not the class: a plain
+ * `AbortController` abort (name `AbortError`) is deliberately not this, and
+ * nothing aborts this request by hand.
+ */
+function isTimeoutAbort(err: unknown): boolean {
+  return (err as { name?: unknown } | null)?.name === "TimeoutError";
+}
+
 export default function WorkbenchPage() {
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
   const [showCompleteDialog, setShowCompleteDialog] = useState(false);
@@ -511,6 +533,11 @@ export default function WorkbenchPage() {
           method: "POST",
           headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
           body: JSON.stringify({ physicalLocationId }),
+          // CB2.5e.4: the move holds row locks while it writes, and a caller
+          // that waits forever leaves the operator on a spinner with no way
+          // back. The server's transaction budget is 30 s (`STOCK_TX_OPTIONS`),
+          // so 60 s is past every answer it can give.
+          signal: AbortSignal.timeout(MOVE_TIMEOUT_MS),
         });
         const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
         if (!response.ok) throw body;
@@ -536,6 +563,23 @@ export default function WorkbenchPage() {
         }
         return body as unknown as MoveResponse;
       } catch (err) {
+        // CB2.5e.4 (B25-G3-8): A TIMEOUT IS NOT A REFUSAL. The request may have
+        // COMMITTED — the answer is the thing we never got — so re-arming the
+        // Undo would offer to restore stock at a location the toast never
+        // named. The toast goes, a warning says where to look, and the caller
+        // rejects with the frozen envelope the dialog renders verbatim.
+        if (isTimeoutAbort(err)) {
+          if (moveTarget !== null) toast.dismiss(`undo-${moveTarget.orderRef}`);
+          // F32/F25, as on the success path: the two refs describe ONE live
+          // toast and it is no longer live, so nothing may re-issue or
+          // re-dismiss it.
+          if (moveTarget !== null && liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`) {
+            reissueUndoToastRef.current = null;
+            liveUndoToastIdRef.current = null;
+          }
+          toast.warning(MOVE_TIMEOUT_WARNING);
+          throw { error: MOVE_TIMEOUT_SENTENCE, code: "TIMEOUT" };
+        }
         // F15: a REFUSAL (or a dead network) leaves the batch exactly where it
         // was, so the Undo is still the right thing to click — with a fresh 10 s
         // to click it in, because the decision is over. F32: only this move's

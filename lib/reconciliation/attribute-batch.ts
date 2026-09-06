@@ -59,7 +59,10 @@ import {
   partiallyStamped,
 } from '@/lib/reconciliation/lock-attributable-batch';
 import { rowWhere } from '@/lib/reconciliation/population';
-import { priorRestorations } from '@/lib/reconciliation/restorations';
+import {
+  locationNameForRefusal,
+  priorRestorations,
+} from '@/lib/reconciliation/restorations';
 import {
   AlreadyMovedRefusal,
   BatchMovedRefusal,
@@ -173,7 +176,10 @@ export async function attributeBatch(
     throw new BatchRestoredRefusal(restoredUnits);
   }
   if (prior.move !== null) {
-    throw new AlreadyMovedRefusal(prior.move.physicalLocationId, prior.move.at);
+    // CB2.5e.2: the name, read HERE and nowhere else — a plain read on the
+    // refusal path only, after the batch lock, so the happy path is untouched.
+    const locationName = await locationNameForRefusal(tx, prior.move.physicalLocationId);
+    throw new AlreadyMovedRefusal(prior.move.physicalLocationId, prior.move.at, locationName);
   }
 
   // 7. THE FULFILLMENT RULES (spec D4 / SETTLED 11), read off the evidence and
