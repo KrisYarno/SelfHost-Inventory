@@ -214,7 +214,6 @@ export async function moneyOracle(lineId: number): Promise<MoneyOracleResult> {
 }
 
 export type ProductOracleResult = {
-  compatQuantity: number;
   locationOneQuantity: number;
   onHand: number;
   ledgerSum: number;
@@ -227,8 +226,7 @@ export async function productOracle(
   const row = await withOracle((conn) =>
     queryOne(
       conn,
-      `SELECT p.quantity AS compatQuantity,
-              COALESCE((SELECT pl.quantity FROM product_locations pl WHERE pl.productId = p.id AND pl.locationId = 1), 0) AS locationOneQuantity,
+      `SELECT COALESCE((SELECT pl.quantity FROM product_locations pl WHERE pl.productId = p.id AND pl.locationId = 1), 0) AS locationOneQuantity,
               COALESCE((SELECT SUM(pl.quantity) FROM product_locations pl WHERE pl.productId = p.id), 0) AS onHand,
               COALESCE((SELECT SUM(il.delta) FROM inventory_logs il WHERE il.productId = p.id), 0) AS ledgerSum
          FROM products p
@@ -239,18 +237,12 @@ export async function productOracle(
   if (!row) throw new Error(`productOracle(${productId}): the product does not exist`);
 
   const result: ProductOracleResult = {
-    compatQuantity: num(row.compatQuantity),
     locationOneQuantity: num(row.locationOneQuantity),
     onHand: num(row.onHand),
     ledgerSum: num(row.ledgerSum),
   };
 
   const failures: string[] = [];
-  if (result.compatQuantity !== result.locationOneQuantity) {
-    failures.push(
-      `products.quantity ${result.compatQuantity} != the LOCATION-1 quantity ${result.locationOneQuantity} (the compatibility mirror is location 1, never the global sum)`,
-    );
-  }
   if (result.onHand !== expectedOnHand) {
     failures.push(`SUM(product_locations.quantity) ${result.onHand} != expected ${expectedOnHand}`);
   }

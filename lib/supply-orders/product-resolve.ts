@@ -162,6 +162,9 @@ async function createNew(
     throw new AppError('Location not found', 'BAD_REQUEST', 400);
   }
 
+  // The retired loc-1 mirror column is not written here (B2.5): it keeps its
+  // schema default of 0 until the drop migration, and the source pin
+  // `__tests__/unit/lib/no-mirror-writes.test.ts` reads this call's argument.
   const created = await tx.product.create({
     data: {
       name: productName,
@@ -169,7 +172,6 @@ async function createNew(
       variant,
       unit,
       numericValue,
-      quantity: 0,
       location: locationId,
       // NULL = inherit the system default (R-L13), never a materialized 10.
       lowStockThreshold: fields.lowStockThreshold === undefined ? null : fields.lowStockThreshold,

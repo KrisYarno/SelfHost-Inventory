@@ -1012,18 +1012,6 @@ export async function fulfillExternalOrder(
             tx
           );
           if (firstLogId === 0) firstLogId = log.id;
-
-          // Legacy product.quantity mirror for location 1. This is a derived
-          // value that should track product_locations[productId, 1].quantity.
-          // No stock guard here: the authoritative check already happened, and
-          // the mirror must track the source of truth.
-          if (winner.locationId === 1) {
-            await tx.$executeRaw(Prisma.sql`
-              UPDATE products
-              SET quantity = quantity - ${deduction.units}
-              WHERE id = ${deduction.productId}
-            `);
-          }
         }
 
         // Update ExternalOrderItem.fulfilledQty. UNCONDITIONAL: the order lock

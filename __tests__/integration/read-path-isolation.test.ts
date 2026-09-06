@@ -74,6 +74,7 @@ import { GET as weeklyReportGET } from '@/app/api/cron/weekly-report/route';
 import { GET as adminProductsGET } from '@/app/api/admin/products/route';
 import { GET as lowStockGET } from '@/app/api/reports/low-stock/route';
 import { GET as optimizedGET } from '@/app/api/products/optimized/route';
+import { GET as productGET } from '@/app/api/products/[id]/route';
 import { GET as variantsGET } from '@/app/api/inventory/variants/route';
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
@@ -297,5 +298,90 @@ describe('SHOW route: GET /api/inventory/variants does not exclude provisional',
     expect(findWhere).not.toHaveProperty('approvalStatus');
     expect(countWhere).not.toHaveProperty('approvalStatus');
     expect(findWhere).toMatchObject({ deletedAt: null });
+  });
+});
+
+// ===========================================================================
+// THE WIRE: the RETIRED loc-1 `products.quantity` mirror never ships (pack
+// CB2.5b.1).
+//
+// Three routes spread the raw Prisma product row onto the wire beside a
+// SEPARATELY computed `currentQuantity`. The column they were leaking is dead
+// (P2-B2.5) and its value is now whatever it happened to hold when the last
+// writer stopped — a number that looks authoritative and is not. Each route
+// strips the key BEFORE the spread; the `include` shapes are untouched, so
+// nothing else on the payload moves.
+// ===========================================================================
+
+describe('the retired mirror never reaches the wire (pack CB2.5b.1)', () => {
+  it('GET /api/products/optimized: no `quantity` at the product root; currentQuantity is the sum', async () => {
+    db.product.findMany.mockResolvedValue([
+      {
+        id: 3,
+        name: 'Widget',
+        quantity: 949, // the stale mirror value, as a prod row would carry it
+        location: 1,
+        product_locations: [
+          { quantity: 4, locationId: 1 },
+          { quantity: 6, locationId: 2 },
+        ],
+      },
+    ] as any);
+    db.product.count.mockResolvedValue(1 as any);
+
+    const resp = await optimizedGET(mkReq('http://t/api/products/optimized'));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(body.products).toHaveLength(1);
+    expect(Object.prototype.hasOwnProperty.call(body.products[0], 'quantity')).toBe(false);
+    // Byte-identical to what the route computed before the strip.
+    expect(body.products[0].currentQuantity).toBe(10);
+    // The rest of the row is untouched.
+    expect(body.products[0]).toMatchObject({ id: 3, name: 'Widget', location: 1 });
+  });
+
+  it('GET /api/admin/products: no `quantity` at the product root; currentQuantity is the sum', async () => {
+    mockRequireAdmin.mockResolvedValue({ user: ADMIN_USER });
+    db.product.findMany.mockResolvedValue([
+      {
+        id: 3,
+        name: 'Widget',
+        quantity: 949,
+        approvalStatus: 'PENDING_REVIEW',
+        createdByUser: { id: 7, username: 'tester', email: 'a@b.c' },
+        product_locations: [{ quantity: 4 }, { quantity: 6 }],
+      },
+    ] as any);
+
+    const resp = await adminProductsGET(mkReq('http://t/api/admin/products'));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(body.products).toHaveLength(1);
+    expect(Object.prototype.hasOwnProperty.call(body.products[0], 'quantity')).toBe(false);
+    expect(body.products[0].currentQuantity).toBe(10);
+    expect(body.products[0]).toMatchObject({ id: 3, name: 'Widget', approvalStatus: 'PENDING_REVIEW' });
+  });
+
+  it('GET /api/products/[id]: no `quantity` at the root; currentQuantity is location 1s row', async () => {
+    mockRequireApproved.mockResolvedValue({ user: APPROVED_USER });
+    db.product.findFirst.mockResolvedValue({
+      id: 3,
+      name: 'Widget',
+      quantity: 949,
+      reorderConfig: null,
+      inventory_logs: [],
+    } as any);
+    db.location.findFirst.mockResolvedValue({ id: 1, name: 'Warehouse' } as any);
+    db.product_locations.findUnique.mockResolvedValue({ quantity: 4 } as any);
+
+    const resp = await productGET(mkReq('http://t/api/products/3'), { params: { id: '3' } });
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(Object.prototype.hasOwnProperty.call(body, 'quantity')).toBe(false);
+    expect(body.currentQuantity).toBe(4);
+    expect(body).toMatchObject({ id: 3, name: 'Widget' });
   });
 });

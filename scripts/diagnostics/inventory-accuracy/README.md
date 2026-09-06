@@ -43,7 +43,7 @@ typo'd flag must not quietly bind a different reading).
 | `d1-reconciliation` | Per (order, product): units Woo observed on a completed order vs NET units the ledger removed for that order. Statuses `full/partial/none/over/unobservable` with unit differences. Plus three supplemental panels: the **over-cohort split**, the **line-grain observed-vs-fulfilledQty** panel (full history), and the **unattributed outbound pool**. |
 | `d2-inbound` | Largest positive-adjustment batches in a trailing window (actor, location, batch id) + identification of mass-update operations as overwrite/count-event dates. Includes negative-correction mass batches. |
 | `d3-snapshot-walk` | Per (product, location, day): snapshot delta vs ledger delta. Coverage gaps disclosed, never interpolated. |
-| `d4-checks` | Legacy `products.quantity` mirror gap; logType census by ISO week; `stockedOut` set-rate over time. |
+| `d4-checks` | Legacy `products.quantity` mirror gap — RETIRED 2026-09 (P2-B2.5); the slots are structurally unpopulated (null + reason), `productsTotal` stays live. Plus logType census by ISO week and `stockedOut` set-rate over time. |
 
 ## Disciplines encoded in the code
 

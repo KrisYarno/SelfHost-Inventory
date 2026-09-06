@@ -501,12 +501,12 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
 
     await POST(req, { params: { orderId: 'order-1' } })
 
-    // Verify atomic UPDATEs were issued. FOUR $executeRaw calls for one item:
+    // Verify atomic UPDATEs were issued. THREE $executeRaw calls for one item —
+    // one fewer since P2-B2.5 retired the loc-1 `products.quantity` mirror:
     //   1. fulfilledQty decrement with WHERE fulfilledQty >= ? (pass 1)
     //   2. the prelock's materialize INSERT (pack CB1b.3, between the passes)
     //   3. product_locations quantity increment (pass 2)
-    //   4. products.quantity legacy mirror (because locationId === 1)
-    expect(tx.$executeRaw).toHaveBeenCalledTimes(4)
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(3)
 
     // The create fallback is GONE — the prelock materialized the row, so the
     // increment cannot miss (pack CB1b.3). This pin now says "never", not
@@ -798,8 +798,8 @@ describe('POST /api/orders/[orderId]/unfulfill', () => {
 
     // $executeRaw: 1 for fulfilledQty decrement + 1 for the prelock's materialize
     // INSERT (both component keys in ONE statement) + 2 for product_locations
-    // + 2 for the legacy mirror (locationId=1) = 6 total calls
-    expect(tx.$executeRaw).toHaveBeenCalledTimes(6)
+    // = 4 total calls. The two loc-1 mirror writes are retired (P2-B2.5).
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(4)
   })
 
   // -----------------------------------------------------------------------

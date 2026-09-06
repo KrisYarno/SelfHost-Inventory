@@ -68,7 +68,16 @@ export const PATCH = apiHandler(async (request: NextRequest) => {
 
   const body = await request.json();
   // Schema enforces >= 0 integers and a non-empty updates array.
-  const { updates } = ThresholdsUpdateSchema.parse(body);
+  const { updates: requestedUpdates } = ThresholdsUpdateSchema.parse(body);
+
+  // B2.5 (pack CB2.5a.2): this route X-locks one `products` row per iteration,
+  // and it takes NO `product_locations` lock before them — so two concurrent
+  // PATCHes naming the same products in different body orders could cycle on
+  // `products.PRIMARY`, a deadlock the gate's classifier can only call
+  // `unattributable`. Lock in the prelock's canonical ASCENDING productId order
+  // instead of the body's. Nothing else is order-sensitive: `updatedCount` is a
+  // length, and each product's audit event is addressed to its own product.
+  const updates = requestedUpdates.slice().sort((a, b) => a.productId - b.productId);
 
   const productIds = updates.map((u) => u.productId);
   const locationPairs = updates.flatMap((u) =>

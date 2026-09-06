@@ -177,8 +177,7 @@ export const POST = apiHandler(async (request: NextRequest, { params }: RoutePar
     //    outside it safely, because a stale `discovered` only ever produces
     //    BATCH_MOVED. The budget is the lane's (`STOCK_TX_OPTIONS`): a 50-key
     //    reverse runs a prelock plus, per key, a ledger create with a three-table
-    //    include, an upsert, the mirror and the audit create — far past Prisma's
-    //    5 s default.
+    //    include, an upsert and the audit create — far past Prisma's 5 s default.
     result = await withDeadlockRetry(() =>
       withOrderLock(
         prisma,

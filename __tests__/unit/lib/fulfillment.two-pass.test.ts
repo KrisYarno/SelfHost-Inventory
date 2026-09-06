@@ -142,7 +142,7 @@ function makeStore(seed: {
    * Fault injection, called with the args BEFORE `externalOrderItem.update`
    * applies them. Throwing here models a statement-level failure of a winner's
    * LAST write — the fulfilledQty increment, which happens after that winner's
-   * stock decrement, its mirror and its stamped ledger row. Under the two-pass
+   * stock decrement and its stamped ledger row. Under the two-pass
    * design that failure is no longer survivable: it aborts the request.
    */
   onOrderItemUpdate?: (args: { where: any; data: any }) => void;
@@ -253,13 +253,10 @@ function makeStore(seed: {
         row.version += 1;
         return 1;
       }
-      if (/UPDATE products\b/.test(text)) {
-        const [deductQty, productId] = values;
-        const row = products.get(productId);
-        if (!row) return 0;
-        row.quantity -= deductQty;
-        return 1;
-      }
+      // NO `UPDATE products` branch: the loc-1 mirror is retired (P2-B2.5), so
+      // that statement reaching this store at all is the regression — and the
+      // throw below is what says so. `not.toMatch(/UPDATE products\b/)` pins
+      // sit beside the callers that used to drive it.
       throw new Error(`unexpected sql: ${text}`);
     },
 
@@ -533,7 +530,10 @@ describe('TP-1 — the savepoint-free path fulfils', () => {
     // The STORE holds the movement: decrements, SALE rows, fulfilledQty.
     expect(store.productLocation(10, 1)).toMatchObject({ quantity: 94, version: 3 });
     expect(store.productLocation(21, 1)).toMatchObject({ quantity: 99, version: 2 });
-    expect(store.product(10).quantity).toBe(94);
+    // ...and NOTHING was written to `products`: the loc-1 mirror is retired
+    // (P2-B2.5). Asserted on the statements, not on the fake store's row, so it
+    // reads as an absence rather than as an unchanged number.
+    rawCalls.forEach((call) => expect(call.sql).not.toMatch(/UPDATE products\b/));
     expect(store.allLogs()).toEqual([
       { productId: 10, locationId: 1, delta: -5, logType: 'SALE', batchId: 'batch-1', orderRecordId: ORDER_ID },
       { productId: 21, locationId: 1, delta: -1, logType: 'SALE', batchId: 'batch-1', orderRecordId: ORDER_ID },
@@ -895,9 +895,10 @@ describe('TP-4 — the within-tx tally', () => {
       },
     ]);
 
-    // ZERO product_locations statements were spent on the refusal: one UPDATE
-    // (the single's) and one mirror, and no locking re-read at all.
+    // ZERO product_locations statements were spent on the refusal: ONE UPDATE
+    // (the single's) and no locking re-read at all.
     expect(rawCalls.filter((c) => /UPDATE product_locations/.test(c.sql))).toHaveLength(1);
+    rawCalls.forEach((call) => expect(call.sql).not.toMatch(/UPDATE products\b/));
     expect(rawCalls.filter((c) => /SELECT quantity FROM product_locations/.test(c.sql))).toHaveLength(0);
     expect(store.orderItem('item-b').fulfilledQty).toBe(0);
   });
@@ -1203,7 +1204,7 @@ describe('TP-6/TP-7 — the backstop and the late failure', () => {
     // The strictly stronger W2S-1: item 1's committed work is gone too.
     expect(store.productLocation(10, 1)).toMatchObject({ quantity: 100, version: 1 });
     expect(store.productLocation(20, 1)).toMatchObject({ quantity: 100, version: 1 });
-    expect(store.product(10).quantity).toBe(100);
+    rawCalls.forEach((call) => expect(call.sql).not.toMatch(/UPDATE products\b/));
     expect(store.allLogs()).toEqual([]);
     expect(store.orderItem('item-1').fulfilledQty).toBe(0);
   });

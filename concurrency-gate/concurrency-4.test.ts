@@ -26,10 +26,12 @@
  *       arise, and each locked record's next-key gap lies BEFORE it, which
  *       sorted acquisition keeps acyclic), and the empirical negative control is
  *       the ONE sort-disabled mutation run recorded beside the scenario below.
- *       It races OFF the location-1 compatibility mirror, for a measured reason
- *       spelled out at `OFF_MIRROR_1` below: the mirror's write on `products`
- *       has a deadlock of its own with a concurrent prelock's FK parent check,
- *       and it is not this scenario's question.
+ *       It races at the SECOND location, for the measured reason spelled out at
+ *       `KEY_SECOND_1` below. That reason — the retired location-1 mirror's own
+ *       `products` deadlock with a concurrent prelock's FK parent check — is
+ *       gone as of P2-B2.5, but the keys stay where every recorded run of this
+ *       scenario took them; scenario 15 is the pin that the location-1 pair now
+ *       serialises.
  *
  *   9d  TWO FIRST-WRITES ON ONE NEVER-STOCKED KEY PRODUCE ONE ROW.
  *       Re-choreographed per pack REV-14 PKb-10: a prelock ALONE leaves the row
@@ -56,8 +58,10 @@
  *       B the locked shortfall, quoting the number the tally actually holds;
  *       C two concurrent fulfils of one order, serialized by the ORDER lock;
  *       D the unfulfill round trip, self-contained. It runs at LOCATION 1 on
- *       purpose: the first real-engine exercise of the `products` compatibility
- *       mirror on a bundle, which is where the named FK S->X residual lives.
+ *       purpose: the first real-engine exercise of the bundle path at the
+ *       location every route deducts at in real life, where each ledger INSERT's
+ *       FK S lock on `products` — the surviving half of the named S->X residual
+ *       (pack CB2.5a.2) — is taken.
  *
  * THE DEADLOCK REPORT IS RECORDED, NEVER ASSERTED AWAY (pack REV-14 PKb-10).
  * MySQL exposes no `Innodb_deadlocks` status counter, so the only truthful
@@ -70,10 +74,14 @@
  * `{ error: 'Internal server error' }`, so the wire never said "deadlock") or,
  * once pack REV-22 F3 lands its typed P2028/P2034 branch, as a 503 `BUSY`; the
  * envelope accepts either and NEITHER names the cycle, which is why the report
- * above prints the engine's own section. The `products` FK S→X residual (every
- * ledger insert takes a shared lock on its product row, and the location-1
- * mirror takes an exclusive one) is the named reason that branch stays open;
- * deduct-simple is single-attempt by design and does not retry into it.
+ * above prints the engine's own section. The `products` S→X residual (every
+ * ledger insert takes a shared lock on its product row, and booking's step-6b
+ * `FOR UPDATE` / decline's soft-delete take an exclusive one afterwards) is the
+ * named reason that branch stays open; deduct-simple is single-attempt by design
+ * and does not retry into it. As of P2-B2.5 NO COVERED writer takes that X lock
+ * any more — the retired location-1 mirror was the covered half — so between two
+ * covered writers the cycle is CLOSED (scenarios 13 and 15 pin it) and the
+ * residual survives only for booking and decline (pack CB2.5a.2).
  *
  * ...BUT THE OPEN BRANCH IS NOT A FREE PASS (pack REV-22 F9). "One committed,
  * one rolled back" is tolerated for that ONE named reason, so when it fires the
@@ -238,9 +246,9 @@ let singleton: PrismaClient;
 // --------------------------------------------------------------------------
 
 /**
- * The two overlapping keys scenario 13 races over, at the COMPATIBILITY
- * location — the routes deduct at location 1 in real life, and the
- * `products.quantity` mirror that entails is part of what is under test there.
+ * The two overlapping keys scenario 13 races over, at LOCATION 1 — where the
+ * routes deduct in real life, and where the covered writers' FK S locks on
+ * `products` all land.
  * P_APPROVED (9101) sorts before P_APPROVED_2 (9103), so "canonical order" is a
  * statement with observable content: it is NOT the order either racer asks in.
  */
@@ -248,33 +256,38 @@ const KEY_1: PrelockKeyInput = { productId: P_APPROVED, locationId: LOCATION_MAI
 const KEY_2: PrelockKeyInput = { productId: P_APPROVED_2, locationId: LOCATION_MAIN };
 
 /**
- * The same two products OFF THE MIRROR, which is where scenario 9c races.
+ * The same two products at the SECOND location, which is where scenario 9c
+ * races.
  *
- * MEASURED, and the reason this pair exists: run 9c's covered writes at
- * location 1 and the race deadlocks — but NOT on the prelock's key order, which
- * is what 9c is about. `applyStockDelta`'s location-1 mirror
- * (`UPDATE products SET quantity = quantity + n`) needs an X lock on the
- * PRODUCT row, while the other session's materialize INSERT is holding a SHARED
- * lock on that same product row (the FK parent check of
- * `product_locations.fk_pl_product`) and waiting for the `product_locations`
- * row the first session holds. That cycle is the `products` FK S→X residual the
- * pack names — `products` sits OUTSIDE the canonical order by spec §2.7, it is
- * why scenario 13's envelope allows a rolled-back writer, and its shape
- * predates B1 (before the prelock, the ledger INSERT's own FK check took the
- * same shared lock at the same point). It is NOT the prelock's ordering, so it
- * does not belong inside the scenario that tests the prelock's ordering: 9c
- * races off the mirror, and the location-1 observation is reported instead.
+ * MEASURED, and the reason this pair exists: when 9c was written, running its
+ * covered writes at location 1 deadlocked the race — but NOT on the prelock's
+ * key order, which is what 9c is about. The location-1 write on the `products`
+ * row that `applyStockDelta` used to make needed an X lock there, while the
+ * other session's materialize INSERT held a SHARED lock on that same product row
+ * (the FK parent check of `product_locations.fk_pl_product`) and waited for the
+ * `product_locations` row the first session held. That cycle was the S→X
+ * residual the pack names — `products` sits OUTSIDE the canonical order by spec
+ * §2.7, it is why scenario 13's envelope allows a rolled-back writer, and its
+ * shape predates B1 (before the prelock, the ledger INSERT's own FK check took
+ * the same shared lock at the same point). It was never the prelock's ordering,
+ * so it did not belong inside the scenario that tests the prelock's ordering.
+ *
+ * P2-B2.5 retired the covered half of that cycle: no covered writer takes an X
+ * lock on `products` any more, and scenario 15 pins the location-1 pair
+ * committing. These keys STAY at the second location all the same — every
+ * recorded run of 9c took them here, and moving them would re-open a settled
+ * measurement for no gain.
  */
-const OFF_MIRROR_1: PrelockKeyInput = { productId: P_APPROVED, locationId: LOCATION_SECOND };
-const OFF_MIRROR_2: PrelockKeyInput = { productId: P_APPROVED_2, locationId: LOCATION_SECOND };
+const KEY_SECOND_1: PrelockKeyInput = { productId: P_APPROVED, locationId: LOCATION_SECOND };
+const KEY_SECOND_2: PrelockKeyInput = { productId: P_APPROVED_2, locationId: LOCATION_SECOND };
 
 /**
  * THE NEVER-STOCKED KEY (9d and the `{0,0}` pin). The seed gives every seeded
  * product a row at BOTH locations, so a genuinely absent key has to be made:
  * the row is deleted after the reset, which is safe precisely because
  * `resetGateFixtures` rebuilds every scoped `product_locations` row from the
- * snapshot — the next reset puts it back with no help from this file. Off the
- * mirror, for the reason above.
+ * snapshot — the next reset puts it back with no help from this file. At the
+ * second location, for the reason above.
  */
 const NEVER_STOCKED_KEY: PrelockKeyInput = {
   productId: P_PENDING,
@@ -374,15 +387,6 @@ async function locationRows(productId: number): Promise<LocationRow[]> {
 async function locationRow(key: PrelockKeyInput): Promise<LocationRow | null> {
   const rows = await locationRows(key.productId);
   return rows.find((row) => row.locationId === key.locationId) ?? null;
-}
-
-/** `products.quantity`, the location-1 compatibility mirror. */
-async function mirroredQuantity(productId: number): Promise<number> {
-  const rows = await rawRows<{ quantity: number }>(
-    "SELECT quantity FROM products WHERE id = ?",
-    [productId],
-  );
-  return Number(rows[0]?.quantity ?? 0);
 }
 
 type CountSnapshot = { ledgerRows: number; auditRows: number; attemptRows: number };
@@ -493,10 +497,12 @@ type DeadlockShape = "products-residual" | "product-locations-cycle" | "unattrib
  * The two shapes the gate has to tell apart:
  *
  *   `products`-residual — at least one waiter wants a `products` row. That is
- *     the residual spec §2.7 names and `OFF_MIRROR_1` measures: `products` sits
- *     OUTSIDE the canonical order (the ledger insert's FK parent check takes S
- *     on it, the location-1 mirror takes X), its shape predates B1, and it is
- *     why scenario 13's envelope allows a rolled-back writer at all.
+ *     the residual spec §2.7 names: `products` sits OUTSIDE the canonical order
+ *     (the ledger insert's FK parent check takes S on it; booking's step-6b
+ *     `FOR UPDATE` and decline's soft-delete take X after their own stock write),
+ *     and its shape predates B1. As of P2-B2.5 it is legal ONLY where a booking
+ *     or a decline is one of the racers (pack CB2.5a.2) — in scenarios 13 and 15,
+ *     which race COVERED writers only, this shape is a FAILURE, not a residual.
  *
  *   `product_locations` cycle — EVERY waiter wants a `product_locations`
  *     record and none wants a `products` row. Two writers took the covered rows
@@ -864,6 +870,85 @@ function batchAdjust(adjustments: Adjustment[]): Promise<RouteAnswer> {
   return callRoute(batchAdjustRoute, "/api/inventory/batch-adjust", { adjustments });
 }
 
+/**
+ * THE THREE-WAY OUTCOME ENVELOPE for a race between two COVERED writers
+ * (pack CB2.5c.2; scenarios 13 and 15 share it).
+ *
+ * After P2-B2.5 no covered transaction takes an X lock on `products` — the
+ * location-1 mirror was the covered half of the lane's engine-traced S->X cycle
+ * and it is retired — so two covered writers over the same keys cannot cycle
+ * with each other: they SERIALISE on the canonical prelock. The legal outcomes,
+ * exactly:
+ *
+ *   BOTH 200                            pass. What the retirement claims.
+ *   one 200 + one 503 `BUSY`, and NO    tolerated and RECORDED. The prelock
+ *   fresh deadlock section              takes each key's X lock at its first
+ *                                       statement, so a same-key second writer
+ *                                       WAITS for the first's commit (CB2.5d) —
+ *                                       a throughput property, and 503 `BUSY` is
+ *                                       its typed answer when a budget blows.
+ *   ANY fresh deadlock section          RED, whatever `classifyDeadlock` calls
+ *                                       it — `products-residual` INCLUDED,
+ *                                       because neither racer here is a booking
+ *                                       or a decline (CB2.5a.2 names those two
+ *                                       as the only surviving X-lock takers).
+ *   a generic 500, two failures, a 409  RED.
+ *
+ * `classifyDeadlock(null)` answers `unattributable`, which is why the freshness
+ * flag — not the verdict — is what opens the red branch.
+ */
+function assertCoveredRaceEnvelope(
+  scenario: string,
+  answers: RouteAnswer[],
+  deadlock: { after: string | null; fresh: boolean },
+): void {
+  const statuses = answers.map((answer) => answer.status).sort();
+
+  if (deadlock.fresh) {
+    const verdict = classifyDeadlock(deadlock.after);
+    throw new Error(
+      [
+        `${scenario}: a FRESH deadlock fired between two COVERED writers. Since P2-B2.5 ` +
+          "neither of them takes an X lock on `products`, so no shape of cycle here is a " +
+          "residual — this is a defect.",
+        `shape: ${verdict.shape} — ${verdict.why}`,
+        `waits parsed: ${
+          verdict.waits.map((wait) => `${wait.table}.${wait.index}`).join(" | ") || "(none)"
+        }`,
+        `statuses: ${statuses.join(", ")}`,
+        "LATEST DETECTED DEADLOCK:",
+        deadlock.after ?? "(the engine has recorded none)",
+      ].join("\n"),
+    );
+  }
+
+  const committed = answers.filter((answer) => answer.status === 200);
+  const busy = answers.filter((answer) => answer.status === 503);
+
+  if (committed.length === answers.length) return;
+
+  if (committed.length === answers.length - 1 && busy.length === 1) {
+    // The CODE is the contract; the sentence is the route's copy and is not
+    // re-spelled here.
+    expect(busy[0].body).toMatchObject({ code: "BUSY" });
+    console.log(
+      `[${scenario}] one writer answered 503 BUSY and the engine recorded no fresh ` +
+        "deadlock — the prelock's same-key wait (CB2.5d), tolerated and recorded.",
+    );
+    return;
+  }
+
+  throw new Error(
+    [
+      `${scenario}: the outcome is outside the envelope. Two covered writers may both ` +
+        "commit, or one may answer 503 `BUSY` with no fresh deadlock — nothing else.",
+      `statuses: ${statuses.join(", ")}`,
+      `bodies: ${JSON.stringify(answers.map((answer) => answer.body))}`,
+    ].join("\n"),
+  );
+}
+
+
 /** The two order-scoped routes scenario 14 drives, always at the gate's own
  *  external order (the path parameter IS the id the audit row names). */
 function fulfillOrder(body: unknown): Promise<RouteAnswer> {
@@ -1152,7 +1237,7 @@ describe("the canonical prelock — real-MySQL pins (pack CB1c)", () => {
  * TWO TRACES THIS GATE ACTUALLY PRODUCED, kept verbatim as the classifier's
  * fixtures (pack REV-22 F9). Not invented shapes: the first came out of the
  * sort-disabled mutation run recorded above scenario 9c, the second out of a
- * throwaway run of 9c's race at location 1 — the configuration `OFF_MIRROR_1`
+ * throwaway run of 9c's race at location 1 — the configuration `KEY_SECOND_1`
  * says deadlocks on the `products` residual, which is exactly what it did.
  *
  * They are here because the classification branch in scenario 13 fires only on
@@ -1259,13 +1344,15 @@ describe("the deadlock classifier (pack REV-22 F9) — pinned on CAPTURED engine
     expect(verdict.shape).toBe("product-locations-cycle");
   });
 
-  test("the location-1 mirror cycle reads as the ACCEPTED `products` residual", () => {
+  test("the `products` S->X cycle, now booking/decline's, reads as the ACCEPTED residual", () => {
     const verdict = classifyDeadlock(CAPTURED_PRODUCTS_RESIDUAL);
 
     // The residual's exact signature: one waiter parked on the covered row, the
-    // other parked on the `products` row the mirror UPDATE needs exclusively —
-    // and the HOLDS lines (a shared `products` lock, held `product_locations`
-    // rows) contribute nothing, which is why only the waits are read.
+    // other parked on the `products` row an X lock is wanted on — the trace was
+    // captured off the retired loc-1 mirror, and it is the same shape booking's
+    // step-6b `FOR UPDATE` and decline's soft-delete still produce (CB2.5a.2).
+    // The HOLDS lines (a shared `products` lock, held `product_locations` rows)
+    // contribute nothing, which is why only the waits are read.
     expect(verdict.waits.map((wait) => `${wait.table}.${wait.index}`)).toEqual([
       "product_locations.unique_product_location",
       "products.PRIMARY",
@@ -1316,7 +1403,7 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
    * assumed — and the control is conclusive: it did not stay green.
    */
   test("scenario 9c: two sessions, two orders, the two product keys asked in OPPOSITE order — the canonical sort makes the acquisition identical and BOTH commit", async () => {
-    // (Off the location-1 mirror by design — see `OFF_MIRROR_1`.)
+    // (At the second location by design — see `KEY_SECOND_1`.)
     await resetAll();
     const sessionA = openClient();
     const sessionB = openClient();
@@ -1328,7 +1415,7 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       // The hold point: the winner's ledger writes sleep while it holds BOTH
       // materialized rows, so the loser is unambiguously blocked on the
       // prelock rather than merely late.
-      await installLedgerHold([OFF_MIRROR_1.productId, OFF_MIRROR_2.productId], 0.3);
+      await installLedgerHold([KEY_SECOND_1.productId, KEY_SECOND_2.productId], 0.3);
 
       const arrive = makeBarrier(2);
       let blocked = false;
@@ -1371,8 +1458,8 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
 
       const { value: race } = await reportDeadlocks("scenario 9c", async () => {
         const inFlight = [
-          session(sessionA, GATE_EXT_ORDER_ID, [OFF_MIRROR_1, OFF_MIRROR_2]),
-          session(sessionB, GATE_EXT_ORDER_2_ID, [OFF_MIRROR_2, OFF_MIRROR_1]),
+          session(sessionA, GATE_EXT_ORDER_ID, [KEY_SECOND_1, KEY_SECOND_2]),
+          session(sessionB, GATE_EXT_ORDER_2_ID, [KEY_SECOND_2, KEY_SECOND_1]),
         ];
         blocked = await waitForLockWait(probe);
         return Promise.allSettled(inFlight);
@@ -1402,20 +1489,18 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       // session read the reset's `{0,0}` on both keys; the other read the
       // first's committed `{1,1}` on both. A half-and-half reading would mean
       // the two prelocks interleaved, which is the thing that must not happen.
-      for (const key of [OFF_MIRROR_1, OFF_MIRROR_2]) {
+      for (const key of [KEY_SECOND_1, KEY_SECOND_2]) {
         const versions = maps.map((map) => readOf(map, key).version).sort();
         const quantities = maps.map((map) => readOf(map, key).quantity).sort();
         expect(versions).toEqual([0, 1]);
         expect(quantities).toEqual([0, 1]);
       }
-      const firstIndex = maps.findIndex((map) => readOf(map, OFF_MIRROR_1).version === 0);
-      expect(readOf(maps[firstIndex], OFF_MIRROR_2).version).toBe(0);
+      const firstIndex = maps.findIndex((map) => readOf(map, KEY_SECOND_1).version === 0);
+      expect(readOf(maps[firstIndex], KEY_SECOND_2).version).toBe(0);
 
-      // Both writes landed on both keys — and location 2 is off the
-      // compatibility mirror, so `products.quantity` never moved.
-      for (const key of [OFF_MIRROR_1, OFF_MIRROR_2]) {
+      // Both writes landed on both keys.
+      for (const key of [KEY_SECOND_1, KEY_SECOND_2]) {
         expect(await locationRow(key)).toMatchObject({ quantity: 2, version: 2 });
-        expect(await mirroredQuantity(key.productId)).toBe(0);
       }
     } finally {
       await dropHoldTrigger();
@@ -1447,8 +1532,7 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
 
       // The hold point: the winner's ledger insert sleeps while it holds the
       // materialized row, so the loser is unambiguously BLOCKED on the ODKU
-      // rather than merely late. Location 2 carries no `products.quantity`
-      // mirror, so the only contention here is the key itself.
+      // rather than merely late. The only contention here is the key itself.
       await installLedgerHold([NEVER_STOCKED_KEY.productId], 0.5);
 
       const arrive = makeBarrier(2);
@@ -1512,8 +1596,6 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
         quantity: DELTA_A + DELTA_B,
         version: 2,
       });
-      // Location 2 is off the compatibility mirror, and stayed off it.
-      expect(await mirroredQuantity(NEVER_STOCKED_KEY.productId)).toBe(0);
     } finally {
       await dropHoldTrigger();
       await Promise.all([sessionA.$disconnect(), sessionB.$disconnect(), probe.$disconnect()]);
@@ -1541,8 +1623,8 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       // scenario writes anything.
       const opening = await countSnapshot();
 
-      // Opening stock through the real write path, so the ledger, the rows and
-      // the mirror all agree before the race starts.
+      // Opening stock through the real write path, so the ledger and the rows
+      // agree before the race starts.
       await stocker.$transaction(async (tx) => {
         for (const key of [KEY_1, KEY_2]) {
           await inventory.applyStockDelta(tx, {
@@ -1602,63 +1684,17 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       );
       expect(blocked).toBe(true);
 
-      // THE OUTCOME ENVELOPE (pack REV-14 PKb-10, widened by REV-22 F3). Both
-      // commit, OR one commits and the other comes back rolled back. Two wire
-      // codes are legal for that second case and the gate accepts either: the
-      // GENERIC 500 the pre-F3 ladder produced (`apiHandler` had no branch for
-      // P2034, so the wire never named the deadlock) and the typed 503 `BUSY`
-      // F3 adds for P2028/P2034. Which one a run lands on is F3's business, not
-      // this gate's — but SOMETHING has to be asserted, and either way the
-      // classification below is what makes the branch cost something. Anything
-      // else (a 409, a 400, two failures) is a real defect.
-      const statuses = [deduct.status, adjust.status].sort();
-      const bothCommitted = statuses[0] === 200 && statuses[1] === 200;
-      const oneRolledBack =
-        statuses[0] === 200 && (statuses[1] === 500 || statuses[1] === 503);
-      expect(bothCommitted || oneRolledBack).toBe(true);
-
-      if (oneRolledBack) {
-        const failed = answers.find((answer) => answer.status !== 200);
-        if (failed?.status === 503) {
-          // F3's typed branch: the CODE is the contract, the sentence is F3's
-          // copy and is not re-spelled here.
-          expect(failed.body).toMatchObject({ code: "BUSY" });
-        } else {
-          // The generic body, verbatim: no code, no P2034, nothing an operator
-          // could act on — which is exactly why the report above prints the
-          // engine's own deadlock section instead.
-          expect(failed?.body).toEqual({ error: "Internal server error" });
-        }
-
-        // AND WHICH DEADLOCK IT WAS (pack REV-22 F9). This branch is tolerated
-        // for ONE named reason, so it has to NAME it: the accepted `products`
-        // residual passes (recorded), a `product_locations` AB/BA cycle fails
-        // with the engine's own trace, and a rollback the section cannot
-        // account for fails too rather than borrowing the residual's licence.
-        // (The section is global and holds only the LATEST cycle: if a race
-        // ever deadlocked twice, this classifies the last one — the printed
-        // trace is the evidence either way.)
-        const verdict = classifyDeadlock(deadlockFresh ? deadlockAfter : null);
-        console.log(
-          `[scenario 13] the rolled-back branch fired — deadlock shape: ${verdict.shape}; ` +
-            `${verdict.why}`,
-        );
-        if (verdict.shape !== "products-residual") {
-          throw new Error(
-            [
-              "scenario 13: a request rolled back, and the engine's deadlock section does NOT " +
-                "say it was the accepted `products` residual.",
-              `shape: ${verdict.shape} — ${verdict.why}`,
-              `waits parsed: ${
-                verdict.waits.map((wait) => `${wait.table}.${wait.index}`).join(" | ") || "(none)"
-              }`,
-              `a NEW deadlock was detected during this race: ${deadlockFresh}`,
-              "LATEST DETECTED DEADLOCK:",
-              deadlockAfter ?? "(the engine has recorded none)",
-            ].join("\n"),
-          );
-        }
-      }
+      // THE OUTCOME ENVELOPE, three-way since P2-B2.5 (pack CB2.5c.2; it
+      // replaces REV-22 F3's two-way one). deduct-simple and batch-adjust are
+      // BOTH covered writers, so neither takes an X lock on `products` any more
+      // and the S->X cycle that once licensed a rolled-back writer here is gone:
+      // both commit, or one answers the typed 503 `BUSY` with no fresh deadlock
+      // section. A generic 500 — the pre-F3 spelling of a swallowed P2034 — is
+      // no longer tolerated, and a fresh deadlock of ANY shape is a defect.
+      assertCoveredRaceEnvelope("scenario 13", answers, {
+        after: deadlockAfter,
+        fresh: deadlockFresh,
+      });
 
       if (deduct.status === 200) {
         // The route contract B1b added: the batch this deduction wrote under.
@@ -1690,8 +1726,6 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
         quantity: expectedFor(DEDUCT_2),
         version: expectedVersion,
       });
-      expect(await mirroredQuantity(KEY_1.productId)).toBe(expectedFor(DEDUCT_1));
-      expect(await mirroredQuantity(KEY_2.productId)).toBe(expectedFor(DEDUCT_2));
 
       // THE RESIDUE THE B1 RESET CLAUSE OWNS. Every committed route minted a
       // batch id, stamped it on its ledger rows and filed an
@@ -1796,23 +1830,21 @@ async function orderStockedOut(): Promise<boolean> {
   return Number(rows[0]?.stockedOut ?? 0) === 1;
 }
 
-/** BOTH tables, in ONE assertable object (pack CB1.5a-ii, PKc-4): scenario 14
- *  runs at location 1, so `products.quantity` is a second source of truth that
- *  has to move with `product_locations` — asserting only one of them would let
- *  the mirror drift silently, which is the exact class of bug this lane exists
- *  to kill. */
-async function stockIn(productId: number): Promise<{ row: number | null; mirror: number }> {
+/** The ONE source of truth scenario 14 reads back (pack CB1.5a-ii, PKc-4; the
+ *  loc-1 `products` mirror it used to assert alongside is retired — P2-B2.5).
+ *  Kept as an object so the assertions still read `{ row: N }` and name the
+ *  table they mean. */
+async function stockIn(productId: number): Promise<{ row: number | null }> {
   const row = await locationRow({ productId, locationId: LOCATION_MAIN });
-  return { row: row?.quantity ?? null, mirror: await mirroredQuantity(productId) };
+  return { row: row?.quantity ?? null };
 }
 
-/** Arrange, through BOTH tables — the same pair every assertion reads back. */
+/** Arrange, through the one table every assertion reads back. */
 async function setStock(productId: number, quantity: number): Promise<void> {
   await singleton.product_locations.updateMany({
     where: { productId, locationId: LOCATION_MAIN },
     data: { quantity },
   });
-  await singleton.product.update({ where: { id: productId }, data: { quantity } });
 }
 
 /** The gate's own external order, as the fulfil dialog would send it: the
@@ -1856,8 +1888,9 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
    * these sub-cases move stock THROUGH the routes, which the oracle expects.
    *
    * `LOCATION_MAIN` is deliberate (OCc-11): the first real-engine exercise of
-   * the location-1 `products` mirror on a BUNDLE — the lane's one observed
-   * deadlock site.
+   * the BUNDLE path at the location every route deducts at, where each ledger
+   * INSERT's FK S lock on `products` is taken (the X half of that residual is
+   * booking's and decline's since P2-B2.5 — pack CB2.5a.2).
    *
    * The bundle line's `bundleComponentSnapshot` is left NULL so that fulfil
    * takes the LIVE fallback and its FIX B freeze really runs on a real engine.
@@ -1978,9 +2011,9 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
     await setStock(P_APPROVED, 10);
     await setStock(P_APPROVED_2, 10);
 
-    // The location-1 mirror on a bundle is the named `products` FK S->X residual
-    // site, so the engine's own deadlock section is sampled around the request
-    // and PRINTED — reported, never asserted (pack REV-14 PKb-10).
+    // A bundle fulfil at location 1 is where the named `products` FK S lock is
+    // taken repeatedly, so the engine's own deadlock section is sampled around
+    // the request and PRINTED — reported, never asserted (pack REV-14 PKb-10).
     const { value: answer } = await reportDeadlocks("scenario 14A", () =>
       fulfillOrder(fulfilRequest()),
     );
@@ -2049,8 +2082,8 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
     ]);
 
     // BOTH TABLES. 10 - 2 - 1 and 10 - 2.
-    expect(await stockIn(P_APPROVED)).toEqual({ row: 7, mirror: 7 });
-    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 8, mirror: 8 });
+    expect(await stockIn(P_APPROVED)).toEqual({ row: 7 });
+    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 8 });
 
     // The route's own contracts: the ORDER change event and the attribution
     // attempt, both filed under this request's batch.
@@ -2117,8 +2150,8 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
       { id: GATE_ITEM_SINGLE, fulfilledQty: 2, hasSnapshot: false },
     ]);
 
-    expect(await stockIn(P_APPROVED)).toEqual({ row: 0, mirror: 0 });
-    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 10, mirror: 10 });
+    expect(await stockIn(P_APPROVED)).toEqual({ row: 0 });
+    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 10 });
 
     // Partial, but stocked out: something was deducted.
     expect(await orderStockedOut()).toBe(true);
@@ -2195,8 +2228,8 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
         { id: GATE_ITEM_BUNDLE, fulfilledQty: 0, hasSnapshot: false },
         { id: GATE_ITEM_SINGLE, fulfilledQty: 2, hasSnapshot: false },
       ]);
-      expect(await stockIn(P_APPROVED)).toEqual({ row: 8, mirror: 8 });
-      expect(await stockIn(P_APPROVED_2)).toEqual({ row: 10, mirror: 10 });
+      expect(await stockIn(P_APPROVED)).toEqual({ row: 8 });
+      expect(await stockIn(P_APPROVED_2)).toEqual({ row: 10 });
     } finally {
       await dropHoldTrigger();
       await probe.$disconnect();
@@ -2213,8 +2246,8 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
     const fulfilled = await fulfillOrder(fulfilRequest());
     expect(fulfilled.status).toBe(200);
     expect(resultsOf(fulfilled).failed).toEqual([]);
-    expect(await stockIn(P_APPROVED)).toEqual({ row: 7, mirror: 7 });
-    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 8, mirror: 8 });
+    expect(await stockIn(P_APPROVED)).toEqual({ row: 7 });
+    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 8 });
 
     const answer = await unfulfillOrder({
       items: [
@@ -2284,9 +2317,100 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
 
     // Back where it started, in both tables — and the order is no longer stocked
     // out, because nothing of it is fulfilled any more.
-    expect(await stockIn(P_APPROVED)).toEqual({ row: 10, mirror: 10 });
-    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 10, mirror: 10 });
+    expect(await stockIn(P_APPROVED)).toEqual({ row: 10 });
+    expect(await stockIn(P_APPROVED_2)).toEqual({ row: 10 });
     expect(await orderStockedOut()).toBe(false);
+  });
+
+  /**
+   * SCENARIO 15-ii (pack CB2.5c.3) — THE SECOND HALF OF THE RETIREMENT'S PROOF.
+   *
+   * It lives inside scenario 14's bracket on purpose: it needs a FULFILLED line
+   * to unfulfil, and 14 owns the order items, the product links and the
+   * `beforeAll`/`afterAll` that create and remove them.
+   *
+   * Two COVERED writers on ONE product at LOCATION 1 — an unfulfill of the
+   * single line against a deduct-simple of the same product. Before P2-B2.5 both
+   * transactions wrote the loc-1 `products` mirror on top of their ledger
+   * INSERT's FK S lock on the same row, which is the S->X cycle the register
+   * traced out of the engine. Neither takes that X lock any more, so the pair has
+   * nothing left to cycle ON: the second writer WAITS at the prelock's
+   * materialize and then commits.
+   */
+  test("scenario 15-ii: an unfulfill and a deduct-simple on ONE product at location 1 — no cycle, they serialise", async () => {
+    await resetAll();
+    await setStock(P_APPROVED, 10);
+    await setStock(P_APPROVED_2, 10);
+
+    // Arrange the thing to unfulfil, through the real route.
+    const fulfilled = await fulfillOrder(fulfilRequest());
+    expect(fulfilled.status).toBe(200);
+    expect(resultsOf(fulfilled).failed).toEqual([]);
+    expect(await stockIn(P_APPROVED)).toEqual({ row: 7 });
+
+    const probe = openClient();
+    try {
+      await warmUp(probe);
+      // Installed AFTER the fulfil, so it holds the two RACERS and nothing else.
+      // Three seconds, 11a-ii's value: the loser has to be OBSERVED queueing.
+      await installLedgerHold([P_APPROVED], 3);
+
+      const RESTORE = 2;
+      const DEDUCT = 1;
+      const {
+        value: observed,
+        after: deadlockAfter,
+        fresh: deadlockFresh,
+      } = await reportDeadlocks("scenario 15-ii", async () => {
+        const inFlight = [
+          unfulfillOrder({
+            items: [
+              {
+                itemId: GATE_ITEM_SINGLE,
+                productId: P_APPROVED,
+                quantity: RESTORE,
+                locationId: LOCATION_MAIN,
+              },
+            ],
+          }),
+          deductSimple(LOCATION_MAIN, [{ productId: P_APPROVED, quantity: DEDUCT }]),
+        ];
+        const seen = await observeRendezvous(probe);
+        const settled = await Promise.all(inFlight);
+        return { ...seen, settled };
+      });
+
+      console.log(
+        `[scenario 15-ii] serialised — InnoDB lock wait: ${observed.lockWait}, ` +
+          `blocked on the prelock's materialize: ${observed.blockedOnMaterialize}; ` +
+          `overlap observed: ${observed.overlapped}`,
+      );
+
+      // THE PRELOCK WAIT, OBSERVED. One key, two writers: they cannot be inside
+      // the hold together, so the probe has to catch the loser waiting — and
+      // WAITING is the whole claim (CB2.5d), as against cycling.
+      expect(observed.lockWait || observed.blockedOnMaterialize).toBe(true);
+
+      const [unfulfilled, deducted] = observed.settled;
+      assertCoveredRaceEnvelope("scenario 15-ii", observed.settled, {
+        after: deadlockAfter,
+        fresh: deadlockFresh,
+      });
+
+      // THE STOCK ORACLE, EXACT, off whichever branch of the envelope this run
+      // landed in — the fulfil's 7, plus what the unfulfill gave back, minus what
+      // the deduction took.
+      const expected =
+        7 +
+        (unfulfilled.status === 200 ? RESTORE : 0) -
+        (deducted.status === 200 ? DEDUCT : 0);
+      expect(await stockIn(P_APPROVED)).toEqual({ row: expected });
+      // The bundle line is untouched by either racer.
+      expect(await stockIn(P_APPROVED_2)).toEqual({ row: 8 });
+    } finally {
+      await dropHoldTrigger();
+      await probe.$disconnect();
+    }
   });
 });
 
@@ -2466,8 +2590,8 @@ describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
       }
 
       // The stock oracle, exact: each product back where it started.
-      expect(await stockIn(P_APPROVED)).toEqual({ row: OPENING, mirror: OPENING });
-      expect(await stockIn(P_APPROVED_2)).toEqual({ row: OPENING, mirror: OPENING });
+      expect(await stockIn(P_APPROVED)).toEqual({ row: OPENING });
+      expect(await stockIn(P_APPROVED_2)).toEqual({ row: OPENING });
 
       // TWO CORRECTION rows, under TWO new batch ids — never the reversed ones.
       const corrections = await correctionRows();
@@ -2528,7 +2652,7 @@ describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
       expect(refused.body.totalUnits).toBe(4);
 
       // ONCE. Not twice, and not zero.
-      expect(await stockIn(P_APPROVED)).toEqual({ row: OPENING, mirror: OPENING });
+      expect(await stockIn(P_APPROVED)).toEqual({ row: OPENING });
       const corrections = await correctionRows();
       expect(corrections).toHaveLength(1);
       expect(corrections[0].delta).toBe(4);
@@ -2667,7 +2791,7 @@ describe("scenario 11a — the reverse on a REAL engine (pack CB2b.6)", () => {
 // the refusal is the only answer any of these sub-cases could produce.
 // ==========================================================================
 
-/** The gate's PHYSICAL location for the move — off the location-1 mirror. */
+/** The gate's PHYSICAL location for the move — the second location. */
 const MOVE_PHYSICAL = LOCATION_SECOND;
 
 type MoveRow = {
@@ -2702,8 +2826,7 @@ async function quantityAt(productId: number, locationId: number): Promise<number
   return row?.quantity ?? null;
 }
 
-/** Arrange the PHYSICAL location. Off the mirror, so `products.quantity` is
- *  untouched — which is what makes the ledger leg's mirror bump observable. */
+/** Arrange the PHYSICAL location, the one `setStock` does not touch. */
 async function setPhysicalStock(productId: number, quantity: number): Promise<void> {
   await singleton.product_locations.updateMany({
     where: { productId, locationId: MOVE_PHYSICAL },
@@ -2806,7 +2929,6 @@ describe("scenario 11b — the wrong-location move on a REAL engine (pack CB2c.5
       // ONCE. The deduction took 4 off the ledger location; the move gave those
       // 4 back there and took them off the physical one.
       expect(await quantityAt(P_APPROVED, LOCATION_MAIN)).toBe(OPENING);
-      expect(await mirroredQuantity(P_APPROVED)).toBe(OPENING);
       expect(await quantityAt(P_APPROVED, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING - 4);
 
       const legs = await transferRows();
@@ -2870,8 +2992,6 @@ describe("scenario 11b — the wrong-location move on a REAL engine (pack CB2c.5
       expect(await quantityAt(P_APPROVED, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING - 4);
       expect(await quantityAt(P_APPROVED_2, LOCATION_MAIN)).toBe(OPENING);
       expect(await quantityAt(P_APPROVED_2, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING - 3);
-      expect(await mirroredQuantity(P_APPROVED)).toBe(OPENING);
-      expect(await mirroredQuantity(P_APPROVED_2)).toBe(OPENING);
 
       // FOUR legs: two per product, netting to zero, each pair under ONE
       // transferId and ONE new batch id that is neither of the moved batches.
@@ -2957,7 +3077,6 @@ describe("scenario 11b — the wrong-location move on a REAL engine (pack CB2c.5
     // move had given the deduction back.
     expect(await quantityAt(P_APPROVED, MOVE_PHYSICAL)).toBe(PHYSICAL_OPENING);
     expect(await quantityAt(P_APPROVED, LOCATION_MAIN)).toBe(OPENING);
-    expect(await mirroredQuantity(P_APPROVED)).toBe(OPENING);
 
     // A SECOND reverse of a MOVED batch is ALREADY_REVERSED — never the corrupt
     // refusal, which is what a belt that could not read a legitimate
@@ -3199,7 +3318,7 @@ describe("scenario 11c — the order-delete webhook takes the ORDER LOCK (pack C
       expect(fulfilled.body.code).toBe("ORDER_GONE");
 
       // ...and it wrote nothing: the stock is untouched and the order is gone.
-      expect(await stockIn(P_APPROVED)).toEqual({ row: 10, mirror: 10 });
+      expect(await stockIn(P_APPROVED)).toEqual({ row: 10 });
       const survivors = await rawRows<{ n: number }>(
         "SELECT COUNT(*) AS n FROM external_orders WHERE id = ?",
         [GATE_WEBHOOK_ORDER_ID],
@@ -3240,7 +3359,7 @@ describe("scenario 11c — the order-delete webhook takes the ORDER LOCK (pack C
       );
       expect(Number(rows[0]?.n ?? 0)).toBe(1);
       expect(await orderStockedOutFor(GATE_WEBHOOK_ORDER_ID)).toBe(true);
-      expect(await stockIn(P_APPROVED)).toEqual({ row: 9, mirror: 9 });
+      expect(await stockIn(P_APPROVED)).toEqual({ row: 9 });
     } finally {
       await dropHoldTrigger();
       await probe.$disconnect();
@@ -3256,3 +3375,111 @@ async function orderStockedOutFor(orderId: string): Promise<boolean> {
   );
   return Number(rows[0]?.stockedOut ?? 0) === 1;
 }
+
+// ==========================================================================
+// SCENARIO 15 — THE B1c DEADLOCK PAIR IS GREEN (pack CB2.5c.3)
+//
+// THIS IS THE RETIREMENT'S PROOF. The register's engine trace was TRX A and
+// TRX B, two covered writers on ONE product at LOCATION 1: each ledger INSERT
+// takes a SHARED lock on the product row for its FK parent check, and each then
+// wanted an EXCLUSIVE one for the location-1 `products.quantity` mirror — S->X,
+// both ways, a cycle InnoDB resolves by rolling one of them back (a live P2034
+// in the B1c gate). P2-B2.5 deleted the mirror write from every covered writer,
+// so the X half is gone from this pair entirely and there is nothing left to
+// cycle on: the second writer WAITS at the prelock's materialize for the first
+// one's commit, and then commits itself.
+//
+// 15-i is the exact pair of the trace (deduct-simple x 2). 15-ii is the same
+// claim across two DIFFERENT covered routes and lives in scenario 14's bracket,
+// where the fulfilled line it unfulfils is owned.
+//
+// The outcome envelope is `assertCoveredRaceEnvelope`'s, shared with scenario 13
+// (CB2.5c.2): both 200, or one 503 `BUSY` with no fresh deadlock section. ANY
+// fresh deadlock here is a defect — `products-residual` included, because
+// neither racer is a booking or a decline (CB2.5a.2).
+// ==========================================================================
+
+describe("scenario 15 — the B1c deadlock pair is GREEN (pack CB2.5c.3)", () => {
+  jest.setTimeout(120_000);
+
+  const OPENING = 20;
+  const DEDUCT_EACH = 2;
+
+  beforeEach(async () => {
+    await resetAll();
+    await setStock(P_APPROVED, OPENING);
+  });
+
+  afterAll(async () => {
+    await dropHoldTrigger();
+    await resetAll();
+  });
+
+  test("15-i: two deduct-simple requests on ONE product at location 1 — the register's TRX A / TRX B pair serialises and BOTH commit", async () => {
+    const probe = openClient();
+    try {
+      await warmUp(probe);
+      // Three seconds, 11a-ii's value (F28): the loser has to be OBSERVED
+      // queueing on the winner's prelocked row, and a shorter hold leaves the
+      // second request's launch racing the hold's own expiry on a loaded box.
+      await installLedgerHold([P_APPROVED], 3);
+
+      const {
+        value: observed,
+        after: deadlockAfter,
+        fresh: deadlockFresh,
+      } = await reportDeadlocks("scenario 15-i", async () => {
+        const inFlight = [
+          deductSimple(LOCATION_MAIN, [{ productId: P_APPROVED, quantity: DEDUCT_EACH }]),
+          deductSimple(LOCATION_MAIN, [{ productId: P_APPROVED, quantity: DEDUCT_EACH }]),
+        ];
+        const seen = await observeRendezvous(probe);
+        const settled = await Promise.all(inFlight);
+        return { ...seen, settled };
+      });
+
+      console.log(
+        `[scenario 15-i] serialised — InnoDB lock wait: ${observed.lockWait}, ` +
+          `blocked on the prelock's materialize: ${observed.blockedOnMaterialize}; ` +
+          `overlap observed: ${observed.overlapped}`,
+      );
+
+      // THE PROBE. One key, two writers: they cannot be inside the hold at the
+      // same instant, so what the probe must catch is the loser WAITING — the
+      // prelock's same-key serialisation (CB2.5d), which is the property that
+      // replaced the cycle.
+      expect(observed.lockWait || observed.blockedOnMaterialize).toBe(true);
+
+      // BOTH COMMIT — no P2034, and `classifyDeadlock` is never reached. If a
+      // fresh deadlock section exists at all, the envelope throws with the
+      // engine's own trace in the message.
+      assertCoveredRaceEnvelope("scenario 15-i", observed.settled, {
+        after: deadlockAfter,
+        fresh: deadlockFresh,
+      });
+
+      const [first, second] = observed.settled;
+      const committed =
+        (first.status === 200 ? 1 : 0) + (second.status === 200 ? 1 : 0);
+
+      // THE STOCK ORACLE, EXACT: each committed request took its own units off
+      // the one key, and nothing was lost to a stale read.
+      expect(await stockIn(P_APPROVED)).toEqual({ row: OPENING - committed * DEDUCT_EACH });
+
+      // ONE SALE row per committed request, all at location 1 — the ledger says
+      // the same thing the row does.
+      const sales = await rawRows<{ delta: number; locationId: number }>(
+        `SELECT delta, locationId FROM inventory_logs
+          WHERE logType = 'SALE' AND productId = ?
+          ORDER BY id`,
+        [P_APPROVED],
+      );
+      expect(sales).toHaveLength(committed);
+      expect(sales.every((row) => Number(row.delta) === -DEDUCT_EACH)).toBe(true);
+      expect(sales.every((row) => Number(row.locationId) === LOCATION_MAIN)).toBe(true);
+    } finally {
+      await dropHoldTrigger();
+      await probe.$disconnect();
+    }
+  });
+});

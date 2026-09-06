@@ -26,9 +26,11 @@ export const GET = apiHandler(async (request: NextRequest, { params }: { params:
     dateFilter.changeTime = { ...dateFilter.changeTime, lte: end };
   }
 
-  // Get product details
+  // Get product details. Narrowed to the one projected field (B2.5): the row's
+  // retired `quantity` mirror has no business being read here at all.
   const product = await prisma.product.findUnique({
     where: { id: productId },
+    select: { name: true },
   });
 
   if (!product) {

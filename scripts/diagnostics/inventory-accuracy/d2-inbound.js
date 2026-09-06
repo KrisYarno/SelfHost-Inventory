@@ -404,8 +404,9 @@ async function run(ctx) {
   notes.push(
     "Mass update is the deliberate exception to single-transaction writes: it commits in " +
       "batches of 50 and records ONE post-hoc summary event via recordIngestion, reusing " +
-      "the operation-wide batchId. It also writes NEITHER the products.quantity mirror NOR " +
-      "a version increment (see D4's mirror-gap check)."
+      "the operation-wide batchId. It DOES write the version increment (since T8), and it " +
+      "writes no products.quantity mirror — nothing does: the mirror was retired in " +
+      "2026-09 (P2-B2.5) and D4's mirror-gap slots are structurally unpopulated."
   );
   notes.push(
     "Phase 0b-1 IS IN THIS REPO TIP: mass-update stamps logType COUNT + reasonCode COUNT " +

@@ -291,6 +291,9 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
     });
 
     // --- Products (lifecycle triad + the reorder cohort) ---------------------
+    // No `quantity` keys: the loc-1 `products.quantity` mirror is retired
+    // (P2-B2.5) and nothing asserts it — the stock these fixtures assert lives
+    // in the `product_locations` rows seeded right below.
     await prisma.product.createMany({
       data: [
         {
@@ -299,7 +302,6 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           baseName: "Gate Widget Alpha",
           variant: "10 mg",
           unit: "mg",
-          quantity: 120,
           location: 1,
           lowStockThreshold: 20,
           costPrice: "4.50",
@@ -312,7 +314,6 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           baseName: "Gate Widget Beta",
           variant: "20 mg",
           unit: "mg",
-          quantity: 0,
           location: 1,
           costPrice: "6.25",
           retailPrice: "24.00",
@@ -325,7 +326,6 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           baseName: "Gate Widget Gamma",
           variant: "30 mg",
           unit: "mg",
-          quantity: 7,
           location: 1,
           approvalStatus: "PENDING_REVIEW",
         },
@@ -334,7 +334,6 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           name: "Gate Reorder Urgent 5 mg",
           baseName: "Gate Reorder Urgent",
           variant: "5 mg",
-          quantity: 2,
           location: 1,
           lowStockThreshold: 25,
           costPrice: "2.00",
@@ -345,7 +344,6 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           name: "Gate Reorder Soon 15 mg",
           baseName: "Gate Reorder Soon",
           variant: "15 mg",
-          quantity: 40,
           location: 1,
           lowStockThreshold: 25,
           costPrice: "3.00",
@@ -356,7 +354,6 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           name: "Gate Reorder Healthy 25 mg",
           baseName: "Gate Reorder Healthy",
           variant: "25 mg",
-          quantity: 500,
           location: 1,
           lowStockThreshold: 25,
           costPrice: "1.25",
@@ -371,7 +368,6 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           name: "Gate Threshold Inherit 5 mg",
           baseName: "Gate Threshold Inherit",
           variant: "5 mg",
-          quantity: 3,
           location: 1,
           approvalStatus: "APPROVED",
         },
@@ -380,7 +376,6 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           name: "Gate Threshold Explicit 5 mg",
           baseName: "Gate Threshold Explicit",
           variant: "5 mg",
-          quantity: 3,
           location: 1,
           lowStockThreshold: 10,
           costPrice: "7.00",
@@ -397,7 +392,6 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           name: "Gate Recon Alpha 1 mg",
           baseName: "Gate Recon Alpha",
           variant: "1 mg",
-          quantity: 0,
           location: 1,
           approvalStatus: "APPROVED",
         },
@@ -406,7 +400,6 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           name: "Gate Recon Beta 2 mg",
           baseName: "Gate Recon Beta",
           variant: "2 mg",
-          quantity: 0,
           location: 1,
           approvalStatus: "APPROVED",
         },

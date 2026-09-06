@@ -328,29 +328,27 @@ export const POST = apiHandler(async (request: NextRequest) => {
 
               // Skip if no actual change (based on the REAL delta, not the
               // client's). A no-change row stays a NO-WRITE row under T8 too:
-              // no ledger row, no `version` bump (the out-of-band drift
+              // no ledger row and no `version` bump (the out-of-band drift
               // detector reads that counter — bumping it for a row nobody
-              // moved would manufacture a change signal), and no mirror write.
-              // Consequence, deliberate: a no-op row does not repair a
-              // PRE-EXISTING mirror drift; the next real change to it does.
+              // moved would manufacture a change signal).
               if (serverDelta === 0) {
                 batchSuccess++;
                 continue;
               }
 
               // T8R-1 (codex T8 micro review) — MID-WRITE FROM HERE DOWN.
-              // The three writes that follow (ledger row, absolute quantity +
-              // version bump, loc-1 mirror) are ONE indivisible row-level unit.
-              // Under allowPartial (the UI default) the catch below used to
-              // swallow any row error and let the transaction COMMIT, so a
+              // The two writes that follow (ledger row, absolute quantity +
+              // version bump) are ONE indivisible row-level unit. Under
+              // allowPartial (the UI default) the catch below used to swallow
+              // any row error and let the transaction COMMIT, so a
               // statement-level error that is not transaction-fatal — the
-              // mirror `product.update` failing after the upsert already
-              // landed, say — recorded a row failure while the SAME tx
-              // committed that row's log, quantity and version bump with
-              // `products.quantity` left behind. That is precisely the
-              // mirror-drift class T8 exists to kill, manufactured by T8's own
-              // failure path. So once this flag is set a row error ALWAYS
-              // aborts the batch, no matter what allowPartial says. Pinned by
+              // `product_locations` upsert throwing after its own row write
+              // already landed, say — recorded a row failure while the SAME tx
+              // committed that row's log and its quantity/version bump. That is
+              // precisely the drift class T8 exists to kill, manufactured by
+              // T8's own failure path. So once this flag is set a row error
+              // ALWAYS aborts the batch, no matter what allowPartial says.
+              // Pinned by
               // __tests__/integration/api/mass-update-delta.test.ts (T8R-1).
               rowWritesStarted = true;
 
@@ -409,28 +407,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
                 },
               });
 
-              // T8: the legacy loc-1 mirror. `products.quantity` is what the
-              // legacy readers consume for location 1, and applyStockDelta
-              // maintains it on every other stock path (`if (locationId === 1)`
-              // — non-loc-1 rows never touch it, which holds here too). A mass
-              // update moved product_locations and left the mirror behind, and
-              // since every weekly COUNT is entered through this route the two
-              // drifted apart by hundreds of units (the +939 phantom class).
-              //
-              // DIVERGENCE from applyStockDelta, deliberate: the house block
-              // writes `{ increment: delta }` because it IS a delta path. Here
-              // the value written is ABSOLUTE — `newQuantity`, the same value
-              // the upsert just set — which is what the pack's "writes the
-              // loc-1 mirror to MATCH" asks for. The two agree exactly whenever
-              // the mirror is already in sync; where they differ is on rows
-              // that ALREADY drifted, and absolute heals those instead of
-              // carrying the error forward forever.
-              if (locationId === 1) {
-                await tx.product.update({
-                  where: { id: productId },
-                  data: { quantity: newQuantity },
-                });
-              }
+              // The mirror is retired (B2.5).
 
               batchProcessed.push({
                 ...change,
@@ -471,8 +448,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
               // already started writing, because suppressing it would leave a
               // half-written row in the committing transaction. Rows that
               // failed before their first write are still suppressed under
-              // allowPartial, unchanged. (The write ORDER makes the reverse
-              // hole impossible: the mirror cannot commit without its upsert.)
+              // allowPartial, unchanged.
               if (rowWritesStarted || !body.allowPartial) {
                 throw error;
               }

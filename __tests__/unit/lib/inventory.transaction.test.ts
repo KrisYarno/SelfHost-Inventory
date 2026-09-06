@@ -123,7 +123,7 @@ beforeEach(() => {
 });
 
 describe('createInventoryTransaction — unified applyStockDelta write path', () => {
-  it('locationId === 1: writes SALE log (DEDUCTION type) + upsert (qty/version increment) + loc-1 mirror', async () => {
+  it('locationId === 1: writes SALE log (DEDUCTION type) + upsert (qty/version increment) and NOTHING on products', async () => {
     const result = await createInventoryTransaction('DEDUCTION', 42, [
       { productId: 7, locationId: 1, quantityChange: -5 },
     ]);
@@ -147,11 +147,9 @@ describe('createInventoryTransaction — unified applyStockDelta write path', ()
     expect(upsertArg.update.version.increment).toBe(1);
     expect(upsertArg.create).toEqual({ productId: 7, locationId: 1, quantity: -5, version: 1 });
 
-    // 3. product.update — loc-1 legacy mirror, increment by delta
-    expect(mockTx.product.update).toHaveBeenCalledTimes(1);
-    const prodArg = mockTx.product.update.mock.calls[0][0] as any;
-    expect(prodArg.where).toEqual({ id: 7 });
-    expect(prodArg.data.quantity.increment).toBe(-5);
+    // 3. NO third statement: the loc-1 mirror is retired (P2-B2.5), so location 1
+    //    is written exactly like every other location.
+    expect(mockTx.product.update).not.toHaveBeenCalled();
 
     // Return contract: synthetic transaction, full log rows, versions map keyed pid-lid.
     expect(result.transaction).toMatchObject({ type: 'DEDUCTION', status: 'COMPLETED', userId: 42 });
@@ -160,7 +158,7 @@ describe('createInventoryTransaction — unified applyStockDelta write path', ()
     expect(result.versions).toEqual({ '7-1': 8 });
   });
 
-  it('locationId !== 1: does NOT touch the legacy Product.quantity mirror', async () => {
+  it('locationId !== 1: the same two statements as location 1, and no product-row write', async () => {
     prelocked([{ productId: 7, locationId: 2, quantity: 100, version: 1 }]);
 
     await createInventoryTransaction('DEDUCTION', 42, [
@@ -169,7 +167,7 @@ describe('createInventoryTransaction — unified applyStockDelta write path', ()
 
     expect(mockTx.inventory_logs.create).toHaveBeenCalledTimes(1);
     expect(mockTx.product_locations.upsert).toHaveBeenCalledTimes(1);
-    // loc-1-only mirror must NOT fire for locationId 2
+    // No product-row write at any location (P2-B2.5).
     expect(mockTx.product.update).not.toHaveBeenCalled();
   });
 
@@ -185,8 +183,8 @@ describe('createInventoryTransaction — unified applyStockDelta write path', ()
 
     expect(mockTx.inventory_logs.create).toHaveBeenCalledTimes(2);
     expect(mockTx.product_locations.upsert).toHaveBeenCalledTimes(2);
-    // only the location-1 item mirrors into Product.quantity
-    expect(mockTx.product.update).toHaveBeenCalledTimes(1);
+    // NEITHER item writes the product row — not even the location-1 one (P2-B2.5).
+    expect(mockTx.product.update).toHaveBeenCalledTimes(0);
     expect(result.logs).toHaveLength(2);
     expect(result.versions).toEqual({ '7-1': 8, '9-2': 3 });
   });

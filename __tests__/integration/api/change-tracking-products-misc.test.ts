@@ -268,6 +268,41 @@ describe("PATCH thresholds — per-product PRODUCT_UPDATE events (R-L6)", () => 
     expect(row.details.productName).toBe("Alpha");
   });
 
+  it("X-locks the product rows in ASCENDING productId order, never the body's (pack CB2.5a.2)", async () => {
+    // THE LOCK-ORDER PIN. This route takes NO `product_locations` lock before
+    // its `products` X locks and it locks one row per iteration, so two
+    // concurrent PATCHes naming the same products in DIFFERENT body orders could
+    // cycle on `products.PRIMARY` — a deadlock the concurrency gate's classifier
+    // can only call `unattributable`. Sorting into the prelock's canonical
+    // ascending order is what makes that cycle impossible.
+    tx.product.findMany.mockResolvedValue([
+      { id: 10, name: "Alpha", lowStockThreshold: 5 },
+      { id: 11, name: "Bravo", lowStockThreshold: 8 },
+      { id: 12, name: "Carol", lowStockThreshold: 1 },
+    ]);
+    tx.product_locations.findMany.mockResolvedValue([]);
+    tx.product.update.mockResolvedValue({});
+
+    const resp = await thresholdsPATCH(
+      mkReq("http://t/api/admin/products/thresholds", "PATCH", {
+        updates: [
+          { productId: 12, combinedMinimum: 15 },
+          { productId: 10, combinedMinimum: 15 },
+          { productId: 11, combinedMinimum: 15 },
+        ],
+      })
+    );
+
+    expect(resp.status).toBe(200);
+    const lockedIds = (tx.product.update as unknown as jest.Mock).mock.calls.map(
+      (call: any[]) => call[0].where.id
+    );
+    expect(lockedIds).toEqual([10, 11, 12]);
+    // ...and the before-image read names them in the same order.
+    const beforeRead = (tx.product.findMany as unknown as jest.Mock).mock.calls[0][0];
+    expect(beforeRead.where.id.in).toEqual([10, 11, 12]);
+  });
+
   it("emits one event PER changed product, all sharing ONE batchId", async () => {
     tx.product.findMany.mockResolvedValue([
       { id: 10, name: "Alpha", lowStockThreshold: 5 },

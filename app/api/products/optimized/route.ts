@@ -66,14 +66,19 @@ export const GET = apiHandler(async (request: NextRequest) => {
     prisma.product.count({ where }),
   ]);
 
-  const productsWithQuantity = products.map((product) => {
+  const productsWithQuantity = products.map((row) => {
     let currentQuantity = 0;
 
     if (locationId) {
-      currentQuantity = product.product_locations[0]?.quantity || 0;
+      currentQuantity = row.product_locations[0]?.quantity || 0;
     } else {
-      currentQuantity = product.product_locations.reduce((sum, pl) => sum + pl.quantity, 0);
+      currentQuantity = row.product_locations.reduce((sum, pl) => sum + pl.quantity, 0);
     }
+
+    // The loc-1 `products.quantity` mirror is retired (B2.5) — strip it before
+    // the spread so a dead column never reaches the wire. `currentQuantity`,
+    // computed from product_locations above, is the only quantity we ship.
+    const { quantity: _retiredMirror, ...product } = row;
 
     return {
       ...product,

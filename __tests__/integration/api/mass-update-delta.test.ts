@@ -48,8 +48,9 @@ function makeTx(currentQuantity: number | null) {
       findUnique: jest
         .fn()
         .mockResolvedValue({ id: 1, name: "Widget", deletedAt: null }),
-      // T8: the loc-1 `products.quantity` mirror write. Call-shape suites only
-      // need it to exist; the mirror's VALUE is pinned by the state suite below.
+      // Present so a REGRESSION shows up as a call rather than as a crash: the
+      // route writes NO product row any more (the loc-1 mirror is retired,
+      // P2-B2.5).
       update: jest.fn().mockResolvedValue({}),
     },
     location: {
@@ -226,7 +227,7 @@ test("phantom-summary fix: a batch that throws mid-way contributes ZERO rows to 
         .fn()
         .mockResolvedValueOnce({ id: 1, name: "Widget", deletedAt: null })
         .mockResolvedValueOnce(null), // second product missing -> throw -> rollback
-      update: jest.fn().mockResolvedValue({}), // T8 loc-1 mirror write
+      update: jest.fn().mockResolvedValue({}), // never called: the mirror is retired (B2.5)
     },
     location: {
       findUnique: jest.fn().mockResolvedValue({ id: 1, name: "Warehouse" }),
@@ -262,18 +263,22 @@ test("phantom-summary fix: a batch that throws mid-way contributes ZERO rows to 
 
 // ---------------------------------------------------------------------------
 // T8 (contract pack 2026-08-13-fulllane-contracts §"T8 — Mass-update
-// ride-along") — the upsert maintains BOTH the row's `version` AND the loc-1
-// `products.quantity` mirror, in place, keeping absolute-set + batched-tx
-// semantics (mass-update deliberately does NOT adopt applyStockDelta).
+// ride-along") — the upsert maintains the row's `version`, in place, keeping
+// absolute-set + batched-tx semantics (mass-update deliberately does NOT adopt
+// applyStockDelta).
 //
-// These are STATE assertions, not call-shape ones, on purpose. mass-update
+// T8's OTHER half is GONE: it also wrote the loc-1 `products.quantity` mirror,
+// and P2-B2.5 retired that column's last writer. Mass-update writes NO mirror,
+// which is why the pins below assert `product_locations` only — the invariant
+// "products.quantity == the location-1 row" is not an invariant any more, it is
+// a dead column, and `__tests__/unit/lib/no-mirror-writes.test.ts` is what keeps
+// it dead. The `version` bump the registered out-of-band drift detector reads is
+// the half that stays load-bearing.
+//
+// These are STATE assertions, not call-shape ones, on purpose: mass-update
 // writes an ABSOLUTE quantity while the house core `applyStockDelta` writes a
-// DELTA, so "was upsert called with the right argument" cannot answer the
-// question the bug is about: does `products.quantity` END UP EQUAL to the
-// location-1 row? That inequality is the +939-unit phantom drift class — every
-// weekly COUNT entered through mass-import moved product_locations and left the
-// legacy mirror (which legacy readers still consume) behind, and skipped the
-// `version` bump the registered out-of-band drift detector reads.
+// DELTA, so "was upsert called with the right argument" cannot answer what the
+// row actually ends up holding across two sequential updates.
 //
 // This repo has no test DB (see __tests__/unit/lib/inventory.applyStockDelta.test.ts),
 // so the store below is a small in-memory Prisma stand-in modelling exactly the
@@ -317,13 +322,18 @@ function makeStore(seed: {
    */
   locations?: number[];
   /**
-   * Fault injection, called with the write args BEFORE `product.update` applies
-   * them. Throwing here models a statement-level failure of the loc-1 MIRROR
-   * write — the LAST write of a row, after its ledger row and its upsert have
-   * already landed. That is the exact T8R-1 shape: an error that is not
-   * transaction-fatal arriving mid-row.
+   * Fault injection, called with the upsert's args AFTER the store's own write
+   * has LANDED (round 4, B25-OC4-2/3). Throwing here models a statement-level
+   * failure of a row's stock write, arriving with its ledger row already
+   * written — the exact T8R-1 shape: an error that is not transaction-fatal
+   * arriving mid-row. It fires AFTER the map write on purpose: a hook that
+   * threw BEFORE it would leave nothing half-written, and the rolled-back pins
+   * below would then pass trivially.
+   *
+   * It used to hang off `product.update` — the loc-1 mirror write, which was the
+   * row's LAST statement until P2-B2.5 retired it.
    */
-  onProductUpdate?: (args: { where: any; data: any }) => void;
+  onProductLocationUpsert?: (args: { where: any; update: any; create: any }) => void;
 }) {
   const products = new Map(
     seed.products.map((p) => [p.id, { deletedAt: null, ...p } as Record<string, any>])
@@ -340,7 +350,6 @@ function makeStore(seed: {
     product: {
       findUnique: async ({ where }: any) => products.get(where.id) ?? null,
       update: async ({ where, data }: any) => {
-        seed.onProductUpdate?.({ where, data });
         const row = products.get(where.id);
         if (!row) throw new Error(`no product ${where.id}`);
         applyWrite(row, data);
@@ -361,13 +370,17 @@ function makeStore(seed: {
       upsert: async ({ where, update, create }: any) => {
         const { productId, locationId } = where.productId_locationId;
         const existing = productLocations.get(plKey(productId, locationId));
+        let row: PlRow;
         if (existing) {
           applyWrite(existing, update);
-          return existing;
+          row = existing;
+        } else {
+          // Schema defaults fill what `create` omits — see the note above.
+          row = { quantity: 0, version: 0, ...create } as PlRow;
+          productLocations.set(plKey(productId, locationId), row);
         }
-        // Schema defaults fill what `create` omits — see the note above.
-        const row = { quantity: 0, version: 0, ...create } as PlRow;
-        productLocations.set(plKey(productId, locationId), row);
+        // AFTER the write has landed, never before (B25-OC4-2/3).
+        seed.onProductLocationUpsert?.({ where, update, create });
         return row;
       },
     },
@@ -455,7 +468,6 @@ describe("T8 — mass-update maintains product_locations.version", () => {
     const row = store.productLocation(1, 1)!;
     expect(row.version).toBe(7); // 5 + 2 — one bump per real change
     expect(row.quantity).toBe(7); // absolute-set semantics: the later value wins
-    expect(store.product(1).quantity).toBe(7); // and the mirror followed it
   });
 
   it("PIN 5: a first-ever (product, location) row is CREATED at version 1", async () => {
@@ -468,29 +480,13 @@ describe("T8 — mass-update maintains product_locations.version", () => {
     const row = store.productLocation(1, 1)!;
     expect(row.version).toBe(1);
     expect(row.quantity).toBe(4);
-    expect(store.product(1).quantity).toBe(4); // the create path mirrors too
-  });
-});
-
-describe("T8 — mass-update maintains the loc-1 products.quantity mirror", () => {
-  it("PIN 2 (mirror-drift): post-write products.quantity == location-1 product_locations.quantity", async () => {
-    // Seeded ALREADY DRIFTED (+939), the exact production shape: past mass
-    // updates moved the location row and never touched the mirror. The write is
-    // ABSOLUTE, so the next real change heals the drift instead of carrying it.
-    const store = makeStore({
-      products: [{ id: 1, name: "Widget", quantity: 949 }],
-      productLocations: [{ productId: 1, locationId: 1, quantity: 10, version: 3 }],
-    });
-
-    await massUpdate(store, [{ productId: 1, locationId: 1, newQuantity: 42 }]);
-
-    const row = store.productLocation(1, 1)!;
-    expect(row.quantity).toBe(42);
-    expect(store.product(1).quantity).toBe(42);
-    expect(store.product(1).quantity).toBe(row.quantity); // the invariant itself
   });
 
-  it("PIN 3: a NON-loc-1 update bumps its own row's version and leaves the mirror untouched", async () => {
+  // PIN 2 is GONE with the retirement: it pinned "post-write products.quantity
+  // == the location-1 row", which IS the retired invariant (P2-B2.5). Nothing
+  // writes that column now, so a pin on its value would assert a stale number.
+
+  it("PIN 3: a NON-loc-1 update bumps its own row's version and leaves LOCATION 1 untouched", async () => {
     const store = makeStore({
       products: [{ id: 1, name: "Widget", quantity: 10 }],
       productLocations: [
@@ -503,17 +499,13 @@ describe("T8 — mass-update maintains the loc-1 products.quantity mirror", () =
 
     expect(store.productLocation(1, 2)!.version).toBe(4);
     expect(store.productLocation(1, 2)!.quantity).toBe(4);
-    // The mirror is location-1's, and location 1 did not move (house rule,
-    // verified against applyStockDelta's `if (locationId === 1)` guard).
-    expect(store.product(1).quantity).toBe(10);
+    // Location 1 did not move at all — a write is scoped to the key it names.
     expect(store.productLocation(1, 1)!.version).toBe(3);
   });
 
-  it("PIN 4: a serverDelta === 0 row writes NEITHER the version NOR the mirror", async () => {
-    // Seeded drifted again, which makes the skip's scope explicit: a no-change
-    // row is a no-write row (no false 'this row changed' signal for the
-    // out-of-band detector), so it does NOT heal a pre-existing mirror drift
-    // either — the next REAL change does. Deliberate; see the route comment.
+  it("PIN 4: a serverDelta === 0 row writes NO version bump and NO ledger row", async () => {
+    // A no-change row is a NO-WRITE row: no ledger row, and no false 'this row
+    // changed' signal for the out-of-band detector that reads the counter.
     const store = makeStore({
       products: [{ id: 1, name: "Widget", quantity: 949 }],
       productLocations: [{ productId: 1, locationId: 1, quantity: 4, version: 5 }],
@@ -524,7 +516,6 @@ describe("T8 — mass-update maintains the loc-1 products.quantity mirror", () =
     const row = store.productLocation(1, 1)!;
     expect(row.version).toBe(5); // untouched
     expect(row.quantity).toBe(4);
-    expect(store.product(1).quantity).toBe(949); // untouched, still drifted
     expect(store.logs).toHaveLength(0); // and no ledger row, as before
   });
 });
@@ -534,14 +525,17 @@ describe("T8 — mass-update maintains the loc-1 products.quantity mirror", () =
 // longer be suppressed per-row.
 //
 // The per-row catch swallows errors under `allowPartial` (the UI default) and
-// only rethrows when !allowPartial. T8 added the loc-1 mirror write AFTER the
-// ledger row and the upsert, INSIDE that suppressible window: a statement-level
-// error in `product.update` that is not transaction-fatal recorded a row
-// failure while the SAME transaction went on to COMMIT that row's
-// inventory_logs row, its absolute quantity and its version bump — with the
-// mirror stale. The exact drift class T8 exists to kill, manufactured by T8's
-// own failure path. (The write ORDER makes the reverse impossible: a mirror
-// cannot commit without its upsert.)
+// only rethrows when !allowPartial. A row's writes sit INSIDE that suppressible
+// window: a statement-level error that is not transaction-fatal recorded a row
+// failure while the SAME transaction went on to COMMIT that row's other writes.
+// The exact drift class T8 exists to kill, manufactured by T8's own failure
+// path.
+//
+// The fault used to be injected at the loc-1 mirror write, which was the row's
+// LAST statement; P2-B2.5 retired it, so the injection MOVED to the
+// `product_locations` upsert and fires AFTER that write has landed. The
+// surviving proof is unchanged in substance: row 1's `product_locations` row
+// rolls back, and `logs.length === 0`.
 //
 // Fix: a flag flipped immediately before the row's FIRST write; once set, a row
 // error ALWAYS rethrows and takes the whole 50-row batch transaction down.
@@ -550,22 +544,29 @@ describe("T8 — mass-update maintains the loc-1 products.quantity mirror", () =
 // batch — every one of its rows lands as a failure, none as a success.
 // ---------------------------------------------------------------------------
 
-/** A statement-level Prisma error: fatal to the STATEMENT, not to the tx. */
+/**
+ * A statement-level Prisma error: fatal to the STATEMENT, not to the tx.
+ *
+ * The NAME is T8R-1's own and is kept so the pins below still read as that
+ * finding; what it injects moved with P2-B2.5. The mirror write it used to fail
+ * is gone, so the fault is re-pointed at the `product_locations` upsert — the
+ * row's stock write, which by then has already landed in the store.
+ */
 function mirrorWriteFault(productId: number) {
   return ({ where }: { where: any }) => {
-    if (where.id !== productId) return;
-    const error: any = new Error("mirror write failed");
+    if (where.productId_locationId.productId !== productId) return;
+    const error: any = new Error("the stock write failed after landing");
     error.code = "P2025"; // maps to DATABASE_ERROR in the route's reason table
     throw error;
   };
 }
 
 describe("T8R-1 — a mid-write row failure aborts the batch, even under allowPartial", () => {
-  it("PIN T8R-1: allowPartial + the mirror write throwing => NOTHING of the batch commits", async () => {
+  it("PIN T8R-1: allowPartial + a LANDED stock write throwing => NOTHING of the batch commits", async () => {
     // Two rows in one batch. Row 1 succeeds completely; row 2 writes its ledger
-    // row and its upsert and THEN its mirror write throws. Pre-fix, allowPartial
-    // suppressed that error and the transaction committed both rows — including
-    // row 2's quantity + version with `products.quantity` left behind.
+    // row, its upsert LANDS, and then that statement throws. Pre-fix,
+    // allowPartial suppressed the error and the transaction committed both rows,
+    // row 2's half-written state included.
     const store = makeStore({
       products: [
         { id: 1, name: "Widget", quantity: 10 },
@@ -575,7 +576,7 @@ describe("T8R-1 — a mid-write row failure aborts the batch, even under allowPa
         { productId: 1, locationId: 1, quantity: 10, version: 3 },
         { productId: 2, locationId: 1, quantity: 20, version: 4 },
       ],
-      onProductUpdate: mirrorWriteFault(2),
+      onProductLocationUpsert: mirrorWriteFault(2),
     });
 
     const res = await massUpdateRaw(
@@ -589,13 +590,11 @@ describe("T8R-1 — a mid-write row failure aborts the batch, even under allowPa
 
     // The tx callback REJECTED, so the batch rolled back whole: not row 2's
     // half-written state, and not row 1's fully-successful writes either.
+    // ROW 1's rolled-back `product_locations` row plus zero logs IS the proof
+    // (the mirror pins that used to sit here are retired with the column).
     expect(store.productLocation(1, 1)).toMatchObject({ quantity: 10, version: 3 });
     expect(store.productLocation(2, 1)).toMatchObject({ quantity: 20, version: 4 });
-    expect(store.product(1).quantity).toBe(10);
-    expect(store.product(2).quantity).toBe(20);
     expect(store.logs).toHaveLength(0); // no ledger row survived either
-    // The invariant T8 is about still holds on the row that failed mid-write.
-    expect(store.product(2).quantity).toBe(store.productLocation(2, 1)!.quantity);
 
     // ...and the response says so: ZERO successes, both rows reported failed.
     expect(res.status).toBe(200); // allowPartial keeps its 200-with-failures shape
@@ -618,7 +617,7 @@ describe("T8R-1 — a mid-write row failure aborts the batch, even under allowPa
     const ids = Array.from({ length: 51 }, (_, i) => i + 1);
     const store = makeStore({
       products: ids.map((id) => ({ id, name: `P${id}`, quantity: 0 })),
-      onProductUpdate: mirrorWriteFault(51),
+      onProductLocationUpsert: mirrorWriteFault(51),
     });
 
     const res = await massUpdateRaw(
@@ -627,13 +626,11 @@ describe("T8R-1 — a mid-write row failure aborts the batch, even under allowPa
       { allowPartial: true }
     );
 
-    // Batch 1: all 50 rows committed (created at version 1, mirror written).
+    // Batch 1: all 50 rows committed (created at version 1).
     expect(store.productLocation(1, 1)).toMatchObject({ quantity: 1, version: 1 });
     expect(store.productLocation(50, 1)).toMatchObject({ quantity: 50, version: 1 });
-    expect(store.product(50).quantity).toBe(50);
-    // Batch 2: rolled back entirely — no row, no mirror move, no ledger row.
+    // Batch 2: rolled back entirely — no row, no ledger row.
     expect(store.productLocation(51, 1)).toBeUndefined();
-    expect(store.product(51).quantity).toBe(0);
     expect(store.logs).toHaveLength(50);
 
     const body = await res.json();
@@ -672,9 +669,8 @@ describe("T8R-1 — a mid-write row failure aborts the batch, even under allowPa
     expect(body.failures[0].locationId).toBe(99);
     expect(body.partial).toBe(true);
 
-    // The good row committed, mirror included.
+    // The good row committed.
     expect(store.productLocation(1, 1)).toMatchObject({ quantity: 4, version: 4 });
-    expect(store.product(1).quantity).toBe(4);
     expect(store.logs).toHaveLength(1);
   });
 
@@ -688,7 +684,7 @@ describe("T8R-1 — a mid-write row failure aborts the batch, even under allowPa
         { productId: 1, locationId: 1, quantity: 10, version: 3 },
         { productId: 2, locationId: 1, quantity: 20, version: 4 },
       ],
-      onProductUpdate: mirrorWriteFault(2),
+      onProductLocationUpsert: mirrorWriteFault(2),
     });
 
     const res = await massUpdateRaw(store, [
@@ -702,7 +698,7 @@ describe("T8R-1 — a mid-write row failure aborts the batch, even under allowPa
     expect(body.failed).toBe(2);
     expect(store.logs).toHaveLength(0);
     expect(store.productLocation(1, 1)).toMatchObject({ quantity: 10, version: 3 });
-    expect(store.product(2).quantity).toBe(20);
+    expect(store.productLocation(2, 1)).toMatchObject({ quantity: 20, version: 4 });
     expect(recordIngestion).not.toHaveBeenCalled();
   });
 });

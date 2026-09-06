@@ -12,8 +12,10 @@
  * Prisma KNOWN code is sufficient but NOT necessary — a deadlock raised through
  * `$executeRaw`/`$queryRaw` can surface as P2010 ("Raw query failed") or with
  * no code at all, carrying only the engine's sentence. Fulfil's hot path is
- * entirely raw, and the loc-1 mirror is the lane's one OBSERVED deadlock site,
- * so code-only matching would miss exactly the case that exists (FDe-1).
+ * entirely raw, and the `products` S->X cycle (booking/decline against a covered
+ * writer's prelock — the surviving half of the retired loc-1 mirror's residual,
+ * pack CB2.5a.2) is the lane's one OBSERVED deadlock class, so code-only
+ * matching would miss exactly the case that exists (FDe-1).
  *
  * Codes: P2034 = write conflict / deadlock; P2028 = the interactive-transaction
  * budget (Prisma also raises it for a misused tx client — a code defect that

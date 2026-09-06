@@ -250,11 +250,12 @@ describe('fulfillExternalOrder — bundle expansion', () => {
 
     const result = await fulfillExternalOrder('ord1', 1, [{ itemId: 'oi1', quantity: 1 }], 42);
 
-    // 3 components, each gets a $executeRaw deduction + legacy mirror at locationId=1
-    // 3 product_locations + 3 products.quantity mirror = 6, plus the canonical
-    // prelock's materialize INSERT ahead of them (B1.5: bundle component keys
-    // are INSIDE the prelock now) = 7 total.
-    expect(tx.$executeRaw).toHaveBeenCalledTimes(7);
+    // 3 components, each gets ONE $executeRaw deduction at locationId=1 — the
+    // loc-1 `products.quantity` mirror that used to follow each of them is
+    // retired (P2-B2.5), so it is 3 product_locations updates, plus the
+    // canonical prelock's materialize INSERT ahead of them (B1.5: bundle
+    // component keys are INSIDE the prelock now) = 4 total.
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(4);
     expect(getRaw().rawCalls[0].sql).toContain('INSERT INTO product_locations');
     // createInventoryLog called once per component
     expect(createInventoryLog).toHaveBeenCalledTimes(3);

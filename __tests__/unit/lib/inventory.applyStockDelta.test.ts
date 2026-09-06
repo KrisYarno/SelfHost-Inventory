@@ -11,7 +11,10 @@
  *
  *   1. createInventoryLog(..., tx)  -> tx.inventory_logs.create  (delta passed through)
  *   2. tx.product_locations.upsert  (update.quantity.increment === delta, version.increment === 1)
- *   3. if locationId === 1          -> tx.product.update (quantity.increment === delta)
+ *
+ * ONE STATEMENT FEWER since P2-B2.5: the loc-1 `products.quantity` mirror write
+ * that used to follow the upsert is RETIRED, and the pins below assert its
+ * ABSENCE at BOTH locations.
  *
  * createInventoryLog is the REAL implementation here (only `tx` is mocked), so the
  * inventory_logs.create assertion validates the actual log write the hot path issues.
@@ -86,11 +89,14 @@ beforeEach(() => {
   // createInventoryLog returns the created row; upsert return is used for newVersion.
   mockTx.inventory_logs.create.mockResolvedValue({ id: 100 } as any);
   mockTx.product_locations.upsert.mockResolvedValue({ version: 7 } as any);
+  // Still primed on purpose: the pins below assert this delegate is NEVER
+  // called, and an unprimed mock would pass those vacuously if the call came
+  // back (P2-B2.5).
   mockTx.product.update.mockResolvedValue({} as any);
 });
 
 describe('applyStockDelta', () => {
-  it('locationId === 1: writes log + upsert (qty/version increment) + product mirror', async () => {
+  it('locationId === 1: writes log + upsert (qty/version increment) and NOTHING on products', async () => {
     const result = await applyStockDelta(mockTx, {
       userId: 1,
       productId: 7,
@@ -124,18 +130,16 @@ describe('applyStockDelta', () => {
       version: 1,
     });
 
-    // 3. product.update — loc-1 legacy mirror, increment by delta
-    expect(mockTx.product.update).toHaveBeenCalledTimes(1);
-    const prodArg = mockTx.product.update.mock.calls[0][0] as any;
-    expect(prodArg.where).toEqual({ id: 7 });
-    expect(prodArg.data.quantity.increment).toBe(5);
+    // 3. NO third statement. The loc-1 mirror is retired (P2-B2.5): location 1
+    //    is now written exactly like every other location.
+    expect(mockTx.product.update).not.toHaveBeenCalled();
 
     // return shape preserved for createInventoryAdjustment's contract
     expect(result.log).toEqual({ id: 100 });
     expect(result.newVersion).toBe(7);
   });
 
-  it('locationId !== 1: does NOT touch the legacy Product.quantity mirror', async () => {
+  it('locationId !== 1: writes log + upsert only — the same two statements as location 1', async () => {
     await applyStockDelta(mockTx, {
       userId: 1,
       productId: 7,
@@ -150,7 +154,7 @@ describe('applyStockDelta', () => {
     expect(upsertArg.update.quantity.increment).toBe(5);
     expect(upsertArg.update.version.increment).toBe(1);
 
-    // loc-1-only reconcile must NOT fire for locationId 2
+    // No product-row write at any location (P2-B2.5).
     expect(mockTx.product.update).not.toHaveBeenCalled();
   });
 
@@ -266,7 +270,7 @@ describe('applyStockDelta', () => {
     // create branch mirrors the (negative) delta verbatim, as in the original block
     expect(upsertArg.create.quantity).toBe(-4);
 
-    const prodArg = mockTx.product.update.mock.calls[0][0] as any;
-    expect(prodArg.data.quantity.increment).toBe(-4);
+    // ...and still no product-row write, negative delta or not (P2-B2.5).
+    expect(mockTx.product.update).not.toHaveBeenCalled();
   });
 });

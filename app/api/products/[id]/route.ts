@@ -47,8 +47,12 @@ export const GET = apiHandler(async (request: NextRequest, { params }: RoutePara
   const location = await prisma.location.findFirst({ where: { id: 1 } });
   const currentQuantity = location ? await getCurrentQuantity(product.id, location.id) : 0;
 
+  // The loc-1 `products.quantity` mirror is retired (B2.5) — strip it before
+  // the spread so a dead column never reaches the wire.
+  const { quantity: _retiredMirror, ...productRow } = product;
+
   return NextResponse.json({
-    ...product,
+    ...productRow,
     currentQuantity,
   });
 });

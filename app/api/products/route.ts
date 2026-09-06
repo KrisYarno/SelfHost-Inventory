@@ -112,6 +112,9 @@ export const POST = apiHandler(async (request: NextRequest) => {
   // Create + record atomically: the audit row is written in the SAME transaction
   // as the product insert, so an unrecordable create never commits (spec D4).
   const product = await prisma.$transaction(async (tx) => {
+    // The retired loc-1 mirror column is not written here (B2.5): it keeps its
+    // schema default of 0 until the drop migration, and the source pin
+    // `__tests__/unit/lib/no-mirror-writes.test.ts` reads this call's argument.
     const created = await tx.product.create({
       data: {
         name,
@@ -119,7 +122,6 @@ export const POST = apiHandler(async (request: NextRequest) => {
         variant,
         unit,
         numericValue,
-        quantity: 0,
         location: locationId,
         // NULL = inherit the system default (R-L13); stop materializing 10 so the
         // configurable default actually governs newly created products. An omitted

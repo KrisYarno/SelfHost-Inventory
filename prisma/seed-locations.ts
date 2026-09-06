@@ -1,3 +1,7 @@
+// UNWIRED: nothing runs this file (package.json's `prisma.seed` points at the
+// singular `seed-location.ts`, and no compose/Dockerfile/script references it).
+// It reads `products.quantity`, a column retired by P2-B2.5 — delete this file
+// in a hygiene round.
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();

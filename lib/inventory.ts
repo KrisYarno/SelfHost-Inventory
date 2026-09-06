@@ -240,7 +240,10 @@ export async function getCurrentQuantity(
  * Performs, in this exact order, the write block shared by every stock route:
  *   1. createInventoryLog(..., tx)
  *   2. tx.product_locations.upsert (increment quantity + version, or create at version 1)
- *   3. if locationId === 1, tx.product.update to mirror the legacy Product.quantity field
+ *
+ * The loc-1 mirror is RETIRED (P2-B2.5, 2026-09); `products.quantity` is a dead column
+ * awaiting its drop migration — no writer touches it. applyStockDelta takes no
+ * product-row X lock; its ledger INSERT still takes the FK S lock on the product row.
  *
  * Extracted verbatim from createInventoryAdjustment so the same write path can be
  * reused (e.g. by pre-staging graduation/decline) without duplicating logic.
@@ -344,14 +347,6 @@ export async function applyStockDelta(
       version: 1,
     },
   });
-
-  // Update the product's quantity field for location 1 (for compatibility)
-  if (locationId === 1) {
-    await tx.product.update({
-      where: { id: productId },
-      data: { quantity: { increment: delta } },
-    });
-  }
 
   return {
     log,
@@ -490,9 +485,9 @@ export async function createInventoryAdjustment(
           );
         }
 
-        // Apply the stock delta: log + product_locations upsert + loc-1 mirror.
+        // Apply the stock delta: log + product_locations upsert.
         // Extracted to applyStockDelta; preserves the exact same Prisma call
-        // sequence (createInventoryLog -> upsert -> conditional product.update).
+        // sequence (createInventoryLog -> upsert; the loc-1 mirror is retired, B2.5).
         const { log, newVersion } = await applyStockDelta(tx, {
           userId,
           productId,
@@ -680,14 +675,6 @@ export async function createInventoryTransfer(options: {
             version: 1,
           },
         });
-
-        // Maintain Product.quantity legacy semantics for location 1
-        if (fromLocationId === 1) {
-          await tx.product.update({ where: { id: productId }, data: { quantity: { decrement: quantity } } });
-        }
-        if (toLocationId === 1) {
-          await tx.product.update({ where: { id: productId }, data: { quantity: { increment: quantity } } });
-        }
 
         // Record the change inside the SAME transaction as both transfer legs.
         if (record) {
@@ -877,8 +864,8 @@ export async function createInventoryTransaction(
     // been advanced to this request's end state.
     for (const item of items) {
       // Apply the stock delta through the shared write core: log +
-      // product_locations upsert (quantity/version increment) + loc-1
-      // Product.quantity mirror — the same path adjust/stock-in/batch-adjust use.
+      // product_locations upsert (quantity/version increment) — the same path
+      // adjust/stock-in/batch-adjust use (the loc-1 mirror is retired, B2.5).
       // Phase C (D6): logType is SALE for "DEDUCTION" (manual-order fulfillment)
       // and ADJUSTMENT otherwise — computed once above from `type`; item.changeType
       // is still not mapped. batchId (from opts) joins each row to its event.

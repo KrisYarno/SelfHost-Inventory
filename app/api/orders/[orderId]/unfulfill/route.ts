@@ -397,15 +397,6 @@ export const POST = apiHandler(async (
               WHERE productId = ${component.productId}
                 AND locationId = ${survivor.locationId}
             `);
-
-            // Legacy product.quantity mirror for location 1 (atomic)
-            if (survivor.locationId === 1) {
-              await tx.$executeRaw(Prisma.sql`
-                UPDATE products
-                SET quantity = quantity + ${component.restoreQty}
-                WHERE id = ${component.productId}
-              `);
-            }
           }
 
           // Per-item component IDs for clean public response (Fix C P0 #6)
@@ -461,15 +452,6 @@ export const POST = apiHandler(async (
           WHERE productId = ${survivor.productId}
             AND locationId = ${survivor.locationId}
         `);
-
-        // Legacy product.quantity mirror for location 1 (atomic)
-        if (survivor.locationId === 1) {
-          await tx.$executeRaw(Prisma.sql`
-            UPDATE products
-            SET quantity = quantity + ${survivor.quantity}
-            WHERE id = ${survivor.productId}
-          `);
-        }
 
         restored.push({
           itemId: survivor.itemId,

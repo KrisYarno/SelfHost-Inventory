@@ -1,10 +1,14 @@
 //
 // Phase 0a / D4 — the cheap one-shot checks.
 //
-//  - MIRROR GAP: products.quantity (the legacy column) vs the location-1
-//    product_locations row. Mass-update writes NEITHER the mirror NOR a version
-//    increment, so if any surface still reads the legacy column it is a
-//    too-high-direction suspect. This query exonerates or implicates the class.
+//  - MIRROR GAP: RETIRED, and structurally unpopulated from 2026-09 on.
+//    products.quantity was a hand-maintained mirror of the location-1
+//    product_locations row; P2-B2.5 stopped every writer, so the gap this check
+//    measured stopped moving and its last honest figures are the ones recorded
+//    in the wave-close row of the B2.5 plan. The slots stay in the artifact as
+//    null + a named reason (never 0 — a filtered-to-zero figure would read as
+//    "no drift", which is a different claim). productsTotal stays live: it
+//    counts products rows, which is an honest number either way.
 //  - LOGTYPE CENSUS by ISO week since 2026-07-14: settles whether the
 //    order-linked paths run at all post-deploy. The "zero SALE rows" claim is
 //    SCOPED to the post-enum window — the SALE enum only exists since migration
@@ -12,17 +16,19 @@
 //  - stockedOut set-rate over time: usage evidence about the workbench, not a
 //    defect count.
 //
-const { query, int, date, bool } = require("./lib/db");
-const { figure, disclosure, table } = require("./lib/artifact");
+const { query, int, date } = require("./lib/db");
+const { figure, emptySlot, disclosure, table } = require("./lib/artifact");
 const { weekStartKey, monthKey } = require("./lib/date-buckets");
 
 const check = "d4-checks";
 const title = "Mirror gap, logType census, stockedOut set-rate";
 const purpose =
-  "Three cheap one-shot questions with expensive consequences: does the legacy " +
-  "products.quantity mirror still disagree with per-location truth (and in which " +
-  "direction); do the order-linked ledger paths run at all since the post-enum deploy; " +
-  "and how often is the workbench's stockedOut flag actually set.";
+  "Two cheap one-shot questions with expensive consequences: do the order-linked " +
+  "ledger paths run at all since the post-enum deploy, and how often is the " +
+  "workbench's stockedOut flag actually set. The third — whether the legacy " +
+  "products.quantity mirror disagreed with per-location truth — is RETIRED: no " +
+  "writer has touched that column since P2-B2.5 (2026-09), so its slots are " +
+  "structurally unpopulated rather than silently zero.";
 
 /** The SALE enum's migration; the census is scoped to on/after the deploy. */
 const SALE_ENUM_MIGRATION = "20260709164143_change_tracking_foundation (deployed ~2026-07-14)";
@@ -32,20 +38,11 @@ async function run(ctx) {
   const { prisma, opts } = ctx;
   const notes = [];
 
-  // ---- mirror gap ---------------------------------------------------------
-  const mirrorRows = await query(
-    prisma,
-    `SELECT p.id AS productId,
-            p.quantity AS legacyQuantity,
-            pl.quantity AS locationQuantity,
-            pl.version AS locationVersion,
-            (p.deletedAt IS NOT NULL) AS isSoftDeleted
-       FROM products p
-       LEFT JOIN product_locations pl
-         ON pl.productId = p.id AND pl.locationId = ?
-      WHERE pl.id IS NULL OR p.quantity <> pl.quantity`,
-    [DEFAULT_LOCATION_ID]
-  );
+  // ---- mirror gap: RETIRED (P2-B2.5) --------------------------------------
+  // The query that measured it is DELETED, not filtered: a filtered query decays
+  // to ~0 rows and a 0 here would read as "no drift", which is not what the
+  // retirement says. What it says is that the column stopped being maintained,
+  // and the source pin is the live evidence.
   const productTotals = await query(
     prisma,
     `SELECT COUNT(*) AS total,
@@ -53,48 +50,10 @@ async function run(ctx) {
        FROM products p`
   );
 
-  const mirrorLive = [];
-  let mirrorSoftDeleted = 0;
-  let missingLocationRow = 0;
-  for (const r of mirrorRows) {
-    if (bool(r.isSoftDeleted)) {
-      mirrorSoftDeleted += 1;
-      continue;
-    }
-    const hasLocationRow = r.locationQuantity !== null && r.locationQuantity !== undefined;
-    if (!hasLocationRow) missingLocationRow += 1;
-    mirrorLive.push({
-      productId: int(r.productId),
-      legacyQuantity: int(r.legacyQuantity),
-      locationQuantity: hasLocationRow ? int(r.locationQuantity) : null,
-      difference: hasLocationRow ? int(r.legacyQuantity) - int(r.locationQuantity) : null,
-      locationVersion: hasLocationRow ? int(r.locationVersion) : null,
-      note: hasLocationRow ? "mismatch" : "no location-1 product_locations row",
-    });
-  }
-  const mirrorTooHigh = mirrorLive.filter((r) => r.difference !== null && r.difference > 0);
-  const mirrorTooLow = mirrorLive.filter((r) => r.difference !== null && r.difference < 0);
-
-  const mirrorDisclosures = [
-    disclosure(
-      "soft_deleted_products_excluded",
-      mirrorSoftDeleted,
-      "Mismatching products with deletedAt set — excluded from the live figures and " +
-        "counted here instead."
-    ),
-    disclosure(
-      "products_without_location_1_row",
-      missingLocationRow,
-      "Products with no product_locations row at location 1 at all. The difference is " +
-        "null (unknown), NOT zero — there is nothing to compare against."
-    ),
-    disclosure(
-      "location_scope",
-      DEFAULT_LOCATION_ID,
-      "The legacy products.quantity column mirrors ONE location (the default, id 1). " +
-        "Stock at other locations is outside this comparison by construction."
-    ),
-  ];
+  /** The one reason every retired mirror slot carries. */
+  const MIRROR_RETIRED_REASON =
+    "products.quantity mirror retired 2026-09 (P2-B2.5); the source pin " +
+    "no-mirror-writes.test.ts is the live evidence";
 
   // ---- logType census -----------------------------------------------------
   const censusSince = opts.censusSince;
@@ -223,12 +182,11 @@ async function run(ctx) {
 
   const sections = {
     mirrorGap: {
-      mismatchedProducts: figure(
-        mirrorLive.length,
+      mismatchedProducts: emptySlot(
+        MIRROR_RETIRED_REASON,
         `Live (not soft-deleted) products where products.quantity differs from the ` +
           `location-${DEFAULT_LOCATION_ID} product_locations.quantity, or where that ` +
-          `location row is absent entirely.`,
-        mirrorDisclosures
+          `location row is absent entirely.`
       ),
       productsTotal: figure(
         int(productTotals[0]?.total),
@@ -241,31 +199,14 @@ async function run(ctx) {
           ),
         ]
       ),
-      legacyTooHigh: figure(
-        mirrorTooHigh.length,
+      legacyTooHigh: emptySlot(
+        MIRROR_RETIRED_REASON,
         "Products where the LEGACY column reads HIGHER than the per-location truth — " +
-          "the direction that matches the reported symptom if any surface still reads it.",
-        mirrorDisclosures
+          "the direction that matches the reported symptom if any surface still reads it."
       ),
-      legacyTooLow: figure(
-        mirrorTooLow.length,
-        "Products where the legacy column reads LOWER than the per-location truth.",
-        mirrorDisclosures
-      ),
-      detail: table(
-        mirrorLive
-          .sort((a, b) => Math.abs(b.difference ?? 0) - Math.abs(a.difference ?? 0))
-          .slice(0, opts.top),
-        `The ${opts.top} largest mirror gaps by absolute difference.`,
-        {
-          difference:
-            "products.quantity - product_locations.quantity (location 1). null when there " +
-            "is no location row to compare against — unknown, not zero.",
-          locationVersion:
-            "product_locations.version, the optimistic-lock counter. Mass-update does not " +
-            "increment it, so a low version next to heavy movement is itself a signal.",
-        },
-        mirrorDisclosures
+      legacyTooLow: emptySlot(
+        MIRROR_RETIRED_REASON,
+        "Products where the legacy column reads LOWER than the per-location truth."
       ),
     },
 
@@ -328,15 +269,15 @@ async function run(ctx) {
   };
 
   notes.push(
-    "The mirror gap and the version counter share one cause: mass-update writes stock " +
-      "directly without the mirror write or the version increment. Registered by the spec " +
-      "for the full lane (G2-8/OC-11a) — this check measures its blast radius."
+    `mirrorGap: ${MIRROR_RETIRED_REASON}. The per-product detail table this section used ` +
+      "to carry is gone with the query; the last honest figures were measured once, " +
+      "before the retirement commit, and are recorded in the B2.5 wave-close row."
   );
 
   return {
     sections,
     notes,
-    meta: { mirrorMismatches: mirrorLive.length, stockedOutSetRate: stockedOutTotal },
+    meta: { mirrorMismatches: null, stockedOutSetRate: stockedOutTotal },
   };
 }
 

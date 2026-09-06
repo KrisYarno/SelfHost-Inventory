@@ -199,14 +199,14 @@ describe('mode: new — the `POST /api/products` mapping, re-homed once (PK2-3)'
 
     // Written out in full, importing nothing from the route: this object IS the
     // contract. `costPrice: null` ALWAYS (premise 1); `approvalStatus` from the
-    // actor (non-admin -> PENDING_REVIEW); `quantity: 0` and no stock.
+    // actor (non-admin -> PENDING_REVIEW); NO `quantity` key at all — the loc-1
+    // mirror is retired (P2-B2.5) and the column keeps its schema default.
     expect((stmt(tx, 'product-create') as { args: { data: unknown } }).args.data).toEqual({
       name: 'Peptide X 10mg',
       baseName: 'Peptide X',
       variant: '10mg',
       unit: 'mg',
       numericValue: 10,
-      quantity: 0,
       location: 3,
       lowStockThreshold: 5,
       costPrice: null,
@@ -250,7 +250,7 @@ describe('mode: new — the `POST /api/products` mapping, re-homed once (PK2-3)'
       variant: '10mg',
       unit: 'mg',
       numericValue: null,
-      quantity: 0,
+      // No `quantity` key: the loc-1 mirror is retired (P2-B2.5).
       // locationId omitted -> the house default 1.
       location: 1,
       // undefined -> NULL (inherit the system default), never a materialized 10.

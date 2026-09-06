@@ -44,8 +44,9 @@ export const GATE_COMPANY_ID = "concurrencygatecompany";
 export const GATE_ADMIN_ID = 9001;
 export const GATE_MEMBER_ID = 9002;
 
-/** Location 1 is the COMPATIBILITY location (`products.quantity` mirrors it and
- *  nothing else); location 2 exists so a batch can land off-mirror. */
+/** Location 1 is where every route deducts in real life (it used to carry the
+ *  `products.quantity` mirror, retired by P2-B2.5); location 2 exists so a
+ *  batch can land somewhere else. */
 export const LOCATION_MAIN = 1;
 export const LOCATION_SECOND = 2;
 
@@ -269,6 +270,10 @@ const SEED_PRODUCTS: Record<number, SeedProduct> = {
   },
 };
 
+// ALLOWLISTED for `__tests__/unit/lib/no-mirror-writes.test.ts` (pack CB2.5a.3):
+// this is a FIXTURE RESET, and `quantity: 0` restores the retired loc-1 mirror
+// column to its schema default so a gate run starts from the seeded shape. No
+// product code writes it any more.
 function productRestoreData(product: SeedProduct) {
   return {
     name: product.name,

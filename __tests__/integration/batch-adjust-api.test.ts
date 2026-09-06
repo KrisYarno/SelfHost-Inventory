@@ -1025,13 +1025,18 @@ describe('/api/inventory/batch-adjust', () => {
     // -----------------------------------------------------------------------
     // FIX-DELTA FDc-1 (coverage gap FDc-3): the WRITE LOOP's catch.
     //
-    // Every guard passes and the transaction is already writing when the lane's
-    // one OBSERVED deadlock site — the location-1 `Product.quantity` mirror,
-    // which every covered writer touches last — loses the race. That catch wraps
-    // an unrecognised failure into a plain `Error` naming the product, and a
-    // plain Error is a rung apiHandler answers with a generic 500: the operator
-    // is told the system broke when nothing broke and nothing was written.
-    // The transient class is rethrown untouched so it reaches the 503 BUSY rung.
+    // Every guard passes and the transaction is already writing when a write
+    // loses a race. That catch wraps an unrecognised failure into a plain
+    // `Error` naming the product, and a plain Error is a rung apiHandler answers
+    // with a generic 500: the operator is told the system broke when nothing
+    // broke and nothing was written. The transient class is rethrown untouched
+    // so it reaches the 503 BUSY rung.
+    //
+    // The INJECTION SITE moved at P2-B2.5 (pack CB2.5c.4): it used to be the
+    // location-1 `products.quantity` mirror — the statement every covered writer
+    // touched last — and that statement is retired, so a fault planted there
+    // would never fire again. It is now the `product_locations` upsert, which is
+    // the covered writers' real contended row.
     // -----------------------------------------------------------------------
     it('FDc-1: a deadlock INSIDE the write loop answers 503 BUSY, not a generic 500', async () => {
       const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined)
@@ -1046,10 +1051,11 @@ describe('/api/inventory/batch-adjust', () => {
         capturedTx = {
           product_locations: {
             findFirst: jest.fn(),
-            upsert: jest.fn().mockResolvedValue({ id: 1, quantity: 60, version: 2 }),
+            // applyStockDelta's SECOND — and now last — write statement.
+            upsert: jest.fn().mockRejectedValue(deadlock),
           },
-          // applyStockDelta's third statement, for location 1 only.
-          product: { update: jest.fn().mockRejectedValue(deadlock) },
+          // Never called: the loc-1 mirror is retired (P2-B2.5).
+          product: { update: jest.fn() },
           inventory_logs: { create: jest.fn().mockResolvedValue({ id: 1, delta: 10 }) },
         }
         return callback(
@@ -1076,10 +1082,10 @@ describe('/api/inventory/batch-adjust', () => {
       // Prisma's own text either.
       expect(data.error).not.toMatch(/Product 1|deadlock|Internal server error/i)
       // The failure is genuinely in the WRITE: the loop had already reached the
-      // ledger insert and the upsert for this item.
+      // ledger insert, and the upsert is the statement that lost the race.
       expect(capturedTx.inventory_logs.create).toHaveBeenCalledTimes(1)
       expect(capturedTx.product_locations.upsert).toHaveBeenCalledTimes(1)
-      expect(capturedTx.product.update).toHaveBeenCalledTimes(1)
+      expect(capturedTx.product.update).not.toHaveBeenCalled()
       // The operator gets "busy"; the REAL cause stays diagnosable in the log —
       // which is the trade the pack accepted for this rung (FDc-8).
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('deadlock'))

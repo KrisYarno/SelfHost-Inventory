@@ -472,7 +472,7 @@ describe("supply-order cross-actor races — real-DB concurrency", () => {
 
       const product = await probe.product.findUniqueOrThrow({
         where: { id: P_PENDING },
-        select: { deletedAt: true, quantity: true, costPrice: true, approvalStatus: true },
+        select: { deletedAt: true, costPrice: true, approvalStatus: true },
       });
       const line = await probe.stagingItem.findUniqueOrThrow({ where: { id: LINE_L2 } });
       const productLogs = await probe.inventory_logs.findMany({
@@ -501,7 +501,6 @@ describe("supply-order cross-actor races — real-DB concurrency", () => {
         { locationId: 1, quantity: 0 },
         { locationId: 2, quantity: 0 },
       ]);
-      expect(product.quantity).toBe(0);
 
       if (bookingRace.status === "fulfilled") {
         // BOOKING FIRST. The batch really happened, so the decline's corrective
@@ -613,15 +612,14 @@ describe("supply-order cross-actor races — real-DB concurrency", () => {
 
       const product = await probe.product.findUniqueOrThrow({
         where: { id: P_PENDING },
-        select: { deletedAt: true, quantity: true, costPrice: true },
+        select: { deletedAt: true, costPrice: true },
       });
       expect(product.deletedAt).not.toBeNull();
+      expect(product.costPrice).toBeNull();
+
       // THE EXACTNESS THE LOCKING READ BUYS: declineProduct reverses the quantity
       // it read FOR UPDATE, so it takes back the 3 units this booking had just
       // committed — a snapshot read would have seen 0 and reversed nothing.
-      expect(product.quantity).toBe(0);
-      expect(product.costPrice).toBeNull();
-
       const locations = await probe.product_locations.findMany({
         where: { productId: P_PENDING },
         orderBy: { locationId: "asc" },
@@ -696,7 +694,7 @@ describe("supply-order cross-actor races — real-DB concurrency", () => {
 
       const product = await probe.product.findUniqueOrThrow({
         where: { id: P_PENDING },
-        select: { approvalStatus: true, deletedAt: true, quantity: true, reviewedBy: true },
+        select: { approvalStatus: true, deletedAt: true, reviewedBy: true },
       });
       expect(product.approvalStatus).toBe("APPROVED");
       expect(product.deletedAt).toBeNull();
@@ -725,7 +723,6 @@ describe("supply-order cross-actor races — real-DB concurrency", () => {
         { locationId: 1, quantity: 3 },
         { locationId: 2, quantity: 0 },
       ]);
-      expect(product.quantity).toBe(3);
 
       // THE POINT OF THE SCENARIO (OCp2-2): whichever order the two committed in,
       // the register never keeps an OPEN row for a product that is now approved.
@@ -803,11 +800,10 @@ describe("supply-order cross-actor races — real-DB concurrency", () => {
 
       const product = await probe.product.findUniqueOrThrow({
         where: { id: P_PENDING },
-        select: { approvalStatus: true, deletedAt: true, quantity: true, reviewedBy: true },
+        select: { approvalStatus: true, deletedAt: true, reviewedBy: true },
       });
       expect(product.approvalStatus).toBe("APPROVED");
       expect(product.deletedAt).toBeNull();
-      expect(product.quantity).toBe(3);
       expect(product.reviewedBy).toBe(GATE_ADMIN_ID);
 
       const line = await probe.stagingItem.findUniqueOrThrow({ where: { id: LINE_L2 } });

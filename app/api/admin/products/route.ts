@@ -38,11 +38,14 @@ export const GET = apiHandler(async (request: NextRequest) => {
     orderBy: { id: "desc" },
   });
 
-  const productsWithQuantity = products.map((product) => {
-    const currentQuantity = product.product_locations.reduce(
+  const productsWithQuantity = products.map((row) => {
+    const currentQuantity = row.product_locations.reduce(
       (sum, pl) => sum + pl.quantity,
       0
     );
+    // The loc-1 `products.quantity` mirror is retired (B2.5) — strip it before
+    // the spread so a dead column never reaches the wire.
+    const { quantity: _retiredMirror, ...product } = row;
     return {
       ...product,
       currentQuantity,

@@ -15,6 +15,13 @@
  * money -> product_locations range lock -> applyStockDelta -> products FOR
  * UPDATE -> D-COST + subjects -> guarded line update -> onRecord.
  *
+ * THE LOCK TRUTH ON `products` (P2-B2.5): `applyStockDelta` takes NO product-row
+ * X lock — the loc-1 mirror it used to write is retired — but its ledger INSERT
+ * still takes the FK S lock on the product row, so step 6b's `FOR UPDATE` is an
+ * in-transaction S->X upgrade and the transaction's FIRST exclusive lock there.
+ * It comes after the step-5 range lock, which is the house order that keeps two
+ * bookings from cycling with each other.
+ *
  * PROPERTY -> TEST MATRIX (pack C2b.4). Three of the five rows land here, and
  * each test below names its OLD HOME:
  *
@@ -115,8 +122,6 @@ function mkTx(options: {
   lineUpdateCount?: number;
   /** rows the guarded raw discard update reports */
   discardCount?: number;
-  /** let the applyStockDelta stub touch products (the location-1 mirror) */
-  stockDeltaTouchesProduct?: boolean;
 } = {}) {
   const {
     line = lockedLine(),
@@ -127,7 +132,6 @@ function mkTx(options: {
     headerWinner = InboundShipmentStatus.RECEIVING,
     lineUpdateCount = 1,
     discardCount = 1,
-    stockDeltaTouchesProduct = false,
   } = options;
 
   const statements: Statement[] = [];
@@ -187,10 +191,10 @@ function mkTx(options: {
 
   mockApplyStockDelta.mockImplementation(async () => {
     statements.push({ kind: 'stock-delta' });
-    // Step 6 note (PK-10): for location 1 `applyStockDelta` ALSO updates
-    // products.quantity, which MAY be the transaction's first product-ROW lock.
-    // Legal, because the step-5 range lock already precedes it.
-    if (stockDeltaTouchesProduct) await tx.product.update({ where: { id: PRODUCT } });
+    // Step 6 (PK-10, restated at P2-B2.5): `applyStockDelta` writes the ledger
+    // row and the location row and NOTHING on `products` — the loc-1 mirror it
+    // used to write is retired. So the stub takes no product statement either,
+    // and `tx.product.update` staying uncalled is the pin.
     return { log: { id: 1 }, newVersion: 1 };
   });
 
@@ -304,8 +308,8 @@ describe('the FROZEN step order (spec §5.2)', () => {
     expect(tx.product.findUnique).not.toHaveBeenCalled();
   });
 
-  it('PERMITS applyStockDelta\'s location-1 products.quantity update before the 6b read (PK-10)', async () => {
-    const tx = mkTx({ stockDeltaTouchesProduct: true });
+  it('takes NO product-row X lock in applyStockDelta — the 6b FOR UPDATE is the first X on `products` (PK-10)', async () => {
+    const tx = mkTx();
     const rec = recorder();
 
     await bookSupplyOrderBatch(tx, args({ locationId: 1 }), {
@@ -313,9 +317,16 @@ describe('the FROZEN step order (spec §5.2)', () => {
       batchId: BATCH,
     });
 
+    // Location 1 is now written exactly like every other location: the loc-1
+    // `products.quantity` mirror is RETIRED (P2-B2.5). What survives is the
+    // ledger INSERT's FK S lock on the product row, which step 6b upgrades — so
+    // the ONLY `products` statement is 6b's, and it comes after the step-5 range
+    // lock and after the stock write.
+    expect(tx.product.update).not.toHaveBeenCalled();
     const order = kinds(tx);
-    expect(order.indexOf('product-update')).toBeGreaterThan(order.indexOf('locations-lock'));
-    expect(order.indexOf('product-update')).toBeLessThan(order.indexOf('product-lock'));
+    expect(order).not.toContain('product-update');
+    expect(order.indexOf('stock-delta')).toBeGreaterThan(order.indexOf('locations-lock'));
+    expect(order.indexOf('product-lock')).toBeGreaterThan(order.indexOf('stock-delta'));
   });
 
   it('locks the product_locations RANGE for the product, ordered by location', async () => {

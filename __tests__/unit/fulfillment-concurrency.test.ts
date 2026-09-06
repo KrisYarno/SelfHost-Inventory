@@ -110,8 +110,7 @@ function isPrelockSelect(sql: string): boolean {
 
 /**
  * What the item's atomic `UPDATE product_locations` reports, per call — the
- * last count repeats. Every other execute (the prelock's materialize, the loc-1
- * mirror) reports 1.
+ * last count repeats. Every other execute (the prelock's materialize) reports 1.
  */
 function updateAffectedRows(...counts: number[]): void {
   let seen = 0
@@ -212,19 +211,19 @@ describe('fulfillExternalOrder atomic stock deduction', () => {
     expect(result.skipped).toHaveLength(0)
     expect(result.failed).toHaveLength(0)
 
-    // The two deduction statements this pin is about:
-    //   1. product_locations decrement with WHERE quantity >= ? — B1.5: the
-    //      clause stays as the BACKSTOP (the guard is the pass-2a tally), and a
-    //      0-row answer under a passing tally is an invariant violation.
-    //   2. products.quantity legacy mirror (locationId === 1)
+    // The ONE deduction statement this pin is about: the product_locations
+    // decrement with WHERE quantity >= ? — B1.5: the clause stays as the
+    // BACKSTOP (the guard is the pass-2a tally), and a 0-row answer under a
+    // passing tally is an invariant violation. The loc-1 `products.quantity`
+    // mirror that used to follow it is RETIRED (P2-B2.5) — one statement fewer,
+    // asserted as an ABSENCE.
     const executes = rawCalls.filter((c) => c.kind === 'execute')
     const decrements = executes.filter((c) => /UPDATE product_locations/.test(c.sql))
     expect(decrements).toHaveLength(1)
     expect(decrements[0].sql).toContain('quantity >=')
-    expect(executes.filter((c) => /UPDATE products\b/.test(c.sql))).toHaveLength(1)
-    // B1a-ii: plus the canonical prelock's materialize ahead of them, which is
-    // the only statement this count gained.
-    expect(tx.$executeRaw).toHaveBeenCalledTimes(3)
+    expect(executes.filter((c) => /UPDATE products\b/.test(c.sql))).toHaveLength(0)
+    // B1a-ii: plus the canonical prelock's materialize ahead of it.
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(2)
     expect(rawCalls[0].sql).toContain('INSERT INTO product_locations')
 
     // The old read-then-upsert pattern must NOT be used

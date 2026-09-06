@@ -35,16 +35,20 @@ import type {
  *   5   product_locations      the whole range, `ORDER BY locationId FOR
  *                              UPDATE` (a gap lock covers a target location
  *                              with no row yet) + PRE-BATCH on-hand
- *   6   `applyStockDelta`      ledger row + product_locations + (location 1)
- *                              products.quantity
+ *   6   `applyStockDelta`      ledger row + product_locations (the loc-1
+ *                              `products` mirror is RETIRED, B2.5)
  *   6b  products `FOR UPDATE`  the AUTHORITATIVE approval / deleted / cost read
  *   7   D-COST + subjects      fill-if-null on the FIRST batch only
  *   8   guarded increment      `WHERE stockedQuantity = <the locked value>`
  *   9   `onRecord`             the ROUTE writes the exception rows + the audit
  *
  * LOCK ORDER, house-uniform: line -> header -> product_locations -> products.
- * `applyStockDelta` may take the product ROW lock first for location 1; that is
- * legal because the step-5 RANGE lock already precedes it (PK-10).
+ * `applyStockDelta` takes NO product-row X lock (the mirror is retired); its
+ * ledger INSERT still takes the FK S lock on `products`, so step 6b's
+ * `SELECT ... FOR UPDATE` after it is an in-transaction S->X upgrade. This lock
+ * order is what keeps two bookings from cycling with each other; against a
+ * COVERED writer's prelock the pair can still cycle (pack CB2.5a.2 — REGISTERED,
+ * booking retries).
  *
  * READ DISCIPLINE: every read is a locking read or comes after the locks. A
  * plain read before the line lock would pin a REPEATABLE READ snapshot older
@@ -340,10 +344,9 @@ export async function bookSupplyOrderBatch(
   );
   const onHandBefore = locations.reduce((sum, row) => sum + row.quantity, 0);
 
-  // 6. THE LEDGER ROW + the location quantities. For location 1 this ALSO
-  //    updates products.quantity, which MAY be this transaction's first
-  //    product-ROW lock — legal, because the range lock above already precedes
-  //    it (PK-10).
+  // 6. THE LEDGER ROW + the location quantities. This takes NO product-row X
+  //    lock (the loc-1 mirror is retired, B2.5) — but its ledger INSERT still
+  //    takes the FK S lock on `products`, which step 6b then upgrades to X.
   await applyStockDelta(tx, {
     userId: actor.id,
     productId,

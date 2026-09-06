@@ -62,10 +62,10 @@ function makeTx(currentQuantity: number | null) {
   return {
     product: {
       findUnique: jest.fn().mockResolvedValue({ id: 1, name: "Widget", deletedAt: null }),
-      // T8: every loc-1 mass-update now also writes the legacy
-      // `products.quantity` mirror inside the same tx. This file pins the COUNT
-      // stamp, not the mirror's value — the state pins live in
-      // __tests__/integration/api/mass-update-delta.test.ts.
+      // Present so a REGRESSION shows up as a call rather than as a crash: the
+      // route writes NO product row (the loc-1 `products.quantity` mirror is
+      // retired, P2-B2.5). This file pins the COUNT stamp; the state pins live
+      // in __tests__/integration/api/mass-update-delta.test.ts.
       update: jest.fn().mockResolvedValue({}),
     },
     location: {
