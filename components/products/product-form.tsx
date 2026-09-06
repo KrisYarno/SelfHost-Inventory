@@ -43,7 +43,9 @@ function initialThresholdMode(value: number | null | undefined): ThresholdMode {
 }
 
 interface ProductFormProps {
-  product?: Product;
+  // The loc-1 `products.quantity` mirror is retired (P2-B2.5) and no longer rides
+  // the wire; this form never read it. `Omit` keeps every existing caller.
+  product?: Omit<Product, "quantity">;
   onSubmit: (data: any) => Promise<void>;
   onCancel: () => void;
   isSubmitting?: boolean;

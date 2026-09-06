@@ -53,6 +53,13 @@ jest.mock('@/lib/rateLimit', () => ({
 }));
 
 
+// The products POST/PUT write an audit row inside their transaction; the row is
+// not what these pins are about (they read the RESPONSE BODY).
+jest.mock('@/lib/change-tracking', () => {
+  const actual = jest.requireActual('@/lib/change-tracking');
+  return { __esModule: true, ...actual, recordChange: jest.fn(async () => undefined) };
+});
+
 // The weekly-report route sends email; stub the whole service.
 jest.mock('@/lib/email', () => ({
   __esModule: true,
@@ -74,7 +81,8 @@ import { GET as weeklyReportGET } from '@/app/api/cron/weekly-report/route';
 import { GET as adminProductsGET } from '@/app/api/admin/products/route';
 import { GET as lowStockGET } from '@/app/api/reports/low-stock/route';
 import { GET as optimizedGET } from '@/app/api/products/optimized/route';
-import { GET as productGET } from '@/app/api/products/[id]/route';
+import { GET as productGET, PUT as productPUT } from '@/app/api/products/[id]/route';
+import { GET as productsGET, POST as productsPOST } from '@/app/api/products/route';
 import { GET as variantsGET } from '@/app/api/inventory/variants/route';
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
@@ -303,14 +311,21 @@ describe('SHOW route: GET /api/inventory/variants does not exclude provisional',
 
 // ===========================================================================
 // THE WIRE: the RETIRED loc-1 `products.quantity` mirror never ships (pack
-// CB2.5b.1).
+// CB2.5b.1, amended B25-FR1/F1).
 //
-// Three routes spread the raw Prisma product row onto the wire beside a
-// SEPARATELY computed `currentQuantity`. The column they were leaking is dead
-// (P2-B2.5) and its value is now whatever it happened to hold when the last
-// writer stopped — a number that looks authoritative and is not. Each route
-// strips the key BEFORE the spread; the `include` shapes are untouched, so
-// nothing else on the payload moves.
+// FOUR READ routes spread the raw Prisma product row onto the wire beside a
+// SEPARATELY computed `currentQuantity` — `/api/products/optimized`,
+// `/api/admin/products`, `/api/products/[id]` and `/api/products` (the last one
+// through `getProductsWithQuantities`, which spreads at BOTH of its map sites).
+// TWO WRITE responses hand the freshly created / updated row straight back:
+// POST `/api/products` (201) and PUT `/api/products/[id]` (200).
+//
+// The column they were leaking is dead (P2-B2.5) and its value is now whatever
+// it happened to hold when the last writer stopped — a number that looks
+// authoritative and is not. Every site strips the key BEFORE the spread (the
+// write responses strip the value handed to `NextResponse.json`; the audit work
+// inside the transaction is untouched); the `include` shapes stay, so nothing
+// else on the payload moves.
 // ===========================================================================
 
 describe('the retired mirror never reaches the wire (pack CB2.5b.1)', () => {
@@ -382,6 +397,118 @@ describe('the retired mirror never reaches the wire (pack CB2.5b.1)', () => {
 
     expect(Object.prototype.hasOwnProperty.call(body, 'quantity')).toBe(false);
     expect(body.currentQuantity).toBe(4);
+    expect(body).toMatchObject({ id: 3, name: 'Widget' });
+  });
+
+  it('GET /api/products: no `quantity` at the product root; currentQuantity is the sum', async () => {
+    mockRequireApproved.mockResolvedValue({ user: APPROVED_USER });
+    db.product.count.mockResolvedValue(1 as any);
+    db.product.findMany.mockResolvedValue([
+      { id: 3, name: 'Widget', quantity: 949, location: 1 },
+    ] as any);
+    // getProductsWithQuantities -> getBulkTotalQuantities reads product_locations.
+    db.product_locations.findMany.mockResolvedValue([
+      { productId: 3, quantity: 4 },
+      { productId: 3, quantity: 6 },
+    ] as any);
+
+    const resp = await productsGET(mkReq('http://t/api/products'));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(body.products).toHaveLength(1);
+    expect(Object.prototype.hasOwnProperty.call(body.products[0], 'quantity')).toBe(false);
+    // Byte-identical to what the helper computed before the strip.
+    expect(body.products[0].currentQuantity).toBe(10);
+    expect(body.products[0]).toMatchObject({ id: 3, name: 'Widget', location: 1 });
+  });
+
+  it('GET /api/products?locationId: the location-specific map site strips it too', async () => {
+    mockRequireApproved.mockResolvedValue({ user: APPROVED_USER });
+    db.product.count.mockResolvedValue(1 as any);
+    db.product.findMany.mockResolvedValue([
+      { id: 3, name: 'Widget', quantity: 949, location: 1 },
+    ] as any);
+    // getBulkCurrentQuantities: the SAME delegate, scoped to one location.
+    db.product_locations.findMany.mockResolvedValue([{ productId: 3, quantity: 4 }] as any);
+
+    const resp = await productsGET(mkReq('http://t/api/products?locationId=2'));
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(body.products).toHaveLength(1);
+    expect(Object.prototype.hasOwnProperty.call(body.products[0], 'quantity')).toBe(false);
+    expect(body.products[0].currentQuantity).toBe(4);
+    expect(body.products[0]).toMatchObject({ id: 3, name: 'Widget' });
+  });
+
+  it('POST /api/products: the 201 body carries no `quantity` at the root', async () => {
+    mockRequireApproved.mockResolvedValue({ user: ADMIN_USER });
+    // isProductUnique -> no clash.
+    db.product.findFirst.mockResolvedValue(null as any);
+    db.location.findUnique.mockResolvedValue({ id: 1, name: 'Warehouse' } as any);
+    db.product.create.mockResolvedValue({
+      id: 3,
+      name: 'Test A',
+      baseName: 'Test',
+      variant: 'A',
+      quantity: 0, // the schema default the dead column still carries
+      location: 1,
+    } as any);
+    db.$transaction.mockImplementation(async (cb: any) => cb(db));
+
+    const resp = await productsPOST(
+      mkReq('http://t/api/products', {
+        method: 'POST',
+        body: JSON.stringify({ baseName: 'Test', variant: 'A' }),
+      })
+    );
+    expect(resp.status).toBe(201);
+    const body = await resp.json();
+
+    expect(Object.prototype.hasOwnProperty.call(body, 'quantity')).toBe(false);
+    expect(body).toMatchObject({ id: 3, name: 'Test A' });
+  });
+
+  it('PUT /api/products/[id]: the 200 body carries no `quantity` at the root', async () => {
+    mockRequireApproved.mockResolvedValue({ user: ADMIN_USER });
+    db.product.findUnique.mockResolvedValue({
+      id: 3,
+      name: 'Widget',
+      baseName: 'Widget',
+      variant: 'A',
+      unit: null,
+      numericValue: null,
+      quantity: 949,
+      costPrice: null,
+      retailPrice: null,
+      lowStockThreshold: null,
+      createdBy: ADMIN_USER.id,
+      approvalStatus: 'APPROVED',
+      deletedAt: null,
+      reorderConfig: null,
+    } as any);
+    db.product.update.mockResolvedValue({
+      id: 3,
+      name: 'Widget',
+      baseName: 'Widget',
+      variant: 'A',
+      quantity: 949, // the stale mirror the update echoes back
+      location: 1,
+    } as any);
+    db.$transaction.mockImplementation(async (cb: any) => cb(db));
+
+    const resp = await productPUT(
+      mkReq('http://t/api/products/3', {
+        method: 'PUT',
+        body: JSON.stringify({ lowStockThreshold: 12 }),
+      }),
+      { params: { id: '3' } }
+    );
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+
+    expect(Object.prototype.hasOwnProperty.call(body, 'quantity')).toBe(false);
     expect(body).toMatchObject({ id: 3, name: 'Widget' });
   });
 });

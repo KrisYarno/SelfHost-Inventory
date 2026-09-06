@@ -5,7 +5,9 @@
 //    products.quantity was a hand-maintained mirror of the location-1
 //    product_locations row; P2-B2.5 stopped every writer, so the gap this check
 //    measured stopped moving and its last honest figures are the ones recorded
-//    in the wave-close row of the B2.5 plan. The slots stay in the artifact as
+//    in `docs/superpowers/plans/2026-08-28-reconciliation-part2-contracts.md`,
+//    amendment row 76 (M-B2.5a as built: 82 products, 42 mismatched — 12 high /
+//    30 low — 3 without a location-1 row). The slots stay in the artifact as
 //    null + a named reason (never 0 — a filtered-to-zero figure would read as
 //    "no drift", which is a different claim). productsTotal stays live: it
 //    counts products rows, which is an honest number either way.
@@ -271,7 +273,10 @@ async function run(ctx) {
   notes.push(
     `mirrorGap: ${MIRROR_RETIRED_REASON}. The per-product detail table this section used ` +
       "to carry is gone with the query; the last honest figures were measured once, " +
-      "before the retirement commit, and are recorded in the B2.5 wave-close row."
+      "before the retirement commit, and are recorded in " +
+      "`docs/superpowers/plans/2026-08-28-reconciliation-part2-contracts.md`, amendment " +
+      "row 76 (M-B2.5a as built: 82 products, 42 mismatched — 12 high / 30 low — 3 " +
+      "without a location-1 row)."
   );
 
   return {

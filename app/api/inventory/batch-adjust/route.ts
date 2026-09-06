@@ -140,8 +140,7 @@ export const POST = apiHandler(async (request: NextRequest) => {
     for (const adjustment of adjustments) {
       try {
         // Atomic write path shared with the other stock routes:
-        // log + product_locations upsert (quantity/version increment)
-        // + Product.quantity mirror for location 1.
+        // log + product_locations upsert (quantity/version increment).
         const { log } = await applyStockDelta(tx, {
           userId: user.id,
           productId: adjustment.productId,
@@ -176,9 +175,10 @@ export const POST = apiHandler(async (request: NextRequest) => {
         // its own code + status, and the message already names the product.
         if (error instanceof AppError) throw error;
         // And the TRANSIENT class (fix-delta FDc-1): a deadlock/budget loss
-        // inside applyStockDelta — the loc-1 mirror is the lane's one OBSERVED
-        // deadlock site — must reach apiHandler's 503 BUSY, not be destroyed
-        // into a plain Error that reads as a generic 500.
+        // inside applyStockDelta — the prelock's same-key wait, or the surviving
+        // booking/decline S→X cycle (pack CB2.5a.2) — must reach apiHandler's
+        // 503 BUSY, not be destroyed into a plain Error that reads as a generic
+        // 500.
         if (isTransientTxError(error)) {
           throw error;
         }

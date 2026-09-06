@@ -267,9 +267,10 @@ const KEY_2: PrelockKeyInput = { productId: P_APPROVED_2, locationId: LOCATION_M
  * (the FK parent check of `product_locations.fk_pl_product`) and waited for the
  * `product_locations` row the first session held. That cycle was the S→X
  * residual the pack names — `products` sits OUTSIDE the canonical order by spec
- * §2.7, it is why scenario 13's envelope allows a rolled-back writer, and its
- * shape predates B1 (before the prelock, the ledger INSERT's own FK check took
- * the same shared lock at the same point). It was never the prelock's ordering,
+ * §2.7, it was why scenario 13's envelope once allowed a rolled-back writer —
+ * since B2.5 a fresh deadlock there is red and the only tolerated loser is a
+ * no-deadlock BUSY — and its shape predates B1 (before the prelock, the ledger
+ * INSERT's own FK check took the same shared lock at the same point). It was never the prelock's ordering,
  * so it did not belong inside the scenario that tests the prelock's ordering.
  *
  * P2-B2.5 retired the covered half of that cycle: no covered writer takes an X
@@ -2397,6 +2398,12 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
         fresh: deadlockFresh,
       });
 
+      // CB2.5c.3: THIS pin's claim is "both commit". The three-way envelope above is
+      // scenario 13's (a 0.3 s two-key choreography where a same-key wait is the
+      // typed answer); here the hold is 3 s against a 30 s budget, so a 503 is a
+      // stall regression wearing the envelope's tolerated branch — red.
+      expect(observed.settled.map((a) => a.status)).toEqual([200, 200]);
+
       // THE STOCK ORACLE, EXACT, off whichever branch of the envelope this run
       // landed in — the fulfil's 7, plus what the unfulfill gave back, minus what
       // the deduction took.
@@ -3457,6 +3464,12 @@ describe("scenario 15 — the B1c deadlock pair is GREEN (pack CB2.5c.3)", () =>
         after: deadlockAfter,
         fresh: deadlockFresh,
       });
+
+      // CB2.5c.3: THIS pin's claim is "both commit". The three-way envelope above is
+      // scenario 13's (a 0.3 s two-key choreography where a same-key wait is the
+      // typed answer); here the hold is 3 s against a 30 s budget, so a 503 is a
+      // stall regression wearing the envelope's tolerated branch — red.
+      expect(observed.settled.map((a) => a.status)).toEqual([200, 200]);
 
       const [first, second] = observed.settled;
       const committed =

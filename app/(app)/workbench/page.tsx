@@ -45,10 +45,16 @@ import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/page-header";
 import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
 import { useLowStockDefault } from "@/hooks/use-low-stock-default";
-import { MOVE_TIMEOUT_MS, MOVE_TIMEOUT_SENTENCE, isTimeoutAbort } from "@/lib/reconciliation/move-timeout";
+import {
+  MOVE_UNANSWERED_SENTENCE,
+  isMoveRefusal,
+  moveAbortSignal,
+  moveUnanswered,
+  type MoveUnanswered,
+} from "@/lib/reconciliation/move-timeout";
 
-/** CB2.5e.4 — the workbench's own warning; the clock, the sentence and the abort rule are `lib/reconciliation/move-timeout.ts`'s (one owner — the seam check of P2-B2.5). */
-const MOVE_TIMEOUT_WARNING =
+/** CB2.5e.4 — the workbench's own warning; the clock, the sentence and the refusal rule are `lib/reconciliation/move-timeout.ts`'s (one owner — the seam check of P2-B2.5). */
+const MOVE_UNANSWERED_WARNING =
   "The move's outcome is unknown — check the batch in Admin → Reconciliation";
 
 export default function WorkbenchPage() {
@@ -500,9 +506,42 @@ export default function WorkbenchPage() {
    * CSRF token, rejecting with the PARSED BODY — every refusal envelope carries
    * `{ error, code }`, which is exactly what the shared dialog reads, so this
    * caller and the drill-down's `useMoveBatch` reject identically.
+   *
+   * THREE DOORS (B25-FR1/F2). (1) The pre-fetch guards are REFUSALS: nothing
+   * left the device, so the batch is provably where it was. (2) The fetch
+   * REJECTED — a timeout, or a network that died with the request already out:
+   * the outcome is unknown. (3) A response ARRIVED but is not ok: it is a
+   * refusal ONLY when it parsed into the house `{ error, code }` envelope; an
+   * ingress 502 whose body parses to `{}` tells us nothing about the batch.
    */
   const confirmMove = useCallback(
     async (physicalLocationId: number): Promise<MoveResponse> => {
+      // Set by the unknown arm so the outer catch's re-arm does not undo it: the
+      // envelope an unknown door throws is `{ error, code }` shaped (the dialog
+      // reads one thing), so the SHAPE cannot tell the two classes apart.
+      let outcomeIsUnknown = false;
+      /**
+       * THE OUTCOME-UNKNOWN ARM, shared by the two unknown doors. The move MAY
+       * have committed (the server's own budget is 30 s), so re-arming the Undo
+       * would offer to restore stock at a location the toast never named: the
+       * toast goes instead, the caches every other page reads are told exactly
+       * as on the success path (the seam check of P2-B2.5 — the hook's
+       * `onSettled` already does this), and a warning says where to look.
+       */
+      const outcomeUnknown = () => {
+        outcomeIsUnknown = true;
+        if (moveTarget !== null) toast.dismiss(`undo-${moveTarget.orderRef}`);
+        // F32/F25, as on the success path: the two refs describe ONE live
+        // toast and it is no longer live, so nothing may re-issue or
+        // re-dismiss it.
+        if (moveTarget !== null && liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`) {
+          reissueUndoToastRef.current = null;
+          liveUndoToastIdRef.current = null;
+        }
+        invalidateInventoryCaches(queryClient);
+        toast.warning(MOVE_UNANSWERED_WARNING);
+      };
+
       try {
         const batchId = moveTarget?.batchIds.deductSimpleBatchId;
         if (!batchId) {
@@ -512,18 +551,39 @@ export default function WorkbenchPage() {
           throw { error: "Session expired. Cannot move this batch.", code: "CSRF_MISSING" };
         }
 
-        const response = await fetch(`/api/inventory/batches/${batchId}/move`, {
-          method: "POST",
-          headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
-          body: JSON.stringify({ physicalLocationId }),
-          // CB2.5e.4: the move holds row locks while it writes, and a caller
-          // that waits forever leaves the operator on a spinner with no way
-          // back. The server's transaction budget is 30 s (`STOCK_TX_OPTIONS`),
-          // so 60 s is past every answer it can give.
-          signal: AbortSignal.timeout(MOVE_TIMEOUT_MS),
-        });
+        let response: Response;
+        try {
+          response = await fetch(`/api/inventory/batches/${batchId}/move`, {
+            method: "POST",
+            headers: withCSRFHeaders({ "Content-Type": "application/json" }, csrfToken),
+            body: JSON.stringify({ physicalLocationId }),
+            // CB2.5e.4: the move holds row locks while it writes, and a caller
+            // that waits forever leaves the operator on a spinner with no way
+            // back. The server's transaction budget is 30 s (`STOCK_TX_OPTIONS`),
+            // so 60 s is past every answer it can give. GUARDED — a browser
+            // without `AbortSignal.timeout` runs on its own clock rather than
+            // throwing before the fetch.
+            signal: moveAbortSignal(),
+          });
+        } catch (err) {
+          // Door 2: the request went out and nothing came back.
+          outcomeUnknown();
+          throw moveUnanswered(err);
+        }
+
         const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-        if (!response.ok) throw body;
+        if (!response.ok) {
+          // Door 3: only the house envelope is an answer.
+          if (isMoveRefusal(body)) throw body;
+          outcomeUnknown();
+          // Typed against the module's own envelope so the frozen sentence and
+          // the two legal codes are the COMPILER's business, not a literal's.
+          const unanswered: MoveUnanswered = {
+            error: MOVE_UNANSWERED_SENTENCE,
+            code: "UNANSWERED",
+          };
+          throw unanswered;
+        }
 
         // Stock moved through a raw fetch, so the react-query caches every other
         // page reads have to be told.
@@ -546,34 +606,17 @@ export default function WorkbenchPage() {
         }
         return body as unknown as MoveResponse;
       } catch (err) {
-        // CB2.5e.4 (B25-G3-8): A TIMEOUT IS NOT A REFUSAL. The request may have
-        // COMMITTED — the answer is the thing we never got — so re-arming the
-        // Undo would offer to restore stock at a location the toast never
-        // named. The toast goes, a warning says where to look, and the caller
-        // rejects with the frozen envelope the dialog renders verbatim.
-        if (isTimeoutAbort(err)) {
-          if (moveTarget !== null) toast.dismiss(`undo-${moveTarget.orderRef}`);
-          // F32/F25, as on the success path: the two refs describe ONE live
-          // toast and it is no longer live, so nothing may re-issue or
-          // re-dismiss it.
-          if (moveTarget !== null && liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`) {
-            reissueUndoToastRef.current = null;
-            liveUndoToastIdRef.current = null;
-          }
-          // The move MAY have committed (the server's own budget is 30 s): the
-          // caches every other page reads are told, exactly as on the success
-          // path — the seam check of P2-B2.5 (the hook's `onSettled` already
-          // does this; the workbench must not show stale on-hand for a move
-          // that landed).
-          invalidateInventoryCaches(queryClient);
-          toast.warning(MOVE_TIMEOUT_WARNING);
-          throw { error: MOVE_TIMEOUT_SENTENCE, code: "TIMEOUT" };
-        }
-        // F15: a REFUSAL (or a dead network) leaves the batch exactly where it
+        // F15 (amended B25-FR1/F2): a REFUSAL leaves the batch exactly where it
         // was, so the Undo is still the right thing to click — with a fresh 10 s
-        // to click it in, because the decision is over. F32: only this move's
-        // own toast gets its clock back.
-        if (moveTarget !== null && liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`) {
+        // to click it in, because the decision is over. A dead network or a
+        // code-less failure does NOT tell us that, so those doors have already
+        // taken the unknown arm above and only pass through here. F32: only this
+        // move's own toast gets its clock back.
+        if (
+          !outcomeIsUnknown &&
+          moveTarget !== null &&
+          liveUndoToastIdRef.current === `undo-${moveTarget.orderRef}`
+        ) {
           reissueUndoToastRef.current?.(10000);
         }
         throw err;

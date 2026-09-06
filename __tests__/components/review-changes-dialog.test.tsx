@@ -20,7 +20,6 @@ const createMockProduct = (
   variant: null,
   unit,
   numericValue: null,
-  quantity: currentQuantity,
   location: 1,
   lowStockThreshold: 10,
   deletedAt: null,

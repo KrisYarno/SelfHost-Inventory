@@ -11,9 +11,12 @@ export type DeclineResult = {
  * Decline (reject) a provisional product — concurrency-hardened (spec E6).
  *
  * Runs inside a single `prisma.$transaction`, outer call wrapped in a
- * deadlock/lock-timeout retry. Lock order matches the rest of the codebase
- * (`lib/fulfillment.ts` / `createInventoryTransfer`): lock `product_locations`
- * BEFORE touching `products`, eliminating the AB-BA deadlock.
+ * deadlock/lock-timeout retry. Lock order: `product_locations` BEFORE `products`
+ * — the house order that keeps two declines/bookings from cycling with each
+ * other. Against a COVERED stock writer's prelock (whose materialize takes
+ * S(`products`) BEFORE X(`product_locations`)) this order can still cycle: the
+ * register's surviving S→X residual (pack CB2.5a.2, a C5 candidate);
+ * `withDeadlockRetry` is the answer.
  *
  * Steps:
  *   0. Idempotency: if the product is missing or already soft-deleted, no-op.

@@ -16,7 +16,9 @@ import { useDeleteProduct } from "@/hooks/use-products";
 import { useCSRF } from "@/hooks/use-csrf";
 
 interface DeleteProductDialogProps {
-  product: Product | null;
+  // The loc-1 `products.quantity` mirror is retired (P2-B2.5) and no longer rides
+  // the wire; this dialog never read it. `Omit` keeps every existing caller.
+  product: Omit<Product, "quantity"> | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }

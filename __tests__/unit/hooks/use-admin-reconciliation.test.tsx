@@ -258,12 +258,16 @@ describe("useAttributeBatch", () => {
 });
 
 // ---------------------------------------------------------------------------
-// CB2.5e.4 — the drill-down's move caller TIMES OUT
+// CB2.5e.4 (amended B25-FR1/F2) — the drill-down's move caller has no OUTCOME.
+//
+// The rule is not "was it a timeout": it is "did an answer arrive". Every
+// rejected fetch is unanswered (TIMEOUT for the abort we asked for, UNANSWERED
+// for everything else), and a `!ok` response is a REFUSAL only when it parsed
+// into the house `{ error, code }` envelope.
 // ---------------------------------------------------------------------------
 
-describe("useMoveBatch — the 60 s timeout", () => {
-  const TIMEOUT_SENTENCE =
-    "The move did not answer in time — check the batch before trying again";
+describe("useMoveBatch — no answer means no outcome", () => {
+  const UNANSWERED_SENTENCE = "The move did not answer — check the batch before trying again";
 
   it("posts with an abort signal", async () => {
     mockFetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ pairs: [] }) });
@@ -287,20 +291,60 @@ describe("useMoveBatch — the 60 s timeout", () => {
     const { result } = renderHook(() => useMoveBatch("batch-1"), { wrapper: Wrapper });
 
     await expect(result.current.mutateAsync({ physicalLocationId: 2 })).rejects.toEqual({
-      error: TIMEOUT_SENTENCE,
+      error: UNANSWERED_SENTENCE,
       code: "TIMEOUT",
     });
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("leaves a plain network failure alone — a dead socket is not a timeout", async () => {
+  // B25-FR1/F2: a dead socket mid-response tells us as little as a timeout does.
+  // It rejects with the SAME sentence under the UNANSWERED code — never a raw
+  // TypeError the shared dialog would have to guess at.
+  it("a REJECTED fetch is UNANSWERED, carrying the one sentence", async () => {
     mockFetch.mockRejectedValue(new TypeError("Failed to fetch"));
     const { Wrapper } = harness();
     const { result } = renderHook(() => useMoveBatch("batch-1"), { wrapper: Wrapper });
 
-    await expect(result.current.mutateAsync({ physicalLocationId: 2 })).rejects.toBeInstanceOf(
-      TypeError,
-    );
+    await expect(result.current.mutateAsync({ physicalLocationId: 2 })).rejects.toEqual({
+      error: UNANSWERED_SENTENCE,
+      code: "UNANSWERED",
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  // The ingress 502/504 whose body is an HTML error page: `.json()` rejects, the
+  // caller's `.catch(() => ({}))` hands over `{}` — no code, so it says NOTHING
+  // about where the batch is and must not be read as a refusal.
+  it("a code-less 502 is UNANSWERED, not a refusal", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: () => Promise.reject(new SyntaxError("Unexpected token <")),
+    });
+    const { Wrapper } = harness();
+    const { result } = renderHook(() => useMoveBatch("batch-1"), { wrapper: Wrapper });
+
+    await expect(result.current.mutateAsync({ physicalLocationId: 2 })).rejects.toEqual({
+      error: UNANSWERED_SENTENCE,
+      code: "UNANSWERED",
+    });
+  });
+
+  // The contrast: 503 BUSY IS an answer (a definite rollback), so it keeps the
+  // server's own mapping through `readReconciliationError`.
+  it("a 503 BUSY is a REFUSAL — the server's own sentence and code", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: "Another writer holds this batch — try again", code: "BUSY" }),
+    });
+    const { Wrapper } = harness();
+    const { result } = renderHook(() => useMoveBatch("batch-1"), { wrapper: Wrapper });
+
+    await expect(result.current.mutateAsync({ physicalLocationId: 2 })).rejects.toEqual({
+      error: "Another writer holds this batch — try again",
+      code: "BUSY",
+    });
   });
 
   it("a 409 still rejects with the SERVER's sentence and code", async () => {

@@ -25,20 +25,34 @@
  *   RULE (ii)  Every ALLOWLISTED file's writer CALL WINDOWS — the balanced
  *              argument, walked by brace depth rather than matched by a regex —
  *              never name `quantity`.
+ *   RULE (iii) NO file, allowlisted or not, reaches `products.quantity` through
+ *              a NESTED RELATION write (B25-FR1/F4): `data: { products: {
+ *              update: { quantity: … } } }` off ANY delegate is the same write
+ *              wearing a different spelling, and rules (i)/(ii) never see it
+ *              because the delegate is not `.product.`. The relation names come
+ *              from `prisma/schema.prisma` at test time, so a new relation to
+ *              `Product` is policed the day it is added.
  *
  * THE CLAIM, stated exactly: after B2.5 no statement under the scanned roots
- * UPDATES or increments `products.quantity`; the creates that remain write only
- * its schema default (`quantity Int @default(0)`).
+ * UPDATES or increments `products.quantity` OUTSIDE the gate's fixture reset
+ * (`concurrency-gate/seed.ts` `productRestoreData`, pinned below); the creates
+ * that remain write only its schema default (`quantity Int @default(0)`).
  *
  * A SOURCE SCAN, like the exceptions write boundary and the legacy discriminator
  * gate: it never loads a module, so no mock can fool it, and it fails on the
  * NEXT writer somebody adds rather than on the next incident. Raw text INCLUDING
- * comments, case-SENSITIVE, `.ts`/`.js` only (not `.tsx` — no client component
- * writes Prisma). A prose occurrence under the roots is therefore a rewrite, by
- * design: the pack would rather re-word a comment than carry a scanner that
- * decides what code is.
+ * comments; `.ts`, `.js` AND `.tsx` (B25-FR1/F4: a server component or a
+ * `"use server"` action in a `.tsx` holds Prisma just as well —
+ * `app/(app)/admin/product-mappings/[integrationId]/map/page.tsx` imports
+ * `@/lib/prisma` today; `components/` joined the roots for the same reason).
+ * The DELEGATE spellings stay case-SENSITIVE (the repo
+ * writes them lower-case and a case-blind matcher there buys nothing); the RAW
+ * SQL spellings are case-INSENSITIVE regexes, because `update products set` is
+ * the same statement as `UPDATE products SET` and only one of them was caught.
+ * A prose occurrence under the roots is therefore a rewrite, by design: the pack
+ * would rather re-word a comment than carry a scanner that decides what code is.
  *
- * TWO RESIDUALS, STATED, NOT ENGINEERED AWAY:
+ * THREE RESIDUALS, STATED, NOT ENGINEERED AWAY:
  *   - Rule (ii) reads the LITERAL argument window, so a `quantity` smuggled
  *     through a local `const data = …` inside an ALLOWLISTED file is not caught
  *     (B25-OC3-4). The allowlisted files carry that by decision; every other
@@ -46,6 +60,9 @@
  *   - The scan roots are stated, not universal. `launch-gate/` sits outside them
  *     (B25-OC4-5); its own seed dropped the mirror keys in the same wave, but
  *     this pin does not police that directory.
+ *   - A raw SQL string ASSEMBLED FROM PARTS or passed as a variable
+ *     (`$executeRawUnsafe(sql)`) is not seen: the scan reads literal source
+ *     text, and a statement that only exists at runtime has no source line.
  */
 
 import fs from 'node:fs';
@@ -54,31 +71,149 @@ import path from 'node:path';
 const REPO_ROOT = process.cwd();
 
 /** Every tree a `products` writer could legitimately live in. */
-const SCANNED_DIRS = ['lib', 'app', 'mcp/src', 'scripts', 'concurrency-gate'];
+const SCANNED_DIRS = ['lib', 'app', 'components', 'mcp/src', 'scripts', 'concurrency-gate'];
 
 /** `scripts/diagnostics/` READS the column on purpose (the d4 artifact). */
 const EXCLUDED_DIRS = ['scripts/diagnostics'];
 
-const SOURCE_EXTENSIONS = new Set(['.ts', '.js']);
+const SOURCE_EXTENSIONS = new Set(['.ts', '.js', '.tsx']);
 
 /**
- * Every spelling of a `products` write this repo uses — Prisma delegate calls on
- * `prisma` or on a tx client, and the two raw-SQL forms. Case-sensitive: the
- * repo writes SQL keywords upper-case and delegates lower-case, and a matcher
- * that guesses at case invites a false negative nobody reads.
+ * The PRISMA DELEGATE spellings, case-SENSITIVE: the repo writes them lower-case
+ * and nothing about a delegate call is case-ambiguous.
  */
-const PRODUCT_WRITE_PATTERNS = [
+const DELEGATE_WRITE_PATTERNS = [
   '.product.update(',
   '.product.updateMany(',
   '.product.create(',
   '.product.createMany(',
   '.product.upsert(',
-  'UPDATE products',
-  'products SET',
 ] as const;
+
+/**
+ * The RAW SQL spellings, case-INSENSITIVE (B25-FR1/F4). `update products set` is
+ * the same statement as `UPDATE products SET`, and the literal match only ever
+ * caught one of them. The optional `db`.`tbl` qualifier and the optional
+ * backticks are what an engine trace and a hand-written statement differ by.
+ */
+const SQL_WRITE_PATTERNS = [
+  { spelling: 'UPDATE products', pattern: /\bUPDATE\s+(?:`?\w+`?\s*\.\s*)?`?products`?\b/gi },
+  {
+    spelling: 'INSERT/REPLACE INTO products',
+    pattern: /\b(?:INSERT|REPLACE)\s+INTO\s+(?:`?\w+`?\s*\.\s*)?`?products`?\b/gi,
+  },
+  // The split-literal belt (`'UPDATE ' + … + 'products SET'`). Case-SENSITIVE on the
+  // keyword by decision (orchestrator, B25-FR1): the repo writes SQL keywords
+  // upper-case, and the English "products set to …" occurs in prose AND in
+  // user-visible admin copy — a belt that rewrites UI strings to stay green is
+  // the wrong belt. A lower-case statement is still caught by the UPDATE regex.
+  { spelling: 'products SET', pattern: /\bproducts`?\s+SET\b/g },
+] as const;
+
+/**
+ * THE ONE TOLERATED SQL LITERAL IN THE TREE. `concurrency-4.test.ts` carries the
+ * engine trace this whole retirement was traced OUT of — a captured
+ * `SHOW ENGINE INNODB STATUS` section whose query line is the retired cycle's own
+ * `UPDATE … products SET quantity`. It is evidence, not a writer, and deleting it
+ * would delete the proof. Tolerated by EXACT LINE PREFIX in EXACTLY that file:
+ * any other SQL hit there is still an offender.
+ */
+const TOLERATED_SQL_FIXTURE_LINES = [
+  {
+    path: 'concurrency-gate/concurrency-4.test.ts',
+    startsWith: '"UPDATE `concurrency_gate`.`products` SET `quantity` = (',
+  },
+] as const;
+
+/** Every spelling of a `products` write, for the per-file pins below. */
+function productWriteSpellings(text: string): string[] {
+  const found: string[] = [];
+  for (const pattern of DELEGATE_WRITE_PATTERNS) {
+    if (text.includes(pattern)) found.push(pattern);
+  }
+  for (const hit of sqlWriteHits(text)) {
+    if (!found.includes(hit.spelling)) found.push(hit.spelling);
+  }
+  return found;
+}
+
+/**
+ * EXPORTED FOR TEST (the self-tests at the bottom drive it on inline fixture
+ * strings, never on the tree — an inversion case has to be a string nobody can
+ * accidentally delete). Every raw-SQL `products` write in `text`, by index.
+ */
+export function sqlWriteHits(text: string): Array<{ index: number; spelling: string }> {
+  const hits: Array<{ index: number; spelling: string }> = [];
+  for (const { spelling, pattern } of SQL_WRITE_PATTERNS) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      hits.push({ index: match.index, spelling });
+    }
+  }
+  return hits.sort((a, b) => a.index - b.index);
+}
 
 /** The delegate calls rule (ii) opens and walks. */
 const WRITE_CALL = /\.product\.(update|updateMany|create|createMany|upsert)\s*\(/g;
+
+/** ANY delegate's write call — rule (iii) walks these looking for a NESTED relation write. */
+const ANY_WRITE_CALL = /\.\w+\.(update|updateMany|create|createMany|upsert)\s*\(/g;
+
+/** The nested operations that WRITE the related row (`connect` and `set` only re-point an FK). */
+const NESTED_WRITE_OPS = 'update|upsert|updateMany|create|createMany|connectOrCreate';
+
+/**
+ * EXPORTED FOR TEST. Every nested-relation write, through a relation to
+ * `Product`, whose nested window NAMES `quantity`. The relation names are the
+ * caller's (read from `prisma/schema.prisma`), so this helper stays a matcher
+ * and the schema stays the source of truth.
+ */
+export function nestedRelationWriteHits(
+  text: string,
+  relationNames: readonly string[],
+): Array<{ index: number; relation: string; op: string }> {
+  const hits: Array<{ index: number; relation: string; op: string }> = [];
+  if (relationNames.length === 0) return hits;
+  const relationWrite = new RegExp(
+    `\\b(${relationNames.join('|')})\\s*:\\s*\\{\\s*(${NESTED_WRITE_OPS})\\b`,
+    'g',
+  );
+
+  ANY_WRITE_CALL.lastIndex = 0;
+  let call: RegExpExecArray | null;
+  while ((call = ANY_WRITE_CALL.exec(text)) !== null) {
+    const window = callWindow(text, text.indexOf('(', call.index));
+    relationWrite.lastIndex = 0;
+    let nested: RegExpExecArray | null;
+    while ((nested = relationWrite.exec(window)) !== null) {
+      // `callWindow` counts all three bracket kinds, so it walks a `{` as
+      // happily as a `(`: the nested window is the relation's own object.
+      const nestedWindow = callWindow(window, window.indexOf('{', nested.index));
+      if (/\bquantity\b/.test(nestedWindow)) {
+        hits.push({ index: call.index, relation: nested[1], op: nested[2] });
+      }
+    }
+  }
+  return hits;
+}
+
+/**
+ * THE RELATION NAMES, READ FROM THE SCHEMA AT TEST TIME. Every field whose type
+ * is `Product`, `Product?` or `Product[]` — today `deletedProducts`,
+ * `createdProducts`, `reviewedProducts`, `product`, `resolvedProduct`,
+ * `orderedProduct`, `products`, `internalProduct`, `priceSourceFor`. Parsed
+ * rather than listed so a relation added tomorrow is policed tomorrow.
+ */
+function productRelationNames(): string[] {
+  const schema = fs.readFileSync(path.join(REPO_ROOT, 'prisma/schema.prisma'), 'utf8');
+  const names = new Set<string>();
+  for (const line of schema.split('\n')) {
+    const match = /^\s+(\w+)\s+Product(\?|\[\])?(\s|$)/.exec(line);
+    if (match) names.add(match[1]);
+  }
+  return Array.from(names);
+}
 
 /**
  * THE ALLOWLIST, BY REAL PATH (round 3, B25-G3-1 / B25-OC3-1 — an earlier draft
@@ -198,6 +333,21 @@ function lineOf(text: string, index: number): number {
   return text.slice(0, index).split('\n').length;
 }
 
+/** The WHOLE trimmed source line an index falls on — what the tolerated-fixture rule reads. */
+function trimmedLineAt(text: string, index: number): string {
+  const start = text.lastIndexOf('\n', index) + 1;
+  const end = text.indexOf('\n', index);
+  return text.slice(start, end === -1 ? text.length : end).trim();
+}
+
+function isToleratedSqlFixture(sourcePath: string, line: string): boolean {
+  return TOLERATED_SQL_FIXTURE_LINES.some(
+    (tolerated) => tolerated.path === sourcePath && line.startsWith(tolerated.startsWith),
+  );
+}
+
+let relationNames: string[];
+
 let sources: SourceFile[];
 
 beforeAll(() => {
@@ -209,6 +359,7 @@ beforeAll(() => {
       .map((rel) => ({ rel, text: fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8') }))
       .map(({ rel, text }) => ({ path: rel, text })),
   );
+  relationNames = productRelationNames();
 });
 
 describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () => {
@@ -218,6 +369,7 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
     // READS the column — is out.
     expect(sources.some((s) => s.path.startsWith('lib/'))).toBe(true);
     expect(sources.some((s) => s.path.startsWith('app/api/'))).toBe(true);
+    expect(sources.some((s) => s.path.startsWith('components/'))).toBe(true);
     expect(sources.some((s) => s.path.startsWith('mcp/src/'))).toBe(true);
     expect(sources.some((s) => s.path.startsWith('scripts/'))).toBe(true);
     expect(sources.some((s) => s.path.startsWith('concurrency-gate/'))).toBe(true);
@@ -234,7 +386,7 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
     expect(ALLOWLIST.filter((rel) => !scanned.has(rel))).toEqual([]);
 
     const writers = sources
-      .filter((s) => PRODUCT_WRITE_PATTERNS.some((pattern) => s.text.includes(pattern)))
+      .filter((s) => productWriteSpellings(s.text).length > 0)
       .map((s) => s.path);
     // A representative sample of the non-stock writers the allowlist exists for.
     expect(writers).toContain('lib/products/decline.ts');
@@ -246,12 +398,18 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
     const offenders: string[] = [];
     for (const source of sources) {
       if (ALLOWED.has(source.path)) continue;
-      for (const pattern of PRODUCT_WRITE_PATTERNS) {
+      for (const pattern of DELEGATE_WRITE_PATTERNS) {
         let at = source.text.indexOf(pattern);
         while (at !== -1) {
           offenders.push(`  ${source.path}:${lineOf(source.text, at)}  ${pattern}`);
           at = source.text.indexOf(pattern, at + pattern.length);
         }
+      }
+      for (const hit of sqlWriteHits(source.text)) {
+        // The gate's captured engine trace is evidence of the RETIRED cycle, by
+        // exact line prefix in exactly that file — never a blanket file pardon.
+        if (isToleratedSqlFixture(source.path, trimmedLineAt(source.text, hit.index))) continue;
+        offenders.push(`  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.spelling}`);
       }
     }
 
@@ -294,6 +452,52 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
     ).toBe('');
   });
 
+  it('RULE (iii): no delegate reaches `products.quantity` through a NESTED relation write', () => {
+    const offenders: string[] = [];
+    for (const source of sources) {
+      for (const hit of nestedRelationWriteHits(source.text, relationNames)) {
+        offenders.push(
+          `  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.relation}: { ${hit.op} … quantity }`,
+        );
+      }
+    }
+
+    expect(
+      offenders.length === 0
+        ? ''
+        : 'A NESTED RELATION write reaches `products.quantity`. Rules (i) and (ii) do not\n' +
+            'see it — the delegate is not `.product.` — but the statement Prisma emits is the\n' +
+            'same `UPDATE products SET quantity` the retirement deleted, and it takes the same\n' +
+            'X lock on the product row inside a stock transaction. Write `product_locations`\n' +
+            'through `applyStockDelta` instead:\n' +
+            offenders.join('\n'),
+    ).toBe('');
+  });
+
+  it('rule (iii) is not vacuous — the schema really names the relations it scans for', () => {
+    // If the parse silently returned nothing, rule (iii) would pass on any tree.
+    expect(relationNames).toContain('products');
+    expect(relationNames).toContain('product');
+    expect(relationNames.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('the ONE tolerated SQL fixture line is still there (the pardon is not vacuous)', () => {
+    // Rule (i) pardons exactly this line. If the trace is ever deleted or
+    // re-wrapped, the pardon must go with it rather than sit here covering a
+    // line nobody can see any more.
+    for (const tolerated of TOLERATED_SQL_FIXTURE_LINES) {
+      const source = sources.find((s) => s.path === tolerated.path);
+      expect(source).toBeDefined();
+      const matching = source!.text
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith(tolerated.startsWith));
+      expect(matching).toHaveLength(1);
+      // And it really IS a hit the rule would otherwise report.
+      expect(sqlWriteHits(matching[0]).length).toBeGreaterThan(0);
+    }
+  });
+
   it('the concurrency gate seeds `quantity: 0` only through its FIXTURE RESET', () => {
     // The one allowlisted `quantity` in the tree, and why rule (ii) does not see
     // it: `productRestoreData` hands the createMany/upsert a value by identifier.
@@ -307,7 +511,7 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
   it('booking.ts stays a no-match allowlist entry (its 6b read is a locking SELECT)', () => {
     const booking = sources.find((s) => s.path === NO_MATCH_BY_DESIGN);
     expect(booking).toBeDefined();
-    const matched = PRODUCT_WRITE_PATTERNS.filter((pattern) => booking!.text.includes(pattern));
+    const matched = productWriteSpellings(booking!.text);
     // If this fails, booking gained a real `products` writer — which changes the
     // survivor analysis in pack CB2.5a.2, not just this list.
     expect(matched).toEqual([]);
@@ -326,7 +530,70 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
     for (const rel of retired) {
       const text = byPath.get(rel);
       expect(text).toBeDefined();
-      expect(PRODUCT_WRITE_PATTERNS.filter((pattern) => text!.includes(pattern))).toEqual([]);
+      expect(productWriteSpellings(text!)).toEqual([]);
     }
+  });
+});
+
+// ===========================================================================
+// THE MATCHERS, SELF-TESTED ON INLINE FIXTURES (B25-FR1/F4d).
+//
+// The inversion cases live HERE, as strings, never in the tree: a scanner
+// proven only by "the tree is clean" is proven by nothing — it would pass just
+// as well with every pattern deleted. Each fixture is one spelling the rules
+// exist to catch, and one near-miss they must NOT catch.
+// ===========================================================================
+
+describe('sqlWriteHits — the raw-SQL matchers', () => {
+  it.each([
+    ['UPDATE `products` SET quantity = 1', 'the backticked table'],
+    ['update products set quantity=quantity+1', 'all lower-case'],
+    ['INSERT INTO inventory.products (id) VALUES (1)', 'a schema-qualified INSERT'],
+    ['REPLACE INTO products (id, quantity) VALUES (1, 0)', 'REPLACE INTO'],
+  ])('catches %s (%s)', (fixture) => {
+    expect(sqlWriteHits(fixture).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['UPDATE product_locations SET quantity = 1', 'the COVERED table is the right one to write'],
+    ['SELECT quantity FROM products', 'a read is not a write'],
+  ])('does NOT catch %s (%s)', (fixture) => {
+    expect(sqlWriteHits(fixture)).toEqual([]);
+  });
+});
+
+describe('nestedRelationWriteHits — the relation matcher', () => {
+  const RELATIONS = ['products', 'product', 'internalProduct'];
+
+  it.each([
+    [
+      'tx.product_locations.update({ where: { id: 1 }, data: { products: { update: { quantity: { increment: 1 } } } } })',
+      'a nested update through the covered row',
+    ],
+    [
+      'tx.inventory_logs.create({ data: { products: { connectOrCreate: { where: { id: 1 }, create: { quantity: 0 } } } } })',
+      'a connectOrCreate that mints a quantity',
+    ],
+  ])('catches %s (%s)', (fixture) => {
+    expect(nestedRelationWriteHits(fixture, RELATIONS).length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    [
+      'tx.product_locations.update({ where: { id: 1 }, data: { quantity: { increment: 1 }, products: { connect: { id: 1 } } } })',
+      "product_locations' OWN quantity beside a plain connect",
+    ],
+    [
+      'tx.product_locations.update({ where: { id: 1 }, data: { products: { update: { name: "x" } } } })',
+      'a nested write that does not name quantity',
+    ],
+  ])('does NOT catch %s (%s)', (fixture) => {
+    expect(nestedRelationWriteHits(fixture, RELATIONS)).toEqual([]);
+  });
+
+  it('an empty relation list matches nothing rather than everything', () => {
+    expect(
+      nestedRelationWriteHits('tx.x.update({ data: { products: { update: { quantity: 1 } } } })', []),
+    ).toEqual([]);
   });
 });

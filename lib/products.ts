@@ -151,17 +151,27 @@ export async function getProductsWithQuantities(
   if (getTotal || !locationId) {
     // Get total quantities across all locations
     const quantities = await getBulkTotalQuantities(productIds);
-    productsWithQuantities = products.map(product => ({
-      ...product,
-      currentQuantity: quantities.get(product.id) || 0,
-    }));
+    productsWithQuantities = products.map(product => {
+      // The loc-1 `products.quantity` mirror is retired (B2.5) — strip it BEFORE
+      // the spread so a dead column never reaches the wire.
+      const { quantity: _retiredMirror, ...row } = product;
+      return {
+        ...row,
+        currentQuantity: quantities.get(product.id) || 0,
+      };
+    });
   } else {
     // Get location-specific quantities
     const quantities = await getBulkCurrentQuantities(productIds, locationId);
-    productsWithQuantities = products.map(product => ({
-      ...product,
-      currentQuantity: quantities.get(product.id) || 0,
-    }));
+    productsWithQuantities = products.map(product => {
+      // The loc-1 `products.quantity` mirror is retired (B2.5) — strip it BEFORE
+      // the spread so a dead column never reaches the wire.
+      const { quantity: _retiredMirror, ...row } = product;
+      return {
+        ...row,
+        currentQuantity: quantities.get(product.id) || 0,
+      };
+    });
   }
 
   return { products: productsWithQuantities, total };

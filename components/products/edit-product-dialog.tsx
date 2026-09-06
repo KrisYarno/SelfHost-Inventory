@@ -15,7 +15,9 @@ import { toast } from "sonner";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 
 interface EditProductDialogProps {
-  product: Product | null;
+  // The loc-1 `products.quantity` mirror is retired (P2-B2.5) and no longer rides
+  // the wire; this dialog never read it. `Omit` keeps every existing caller.
+  product: Omit<Product, "quantity"> | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }

@@ -164,6 +164,11 @@ export const POST = apiHandler(async (request: NextRequest) => {
     return created;
   });
 
-  const response = NextResponse.json(product, { status: 201 });
+  // The loc-1 `products.quantity` mirror is retired (B2.5) — strip it from the
+  // response body so a dead column never reaches the wire. The audit /
+  // `recordChange` work inside the transaction above is untouched.
+  const { quantity: _retiredMirror, ...productRow } = product;
+
+  const response = NextResponse.json(productRow, { status: 201 });
   return applyRateLimitHeaders(response, rateLimitHeaders);
 });

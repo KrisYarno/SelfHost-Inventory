@@ -106,7 +106,8 @@ function completion(over: Partial<CompletionArgs> = {}): CompletionArgs {
   } as unknown as CompletionArgs;
 }
 
-type Answer = { status: number; body: unknown };
+/** `jsonRejects` stages the ingress failure whose body is not JSON at all (B25-FR1/F2). */
+type Answer = { status: number; body: unknown; jsonRejects?: boolean };
 
 let fetchMock: jest.Mock;
 let moveAnswer: Answer;
@@ -117,7 +118,9 @@ function response(a: Answer): Response {
   return {
     ok: a.status >= 200 && a.status < 300,
     status: a.status,
-    json: async () => a.body,
+    json: a.jsonRejects
+      ? () => Promise.reject(new SyntaxError("Unexpected token < in JSON at position 0"))
+      : async () => a.body,
   } as unknown as Response;
 }
 
@@ -616,15 +619,25 @@ describe("the workbench move — ONE POST, for the manual batch (PK-1)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// CB2.5e.4 — the caller TIMES OUT, and says so honestly
+// CB2.5e.4 (amended B25-FR1/F2) — the caller has no OUTCOME, and says so honestly.
+//
+// THE RULE IS NOT "was it a timeout": it is "did an answer arrive". Three doors
+// give no answer — the 60 s abort, a `fetch` that REJECTED with the request
+// already out (a `TypeError`: wifi dropped mid-response), and a response that
+// arrived without the house refusal envelope (an ingress 502/504 whose body is
+// not JSON and parses to `{}`). All three take the same arm: the Undo toast is
+// dismissed, NEVER re-armed — the move may have committed, and an Undo that then
+// restores stock at a location the toast never named is a lie.
+//
+// A REFUSAL — a body that parsed with a string `code`, 503 BUSY included — IS an
+// answer: the batch is provably where it was, so the 10 s comes back.
 // ---------------------------------------------------------------------------
 
-const TIMEOUT_SENTENCE =
-  "The move did not answer in time — check the batch before trying again";
-const TIMEOUT_WARNING =
+const UNANSWERED_SENTENCE = "The move did not answer — check the batch before trying again";
+const UNANSWERED_WARNING =
   "The move's outcome is unknown — check the batch in Admin → Reconciliation";
 
-describe("the workbench move — the 60 s timeout (CB2.5e.4)", () => {
+describe("the workbench move — no answer means no outcome (CB2.5e.4 / B25-FR1)", () => {
   async function timeOutAMove() {
     moveRejection = new DOMException("timeout", "TimeoutError");
     const user = userEvent.setup({ pointerEventsCheck: 0 });
@@ -655,10 +668,10 @@ describe("the workbench move — the 60 s timeout (CB2.5e.4)", () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("an ABORT renders the timeout sentence — never a bare 'could not be completed'", async () => {
+  it("an ABORT renders the one unanswered sentence — never a bare 'could not be completed'", async () => {
     await timeOutAMove();
 
-    expect(screen.getByTestId("move-dialog-refusal")).toHaveTextContent(TIMEOUT_SENTENCE);
+    expect(screen.getByTestId("move-dialog-refusal")).toHaveTextContent(UNANSWERED_SENTENCE);
     expect(callsTo("/move")).toHaveLength(1);
   });
 
@@ -679,7 +692,7 @@ describe("the workbench move — the 60 s timeout (CB2.5e.4)", () => {
     await timeOutAMove();
 
     expect(mockToastDismiss).toHaveBeenCalledWith("undo-ORD-1");
-    expect(mockToastWarning).toHaveBeenCalledWith(TIMEOUT_WARNING);
+    expect(mockToastWarning).toHaveBeenCalledWith(UNANSWERED_WARNING);
     // NOT re-armed: the last toast issued is the held-open one from opening the
     // dialog (no clock), never a fresh 10 s.
     expect(lastToastOptions().duration).not.toBe(10000);
@@ -706,9 +719,7 @@ describe("the workbench move — the 60 s timeout (CB2.5e.4)", () => {
     expect(mockToastWarning).not.toHaveBeenCalled();
   });
 
-  // A dead network is NOT a timeout: it keeps today's behaviour (the Undo comes
-  // back), because nothing was ever sent.
-  it("a TIMEOUT invalidates the inventory caches — the move MAY have committed (the seam check)", async () => {
+  it("an unanswered move invalidates the inventory caches — it MAY have committed (the seam check)", async () => {
     const spy = jest.spyOn(QueryClient.prototype, "invalidateQueries");
     try {
       await timeOutAMove();
@@ -722,8 +733,75 @@ describe("the workbench move — the 60 s timeout (CB2.5e.4)", () => {
     }
   });
 
-  it("a plain network failure is not relabelled TIMEOUT", async () => {
-    moveRejection = new TypeError("Failed to fetch");
+  // B25-FR1/F2 (a): the request WENT OUT and the network died before the answer
+  // came back. Nothing distinguishes that from a timeout as far as the batch is
+  // concerned — the old arm re-armed the Undo here.
+  it("a REJECTED fetch (dead network mid-response) is unanswered, not a refusal", async () => {
+    const spy = jest.spyOn(QueryClient.prototype, "invalidateQueries");
+    try {
+      moveRejection = new TypeError("Failed to fetch");
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      await completeAndShowToast();
+      await act(async () => {
+        await user.click(screen.getByTestId("wrong-location-ORD-1"));
+      });
+      await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+      await user.click(screen.getByTestId("move-dialog-confirm"));
+      await waitFor(() => expect(screen.getByTestId("move-dialog-refusal")).toBeInTheDocument());
+
+      expect(screen.getByTestId("move-dialog-refusal")).toHaveTextContent(UNANSWERED_SENTENCE);
+      expect(mockToastDismiss).toHaveBeenCalledWith("undo-ORD-1");
+      expect(mockToastWarning).toHaveBeenCalledWith(UNANSWERED_WARNING);
+      expect(lastToastOptions().duration).not.toBe(10000);
+
+      const roots = spy.mock.calls.map(([arg]) => {
+        const key = (arg as { queryKey?: unknown } | undefined)?.queryKey;
+        return Array.isArray(key) ? key[0] : undefined;
+      });
+      expect(roots).toContain("product-location-quantity");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // B25-FR1/F2 (b): the ingress answered, but with an HTML error page. The body
+  // parses to `{}` — no `code`, so it says NOTHING about where the batch is.
+  it("a 502 whose body is not the house envelope is unanswered, not a refusal", async () => {
+    const spy = jest.spyOn(QueryClient.prototype, "invalidateQueries");
+    try {
+      moveAnswer = { status: 502, body: {}, jsonRejects: true };
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      await completeAndShowToast();
+      await act(async () => {
+        await user.click(screen.getByTestId("wrong-location-ORD-1"));
+      });
+      await user.selectOptions(screen.getByTestId("move-dialog-location"), "2");
+      await user.click(screen.getByTestId("move-dialog-confirm"));
+      await waitFor(() => expect(screen.getByTestId("move-dialog-refusal")).toBeInTheDocument());
+
+      expect(screen.getByTestId("move-dialog-refusal")).toHaveTextContent(UNANSWERED_SENTENCE);
+      expect(mockToastDismiss).toHaveBeenCalledWith("undo-ORD-1");
+      expect(mockToastWarning).toHaveBeenCalledWith(UNANSWERED_WARNING);
+      expect(lastToastOptions().duration).not.toBe(10000);
+
+      const roots = spy.mock.calls.map(([arg]) => {
+        const key = (arg as { queryKey?: unknown } | undefined)?.queryKey;
+        return Array.isArray(key) ? key[0] : undefined;
+      });
+      expect(roots).toContain("product-location-quantity");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // The 503 the pack names by hand: BUSY is a DEFINITE rollback, so it re-arms
+  // exactly like every other refusal. This is the contrast the two pins above
+  // depend on — without it "never re-arm" would be a legal implementation.
+  it("a 503 BUSY IS an answer — a definite rollback, so the 10 s comes back", async () => {
+    moveAnswer = {
+      status: 503,
+      body: { error: "Another writer holds this batch — try again", code: "BUSY" },
+    };
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     await completeAndShowToast();
     await act(async () => {
@@ -733,10 +811,9 @@ describe("the workbench move — the 60 s timeout (CB2.5e.4)", () => {
     await user.click(screen.getByTestId("move-dialog-confirm"));
     await waitFor(() => expect(screen.getByTestId("move-dialog-refusal")).toBeInTheDocument());
 
-    expect(screen.getByTestId("move-dialog-refusal")).toHaveTextContent(
-      "The move could not be completed.",
-    );
-    expect(mockToastWarning).not.toHaveBeenCalled();
+    expect(screen.getByTestId("move-dialog-refusal")).toHaveTextContent("Another writer holds this batch");
     expect(lastToastOptions()).toMatchObject({ id: "undo-ORD-1", duration: 10000 });
+    expect(mockToastDismiss).not.toHaveBeenCalled();
+    expect(mockToastWarning).not.toHaveBeenCalled();
   });
 });

@@ -16,7 +16,13 @@ import type {
 import type { ExceptionsPage } from "@/lib/reconciliation/exceptions";
 import type { UnmappedPage } from "@/lib/reconciliation/unmapped";
 import type { ExceptionKind, ExceptionSeverity } from "@/lib/exceptions/kinds";
-import { MOVE_TIMEOUT_MS, MOVE_TIMEOUT_SENTENCE, isTimeoutAbort } from "@/lib/reconciliation/move-timeout";
+import {
+  MOVE_UNANSWERED_SENTENCE,
+  isMoveRefusal,
+  moveAbortSignal,
+  moveUnanswered,
+  type MoveUnanswered,
+} from "@/lib/reconciliation/move-timeout";
 
 // ---------------------------------------------------------------------------
 // Shared TanStack Query hooks for the /admin surface.
@@ -995,21 +1001,34 @@ export function useMoveBatch(batchId: string) {
             // that waits forever leaves the operator staring at a spinner with
             // no way back. The server's own transaction budget is 30 s
             // (`STOCK_TX_OPTIONS`), so 60 s is past every answer it can give.
-            signal: AbortSignal.timeout(MOVE_TIMEOUT_MS),
+            // GUARDED — a browser without `AbortSignal.timeout` runs on its own
+            // clock rather than throwing before the fetch.
+            signal: moveAbortSignal(),
           },
         );
       } catch (err) {
-        // The abort is not a refusal and not a network death: it is "we do not
-        // know". The SAME `{ error, code }` shape the refusals use, so the one
-        // shared dialog reads one thing.
-        if (isTimeoutAbort(err)) throw { error: MOVE_TIMEOUT_SENTENCE, code: "TIMEOUT" };
-        throw err;
+        // B25-FR1/F2: EVERY rejection is "we do not know" — the timeout we asked
+        // for, and equally a network that died with the request already out. The
+        // SAME `{ error, code }` shape the refusals use, so the one shared dialog
+        // reads one thing.
+        throw moveUnanswered(err);
       }
       const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (!res.ok) {
         // A PLAIN OBJECT, not an Error subclass: the workbench's raw-fetch
         // caller rejects with the parsed body, and this is what makes the two
-        // rejections the same shape for the one dialog that reads them.
+        // rejections the same shape for the one dialog that reads them. A
+        // response is a REFUSAL only when it parsed into the house envelope: an
+        // ingress 502 with no `code` says nothing about where the batch is.
+        if (!isMoveRefusal(json)) {
+          // Typed against the module's own envelope (the frozen sentence and the
+          // two legal codes are the compiler's business, not a literal's).
+          const unanswered: MoveUnanswered = {
+            error: MOVE_UNANSWERED_SENTENCE,
+            code: "UNANSWERED",
+          };
+          throw unanswered;
+        }
         const refusal = readReconciliationError(res, json);
         throw { error: refusal.message, code: refusal.code };
       }

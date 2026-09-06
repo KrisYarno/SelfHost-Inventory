@@ -3,8 +3,10 @@ import { Product as PrismaProduct, inventory_logs, ProductApprovalStatus } from 
 // Base product type from Prisma
 export type Product = PrismaProduct;
 
-// Product with computed current quantity
-export interface ProductWithQuantity extends Product {
+// Product with computed current quantity.
+// The loc-1 `products.quantity` mirror is RETIRED (P2-B2.5): it is omitted here so
+// a future `.quantity` read off a product row is a tsc error, not a stale number.
+export interface ProductWithQuantity extends Omit<Product, "quantity"> {
   currentQuantity: number;
   lastUpdated?: Date;
   locationQuantities?: Map<number, number>; // Optional: quantities per location

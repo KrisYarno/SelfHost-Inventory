@@ -14,10 +14,11 @@
  *                  cumulative share of the line total; an UNPRICED line has no
  *                  priced share at all; a SHORT ordered line's loss plus its
  *                  delivered value is the whole total.
- *   productOracle  `products.quantity` is the LOCATION-1 MIRROR (never the
- *                  global sum), on-hand across locations is what the scenario
- *                  expects, and — from this gate's zero baseline — equals the
- *                  sum of every ledger delta for the product.
+ *   productOracle  on-hand across locations is what the scenario expects and —
+ *                  from this gate's zero baseline — equals the sum of every
+ *                  ledger delta for the product; it reads `product_locations`
+ *                  ONLY (the loc-1 `products.quantity` mirror is retired,
+ *                  P2-B2.5).
  */
 
 import mysql from "mysql2/promise";
