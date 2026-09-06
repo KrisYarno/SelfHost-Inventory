@@ -45,28 +45,11 @@ import { cn } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/page-header";
 import { effectiveLowStockThreshold, isLowStock } from "@/lib/stock-threshold";
 import { useLowStockDefault } from "@/hooks/use-low-stock-default";
+import { MOVE_TIMEOUT_MS, MOVE_TIMEOUT_SENTENCE, isTimeoutAbort } from "@/lib/reconciliation/move-timeout";
 
-/**
- * CB2.5e.4 — THE MOVE'S OWN CLOCK. Spelled here as well as in
- * `hooks/use-admin.ts`'s `useMoveBatch`, deliberately: a value import from the
- * admin hooks module would drag that whole surface into the workbench bundle
- * for two strings. The two callers' suites pin the same literals.
- */
-const MOVE_TIMEOUT_MS = 60_000;
-const MOVE_TIMEOUT_SENTENCE =
-  "The move did not answer in time — check the batch before trying again";
+/** CB2.5e.4 — the workbench's own warning; the clock, the sentence and the abort rule are `lib/reconciliation/move-timeout.ts`'s (one owner — the seam check of P2-B2.5). */
 const MOVE_TIMEOUT_WARNING =
   "The move's outcome is unknown — check the batch in Admin → Reconciliation";
-
-/**
- * `AbortSignal.timeout` rejects the fetch with a `DOMException` NAMED
- * `TimeoutError`. The NAME is what is checked, not the class: a plain
- * `AbortController` abort (name `AbortError`) is deliberately not this, and
- * nothing aborts this request by hand.
- */
-function isTimeoutAbort(err: unknown): boolean {
-  return (err as { name?: unknown } | null)?.name === "TimeoutError";
-}
 
 export default function WorkbenchPage() {
   const [selectedProduct, setSelectedProduct] = useState<ProductWithQuantity | null>(null);
@@ -577,6 +560,12 @@ export default function WorkbenchPage() {
             reissueUndoToastRef.current = null;
             liveUndoToastIdRef.current = null;
           }
+          // The move MAY have committed (the server's own budget is 30 s): the
+          // caches every other page reads are told, exactly as on the success
+          // path — the seam check of P2-B2.5 (the hook's `onSettled` already
+          // does this; the workbench must not show stale on-hand for a move
+          // that landed).
+          invalidateInventoryCaches(queryClient);
           toast.warning(MOVE_TIMEOUT_WARNING);
           throw { error: MOVE_TIMEOUT_SENTENCE, code: "TIMEOUT" };
         }

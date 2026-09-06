@@ -16,6 +16,7 @@ import type {
 import type { ExceptionsPage } from "@/lib/reconciliation/exceptions";
 import type { UnmappedPage } from "@/lib/reconciliation/unmapped";
 import type { ExceptionKind, ExceptionSeverity } from "@/lib/exceptions/kinds";
+import { MOVE_TIMEOUT_MS, MOVE_TIMEOUT_SENTENCE, isTimeoutAbort } from "@/lib/reconciliation/move-timeout";
 
 // ---------------------------------------------------------------------------
 // Shared TanStack Query hooks for the /admin surface.
@@ -962,25 +963,6 @@ export function useReverseBatch(batchId: string) {
   });
 }
 
-/**
- * CB2.5e.4 — THE MOVE'S OWN CLOCK, shared by this hook and the workbench's
- * raw-fetch caller (which spells both constants itself: a value import from a
- * hooks module into the workbench page would drag the whole admin surface into
- * that bundle for two strings).
- */
-const MOVE_TIMEOUT_MS = 60_000;
-const MOVE_TIMEOUT_SENTENCE =
-  "The move did not answer in time — check the batch before trying again";
-
-/**
- * `AbortSignal.timeout` rejects the fetch with a `DOMException` NAMED
- * `TimeoutError`. The name is what is checked rather than the class: a caller's
- * abort can arrive from another realm, and a plain `AbortController` abort
- * (name `AbortError`) is deliberately NOT this — nobody aborts a move by hand.
- */
-function isTimeoutAbort(err: unknown): boolean {
-  return (err as { name?: unknown } | null)?.name === "TimeoutError";
-}
 
 /**
  * THE WRONG-LOCATION MOVE (pack CB2c.3). `onSettled`, like its two siblings: a

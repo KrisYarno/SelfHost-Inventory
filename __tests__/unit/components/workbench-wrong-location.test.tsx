@@ -708,6 +708,20 @@ describe("the workbench move — the 60 s timeout (CB2.5e.4)", () => {
 
   // A dead network is NOT a timeout: it keeps today's behaviour (the Undo comes
   // back), because nothing was ever sent.
+  it("a TIMEOUT invalidates the inventory caches — the move MAY have committed (the seam check)", async () => {
+    const spy = jest.spyOn(QueryClient.prototype, "invalidateQueries");
+    try {
+      await timeOutAMove();
+      const roots = spy.mock.calls.map(([arg]) => {
+        const key = (arg as { queryKey?: unknown } | undefined)?.queryKey;
+        return Array.isArray(key) ? key[0] : undefined;
+      });
+      expect(roots).toContain("product-location-quantity");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("a plain network failure is not relabelled TIMEOUT", async () => {
     moveRejection = new TypeError("Failed to fetch");
     const user = userEvent.setup({ pointerEventsCheck: 0 });
