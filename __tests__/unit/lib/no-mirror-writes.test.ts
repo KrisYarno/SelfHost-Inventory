@@ -80,7 +80,11 @@
  *     before the paren, optional chaining (`?.`) and explicit type arguments
  *     (`update<T>(`), all self-tested below (B25-FD2-1/2); an alias is a
  *     different spelling, not a different layout, and is stated, not chased.
- *     `tx.product['update'](` and `.update.call(` are of the alias class.
+ *     `tx.product['update'](` and `.update.call(` are of the alias class, and
+ *     so is a CONDITIONAL delegate or relation object (B25-FD4-2):
+ *     `(cond ? tx.product : tx.other).update(` reads as no delegate, and
+ *     `products: cond ? { update: { quantity } } : undefined` is not an
+ *     object literal — the parser reports neither; stated, not chased.
  */
 
 import fs from 'node:fs';
@@ -252,11 +256,18 @@ export function nestedRelationWriteHits(
  * SPELLINGS THE PARSER CANNOT SEE (B25-CX3-2). An AST-only scan is blind to a
  * write inside a string (`eval("tx.product.update({…quantity…})")`) or a
  * commented-out call. The raw text is not: every product-write spelling
- * (rule (i)'s regex) and every nested-relation-write spelling whose offset falls
- * OUTSIDE every parser-recognised write call is reported as an offender —
- * conservatively, without a window: a spelling nobody can execute as code is a
- * rewrite (comments are prose the pack owns), and one that CAN be executed
- * (`eval`) is exactly what this pin exists to refuse.
+ * (rule (i)'s regex) and every FIRST-KEY nested-relation-write spelling
+ * (`<relation>: { <op>` — B25-FD4-3: a spelling whose op is not the first key
+ * is the parser path's to see) whose offset falls OUTSIDE every parser-
+ * recognised Prisma write call (a call on a NAMED delegate — B25-FD4-4) is
+ * reported as an offender — conservatively, without a window and WITHOUT
+ * asking for `quantity`: a spelling nobody can execute as code is a rewrite
+ * (comments are prose the pack owns), and one that CAN be executed (`eval`) is
+ * exactly what this pin exists to refuse. The one ordinary shape this reds by
+ * design (B25-FD4-1): a MOCK or a TYPE LITERAL outside any call whose first key
+ * under a relation name is a write op (`product: { update: jest.fn() }`) —
+ * move it into a call or rename the key; the failure direction is a loud red,
+ * never a missed write.
  */
 export function unseenWriteSpellings(
   rel: string,
@@ -265,7 +276,11 @@ export function unseenWriteSpellings(
   parsed?: ts.SourceFile,
 ): Array<{ index: number; spelling: string }> {
   const sf = parsed ?? parseSource(rel, text);
-  const spans = writeCallWindows(rel, text, sf).map((w) => [w.call.getStart(sf), w.call.end] as const);
+  // Only calls on a NAMED delegate count as "seen" (B25-FD4-4): an `.update(`
+  // on some other object must not hide a spelling nested in its arguments.
+  const spans = writeCallWindows(rel, text, sf)
+    .filter((w) => w.delegate !== null)
+    .map((w) => [w.call.getStart(sf), w.call.end] as const);
   const inside = (i: number): boolean => spans.some(([s, e]) => i >= s && i < e);
   const found: Array<{ index: number; spelling: string }> = [];
   for (const hit of delegateWriteHits(text)) {
@@ -358,18 +373,6 @@ function relative(abs: string): string {
   return path.relative(REPO_ROOT, abs).split(path.sep).join('/');
 }
 
-/**
- * THE ARGUMENT WALK. From the call's opening `(`, advance one character at a
- * time tracking bracket DEPTH — `(`, `[` and `{` open, `)`, `]` and `}` close —
- * and stop where the depth returns to zero. Quoted strings, template literals
- * and comments are skipped so a bracket inside one cannot unbalance the window;
- * the window itself is returned RAW, comments included, because what rule (ii)
- * asks is whether the call NAMES the column, not whether the compiler would.
- *
- * A regex could not do this: the write's argument is a nested object literal
- * whose end no fixed pattern locates, and a fixed-length window either stops
- * short of the key or runs past the statement.
- */
 /**
  * THE ARGUMENT WINDOWS ARE THE PARSER'S (B25-CX2-1/2/3 — the third and last
  * shape of this walker). A character walker by brace depth was defeated by a
@@ -508,7 +511,7 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
       .map((s) => ({ path: s.path, diagnostics: parseDiagnostics(s.sf) }))
       .filter((d) => d.diagnostics.length > 0)
       .map((d) => `  ${d.path}: ${d.diagnostics.slice(0, 2).map((x) => ts.flattenDiagnosticMessageText(x.messageText, ' ')).join(' | ')}`);
-    expect(bad.length === 0 ? '' : 'The parser could not read these files cleanly, so rules (ii)/(iii) have no reliable\nwindows there. Fix the syntax (tsc would have refused it too):\n' + bad.join('\n')).toBe('');
+    expect(bad.length === 0 ? '' : 'The parser could not read these files cleanly, so rules (ii)/(iii) have no reliable\nwindows there. Fix the syntax (`.js` files are parsed with the JSX language variant, so a\nJSX-ambiguous construct counts too — B25-FD4-6):\n' + bad.join('\n')).toBe('');
   });
 
   it('is not vacuous — every allowlisted path EXISTS and the writers it names are found', () => {
@@ -588,7 +591,9 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
       // And the spellings the parser cannot see (B25-CX3-2): a string, a
       // comment, an eval — no window, so reported outright.
       for (const u of unseenWriteSpellings(source.path, source.text, [], source.sf)) {
-        offenders.push(`  ${source.path}:${lineOf(source.text, u.index)}  ${u.spelling} (outside any parsed call — a string, a comment or an eval)`);
+        offenders.push(
+          `  ${source.path}:${lineOf(source.text, u.index)}  ${u.spelling} (outside any parsed Prisma call — a string, a comment, an eval, a mock or a type literal; move it into a call or rename the key)`,
+        );
       }
     }
 
