@@ -24,9 +24,9 @@
  *              writer, and NO file at all — allowlisted or not — contains a
  *              raw-SQL `products` write (B25-CX-1: the allowlist licenses
  *              delegate writers of non-stock fields, never raw SQL).
- *   RULE (ii)  Every ALLOWLISTED file's writer CALL WINDOWS — the balanced
- *              argument, walked by brace depth rather than matched by a regex —
- *              never name `quantity`.
+ *   RULE (ii)  Every ALLOWLISTED file's writer CALL WINDOWS — the argument
+ *              span as TypeScript's own parser reads it (B25-CX2) — never name
+ *              `quantity`.
  *   RULE (iii) NO file, allowlisted or not, reaches `products.quantity` through
  *              a NESTED RELATION write (B25-FR1/F4): `data: { products: {
  *              update: { quantity: … } } }` off ANY delegate is the same write
@@ -74,7 +74,8 @@
  *     also FLAG a multi-table UPDATE that merely JOINs `products` to filter a
  *     `product_locations` write — a rewrite (join in a subquery), not a hole.
  *   - The ALIAS class (B25-FD1-1): `const p = tx.product; p.update(…)` and
- *     `tx['product'].update(…)` name no `.product.` chain and escape every rule.
+ *     `p.update(…)` names no `.product.` chain and escapes every rule
+ *     (`tx['product'].update(…)` is now read by the parser — B25-CX2).
  *     The delegate matcher tolerates LAYOUT — whitespace around both dots and
  *     before the paren, optional chaining (`?.`) and explicit type arguments
  *     (`update<T>(`), all self-tested below (B25-FD2-1/2); an alias is a
@@ -84,6 +85,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import ts from 'typescript';
 
 const REPO_ROOT = process.cwd();
 
@@ -160,8 +162,9 @@ const SQL_WRITE_PATTERNS = [
  * engine trace this whole retirement was traced OUT of — a captured
  * `SHOW ENGINE INNODB STATUS` section whose query line is the retired cycle's own
  * `UPDATE … products SET quantity`. It is evidence, not a writer, and deleting it
- * would delete the proof. Tolerated by EXACT LINE PREFIX in EXACTLY that file:
- * any other SQL hit there is still an offender.
+ * would delete the proof. Tolerated by EXACT LINE in EXACTLY that file
+ * (B25-CX-3 — a prefix pardoned anything appended): any other SQL hit there is
+ * still an offender.
  */
 const TOLERATED_SQL_FIXTURE_LINES = [
   {
@@ -200,9 +203,6 @@ export function sqlWriteHits(text: string): Array<{ index: number; spelling: str
   return hits.sort((a, b) => a.index - b.index);
 }
 
-/** ANY delegate's write call — rule (iii) walks these looking for a NESTED relation write. Same layout tolerance as the delegate matcher. */
-const ANY_WRITE_CALL = /\.\s*\w+\s*\??\.\s*(update|updateMany|create|createMany|upsert)\s*(?:<[^(]*>)?\s*\(/g;
-
 /** The nested operations that WRITE the related row (`connect` and `set` only re-point an FK). */
 const NESTED_WRITE_OPS = 'update|upsert|updateMany|create|createMany|connectOrCreate';
 
@@ -215,28 +215,31 @@ const NESTED_WRITE_OPS = 'update|upsert|updateMany|create|createMany|connectOrCr
 export function nestedRelationWriteHits(
   text: string,
   relationNames: readonly string[],
+  rel = 'inline.ts',
 ): Array<{ index: number; relation: string; op: string }> {
   const hits: Array<{ index: number; relation: string; op: string }> = [];
   if (relationNames.length === 0) return hits;
-  const relationWrite = new RegExp(
-    `\\b(${relationNames.join('|')})\\s*:\\s*\\{\\s*(${NESTED_WRITE_OPS})\\b`,
-    'g',
-  );
-
-  ANY_WRITE_CALL.lastIndex = 0;
-  let call: RegExpExecArray | null;
-  while ((call = ANY_WRITE_CALL.exec(text)) !== null) {
-    const window = callWindow(text, text.indexOf('(', call.index));
-    relationWrite.lastIndex = 0;
-    let nested: RegExpExecArray | null;
-    while ((nested = relationWrite.exec(window)) !== null) {
-      // `callWindow` counts all three bracket kinds, so it walks a `{` as
-      // happily as a `(`: the nested window is the relation's own object.
-      const nestedWindow = callWindow(window, window.indexOf('{', nested.index));
-      if (/\bquantity\b/.test(nestedWindow)) {
-        hits.push({ index: call.index, relation: nested[1], op: nested[2] });
+  const relations = new Set(relationNames);
+  const nestedOps = new Set(NESTED_WRITE_OPS.split('|'));
+  for (const w of writeCallWindows(rel, text)) {
+    const visit = (node: ts.Node): void => {
+      if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.initializer)) {
+        const relation = propertyName(node.name);
+        if (relation !== null && relations.has(relation)) {
+          for (const inner of node.initializer.properties) {
+            const op = inner.name ? propertyName(inner.name) : null;
+            if (op !== null && nestedOps.has(op)) {
+              // The nested WRITE's own text — `product_locations`' own `quantity`
+              // beside a plain `connect` is outside it.
+              const nested = text.slice(node.initializer.pos, node.initializer.end);
+              if (/\bquantity\b/.test(nested)) hits.push({ index: w.index, relation, op });
+            }
+          }
+        }
       }
-    }
+      ts.forEachChild(node, visit);
+    };
+    w.call.arguments.forEach(visit);
   }
   return hits;
 }
@@ -328,88 +331,65 @@ function relative(abs: string): string {
  * whose end no fixed pattern locates, and a fixed-length window either stops
  * short of the key or runs past the statement.
  */
-/** Does a `/` at `i` start a REGEX LITERAL (vs a division)? By the previous significant character. */
-function startsRegexLiteral(text: string, i: number, windowStart: number): boolean {
-  let j = i - 1;
-  while (j >= windowStart && /\s/.test(text[j])) j -= 1;
-  if (j < windowStart) return true;
-  const prev = text[j];
-  // After an operand (an identifier, a number, a closing paren/bracket) a `/`
-  // divides; after an operator or an opener it begins a literal.
-  return !/[\w$)\]]/.test(prev);
+/**
+ * THE ARGUMENT WINDOWS ARE THE PARSER'S (B25-CX2-1/2/3 — the third and last
+ * shape of this walker). A character walker by brace depth was defeated by a
+ * regex literal (`/[}}]/`), then, taught regex literals, by a regex after a
+ * keyword (`typeof /}}\)/`), a nested template literal, and a division after a
+ * block comment. TypeScript's own parser (`ts.createSourceFile`: syntax only —
+ * no type-check, no module load, error-tolerant) already knows where every
+ * call's arguments begin and end, so the window is its span, RAW (comments
+ * included, because what the rules ask is whether the call NAMES the column).
+ */
+const WRITE_OPS = new Set(['update', 'updateMany', 'create', 'createMany', 'upsert']);
+
+function parseSource(rel: string, text: string): ts.SourceFile {
+  const kind = rel.endsWith('.tsx')
+    ? ts.ScriptKind.TSX
+    : rel.endsWith('.js')
+      ? ts.ScriptKind.JS
+      : ts.ScriptKind.TS;
+  return ts.createSourceFile(rel, text, ts.ScriptTarget.Latest, false, kind);
 }
 
-/** Skip a regex literal starting at `i` (its `/`); returns the index after the closing `/` + flags. */
-function skipRegexLiteral(text: string, i: number): number {
-  let k = i + 1;
-  let inClass = false;
-  while (k < text.length) {
-    const c = text[k];
-    if (c === '\\') { k += 2; continue; }
-    if (c === '\n') return k; // an unterminated literal cannot cross a line
-    if (inClass) { if (c === ']') inClass = false; k += 1; continue; }
-    if (c === '[') { inClass = true; k += 1; continue; }
-    if (c === '/') { k += 1; while (k < text.length && /[a-z]/i.test(text[k])) k += 1; return k; }
-    k += 1;
-  }
-  return k;
+function propertyName(node: ts.PropertyName): string | null {
+  if (ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  return null;
 }
 
-const CLOSER_OF: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
+export interface WriteCallWindow {
+  /** Character offset of the call (for line reporting). */
+  index: number;
+  op: string;
+  /** The delegate the op is called on (`product`, `product_locations`, …), by name or by string index (`tx['product']`); null if unreadable. */
+  delegate: string | null;
+  /** The raw text of the call's arguments. */
+  window: string;
+  call: ts.CallExpression;
+}
 
-function callWindow(text: string, openParenIndex: number): string {
-  // A TYPED stack (B25-CX-2), not a counter: a closer pops only its own opener,
-  // so a stray bracket cannot close a scope it never opened.
-  const stack: string[] = [];
-  let i = openParenIndex;
-  while (i < text.length) {
-    const ch = text[i];
-    const next = text[i + 1];
-
-    if (ch === '/' && next !== '/' && next !== '*' && startsRegexLiteral(text, i, openParenIndex)) {
-      // B25-CX-2: `/[}}]/` inside a `where` used to end the window before `data`.
-      i = skipRegexLiteral(text, i);
-      continue;
-    }
-
-    if (ch === '/' && next === '/') {
-      const end = text.indexOf('\n', i);
-      i = end === -1 ? text.length : end + 1;
-      continue;
-    }
-    if (ch === '/' && next === '*') {
-      const end = text.indexOf('*/', i + 2);
-      i = end === -1 ? text.length : end + 2;
-      continue;
-    }
-    if (ch === "'" || ch === '"' || ch === '`') {
-      const quote = ch;
-      i += 1;
-      while (i < text.length) {
-        if (text[i] === '\\') {
-          i += 2;
-          continue;
+/** EXPORTED FOR TEST. Every `<x>.<delegate>.<op>(…)` write call in `text`, with its argument window. */
+export function writeCallWindows(rel: string, text: string): WriteCallWindow[] {
+  const sf = parseSource(rel, text);
+  const found: WriteCallWindow[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const op = node.expression.name.text;
+      if (WRITE_OPS.has(op)) {
+        const inner = node.expression.expression;
+        let delegate: string | null = null;
+        if (ts.isPropertyAccessExpression(inner)) delegate = inner.name.text;
+        else if (ts.isElementAccessExpression(inner) && ts.isStringLiteralLike(inner.argumentExpression)) {
+          delegate = inner.argumentExpression.text;
         }
-        if (text[i] === quote) {
-          i += 1;
-          break;
-        }
-        i += 1;
+        const window = node.arguments.length === 0 ? '' : text.slice(node.arguments.pos, node.end);
+        found.push({ index: node.getStart(sf), op, delegate, window, call: node });
       }
-      continue;
     }
-
-    if (ch === '(' || ch === '[' || ch === '{') stack.push(CLOSER_OF[ch]);
-    else if (ch === ')' || ch === ']' || ch === '}') {
-      if (stack[stack.length - 1] === ch) {
-        stack.pop();
-        if (stack.length === 0) return text.slice(openParenIndex, i + 1);
-      }
-      // a mismatched closer is noise, not a scope end
-    }
-    i += 1;
-  }
-  return text.slice(openParenIndex);
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
 }
 
 function lineOf(text: string, index: number): number {
@@ -484,13 +464,25 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
       // never raw SQL on `products` (B25-CX-1: an allowlisted file could add
       // `$executeRawUnsafe("UPDATE products SET quantity = 0")` and stay green).
       if (!ALLOWED.has(source.path)) {
+        const seen = new Set<number>();
         for (const hit of delegateWriteHits(source.text)) {
-          offenders.push(`  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.spelling}`);
+          const line = lineOf(source.text, hit.index);
+          seen.add(line);
+          offenders.push(`  ${source.path}:${line}  ${hit.spelling}`);
+        }
+        // The PARSER's view as well (B25-CX2): a `tx['product'].update(` or any
+        // layout the spelling regex does not anticipate is still a product write.
+        for (const w of writeCallWindows(source.path, source.text)) {
+          if (w.delegate !== 'product') continue;
+          const line = lineOf(source.text, w.index);
+          if (seen.has(line)) continue;
+          seen.add(line);
+          offenders.push(`  ${source.path}:${line}  .product.${w.op}( (parser)`);
         }
       }
       for (const hit of sqlWriteHits(source.text)) {
         // The gate's captured engine trace is evidence of the RETIRED cycle, by
-        // exact line prefix in exactly that file — never a blanket file pardon.
+        // EXACT line in exactly that file — never a blanket file pardon.
         if (isToleratedSqlFixture(source.path, trimmedLineAt(source.text, hit.index))) continue;
         offenders.push(`  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.spelling}`);
       }
@@ -514,14 +506,11 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
     const offenders: string[] = [];
     for (const source of sources) {
       if (!ALLOWED.has(source.path)) continue;
-      // The SAME matcher rule (i) uses, consumed as a list (B25-FD2-3: never two
-      // `exec` loops over one shared `g` regex object). `<T>` cannot contain `(`,
-      // so the first paren after the hit is the call's own.
-      for (const hit of delegateWriteHits(source.text)) {
-        const openParen = source.text.indexOf('(', hit.index);
-        const window = callWindow(source.text, openParen);
-        if (/\bquantity\b/.test(window)) {
-          offenders.push(`  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.spelling}`);
+      // The PARSER's windows (B25-CX2): exact spans, whatever the argument holds.
+      for (const w of writeCallWindows(source.path, source.text)) {
+        if (w.delegate !== 'product') continue;
+        if (/\bquantity\b/.test(w.window)) {
+          offenders.push(`  ${source.path}:${lineOf(source.text, w.index)}  .product.${w.op}(`);
         }
       }
     }
@@ -539,7 +528,7 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
   it('RULE (iii): no delegate reaches `products.quantity` through a NESTED relation write', () => {
     const offenders: string[] = [];
     for (const source of sources) {
-      for (const hit of nestedRelationWriteHits(source.text, relationNames)) {
+      for (const hit of nestedRelationWriteHits(source.text, relationNames, source.path)) {
         offenders.push(
           `  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.relation}: { ${hit.op} … quantity }`,
         );
@@ -655,21 +644,37 @@ describe('delegateWriteHits — the Prisma delegate matcher', () => {
   });
 });
 
-describe('callWindow — the argument walker (B25-CX-2)', () => {
-  const window = (src: string) => callWindow(src, src.indexOf('('));
+describe('writeCallWindows — the argument windows are the PARSER\'s (B25-CX-2, B25-CX2-1/2/3)', () => {
+  const productWindow = (src: string): string => {
+    const w = writeCallWindows('inline.ts', src).filter((x) => x.delegate === 'product');
+    expect(w).toHaveLength(1);
+    return w[0].window;
+  };
   it.each([
-    ['tx.product.update({ where: { name: /[}}]/.test(input) ? "a" : "b" }, data: { quantity: { increment: 1 } } })', "codex's smuggle: two closing braces inside a regex class"],
+    ['tx.product.update({ where: { name: /[}}]/.test(input) ? "a" : "b" }, data: { quantity: { increment: 1 } } })', "codex's first smuggle: two closing braces inside a regex class"],
+    ['tx.product.update({ where: { id: typeof /}}\\)/ === "object" ? 1 : 2 }, data: { quantity: 1 } })', 'a regex after a keyword (B25-CX2-1)'],
+    ['tx.product.update({ where: { id: (() => { return /}\\)}}\\)/.test(s) ? 1 : 2; })() }, data: { quantity: 1 } })', 'a regex after return (B25-CX2-1)'],
+    ['tx.product.update({ where: { name: `a ${`}})`} z` }, data: { quantity: 1 } })', 'a NESTED template literal (B25-CX2-2)'],
     ['tx.product.update({ where: { id: /\\/[)]\\//.test(s) ? 1 : 2 }, data: { quantity: 1 } })', 'escaped slashes and a paren in a class'],
-    ['tx.product.update({ where: { id }, data: { half: total / 2, quantity: total / 2 } })', 'a DIVISION is not a regex'],
+    ['tx.product.update({ where: { id }, data: { half: a / b / c, quantity: total / 2 } })', 'divisions are not regexes'],
     ['tx.product.update({ where: { id }, data: { note: `a ${x} }`, quantity: 1 } })', 'a template literal with a brace'],
-    ['tx.product.update({ where: { id: (a) ? 1 : 2 }, data: { quantity: 1 } })', 'a stray closer never ends the window early'],
+    ["tx['product'].update({ where: { id }, data: { quantity: 1 } })", 'the string-index delegate spelling'],
+    ['prisma.product?.update<Prisma.ProductUpdateArgs>({ where: { id }, data: { quantity: 1 } })', 'optional chaining + type arguments'],
   ])('keeps `quantity` inside the window for %s (%s)', (src) => {
-    expect(/\bquantity\b/.test(window(src))).toBe(true);
-    expect(window(src).endsWith('})')).toBe(true);
+    expect(/\bquantity\b/.test(productWindow(src))).toBe(true);
   });
-  it('ends the window at the call, not at the file', () => {
-    const src = 'tx.product.update({ where: { id } })\nconst quantity = 1;';
-    expect(/\bquantity\b/.test(window(src))).toBe(false);
+
+  it.each([
+    ['tx.product.update({ where: { id: total /* units */ / 2 }, data: { name: "ok" } });\nconst quantity = 0;', 'a division after a block comment (B25-CX2-3: the walker overran into the next statement)'],
+    ['tx.product.update({ where: { id } })\nconst quantity = 1;', 'the window ends at the call'],
+    ['tx.product.update({ where: { id: x /= 2 }, data: { name: "ok" } }); let quantity;', 'a compound division'],
+  ])('ends the window at the call for %s (%s)', (src) => {
+    expect(/\bquantity\b/.test(productWindow(src))).toBe(false);
+  });
+
+  it('reads the delegate by name or by string index, and ignores non-write ops', () => {
+    const windows = writeCallWindows('inline.ts', 'a.product.findMany({}); b.product_locations.update({ data: { quantity: 1 } }); c["product"].upsert({});');
+    expect(windows.map((w) => [w.delegate, w.op])).toEqual([['product_locations', 'update'], ['product', 'upsert']]);
   });
 });
 

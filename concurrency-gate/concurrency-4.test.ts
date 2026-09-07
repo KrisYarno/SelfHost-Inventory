@@ -891,13 +891,12 @@ function batchAdjust(adjustments: Adjustment[]): Promise<RouteAnswer> {
  * with each other: they SERIALISE on the canonical prelock. The legal outcomes,
  * exactly:
  *
- *   BOTH 200                            pass. What the retirement claims.
- *   one 200 + one 503 `BUSY`, and NO    tolerated and RECORDED. The prelock
- *   fresh deadlock section              takes each key's X lock at its first
- *                                       statement, so a same-key second writer
- *                                       WAITS for the first's commit (CB2.5d) —
- *                                       a throughput property, and 503 `BUSY` is
- *                                       its typed answer when a budget blows.
+ *   BOTH 200                            pass. What the retirement claims — and
+ *                                       the ONLY green (B25-CX-4: the prelock's
+ *                                       same-key second writer WAITS for the
+ *                                       first's commit, CB2.5d; inside these
+ *                                       choreographies a wait never answers 503,
+ *                                       so a `BUSY` here is a stall — red).
  *   ANY fresh deadlock section          RED, whatever `classifyDeadlock` calls
  *                                       it — `products-residual` INCLUDED,
  *                                       because neither racer here is a booking
@@ -1689,8 +1688,8 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       );
       expect(blocked).toBe(true);
 
-      // THE OUTCOME ENVELOPE, three-way since P2-B2.5 (pack CB2.5c.2; it
-      // replaces REV-22 F3's two-way one). deduct-simple and batch-adjust are
+      // THE OUTCOME ENVELOPE (pack CB2.5c.2; both-200 since B25-CX-4 — the
+      // round-2 one-BUSY tolerance was withdrawn). deduct-simple and batch-adjust are
       // BOTH covered writers, so neither takes an X lock on `products` any more
       // and the S->X cycle that once licensed a rolled-back writer here is gone:
       // both commit, or one answers the typed 503 `BUSY` with no fresh deadlock
@@ -2402,10 +2401,9 @@ describe("scenario 14 — fulfil and unfulfill on a REAL engine (pack CB1.5a-ii)
         fresh: deadlockFresh,
       });
 
-      // CB2.5c.3: THIS pin's claim is "both commit". The three-way envelope above is
-      // scenario 13's (a 0.3 s two-key choreography where a same-key wait is the
-      // typed answer); here the hold is 3 s against a 30 s budget, so a 503 is a
-      // stall regression wearing the envelope's tolerated branch — red.
+      // CB2.5c.3: THIS pin's claim is "both commit", spelled directly beside the
+      // envelope (which since B25-CX-4 requires the same thing): a 503 here is a
+      // stall regression wearing the shared wire code — red.
       expect(observed.settled.map((a) => a.status)).toEqual([200, 200]);
 
       // THE STOCK ORACLE, EXACT, off whichever branch of the envelope this run
@@ -3405,7 +3403,7 @@ async function orderStockedOutFor(orderId: string): Promise<boolean> {
 // where the fulfilled line it unfulfils is owned.
 //
 // The outcome envelope is `assertCoveredRaceEnvelope`'s, shared with scenario 13
-// (CB2.5c.2): both 200, or one 503 `BUSY` with no fresh deadlock section. ANY
+// (CB2.5c.2): both 200 — nothing else (B25-CX-4). ANY
 // fresh deadlock here is a defect — `products-residual` included, because
 // neither racer is a booking or a decline (CB2.5a.2).
 // ==========================================================================
@@ -3469,10 +3467,9 @@ describe("scenario 15 — the B1c deadlock pair is GREEN (pack CB2.5c.3)", () =>
         fresh: deadlockFresh,
       });
 
-      // CB2.5c.3: THIS pin's claim is "both commit". The three-way envelope above is
-      // scenario 13's (a 0.3 s two-key choreography where a same-key wait is the
-      // typed answer); here the hold is 3 s against a 30 s budget, so a 503 is a
-      // stall regression wearing the envelope's tolerated branch — red.
+      // CB2.5c.3: THIS pin's claim is "both commit", spelled directly beside the
+      // envelope (which since B25-CX-4 requires the same thing): a 503 here is a
+      // stall regression wearing the shared wire code — red.
       expect(observed.settled.map((a) => a.status)).toEqual([200, 200]);
 
       const [first, second] = observed.settled;
