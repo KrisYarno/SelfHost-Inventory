@@ -717,8 +717,15 @@ async function observeRendezvous(
         (r) => r.STATE !== "User sleep" && (r.INFO ?? "").trimStart().startsWith("INSERT INTO product_locations"),
       );
       if (blocked) seen.blockedOnMaterialize = true;
+      // B25-CX-5 / B25-QA-4: scoped to a WAITING lock on the gate DB's
+      // `product_locations` — `data_lock_waits` alone is server-wide, and an
+      // unrelated wait would have counted as this rendezvous.
       const waits = await probe.$queryRawUnsafe<{ n: bigint | number }[]>(
-        `SELECT COUNT(*) AS n FROM performance_schema.data_lock_waits`,
+        `SELECT COUNT(*) AS n
+           FROM performance_schema.data_lock_waits w
+           JOIN performance_schema.data_locks l ON l.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID
+          WHERE l.OBJECT_SCHEMA = ? AND l.OBJECT_NAME = 'product_locations' AND l.LOCK_STATUS = 'WAITING'`,
+        GATE_DB_NAME,
       );
       if (Number(waits[0]?.n ?? 0) > 0) seen.lockWait = true;
       if (seen.blockedOnMaterialize || seen.lockWait) return seen;
@@ -927,25 +934,18 @@ function assertCoveredRaceEnvelope(
   }
 
   const committed = answers.filter((answer) => answer.status === 200);
-  const busy = answers.filter((answer) => answer.status === 503);
 
   if (committed.length === answers.length) return;
 
-  if (committed.length === answers.length - 1 && busy.length === 1) {
-    // The CODE is the contract; the sentence is the route's copy and is not
-    // re-spelled here.
-    expect(busy[0].body).toMatchObject({ code: "BUSY" });
-    console.log(
-      `[${scenario}] one writer answered 503 BUSY and the engine recorded no fresh ` +
-        "deadlock — the prelock's same-key wait (CB2.5d), tolerated and recorded.",
-    );
-    return;
-  }
-
+  // B25-CX-4 (codex, the further pass): the tolerated one-BUSY branch is GONE.
+  // A prelock same-key wait WAITS (up to the lock-wait timeout) — it never
+  // answers 503 inside these choreographies (0.3 s and 3 s holds against a
+  // 30 s budget) — so a BUSY here is P2024 pool exhaustion, a P2028 budget
+  // defect or a lock-wait timeout wearing the shared wire code, and it is red.
   throw new Error(
     [
-      `${scenario}: the outcome is outside the envelope. Two covered writers may both ` +
-        "commit, or one may answer 503 `BUSY` with no fresh deadlock — nothing else.",
+      `${scenario}: the outcome is outside the envelope. Two covered writers BOTH ` +
+        "commit — nothing else (a 503 BUSY with no fresh deadlock is a stall, not a wait).",
       `statuses: ${statuses.join(", ")}`,
       `bodies: ${JSON.stringify(answers.map((answer) => answer.body))}`,
     ].join("\n"),
@@ -1241,8 +1241,9 @@ describe("the canonical prelock — real-MySQL pins (pack CB1c)", () => {
  * TWO TRACES THIS GATE ACTUALLY PRODUCED, kept verbatim as the classifier's
  * fixtures (pack REV-22 F9). Not invented shapes: the first came out of the
  * sort-disabled mutation run recorded above scenario 9c, the second out of a
- * throwaway run of 9c's race at location 1 — the configuration `KEY_SECOND_1`
- * says deadlocks on the `products` residual, which is exactly what it did.
+ * throwaway location-1 variant of scenario 9c's race (the constant in play was
+ * `LOCATION_SECOND`, not `KEY_SECOND_1` — B25-CX-6): the pre-B2.5 mirror made
+ * that variant deadlock on the `products` residual, which is exactly what it did.
  *
  * They are here because the classification branch in scenario 13 fires only on
  * a rollback this gate has never yet observed, and unexercised code is how this

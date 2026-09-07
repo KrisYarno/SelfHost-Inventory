@@ -20,8 +20,10 @@
  * `app/api/products/[id]/route.ts` and `scripts/backfill-product-variants.js` —
  * and a statement window false-positives across a `Promise.all` comma. So:
  *
- *   RULE (i)   No file OUTSIDE the allowlist contains a `products` writer at
- *              all, in any spelling this repo uses.
+ *   RULE (i)   No file OUTSIDE the allowlist contains a `products` DELEGATE
+ *              writer, and NO file at all — allowlisted or not — contains a
+ *              raw-SQL `products` write (B25-CX-1: the allowlist licenses
+ *              delegate writers of non-stock fields, never raw SQL).
  *   RULE (ii)  Every ALLOWLISTED file's writer CALL WINDOWS — the balanced
  *              argument, walked by brace depth rather than matched by a regex —
  *              never name `quantity`.
@@ -164,7 +166,8 @@ const SQL_WRITE_PATTERNS = [
 const TOLERATED_SQL_FIXTURE_LINES = [
   {
     path: 'concurrency-gate/concurrency-4.test.ts',
-    startsWith: '"UPDATE `concurrency_gate`.`products` SET `quantity` = (',
+    // EXACT line (B25-CX-3): a prefix pardoned anything appended to the line.
+    line: '"UPDATE `concurrency_gate`.`products` SET `quantity` = (`concurrency_gate`.`products`.`quantity` + 1) WHERE (`concurrency_gate`.`products`.`id` IN (9101) AND (`concurrency_gate`.`products`.`id` = 9101 AND 1=1))",',
   },
 ] as const;
 
@@ -325,12 +328,49 @@ function relative(abs: string): string {
  * whose end no fixed pattern locates, and a fixed-length window either stops
  * short of the key or runs past the statement.
  */
+/** Does a `/` at `i` start a REGEX LITERAL (vs a division)? By the previous significant character. */
+function startsRegexLiteral(text: string, i: number, windowStart: number): boolean {
+  let j = i - 1;
+  while (j >= windowStart && /\s/.test(text[j])) j -= 1;
+  if (j < windowStart) return true;
+  const prev = text[j];
+  // After an operand (an identifier, a number, a closing paren/bracket) a `/`
+  // divides; after an operator or an opener it begins a literal.
+  return !/[\w$)\]]/.test(prev);
+}
+
+/** Skip a regex literal starting at `i` (its `/`); returns the index after the closing `/` + flags. */
+function skipRegexLiteral(text: string, i: number): number {
+  let k = i + 1;
+  let inClass = false;
+  while (k < text.length) {
+    const c = text[k];
+    if (c === '\\') { k += 2; continue; }
+    if (c === '\n') return k; // an unterminated literal cannot cross a line
+    if (inClass) { if (c === ']') inClass = false; k += 1; continue; }
+    if (c === '[') { inClass = true; k += 1; continue; }
+    if (c === '/') { k += 1; while (k < text.length && /[a-z]/i.test(text[k])) k += 1; return k; }
+    k += 1;
+  }
+  return k;
+}
+
+const CLOSER_OF: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
+
 function callWindow(text: string, openParenIndex: number): string {
-  let depth = 0;
+  // A TYPED stack (B25-CX-2), not a counter: a closer pops only its own opener,
+  // so a stray bracket cannot close a scope it never opened.
+  const stack: string[] = [];
   let i = openParenIndex;
   while (i < text.length) {
     const ch = text[i];
     const next = text[i + 1];
+
+    if (ch === '/' && next !== '/' && next !== '*' && startsRegexLiteral(text, i, openParenIndex)) {
+      // B25-CX-2: `/[}}]/` inside a `where` used to end the window before `data`.
+      i = skipRegexLiteral(text, i);
+      continue;
+    }
 
     if (ch === '/' && next === '/') {
       const end = text.indexOf('\n', i);
@@ -359,10 +399,13 @@ function callWindow(text: string, openParenIndex: number): string {
       continue;
     }
 
-    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    if (ch === '(' || ch === '[' || ch === '{') stack.push(CLOSER_OF[ch]);
     else if (ch === ')' || ch === ']' || ch === '}') {
-      depth -= 1;
-      if (depth === 0) return text.slice(openParenIndex, i + 1);
+      if (stack[stack.length - 1] === ch) {
+        stack.pop();
+        if (stack.length === 0) return text.slice(openParenIndex, i + 1);
+      }
+      // a mismatched closer is noise, not a scope end
     }
     i += 1;
   }
@@ -382,7 +425,7 @@ function trimmedLineAt(text: string, index: number): string {
 
 function isToleratedSqlFixture(sourcePath: string, line: string): boolean {
   return TOLERATED_SQL_FIXTURE_LINES.some(
-    (tolerated) => tolerated.path === sourcePath && line.startsWith(tolerated.startsWith),
+    (tolerated) => tolerated.path === sourcePath && line === tolerated.line,
   );
 }
 
@@ -437,9 +480,13 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
   it('RULE (i): no file outside the allowlist writes `products` at all', () => {
     const offenders: string[] = [];
     for (const source of sources) {
-      if (ALLOWED.has(source.path)) continue;
-      for (const hit of delegateWriteHits(source.text)) {
-        offenders.push(`  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.spelling}`);
+      // The allowlist licenses DELEGATE writers (non-stock product fields) —
+      // never raw SQL on `products` (B25-CX-1: an allowlisted file could add
+      // `$executeRawUnsafe("UPDATE products SET quantity = 0")` and stay green).
+      if (!ALLOWED.has(source.path)) {
+        for (const hit of delegateWriteHits(source.text)) {
+          offenders.push(`  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.spelling}`);
+        }
       }
       for (const hit of sqlWriteHits(source.text)) {
         // The gate's captured engine trace is evidence of the RETIRED cycle, by
@@ -528,7 +575,7 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
       const matching = source!.text
         .split('\n')
         .map((line) => line.trim())
-        .filter((line) => line.startsWith(tolerated.startsWith));
+        .filter((line) => line === tolerated.line);
       expect(matching).toHaveLength(1);
       // And it really IS a hit the rule would otherwise report.
       expect(sqlWriteHits(matching[0]).length).toBeGreaterThan(0);
@@ -605,6 +652,33 @@ describe('delegateWriteHits — the Prisma delegate matcher', () => {
 
   it('labels every hit with the canonical spelling, whatever the layout', () => {
     expect(delegateWriteHits('tx.product\n  .update(').map((h) => h.spelling)).toEqual(['.product.update(']);
+  });
+});
+
+describe('callWindow — the argument walker (B25-CX-2)', () => {
+  const window = (src: string) => callWindow(src, src.indexOf('('));
+  it.each([
+    ['tx.product.update({ where: { name: /[}}]/.test(input) ? "a" : "b" }, data: { quantity: { increment: 1 } } })', "codex's smuggle: two closing braces inside a regex class"],
+    ['tx.product.update({ where: { id: /\\/[)]\\//.test(s) ? 1 : 2 }, data: { quantity: 1 } })', 'escaped slashes and a paren in a class'],
+    ['tx.product.update({ where: { id }, data: { half: total / 2, quantity: total / 2 } })', 'a DIVISION is not a regex'],
+    ['tx.product.update({ where: { id }, data: { note: `a ${x} }`, quantity: 1 } })', 'a template literal with a brace'],
+    ['tx.product.update({ where: { id: (a) ? 1 : 2 }, data: { quantity: 1 } })', 'a stray closer never ends the window early'],
+  ])('keeps `quantity` inside the window for %s (%s)', (src) => {
+    expect(/\bquantity\b/.test(window(src))).toBe(true);
+    expect(window(src).endsWith('})')).toBe(true);
+  });
+  it('ends the window at the call, not at the file', () => {
+    const src = 'tx.product.update({ where: { id } })\nconst quantity = 1;';
+    expect(/\bquantity\b/.test(window(src))).toBe(false);
+  });
+});
+
+describe('the tolerated SQL fixture is pardoned by EXACT line (B25-CX-3)', () => {
+  it('an appended statement on the fixture line is NOT pardoned', () => {
+    const [tolerated] = TOLERATED_SQL_FIXTURE_LINES;
+    expect(isToleratedSqlFixture(tolerated.path, tolerated.line)).toBe(true);
+    expect(isToleratedSqlFixture(tolerated.path, tolerated.line + ' tx.$executeRawUnsafe("UPDATE products SET quantity = 7")')).toBe(false);
+    expect(isToleratedSqlFixture('lib/inventory.ts', tolerated.line)).toBe(false);
   });
 });
 
