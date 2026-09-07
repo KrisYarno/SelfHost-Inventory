@@ -105,8 +105,9 @@ const SOURCE_EXTENSIONS = new Set(['.ts', '.js', '.tsx']);
  * an optional-chaining method dot (`product?.update(`) and explicit type
  * arguments (`update<Prisma.ProductUpdateArgs>(`) — because nothing normalises
  * source before this scan (no prettier hook is wired) and every one of those is
- * the same call. Shared by rule (i), rule (ii) and the per-file spellings so
- * the three can never disagree about what a delegate write looks like.
+ * the same call. This is the SPELLING matcher: rule (i)'s belt, the per-file
+ * spellings, and the raw-text fallback of rules (ii)/(iii) (a spelling the
+ * parser cannot see is an offender). The WINDOWS are the parser's (below).
  */
 const DELEGATE_WRITE_CALL =
   /\.\s*product\s*\??\.\s*(update|updateMany|create|createMany|upsert)\s*(?:<[^(]*>)?\s*\(/g;
@@ -216,22 +217,25 @@ export function nestedRelationWriteHits(
   text: string,
   relationNames: readonly string[],
   rel = 'inline.ts',
+  parsed?: ts.SourceFile,
 ): Array<{ index: number; relation: string; op: string }> {
   const hits: Array<{ index: number; relation: string; op: string }> = [];
   if (relationNames.length === 0) return hits;
   const relations = new Set(relationNames);
   const nestedOps = new Set(NESTED_WRITE_OPS.split('|'));
-  for (const w of writeCallWindows(rel, text)) {
+  for (const w of writeCallWindows(rel, text, parsed)) {
     const visit = (node: ts.Node): void => {
-      if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.initializer)) {
+      // B25-CX3-1: `products: { update: … } as const` is the same object — unwrap.
+      const init = ts.isPropertyAssignment(node) ? unwrap(node.initializer) : null;
+      if (ts.isPropertyAssignment(node) && init !== null && ts.isObjectLiteralExpression(init)) {
         const relation = propertyName(node.name);
         if (relation !== null && relations.has(relation)) {
-          for (const inner of node.initializer.properties) {
+          for (const inner of init.properties) {
             const op = inner.name ? propertyName(inner.name) : null;
             if (op !== null && nestedOps.has(op)) {
               // The nested WRITE's own text — `product_locations`' own `quantity`
               // beside a plain `connect` is outside it.
-              const nested = text.slice(node.initializer.pos, node.initializer.end);
+              const nested = text.slice(init.pos, init.end);
               if (/\bquantity\b/.test(nested)) hits.push({ index: w.index, relation, op });
             }
           }
@@ -242,6 +246,39 @@ export function nestedRelationWriteHits(
     w.call.arguments.forEach(visit);
   }
   return hits;
+}
+
+/**
+ * SPELLINGS THE PARSER CANNOT SEE (B25-CX3-2). An AST-only scan is blind to a
+ * write inside a string (`eval("tx.product.update({…quantity…})")`) or a
+ * commented-out call. The raw text is not: every product-write spelling
+ * (rule (i)'s regex) and every nested-relation-write spelling whose offset falls
+ * OUTSIDE every parser-recognised write call is reported as an offender —
+ * conservatively, without a window: a spelling nobody can execute as code is a
+ * rewrite (comments are prose the pack owns), and one that CAN be executed
+ * (`eval`) is exactly what this pin exists to refuse.
+ */
+export function unseenWriteSpellings(
+  rel: string,
+  text: string,
+  relationNames: readonly string[],
+  parsed?: ts.SourceFile,
+): Array<{ index: number; spelling: string }> {
+  const sf = parsed ?? parseSource(rel, text);
+  const spans = writeCallWindows(rel, text, sf).map((w) => [w.call.getStart(sf), w.call.end] as const);
+  const inside = (i: number): boolean => spans.some(([s, e]) => i >= s && i < e);
+  const found: Array<{ index: number; spelling: string }> = [];
+  for (const hit of delegateWriteHits(text)) {
+    if (!inside(hit.index)) found.push({ index: hit.index, spelling: hit.spelling });
+  }
+  if (relationNames.length > 0) {
+    const relationWrite = new RegExp(`\\b(${relationNames.join('|')})\\s*:\\s*\\{\\s*(${NESTED_WRITE_OPS})\\b`, 'g');
+    let m: RegExpExecArray | null;
+    while ((m = relationWrite.exec(text)) !== null) {
+      if (!inside(m.index)) found.push({ index: m.index, spelling: `${m[1]}: { ${m[2]}` });
+    }
+  }
+  return found;
 }
 
 /**
@@ -298,6 +335,8 @@ const ALLOWED = new Set<string>(ALLOWLIST);
 interface SourceFile {
   path: string;
   text: string;
+  /** Parsed ONCE (B25-CX3 (d)): every rule reads the same tree. */
+  sf: ts.SourceFile;
 }
 
 function walk(dir: string): string[] {
@@ -354,7 +393,30 @@ function parseSource(rel: string, text: string): ts.SourceFile {
 
 function propertyName(node: ts.PropertyName): string | null {
   if (ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  // `['products']: { update: … }` (B25-CX3, the computed spelling).
+  if (ts.isComputedPropertyName(node) && ts.isStringLiteralLike(node.expression)) return node.expression.text;
   return null;
+}
+
+/**
+ * Strip the wrappers that change nothing at runtime (B25-CX3-1): parentheses,
+ * `as T`, `satisfies T`, the postfix `!`, the angle-bracket assertion. A relation
+ * object written `{ update: { quantity } } as const` is the same object.
+ */
+function unwrap(expr: ts.Expression): ts.Expression {
+  let e = expr;
+  for (;;) {
+    if (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isNonNullExpression(e) || ts.isTypeAssertionExpression(e)) {
+      e = e.expression;
+      continue;
+    }
+    return e;
+  }
+}
+
+/** The parser's own syntax diagnostics (a private field, but the only one without building a Program). */
+function parseDiagnostics(sf: ts.SourceFile): readonly ts.Diagnostic[] {
+  return (sf as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? [];
 }
 
 export interface WriteCallWindow {
@@ -369,14 +431,16 @@ export interface WriteCallWindow {
 }
 
 /** EXPORTED FOR TEST. Every `<x>.<delegate>.<op>(…)` write call in `text`, with its argument window. */
-export function writeCallWindows(rel: string, text: string): WriteCallWindow[] {
-  const sf = parseSource(rel, text);
+export function writeCallWindows(rel: string, text: string, parsed?: ts.SourceFile): WriteCallWindow[] {
+  const sf = parsed ?? parseSource(rel, text);
   const found: WriteCallWindow[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const op = node.expression.name.text;
+    const callee = ts.isCallExpression(node) ? unwrap(node.expression) : null;
+    if (ts.isCallExpression(node) && callee !== null && ts.isPropertyAccessExpression(callee)) {
+      const op = callee.name.text;
       if (WRITE_OPS.has(op)) {
-        const inner = node.expression.expression;
+        // `(tx.product as any).update(`, `(tx.product).update(` — the same delegate.
+        const inner = unwrap(callee.expression);
         let delegate: string | null = null;
         if (ts.isPropertyAccessExpression(inner)) delegate = inner.name.text;
         else if (ts.isElementAccessExpression(inner) && ts.isStringLiteralLike(inner.argumentExpression)) {
@@ -420,7 +484,7 @@ beforeAll(() => {
       .map((abs) => relative(abs))
       .filter((rel) => !excluded.some((prefix) => rel.startsWith(prefix)))
       .map((rel) => ({ rel, text: fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8') }))
-      .map(({ rel, text }) => ({ path: rel, text })),
+      .map(({ rel, text }) => ({ path: rel, text, sf: parseSource(rel, text) })),
   );
   relationNames = productRelationNames();
 });
@@ -437,6 +501,14 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
     expect(sources.some((s) => s.path.startsWith('scripts/'))).toBe(true);
     expect(sources.some((s) => s.path.startsWith('concurrency-gate/'))).toBe(true);
     expect(sources.some((s) => s.path.startsWith('scripts/diagnostics/'))).toBe(false);
+  });
+
+  it('every scanned file PARSES without syntax diagnostics (B25-CX3-3: a malformed file has no reliable spans)', () => {
+    const bad = sources
+      .map((s) => ({ path: s.path, diagnostics: parseDiagnostics(s.sf) }))
+      .filter((d) => d.diagnostics.length > 0)
+      .map((d) => `  ${d.path}: ${d.diagnostics.slice(0, 2).map((x) => ts.flattenDiagnosticMessageText(x.messageText, ' ')).join(' | ')}`);
+    expect(bad.length === 0 ? '' : 'The parser could not read these files cleanly, so rules (ii)/(iii) have no reliable\nwindows there. Fix the syntax (tsc would have refused it too):\n' + bad.join('\n')).toBe('');
   });
 
   it('is not vacuous — every allowlisted path EXISTS and the writers it names are found', () => {
@@ -472,7 +544,7 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
         }
         // The PARSER's view as well (B25-CX2): a `tx['product'].update(` or any
         // layout the spelling regex does not anticipate is still a product write.
-        for (const w of writeCallWindows(source.path, source.text)) {
+        for (const w of writeCallWindows(source.path, source.text, source.sf)) {
           if (w.delegate !== 'product') continue;
           const line = lineOf(source.text, w.index);
           if (seen.has(line)) continue;
@@ -507,11 +579,16 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
     for (const source of sources) {
       if (!ALLOWED.has(source.path)) continue;
       // The PARSER's windows (B25-CX2): exact spans, whatever the argument holds.
-      for (const w of writeCallWindows(source.path, source.text)) {
+      for (const w of writeCallWindows(source.path, source.text, source.sf)) {
         if (w.delegate !== 'product') continue;
         if (/\bquantity\b/.test(w.window)) {
           offenders.push(`  ${source.path}:${lineOf(source.text, w.index)}  .product.${w.op}(`);
         }
+      }
+      // And the spellings the parser cannot see (B25-CX3-2): a string, a
+      // comment, an eval — no window, so reported outright.
+      for (const u of unseenWriteSpellings(source.path, source.text, [], source.sf)) {
+        offenders.push(`  ${source.path}:${lineOf(source.text, u.index)}  ${u.spelling} (outside any parsed call — a string, a comment or an eval)`);
       }
     }
 
@@ -528,10 +605,15 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
   it('RULE (iii): no delegate reaches `products.quantity` through a NESTED relation write', () => {
     const offenders: string[] = [];
     for (const source of sources) {
-      for (const hit of nestedRelationWriteHits(source.text, relationNames, source.path)) {
+      for (const hit of nestedRelationWriteHits(source.text, relationNames, source.path, source.sf)) {
         offenders.push(
           `  ${source.path}:${lineOf(source.text, hit.index)}  ${hit.relation}: { ${hit.op} … quantity }`,
         );
+      }
+      // The nested-write SPELLING outside any parsed call (B25-CX3-2).
+      for (const u of unseenWriteSpellings(source.path, source.text, relationNames, source.sf)) {
+        if (!u.spelling.includes(': {')) continue; // the delegate spellings are rule (i)/(ii)'s
+        offenders.push(`  ${source.path}:${lineOf(source.text, u.index)}  ${u.spelling} (outside any parsed call — a string, a comment or an eval)`);
       }
     }
 
@@ -672,6 +754,20 @@ describe('writeCallWindows — the argument windows are the PARSER\'s (B25-CX-2,
     expect(/\bquantity\b/.test(productWindow(src))).toBe(false);
   });
 
+  it.each([
+    ['(tx.product as any).update({ where: { id }, data: { quantity: 1 } })', 'a callee wrapped in `as any` (B25-CX3)'],
+    ['(tx.product).update({ where: { id }, data: { quantity: 1 } })', 'a parenthesised delegate'],
+    ['(tx.product.update)({ where: { id }, data: { quantity: 1 } })', 'a parenthesised callee'],
+    ['(tx.product satisfies unknown)!.update({ where: { id }, data: { quantity: 1 } })', 'satisfies + non-null'],
+  ])('reads the delegate through runtime-neutral wrappers for %s (%s)', (src) => {
+    expect(/\bquantity\b/.test(productWindow(src))).toBe(true);
+  });
+
+  it('a malformed file carries parse diagnostics (the diagnostics pin is not vacuous)', () => {
+    const sf = parseSource('inline.ts', 'const a = `unclosed; tx.product.update({ data: { quantity: 1 } })');
+    expect(parseDiagnostics(sf).length).toBeGreaterThan(0);
+  });
+
   it('reads the delegate by name or by string index, and ignores non-write ops', () => {
     const windows = writeCallWindows('inline.ts', 'a.product.findMany({}); b.product_locations.update({ data: { quantity: 1 } }); c["product"].upsert({});');
     expect(windows.map((w) => [w.delegate, w.op])).toEqual([['product_locations', 'update'], ['product', 'upsert']]);
@@ -744,6 +840,23 @@ describe('nestedRelationWriteHits — the relation matcher', () => {
     ],
   ])('does NOT catch %s (%s)', (fixture) => {
     expect(nestedRelationWriteHits(fixture, RELATIONS)).toEqual([]);
+  });
+
+  it.each([
+    ['tx.product_locations.update({ where: { id: 1 }, data: { products: { update: { quantity: { increment: 1 } } } as const } })', 'the relation object behind `as const` (B25-CX3-1)'],
+    ['tx.product_locations.update({ where: { id: 1 }, data: { products: ({ update: { quantity: 1 } } satisfies unknown)! } })', 'satisfies + non-null'],
+    ["tx.product_locations.update({ where: { id: 1 }, data: { ['products']: { update: { quantity: 1 } } } })", 'a computed relation name'],
+  ])('catches the wrapped relation write %s (%s)', (fixture) => {
+    expect(nestedRelationWriteHits(fixture, RELATIONS).length).toBeGreaterThan(0);
+  });
+
+  it('spellings the parser cannot see are reported outright (B25-CX3-2)', () => {
+    const evalString = 'await eval("tx.product_locations.update({where:{id:1},data:{products:{update:{quantity:1}}}})");';
+    expect(unseenWriteSpellings('inline.ts', evalString, RELATIONS).map((u) => u.spelling)).toEqual(['products: { update']);
+    const commented = '// tx.product.update({ data: { quantity: 1 } })\ntx.product.findMany({});';
+    expect(unseenWriteSpellings('inline.ts', commented, RELATIONS).map((u) => u.spelling)).toEqual(['.product.update(']);
+    const seen = 'tx.product.update({ data: { name: "x" } }); tx.product_locations.update({ data: { products: { update: { name: "y" } } } });';
+    expect(unseenWriteSpellings('inline.ts', seen, RELATIONS)).toEqual([]);
   });
 
   it('an empty relation list matches nothing rather than everything', () => {

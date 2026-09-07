@@ -882,8 +882,8 @@ function batchAdjust(adjustments: Adjustment[]): Promise<RouteAnswer> {
 }
 
 /**
- * THE THREE-WAY OUTCOME ENVELOPE for a race between two COVERED writers
- * (pack CB2.5c.2; scenarios 13 and 15 share it).
+ * THE OUTCOME ENVELOPE for a race between two COVERED writers — both commit
+ * (pack CB2.5c.2; scenarios 13 and 15 share it; three-way until B25-CX-4).
  *
  * After P2-B2.5 no covered transaction takes an X lock on `products` — the
  * location-1 mirror was the covered half of the lane's engine-traced S->X cycle
@@ -1692,9 +1692,10 @@ describe("the lock discipline — real-DB concurrency (pack CB1c scenarios 9c / 
       // round-2 one-BUSY tolerance was withdrawn). deduct-simple and batch-adjust are
       // BOTH covered writers, so neither takes an X lock on `products` any more
       // and the S->X cycle that once licensed a rolled-back writer here is gone:
-      // both commit, or one answers the typed 503 `BUSY` with no fresh deadlock
-      // section. A generic 500 — the pre-F3 spelling of a swallowed P2034 — is
-      // no longer tolerated, and a fresh deadlock of ANY shape is a defect.
+      // BOTH commit — nothing else (B25-CX-4 withdrew the one-BUSY tolerance: a
+      // same-key wait waits, it never answers 503 in a 0.3 s choreography). A
+      // generic 500 — the pre-F3 spelling of a swallowed P2034 — is not
+      // tolerated, and a fresh deadlock of ANY shape is a defect.
       assertCoveredRaceEnvelope("scenario 13", answers, {
         after: deadlockAfter,
         fresh: deadlockFresh,
