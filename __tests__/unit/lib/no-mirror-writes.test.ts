@@ -259,15 +259,15 @@ export function nestedRelationWriteHits(
  * (rule (i)'s regex) and every FIRST-KEY nested-relation-write spelling
  * (`<relation>: { <op>` — B25-FD4-3: a spelling whose op is not the first key
  * is the parser path's to see) whose offset falls OUTSIDE every parser-
- * recognised Prisma write call (a call on a NAMED delegate — B25-FD4-4) is
- * reported as an offender — conservatively, without a window and WITHOUT
- * asking for `quantity`: a spelling nobody can execute as code is a rewrite
- * (comments are prose the pack owns), and one that CAN be executed (`eval`) is
- * exactly what this pin exists to refuse. The one ordinary shape this reds by
- * design (B25-FD4-1): a MOCK or a TYPE LITERAL outside any call whose first key
- * under a relation name is a write op (`product: { update: jest.fn() }`) —
- * move it into a call or rename the key; the failure direction is a loud red,
- * never a missed write.
+ * recognised write call is reported as an offender — conservatively, without
+ * a window: a spelling nobody can execute as code is a rewrite (comments are
+ * prose the pack owns), and one that CAN be executed (`eval`) is exactly what
+ * this pin exists to refuse. The relation belt additionally requires
+ * `quantity` within 300 chars (B25-CX4-2), so a prepared non-stock relation
+ * object or a `product: { update: jest.fn() }` mock is not a hit; a mock or a
+ * type literal that names `quantity` under a relation write op outside any
+ * call still reds BY DESIGN (B25-FD4-1) — move it into a call or rename the
+ * key; the failure direction is a loud red, never a missed write.
  */
 export function unseenWriteSpellings(
   rel: string,
@@ -276,18 +276,23 @@ export function unseenWriteSpellings(
   parsed?: ts.SourceFile,
 ): Array<{ index: number; spelling: string }> {
   const sf = parsed ?? parseSource(rel, text);
-  // Only calls on a NAMED delegate count as "seen" (B25-FD4-4): an `.update(`
-  // on some other object must not hide a spelling nested in its arguments.
-  const spans = writeCallWindows(rel, text, sf)
-    .filter((w) => w.delegate !== null)
-    .map((w) => [w.call.getStart(sf), w.call.end] as const);
+  // EVERY parsed write call counts as "seen" (B25-CX4-3, reverting B25-FD4-4's
+  // named-delegate filter): rule (iii)'s AST walk already reads a real nested
+  // write inside ANY call's arguments, so keeping unknown-delegate calls out of
+  // the spans only double-reported those. The residual (B25-CX4-4, registered):
+  // a spelling inside a STRING or COMMENT within some parsed call's span is
+  // suppressed by nobody's check.
+  const spans = writeCallWindows(rel, text, sf).map((w) => [w.call.getStart(sf), w.call.end] as const);
   const inside = (i: number): boolean => spans.some(([s, e]) => i >= s && i < e);
   const found: Array<{ index: number; spelling: string }> = [];
   for (const hit of delegateWriteHits(text)) {
     if (!inside(hit.index)) found.push({ index: hit.index, spelling: hit.spelling });
   }
   if (relationNames.length > 0) {
-    const relationWrite = new RegExp(`\\b(${relationNames.join('|')})\\s*:\\s*\\{\\s*(${NESTED_WRITE_OPS})\\b`, 'g');
+    // …and it must NAME `quantity` within 300 chars (B25-CX4-2): a prepared
+    // NON-stock relation object (`const data = { products: { update: { name } } }`)
+    // is ordinary code and is not a mirror write.
+    const relationWrite = new RegExp(`\\b(${relationNames.join('|')})\\s*:\\s*\\{\\s*(${NESTED_WRITE_OPS})\\b[\\s\\S]{0,300}?\\bquantity\\b`, 'g');
     let m: RegExpExecArray | null;
     while ((m = relationWrite.exec(text)) !== null) {
       if (!inside(m.index)) found.push({ index: m.index, spelling: `${m[1]}: { ${m[2]}` });
@@ -397,7 +402,11 @@ function parseSource(rel: string, text: string): ts.SourceFile {
 function propertyName(node: ts.PropertyName): string | null {
   if (ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
   // `['products']: { update: … }` (B25-CX3, the computed spelling).
-  if (ts.isComputedPropertyName(node) && ts.isStringLiteralLike(node.expression)) return node.expression.text;
+  if (ts.isComputedPropertyName(node)) {
+    // `[("products" as const)]` — the operand is unwrapped too (B25-CX4-1).
+    const operand = unwrap(node.expression);
+    if (ts.isStringLiteralLike(operand)) return operand.text;
+  }
   return null;
 }
 
@@ -410,6 +419,12 @@ function unwrap(expr: ts.Expression): ts.Expression {
   let e = expr;
   for (;;) {
     if (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isSatisfiesExpression(e) || ts.isNonNullExpression(e) || ts.isTypeAssertionExpression(e)) {
+      e = e.expression;
+      continue;
+    }
+    // `(tx.product.update<Prisma.ProductUpdateArgs>)(…)` — an instantiation
+    // expression emits as the plain parenthesised method call (B25-CX4-1).
+    if (ts.isExpressionWithTypeArguments(e)) {
       e = e.expression;
       continue;
     }
@@ -446,8 +461,9 @@ export function writeCallWindows(rel: string, text: string, parsed?: ts.SourceFi
         const inner = unwrap(callee.expression);
         let delegate: string | null = null;
         if (ts.isPropertyAccessExpression(inner)) delegate = inner.name.text;
-        else if (ts.isElementAccessExpression(inner) && ts.isStringLiteralLike(inner.argumentExpression)) {
-          delegate = inner.argumentExpression.text;
+        else if (ts.isElementAccessExpression(inner)) {
+          const operand = unwrap(inner.argumentExpression);
+          if (ts.isStringLiteralLike(operand)) delegate = operand.text;
         }
         const window = node.arguments.length === 0 ? '' : text.slice(node.arguments.pos, node.end);
         found.push({ index: node.getStart(sf), op, delegate, window, call: node });
@@ -511,7 +527,7 @@ describe('the loc-1 `products.quantity` mirror is retired (pack CB2.5a.3)', () =
       .map((s) => ({ path: s.path, diagnostics: parseDiagnostics(s.sf) }))
       .filter((d) => d.diagnostics.length > 0)
       .map((d) => `  ${d.path}: ${d.diagnostics.slice(0, 2).map((x) => ts.flattenDiagnosticMessageText(x.messageText, ' ')).join(' | ')}`);
-    expect(bad.length === 0 ? '' : 'The parser could not read these files cleanly, so rules (ii)/(iii) have no reliable\nwindows there. Fix the syntax (`.js` files are parsed with the JSX language variant, so a\nJSX-ambiguous construct counts too — B25-FD4-6):\n' + bad.join('\n')).toBe('');
+    expect(bad.length === 0 ? '' : 'The parser could not read these files cleanly, so rules (ii)/(iii) have no reliable\nwindows there — this pin REFUSES a partial parse rather than reason about which spans survived it\n(B25-CX4-5). Fix the syntax (`.js` files are parsed with the JSX language variant, so a\nJSX-ambiguous construct counts too — B25-FD4-6):\n' + bad.join('\n')).toBe('');
   });
 
   it('is not vacuous — every allowlisted path EXISTS and the writers it names are found', () => {
@@ -764,6 +780,8 @@ describe('writeCallWindows — the argument windows are the PARSER\'s (B25-CX-2,
     ['(tx.product).update({ where: { id }, data: { quantity: 1 } })', 'a parenthesised delegate'],
     ['(tx.product.update)({ where: { id }, data: { quantity: 1 } })', 'a parenthesised callee'],
     ['(tx.product satisfies unknown)!.update({ where: { id }, data: { quantity: 1 } })', 'satisfies + non-null'],
+    ['(tx.product.update<Prisma.ProductUpdateArgs>)({ where: { id }, data: { quantity: 1 } })', 'an instantiation expression (B25-CX4-1)'],
+    ['tx[("product" as const)].update({ where: { id }, data: { quantity: 1 } })', 'a computed delegate operand behind `as const` (B25-CX4-1)'],
   ])('reads the delegate through runtime-neutral wrappers for %s (%s)', (src) => {
     expect(/\bquantity\b/.test(productWindow(src))).toBe(true);
   });
@@ -851,6 +869,7 @@ describe('nestedRelationWriteHits — the relation matcher', () => {
     ['tx.product_locations.update({ where: { id: 1 }, data: { products: { update: { quantity: { increment: 1 } } } as const } })', 'the relation object behind `as const` (B25-CX3-1)'],
     ['tx.product_locations.update({ where: { id: 1 }, data: { products: ({ update: { quantity: 1 } } satisfies unknown)! } })', 'satisfies + non-null'],
     ["tx.product_locations.update({ where: { id: 1 }, data: { ['products']: { update: { quantity: 1 } } } })", 'a computed relation name'],
+    ["tx.product_locations.update({ where: { id: 1 }, data: { [('products' as const)]: { update: { quantity: 1 } } } })", 'a computed relation name behind `as const` (B25-CX4-1)'],
   ])('catches the wrapped relation write %s (%s)', (fixture) => {
     expect(nestedRelationWriteHits(fixture, RELATIONS).length).toBeGreaterThan(0);
   });
@@ -862,6 +881,11 @@ describe('nestedRelationWriteHits — the relation matcher', () => {
     expect(unseenWriteSpellings('inline.ts', commented, RELATIONS).map((u) => u.spelling)).toEqual(['.product.update(']);
     const seen = 'tx.product.update({ data: { name: "x" } }); tx.product_locations.update({ data: { products: { update: { name: "y" } } } });';
     expect(unseenWriteSpellings('inline.ts', seen, RELATIONS)).toEqual([]);
+    // B25-CX4-2: a prepared NON-stock relation object is ordinary code; a prepared one naming quantity is the stated indirection residual made visible.
+    expect(unseenWriteSpellings('inline.ts', 'const data = { products: { update: { name: "x" } } };', RELATIONS)).toEqual([]);
+    expect(unseenWriteSpellings('inline.ts', 'const data = { products: { update: { quantity: 1 } } };', RELATIONS).map((u) => u.spelling)).toEqual(['products: { update']);
+    // B25-CX4-3: an unknown-delegate call is reported by the AST walk alone, never twice.
+    expect(unseenWriteSpellings('inline.ts', 'cache.update({ products: { update: { quantity: 1 } } });', RELATIONS)).toEqual([]);
   });
 
   it('an empty relation list matches nothing rather than everything', () => {
