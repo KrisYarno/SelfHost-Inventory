@@ -582,13 +582,22 @@ describe("Composer", () => {
 // ---------------------------------------------------------------------------
 
 describe("markdown sanitize schema (D-B2)", () => {
-  test("allows exactly the D-B2 element set", () => {
+  test("allows exactly the D-B2 + A1 C1 element set", () => {
     expect([...MARKDOWN_SANITIZE_SCHEMA.tagNames]).toEqual([
-      "p", "br", "h2", "h3", "ul", "ol", "li", "strong", "em", "a", "code", "pre",
+      "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "ul", "ol", "li", "strong", "em", "a",
+      "code", "pre", "table", "thead", "tbody", "tr", "th", "td",
     ]);
   });
-  test("excludes script/style/table/img/iframe/h1", () => {
-    for (const bad of ["script", "style", "table", "thead", "tbody", "tr", "td", "img", "iframe", "h1"]) {
+  test("allows attributes only on a (href) and code (className) — none on the table family, headings or hr", () => {
+    expect(MARKDOWN_SANITIZE_SCHEMA.attributes).toEqual({ a: ["href"], code: ["className"] });
+  });
+  test("includes the table family, every heading level and hr (A1 C1 — inert structure)", () => {
+    for (const ok of ["table", "thead", "tbody", "tr", "th", "td", "h1", "h4", "h5", "h6", "hr"]) {
+      expect(MARKDOWN_SANITIZE_SCHEMA.tagNames).toContain(ok);
+    }
+  });
+  test("still excludes img/script/style/iframe/input/blockquote/del", () => {
+    for (const bad of ["img", "script", "style", "iframe", "input", "blockquote", "del"]) {
       expect(MARKDOWN_SANITIZE_SCHEMA.tagNames).not.toContain(bad);
     }
   });
