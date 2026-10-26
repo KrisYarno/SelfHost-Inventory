@@ -123,7 +123,7 @@ import { resolveSurfaceModel } from "@/lib/assistant/providers";
 import { requireApproved } from "@/lib/api-utils";
 import { validateCSRFToken } from "@/lib/csrf";
 import { enforceRateLimit } from "@/lib/rateLimit";
-import { FINALIZE_DEADLINE_MS } from "@/lib/assistant/timing";
+import { FINALIZE_DEADLINE_MS, PROVIDER_TIMEOUT_MS } from "@/lib/assistant/timing";
 import {
   HISTORY_OMISSION_ID,
   HISTORY_OMISSION_NOTE,
@@ -532,9 +532,35 @@ describe("streamText wiring", () => {
     expect(opts.system as string).toContain("Today is");
     expect(opts.stopWhen).toEqual({ __stepCountIs: 10 }); // stepCountIs(STEP_LIMIT), W3-TUNE
     expect(opts.timeout).toBe(60_000); // RETAINED alongside the route-owned timers
-    expect(opts.maxOutputTokens).toBe(3072); // W3-TUNE (spec §5 T-TUNE REV-2)
+    expect(opts.maxOutputTokens).toBe(16000); // A1 plan D5 (model-options.ts)
+    // "claude-x" is ANTHROPIC but outside the effort table: API defaults, no options.
+    expect(opts).not.toHaveProperty("providerOptions");
+    expect(opts).not.toHaveProperty("prepareStep");
     expect(opts.tools).toEqual({ find_product: {} });
     expect(typeof opts.onFinish).toBe("function");
+  });
+
+  // A1 pack C3/C4 (seam S1): the route spells no provider option itself — the
+  // resolved kind + model go through modelCallOptions(..., "assistant").
+  test("a resolved claude-opus-5-5 sends effort medium (its API default) and no thinking", async () => {
+    resolveMock.mockResolvedValue({ ...MODEL, model: "claude-opus-5-5" });
+    await POST(req(validBody));
+    const opts = streamTextSpy.mock.calls[0][0] as Record<string, unknown>;
+    expect(opts.providerOptions).toEqual({ anthropic: { effort: "medium" } });
+    expect(opts.maxOutputTokens).toBe(16000);
+    expect(JSON.stringify(opts.providerOptions)).not.toContain("thinking");
+    expect(opts).not.toHaveProperty("prepareStep");
+    expect(opts.stopWhen).toEqual({ __stepCountIs: 10 });
+  });
+
+  test("an OPENAI row gets NO providerOptions, the same 16000 per-step cap, no prepareStep", async () => {
+    resolveMock.mockResolvedValue({ languageModel: { __model: true }, kind: "OPENAI", model: "gpt-x" });
+    await POST(req(validBody));
+    const opts = streamTextSpy.mock.calls[0][0] as Record<string, unknown>;
+    expect(opts).not.toHaveProperty("providerOptions");
+    expect(opts.maxOutputTokens).toBe(16000);
+    expect(opts).not.toHaveProperty("prepareStep");
+    expect(opts.stopWhen).toEqual({ __stepCountIs: 10 });
   });
 
   test("abortSignal is the LATCH's signal, never request.signal directly", async () => {
@@ -545,16 +571,16 @@ describe("streamText wiring", () => {
     expect(opts.abortSignal).not.toBe(request.signal);
   });
 
-  // W3-TUNE (spec §5 T-TUNE REV-2) — PINNED cost math: the per-step MAX_OUTPUT_TOKENS
-  // cap applies PER STEP, so 10 steps x 4096 would have raised worst-case generation
-  // ~2.5x; 10 x 3072 keeps it ~1.9x and the 60s provider timeout still stands. STEP_LIMIT
-  // 8 -> 10 and MAX_OUTPUT_TOKENS 2048 -> 3072 are pinned here; changing either must
-  // re-derive that cost math (and revisit after live-drive latency/cost data).
-  test("STEP_LIMIT is 10 and MAX_OUTPUT_TOKENS is 3072 (pinned cost math)", async () => {
+  // STEP_LIMIT 8 -> 10 is W3-TUNE (spec §5 T-TUNE REV-2). The per-step output cap is
+  // A1 plan D5: 3072 cut one Opus 5.5 answer in five (thinking counts toward it), so
+  // it is 16000 and lives in lib/assistant/model-options.ts. Cost is dominated by
+  // INPUT, not this cap — it moves only the output tail. Changing either value here
+  // must re-derive D5.
+  test("STEP_LIMIT is 10 and the per-step output cap is 16000 (A1 plan D5)", async () => {
     await POST(req(validBody));
     const opts = streamTextSpy.mock.calls[0][0] as Record<string, unknown>;
     expect(opts.stopWhen).toEqual({ __stepCountIs: 10 });
-    expect(opts.maxOutputTokens).toBe(3072);
+    expect(opts.maxOutputTokens).toBe(16000);
   });
 
   test("createAiTools bound to the resolved ctx + a byte budget + telemetry wrapper", async () => {
@@ -604,6 +630,41 @@ describe("response stream options (C3)", () => {
       threadId: THREAD_ID,
     });
     expect(o.messageMetadata({ part: { type: "text-delta" } })).toBeUndefined();
+  });
+
+  // A1 pack C4b (seam S2, producer half): an `abort` part that was NOT a user Stop
+  // carries the timeout to the live client as message metadata.
+  test("messageMetadata on an abort part after T1 (cause 'provider-timeout') carries PROVIDER_TIMEOUT", async () => {
+    await POST(req(validBody));
+    await jest.advanceTimersByTimeAsync(PROVIDER_TIMEOUT_MS);
+    // Positive control: T1 really fired (it aborts the latch's signal) and T2 did not.
+    const opts = streamTextSpy.mock.calls[0][0] as { abortSignal: AbortSignal };
+    expect(opts.abortSignal.aborted).toBe(true);
+    expect(mockThreadOps.finalizeTurn).not.toHaveBeenCalled();
+    expect(capturedStreamOptions().messageMetadata({ part: { type: "abort" } })).toEqual({
+      errorCode: "PROVIDER_TIMEOUT",
+      threadId: THREAD_ID,
+    });
+  });
+
+  test("messageMetadata on an abort part with NO latched cause (the SDK's own timeout) carries PROVIDER_TIMEOUT", async () => {
+    await POST(req(validBody));
+    expect(capturedStreamOptions().messageMetadata({ part: { type: "abort" } })).toEqual({
+      errorCode: "PROVIDER_TIMEOUT",
+      threadId: THREAD_ID,
+    });
+  });
+
+  test("messageMetadata on an abort part after a user Stop (cause 'client') is undefined", async () => {
+    const request = req(validBody);
+    const controller = new AbortController();
+    Object.defineProperty(request, "signal", { value: controller.signal });
+    await POST(request);
+    controller.abort();
+    const o = capturedStreamOptions();
+    expect(o.messageMetadata({ part: { type: "abort" } })).toBeUndefined();
+    // The thread id still rides "start" after a Stop — only the abort branch differs.
+    expect(o.messageMetadata({ part: { type: "start" } })).toEqual({ threadId: THREAD_ID });
   });
 
   test("onError masks any provider error to a fixed code, never the raw payload", async () => {

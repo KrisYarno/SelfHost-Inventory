@@ -73,6 +73,14 @@ function generateArgs(): Record<string, any> {
   return mockGenerateText.mock.calls[0][0];
 }
 
+/** True when ANY nested plain object/array of `value` owns `key` (cycle-safe). */
+function hasKeyDeep(value: unknown, key: string, seen: Set<unknown> = new Set()): boolean {
+  if (value === null || typeof value !== "object" || seen.has(value)) return false;
+  seen.add(value);
+  if (Object.prototype.hasOwnProperty.call(value, key)) return true;
+  return Object.values(value as Record<string, unknown>).some((v) => hasKeyDeep(v, key, seen));
+}
+
 /** The conditional thread update, as the module made it. */
 function titleUpdates(): Array<Record<string, any>> {
   return db.assistantThread.updateMany.mock.calls.map((call: any[]) => call[0]);
@@ -121,7 +129,7 @@ describe('generateThreadTitle "creating-model" (C6): the detached model call', (
     ]);
   });
 
-  it("calls generateText ONCE with the C6 prompt, maxOutputTokens 256, thinking disabled and an abort signal", async () => {
+  it("calls generateText ONCE with the C6 prompt, maxOutputTokens 1024, no thinking and an abort signal", async () => {
     await generateThreadTitle(CREATING_JOB);
 
     expect(mockGenerateText).toHaveBeenCalledTimes(1);
@@ -129,14 +137,47 @@ describe('generateThreadTitle "creating-model" (C6): the detached model call', (
     expect(args.model).toBe(RESOLVED.languageModel);
     expect(args.system).toBe(TITLE_SYSTEM);
     expect(args.prompt).toBe(CREATING_JOB.firstUserText);
-    // F-7 (2.C live re-baseline): reasoning-default models (Claude 5 family) burn a
-    // small output cap on thinking before any text — every live title fell back.
-    // Thinking is DISABLED for the anthropic path (a title needs no reasoning) and
-    // the cap is a cost bound tolerant of providers that ignore that namespace.
-    expect(args.maxOutputTokens).toBe(256);
-    expect(args.providerOptions).toEqual({ anthropic: { thinking: { type: "disabled" } } });
+    // A1 pack C3/C4: the title cap comes from model-options.ts (TITLE_MAX_OUTPUT_TOKENS).
+    // F-7's `thinking: { type: "disabled" }` is gone for good — Opus 5.5 rejects it
+    // with a 400 at every effort (review #4 R4-3), so no thinking option is ever sent.
+    expect(args.maxOutputTokens).toBe(1024);
+    expect(hasKeyDeep(args, "thinking")).toBe(false);
+    // An OLLAMA row gets NO provider options at all (launch-gate/spike-a-title.mjs
+    // mirrors exactly this call).
+    expect(args).not.toHaveProperty("providerOptions");
     expect(args.abortSignal).toBeInstanceOf(AbortSignal);
     expect(args.abortSignal.aborted).toBe(false);
+  });
+
+  it("sends effort LOW (and nothing else) for a current Anthropic id; no thinking anywhere", async () => {
+    mockResolveSurfaceModel.mockResolvedValue({
+      kind: "ANTHROPIC",
+      model: "claude-opus-5-5",
+      languageModel: { __mock: "lm" },
+    });
+
+    await generateThreadTitle(CREATING_JOB);
+
+    const args = generateArgs();
+    expect(args.maxOutputTokens).toBe(1024);
+    expect(args.providerOptions.anthropic.effort).toBe("low");
+    expect(args.providerOptions).toEqual({ anthropic: { effort: "low" } });
+    expect(hasKeyDeep(args, "thinking")).toBe(false);
+  });
+
+  it("sends NO provider options for an Anthropic id outside the effort table (effort 400s there)", async () => {
+    mockResolveSurfaceModel.mockResolvedValue({
+      kind: "ANTHROPIC",
+      model: "claude-sonnet-4-5",
+      languageModel: { __mock: "lm" },
+    });
+
+    await generateThreadTitle(CREATING_JOB);
+
+    const args = generateArgs();
+    expect(args.maxOutputTokens).toBe(1024);
+    expect(args).not.toHaveProperty("providerOptions");
+    expect(hasKeyDeep(args, "thinking")).toBe(false);
   });
 
   it("truncates the prompt to 500 characters (the C6 input bound)", async () => {

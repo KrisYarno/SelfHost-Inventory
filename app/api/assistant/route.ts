@@ -9,8 +9,11 @@
  * and a per-turn byte budget.
  *
  * Security posture: provider/tool errors reach the client ONLY as the fixed
- * codes PROVIDER_ERROR / STEP_LIMIT / TOOL_ERROR — raw provider payloads (urls,
- * headers, bodies, keys) never cross the boundary, and server logs carry only
+ * codes PROVIDER_ERROR / STEP_LIMIT / TOOL_ERROR, and a provider timeout ONLY as
+ * PROVIDER_TIMEOUT, carried as message METADATA on the stream's `abort` part (an
+ * abort is never a client error; lib/assistant/stream-metadata.ts). Raw provider
+ * payloads (urls, headers, bodies, keys) never cross the boundary, and server logs
+ * carry only
  * { threadId, requestId, userId, providerKind, model, toolNames, outcome,
  * durationMs } (never prompts, args, or results). System prompt is static; tool
  * output is delivered as structured tool messages, never interpolated into
@@ -36,6 +39,8 @@ import { requireApproved, requireCSRF, errorResponse } from "@/lib/api-utils";
 import { enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
 import { AppError } from "@/lib/error-handling";
 import { resolveSurfaceModel, PROVIDER_TIMEOUT_MS } from "@/lib/assistant/providers";
+import { modelCallOptions } from "@/lib/assistant/model-options";
+import { turnMessageMetadata } from "@/lib/assistant/stream-metadata";
 import { resolveToolContext, type ToolContext } from "@/lib/assistant/context";
 import { createAiTools } from "@/lib/assistant/tool-adapters";
 import { TURN_RESULT_BUDGET_BYTES } from "@/lib/assistant/tools";
@@ -65,12 +70,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // W3-TUNE (spec §5 T-TUNE REV-2). STEP_LIMIT 8 -> 10 (composites cut multi-call
-// choreography but wider breadth needs headroom). MAX_OUTPUT_TOKENS 2048 -> 3072:
-// the cap applies PER STEP, so 10x4096 would have raised worst-case generation ~2.5x;
-// 10x3072 keeps it ~1.9x and the 60s provider timeout stands. Revisit after live-drive
-// cost/latency data. Pinned in __tests__/integration/api/lane4-assistant.test.ts.
+// choreography but wider breadth needs headroom). The per-step output cap is NOT
+// here: it lives in lib/assistant/model-options.ts with the effort table (A1 plan
+// D5 — it applies per step, thinking counts toward it, and cost is dominated by
+// input, not the cap). Both pinned in __tests__/integration/api/lane4-assistant.test.ts.
 const STEP_LIMIT = 10;
-const MAX_OUTPUT_TOKENS = 3072;
 const RATE_LIMIT = { limit: 30, ttl: 60 * 60 * 1000 } as const;
 
 /** How long the finalizer waits for `result.usage` before recording NULL tokens
@@ -592,6 +596,13 @@ export async function POST(request: NextRequest): Promise<Response> {
     });
 
     // --- Stream ---
+    // A1 pack C3: the cap and (for an ANTHROPIC id in the effort table) the effort
+    // come from the one owner; this route spells no provider option itself.
+    const callOptions = modelCallOptions({
+      kind: resolved.kind,
+      model: resolved.model,
+      surface: "assistant",
+    });
     const result = streamText({
       model: resolved.languageModel,
       // Server-controlled context: today's UTC date (D-T6). `new Date()` is trusted
@@ -608,7 +619,8 @@ export async function POST(request: NextRequest): Promise<Response> {
       // Retained alongside the route-owned timers: it still cuts a stream that
       // YIELDS between reads. T1/T2 are the observable truth.
       timeout: PROVIDER_TIMEOUT_MS,
-      maxOutputTokens: MAX_OUTPUT_TOKENS,
+      maxOutputTokens: callOptions.maxOutputTokens,
+      ...(callOptions.providerOptions ? { providerOptions: callOptions.providerOptions } : {}),
       onFinish: () => logRun("ok"),
       // Suppress the SDK's default raw-error console logging; the client-facing
       // mask + the redacted log happen in the UI-stream onError below.
@@ -626,14 +638,10 @@ export async function POST(request: NextRequest): Promise<Response> {
       // C3: the client reads its thread id off the FIRST metadata it sees, and the
       // finish reason still rides home so a step-cap is distinguishable from a
       // natural completion (D-B4). The finalizer re-reads finishReason from the
-      // persisted message's own metadata, so "finish" must keep carrying it.
-      messageMetadata: ({ part }) => {
-        if (part.type === "start") return { threadId: claim.threadId };
-        if (part.type === "finish") {
-          return { finishReason: part.finishReason, threadId: claim.threadId };
-        }
-        return undefined;
-      },
+      // persisted message's own metadata, so "finish" must keep carrying it. A1 C4b:
+      // an `abort` part that was not a user Stop carries PROVIDER_TIMEOUT to the live
+      // client. The latch's cause is read per part, at the moment the part arrives.
+      messageMetadata: ({ part }) => turnMessageMetadata(part, latch.cause(), claim.threadId),
       onError: (error) => {
         const code = maskStreamError(error);
         if (errorLatched === null) errorLatched = code;

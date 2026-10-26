@@ -25,6 +25,7 @@
 import { generateText, type LanguageModel, type LanguageModelUsage } from "ai";
 import prisma from "@/lib/prisma";
 import { resolveSurfaceModel } from "@/lib/assistant/providers";
+import { modelCallOptions, type CallOptions } from "@/lib/assistant/model-options";
 import { finalizeTitleRequest, insertTitleRequest } from "@/lib/assistant/requests";
 import type { UsageTriple } from "@/lib/assistant/thread-contracts";
 
@@ -59,13 +60,6 @@ const FALLBACK_MAX_CHARS = 60;
 
 /** The model only ever sees the head of the first user message. */
 const PROMPT_MAX_CHARS = 500;
-
-/** A title is a handful of words; the cap is a COST bound, not a target length.
- *  F-7 (2.C live re-baseline): 24 was too tight for reasoning-default models — the
- *  Claude 5 family burns the whole cap on adaptive thinking before any text, so
- *  every live title fell back. Thinking is disabled for the anthropic path below;
- *  256 additionally tolerates providers that ignore that namespace. */
-const TITLE_MAX_OUTPUT_TOKENS = 256;
 
 /** Spec C6, verbatim. The message is DATA — this prompt is the injection posture. */
 const TITLE_SYSTEM_PROMPT =
@@ -117,7 +111,11 @@ async function runModelTitle(job: Extract<TitleJob, { mode: "creating-model" }>)
       membershipScope: job.membershipScope,
     });
 
-    const result = await callWithTimeout(resolved.languageModel, job.firstUserText);
+    const result = await callWithTimeout(
+      resolved.languageModel,
+      job.firstUserText,
+      modelCallOptions({ kind: resolved.kind, model: resolved.model, surface: "title" }),
+    );
     const title = sanitize(result.text ?? "", TITLE_MAX_CHARS);
     // An empty answer is a FAILED answer: a blank title would satisfy the
     // `title IS NULL` fence forever and no later backfill could repair it.
@@ -200,6 +198,7 @@ async function runLaterFallback(job: Extract<TitleJob, { mode: "later-fallback" 
 async function callWithTimeout(
   model: LanguageModel,
   firstUserText: string,
+  callOptions: CallOptions,
 ): Promise<{ text?: string; usage?: LanguageModelUsage }> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -208,10 +207,15 @@ async function callWithTimeout(
     model,
     system: TITLE_SYSTEM_PROMPT,
     prompt: firstUserText.slice(0, PROMPT_MAX_CHARS),
-    maxOutputTokens: TITLE_MAX_OUTPUT_TOKENS,
-    // F-7: a title needs no reasoning. Other providers ignore this namespace —
-    // their reasoning-default models lean on the raised output cap instead.
-    providerOptions: { anthropic: { thinking: { type: "disabled" } } },
+    // The cap and the effort are model-options.ts's (A1 pack C3), never spelled here.
+    // F-7 (2.C live re-baseline) found 24 tokens too tight: a reasoning-default model
+    // spends a small cap on thinking before any text. Its fix — `thinking: disabled`
+    // — is GONE: Opus 5.5 rejects it with a 400 at every effort (review #4 R4-3), so
+    // no thinking option is ever sent. A title runs adaptive at effort "low" (an
+    // ANTHROPIC id in the effort table) within a 1,024-token cost bound; any other
+    // row gets no provider options at all.
+    maxOutputTokens: callOptions.maxOutputTokens,
+    ...(callOptions.providerOptions ? { providerOptions: callOptions.providerOptions } : {}),
     abortSignal: controller.signal,
   });
   // Handled here, read nowhere: without this, a hung call that eventually rejects
