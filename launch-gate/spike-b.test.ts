@@ -29,12 +29,12 @@
  *      any SDK timeout, so the ROUTE's T2 deadline is the only thing that bounds the
  *      turn: a content-then-stall stream must finalize error/PROVIDER_TIMEOUT with
  *      the ACCUMULATOR's partial persisted, and an indefinitely-open SILENT stream
- *      must finalize the same way with no message row — both BEFORE the 90s lease.
+ *      must finalize the same way with no message row — both BEFORE the 120s lease.
  *      Per pack REV-4 the T2 clock starts at CLAIM COMPLETION, not at first token.
  *
  * NO WALL-CLOCK SLEEPS ON THE LEASE (plan D7): staleness is manufactured by
  * BACKDATING `createdAt` through the oracle. The only real waiting in this file is
- * (d)'s two ~75s deadline cases, which are the contract itself.
+ * (d)'s two ~105s deadline cases, which are the contract itself.
  *
  * DATABASE BINDING (b): `lib/assistant/threads.ts` reaches the database through the
  * `@/lib/prisma` singleton, which constructs its `PrismaClient` at module load and
@@ -154,7 +154,7 @@ async function maxRequestId(): Promise<number> {
 }
 
 /** Manufacture staleness the ONLY sanctioned way (plan D7): move `createdAt` back
- *  past the lease instead of waiting out 90 seconds of wall clock. */
+ *  past the lease instead of waiting out 120 seconds of wall clock. */
 async function backdate(requestId: number, seconds: number): Promise<void> {
   await oracleQuery(
     "UPDATE assistant_requests SET createdAt = DATE_SUB(NOW(3), INTERVAL ? SECOND) WHERE id = ?",
@@ -594,7 +594,7 @@ describe("SPIKE B(d) — bounded finalization at the route-owned T2 deadline", (
       (candidate) => candidate.status !== "running",
       // Generous enough to SEE a late finalize (which would fail the lease assertion
       // with real evidence) rather than time out ambiguously.
-      100_000,
+      130_000,
       `B(d) ${scenario} finalize`,
       1_000,
     );
@@ -615,7 +615,7 @@ describe("SPIKE B(d) — bounded finalization at the route-owned T2 deadline", (
 
     beforeAll(async () => {
       outcome = await driveStalledTurn("spike-b-stall", "spike-b-stall-user");
-    }, 110_000);
+    }, 140_000);
 
     it("finalizes error/PROVIDER_TIMEOUT — never `aborted`, never `ok`", () => {
       expect(outcome.row.status).toBe("error");
@@ -646,7 +646,7 @@ describe("SPIKE B(d) — bounded finalization at the route-owned T2 deadline", (
 
     beforeAll(async () => {
       outcome = await driveStalledTurn("spike-b-silent", "spike-b-silent-user");
-    }, 110_000);
+    }, 140_000);
 
     it("finalizes error/PROVIDER_TIMEOUT on the same bounded clock", () => {
       expect(outcome.row.status).toBe("error");

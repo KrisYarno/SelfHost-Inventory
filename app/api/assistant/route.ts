@@ -38,7 +38,8 @@ import { ZodError } from "zod";
 import { requireApproved, requireCSRF, errorResponse } from "@/lib/api-utils";
 import { enforceRateLimit, RateLimitError } from "@/lib/rateLimit";
 import { AppError } from "@/lib/error-handling";
-import { resolveSurfaceModel, PROVIDER_TIMEOUT_MS } from "@/lib/assistant/providers";
+import { resolveSurfaceModel } from "@/lib/assistant/providers";
+import { PROVIDER_TIMEOUT_MS } from "@/lib/assistant/timing";
 import { modelCallOptions } from "@/lib/assistant/model-options";
 import { turnMessageMetadata } from "@/lib/assistant/stream-metadata";
 import { resolveToolContext, type ToolContext } from "@/lib/assistant/context";
@@ -567,8 +568,8 @@ export async function POST(request: NextRequest): Promise<Response> {
     return finalizing;
   };
 
-  // T1 (60s) latches "provider-timeout" and aborts inside the latch itself; T2
-  // (75s) is ours: finalize with the accumulator's frozen snapshot and abandon the
+  // T1 (90s) latches "provider-timeout" and aborts inside the latch itself; T2
+  // (105s) is ours: finalize with the accumulator's frozen snapshot and abandon the
   // blocked read, whose late finalize no-ops on the fence.
   latch.armTimers(() => {
     void finalizeOnce(accumulator.snapshot(), false);

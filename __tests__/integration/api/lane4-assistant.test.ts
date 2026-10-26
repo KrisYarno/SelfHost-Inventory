@@ -52,9 +52,10 @@ jest.mock("ai", () => ({
 }));
 
 // --- provider seam ---------------------------------------------------------
+// A1 pack C5: no PROVIDER_TIMEOUT_MS key — timing.ts is its one owner, and the route's
+// `timeout` pin below reads the REAL timing value.
 jest.mock("@/lib/assistant/providers", () => ({
   __esModule: true,
-  PROVIDER_TIMEOUT_MS: 60_000,
   resolveSurfaceModel: jest.fn(),
 }));
 
@@ -531,7 +532,9 @@ describe("streamText wiring", () => {
     expect(opts.system).toBe(buildSystemPrompt(new Date()));
     expect(opts.system as string).toContain("Today is");
     expect(opts.stopWhen).toEqual({ __stepCountIs: 10 }); // stepCountIs(STEP_LIMIT), W3-TUNE
-    expect(opts.timeout).toBe(60_000); // RETAINED alongside the route-owned timers
+    // RETAINED alongside the route-owned timers; A1 pack C5: the value is timing.ts's
+    // (the providers mock above carries no such key, so a providers import reads undefined).
+    expect(opts.timeout).toBe(PROVIDER_TIMEOUT_MS);
     expect(opts.maxOutputTokens).toBe(16000); // A1 plan D5 (model-options.ts)
     // "claude-x" is ANTHROPIC but outside the effort table: API defaults, no options.
     expect(opts).not.toHaveProperty("providerOptions");

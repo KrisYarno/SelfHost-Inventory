@@ -181,10 +181,12 @@ describe("constants (T1)", () => {
     expect(SHED_KEEP_TURNS).toBe(4);
   });
 
-  it("pins the three time constants on timing.ts with 60 < 75 < 90", () => {
-    expect(PROVIDER_TIMEOUT_MS).toBe(60_000);
-    expect(FINALIZE_DEADLINE_MS).toBe(75_000);
-    expect(CLAIM_STALE_MS).toBe(90_000);
+  // A1 pack C5 / plan D6: the triple moved 60/75/90 -> 90/105/120, ordering and the
+  // 15 s gaps kept.
+  it("pins the three time constants on timing.ts with 90 < 105 < 120", () => {
+    expect(PROVIDER_TIMEOUT_MS).toBe(90_000);
+    expect(FINALIZE_DEADLINE_MS).toBe(105_000);
+    expect(CLAIM_STALE_MS).toBe(120_000);
     expect(PROVIDER_TIMEOUT_MS).toBeLessThan(FINALIZE_DEADLINE_MS);
     expect(FINALIZE_DEADLINE_MS).toBeLessThan(CLAIM_STALE_MS);
   });

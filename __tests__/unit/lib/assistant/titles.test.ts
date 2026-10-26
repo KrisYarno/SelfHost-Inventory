@@ -26,7 +26,6 @@ const mockResolveSurfaceModel = jest.fn();
 jest.mock("@/lib/assistant/providers", () => ({
   __esModule: true,
   resolveSurfaceModel: (...args: unknown[]) => mockResolveSurfaceModel(...args),
-  PROVIDER_TIMEOUT_MS: 60_000,
 }));
 
 const mockInsertTitleRequest = jest.fn();

@@ -29,9 +29,9 @@ export default {
   globalTeardown: "<rootDir>/global-teardown.ts",
   // Serial by contract: one container, one app, one shim, one deterministic order.
   maxWorkers: 1,
-  // HTTP round-trips against `next dev` plus the ~75s PROVIDER_TIMEOUT cases (1.8).
+  // HTTP round-trips against `next dev` plus the ~105s PROVIDER_TIMEOUT cases (1.8).
   // Individual tests may narrow this.
-  testTimeout: 120_000,
+  testTimeout: 150_000,
   transform: {
     "^.+\\.ts$": [
       "ts-jest",

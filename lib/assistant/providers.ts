@@ -25,8 +25,6 @@ export interface ResolvedModel {
   languageModel: LanguageModel;
 }
 
-export const PROVIDER_TIMEOUT_MS = 60_000;
-
 const AI_SURFACE_CONFIG_KEY = "aiSurfaceConfig";
 
 type ProviderRow = { encryptedApiKey: string | null; baseUrl: string | null };

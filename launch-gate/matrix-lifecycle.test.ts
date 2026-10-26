@@ -12,9 +12,9 @@
  *   · the crash path (SIGKILL -> young-row THREAD_BUSY -> lease -> SUPERSEDED) —
  *     spike-b B(c).
  *   · THE TWO PROVIDER_TIMEOUT CASES (content-then-stall and indefinitely-open
- *     silent, both finalizing via T2 at ~75s before the 90s lease) — spike-b B(d)(i)
+ *     silent, both finalizing via T2 at ~105s before the 120s lease) — spike-b B(d)(i)
  *     and (ii), which are the spec REV-8 standing rows themselves. Duplicating them
- *     here would add 150 seconds of wall clock and zero information.
+ *     here would add 210 seconds of wall clock and zero information.
  *
  * THE GENERATION BOUNDARY. This file opens with `restartApp()` (plan Task 1.8: "the
  * POST budget ... restartApp between rows 3 and 4"). Jest's file order VARIES (pack

@@ -30,7 +30,9 @@ jest.mock("ai-sdk-ollama", () => ({ __esModule: true, createOllama: jest.fn(() =
 jest.mock("@/lib/encryption", () => ({ __esModule: true, decryptValue: jest.fn(() => "decrypted-key") }));
 
 import prisma from "@/lib/prisma";
-import { resolveSurfaceModel, PROVIDER_TIMEOUT_MS } from "@/lib/assistant/providers";
+import * as providersModule from "@/lib/assistant/providers";
+import { resolveSurfaceModel } from "@/lib/assistant/providers";
+import { PROVIDER_TIMEOUT_MS } from "@/lib/assistant/timing";
 import { AppError } from "@/lib/error-handling";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
@@ -134,8 +136,16 @@ describe("resolveSurfaceModel: happy path + per-request registry", () => {
     expect(mockLanguageModel).toHaveBeenCalledWith("openai:gpt-x");
   });
 
-  it("exposes the per-request provider timeout constant", () => {
-    expect(PROVIDER_TIMEOUT_MS).toBe(60_000);
+  // A1 pack C5 / plan D6: ONE owner. The provider timeout lives in timing.ts only;
+  // providers.ts neither defines nor re-exports it (a second literal here is how the
+  // route once kept a 60 s SDK timeout after timing.ts changed).
+  it("providers.ts exports NO PROVIDER_TIMEOUT_MS (one owner: timing.ts)", () => {
+    expect(providersModule).not.toHaveProperty("PROVIDER_TIMEOUT_MS");
+    expect(Object.keys(providersModule)).not.toContain("PROVIDER_TIMEOUT_MS");
+  });
+
+  it("the provider timeout is timing.ts's 90 s", () => {
+    expect(PROVIDER_TIMEOUT_MS).toBe(90_000);
   });
 });
 

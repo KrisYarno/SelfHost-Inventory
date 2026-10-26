@@ -135,7 +135,6 @@ jest.mock("@/lib/assistant/providers", () => ({
     throw new Error("unconfigured (mock)");
   }),
   validateSurfaceConfig: jest.fn(async () => undefined),
-  PROVIDER_TIMEOUT_MS: 60_000,
 }));
 
 // ---------------------------------------------------------------------------
