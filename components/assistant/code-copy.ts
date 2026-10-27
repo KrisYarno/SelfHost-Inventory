@@ -27,8 +27,10 @@
  * value are kept as written. The skip is ONLY for a quote that closes (pack C12): the
  * quoted field must end at a `"` (not half of a `""`) followed by a comma, a line
  * ending or the end of the text; otherwise the field is the unquoted literal it was
- * before C11 (`Note, "approx 5` -> `Note` and ` "approx 5`), so a stray quote never
- * swallows the rows after it.
+ * before C11 (`Note, "approx 5` -> `Note` and ` "approx 5`), so a stray quote AFTER
+ * WHITESPACE never swallows the rows after it. A stray quote at a field start with no
+ * space before it still opens a quoted field (RFC 4180), and the `text/plain` copy is
+ * always the exact block.
  */
 export function parseCsv(text: string): string[][] {
   /** True when the `"` at `open` closes: its quoted field's end — the first `"` after

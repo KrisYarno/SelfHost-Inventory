@@ -19,6 +19,10 @@
  * Imports only from `ai` (the two classes' `isInstance`, the SDK's own marker check),
  * so the A1 wire probe bundles it with `ai` external and runs it against the REAL SDK.
  *
+ * Complete only for the route's current `streamText` options: with an
+ * `experimental_repairToolCall` (or a tool-input refine), a recovered call's error
+ * becomes a `ToolCallRepairError` (`ai/dist/index.js:3780-3784`) and must be added here.
+ *
  * MUST stay Next-free.
  */
 
