@@ -46,7 +46,9 @@ export type TurnStatus =
   | "failed-after-content"
   | "step-capped"
   | "length-capped"
-  | "truncated";
+  | "truncated"
+  | "timed-out"
+  | "refused";
 
 /** An assistant turn has content once it has any non-empty text or any tool. */
 export function assistantHasContent(m?: UIMessage): boolean {
@@ -66,8 +68,10 @@ function assistantHasTruncatedTool(m?: UIMessage): boolean {
   });
 }
 
-/** The turn metadata the finalizer persists (T0) — present on RESUMED turns, and
- *  carrying `finishReason` on a live turn once "finish" lands. */
+/** The turn metadata the finalizer persists (T0) — present on RESUMED turns. On a
+ *  live turn the SDK merges the stream's message metadata instead: `finishReason`
+ *  once "finish" lands, or `errorCode: "PROVIDER_TIMEOUT"` once a provider-timeout
+ *  "abort" lands (`lib/assistant/stream-metadata.ts`). */
 function metadataOf(m?: UIMessage): AssistantMessageMetadata | undefined {
   return (m?.metadata ?? undefined) as AssistantMessageMetadata | undefined;
 }
@@ -78,8 +82,10 @@ function metadataOf(m?: UIMessage): AssistantMessageMetadata | undefined {
  *
  * The SIGNATURE is fixed (every transcript call site passes exactly this): the
  * persisted-metadata truth is read from `assistant.metadata` INTERNALLY, so a
- * thread reloaded from the database renders stopped/failed/capped turns honestly
- * instead of flattening them all to "completed".
+ * thread reloaded from the database renders stopped/timed-out/failed/refused/capped
+ * turns honestly instead of flattening them all to "completed". A LIVE timeout lands
+ * in the same terminal branch: the chat settles `ready` after the stream's `abort`
+ * part, with its metadata already merged onto the message.
  */
 export function deriveTurnStatus(args: {
   assistant?: UIMessage;
@@ -99,14 +105,19 @@ export function deriveTurnStatus(args: {
     }
   }
 
-  // Terminal: a completed active turn OR any historical turn. Persisted metadata
-  // wins in T4's order — aborted, then errorCode, then the finish-reason caps (a
-  // stopped turn that also carries a trimmed tool result is still "stopped").
+  // Terminal: a settled active turn OR any historical turn. Metadata wins in this
+  // order (A1 pack C6) — aborted (a user Stop), then a provider timeout, then any
+  // other errorCode, then a refusal, then a trimmed tool result, then the
+  // finish-reason caps. A stopped turn that also carries a timeout or a trimmed
+  // tool result is still "stopped"; a refusal outranks a trimmed tool result.
   const meta = metadataOf(assistant);
   if (meta?.aborted === true) return "stopped";
+  if (meta?.errorCode === "PROVIDER_TIMEOUT") return "timed-out";
   if (meta?.errorCode) return content ? "failed-after-content" : "failed-before-content";
-  if (assistantHasTruncatedTool(assistant)) return "truncated";
   const fr = meta?.finishReason;
+  // `@ai-sdk/anthropic` maps the API's `stop_reason: "refusal"` to "content-filter".
+  if (fr === "content-filter") return "refused";
+  if (assistantHasTruncatedTool(assistant)) return "truncated";
   // Two DISTINCT failures (review M3): "tool-calls" = the model hit the step cap
   // before finishing its work; "length" = the model's own ANSWER was cut off at the
   // output-token ceiling. They need different copy, so they are different states.

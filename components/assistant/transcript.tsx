@@ -56,7 +56,9 @@ function usePrefersReducedMotion(): boolean {
 }
 
 /** The single milestone string for the active turn (D-B10). Stable while a phase
- *  persists, so the polite region announces once per milestone. */
+ *  persists, so the polite region announces once per milestone. EXHAUSTIVE with no
+ *  `default` (A1 pack C6, seam S7): a new `TurnStatus` fails tsc on `_exhaustive`
+ *  until it is given an honest announcement here. */
 function milestoneFor(status: TurnStatus, assistant?: UIMessage): string {
   switch (status) {
     case "submitting":
@@ -73,17 +75,26 @@ function milestoneFor(status: TurnStatus, assistant?: UIMessage): string {
       return "Assistant is responding.";
     }
     case "completed":
-    case "step-capped":
-    case "truncated":
       return "Response complete.";
     case "stopped":
       return "Response stopped.";
     case "failed-before-content":
     case "failed-after-content":
       return "Assistant response failed.";
-    default:
-      return "";
+    case "step-capped":
+      return "Assistant stopped at its work limit.";
+    case "truncated":
+      return "Response complete; some results were omitted.";
+    case "length-capped":
+      return "Assistant response was cut off.";
+    case "timed-out":
+      return "Assistant response timed out.";
+    case "refused":
+      return "Assistant declined to answer.";
   }
+  const _exhaustive: never = status;
+  // Unreachable by type; a value cast past the union stays silent, never announced raw.
+  return "";
 }
 
 export function Transcript({

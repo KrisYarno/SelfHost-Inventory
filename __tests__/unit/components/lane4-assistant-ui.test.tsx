@@ -788,3 +788,165 @@ describe("AssistantPage states (D-B7)", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// AssistantPage — milestone announcements (A1 pack C6; seams S2 consumer half, S7).
+// `milestoneFor` is private to transcript.tsx, so the strings are pinned through
+// the page, reading the ONE polite milestone region the transcript renders. The
+// live timeout case is the S2 consumer end to end: abort-part metadata merged onto
+// the live assistant message, chat settled `ready` -> timed-out strip + milestone.
+// ---------------------------------------------------------------------------
+
+describe("AssistantPage milestones (A1 C6)", () => {
+  // jsdom implements no Element.scrollTo, and these are the first page cases that
+  // mount a NON-EMPTY transcript (its auto-stick effect scrolls on mount).
+  const originalScrollTo = Element.prototype.scrollTo;
+  afterEach(() => {
+    Element.prototype.scrollTo = originalScrollTo;
+  });
+
+  beforeEach(() => {
+    Element.prototype.scrollTo = jest.fn() as unknown as typeof Element.prototype.scrollTo;
+    useSessionMock.mockReturnValue({ data: { user: { isAdmin: false } } });
+    window.sessionStorage.clear(); // no last-open thread => no resume fetch
+    global.fetch = jest.fn(async (input: unknown) => {
+      const url = typeof input === "string" ? input : String((input as { url?: unknown })?.url);
+      if (url.startsWith("/api/assistant/threads")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ items: [], limit: 20, offset: 0, nextOffset: null }),
+        } as unknown as Response;
+      }
+      throw new Error("probe disabled");
+    }) as unknown as typeof fetch;
+  });
+
+  /** The single polite, atomic milestone region (status-region.tsx). */
+  function milestoneRegion(): HTMLElement {
+    const regions = screen
+      .getAllByRole("status")
+      .filter((el) => el.getAttribute("aria-live") === "polite");
+    expect(regions).toHaveLength(1);
+    return regions[0];
+  }
+
+  const TIMEOUT_COPY =
+    "This took longer than the time limit, so the answer stopped. Asking for one part at a time usually helps.";
+  const truncatedTool = toolPart("get_sales", "output-available", {
+    output: { status: "truncated", meta: { scope: "company" } },
+  });
+
+  const cases: Array<{ name: string; status: string; messages: Msg[]; error?: Error; milestone: string }> = [
+    // Unchanged strings.
+    { name: "submitting", status: "submitted", messages: [userMsg("q")], milestone: "Assistant is responding." },
+    {
+      name: "streaming",
+      status: "streaming",
+      messages: [userMsg("q"), asstText("partial")],
+      milestone: "Assistant is responding.",
+    },
+    {
+      name: "streaming with a pending tool (its pendingLabel)",
+      status: "streaming",
+      messages: [userMsg("q"), { id: "a1", role: "assistant", parts: [toolPart("get_sales", "input-available")] }],
+      milestone: "Looking up sales…",
+    },
+    {
+      name: "completed",
+      status: "ready",
+      messages: [userMsg("q"), asstText("done", "a1", { finishReason: "stop" })],
+      milestone: "Response complete.",
+    },
+    {
+      name: "stopped",
+      status: "ready",
+      messages: [userMsg("q"), asstText("partial", "a1", { aborted: true })],
+      milestone: "Response stopped.",
+    },
+    {
+      name: "failed-after-content (persisted errorCode)",
+      status: "ready",
+      messages: [userMsg("q"), asstText("partial", "a1", { errorCode: "PROVIDER_ERROR" })],
+      milestone: "Assistant response failed.",
+    },
+    {
+      name: "failed-before-content (live chat error)",
+      status: "error",
+      messages: [userMsg("q")],
+      error: new Error("PROVIDER_ERROR"),
+      milestone: "Assistant response failed.",
+    },
+    // The five A1 strings.
+    {
+      name: "step-capped",
+      status: "ready",
+      messages: [userMsg("q"), asstText("some", "a1", { finishReason: "tool-calls" })],
+      milestone: "Assistant stopped at its work limit.",
+    },
+    {
+      name: "truncated",
+      status: "ready",
+      messages: [userMsg("q"), { id: "a1", role: "assistant", parts: [truncatedTool], metadata: { finishReason: "stop" } }],
+      milestone: "Response complete; some results were omitted.",
+    },
+    {
+      name: "length-capped",
+      status: "ready",
+      messages: [userMsg("q"), asstText("half", "a1", { finishReason: "length" })],
+      milestone: "Assistant response was cut off.",
+    },
+    {
+      name: "timed-out (live, with content)",
+      status: "ready",
+      messages: [userMsg("q"), asstText("partial", "a1", { threadId: "cthread0001", errorCode: "PROVIDER_TIMEOUT" })],
+      milestone: "Assistant response timed out.",
+    },
+    {
+      name: "timed-out (live, without content)",
+      status: "ready",
+      messages: [
+        userMsg("q"),
+        { id: "a1", role: "assistant", parts: [], metadata: { threadId: "cthread0001", errorCode: "PROVIDER_TIMEOUT" } },
+      ],
+      milestone: "Assistant response timed out.",
+    },
+    {
+      name: "refused",
+      status: "ready",
+      messages: [userMsg("q"), asstText("", "a1", { finishReason: "content-filter" })],
+      milestone: "Assistant declined to answer.",
+    },
+  ];
+
+  test.each(cases)("$name -> \"$milestone\"", ({ status, messages, error, milestone }) => {
+    useChatMock.mockReturnValue(chatReturn({ status, messages, error }));
+    renderPage();
+    expect(milestoneRegion().textContent).toBe(milestone);
+  });
+
+  test("S2 consumer: a live timeout renders the timed-out strip (Retry) in the transcript, partial text above", () => {
+    const regenerate = jest.fn();
+    useChatMock.mockReturnValue(
+      chatReturn({
+        status: "ready",
+        regenerate,
+        messages: [
+          userMsg("q"),
+          asstText("partial answer", "a1", { threadId: "cthread0001", errorCode: "PROVIDER_TIMEOUT" }),
+        ],
+      }),
+    );
+    renderPage();
+    const transcript = screen.getByTestId("assistant-transcript");
+    const alert = within(transcript).getByRole("alert");
+    expect(within(alert).getByText(TIMEOUT_COPY)).toBeInTheDocument();
+    expect(within(transcript).queryByText(/could not reach its AI provider/)).toBeNull();
+    const md = within(transcript).getByTestId("md");
+    expect(md).toHaveTextContent("partial answer");
+    expect(md.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(regenerate).toHaveBeenCalledTimes(1);
+    expect(milestoneRegion().textContent).toBe("Assistant response timed out.");
+  });
+});

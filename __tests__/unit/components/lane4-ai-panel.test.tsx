@@ -52,6 +52,7 @@ jest.mock("@/hooks/use-ai-admin", () => {
 import {
   ProviderPanel,
   computeProviderStatus,
+  KNOWN_MODELS,
   OLLAMA_PROMPT_WARNING,
   ROUTED_DISABLE_MESSAGE,
 } from "@/components/admin/ai/provider-panel";
@@ -111,6 +112,13 @@ describe("computeProviderStatus precedence (D-B8)", () => {
 // ProviderPanel — chip editor, Ollama warning, disable guard, save error
 // ---------------------------------------------------------------------------
 describe("ProviderPanel", () => {
+  // A1 pack C9: the suggested Anthropic seed is the current model family. OPENAI is
+  // deliberately unchanged until the SDK upgrade (A3).
+  it("seeds the Anthropic chip editor with the current model family (A1 C9)", () => {
+    expect(KNOWN_MODELS.ANTHROPIC).toEqual(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+    expect(KNOWN_MODELS.OPENAI).toEqual(["gpt-5.1", "gpt-5.1-mini", "o4-mini"]);
+  });
+
   it("Ollama panel carries the required prompt-data warning (copy-tested)", () => {
     render(<ProviderPanel provider={provider({ kind: "OLLAMA" })} isRouted={false} />);
     expect(screen.getByText(OLLAMA_PROMPT_WARNING)).toBeInTheDocument();

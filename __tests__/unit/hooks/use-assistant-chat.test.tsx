@@ -354,6 +354,140 @@ describe("deriveTurnStatus on persisted turns", () => {
 });
 
 // ---------------------------------------------------------------------------
+// deriveTurnStatus — timed-out + refused (A1 pack C6; seams S2 consumer half, S3c).
+// A timeout reaches the LIVE client as message metadata merged off the stream's
+// `abort` part (`stream-metadata.ts`), after which the chat settles `ready`; the
+// finalizer persists the same `errorCode` for a reload. A refusal arrives as the
+// provider's `content-filter` finish reason.
+// ---------------------------------------------------------------------------
+
+describe("deriveTurnStatus: timed-out and refused (A1 C6)", () => {
+  const live = { isActive: true, chatStatus: "ready" as const, stopped: false };
+  const resumed = { isActive: false, chatStatus: "ready" as const, stopped: false };
+  const timeoutMeta = { threadId: "cthread0001", errorCode: "PROVIDER_TIMEOUT" };
+  /** A live assistant message the SDK opened on "start" but that streamed nothing. */
+  const contentless = (metadata: unknown, id = "a1"): Msg => ({ id, role: "assistant", parts: [], metadata });
+  const truncatedTool = {
+    type: "tool-get_sales",
+    state: "output-available",
+    output: { status: "truncated", meta: { scope: "company" } },
+  };
+
+  test("LIVE timeout WITH content -> timed-out (not completed, not failed-*)", () => {
+    expect(
+      deriveTurnStatus({ ...live, assistant: asstMsg("partial", "a1", timeoutMeta) as never }),
+    ).toBe("timed-out");
+  });
+
+  test("LIVE timeout WITHOUT content -> timed-out", () => {
+    expect(deriveTurnStatus({ ...live, assistant: contentless(timeoutMeta) as never })).toBe("timed-out");
+    // A whitespace-only text part is still no content.
+    expect(
+      deriveTurnStatus({ ...live, assistant: asstMsg("   ", "a1", timeoutMeta) as never }),
+    ).toBe("timed-out");
+  });
+
+  test("RELOADED timeout (persisted errorCode) -> timed-out, with and without content", () => {
+    expect(
+      deriveTurnStatus({
+        ...resumed,
+        assistant: asstMsg("partial", "a1", { errorCode: "PROVIDER_TIMEOUT" }) as never,
+      }),
+    ).toBe("timed-out");
+    expect(
+      deriveTurnStatus({ ...resumed, assistant: contentless({ errorCode: "PROVIDER_TIMEOUT" }) as never }),
+    ).toBe("timed-out");
+  });
+
+  test("aborted WINS over PROVIDER_TIMEOUT -> stopped", () => {
+    expect(
+      deriveTurnStatus({
+        ...resumed,
+        assistant: asstMsg("partial", "a1", { aborted: true, errorCode: "PROVIDER_TIMEOUT" }) as never,
+      }),
+    ).toBe("stopped");
+    expect(
+      deriveTurnStatus({
+        ...live,
+        assistant: asstMsg("partial", "a1", { aborted: true, errorCode: "PROVIDER_TIMEOUT" }) as never,
+      }),
+    ).toBe("stopped");
+  });
+
+  test("a user Stop on this turn still reads stopped even if the server records the timeout (D6)", () => {
+    expect(
+      deriveTurnStatus({ ...live, stopped: true, assistant: asstMsg("partial", "a1", timeoutMeta) as never }),
+    ).toBe("stopped");
+  });
+
+  test.each(["PROVIDER_ERROR", "TOOL_ERROR", "STEP_LIMIT"])(
+    "another errorCode (%s) still -> failed-* (unchanged)",
+    (errorCode) => {
+      expect(
+        deriveTurnStatus({ ...resumed, assistant: asstMsg("partial", "a1", { errorCode }) as never }),
+      ).toBe("failed-after-content");
+      expect(deriveTurnStatus({ ...resumed, assistant: contentless({ errorCode }) as never })).toBe(
+        "failed-before-content",
+      );
+      expect(deriveTurnStatus({ ...live, assistant: contentless({ errorCode }) as never })).toBe(
+        "failed-before-content",
+      );
+    },
+  );
+
+  test("finishReason content-filter -> refused (live and reloaded, with or without content)", () => {
+    const meta = { finishReason: "content-filter" };
+    expect(deriveTurnStatus({ ...live, assistant: asstMsg("", "a1", meta) as never })).toBe("refused");
+    expect(deriveTurnStatus({ ...live, assistant: asstMsg("Partial.", "a1", meta) as never })).toBe("refused");
+    expect(deriveTurnStatus({ ...resumed, assistant: asstMsg("Partial.", "a1", meta) as never })).toBe(
+      "refused",
+    );
+  });
+
+  test("content-filter ranks ABOVE a truncated tool part -> refused, not truncated", () => {
+    const refusedWithTrim: Msg = {
+      id: "a1",
+      role: "assistant",
+      parts: [truncatedTool, { type: "text", text: "partial" }],
+      metadata: { finishReason: "content-filter" },
+    };
+    expect(deriveTurnStatus({ ...live, assistant: refusedWithTrim as never })).toBe("refused");
+    expect(deriveTurnStatus({ ...resumed, assistant: refusedWithTrim as never })).toBe("refused");
+  });
+
+  test("a truncated tool part WITHOUT a refusal still reads truncated (positive control)", () => {
+    const trimmed: Msg = {
+      id: "a1",
+      role: "assistant",
+      parts: [truncatedTool],
+      metadata: { finishReason: "stop" },
+    };
+    expect(deriveTurnStatus({ ...live, assistant: trimmed as never })).toBe("truncated");
+  });
+
+  test("errorCode outranks content-filter (the terminal order is aborted, errorCode, finishReason)", () => {
+    expect(
+      deriveTurnStatus({
+        ...resumed,
+        assistant: asstMsg("x", "a1", { errorCode: "PROVIDER_TIMEOUT", finishReason: "content-filter" }) as never,
+      }),
+    ).toBe("timed-out");
+  });
+
+  test("the live in-flight states are untouched by timeout metadata", () => {
+    // While the chat is still streaming, the active branch answers first.
+    expect(
+      deriveTurnStatus({
+        assistant: asstMsg("partial", "a1", timeoutMeta) as never,
+        isActive: true,
+        chatStatus: "streaming",
+        stopped: false,
+      }),
+    ).toBe("streaming");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The returned surface (pack T7) — 2.2 consumes exactly this.
 // ---------------------------------------------------------------------------
 

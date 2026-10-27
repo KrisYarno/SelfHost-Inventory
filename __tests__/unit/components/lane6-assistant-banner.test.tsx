@@ -6,7 +6,7 @@
 // "tool-calls"). They must map to distinct states with distinct, honest copy.
 
 import * as React from "react";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 
 jest.mock("react-markdown", () => ({
   __esModule: true,
@@ -43,7 +43,16 @@ const asstText = (text: string, metadata?: unknown): Msg => ({
 });
 
 const STEP_COPY = /Assistant reached its work limit before finishing/;
-const LENGTH_COPY = /The answer was cut off\. Ask for a shorter summary or a narrower slice\./;
+// A1 pack C7 — frozen copy, matched EXACTLY (string matchers, not regexes).
+const LENGTH_COPY =
+  "The answer ran out of room before it finished. Ask for fewer rows, or one part at a time.";
+const TIMEOUT_COPY =
+  "This took longer than the time limit, so the answer stopped. Asking for one part at a time usually helps.";
+const REFUSED_COPY =
+  "The AI model declined to answer this question. If it keeps declining ordinary inventory questions, an admin can review the model in AI Providers.";
+// The failed-* sentence is unchanged by A1 — byte-identical.
+const PROVIDER_FAILURE_COPY =
+  "Assistant could not reach its AI provider. Try again. If this keeps happening, ask an admin to check AI Providers.";
 
 describe("deriveTurnStatus: length vs step cap are distinct (review M3)", () => {
   const base = { isActive: true, chatStatus: "ready" as const, stopped: false };
@@ -91,4 +100,143 @@ describe("MessageTurn: length-capped banner copy is distinct from step-capped", 
     expect(screen.getByText(STEP_COPY)).toBeInTheDocument();
     expect(screen.queryByText(LENGTH_COPY)).toBeNull();
   });
+});
+
+// ---------------------------------------------------------------------------
+// A1 pack C7 — timed-out / refused / length-capped copy. Banners carry NO live
+// role (the transcript's milestone region is the single announcer); the
+// FailureStrip keeps its existing role="alert", for timed-out as for failed-*.
+// ---------------------------------------------------------------------------
+
+/** `a` comes BEFORE `b` in document order. */
+function precedes(a: Element, b: Element): boolean {
+  return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+}
+
+describe("MessageTurn: A1 C7 frozen copy", () => {
+  const noop = () => undefined;
+
+  test("timed-out: the FailureStrip layout (role=alert + Retry) with the time-limit sentence", () => {
+    const onRetry = jest.fn();
+    render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={asstText("half an answer") as never} status="timed-out" onRetry={onRetry} />
+      </ul>,
+    );
+    const alert = screen.getByRole("alert");
+    expect(within(alert).getByText(TIMEOUT_COPY)).toBeInTheDocument();
+    // Its OWN sentence — never the provider-unreachable one.
+    expect(screen.queryByText(PROVIDER_FAILURE_COPY)).toBeNull();
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    // The partial answer is preserved ABOVE the strip.
+    const md = screen.getByTestId("md");
+    expect(md).toHaveTextContent("half an answer");
+    expect(precedes(md, alert)).toBe(true);
+  });
+
+  test("timed-out with NO content (live): the assistant body still shows the strip", () => {
+    const contentless = { id: "a1", role: "assistant", parts: [], metadata: { errorCode: "PROVIDER_TIMEOUT" } };
+    render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={contentless as never} status="timed-out" onRetry={noop} />
+      </ul>,
+    );
+    expect(within(screen.getByRole("alert")).getByText(TIMEOUT_COPY)).toBeInTheDocument();
+    expect(screen.queryByTestId("md")).toBeNull();
+  });
+
+  test("timed-out with no assistant message at all: showAssistant is still true (C6)", () => {
+    render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} status="timed-out" onRetry={noop} />
+      </ul>,
+    );
+    expect(screen.getByText("Assistant")).toBeInTheDocument();
+    expect(within(screen.getByRole("alert")).getByText(TIMEOUT_COPY)).toBeInTheDocument();
+  });
+
+  test.each(["failed-before-content", "failed-after-content"] as const)(
+    "%s: the provider-unreachable sentence is byte-identical, with Retry",
+    (status) => {
+      const onRetry = jest.fn();
+      render(
+        <ul>
+          <MessageTurn
+            user={userMsg("q") as never}
+            assistant={status === "failed-after-content" ? (asstText("partial") as never) : undefined}
+            status={status}
+            onRetry={onRetry}
+          />
+        </ul>,
+      );
+      const alert = screen.getByRole("alert");
+      const sentence = within(alert).getByText(PROVIDER_FAILURE_COPY);
+      expect(sentence.textContent).toBe(PROVIDER_FAILURE_COPY);
+      expect(screen.queryByText(TIMEOUT_COPY)).toBeNull();
+      fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+      expect(onRetry).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test("length-capped: the AmberBanner carries the C7 sentence exactly, partial text above, no live role", () => {
+    const { container } = render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={asstText("half an answer") as never} status="length-capped" onRetry={noop} />
+      </ul>,
+    );
+    const banner = screen.getByText(LENGTH_COPY);
+    expect(banner.textContent).toBe(LENGTH_COPY);
+    expect(precedes(screen.getByTestId("md"), banner)).toBe(true);
+    expect(banner).not.toHaveAttribute("role");
+    expect(container.querySelector("[role], [aria-live]")).toBeNull();
+    // The pre-A1 sentence is gone.
+    expect(screen.queryByText(/Ask for a shorter summary or a narrower slice/)).toBeNull();
+  });
+
+  test("refused: the AmberBanner carries the C7 sentence exactly, partial text above, no live role", () => {
+    const { container } = render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={asstText("A partial line.") as never} status="refused" onRetry={noop} />
+      </ul>,
+    );
+    const banner = screen.getByText(REFUSED_COPY);
+    expect(banner.textContent).toBe(REFUSED_COPY);
+    expect(precedes(screen.getByTestId("md"), banner)).toBe(true);
+    expect(banner).not.toHaveAttribute("role");
+    expect(container.querySelector("[role], [aria-live]")).toBeNull();
+    // A refusal is not a failure: no strip, no Retry.
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  test("refused with an empty answer: the banner still shows (R4-6b — never a blank 'completed')", () => {
+    render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={asstText("") as never} status="refused" onRetry={noop} />
+      </ul>,
+    );
+    expect(screen.getByText(REFUSED_COPY)).toBeInTheDocument();
+  });
+
+  test("refused with no assistant message at all: showAssistant is still true (C6)", () => {
+    render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} status="refused" onRetry={noop} />
+      </ul>,
+    );
+    expect(screen.getByText("Assistant")).toBeInTheDocument();
+    expect(screen.getByText(REFUSED_COPY)).toBeInTheDocument();
+  });
+
+  test.each(["step-capped", "truncated", "stopped"] as const)(
+    "%s: the banner is unchanged and carries no live role",
+    (status) => {
+      const { container } = render(
+        <ul>
+          <MessageTurn user={userMsg("q") as never} assistant={asstText("some") as never} status={status} onRetry={noop} />
+        </ul>,
+      );
+      expect(container.querySelector("[role], [aria-live]")).toBeNull();
+    },
+  );
 });

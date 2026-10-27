@@ -11,10 +11,14 @@
  *     not be the sole label), prose column max-w-[48rem], tool disclosures escape
  *     the prose cap in their own scroller.
  *
- * The 7-state machine (D-B4) renders as: submitting -> a STATIC "Assistant is
- * working…" + motion-reduce-safe skeleton; streaming -> content; stopped /
- * failed / step-capped / truncated -> content PRESERVED with the right banner
- * (Retry regenerates the last user turn, never duplicating it).
+ * The turn-state machine (D-B4 + A1 pack C6/C7) renders as: submitting -> a STATIC
+ * "Assistant is working…" + motion-reduce-safe skeleton; streaming / completed ->
+ * content; stopped / step-capped / length-capped / truncated / refused -> content
+ * PRESERVED with the right banner; failed-* / timed-out -> content PRESERVED above
+ * the FailureStrip, each with its own sentence (Retry regenerates the last user
+ * turn, never duplicating it). Banners carry NO live role — the transcript's
+ * milestone region is the single announcer; only the FailureStrip keeps
+ * role="alert".
  */
 
 import * as React from "react";
@@ -99,16 +103,20 @@ function AmberBanner({ children }: { children: React.ReactNode }) {
   );
 }
 
-function FailureStrip({ onRetry }: { onRetry: () => void }) {
+/** failed-* (unchanged sentence). */
+const PROVIDER_FAILURE_COPY =
+  "Assistant could not reach its AI provider. Try again. If this keeps happening, ask an admin to check AI Providers.";
+/** timed-out (A1 pack C7). */
+const TIMEOUT_COPY =
+  "This took longer than the time limit, so the answer stopped. Asking for one part at a time usually helps.";
+
+function FailureStrip({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <div
       role="alert"
       className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2"
     >
-      <span className="text-body-sm text-destructive">
-        Assistant could not reach its AI provider. Try again. If this keeps happening, ask an
-        admin to check AI Providers.
-      </span>
+      <span className="text-body-sm text-destructive">{message}</span>
       <Button variant="outline" size="sm" onClick={onRetry} className="min-h-[44px]">
         Retry
       </Button>
@@ -159,7 +167,8 @@ function AssistantBody({
         )}
         {status === "length-capped" && (
           <AmberBanner>
-            The answer was cut off. Ask for a shorter summary or a narrower slice.
+            The answer ran out of room before it finished. Ask for fewer rows, or one part at a
+            time.
           </AmberBanner>
         )}
         {status === "truncated" && (
@@ -168,16 +177,29 @@ function AssistantBody({
             date range.
           </AmberBanner>
         )}
-        {(status === "failed-before-content" || status === "failed-after-content") && (
-          <FailureStrip onRetry={onRetry} />
+        {status === "refused" && (
+          <AmberBanner>
+            The AI model declined to answer this question. If it keeps declining ordinary
+            inventory questions, an admin can review the model in AI Providers.
+          </AmberBanner>
         )}
+        {(status === "failed-before-content" || status === "failed-after-content") && (
+          <FailureStrip message={PROVIDER_FAILURE_COPY} onRetry={onRetry} />
+        )}
+        {status === "timed-out" && <FailureStrip message={TIMEOUT_COPY} onRetry={onRetry} />}
       </div>
     </div>
   );
 }
 
 export function MessageTurn({ user, assistant, status, onRetry }: MessageTurnProps) {
-  const showAssistant = status === "submitting" || !!assistant || status.startsWith("failed");
+  // A contentless timed-out / refused turn still shows its strip or banner (C6).
+  const showAssistant =
+    status === "submitting" ||
+    status === "timed-out" ||
+    status === "refused" ||
+    !!assistant ||
+    status.startsWith("failed");
 
   return (
     <li className="space-y-3 list-none">

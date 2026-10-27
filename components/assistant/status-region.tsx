@@ -5,8 +5,9 @@
  * region (spec §12 D-B10). Streamed transcript text carries NO aria-live; this
  * one polite, atomic `role="status"` region announces lifecycle MILESTONES only
  * ("Assistant is responding." / a tool label / "Response complete." /
- * "Response stopped." / "Assistant response failed."). Milestone text is set by
- * the transcript as the machine advances.
+ * "Response stopped." / "Assistant response failed." / "Assistant response timed
+ * out." / …). Milestone text is set by the transcript as the machine advances —
+ * `milestoneFor` in transcript.tsx is the exhaustive list, one string per state.
  */
 
 export function StatusRegion({ message }: { message: string }) {

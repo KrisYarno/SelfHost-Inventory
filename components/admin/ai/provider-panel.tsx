@@ -31,7 +31,8 @@ import {
 // Small per-kind seed lists (D-B8: chip editor seeded from a known-models
 // constant). Fully editable by the admin — these are conveniences, not claims.
 export const KNOWN_MODELS: Record<ProviderKind, string[]> = {
-  ANTHROPIC: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
+  ANTHROPIC: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
+  // The GPT-6 family waits for the @ai-sdk/openai upgrade (A3).
   OPENAI: ["gpt-5.1", "gpt-5.1-mini", "o4-mini"],
   GOOGLE: ["gemini-2.5-pro", "gemini-2.5-flash"],
   OLLAMA: ["llama3.3", "qwen2.5", "mistral"],
