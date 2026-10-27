@@ -148,6 +148,34 @@ describe("parseCsv", () => {
     expect(parseCsv('x, 5" pipe')).toEqual([["x", ' 5" pipe']]);
   });
 
+  // A1 pack C12 (FR4, A1-FD3-8): C11's skip opened a quoted field at ANY quote after a
+  // space, so a stray `"` swallowed the rest of the block into one cell. The skip now
+  // applies only to a quote that closes — its quoted field ends at a `"` (not half of
+  // a `""`) followed by a comma, a line ending or the end. Otherwise the field is the
+  // unquoted literal it was before C11.
+  test("a space before a quote that never closes is literal, as before C11", () => {
+    expect(parseCsv('Note, "approx 5')).toEqual([["Note", ' "approx 5']]);
+    expect(parseCsv('a, "')).toEqual([["a", ' "']]);
+    // The FR3 case still parses as quoted.
+    expect(parseCsv('Alpha 5mg, "1,234.50", 10')).toEqual([["Alpha 5mg", "1,234.50", " 10"]]);
+  });
+
+  test("a stray quote after a space cannot swallow the rows that follow it", () => {
+    expect(parseCsv('Product,Note\nAlpha 5mg, "approx 5\nBeta 2mg,12\nGamma 1mg,3')).toEqual([
+      ["Product", "Note"],
+      ["Alpha 5mg", ' "approx 5'],
+      ["Beta 2mg", "12"],
+      ["Gamma 1mg", "3"],
+    ]);
+    // A LATER quoted field does not close the stray one: the stray field's own quote
+    // (the next `"`) is followed by "1", so it does not close, and the later field
+    // still parses as quoted.
+    expect(parseCsv('Alpha 5mg, "approx 5\nBeta 2mg, "12"\n')).toEqual([
+      ["Alpha 5mg", ' "approx 5'],
+      ["Beta 2mg", "12"],
+    ]);
+  });
+
   test("values are never altered: formula-leading and padded values stay as written", () => {
     expect(parseCsv("v\n=SUM(A1:A2)\n+1\n@x\n  padded  ")).toEqual([
       ["v"],

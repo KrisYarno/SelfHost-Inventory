@@ -116,13 +116,15 @@ const TIMEOUT_COPY =
   "This took longer than the time limit, so the answer stopped. Asking for one part at a time usually helps.";
 
 /** The settled turns that stopped mid-answer, so a fenced block's last line may be
- *  incomplete (A1 pack C11). `step-capped` is NOT one: its last step ended with a
- *  tool call, after its text closed. */
+ *  incomplete (A1 pack C11; `refused` C12 — a content-filter stop can come
+ *  mid-answer). `step-capped` is NOT one: its last step ended with a tool call, after
+ *  its text closed. */
 const CUT_OFF_STATUSES: ReadonlySet<TurnStatus> = new Set<TurnStatus>([
   "timed-out",
   "length-capped",
   "stopped",
   "failed-after-content",
+  "refused",
 ]);
 
 /** Retry AND the live role only with `onRetry` (the last turn): an older strip is

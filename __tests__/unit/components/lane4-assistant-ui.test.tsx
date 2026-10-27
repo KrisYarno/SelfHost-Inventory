@@ -10,7 +10,7 @@
 // (plain React text) — neither needs the real renderer.
 
 import * as React from "react";
-import { render, screen, fireEvent, within, act } from "@testing-library/react";
+import { render, screen, fireEvent, within, act, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // A text that is exactly ONE fenced block is handed to the REAL `pre` override, with
@@ -339,7 +339,9 @@ describe("MessageTurn — code blocks follow the turn state (A1 C11)", () => {
       </ul>,
     );
 
-  test.each<TurnStatus>(["timed-out", "length-capped", "stopped", "failed-after-content"])(
+  // C12 (FR4, A1-FD3-4): `refused` joins them — a content-filter stop can come
+  // mid-answer.
+  test.each<TurnStatus>(["timed-out", "length-capped", "stopped", "failed-after-content", "refused"])(
     "%s: the block says it was cut off; Copy stays enabled",
     (status) => {
       renderTurn(status);
@@ -355,8 +357,8 @@ describe("MessageTurn — code blocks follow the turn state (A1 C11)", () => {
   });
 
   // step-capped is NOT cut off: its last step ended with a tool call, after its text
-  // closed. truncated / refused are not in the set either.
-  test.each<TurnStatus>(["completed", "step-capped", "truncated", "refused"])(
+  // closed. truncated is not in the set either.
+  test.each<TurnStatus>(["completed", "step-capped", "truncated"])(
     "%s: neither — no cut-off text, Copy enabled",
     (status) => {
       renderTurn(status);
@@ -364,6 +366,39 @@ describe("MessageTurn — code blocks follow the turn state (A1 C11)", () => {
       expect(screen.getByRole("button", { name: "Copy csv" })).toBeEnabled();
     },
   );
+
+  // C12 (FR4, A1-FD3-3): a copied partial row carried no marker. A cut-off block's
+  // successful Copy now says the last line may be incomplete; the copied text is still
+  // exactly the block. `sonner` is the file's existing mock; jsdom has no clipboard, so
+  // a writeText-only one is installed (no ClipboardItem -> the plain-text path).
+  describe("the Copy toast", () => {
+    const writeText = jest.fn(async (_text: string) => undefined);
+    const successToast = jest.requireMock("sonner").toast.success as jest.Mock;
+    const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+
+    beforeEach(() => {
+      writeText.mockClear();
+      successToast.mockClear();
+      Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    });
+    afterEach(() => {
+      if (original) Object.defineProperty(navigator, "clipboard", original);
+      else delete (navigator as { clipboard?: unknown }).clipboard;
+    });
+
+    test.each<[TurnStatus, string]>([
+      ["timed-out", "Copied — the last line may be incomplete"],
+      ["refused", "Copied — the last line may be incomplete"],
+      ["completed", "Copied"],
+      ["step-capped", "Copied"],
+    ])("%s: a successful copy toasts %p and copies the exact block", async (status, toastText) => {
+      renderTurn(status);
+      fireEvent.click(screen.getByRole("button", { name: "Copy csv" }));
+      await waitFor(() => expect(successToast).toHaveBeenCalledTimes(1));
+      expect(successToast).toHaveBeenCalledWith(toastText);
+      expect(writeText).toHaveBeenCalledWith("Product,On hand\nAlpha 5mg,12\nBeta 2mg,1");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1069,6 +1104,22 @@ describe("AssistantPage milestones (A1 C6)", () => {
     renderPage();
     expect(milestoneRegion().textContent).toBe(milestone);
   });
+
+  // A1 pack C12 (FR4, A1-FD3-7): the pending-label lookup is own-property, so a tool
+  // part named after an Object.prototype member announces the default milestone.
+  test.each(["constructor", "__proto__", "toString", "hasOwnProperty"])(
+    "streaming with a pending tool part named %p -> the default milestone, no throw",
+    (name) => {
+      useChatMock.mockReturnValue(
+        chatReturn({
+          status: "streaming",
+          messages: [userMsg("q"), { id: "a1", role: "assistant", parts: [toolPart(name, "input-available")] }],
+        }),
+      );
+      expect(() => renderPage()).not.toThrow();
+      expect(milestoneRegion().textContent).toBe("Assistant is responding.");
+    },
+  );
 
   test("S2 consumer: a live timeout renders the timed-out strip (Retry) in the transcript, partial text above", () => {
     const regenerate = jest.fn();

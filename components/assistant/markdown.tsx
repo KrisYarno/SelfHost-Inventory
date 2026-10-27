@@ -10,8 +10,8 @@
  *     level, `hr`, `del` and `sup` are inert structure: no attribute is allowed on
  *     any of them (h1 renders as an h2, h4-h6 as an h3; `del` is GFM strikethrough,
  *     so a struck figure renders struck instead of reading as a second real figure;
- *     `sup` is a GFM footnote marker, so "12[^a]" renders "12" and a superscript
- *     marker, never a plain "121");
+ *     `sup` is a GFM footnote marker, so "12[^a]" renders "12", a space and a
+ *     superscript marker — its text reads "12 1", never a plain "121");
  *   - strikethrough is `~~x~~` ONLY (`singleTilde: false`): "~12/day" and "20~25"
  *     render literally, never as a struck run of real figures;
  *   - raw HTML in model output is REMOVED, never shown: there is no rehype-raw, and
@@ -22,13 +22,16 @@
  *     safe rel/target;
  *   - markdown tables render inside a focusable, labelled horizontal-scroll region,
  *     widened to their widest row: a row with more cells than its header keeps every
- *     cell (the header gets an empty `th` per added column) — no cell is ever dropped;
+ *     cell (the header gets an empty `th` per added column) — no cell is ever dropped —
+ *     and the widened table is followed by a short italic note that its columns may
+ *     be shifted (that row's figures sit under the wrong headers);
  *   - EVERY fenced block (with or without a language) gets a language label
  *     ("text" when absent), internal horizontal scroll, and a 44px Copy button;
  *     `code` alone is inline code only. The `blocks` prop carries the turn's state:
  *     "busy" disables Copy (a block still being written cannot be copied); "cut-off"
  *     says "Answer cut off — the last line may be incomplete" in the block header
- *     (Copy still copies the exact text — values are never altered);
+ *     (Copy still copies the exact text — values are never altered — and its toast
+ *     says "Copied — the last line may be incomplete");
  *   - a soft line break (a single newline — LF, CRLF or a lone CR — inside a
  *     paragraph) renders as a `br` (`remarkSoftBreaks`), so model lines never
  *     collapse into one run-on line;
@@ -129,15 +132,22 @@ const BR_TAG = /^\s*<br(?=[\s/>])[^>]*>\s*$/i;
  *  delete, link, table cell…). */
 const BLOCK_PARENTS = new Set(["root", "blockquote", "listItem", "footnoteDefinition"]);
 
-function normalize(node: MdastNode): void {
+/** The note a widened table carries, as its next sibling (A1 pack C12). */
+const SHIFTED_COLUMNS_NOTE = "A row in this table has more cells than its header, so its columns may be shifted.";
+
+/** Normalizes `node` in place; returns true when `node` is a table it widened (the
+ *  caller then puts the note right after it). */
+function normalize(node: MdastNode): boolean {
+  let widened = false;
   if (node.type === "table" && Array.isArray(node.align) && node.children) {
     // mdast-util-to-hast's table-row renders exactly `align.length` cells, so a row
     // wider than its header would silently lose its last cells.
     const widest = node.children.reduce((w, row) => Math.max(w, row.children?.length ?? 0), 0);
+    widened = node.align.length < widest;
     while (node.align.length < widest) node.align.push(null);
   }
   const children = node.children;
-  if (!children) return;
+  if (!children) return widened;
   let changed = false;
   let afterBrTag = false;
   const next: MdastNode[] = [];
@@ -164,13 +174,27 @@ function normalize(node: MdastNode): void {
       } else {
         next.push(child);
       }
+    } else if (child.type === "footnoteReference") {
+      // A space before the marker: "12" + "1" is "12 1" as text too (copy-paste, a
+      // screen reader), never "121".
+      next.push({ type: "text", value: " " }, child);
+      changed = true;
     } else {
-      normalize(child);
+      const childWidened = normalize(child);
       next.push(child);
+      if (childWidened) {
+        // The wide row's figures sit under the wrong headers: say so, right after it.
+        next.push({
+          type: "paragraph",
+          children: [{ type: "emphasis", children: [{ type: "text", value: SHIFTED_COLUMNS_NOTE }] }],
+        });
+        changed = true;
+      }
     }
     afterBrTag = brTag;
   }
   if (changed) node.children = next;
+  return widened;
 }
 
 /**
@@ -198,7 +222,13 @@ function normalize(node: MdastNode): void {
  *     extended with `null` to that width: mdast-util-to-hast renders exactly
  *     `align.length` cells per row, so an extra cell (an unescaped `|` in a product
  *     name is enough) would vanish. The header row then shows an empty `th` for each
- *     added column; a table whose rows all fit is untouched.
+ *     added column; a table whose rows all fit is untouched;
+ *   - (pack C12) a table so widened gets, as its NEXT sibling in the same parent, a
+ *     `paragraph` > `emphasis` > `text` note: "A row in this table has more cells than
+ *     its header, so its columns may be shifted." — every cell is kept, but that row's
+ *     figures sit under the wrong headers;
+ *   - (pack C12) a single-space `text` node goes right before every
+ *     `footnoteReference`, so `12[^a]` reads "12 1" as text, never "121".
  */
 export function remarkSoftBreaks() {
   return (tree: MdastNode) => {
@@ -215,8 +245,19 @@ const CodeBlocksContext = React.createContext<CodeBlocks>("complete");
 
 // The exact block text is always copied; a csv block also carries an HTML table of
 // the same cells so a spreadsheet pastes cells, not one column (A1 pack C2b). A block
-// still being written cannot be copied: `disabled`, same label and size (pack C11).
-function CopyButton({ value, language, disabled }: { value: string; language: string; disabled: boolean }) {
+// still being written cannot be copied: `disabled`, same label and size (pack C11). A
+// cut-off block's copy says its last line may be incomplete (pack C12).
+function CopyButton({
+  value,
+  language,
+  disabled,
+  cutOff,
+}: {
+  value: string;
+  language: string;
+  disabled: boolean;
+  cutOff: boolean;
+}) {
   const [copied, setCopied] = React.useState(false);
   return (
     <button
@@ -229,7 +270,7 @@ function CopyButton({ value, language, disabled }: { value: string; language: st
             ClipboardItem: globalThis.ClipboardItem,
           });
           setCopied(true);
-          toast.success("Copied");
+          toast.success(cutOff ? "Copied — the last line may be incomplete" : "Copied");
           window.setTimeout(() => setCopied(false), 1500);
         } catch {
           toast.error("Could not copy");
@@ -257,7 +298,7 @@ function CodeBlock({ language, value }: { language: string; value: string }) {
             </span>
           )}
         </div>
-        <CopyButton value={value} language={language} disabled={blocks === "busy"} />
+        <CopyButton value={value} language={language} disabled={blocks === "busy"} cutOff={blocks === "cut-off"} />
       </div>
       <pre className="overflow-x-auto p-3 text-body-sm">
         <code className="font-mono">{value}</code>

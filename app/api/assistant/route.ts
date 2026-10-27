@@ -42,6 +42,7 @@ import { resolveSurfaceModel } from "@/lib/assistant/providers";
 import { PROVIDER_TIMEOUT_MS } from "@/lib/assistant/timing";
 import { modelCallOptions } from "@/lib/assistant/model-options";
 import { turnMessageMetadata } from "@/lib/assistant/stream-metadata";
+import { isRecoveredToolCallError } from "@/lib/assistant/stream-errors";
 import { resolveToolContext, type ToolContext } from "@/lib/assistant/context";
 import { createAiTools } from "@/lib/assistant/tool-adapters";
 import { TURN_RESULT_BUDGET_BYTES } from "@/lib/assistant/tools";
@@ -644,6 +645,10 @@ export async function POST(request: NextRequest): Promise<Response> {
       // client. The latch's cause is read per part, at the moment the part arrives.
       messageMetadata: ({ part }) => turnMessageMetadata(part, latch.cause(), claim.threadId),
       onError: (error) => {
+        // A1 pack C12: the SDK also calls this (twice: the instance, then its string) for
+        // a tool call it REJECTED. The model reads the rejection and can recover, so it is
+        // the part's error text only — never latched, logged or finalized as a failure.
+        if (isRecoveredToolCallError(error)) return "TOOL_ERROR";
         const code = maskStreamError(error);
         if (errorLatched === null) errorLatched = code;
         logRun("error");

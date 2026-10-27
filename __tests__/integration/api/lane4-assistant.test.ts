@@ -34,22 +34,130 @@ const toUIResponseSpy: jest.Mock = jest.fn(
 const mockUsage: { promise: PromiseLike<unknown> } = {
   promise: Promise.resolve({ inputTokens: 11, outputTokens: 22, totalTokens: 33 }),
 };
-jest.mock("ai", () => ({
-  __esModule: true,
-  streamText: (opts: unknown) => {
-    streamTextSpy(opts);
-    return {
-      usage: mockUsage.promise,
-      toUIMessageStreamResponse: (o: unknown) => toUIResponseSpy(o),
-    };
-  },
-  convertToModelMessages: jest.fn(async (m: unknown, o: unknown) => ({ __converted: m, __opts: o })),
-  stepCountIs: (n: number) => ({ __stepCountIs: n }),
-  createIdGenerator: jest.fn((o: { prefix: string; size: number }) => {
-    let seq = 0;
-    return () => `${o.prefix}_${o.size}_${(seq += 1)}`;
-  }),
-}));
+jest.mock("ai", () => {
+  // A1 pack C12 (FR4): the SDK error classes the route's onError tells apart. The real
+  // `ai` cannot load here (ENV NOTE above), so these MIRROR ai@7.0.29 everywhere the
+  // route can look: the constructor arguments (dist/index.d.ts:3150-3174), the names,
+  // and `isInstance` = @ai-sdk/provider's AISDKError.hasMarker over the same
+  // Symbol.for registry markers (ai dist/index.js:146-166, :371-392; provider
+  // dist/index.js:2-36, :38-72). Checked against the installed SDK: the REAL
+  // `isInstance` accepts these instances and these accept the real ones.
+  const hasMarker = (error: unknown, marker: string): boolean => {
+    const symbol = Symbol.for(marker);
+    return (
+      error != null &&
+      typeof error === "object" &&
+      symbol in error &&
+      (error as Record<symbol, unknown>)[symbol] === true
+    );
+  };
+  const mark = (error: object, marker: string): void => {
+    (error as Record<symbol, boolean>)[Symbol.for(marker)] = true;
+  };
+  class AISDKError extends Error {
+    constructor({ name, message, cause }: { name: string; message: string; cause?: unknown }) {
+      super(message);
+      mark(this, "vercel.ai.error");
+      this.name = name;
+      this.cause = cause;
+    }
+    static isInstance(error: unknown): boolean {
+      return hasMarker(error, "vercel.ai.error");
+    }
+  }
+  class InvalidToolInputError extends AISDKError {
+    readonly toolInput: string;
+    readonly toolName: string;
+    constructor({
+      toolInput,
+      toolName,
+      cause,
+      message = `Invalid input for tool ${toolName}: ${String(cause)}`,
+    }: {
+      message?: string;
+      toolInput: string;
+      toolName: string;
+      cause: unknown;
+    }) {
+      super({ name: "AI_InvalidToolInputError", message, cause });
+      mark(this, "vercel.ai.error.AI_InvalidToolInputError");
+      this.toolInput = toolInput;
+      this.toolName = toolName;
+    }
+    static isInstance(error: unknown): boolean {
+      return hasMarker(error, "vercel.ai.error.AI_InvalidToolInputError");
+    }
+  }
+  class NoSuchToolError extends AISDKError {
+    readonly toolName: string;
+    readonly availableTools: string[] | undefined;
+    constructor({
+      toolName,
+      availableTools = undefined,
+      message = `Model tried to call unavailable tool '${toolName}'. ${
+        availableTools === undefined ? "No tools are available." : `Available tools: ${availableTools.join(", ")}.`
+      }`,
+    }: {
+      toolName: string;
+      availableTools?: string[] | undefined;
+      message?: string;
+    }) {
+      super({ name: "AI_NoSuchToolError", message });
+      mark(this, "vercel.ai.error.AI_NoSuchToolError");
+      this.toolName = toolName;
+      this.availableTools = availableTools;
+    }
+    static isInstance(error: unknown): boolean {
+      return hasMarker(error, "vercel.ai.error.AI_NoSuchToolError");
+    }
+  }
+  /** The provider-shaped control: what a failed provider HTTP call throws. */
+  class APICallError extends AISDKError {
+    readonly statusCode?: number;
+    readonly responseBody?: string;
+    constructor({
+      message,
+      statusCode,
+      responseBody,
+      cause,
+    }: {
+      message: string;
+      url: string;
+      requestBodyValues: unknown;
+      statusCode?: number;
+      responseBody?: string;
+      cause?: unknown;
+    }) {
+      super({ name: "AI_APICallError", message, cause });
+      mark(this, "vercel.ai.error.AI_APICallError");
+      this.statusCode = statusCode;
+      this.responseBody = responseBody;
+    }
+    static isInstance(error: unknown): boolean {
+      return hasMarker(error, "vercel.ai.error.AI_APICallError");
+    }
+  }
+  return {
+    __esModule: true,
+    streamText: (opts: unknown) => {
+      streamTextSpy(opts);
+      return {
+        usage: mockUsage.promise,
+        toUIMessageStreamResponse: (o: unknown) => toUIResponseSpy(o),
+      };
+    },
+    convertToModelMessages: jest.fn(async (m: unknown, o: unknown) => ({ __converted: m, __opts: o })),
+    stepCountIs: (n: number) => ({ __stepCountIs: n }),
+    createIdGenerator: jest.fn((o: { prefix: string; size: number }) => {
+      let seq = 0;
+      return () => `${o.prefix}_${o.size}_${(seq += 1)}`;
+    }),
+    AISDKError,
+    InvalidToolInputError,
+    NoSuchToolError,
+    APICallError,
+  };
+});
 
 // --- provider seam ---------------------------------------------------------
 // A1 pack C5: no PROVIDER_TIMEOUT_MS key — timing.ts is its one owner, and the route's
@@ -116,6 +224,8 @@ jest.mock("@/lib/assistant/titles", () => ({
 }));
 
 import { NextRequest } from "next/server";
+// The mocked module's mirrors (above), typed — and so constructed — by the REAL d.ts.
+import { APICallError, InvalidToolInputError, NoSuchToolError } from "ai";
 import { GET, POST } from "@/app/api/assistant/route";
 import { buildSystemPrompt } from "@/lib/assistant/prompt";
 import { AppError } from "@/lib/error-handling";
@@ -908,6 +1018,187 @@ describe("finalize-once", () => {
     expect(mockThreadOps.finalizeTurn).toHaveBeenCalledWith(
       expect.objectContaining({ message: null, errorLatched: "PROVIDER_ERROR", usage: null }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A1 pack C12 (FR4, A1-FD3-1) — the SDK also calls the UI-stream onError for a tool
+// call it REJECTED: a `tool-input-error` part for invalid input or an unknown tool
+// (ai dist/index.js:7335-7345; produced at :8232-8242). The model reads the rejection
+// and can recover, so that call returns "TOOL_ERROR" as the part's error text and does
+// nothing else. Every other error keeps today's exact path: masked, latched, logged,
+// finalize scheduled.
+//
+// REV 11 (amendment row 11): for ONE rejected call the SDK calls onError TWICE — with
+// the instance, then with its string form for the paired `tool-output-error` (:7394-
+// 7399; the producer sets `error: getErrorMessage(instance)` = `instance.toString()`).
+// The route classifies both through lib/assistant/stream-errors.ts (REAL here; only
+// `ai` is mocked). The real SDK's sequence is proven in the wire probe, case f.
+// ---------------------------------------------------------------------------
+
+describe("onError: a tool call the SDK rejected is not a failed turn (A1 C12)", () => {
+  /** classifyTurn's rule (threads.ts) for a turn with no abort cause: a latched code
+   *  is status "error", none is "ok". The fence's answer — and the title job behind
+   *  it — follows what the route latched. */
+  const fenceFromLatch = async (input: { errorLatched: string | null }) => ({
+    finalized: true,
+    status: input.errorLatched === null ? "ok" : "error",
+  });
+  const RECOVERED = {
+    id: "am_1",
+    role: "assistant",
+    parts: [{ type: "text", text: "Alpha 5mg has 12 on hand." }],
+  };
+
+  let info: jest.SpyInstance;
+  beforeEach(() => {
+    mockThreadOps.finalizeTurn.mockImplementation(fenceFromLatch);
+    info = jest.spyOn(console, "info").mockImplementation(() => {});
+  });
+  afterEach(() => info.mockRestore());
+
+  const failedRunsLogged = (): number =>
+    info.mock.calls.filter(
+      ([tag, row]) => tag === "[assistant] run" && (row as { outcome?: string }).outcome === "error",
+    ).length;
+  const fenceStatus = (call: number): Promise<unknown> => mockThreadOps.finalizeTurn.mock.results[call].value;
+
+  const REJECTIONS: Array<[string, () => Error]> = [
+    [
+      "an InvalidToolInputError",
+      () =>
+        new InvalidToolInputError({
+          toolName: "find_product",
+          toolInput: '{"query":5}',
+          cause: new Error("Expected string, received number"),
+        }),
+    ],
+    ["a NoSuchToolError", () => new NoSuchToolError({ toolName: "find_products", availableTools: ["find_product"] })],
+  ];
+
+  test.each(REJECTIONS)(
+    "%s, the SDK's real TWO-call sequence (the instance, then its string) -> both 'TOOL_ERROR'; the turn finalizes ok and gets its title",
+    async (_name, rejection) => {
+      await POST(req(validBody));
+      const o = capturedStreamOptions();
+      const instance = rejection();
+      // What the SDK hands onError for the paired tool-output-error: getErrorMessage(
+      // instance), i.e. `instance.toString()` = "<name>: <message>".
+      const sdkString = instance.toString();
+      expect(sdkString.startsWith(`${instance.name}: `)).toBe(true);
+
+      expect(o.onError(instance)).toBe("TOOL_ERROR"); // tool-input-error
+      expect(o.onError(sdkString)).toBe("TOOL_ERROR"); // tool-output-error
+      await settle();
+      expect(mockThreadOps.finalizeTurn).not.toHaveBeenCalled(); // no early finalize
+      expect(failedRunsLogged()).toBe(0);
+
+      o.onEnd({ responseMessage: RECOVERED, isAborted: false });
+      await settle();
+      expect(mockThreadOps.finalizeTurn).toHaveBeenCalledTimes(1);
+      expect(mockThreadOps.finalizeTurn).toHaveBeenCalledWith(
+        expect.objectContaining({ message: RECOVERED, cause: null, eventAborted: false, errorLatched: null }),
+      );
+      await expect(fenceStatus(0)).resolves.toEqual({ finalized: true, status: "ok" });
+      expect(mockTitles.generateThreadTitle).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test.each([
+    ["a string that names the class mid-text", "Upstream said: AI_NoSuchToolError: model tried a tool"],
+    ["a string that is the bare name (no ': ')", "AI_InvalidToolInputError"],
+    ["a lower-case look-alike string", "ai_nosuchtoolerror: x"],
+    // The instance check is the SDK's marker check, never the name.
+    ["an Error merely NAMED like one", Object.assign(new Error("x"), { name: "AI_NoSuchToolError" })],
+  ])("CONTROL: %s keeps today's path — PROVIDER_ERROR latched, logged, finalized; status error", async (_name, error) => {
+    await POST(req(validBody));
+    const o = capturedStreamOptions();
+    expect(o.onError(error)).toBe("PROVIDER_ERROR");
+    await settle();
+    expect(failedRunsLogged()).toBe(1);
+    expect(mockThreadOps.finalizeTurn).toHaveBeenCalledTimes(1);
+    expect(mockThreadOps.finalizeTurn).toHaveBeenCalledWith(expect.objectContaining({ errorLatched: "PROVIDER_ERROR" }));
+    await expect(fenceStatus(0)).resolves.toEqual({ finalized: true, status: "error" });
+    expect(mockTitles.generateThreadTitle).not.toHaveBeenCalled();
+  });
+
+  test.each(REJECTIONS)(
+    "%s -> 'TOOL_ERROR'; nothing latched, logged or finalized early; the recovered turn finalizes ok and gets its title",
+    async (_name, rejection) => {
+      await POST(req(validBody));
+      const o = capturedStreamOptions();
+
+      expect(o.onError(rejection())).toBe("TOOL_ERROR");
+      await settle();
+      expect(mockThreadOps.finalizeTurn).not.toHaveBeenCalled(); // no early finalize
+      expect(failedRunsLogged()).toBe(0);
+
+      // The model recovers; the stream ends normally.
+      o.onEnd({ responseMessage: RECOVERED, isAborted: false });
+      await settle();
+      expect(mockThreadOps.finalizeTurn).toHaveBeenCalledTimes(1);
+      expect(mockThreadOps.finalizeTurn).toHaveBeenCalledWith(
+        expect.objectContaining({ message: RECOVERED, cause: null, eventAborted: false, errorLatched: null }),
+      );
+      await expect(fenceStatus(0)).resolves.toEqual({ finalized: true, status: "ok" });
+      expect(mockTitles.generateThreadTitle).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  test("CONTROL: a provider error (an APICallError) keeps today's path — PROVIDER_ERROR latched, logged, finalized without onEnd; status error, no title", async () => {
+    await POST(req(validBody));
+    const o = capturedStreamOptions();
+    const masked = o.onError(
+      new APICallError({
+        message: "Overloaded",
+        url: "https://provider.invalid/v1/messages",
+        requestBodyValues: {},
+        statusCode: 529,
+        responseBody: "sk-live-SECRET-should-never-leak",
+      }),
+    );
+    expect(masked).toBe("PROVIDER_ERROR");
+    await settle();
+    expect(failedRunsLogged()).toBe(1);
+    expect(mockThreadOps.finalizeTurn).toHaveBeenCalledTimes(1);
+    expect(mockThreadOps.finalizeTurn).toHaveBeenCalledWith(expect.objectContaining({ errorLatched: "PROVIDER_ERROR" }));
+    await expect(fenceStatus(0)).resolves.toEqual({ finalized: true, status: "error" });
+
+    o.onEnd({ responseMessage: RECOVERED, isAborted: false });
+    await settle();
+    expect(mockThreadOps.finalizeTurn).toHaveBeenCalledTimes(1);
+    expect(mockTitles.generateThreadTitle).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["a plain Error", "PROVIDER_ERROR", () => new Error("socket hang up")],
+    ["an AppError STEP_LIMIT", "STEP_LIMIT", () => new AppError("step cap", "STEP_LIMIT", 500)],
+    // The new branch keys on the SDK's class, never on the code string: our own
+    // TOOL_ERROR is still latched.
+    ["an AppError TOOL_ERROR", "TOOL_ERROR", () => new AppError("tool failed", "TOOL_ERROR", 500)],
+  ])("CONTROL: %s is unchanged — masked to %p, latched, logged, finalized", async (_name, code, make) => {
+    await POST(req(validBody));
+    const o = capturedStreamOptions();
+    expect(o.onError(make())).toBe(code);
+    await settle();
+    expect(failedRunsLogged()).toBe(1);
+    expect(mockThreadOps.finalizeTurn).toHaveBeenCalledTimes(1);
+    expect(mockThreadOps.finalizeTurn).toHaveBeenCalledWith(expect.objectContaining({ errorLatched: code }));
+    await expect(fenceStatus(0)).resolves.toEqual({ finalized: true, status: "error" });
+    expect(mockTitles.generateThreadTitle).not.toHaveBeenCalled();
+  });
+
+  test("a rejected tool call shields nothing: a LATER provider error still latches PROVIDER_ERROR", async () => {
+    await POST(req(validBody));
+    const o = capturedStreamOptions();
+    expect(o.onError(new NoSuchToolError({ toolName: "find_products" }))).toBe("TOOL_ERROR");
+    expect(o.onError(new Error("provider blew up"))).toBe("PROVIDER_ERROR");
+    await settle();
+    expect(failedRunsLogged()).toBe(1);
+    expect(mockThreadOps.finalizeTurn).toHaveBeenCalledTimes(1);
+    expect(mockThreadOps.finalizeTurn).toHaveBeenCalledWith(expect.objectContaining({ errorLatched: "PROVIDER_ERROR" }));
+    await expect(fenceStatus(0)).resolves.toEqual({ finalized: true, status: "error" });
+    expect(mockTitles.generateThreadTitle).not.toHaveBeenCalled();
   });
 });
 

@@ -41,7 +41,16 @@
  *       `sendMessages` returns (parsed with `uiMessageChunkSchema`) is read with
  *       `readUIMessageStream`;
  *   e-sse-client  control (non-vacuity): the same with cause "client" (a user Stop) —
- *       the abort still arrives, with NO timeout metadata behind it.
+ *       the abort still arrives, with NO timeout metadata behind it;
+ *   f   rejected tool calls (pack C12 REV 11, A1-FD3-1): a three-step `streamText`
+ *       through `toUIMessageStream({ onError })` whose capture scripts step 1 a
+ *       `tool_use` for an UNKNOWN tool, step 2 a `tool_use` whose input fails the tool's
+ *       zod schema, step 3 plain text with `end_turn`. Every `onError` argument is
+ *       recorded — its kind (instance / string / object) and lib/assistant/
+ *       stream-errors.ts's verdict — and tied to its UI chunk through the error text
+ *       this `onError` returns (`TOOL_ERROR#n` / `PROVIDER_ERROR#n`);
+ *   f-overloaded  control: an `overloaded_error` event mid-stream (after a text delta);
+ *   f-500  control: an HTTP 500 (`maxRetries: 0`, so the one attempt is the error).
  * Plus a "bundles" line first (what each leaf bundle contains) and a "summary" line
  * last (stray fetches, unhandled rejections).
  *
@@ -63,10 +72,14 @@ import {
   streamText,
   tool,
 } from "ai";
+import { z } from "zod";
 import { bundleToCache } from "./esm-bundle.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const LEAVES = ["lib/assistant/model-options.ts", "lib/assistant/stream-metadata.ts"];
+/** Imports `ai` (the two error classes): bundled with `ai` EXTERNAL, so the bundle and
+ *  this probe share the one installed SDK (pack C12 REV 11). */
+const AI_LEAVES = ["lib/assistant/stream-errors.ts"];
 
 const CAPTURE_HOST = "anthropic-wire-probe.invalid";
 const BASE_URL = `https://${CAPTURE_HOST}/v1`;
@@ -246,6 +259,68 @@ function holdOpenReply(body, init) {
   return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
+/** @param {string} text */
+function sseResponse(text) {
+  return new Response(text, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+/**
+ * One streamed `tool_use` turn (`stop_reason: "tool_use"`), the input sent as one
+ * `input_json_delta` exactly as the Messages API streams it.
+ * @param {string} id @param {string} name @param {string} inputJson
+ * @returns {Reply}
+ */
+function toolUseReply(id, name, inputJson) {
+  return (body) =>
+    sseResponse(
+      messageStart(String(body?.model ?? "unknown")) +
+        sse("content_block_start", { index: 0, content_block: { type: "tool_use", id, name, input: {} } }) +
+        sse("content_block_delta", { index: 0, delta: { type: "input_json_delta", partial_json: inputJson } }) +
+        sse("content_block_stop", { index: 0 }) +
+        sse("message_delta", { delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 5 } }) +
+        MESSAGE_STOP,
+    );
+}
+
+/** One streamed text turn ending `end_turn`. @param {string} text @returns {Reply} */
+function textReply(text) {
+  return (body) =>
+    sseResponse(
+      messageStart(String(body?.model ?? "unknown")) +
+        BLOCK_START +
+        sse("content_block_delta", { index: 0, delta: { type: "text_delta", text } }) +
+        BLOCK_STOP +
+        MESSAGE_DELTA +
+        MESSAGE_STOP,
+    );
+}
+
+/** The replies in order, one per request (one per step); a request past the script is
+ *  answered with the last one. @param {Reply[]} replies @returns {Reply} */
+function scriptedReplies(replies) {
+  let next = 0;
+  return (body, init) => replies[Math.min(next++, replies.length - 1)](body, init);
+}
+
+/** Case f-overloaded: a text delta, then the API's `overloaded_error` event mid-stream.
+ *  @type {Reply} */
+function overloadedReply(body) {
+  return sseResponse(
+    messageStart(String(body?.model ?? "unknown")) +
+      BLOCK_START +
+      TEXT_DELTA +
+      sse("error", { error: { type: "overloaded_error", message: "Overloaded" } }),
+  );
+}
+
+/** Case f-500: the API's 500 error body. @type {Reply} */
+function serverErrorReply() {
+  return new Response(JSON.stringify({ type: "error", error: { type: "api_error", message: "Internal server error" } }), {
+    status: 500,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 /** @param {typeof fetch} capture */
 function anthropicWith(capture) {
   return createAnthropic({ apiKey: API_KEY, baseURL: BASE_URL, fetch: capture });
@@ -270,6 +345,19 @@ const PROBE_TOOL = tool({
   }),
   execute: async () => ({ ok: true }),
 });
+
+/** Case f's one tool. A zod schema, as the assistant's real tools have (tool-adapters.ts),
+ *  so input that fails it is the SDK's InvalidToolInputError (`jsonSchema` without a
+ *  `validate` never rejects). */
+const F_TOOL_NAME = "probe_stock";
+const F_TOOL = tool({
+  description: "Probe stock lookup. The scripted reply calls it with input that fails its schema.",
+  inputSchema: z.object({ q: z.string() }),
+  execute: async () => ({ ok: true }),
+});
+const F_UNKNOWN_CALL = { id: "toolu_f_unknown", name: "probe_no_such_tool", input: "{}" };
+const F_INVALID_CALL = { id: "toolu_f_invalid", name: F_TOOL_NAME, input: '{"q":5}' };
+const F_TEXT = "Alpha 5mg has 12 on hand.";
 
 // ---------------------------------------------------------------------------
 // Case runner: one NDJSON line per case, a 10 s watchdog each
@@ -331,6 +419,8 @@ function bundleFacts(text) {
 let modelOptions;
 /** @type {any} */
 let streamMetadata;
+/** @type {any} */
+let streamErrors;
 try {
   const bundles = [];
   /** @type {any[]} */
@@ -341,13 +431,25 @@ try {
     modules.push(await import(pathToFileURL(outfile).href));
   }
   [modelOptions, streamMetadata] = modules;
+  const aiBundles = [];
+  /** @type {any[]} */
+  const aiModules = [];
+  for (const leaf of AI_LEAVES) {
+    const outfile = await bundleToCache(path.join(REPO_ROOT, leaf), { external: ["ai"] });
+    aiBundles.push({ entry: leaf, ...bundleFacts(await readFile(outfile, "utf8")) });
+    aiModules.push(await import(pathToFileURL(outfile).href));
+  }
+  [streamErrors] = aiModules;
   if (typeof modelOptions.modelCallOptions !== "function") {
     throw new Error("the model-options bundle does not export modelCallOptions");
   }
   if (typeof streamMetadata.turnMessageMetadata !== "function") {
     throw new Error("the stream-metadata bundle does not export turnMessageMetadata");
   }
-  emit({ case: "bundles", bundles });
+  if (typeof streamErrors.isRecoveredToolCallError !== "function") {
+    throw new Error("the stream-errors bundle does not export isRecoveredToolCallError");
+  }
+  emit({ case: "bundles", bundles, aiBundles });
 } catch (err) {
   process.stderr.write(
     `anthropic-wire-probe: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
@@ -623,6 +725,107 @@ function abortSseCase(model, cause) {
   };
 }
 
+/** @param {unknown} error @returns {string} */
+function errorKind(error) {
+  if (typeof error === "string") return "string";
+  if (error instanceof Error) return "instance";
+  return error !== null && typeof error === "object" ? "object" : typeof error;
+}
+
+/** The class an `onError` argument names: an Error's `name`, a string's text before
+ *  its first ": ", an object's `type`. @param {unknown} error @returns {string | null} */
+function errorName(error) {
+  if (typeof error === "string") return error.includes(": ") ? error.slice(0, error.indexOf(": ")) : null;
+  if (error instanceof Error) return error.name;
+  if (error !== null && typeof error === "object" && "type" in error) return String(error.type);
+  return null;
+}
+
+/**
+ * Cases f / f-overloaded / f-500 (pack C12 REV 11): what the REAL SDK hands the UI
+ * stream's `onError`, and how lib/assistant/stream-errors.ts classifies each argument.
+ * @param {string} model
+ * @param {Reply} reply
+ * @param {Record<string, unknown>} [extra] further `streamText` options
+ */
+function onErrorCase(model, reply, extra = {}) {
+  /** @param {Record<string, any>} record */
+  return async (record) => {
+    const { capture, requests } = makeCapture(reply);
+    /** @type {Array<{ n: number, kind: string, name: string | null, verdict: boolean }>} */
+    const onErrorCalls = [];
+    /** @type {Array<Record<string, unknown>>} */
+    const errorChunks = [];
+    /** @type {string[]} */
+    const chunkTypes = [];
+    /** @type {string[]} */
+    const readErrors = [];
+    record.model = model;
+    record.requests = requests;
+    record.onErrorCalls = onErrorCalls;
+    record.errorChunks = errorChunks;
+    record.chunkTypes = chunkTypes;
+    record.readErrors = readErrors;
+
+    const options = modelOptions.modelCallOptions({ kind: "ANTHROPIC", model, surface: "assistant" });
+    const result = streamText({
+      model: anthropicWith(capture)(model),
+      system: SYSTEM,
+      prompt: PROMPT,
+      tools: { [F_TOOL_NAME]: F_TOOL },
+      stopWhen: stepCountIs(10),
+      ...callParams(options),
+      ...extra,
+      onError: () => {},
+    });
+    const uiChunks = result
+      .toUIMessageStream({
+        // The returned text becomes the chunk's `errorText`, which ties each recorded
+        // call to the chunk the SDK built with it.
+        onError: (error) => {
+          const n = onErrorCalls.length + 1;
+          const verdict = streamErrors.isRecoveredToolCallError(error);
+          onErrorCalls.push({ n, kind: errorKind(error), name: errorName(error), verdict });
+          return `${verdict ? "TOOL_ERROR" : "PROVIDER_ERROR"}#${n}`;
+        },
+      })
+      .pipeThrough(
+        new TransformStream({
+          transform(chunk, out) {
+            chunkTypes.push(chunk.type);
+            if ("errorText" in chunk) {
+              errorChunks.push({
+                type: chunk.type,
+                toolCallId: "toolCallId" in chunk ? chunk.toolCallId : null,
+                toolName: "toolName" in chunk ? chunk.toolName : null,
+                errorText: chunk.errorText,
+              });
+            }
+            out.enqueue(chunk);
+          },
+        }),
+      );
+
+    /** @type {any} */
+    let last = null;
+    for await (const message of readUIMessageStream({
+      stream: uiChunks,
+      onError: (err) => readErrors.push(describeError(err)),
+    })) {
+      last = message;
+    }
+    try {
+      record.finishReason = await result.finishReason;
+    } catch (err) {
+      record.finishReasonError = describeError(err);
+    }
+    record.finalText = (last?.parts ?? [])
+      .filter((/** @type {any} */ part) => part.type === "text")
+      .map((/** @type {any} */ part) => part.text)
+      .join("");
+  };
+}
+
 const titleParams = (/** @type {string} */ model) =>
   callParams(modelOptions.modelCallOptions({ kind: "ANTHROPIC", model, surface: "title" }));
 // The PRE-A1 title call, literally (titles.ts before A1): the non-vacuity control.
@@ -639,5 +842,18 @@ await runCase("d", chatCase("claude-sonnet-4-5"));
 await runCase("e", abortCase("claude-opus-5-5"));
 await runCase("e-sse", abortSseCase("claude-opus-5-5", "provider-timeout"));
 await runCase("e-sse-client", abortSseCase("claude-opus-5-5", "client"));
+await runCase(
+  "f",
+  onErrorCase(
+    "claude-opus-5-5",
+    scriptedReplies([
+      toolUseReply(F_UNKNOWN_CALL.id, F_UNKNOWN_CALL.name, F_UNKNOWN_CALL.input),
+      toolUseReply(F_INVALID_CALL.id, F_INVALID_CALL.name, F_INVALID_CALL.input),
+      textReply(F_TEXT),
+    ]),
+  ),
+);
+await runCase("f-overloaded", onErrorCase("claude-opus-5-5", overloadedReply));
+await runCase("f-500", onErrorCase("claude-opus-5-5", serverErrorReply, { maxRetries: 0 }));
 
 emit({ case: "summary", captureHost: CAPTURE_HOST, strayFetches, unhandledRejections });

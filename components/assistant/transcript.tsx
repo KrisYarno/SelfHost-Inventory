@@ -68,8 +68,12 @@ function milestoneFor(status: TurnStatus, assistant?: UIMessage): string {
         (p) => isToolUIPart(p) && (p.state === "input-available" || p.state === "input-streaming"),
       );
       if (pending) {
-        const label = TOOL_PRESENTATION[getToolName(pending as Parameters<typeof getToolName>[0])]
-          ?.pendingLabel;
+        // Own-property only (A1 pack C12): a part named `constructor` / `__proto__`
+        // gets the default milestone, never a prototype member.
+        const name = getToolName(pending as Parameters<typeof getToolName>[0]);
+        const label = Object.prototype.hasOwnProperty.call(TOOL_PRESENTATION, name)
+          ? TOOL_PRESENTATION[name].pendingLabel
+          : undefined;
         if (label) return label;
       }
       return "Assistant is responding.";

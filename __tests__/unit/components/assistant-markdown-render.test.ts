@@ -141,6 +141,9 @@ describe("assistant markdown render probe (A1 C2)", () => {
       cellSpan: "| a |\n|---|\n| 10<span>20</span> |",
       footnoteCell: "| Product | On hand |\n|---|---|\n| Alpha 5mg | 12[^a] |\n\n[^a]: As of the last count.",
       wideRow: TABLE_WIDE_ROW,
+      // A1 pack C12 (FR4).
+      wideRowInList: `- Stock\n\n${TABLE_WIDE_ROW.split("\n").map((line) => `  ${line}`).join("\n")}`,
+      footnoteProse: "Sold 12[^a] units this week.\n\n[^a]: Shop orders only.",
       escapedPipe: "| Product | On hand | Cost |\n|---|---|---|\n| Sema \\| Kit 10mg | 7 | $9.50 |",
       csvBusy: { markdown: CUT_CSV, blocks: "busy" },
       csvCutOff: { markdown: CUT_CSV, blocks: "cut-off" },
@@ -448,16 +451,24 @@ describe("assistant markdown render probe (A1 C2)", () => {
     });
 
     // QA-5: a GFM footnote marker renders as a bare superscript, never as a digit fused
-    // onto the figure before it ("12" + "1" read as "121").
-    test("pin 20 (R): a footnote marker is a bare sup after the figure, never fused into it", () => {
+    // onto the figure before it ("12" + "1" read as "121"). C12 (FR4, A1-FD3-5): the
+    // `sup` separated them only visually — the cell's TEXT (copy-paste, a screen reader)
+    // still read "121". A space now precedes every marker, so the text reads "12 1".
+    test("pin 20 (R): a footnote marker is a bare sup after the figure and a space, never fused into it", () => {
       const cells = Array.from(doc.footnoteCell.querySelectorAll("tbody td"));
-      expect(cells.map((td) => td.firstChild?.textContent ?? "")).toEqual(["Alpha 5mg", "12"]);
+      expect(text(cells[1])).toContain("12 1");
+      expect(text(cells[1])).not.toContain("121");
+      expect(cells.map((td) => td.firstChild?.textContent ?? "")).toEqual(["Alpha 5mg", "12 "]);
       const sup = cells[1].querySelector("sup");
       expect(sup).not.toBeNull();
       const marker = sup as Element;
       expect(marker.getAttributeNames()).toEqual([]);
       expect(text(marker)).toBe("1");
-      expect(marker.previousSibling?.textContent).toBe("12");
+      expect(marker.previousSibling?.textContent).toBe("12 ");
+      // In prose too.
+      const p = doc.footnoteProse.querySelector("p") as Element;
+      expect(p.querySelector("sup")).not.toBeNull();
+      expect(text(p)).toContain("Sold 12 1 units");
       // Nothing of the footnote machinery's attributes survives the sanitizer.
       expect(doc.footnoteCell.querySelector("[id], [data-footnote-ref], [data-footnotes], [aria-describedby]")).toBeNull();
     });
@@ -491,6 +502,48 @@ describe("assistant markdown render probe (A1 C2)", () => {
       // ...and the pin-1 table is untouched.
       expect(doc.table4.querySelectorAll("th")).toHaveLength(4);
       expect(doc.table4.querySelectorAll("td")).toHaveLength(8);
+    });
+
+    // A1 pack C12 (FR4, A1-FD3-2): widening keeps every cell, but the wide row's figures
+    // sit under the wrong headers ("7" under Cost). A widened table says so, in a short
+    // italic note right after it; a table whose rows all fit gets nothing.
+    const SHIFTED_NOTE = "A row in this table has more cells than its header, so its columns may be shifted.";
+
+    /** The element right after the table's scroll region, if it is C12's note. */
+    const noteAfter = (region: Element) => {
+      const next = region.nextElementSibling;
+      return next !== null && next.tagName === "P" && text(next) === SHIFTED_NOTE ? next : null;
+    };
+
+    test("pin 23 (R): a widened table is followed by the note paragraph — one bare em, the exact text", () => {
+      const region = doc.wideRow.querySelector('[role="region"]') as Element;
+      const note = noteAfter(region);
+      expect(note).not.toBeNull();
+      const p = note as Element;
+      expect(p.children).toHaveLength(1);
+      const em = p.firstElementChild as Element;
+      expect(em.tagName).toBe("EM");
+      expect(text(em)).toBe(SHIFTED_NOTE);
+      expect(p.getAttributeNames()).toEqual([]);
+      expect(em.getAttributeNames()).toEqual([]);
+      // Once, and nothing else about the table changed (pin 21 still holds).
+      expect(doc.wideRow.querySelectorAll("em")).toHaveLength(1);
+      expect(doc.wideRow.querySelectorAll("thead th")).toHaveLength(4);
+
+      // In the same parent as the table: inside the list item, right after it.
+      const listRegion = doc.wideRowInList.querySelector('li [role="region"]') as Element;
+      expect(listRegion).not.toBeNull();
+      const listNote = noteAfter(listRegion);
+      expect(listNote).not.toBeNull();
+      expect((listNote as Element).parentElement?.tagName).toBe("LI");
+    });
+
+    test("pin 23: a table whose rows all fit gets no note", () => {
+      for (const name of ["table4", "escapedPipe", "cellCode", "table12", "tableInList", "footnoteCell"] as const) {
+        const region = doc[name].querySelector('[role="region"]') as Element;
+        expect({ name, note: noteAfter(region) }).toEqual({ name, note: null });
+        expect({ name, text: (doc[name].body.textContent ?? "").includes(SHIFTED_NOTE) }).toEqual({ name, text: false });
+      }
     });
 
     // QA-4: a block still being written cannot be copied; a cut-off turn's block says

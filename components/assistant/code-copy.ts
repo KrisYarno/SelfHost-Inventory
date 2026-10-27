@@ -24,9 +24,28 @@
  * One leniency beyond RFC 4180 (A1 pack C11): at a field start, spaces and tabs
  * followed by a `"` are skipped and the field parses as quoted, so a model's
  * `Alpha 5mg, "1,234.50", 10` is three cells, not four. Spaces before an UNQUOTED
- * value are kept as written.
+ * value are kept as written. The skip is ONLY for a quote that closes (pack C12): the
+ * quoted field must end at a `"` (not half of a `""`) followed by a comma, a line
+ * ending or the end of the text; otherwise the field is the unquoted literal it was
+ * before C11 (`Note, "approx 5` -> `Note` and ` "approx 5`), so a stray quote never
+ * swallows the rows after it.
  */
 export function parseCsv(text: string): string[][] {
+  /** True when the `"` at `open` closes: its quoted field's end — the first `"` after
+   *  it that is not half of a `""` — is followed by a comma, a line ending or the end. */
+  const quoteCloses = (open: number): boolean => {
+    for (let k = open + 1; k < text.length; k++) {
+      if (text[k] !== '"') continue;
+      if (text[k + 1] === '"') {
+        k++;
+        continue;
+      }
+      const after = text[k + 1];
+      return after === undefined || after === "," || after === "\r" || after === "\n";
+    }
+    return false;
+  };
+
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -51,7 +70,7 @@ export function parseCsv(text: string): string[][] {
     if (atFieldStart && (ch === " " || ch === "\t")) {
       let j = i;
       while (text[j] === " " || text[j] === "\t") j++;
-      if (text[j] === '"') {
+      if (text[j] === '"' && quoteCloses(j)) {
         i = j;
         quoted = true;
         atFieldStart = false;

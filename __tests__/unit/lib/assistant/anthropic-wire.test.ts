@@ -16,6 +16,12 @@
 // whose `fetch` is in-process (a `.invalid` client host). It is COVERAGE of existing
 // behaviour over a path no other test crossed, not a red-first fix.
 //
+// Case f (pack C12 REV 11, A1-FD3-1) runs lib/assistant/stream-errors.ts (bundled with
+// `ai` external) against what the REAL SDK hands the UI stream's onError for rejected
+// tool calls — the capture scripts an unknown tool, then input that fails the tool's
+// zod schema, then the answer. For each rejected call the SDK calls onError twice: the
+// instance, then its string. f-overloaded / f-500 are the provider-failure controls.
+//
 // The FIRST test is the harness self-check. Every other pin runs only after it is
 // green: a probe load error or a watchdog is never evidence.
 
@@ -26,7 +32,7 @@ const PROBE = path.resolve(__dirname, "../../../support/anthropic-wire-probe.mjs
 const PROBE_TIMEOUT_MS = 90_000;
 const CAPTURE_HOST = "anthropic-wire-probe.invalid";
 const CLIENT_HOST = "wire-probe.invalid";
-const CASES = ["a0", "a", "b", "c", "d", "e", "e-sse", "e-sse-client"] as const;
+const CASES = ["a0", "a", "b", "c", "d", "e", "e-sse", "e-sse-client", "f", "f-overloaded", "f-500"] as const;
 type CaseName = (typeof CASES)[number];
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -122,6 +128,14 @@ describe("anthropic wire probe (A1 C4)", () => {
         expect(b.imports).toEqual([]);
         expect(b.mentionsPrisma).toBe(false);
       }
+    });
+
+    test("the stream-errors bundle is the leaf alone, its one import `ai` (Next-free; the probe's own SDK)", () => {
+      const aiBundles = records.bundles.aiBundles as Array<Record<string, any>>;
+      expect(aiBundles.map((b) => b.entry)).toEqual(["lib/assistant/stream-errors.ts"]);
+      expect(aiBundles[0].sources).toEqual(["lib/assistant/stream-errors.ts"]);
+      expect(aiBundles[0].imports).toEqual(["ai"]);
+      expect(aiBundles[0].mentionsPrisma).toBe(false);
     });
 
     test("a0 (control): the PRE-A1 title parameters DO put thinking disabled and max_tokens 256 on the wire", () => {
@@ -229,6 +243,84 @@ describe("anthropic wire probe (A1 C4)", () => {
       expect(parsed.slice(parsed.indexOf("abort"))).toEqual(["abort"]);
       expect(r.finalMetadata).toEqual({ threadId: "t1" });
       expect(r.readErrors).toEqual([]);
+    });
+
+    // -------------------------------------------------------------------------
+    // Case f (pack C12 REV 11, A1-FD3-1): the classifier against the REAL SDK.
+    // -------------------------------------------------------------------------
+
+    type OnErrorCall = { n: number; kind: string; name: string | null; verdict: boolean };
+    type ErrorChunk = { type: string; toolCallId: string | null; toolName: string | null; errorText: string };
+
+    /** The onError calls the SDK made while building one tool call's chunks: each
+     *  chunk's `errorText` is the `#n` the probe's onError returned for call n. */
+    function callsFor(name: CaseName, toolCallId: string): OnErrorCall[] {
+      const chunks = (records[name].errorChunks as ErrorChunk[]).filter((c) => c.toolCallId === toolCallId);
+      const ns = chunks.map((c) => Number(/#(\d+)$/.exec(c.errorText)?.[1]));
+      return (records[name].onErrorCalls as OnErrorCall[]).filter((c) => ns.includes(c.n));
+    }
+
+    /** The `tool_result` blocks a request handed back to the model. */
+    function toolResults(request: Captured): Array<Record<string, any>> {
+      const messages = (request.body.messages ?? []) as Array<{ content?: unknown }>;
+      return messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).filter((b) => b?.type === "tool_result");
+    }
+
+    test("f: each rejected tool call reaches onError as an instance AND as its string; every argument classifies recovered; the turn finishes stop with the step-3 text", () => {
+      const r = records.f;
+      const rejected = [
+        ["toolu_f_unknown", "AI_NoSuchToolError"],
+        ["toolu_f_invalid", "AI_InvalidToolInputError"],
+      ] as const;
+      for (const [toolCallId, className] of rejected) {
+        const calls = callsFor("f", toolCallId);
+        const kinds = calls.map((c) => c.kind);
+        expect({ toolCallId, instance: kinds.includes("instance"), string: kinds.includes("string") }).toEqual({
+          toolCallId,
+          instance: true,
+          string: true,
+        });
+        for (const c of calls) expect({ toolCallId, n: c.n, name: c.name }).toEqual({ toolCallId, n: c.n, name: className });
+      }
+
+      // Every onError argument of the turn belongs to one of the two calls, and every
+      // verdict is "recovered".
+      const all = r.onErrorCalls as OnErrorCall[];
+      expect(all.length).toBeGreaterThanOrEqual(4);
+      expect(all.length).toBe(rejected.reduce((sum, [id]) => sum + callsFor("f", id).length, 0));
+      for (const c of all) expect({ n: c.n, kind: c.kind, verdict: c.verdict }).toEqual({ n: c.n, kind: c.kind, verdict: true });
+
+      // The model was handed each rejection (an is_error tool_result) and went on: one
+      // request per step, and the turn ended naturally with the step-3 answer.
+      const requests = r.requests as Captured[];
+      expect(requests).toHaveLength(3);
+      expect(toolResults(requests[1]).map((b) => [b.tool_use_id, b.is_error])).toEqual([["toolu_f_unknown", true]]);
+      expect(toolResults(requests[2]).map((b) => [b.tool_use_id, b.is_error])).toEqual([
+        ["toolu_f_unknown", true],
+        ["toolu_f_invalid", true],
+      ]);
+      expect(r.finishReason).toBe("stop");
+      expect(r.finalText).toBe("Alpha 5mg has 12 on hand.");
+      expect((r.chunkTypes as string[]).includes("error")).toBe(false);
+      expect(r.readErrors).toEqual([]);
+    });
+
+    test("f-overloaded / f-500 (controls): a provider failure reaches onError and classifies false", () => {
+      const controls = [
+        ["f-overloaded", "object", "overloaded_error"],
+        ["f-500", "instance", "AI_APICallError"],
+      ] as const;
+      for (const [name, kind, errorName] of controls) {
+        const r = records[name];
+        expect({ name, calls: r.onErrorCalls }).toEqual({ name, calls: [{ n: 1, kind, name: errorName, verdict: false }] });
+        expect({ name, chunks: r.errorChunks }).toEqual({
+          name,
+          chunks: [{ type: "error", toolCallId: null, toolName: null, errorText: "PROVIDER_ERROR#1" }],
+        });
+      }
+      // The overload came MID-stream: after a text delta of the same reply.
+      const types = records["f-overloaded"].chunkTypes as string[];
+      expect(types.indexOf("error")).toBeGreaterThan(types.indexOf("text-delta"));
     });
   });
 });
