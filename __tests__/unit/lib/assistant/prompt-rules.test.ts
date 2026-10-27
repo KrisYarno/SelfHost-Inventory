@@ -189,6 +189,27 @@ describe("A1 C8 TRUTHFULNESS: the cents exception and the caveat rule", () => {
   });
 });
 
+// A1 pack C13 (FR5, A1-E1-1/2): in E1 the model restated two tool rules in its own
+// words with the wrong boundary ("only once it hits 0") or the wrong base ("twice the
+// reorder point"). The UNTRUSTED DATA section stays pinned byte-identical below.
+describe("A1 C13 TRUTHFULNESS: a tool's own rule is given exactly", () => {
+  const RULE_BULLET =
+    "- When you explain how a tool decides something — a threshold, a reorder point, a " +
+    "target, a window — give the tool's own rule exactly (\"at or below its alert " +
+    "threshold\"); never restate it with a different boundary or base.";
+
+  it("states the rule exactly once, as a bullet of its own", () => {
+    expect(p.split(RULE_BULLET).length - 1).toBe(1);
+    expect(bulletStartingWith("- When you explain how a tool decides something")).toBe(RULE_BULLET);
+  });
+
+  it("sits immediately after the 'Relay every caveat' bullet", () => {
+    const caveat = bulletStartingWith("- Relay every caveat the tools return");
+    expect(caveat).not.toBe(""); // non-vacuity
+    expect(p).toContain(`${caveat} ${RULE_BULLET} - If a tool returns no data`);
+  });
+});
+
 describe("A1 C8 WHAT WE TRACK: the two fact families disagree, and the gap is never 'small'", () => {
   it("gives both figures, says which is larger, and never reconciles them itself", () => {
     expect(p).toContain("These are two fact families and they often disagree.");
@@ -484,6 +505,31 @@ describe("A1 C8: the tool descriptions the model is handed", () => {
     expect(descOf("compare_periods")).toContain(
       "report those rows as not comparable (the row's reasons name which period has no " +
         "figure), NEVER as growth.",
+    );
+  });
+
+  // A1 pack C13 (FR5): the two rules the model restates are stated where it reads them.
+  // A1-E1-1: the lead question carries the INCLUSIVE boundary (`needsReorderAttention`,
+  // lib/reports/low-stock.ts: quantity <= threshold).
+  it("low_stock_report's lead question says 'at or below' its alert threshold", () => {
+    const d = descOf("low_stock_report");
+    expect(d).toContain('"what is currently at or below its alert threshold?"');
+    expect(d).not.toContain("currently below its");
+  });
+
+  // A1-E1-2: the multiple applies to lead-time demand, never to the reorder point
+  // (lib/reports/reorder.ts: reorderPoint = override ?? ceil(avg x lead + avg x buffer);
+  // targetLevel = max(reorderPoint, ceil(avg x lead x multiple))).
+  it("reorder_report states its reorder-point and target rules, right after the assumptions", () => {
+    const RULES =
+      "The rules: reorderPoint = average daily demand × (leadTimeDays + bufferDays), " +
+      "rounded up, unless a reorder-point override is set; targetLevel = the larger of " +
+      "reorderPoint and average daily demand × leadTimeDays × targetCoverageMultiple, " +
+      "rounded up — the multiple applies to lead-time demand, never to the reorder point.";
+    const d = descOf("reorder_report");
+    expect(d).toContain(RULES);
+    expect(d).toContain(
+      `bufferDays, targetCoverageMultiple, and demand definition — relay them. ${RULES} 'coverage' counts`,
     );
   });
 });
