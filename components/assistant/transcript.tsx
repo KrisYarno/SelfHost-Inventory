@@ -175,7 +175,9 @@ export function Transcript({
                 user={turn.user}
                 assistant={turn.assistant}
                 status={status}
-                onRetry={onRetry}
+                // `regenerate()` re-runs the LATEST turn, so only the last turn may
+                // offer Retry (A1 pack C6); an older strip renders statically.
+                onRetry={isActive ? onRetry : undefined}
               />
             );
           })}

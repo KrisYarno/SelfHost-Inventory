@@ -39,6 +39,7 @@ import rehypeSanitize from "rehype-sanitize";
 import { toast } from "sonner";
 import { Check, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { copyCodeBlock } from "@/components/assistant/code-copy";
 
 /**
  * The rehype-sanitize schema. Self-contained (does NOT extend `defaultSchema`)
@@ -123,6 +124,8 @@ export function remarkSoftBreaks() {
   };
 }
 
+// The exact block text is always copied; a csv block also carries an HTML table of
+// the same cells so a spreadsheet pastes cells, not one column (A1 pack C2b).
 function CopyButton({ value, language }: { value: string; language: string }) {
   const [copied, setCopied] = React.useState(false);
   return (
@@ -130,12 +133,15 @@ function CopyButton({ value, language }: { value: string; language: string }) {
       type="button"
       onClick={async () => {
         try {
-          await navigator.clipboard.writeText(value);
+          await copyCodeBlock(value, language, {
+            clipboard: navigator.clipboard,
+            ClipboardItem: globalThis.ClipboardItem,
+          });
           setCopied(true);
-          toast.success("Code copied");
+          toast.success("Copied");
           window.setTimeout(() => setCopied(false), 1500);
         } catch {
-          toast.error("Could not copy code");
+          toast.error("Could not copy");
         }
       }}
       className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1 rounded-md px-2 text-body-sm text-muted-foreground transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"

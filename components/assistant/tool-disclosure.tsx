@@ -5,8 +5,10 @@
  * (spec §12 D-B3). Reuses the ChangeDiffList disclosure motif (NOT the stock
  * Accordion — it lacks aria-expanded and runs 300ms).
  *
- * Three lifecycle states:
+ * Lifecycle states:
  *   - pending   : humanized pendingLabel + one motion-reduce-safe spinner;
+ *   - incomplete: a call a SETTLED turn left without output (timed out, stopped,
+ *                 failed) — muted "Did not finish", no spinner (A1 pack C6);
  *   - success   : humanized successLabel + phrase-form args summary, an
  *                 expandable ToolResultTable, and truthfulness meta chips
  *                 (scope; `Trimmed` on truncation);
@@ -24,7 +26,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { TOOL_PRESENTATION, type ToolPresentation } from "@/lib/assistant/tool-presentation";
 import { ToolResultTable, resultIsEmpty } from "@/components/assistant/tool-result-table";
 
-export type ToolDisclosureStatus = "pending" | "success" | "error" | "truncated";
+export type ToolDisclosureStatus = "pending" | "incomplete" | "success" | "error" | "truncated";
 
 export interface ToolInvocationView {
   /** Raw tool name — used ONLY to look up presentation copy, never rendered. */
@@ -125,6 +127,15 @@ export function ToolDisclosure({ tool }: { tool: ToolInvocationView }) {
       <div className="flex min-h-[44px] items-center gap-2 py-1 text-body-sm text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden />
         <span>{p.pendingLabel}</span>
+      </div>
+    );
+  }
+
+  // --- incomplete (the pending row's height; static text, no spinner) -----
+  if (tool.status === "incomplete") {
+    return (
+      <div className="flex min-h-[44px] items-center gap-2 py-1 text-body-sm text-muted-foreground">
+        <span>Did not finish</span>
       </div>
     );
   }

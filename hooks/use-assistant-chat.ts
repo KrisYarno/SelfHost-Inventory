@@ -106,10 +106,11 @@ export function deriveTurnStatus(args: {
   }
 
   // Terminal: a settled active turn OR any historical turn. Metadata wins in this
-  // order (A1 pack C6) — aborted (a user Stop), then a provider timeout, then any
-  // other errorCode, then a refusal, then a trimmed tool result, then the
-  // finish-reason caps. A stopped turn that also carries a timeout or a trimmed
-  // tool result is still "stopped"; a refusal outranks a trimmed tool result.
+  // order (A1 pack C6 REV 6) — aborted (a user Stop), then a provider timeout, then
+  // any other errorCode, then a refusal, then the finish-reason caps (step cap, then
+  // length), then a trimmed tool result. A stopped turn that also carries a timeout
+  // or a trimmed tool result is still "stopped"; a refusal or an unfinished answer
+  // outranks a trimmed tool result (a capped turn never reads "Response complete").
   const meta = metadataOf(assistant);
   if (meta?.aborted === true) return "stopped";
   if (meta?.errorCode === "PROVIDER_TIMEOUT") return "timed-out";
@@ -117,12 +118,12 @@ export function deriveTurnStatus(args: {
   const fr = meta?.finishReason;
   // `@ai-sdk/anthropic` maps the API's `stop_reason: "refusal"` to "content-filter".
   if (fr === "content-filter") return "refused";
-  if (assistantHasTruncatedTool(assistant)) return "truncated";
   // Two DISTINCT failures (review M3): "tool-calls" = the model hit the step cap
   // before finishing its work; "length" = the model's own ANSWER was cut off at the
   // output-token ceiling. They need different copy, so they are different states.
   if (fr === "tool-calls") return "step-capped";
   if (fr === "length") return "length-capped";
+  if (assistantHasTruncatedTool(assistant)) return "truncated";
   return "completed";
 }
 

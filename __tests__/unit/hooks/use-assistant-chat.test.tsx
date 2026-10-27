@@ -488,6 +488,57 @@ describe("deriveTurnStatus: timed-out and refused (A1 C6)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// deriveTurnStatus — terminal order REV 6 (A1 pack C6; FR1, A1-OCC-4). An
+// unfinished answer outranks a trimmed tool result: a turn that hit the step cap
+// or the output ceiling must not announce "Response complete; some results were
+// omitted." just because one of its tool results was trimmed.
+// ---------------------------------------------------------------------------
+
+describe("deriveTurnStatus: the caps outrank a trimmed tool result (A1 C6 REV 6)", () => {
+  const live = { isActive: true, chatStatus: "ready" as const, stopped: false };
+  const resumed = { isActive: false, chatStatus: "ready" as const, stopped: false };
+  const truncatedTool = {
+    type: "tool-get_sales",
+    state: "output-available",
+    output: { status: "truncated", meta: { scope: "company" } },
+  };
+  const withTrim = (metadata: unknown): Msg => ({
+    id: "a1",
+    role: "assistant",
+    parts: [truncatedTool, { type: "text", text: "partial" }],
+    metadata,
+  });
+
+  test("tool-calls + a truncated tool part -> step-capped (live and reloaded)", () => {
+    const m = withTrim({ finishReason: "tool-calls" });
+    expect(deriveTurnStatus({ ...live, assistant: m as never })).toBe("step-capped");
+    expect(deriveTurnStatus({ ...resumed, assistant: m as never })).toBe("step-capped");
+  });
+
+  test("length + a truncated tool part -> length-capped (live and reloaded)", () => {
+    const m = withTrim({ finishReason: "length" });
+    expect(deriveTurnStatus({ ...live, assistant: m as never })).toBe("length-capped");
+    expect(deriveTurnStatus({ ...resumed, assistant: m as never })).toBe("length-capped");
+  });
+
+  test("a truncated tool part alone -> truncated (natural stop, or no finish reason)", () => {
+    expect(deriveTurnStatus({ ...live, assistant: withTrim({ finishReason: "stop" }) as never })).toBe(
+      "truncated",
+    );
+    expect(deriveTurnStatus({ ...resumed, assistant: withTrim(undefined) as never })).toBe("truncated");
+  });
+
+  test("refused still ranks above all three (content-filter + a truncated tool part)", () => {
+    expect(
+      deriveTurnStatus({ ...live, assistant: withTrim({ finishReason: "content-filter" }) as never }),
+    ).toBe("refused");
+    expect(
+      deriveTurnStatus({ ...resumed, assistant: withTrim({ finishReason: "content-filter" }) as never }),
+    ).toBe("refused");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The returned surface (pack T7) — 2.2 consumes exactly this.
 // ---------------------------------------------------------------------------
 

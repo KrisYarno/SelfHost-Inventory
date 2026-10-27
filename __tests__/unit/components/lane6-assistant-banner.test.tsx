@@ -240,3 +240,65 @@ describe("MessageTurn: A1 C7 frozen copy", () => {
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// A1 pack C6 (FR1, A1-OCC-2) — Retry on the LAST turn only. `regenerate()` always
+// re-runs the latest turn, so the transcript hands `onRetry` to the last turn
+// alone; an OLDER failed / timed-out turn shows its sentence statically — same
+// sentence, same styling, no Retry button and no role="alert" (a historic strip
+// must not re-announce).
+// ---------------------------------------------------------------------------
+
+describe("MessageTurn: the FailureStrip without onRetry is static (A1 C6 FR1)", () => {
+  const cases = [
+    { status: "timed-out" as const, copy: TIMEOUT_COPY, assistant: asstText("half an answer") },
+    { status: "failed-after-content" as const, copy: PROVIDER_FAILURE_COPY, assistant: asstText("partial") },
+    { status: "failed-before-content" as const, copy: PROVIDER_FAILURE_COPY, assistant: undefined },
+  ];
+
+  test.each(cases)("$status with no onRetry: the sentence, no Retry, no live role", ({ status, copy, assistant }) => {
+    const { container } = render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={assistant as never} status={status} />
+      </ul>,
+    );
+    const sentence = screen.getByText(copy);
+    expect(sentence.textContent).toBe(copy);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(container.querySelector("[role], [aria-live]")).toBeNull();
+  });
+
+  test.each(cases)("$status: the static strip keeps the strip's styling exactly", ({ status, copy, assistant }) => {
+    const live = render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={assistant as never} status={status} onRetry={jest.fn()} />
+      </ul>,
+    );
+    const liveSentence = within(live.getByRole("alert")).getByText(copy);
+    const liveClasses = { sentence: liveSentence.className, strip: liveSentence.parentElement!.className };
+    live.unmount();
+
+    render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={assistant as never} status={status} />
+      </ul>,
+    );
+    const staticSentence = screen.getByText(copy);
+    expect(staticSentence.className).toBe(liveClasses.sentence);
+    expect(staticSentence.parentElement!.className).toBe(liveClasses.strip);
+  });
+
+  test.each(cases)("$status WITH onRetry (the last turn): role=alert + Retry calls it", ({ status, copy, assistant }) => {
+    const onRetry = jest.fn();
+    render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={assistant as never} status={status} onRetry={onRetry} />
+      </ul>,
+    );
+    const alert = screen.getByRole("alert");
+    expect(within(alert).getByText(copy)).toBeInTheDocument();
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});

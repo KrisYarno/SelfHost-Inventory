@@ -15,10 +15,11 @@
  * "Assistant is working…" + motion-reduce-safe skeleton; streaming / completed ->
  * content; stopped / step-capped / length-capped / truncated / refused -> content
  * PRESERVED with the right banner; failed-* / timed-out -> content PRESERVED above
- * the FailureStrip, each with its own sentence (Retry regenerates the last user
- * turn, never duplicating it). Banners carry NO live role — the transcript's
- * milestone region is the single announcer; only the FailureStrip keeps
- * role="alert".
+ * the FailureStrip, each with its own sentence. Retry regenerates the last user
+ * turn, never duplicating it — so only the LAST turn is given `onRetry`; an older
+ * strip shows its sentence statically (A1 pack C6). Banners carry NO live role —
+ * the transcript's milestone region is the single announcer; only the last turn's
+ * FailureStrip keeps role="alert".
  */
 
 import * as React from "react";
@@ -35,7 +36,8 @@ interface MessageTurnProps {
   user?: UIMessage;
   assistant?: UIMessage;
   status: TurnStatus;
-  onRetry: () => void;
+  /** Given to the LAST turn only: `regenerate()` always re-runs the latest turn. */
+  onRetry?: () => void;
 }
 
 function userText(m: UIMessage): string {
@@ -45,8 +47,11 @@ function userText(m: UIMessage): string {
     .join("");
 }
 
-/** Normalize a tool UI part into the disclosure view (client-safe). */
-function toToolView(part: UIMessage["parts"][number]): ToolInvocationView {
+/** Normalize a tool UI part into the disclosure view (client-safe). A part with no
+ *  output is "pending" only while its turn is in flight (`busy`); a settled turn
+ *  left it unfinished, so it is "incomplete" — never a spinner that keeps turning
+ *  (A1 pack C6). */
+function toToolView(part: UIMessage["parts"][number], busy: boolean): ToolInvocationView {
   const name = getToolName(part as Parameters<typeof getToolName>[0]);
   const tp = part as {
     state?: string;
@@ -79,7 +84,7 @@ function toToolView(part: UIMessage["parts"][number]): ToolInvocationView {
     return { name, status: "error", input, scope: out.meta?.scope };
   }
   if (tp.state === "output-error") return { name, status: "error", input };
-  return { name, status: "pending", input };
+  return { name, status: busy ? "pending" : "incomplete", input };
 }
 
 function AssistantHeader() {
@@ -110,16 +115,21 @@ const PROVIDER_FAILURE_COPY =
 const TIMEOUT_COPY =
   "This took longer than the time limit, so the answer stopped. Asking for one part at a time usually helps.";
 
-function FailureStrip({ message, onRetry }: { message: string; onRetry: () => void }) {
+/** Retry AND the live role only with `onRetry` (the last turn): an older strip is
+ *  the same sentence and styling, static — it never re-runs the wrong turn and never
+ *  re-announces (A1 pack C6). */
+function FailureStrip({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
     <div
-      role="alert"
+      role={onRetry ? "alert" : undefined}
       className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2"
     >
       <span className="text-body-sm text-destructive">{message}</span>
-      <Button variant="outline" size="sm" onClick={onRetry} className="min-h-[44px]">
-        Retry
-      </Button>
+      {onRetry && (
+        <Button variant="outline" size="sm" onClick={onRetry} className="min-h-[44px]">
+          Retry
+        </Button>
+      )}
     </div>
   );
 }
@@ -131,7 +141,7 @@ function AssistantBody({
 }: {
   assistant?: UIMessage;
   status: TurnStatus;
-  onRetry: () => void;
+  onRetry?: () => void;
 }) {
   const busy = status === "submitting" || status === "streaming";
 
@@ -152,7 +162,7 @@ function AssistantBody({
               ) : null;
             }
             if (isToolUIPart(part)) {
-              return <ToolDisclosure key={i} tool={toToolView(part)} />;
+              return <ToolDisclosure key={i} tool={toToolView(part, busy)} />;
             }
             return null;
           })

@@ -250,6 +250,50 @@ describe("MessageTurn", () => {
     );
     expect(container.querySelector('[aria-busy="true"]')).toBeTruthy();
   });
+
+  // A1 pack C6 (FR1, A1-OCC-5): a tool part with no output is "pending" only while
+  // the turn is in flight; in a settled turn it is "incomplete" — never a spinner
+  // left turning above "timed out" / "stopped" / a failure strip.
+  const inputOnly = (state: string): Msg => ({
+    id: "a1",
+    role: "assistant",
+    parts: [toolPart("get_sales", state, { input: {} }), { type: "text", text: "partial" }],
+  });
+
+  test.each<TurnStatus>(["timed-out", "stopped", "failed-after-content"])(
+    "a settled %s turn with an input-only tool part: 'Did not finish', no spinner",
+    (status) => {
+      const { container } = render(
+        <ul>
+          <MessageTurn user={userMsg("q") as never} assistant={inputOnly("input-available") as never} status={status} onRetry={noop} />
+        </ul>,
+      );
+      expect(screen.getByText("Did not finish")).toBeInTheDocument();
+      expect(screen.queryByText("Looking up sales…")).toBeNull();
+      expect(container.querySelector(".animate-spin")).toBeNull();
+    },
+  );
+
+  test("a settled turn with a still-streaming-input tool part is also 'Did not finish'", () => {
+    const { container } = render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={inputOnly("input-streaming") as never} status="timed-out" onRetry={noop} />
+      </ul>,
+    );
+    expect(screen.getByText("Did not finish")).toBeInTheDocument();
+    expect(container.querySelector(".animate-spin")).toBeNull();
+  });
+
+  test("a STREAMING turn with an input-only tool part still shows the pending label + spinner", () => {
+    const { container } = render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={inputOnly("input-available") as never} status="streaming" onRetry={noop} />
+      </ul>,
+    );
+    expect(screen.getByText("Looking up sales…")).toBeInTheDocument();
+    expect(container.querySelector(".animate-spin")).toBeTruthy();
+    expect(screen.queryByText("Did not finish")).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -297,6 +341,20 @@ describe("ToolDisclosure", () => {
   test("truncated: Trimmed warning badge", () => {
     render(<ToolDisclosure tool={{ name: "get_sales", status: "truncated", input: {}, scope: "company" }} />);
     expect(screen.getByText("Trimmed")).toBeInTheDocument();
+  });
+
+  // A1 pack C6 (FR1, A1-OCC-5): a tool part a settled turn left without output.
+  test("incomplete: muted 'Did not finish', NO spinner, no live role, the pending row's height", () => {
+    const { container } = render(<ToolDisclosure tool={{ name: "get_sales", status: "incomplete", input: {} }} />);
+    const text = screen.getByText("Did not finish");
+    expect(text.closest(".text-muted-foreground")).toBeTruthy();
+    expect(container.querySelector(".animate-spin")).toBeNull();
+    expect(container.querySelector("svg")).toBeNull();
+    expect(container.querySelector("[role], [aria-live]")).toBeNull();
+    expect(container.firstElementChild).toHaveClass("min-h-[44px]");
+    // Never the in-flight label, never the raw tool name.
+    expect(screen.queryByText("Looking up sales…")).toBeNull();
+    expect(screen.queryByText(/get_sales/)).toBeNull();
   });
 });
 
@@ -948,5 +1006,71 @@ describe("AssistantPage milestones (A1 C6)", () => {
     fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
     expect(regenerate).toHaveBeenCalledTimes(1);
     expect(milestoneRegion().textContent).toBe("Assistant response timed out.");
+  });
+
+  // A1 pack C6 (FR1, A1-OCC-2): `regenerate()` re-runs the LATEST turn, so only the
+  // last turn gets Retry (and the strip's alert). An older failed / timed-out turn
+  // keeps its sentence, statically: no button, no role="alert".
+  const PROVIDER_FAILURE_COPY =
+    "Assistant could not reach its AI provider. Try again. If this keeps happening, ask an admin to check AI Providers.";
+  const olderFailures: Msg[] = [
+    userMsg("first", "u1"),
+    asstText("first partial", "a1", { errorCode: "PROVIDER_ERROR" }),
+    userMsg("second", "u2"),
+    asstText("second partial", "a2", { errorCode: "PROVIDER_TIMEOUT" }),
+  ];
+
+  test("older failed + timed-out turns under a completed last turn: no Retry, no alert, sentences still shown", () => {
+    const regenerate = jest.fn();
+    useChatMock.mockReturnValue(
+      chatReturn({
+        status: "ready",
+        regenerate,
+        messages: [...olderFailures, userMsg("third", "u3"), asstText("done", "a3", { finishReason: "stop" })],
+      }),
+    );
+    renderPage();
+    const transcript = screen.getByTestId("assistant-transcript");
+    expect(within(transcript).queryAllByRole("alert")).toHaveLength(0);
+    expect(within(transcript).queryAllByRole("button", { name: "Retry" })).toHaveLength(0);
+    expect(within(transcript).getByText(PROVIDER_FAILURE_COPY)).toBeInTheDocument();
+    expect(within(transcript).getByText(TIMEOUT_COPY)).toBeInTheDocument();
+    expect(regenerate).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { last: "timed-out", meta: { errorCode: "PROVIDER_TIMEOUT" }, copy: TIMEOUT_COPY, milestone: "Assistant response timed out." },
+    { last: "failed-after-content", meta: { errorCode: "PROVIDER_ERROR" }, copy: PROVIDER_FAILURE_COPY, milestone: "Assistant response failed." },
+  ])("a $last LAST turn below older failures: exactly one alert + Retry, on the last turn, calling retry", ({ meta, copy, milestone }) => {
+    const regenerate = jest.fn();
+    useChatMock.mockReturnValue(
+      chatReturn({
+        status: "ready",
+        regenerate,
+        messages: [...olderFailures, userMsg("third", "u3"), asstText("third partial", "a3", meta)],
+      }),
+    );
+    renderPage();
+    const transcript = screen.getByTestId("assistant-transcript");
+    const turns = transcript.querySelectorAll("ol > li");
+    expect(turns).toHaveLength(3);
+    const lastTurn = turns[turns.length - 1] as HTMLElement;
+
+    const alerts = within(transcript).getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    expect(lastTurn.contains(alerts[0])).toBe(true);
+    expect(within(alerts[0]).getByText(copy)).toBeInTheDocument();
+
+    const retries = within(transcript).getAllByRole("button", { name: "Retry" });
+    expect(retries).toHaveLength(1);
+    expect(alerts[0].contains(retries[0])).toBe(true);
+
+    // The older turns keep their sentences, statically.
+    expect(within(turns[0] as HTMLElement).getByText(PROVIDER_FAILURE_COPY)).toBeInTheDocument();
+    expect(within(turns[1] as HTMLElement).getByText(TIMEOUT_COPY)).toBeInTheDocument();
+
+    fireEvent.click(retries[0]);
+    expect(regenerate).toHaveBeenCalledTimes(1);
+    expect(milestoneRegion().textContent).toBe(milestone);
   });
 });
