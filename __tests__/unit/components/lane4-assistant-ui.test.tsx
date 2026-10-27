@@ -13,9 +13,27 @@ import * as React from "react";
 import { render, screen, fireEvent, within, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
+// A text that is exactly ONE fenced block is handed to the REAL `pre` override, with
+// the `code` child react-markdown gives it (A1 pack C2), so the turn -> CodeBlock seam
+// (pack C11: busy / cut-off) runs through the real CodeBlock. This fence match is a
+// stand-in; the real parse is pinned in assistant-markdown-render.test.ts.
 jest.mock("react-markdown", () => ({
   __esModule: true,
-  default: ({ children }: { children: React.ReactNode }) => <div data-testid="md">{children}</div>,
+  default: ({ children, components }: { children: string; components?: { pre?: React.ElementType } }) => {
+    const fence = /^```(\w*)\n([\s\S]*?)\n```$/.exec(children);
+    const Pre = components?.pre;
+    return (
+      <div data-testid="md">
+        {fence && Pre ? (
+          <Pre>
+            <code className={fence[1] ? `language-${fence[1]}` : undefined}>{`${fence[2]}\n`}</code>
+          </Pre>
+        ) : (
+          children
+        )}
+      </div>
+    );
+  },
 }));
 jest.mock("remark-gfm", () => ({ __esModule: true, default: () => undefined }));
 jest.mock("rehype-sanitize", () => ({ __esModule: true, default: () => undefined }));
@@ -294,6 +312,58 @@ describe("MessageTurn", () => {
     expect(container.querySelector(".animate-spin")).toBeTruthy();
     expect(screen.queryByText(/Did not finish/)).toBeNull();
   });
+
+  // A1 pack C11 (FR3, A1-FD2-6): a tool part whose name is an Object.prototype member
+  // renders the fallback copy instead of crashing the transcript.
+  test("a settled turn with a tool part named 'constructor' renders 'Did not finish reading data'", () => {
+    const part = toolPart("constructor", "input-available", { input: {} });
+    render(
+      <ul>
+        <MessageTurn user={userMsg("q") as never} assistant={{ id: "a1", role: "assistant", parts: [part] } as never} status="timed-out" />
+      </ul>,
+    );
+    expect(screen.getByText("Did not finish reading data")).toBeInTheDocument();
+  });
+});
+
+// A1 pack C11 (FR3, A1-QA-4): a fenced block follows its turn's state. A block still
+// being written cannot be copied; a block of a turn that stopped mid-answer says its
+// last line may be incomplete (and still copies exactly what is shown).
+describe("MessageTurn — code blocks follow the turn state (A1 C11)", () => {
+  const CSV_ANSWER = "```csv\nProduct,On hand\nAlpha 5mg,12\nBeta 2mg,1\n```";
+  const CUT_OFF = "Answer cut off — the last line may be incomplete";
+  const renderTurn = (status: TurnStatus) =>
+    render(
+      <ul>
+        <MessageTurn user={userMsg("export") as never} assistant={asstText(CSV_ANSWER) as never} status={status} />
+      </ul>,
+    );
+
+  test.each<TurnStatus>(["timed-out", "length-capped", "stopped", "failed-after-content"])(
+    "%s: the block says it was cut off; Copy stays enabled",
+    (status) => {
+      renderTurn(status);
+      expect(screen.getByText(CUT_OFF)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Copy csv" })).toBeEnabled();
+    },
+  );
+
+  test("streaming: Copy is disabled (same label), no cut-off text", () => {
+    renderTurn("streaming");
+    expect(screen.getByRole("button", { name: "Copy csv" })).toBeDisabled();
+    expect(screen.queryByText(CUT_OFF)).toBeNull();
+  });
+
+  // step-capped is NOT cut off: its last step ended with a tool call, after its text
+  // closed. truncated / refused are not in the set either.
+  test.each<TurnStatus>(["completed", "step-capped", "truncated", "refused"])(
+    "%s: neither — no cut-off text, Copy enabled",
+    (status) => {
+      renderTurn(status);
+      expect(screen.queryByText(CUT_OFF)).toBeNull();
+      expect(screen.getByRole("button", { name: "Copy csv" })).toBeEnabled();
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -357,6 +427,21 @@ describe("ToolDisclosure", () => {
     // Never the in-flight label, never the raw tool name.
     expect(screen.queryByText("Looking up sales…")).toBeNull();
     expect(screen.queryByText(/get_sales/)).toBeNull();
+  });
+
+  // A1 pack C11 (FR3, A1-FD2-6): the presentation lookup is own-property only — a name
+  // that is an Object.prototype member gets the FALLBACK copy, never a prototype value.
+  test.each(["constructor", "__proto__", "toString", "hasOwnProperty"])(
+    "incomplete: a part named %s renders the FALLBACK noun ('Did not finish reading data') and never throws",
+    (name) => {
+      render(<ToolDisclosure tool={{ name, status: "incomplete", input: {} }} />);
+      expect(screen.getByText("Did not finish reading data")).toBeInTheDocument();
+    },
+  );
+
+  test("incomplete: an unknown tool name renders the FALLBACK noun too", () => {
+    render(<ToolDisclosure tool={{ name: "get_not_a_tool", status: "incomplete", input: {} }} />);
+    expect(screen.getByText("Did not finish reading data")).toBeInTheDocument();
   });
 });
 
@@ -642,17 +727,17 @@ describe("Composer", () => {
 // ---------------------------------------------------------------------------
 
 describe("markdown sanitize schema (D-B2)", () => {
-  test("allows exactly the D-B2 + A1 C1 element set", () => {
+  test("allows exactly the D-B2 + A1 C1/C11 element set", () => {
     expect([...MARKDOWN_SANITIZE_SCHEMA.tagNames]).toEqual([
-      "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "ul", "ol", "li", "strong", "em", "del", "a",
-      "code", "pre", "table", "thead", "tbody", "tr", "th", "td",
+      "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "ul", "ol", "li", "strong", "em", "del", "sup",
+      "a", "code", "pre", "table", "thead", "tbody", "tr", "th", "td",
     ]);
   });
-  test("allows attributes only on a (href) and code (className) — none on the table family, headings or hr", () => {
+  test("allows attributes only on a (href) and code (className) — none on the table family, headings, hr, del or sup", () => {
     expect(MARKDOWN_SANITIZE_SCHEMA.attributes).toEqual({ a: ["href"], code: ["className"] });
   });
-  test("includes the table family, every heading level and hr (A1 C1 — inert structure)", () => {
-    for (const ok of ["table", "thead", "tbody", "tr", "th", "td", "h1", "h4", "h5", "h6", "hr"]) {
+  test("includes the table family, every heading level, hr, del and sup (A1 C1/C11 — inert structure)", () => {
+    for (const ok of ["table", "thead", "tbody", "tr", "th", "td", "h1", "h4", "h5", "h6", "hr", "del", "sup"]) {
       expect(MARKDOWN_SANITIZE_SCHEMA.tagNames).toContain(ok);
     }
   });

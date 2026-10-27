@@ -115,6 +115,16 @@ const PROVIDER_FAILURE_COPY =
 const TIMEOUT_COPY =
   "This took longer than the time limit, so the answer stopped. Asking for one part at a time usually helps.";
 
+/** The settled turns that stopped mid-answer, so a fenced block's last line may be
+ *  incomplete (A1 pack C11). `step-capped` is NOT one: its last step ended with a
+ *  tool call, after its text closed. */
+const CUT_OFF_STATUSES: ReadonlySet<TurnStatus> = new Set<TurnStatus>([
+  "timed-out",
+  "length-capped",
+  "stopped",
+  "failed-after-content",
+]);
+
 /** Retry AND the live role only with `onRetry` (the last turn): an older strip is
  *  the same sentence and styling, static — it never re-runs the wrong turn and never
  *  re-announces (A1 pack C6). */
@@ -144,6 +154,7 @@ function AssistantBody({
   onRetry?: () => void;
 }) {
   const busy = status === "submitting" || status === "streaming";
+  const blocks = busy ? "busy" : CUT_OFF_STATUSES.has(status) ? "cut-off" : "complete";
 
   return (
     <div className="w-full bg-background" aria-busy={busy || undefined}>
@@ -158,7 +169,9 @@ function AssistantBody({
           assistant?.parts.map((part, i) => {
             if (part.type === "text") {
               return part.text.trim() ? (
-                <AssistantMarkdown key={i}>{part.text}</AssistantMarkdown>
+                <AssistantMarkdown key={i} blocks={blocks}>
+                  {part.text}
+                </AssistantMarkdown>
               ) : null;
             }
             if (isToolUIPart(part)) {

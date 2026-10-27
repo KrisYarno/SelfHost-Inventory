@@ -11,6 +11,9 @@
 // The FIRST test is the harness self-check. Every pin runs only after it is green: a
 // probe that fails to load is a harness failure, never a red-first result.
 //
+// An input is a markdown string (rendered with the component's default `blocks`) or
+// `{ markdown, blocks }` — the turn state a fenced block's Copy depends on (pack C11).
+//
 // Product names are synthetic.
 
 import { spawnSync } from "node:child_process";
@@ -20,7 +23,9 @@ import { JSDOM } from "jsdom";
 const PROBE = path.resolve(__dirname, "../../support/render-markdown-probe.mjs");
 const PROBE_TIMEOUT_MS = 60_000;
 
-function spawnProbe(inputs: string[]) {
+type ProbeInput = string | { markdown: string; blocks: "complete" | "busy" | "cut-off" };
+
+function spawnProbe(inputs: ProbeInput[]) {
   return spawnSync(process.execPath, [PROBE], {
     input: JSON.stringify(inputs),
     encoding: "utf8",
@@ -29,7 +34,7 @@ function spawnProbe(inputs: string[]) {
 }
 
 /** Render every input through the probe; throws (never returns partial) on a load error. */
-function renderAll(inputs: string[]): string[] {
+function renderAll(inputs: ProbeInput[]): string[] {
   const r = spawnProbe(inputs);
   if (r.error) throw new Error(`render probe failed to spawn: ${r.error.message}`);
   if (r.status !== 0) {
@@ -63,6 +68,24 @@ describe("assistant markdown render probe (A1 C2)", () => {
       "|---|---|---|---|",
       "| Alpha 1mg | 10 | $1.00 | 3 |",
       "| Beta 2mg | 20 | $2.00 | 4 |",
+    ].join("\n");
+    // QA-1: an unescaped `|` in a product name gives the row one cell more than its
+    // header (mdast-util-to-hast's table-row stops at `align.length`).
+    const TABLE_WIDE_ROW = [
+      "| Product | On hand | Cost |",
+      "|---|---|---|",
+      "| Alpha 5mg | 12 | $4.00 |",
+      "| Sema | Kit 10mg | 7 | $9.50 |",
+      "| Beta 2mg | 30 | $1.25 |",
+    ].join("\n");
+    // QA-4: an export cut off mid-row ("Beta 2mg,1" of a real 130).
+    const CUT_CSV = [
+      "Caveats: costs not set for 2 products. 100 rows in total.",
+      "",
+      "```csv",
+      "Product,On hand,Received",
+      "Alpha 5mg,12,40",
+      "Beta 2mg,1",
     ].join("\n");
     const cols12 = Array.from({ length: 12 }, (_, i) => `c${i + 1}`);
     const TABLE_12 = [
@@ -100,7 +123,29 @@ describe("assistant markdown render probe (A1 C2)", () => {
       codeBr: "Type `a<br>b` here.",
       boldTag: "Some <b>x</b> text.",
       strike: "~~$12.00~~ $10.00",
-    } as const;
+      // A1 pack C11 (FR3).
+      approxTilde: "Alpha sells ~12/day; reorder at 20~25 units.",
+      tildeRanges: "5~10 and 20~30",
+      brIndented: "First paragraph.\n\n  <br>\n\nSecond paragraph.",
+      brTrailing: "First paragraph.\n\n<br>  \n\nSecond paragraph.",
+      brDash: "a<br-foo>b",
+      brThenNewline: "10<br>\n20",
+      loneCr: "a\rb",
+      inlineSup: "10<sup>2</sup>",
+      inlineSpan: "10<span>20</span>",
+      inlineComment: "10<!-- x -->20",
+      inlineWbr: "10<wbr>20",
+      closingBr: "10</br>20",
+      brQuotedGt: '10<br title="a>b">20',
+      cellSup: "| a |\n|---|\n| 10<sup>2</sup> |",
+      cellSpan: "| a |\n|---|\n| 10<span>20</span> |",
+      footnoteCell: "| Product | On hand |\n|---|---|\n| Alpha 5mg | 12[^a] |\n\n[^a]: As of the last count.",
+      wideRow: TABLE_WIDE_ROW,
+      escapedPipe: "| Product | On hand | Cost |\n|---|---|---|\n| Sema \\| Kit 10mg | 7 | $9.50 |",
+      csvBusy: { markdown: CUT_CSV, blocks: "busy" },
+      csvCutOff: { markdown: CUT_CSV, blocks: "cut-off" },
+      csvComplete: { markdown: CUT_CSV, blocks: "complete" },
+    } satisfies Record<string, ProbeInput>;
     type CaseName = keyof typeof CASES;
 
     const html = {} as Record<CaseName, string>;
@@ -313,7 +358,8 @@ describe("assistant markdown render probe (A1 C2)", () => {
       expect(doc.codeBr.querySelector("br")).toBeNull();
 
       expect(doc.boldTag.querySelector("b")).toBeNull();
-      expect(text(doc.boldTag.querySelector("p"))).toBe("Some x text.");
+      // Whitespace-collapsed: since C11 (FR3) each removed inline tag leaves a space.
+      expect(text(doc.boldTag.querySelector("p")).replace(/\s+/g, " ")).toBe("Some x text.");
     });
 
     // A1 pack C1/C2 REV 7 (FR2, A1-CRS-6): a struck figure reads as struck, not as a
@@ -326,6 +372,167 @@ describe("assistant markdown render probe (A1 C2)", () => {
       expect(dels[0].getAttributeNames()).toEqual([]);
       expect(dels[0].nextSibling?.textContent).toBe(" $10.00");
       expect(text(p)).toBe("$12.00 $10.00");
+    });
+
+    // -------------------------------------------------------------------------
+    // A1 pack C11 (FR3): figures are never struck, fused, dropped or copied as clean
+    // when they are not.
+    // -------------------------------------------------------------------------
+
+    // FD2-1 / QA-3: remark-gfm's default strikethrough takes a SINGLE `~`, which struck
+    // "12/day; reorder at 20" in a real-shaped answer. Only `~~x~~` strikes now.
+    test("pin 16 (R): a single tilde is literal — no del, the text exactly as written", () => {
+      for (const name of ["approxTilde", "tildeRanges"] as const) {
+        const p = doc[name].querySelector("p") as Element;
+        expect({ name, dels: p.querySelectorAll("del").length }).toEqual({ name, dels: 0 });
+        expect({ name, text: text(p) }).toEqual({ name, text: CASES[name] });
+      }
+      // `~~x~~` is still strikethrough (pin 15).
+      expect(doc.strike.querySelectorAll("del")).toHaveLength(1);
+    });
+
+    // FD2-2: a block `<br>` may carry indentation or trailing spaces; `<br-foo>` is not
+    // a `<br>` tag.
+    test("pin 17 (R): an indented or space-trailed block <br> is one br; <br-foo> is not a break", () => {
+      for (const name of ["brIndented", "brTrailing"] as const) {
+        const d = doc[name];
+        expect({ name, brs: d.querySelectorAll("br").length }).toEqual({ name, brs: 1 });
+        expect(Array.from(d.querySelectorAll("p")).map((p) => text(p))).toEqual([
+          "First paragraph.",
+          "Second paragraph.",
+        ]);
+        expect(d.body.textContent).not.toContain("<br");
+      }
+      expect(doc.brDash.querySelector("br")).toBeNull();
+      expect(doc.brDash.body.textContent).not.toContain("br-foo");
+    });
+
+    // FD2-3: the `<br>` and the line ending after it are ONE break, not two.
+    test("pin 18 (R): <br> followed by a line ending renders exactly one br", () => {
+      const p = doc.brThenNewline.querySelector("p") as Element;
+      expect(p.querySelectorAll("br")).toHaveLength(1);
+      expect(text(p)).toBe("10\n20");
+    });
+
+    // FD2-8: a lone CR is a line ending too.
+    test("pin 8b (R): a lone CR is a br, and no CR is left in the raw HTML", () => {
+      expect(doc.loneCr.querySelectorAll("p br")).toHaveLength(1);
+      expect(html.loneCr).not.toContain("\r");
+    });
+
+    // QA-5: the sanitizer drops inline raw HTML, which fused the figures on either side
+    // ("10<sup>2</sup>" -> "102"). Every inline tag other than `<br>` becomes a space.
+    test("pin 19 (R): any other inline raw HTML leaves a space — the figures never fuse, no tag survives", () => {
+      const expected: Array<[CaseName, string]> = [
+        ["inlineSup", "10 2"],
+        ["inlineSpan", "10 20"],
+        ["inlineComment", "10 20"],
+        ["inlineWbr", "10 20"],
+        ["closingBr", "10 20"],
+        ["brQuotedGt", "10 20"],
+      ];
+      for (const [name, collapsed] of expected) {
+        const p = doc[name].querySelector("p") as Element;
+        // No element at all inside the paragraph: no sup/span/wbr/br from raw HTML.
+        expect({ name, elements: p.children.length }).toEqual({ name, elements: 0 });
+        expect({ name, text: text(p).replace(/\s+/g, " ").trim() }).toEqual({ name, text: collapsed });
+        expect({ name, tagText: /[<>]/.test(text(p)) }).toEqual({ name, tagText: false });
+      }
+      expect(doc.inlineComment.body.textContent).not.toContain("x");
+
+      for (const [name, collapsed] of [["cellSup", "10 2"], ["cellSpan", "10 20"]] as const) {
+        const td = doc[name].querySelector("tbody td") as Element;
+        expect({ name, elements: td.children.length }).toEqual({ name, elements: 0 });
+        expect({ name, text: text(td).replace(/\s+/g, " ").trim() }).toEqual({ name, text: collapsed });
+      }
+    });
+
+    // QA-5: a GFM footnote marker renders as a bare superscript, never as a digit fused
+    // onto the figure before it ("12" + "1" read as "121").
+    test("pin 20 (R): a footnote marker is a bare sup after the figure, never fused into it", () => {
+      const cells = Array.from(doc.footnoteCell.querySelectorAll("tbody td"));
+      expect(cells.map((td) => td.firstChild?.textContent ?? "")).toEqual(["Alpha 5mg", "12"]);
+      const sup = cells[1].querySelector("sup");
+      expect(sup).not.toBeNull();
+      const marker = sup as Element;
+      expect(marker.getAttributeNames()).toEqual([]);
+      expect(text(marker)).toBe("1");
+      expect(marker.previousSibling?.textContent).toBe("12");
+      // Nothing of the footnote machinery's attributes survives the sanitizer.
+      expect(doc.footnoteCell.querySelector("[id], [data-footnote-ref], [data-footnotes], [aria-describedby]")).toBeNull();
+    });
+
+    // QA-1: a row with one cell more than its header used to DROP the last cell
+    // ("$9.50" gone). The table is widened to its widest row; the header shows an empty
+    // th for the added column.
+    test("pin 21 (R): a row wider than its header keeps every cell; a fitting table is unchanged", () => {
+      const d = doc.wideRow;
+      expect(Array.from(d.querySelectorAll("thead th")).map((th) => text(th))).toEqual([
+        "Product", "On hand", "Cost", "",
+      ]);
+      const rows = Array.from(d.querySelectorAll("tbody tr")).map((tr) =>
+        Array.from(tr.querySelectorAll("td")).map((td) => text(td)),
+      );
+      expect(rows).toEqual([
+        ["Alpha 5mg", "12", "$4.00", ""],
+        ["Sema", "Kit 10mg", "7", "$9.50"],
+        ["Beta 2mg", "30", "$1.25", ""],
+      ]);
+      expect(d.body.textContent).toContain("$9.50");
+
+      // The prompt's advice (`\|` inside a cell) gives a normal 3-column table.
+      const e = doc.escapedPipe;
+      expect(Array.from(e.querySelectorAll("thead th")).map((th) => text(th))).toEqual([
+        "Product", "On hand", "Cost",
+      ]);
+      expect(Array.from(e.querySelectorAll("tbody td")).map((td) => text(td))).toEqual([
+        "Sema | Kit 10mg", "7", "$9.50",
+      ]);
+      // ...and the pin-1 table is untouched.
+      expect(doc.table4.querySelectorAll("th")).toHaveLength(4);
+      expect(doc.table4.querySelectorAll("td")).toHaveLength(8);
+    });
+
+    // QA-4: a block still being written cannot be copied; a cut-off turn's block says
+    // its last line may be incomplete. Values are never altered.
+    const CUT_OFF_TEXT = "Answer cut off — the last line may be incomplete";
+    const blockOf = (d: Document) => {
+      const pre = d.querySelector("pre") as Element;
+      const header = (pre.parentElement as Element).firstElementChild as Element;
+      const button = header.querySelector('button[aria-label="Copy csv"]') as HTMLButtonElement | null;
+      return { pre, header, button };
+    };
+
+    test("pin 22 (R): a busy turn's code block has Copy disabled — same label, same size", () => {
+      const { pre, header, button } = blockOf(doc.csvBusy);
+      expect(button).not.toBeNull();
+      expect((button as HTMLButtonElement).hasAttribute("disabled")).toBe(true);
+      const classes = (button as HTMLButtonElement).className.split(/\s+/);
+      expect(classes).toEqual(expect.arrayContaining(["min-h-[44px]", "min-w-[44px]"]));
+      expect(text(header)).not.toContain(CUT_OFF_TEXT);
+      expect(text(pre)).toBe("Product,On hand,Received\nAlpha 5mg,12,40\nBeta 2mg,1");
+    });
+
+    test("pin 22 (R): a cut-off turn's code block says so after the language label; Copy stays enabled", () => {
+      const { pre, header, button } = blockOf(doc.csvCutOff);
+      const spans = Array.from(header.querySelectorAll("span")).map((s) => text(s));
+      const lang = spans.indexOf("csv");
+      const note = spans.indexOf(CUT_OFF_TEXT);
+      expect(lang).toBeGreaterThanOrEqual(0);
+      expect(note).toBeGreaterThan(lang);
+      expect(button).not.toBeNull();
+      expect((button as HTMLButtonElement).hasAttribute("disabled")).toBe(false);
+      // The block text is exactly what was written — nothing appended, nothing trimmed.
+      expect(text(pre)).toBe("Product,On hand,Received\nAlpha 5mg,12,40\nBeta 2mg,1");
+    });
+
+    test("pin 22: a complete turn's code block (explicit or the default) has no cut-off text and an enabled Copy", () => {
+      for (const name of ["csvComplete", "csvFence"] as const) {
+        const d = doc[name];
+        expect({ name, cutOff: (d.body.textContent ?? "").includes(CUT_OFF_TEXT) }).toEqual({ name, cutOff: false });
+        const button = d.querySelector('button[aria-label="Copy csv"]') as HTMLButtonElement;
+        expect({ name, disabled: button.hasAttribute("disabled") }).toEqual({ name, disabled: false });
+      }
     });
 
     test("C2 guard: no override spreads react-markdown's node prop onto the DOM", () => {

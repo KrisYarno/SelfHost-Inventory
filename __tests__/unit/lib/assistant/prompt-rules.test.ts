@@ -299,6 +299,15 @@ describe("A1 C8 STYLE: lists, tables, paging", () => {
     expect(p).toContain("If more rows exist, say so and give the total the tool reported.");
   });
 
+  // A1 pack C11 (FR3, A1-QA-1/7): a line typed right under a table becomes a table row
+  // (GFM), and an unescaped `|` in a cell gives the row an extra cell.
+  it("leaves a blank line after the table and escapes a | inside a cell", () => {
+    expect(p).toContain(
+      "at most 40 rows. Leave a blank line after the table, and write a | inside a cell as \\|. " +
+        "If more rows exist,",
+    );
+  });
+
   it("continues from the last row shown, via fetched rows or the tool's own nextOffset", () => {
     expect(p).toContain(
       "When the user asks for the next part, continue from the last row you showed — from " +
@@ -337,8 +346,10 @@ describe("A1 C8 STYLE: the csv export rule (seam S6 — the renderer's Copy bloc
 });
 
 describe("A1 C8 STYLE: markdown only, clarifying answers, 'outstock', read-only", () => {
-  it("markdown only — never HTML tags (the renderer removes raw HTML)", () => {
-    expect(p).toContain("Use markdown only — never HTML tags.");
+  // A1 pack C11 (FR3, A1-QA-5): a footnote marker fuses with the figure before it.
+  it("markdown only — never HTML tags or footnotes (the renderer removes raw HTML)", () => {
+    expect(p).toContain("- Use markdown only — never HTML tags or footnotes.");
+    expect(p).not.toContain("never HTML tags.");
   });
 
   it("a clarifying answer REPLACES the earlier assumption, and the answer names the filters", () => {

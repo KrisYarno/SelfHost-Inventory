@@ -55,8 +55,10 @@ const FALLBACK: ToolPresentation = {
   summarizeArgs: () => "",
 };
 
+// Own properties only: a part named `constructor` / `__proto__` / `toString` must get
+// the FALLBACK, never an Object.prototype member (A1 pack C11).
 function presentationFor(name: string): ToolPresentation {
-  return TOOL_PRESENTATION[name] ?? FALLBACK;
+  return Object.prototype.hasOwnProperty.call(TOOL_PRESENTATION, name) ? TOOL_PRESENTATION[name] : FALLBACK;
 }
 
 /** The per-scope chip label. "mixed" gets a DISTINCT chip (spec §6 REV-2) so a

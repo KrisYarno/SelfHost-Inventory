@@ -130,6 +130,24 @@ describe("parseCsv", () => {
     expect(parseCsv('a,"open\nstill open')).toEqual([["a", "open\nstill open"]]);
   });
 
+  // A1 pack C11 (FR3, A1-QA-6): a model writes `, "1,234.50"` — a space before the
+  // opening quote. RFC 4180 would read the quote as literal and split the value at its
+  // comma; the parse skips spaces and tabs before an opening quote instead.
+  test("spaces or tabs before an opening quote are skipped and the field parses as quoted", () => {
+    expect(parseCsv('Alpha 5mg, "1,234.50", 10')).toEqual([["Alpha 5mg", "1,234.50", " 10"]]);
+    expect(parseCsv('name,cost\nAlpha 5mg,\t "1,234.50"\n')).toEqual([
+      ["name", "cost"],
+      ["Alpha 5mg", "1,234.50"],
+    ]);
+    expect(parseCsv('a,  "say ""hi"", ok"')).toEqual([["a", 'say "hi", ok']]);
+  });
+
+  test("spaces before an UNQUOTED value are kept as written", () => {
+    expect(parseCsv("a, 10,\t20,  b c")).toEqual([["a", " 10", "\t20", "  b c"]]);
+    // A quote later in an unquoted field is still literal.
+    expect(parseCsv('x, 5" pipe')).toEqual([["x", ' 5" pipe']]);
+  });
+
   test("values are never altered: formula-leading and padded values stay as written", () => {
     expect(parseCsv("v\n=SUM(A1:A2)\n+1\n@x\n  padded  ")).toEqual([
       ["v"],
@@ -219,6 +237,20 @@ describe("copyCodeBlock", () => {
         "<tr><td>A-1</td><td>Alpha, 1mg</td><td>10</td></tr>" +
         '<tr><td>B-2</td><td>say &quot;hi&quot;\nthere</td><td>&lt;script&gt;</td></tr>' +
         "</tbody></table>",
+    );
+  });
+
+  // A1 pack C11 (FR3, A1-QA-6): the QA row pastes as three cells; text/plain is still
+  // the exact block text.
+  test("a space before an opening quote: the html table keeps the quoted value in ONE cell", async () => {
+    const value = 'Product, Cost, Qty\nAlpha 5mg, "1,234.50", 10';
+    const clipboard = new FakeClipboard();
+    await copyCodeBlock(value, "csv", { clipboard, ClipboardItem: FakeClipboardItem });
+    const items = (clipboard.calls[0] as { items: unknown[] }).items;
+    expect(await blobText(items[0], "text/plain")).toBe(value);
+    expect(await blobText(items[0], "text/html")).toBe(
+      "<table><thead><tr><th>Product</th><th> Cost</th><th> Qty</th></tr></thead>" +
+        "<tbody><tr><td>Alpha 5mg</td><td>1,234.50</td><td> 10</td></tr></tbody></table>",
     );
   });
 

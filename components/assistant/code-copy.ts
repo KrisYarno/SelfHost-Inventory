@@ -20,6 +20,11 @@
  * line break adds no row; an empty text has no rows. Lenient on malformed input —
  * a quote that does not open a field is literal, text after a closing quote is kept,
  * and an unterminated quote runs to the end — so a value is never dropped.
+ *
+ * One leniency beyond RFC 4180 (A1 pack C11): at a field start, spaces and tabs
+ * followed by a `"` are skipped and the field parses as quoted, so a model's
+ * `Alpha 5mg, "1,234.50", 10` is three cells, not four. Spaces before an UNQUOTED
+ * value are kept as written.
  */
 export function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
@@ -42,6 +47,16 @@ export function parseCsv(text: string): string[][] {
         field += ch;
       }
       continue;
+    }
+    if (atFieldStart && (ch === " " || ch === "\t")) {
+      let j = i;
+      while (text[j] === " " || text[j] === "\t") j++;
+      if (text[j] === '"') {
+        i = j;
+        quoted = true;
+        atFieldStart = false;
+        continue;
+      }
     }
     if (ch === '"' && atFieldStart) {
       quoted = true;
