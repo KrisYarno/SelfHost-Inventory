@@ -93,7 +93,9 @@ describe("buildSystemPrompt: what-we-track + routing map (W3-PROMPT, spec §5 T-
 
   it("what-we-track: fulfillment lives in Woo, two fact families, no PO/on-order, retail via valuation, no history", () => {
     expect(PROMPT).toContain("WooCommerce");
-    expect(PROMPT).toContain("physical ledger");
+    // Whitespace-collapsed (A1 C8): the phrase now survives only across a line wrap
+    // ("…report the physical / ledger (units physically moved…)").
+    expect(PROMPT.replace(/\s+/g, " ")).toContain("physical ledger");
     expect(PROMPT.toLowerCase()).toContain("two fact families");
     // retail + margin now come from get_valuation.
     expect(PROMPT).toContain("get_valuation");

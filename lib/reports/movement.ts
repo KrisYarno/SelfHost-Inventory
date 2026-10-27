@@ -140,7 +140,7 @@ const UNCLASSIFIED_LEGACY_NOTE =
   "unclassified outbound, not classifiable as sales.";
 
 /** The 11 signed-sum buckets (everything except the derived `net`). */
-const BUCKET_KEYS = [
+export const BUCKET_KEYS = [
   "stockIn", "correctionIn", "adjustmentIn", "countIn",
   "sale", "classifiedLoss", "adjustmentUnclassified", "correctionUnclassified", "countOut",
   "transferIn", "transferOut",
