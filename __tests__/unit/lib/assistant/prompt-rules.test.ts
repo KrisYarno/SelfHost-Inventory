@@ -192,21 +192,35 @@ describe("A1 C8 TRUTHFULNESS: the cents exception and the caveat rule", () => {
 // A1 pack C13 (FR5, A1-E1-1/2): in E1 the model restated two tool rules in its own
 // words with the wrong boundary ("only once it hits 0") or the wrong base ("twice the
 // reorder point"). The UNTRUSTED DATA section stays pinned byte-identical below.
-describe("A1 C13 TRUTHFULNESS: a tool's own rule is given exactly", () => {
+// Pack C13b (FR5b, A1-FD5-2): the bullet no longer says "exactly" — that word once
+// pushed the model to paste raw field text (see the caveat pin above).
+describe("A1 C13 TRUTHFULNESS: a tool's own boundary and base, in plain words", () => {
   const RULE_BULLET =
     "- When you explain how a tool decides something — a threshold, a reorder point, a " +
-    "target, a window — give the tool's own rule exactly (\"at or below its alert " +
-    "threshold\"); never restate it with a different boundary or base.";
+    "target, a window — keep the tool's own boundary and base, in plain words (\"at or " +
+    "below its alert threshold\"); never restate it with a different boundary or base.";
 
-  it("states the rule exactly once, as a bullet of its own", () => {
+  it("states the rule exactly once, as a bullet of its own, without 'exactly'", () => {
     expect(p.split(RULE_BULLET).length - 1).toBe(1);
-    expect(bulletStartingWith("- When you explain how a tool decides something")).toBe(RULE_BULLET);
+    const bullet = bulletStartingWith("- When you explain how a tool decides something");
+    expect(bullet).toBe(RULE_BULLET);
+    expect(bullet).not.toContain("exactly");
   });
 
   it("sits immediately after the 'Relay every caveat' bullet", () => {
     const caveat = bulletStartingWith("- Relay every caveat the tools return");
     expect(caveat).not.toBe(""); // non-vacuity
     expect(p).toContain(`${caveat} ${RULE_BULLET} - If a tool returns no data`);
+  });
+});
+
+// A1 pack C13b (FR5b, A1-FD5-1): the routing line carried the same strict "below" C13
+// removed from the tool — the whole prompt now says "at or below" wherever it names it.
+describe("A1 C13b ROUTING: the low-stock route says 'at or below'", () => {
+  it("routes the 'at or below its alert threshold' question, and never says a bare 'below'", () => {
+    expect(p).toContain('"What is at or below its alert threshold?" -> low_stock_report.');
+    expect(p).toContain("below its alert threshold"); // non-vacuity for the negative below
+    expect(p).not.toMatch(/(?<!at or )below its alert threshold/);
   });
 });
 
@@ -510,26 +524,40 @@ describe("A1 C8: the tool descriptions the model is handed", () => {
 
   // A1 pack C13 (FR5): the two rules the model restates are stated where it reads them.
   // A1-E1-1: the lead question carries the INCLUSIVE boundary (`needsReorderAttention`,
-  // lib/reports/low-stock.ts: quantity <= threshold).
-  it("low_stock_report's lead question says 'at or below' its alert threshold", () => {
+  // lib/reports/low-stock.ts: quantity <= threshold). C13b (FR5b): the pin is anchored
+  // to the lead sentence (A1-FD5-6), and a 0 effective threshold — which
+  // `needsReorderAttention` never lists — is stated as alerts off (A1-FD5-5).
+  it("low_stock_report leads with 'at or below' its alert threshold, and says 0 means alerts off", () => {
+    const ZERO_OFF = "A product whose effective threshold is 0 has alerts off and is never listed.";
     const d = descOf("low_stock_report");
-    expect(d).toContain('"what is currently at or below its alert threshold?"');
+    expect(d.startsWith(
+      'Low-stock ALERT report (threshold-based) — answers "what is currently at or below its ' +
+        'alert threshold?" — NOT the demand-based reorder_report.',
+    )).toBe(true);
     expect(d).not.toContain("currently below its");
+    expect(d).toContain(ZERO_OFF);
+    expect(d).toContain(`INCLUDING out-of-stock items, sorted most-critical first. ${ZERO_OFF} This flags`);
   });
 
   // A1-E1-2: the multiple applies to lead-time demand, never to the reorder point
   // (lib/reports/reorder.ts: reorderPoint = override ?? ceil(avg x lead + avg x buffer);
-  // targetLevel = max(reorderPoint, ceil(avg x lead x multiple))).
-  it("reorder_report states its reorder-point and target rules, right after the assumptions", () => {
+  // targetLevel = max(reorderPoint, ceil(avg x lead x multiple))). C13b (FR5b, A1-FD5-3):
+  // the quantity rule follows it (`roundUpToMOQ(max(0, targetLevel - currentStock), moq)`).
+  it("reorder_report states its reorder-point, target and quantity rules, right after the assumptions", () => {
     const RULES =
       "The rules: reorderPoint = average daily demand × (leadTimeDays + bufferDays), " +
       "rounded up, unless a reorder-point override is set; targetLevel = the larger of " +
       "reorderPoint and average daily demand × leadTimeDays × targetCoverageMultiple, " +
       "rounded up — the multiple applies to lead-time demand, never to the reorder point.";
+    const QUANTITY =
+      "The suggested quantity (grossReplenishmentNeed) = targetLevel − currentStock, never " +
+      "below 0, rounded up to a whole multiple of minOrderQuantity; relay each row's " +
+      "figures, never recompute them.";
     const d = descOf("reorder_report");
     expect(d).toContain(RULES);
+    expect(d).toContain(`${RULES} ${QUANTITY}`);
     expect(d).toContain(
-      `bufferDays, targetCoverageMultiple, and demand definition — relay them. ${RULES} 'coverage' counts`,
+      `bufferDays, targetCoverageMultiple, and demand definition — relay them. ${RULES} ${QUANTITY} 'coverage' counts`,
     );
   });
 });

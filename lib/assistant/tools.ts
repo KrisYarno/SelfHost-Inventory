@@ -2488,7 +2488,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `Low-stock ALERT report (threshold-based) — answers "what is currently at or below ` +
       `its alert threshold?" — NOT the demand-based reorder_report. Products at or below ` +
       `their effective low-stock threshold, INCLUDING out-of-stock items, sorted ` +
-      `most-critical first. This flags what is LOW against a fixed threshold; for ` +
+      `most-critical first. A product whose effective threshold is 0 has alerts off and ` +
+      `is never listed. This flags what is LOW against a fixed threshold; for ` +
       `demand-based suggested ORDER QUANTITIES use reorder_report instead. Top-level ` +
       `systemDefaultThreshold is the shop default; each row's effectiveThreshold + ` +
       `thresholdSource is the value that actually applied. averageDailyUsage is null ` +
@@ -2569,7 +2570,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `reorderPoint = average daily demand × (leadTimeDays + bufferDays), rounded up, ` +
       `unless a reorder-point override is set; targetLevel = the larger of reorderPoint ` +
       `and average daily demand × leadTimeDays × targetCoverageMultiple, rounded up — the ` +
-      `multiple applies to lead-time demand, never to the reorder point. 'coverage' ` +
+      `multiple applies to lead-time demand, never to the reorder point. The suggested ` +
+      `quantity (grossReplenishmentNeed) = targetLevel − currentStock, never below 0, ` +
+      `rounded up to a whole multiple of minOrderQuantity; relay each row's figures, ` +
+      `never recompute them. 'coverage' ` +
       `counts total/suggested/unavailable/healthy/approachingOmitted/costed and satisfies ` +
       `total = suggested + unavailable + healthy + approachingOmitted; healthy products ` +
       `are counted, never rows by default — coverageNote states the definition, relay it. ` +
