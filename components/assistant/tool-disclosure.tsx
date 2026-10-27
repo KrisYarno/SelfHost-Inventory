@@ -8,7 +8,8 @@
  * Lifecycle states:
  *   - pending   : humanized pendingLabel + one motion-reduce-safe spinner;
  *   - incomplete: a call a SETTLED turn left without output (timed out, stopped,
- *                 failed) — muted "Did not finish", no spinner (A1 pack C6);
+ *                 failed) — muted "Did not finish reading {failureNoun}" (the
+ *                 error badge's noun: WHICH lookup), no spinner (A1 pack C6);
  *   - success   : humanized successLabel + phrase-form args summary, an
  *                 expandable ToolResultTable, and truthfulness meta chips
  *                 (scope; `Trimmed` on truncation);
@@ -135,7 +136,7 @@ export function ToolDisclosure({ tool }: { tool: ToolInvocationView }) {
   if (tool.status === "incomplete") {
     return (
       <div className="flex min-h-[44px] items-center gap-2 py-1 text-body-sm text-muted-foreground">
-        <span>Did not finish</span>
+        <span>Did not finish reading {p.failureNoun}</span>
       </div>
     );
   }

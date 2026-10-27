@@ -92,6 +92,14 @@ describe("assistant markdown render probe (A1 C2)", () => {
       cellCode: "| Name | Note |\n|---|---|\n| Alpha 1mg | `code` |",
       tableInList: "- Products\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |",
       table12: TABLE_12,
+      cellBr: "| On hand | Note |\n|---|---|\n| 10<br>20 | x |",
+      brSlash: "Line A<br/>Line B",
+      brUpper: "Line A<BR>Line B",
+      brAttr: 'a<br onclick="x">b',
+      brOnlyLine: "First paragraph.\n\n<br>\n\nSecond paragraph.",
+      codeBr: "Type `a<br>b` here.",
+      boldTag: "Some <b>x</b> text.",
+      strike: "~~$12.00~~ $10.00",
     } as const;
     type CaseName = keyof typeof CASES;
 
@@ -203,7 +211,9 @@ describe("assistant markdown render probe (A1 C2)", () => {
       expect(text(ps[0])).toContain("Beta 2mg: 20");
 
       expect(doc.crlf.querySelectorAll("br")).toHaveLength(1);
-      expect(doc.crlf.body.textContent).not.toContain("\r");
+      // The RAW HTML string, not the DOM: jsdom normalises CR to LF while parsing, so a
+      // textContent check could never fail (A1-CRS-3). React leaves `\r` unescaped.
+      expect(html.crlf).not.toContain("\r");
     });
 
     test("pin 9 (R): soft breaks split text at any depth — inside strong, twice in one node, in a list item", () => {
@@ -255,6 +265,67 @@ describe("assistant markdown render probe (A1 C2)", () => {
       const region = d.querySelector("table")?.closest('[role="region"]');
       expect(region).not.toBeNull();
       expect((region as Element).className.split(/\s+/)).toContain("overflow-x-auto");
+    });
+
+    // A1 pack C2 REV 7 (FR2, A1-CRS-2): the sanitizer drops raw HTML, so a model's
+    // `<br>` used to vanish and fuse the figures on either side ("10<br>20" -> "1020").
+    test("pin 14 (R): a <br> in a table cell is a line break, never a fused figure", () => {
+      const td = doc.cellBr.querySelector("tbody td");
+      expect(td).not.toBeNull();
+      const cell = td as Element;
+      expect(cell.querySelectorAll("br")).toHaveLength(1);
+      const br = cell.querySelector("br") as Element;
+      // A markdown hard break renders `<br>` plus a newline text node (mdast-util-to-hast),
+      // so the text after the br starts with "\n".
+      expect(br.previousSibling?.textContent).toBe("10");
+      expect(br.nextSibling?.textContent?.trim()).toBe("20");
+      expect(text(cell)).toBe("10\n20");
+      expect(doc.cellBr.body.textContent).not.toContain("1020");
+    });
+
+    test("pin 14 (R): <br/>, <BR> and <br onclick> in a paragraph are bare breaks", () => {
+      for (const name of ["brSlash", "brUpper"] as const) {
+        const p = doc[name].querySelector("p") as Element;
+        expect({ name, brs: p.querySelectorAll("br").length }).toEqual({ name, brs: 1 });
+        const br = p.querySelector("br") as Element;
+        expect(br.previousSibling?.textContent).toBe("Line A");
+        expect(br.nextSibling?.textContent?.trim()).toBe("Line B");
+      }
+
+      const p = doc.brAttr.querySelector("p") as Element;
+      expect(p.querySelectorAll("br")).toHaveLength(1);
+      expect((p.querySelector("br") as Element).getAttributeNames()).toEqual([]);
+      expect(html.brAttr).not.toContain("onclick");
+      expect(text(p)).toBe("a\nb");
+    });
+
+    test("pin 14 (R): a line holding only <br> between two paragraphs renders, as a break", () => {
+      const d = doc.brOnlyLine;
+      const ps = Array.from(d.querySelectorAll("p"));
+      expect(ps.map((p) => text(p))).toEqual(["First paragraph.", "Second paragraph."]);
+      expect(d.querySelectorAll("br")).toHaveLength(1);
+      expect(d.body.textContent).not.toContain("<br");
+    });
+
+    test("pin 14: inline code keeps a literal <br>; any other raw HTML is still removed", () => {
+      const code = doc.codeBr.querySelector("code");
+      expect(text(code)).toBe("a<br>b");
+      expect(doc.codeBr.querySelector("br")).toBeNull();
+
+      expect(doc.boldTag.querySelector("b")).toBeNull();
+      expect(text(doc.boldTag.querySelector("p"))).toBe("Some x text.");
+    });
+
+    // A1 pack C1/C2 REV 7 (FR2, A1-CRS-6): a struck figure reads as struck, not as a
+    // second real figure.
+    test("pin 15 (R): ~~$12.00~~ $10.00 renders a bare del around the struck figure only", () => {
+      const p = doc.strike.querySelector("p") as Element;
+      const dels = p.querySelectorAll("del");
+      expect(dels).toHaveLength(1);
+      expect(text(dels[0])).toBe("$12.00");
+      expect(dels[0].getAttributeNames()).toEqual([]);
+      expect(dels[0].nextSibling?.textContent).toBe(" $10.00");
+      expect(text(p)).toBe("$12.00 $10.00");
     });
 
     test("C2 guard: no override spreads react-markdown's node prop onto the DOM", () => {

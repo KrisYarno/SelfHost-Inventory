@@ -240,7 +240,18 @@ describe("copyCodeBlock", () => {
     expect(clipboard.calls).toEqual([{ method: "writeText", text: CSV }]);
   });
 
-  test.each(["text", "json", "sql", "CSV", "tsv"])("non-csv language (%s) -> writeText(value) only", async (language) => {
+  // A1 pack C2b REV 7 (FR2, A1-CRS-7): the language matches case-insensitively, so a
+  // ```CSV block gets the spreadsheet paste too.
+  test.each(["CSV", "Csv"])("csv in any case (%s) takes the rich write, not writeText", async (language) => {
+    const clipboard = new FakeClipboard();
+    await copyCodeBlock(CSV, language, { clipboard, ClipboardItem: FakeClipboardItem });
+    expect(clipboard.calls.map((c) => c.method)).toEqual(["write"]);
+    const items = (clipboard.calls[0] as { items: unknown[] }).items;
+    expect(await blobText(items[0], "text/plain")).toBe(CSV);
+    expect(await blobText(items[0], "text/html")).toBe(rowsToHtmlTable(parseCsv(CSV)));
+  });
+
+  test.each(["text", "json", "sql", "tsv"])("non-csv language (%s) -> writeText(value) only", async (language) => {
     const clipboard = new FakeClipboard();
     await copyCodeBlock("a,b\n1,2", language, { clipboard, ClipboardItem: FakeClipboardItem });
     expect(clipboard.calls).toEqual([{ method: "writeText", text: "a,b\n1,2" }]);

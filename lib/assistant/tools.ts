@@ -1489,7 +1489,8 @@ const DATA_POSTURE =
 
 const PAGING_POSTURE =
   "List results are paginated: `returned`/`totalRows`/`nextOffset` describe the page. " +
-  "When `nextOffset` is not null, more rows exist — call again with that `offset`.";
+  "When `nextOffset` is not null, more rows exist — call again with that `offset` " +
+  "when you need the remaining rows.";
 
 /** The find_product row note for a soft-deleted product (spec C13, verbatim). */
 const FIND_PRODUCT_DELETED_NOTE =

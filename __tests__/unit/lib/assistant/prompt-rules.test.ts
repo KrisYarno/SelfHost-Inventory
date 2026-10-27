@@ -446,6 +446,29 @@ describe("A1 C8: the tool descriptions the model is handed", () => {
     );
   });
 
+  // A1 pack C8 REV 7 (FR2, A1-CRS-4): paging only when the remaining rows are needed —
+  // the prompt shows at most 40 rows and pages on the user's request.
+  it("every paginated tool pages only when the remaining rows are needed", () => {
+    const paged = descriptions.filter(([, text]) =>
+      text.replace(/\s+/g, " ").includes(
+        "List results are paginated: `returned`/`totalRows`/`nextOffset` describe the page.",
+      ),
+    );
+    expect(paged.length).toBeGreaterThan(0); // non-vacuity
+    for (const [name, text] of paged) {
+      const d = text.replace(/\s+/g, " ");
+      expect({ name, has: d.includes(
+        "When `nextOffset` is not null, more rows exist — call again with that `offset` " +
+          "when you need the remaining rows.",
+      ) }).toEqual({ name, has: true });
+    }
+    // The old unconditional instruction is gone from every description.
+    for (const [name, text] of descriptions) {
+      const d = text.replace(/\s+/g, " ");
+      expect({ name, hit: d.includes("call again with that `offset`.") }).toEqual({ name, hit: false });
+    }
+  });
+
   it("compare_periods reports unranked rows as not comparable, in the prompt's terms", () => {
     expect(descOf("compare_periods")).toContain(
       "report those rows as not comparable (the row's reasons name which period has no " +

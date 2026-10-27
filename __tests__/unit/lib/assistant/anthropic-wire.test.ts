@@ -11,6 +11,11 @@
 // capture `fetch` (a `.invalid` host, the literal key "test-key"; global fetch is a
 // tripwire). It prints one NDJSON line per case.
 //
+// Case e-sse (pack C4 REV 7, A1-CRS-1) carries case e's timeout over the REAL wire: the
+// SSE encoder (`createUIMessageStreamResponse`) and a REAL `DefaultChatTransport` parse,
+// whose `fetch` is in-process (a `.invalid` client host). It is COVERAGE of existing
+// behaviour over a path no other test crossed, not a red-first fix.
+//
 // The FIRST test is the harness self-check. Every other pin runs only after it is
 // green: a probe load error or a watchdog is never evidence.
 
@@ -20,7 +25,8 @@ import path from "node:path";
 const PROBE = path.resolve(__dirname, "../../../support/anthropic-wire-probe.mjs");
 const PROBE_TIMEOUT_MS = 90_000;
 const CAPTURE_HOST = "anthropic-wire-probe.invalid";
-const CASES = ["a0", "a", "b", "c", "d", "e"] as const;
+const CLIENT_HOST = "wire-probe.invalid";
+const CASES = ["a0", "a", "b", "c", "d", "e", "e-sse", "e-sse-client"] as const;
 type CaseName = (typeof CASES)[number];
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -98,6 +104,10 @@ describe("anthropic wire probe (A1 C4)", () => {
       for (const name of CASES) expect({ case: name, error: records[name].error }).toEqual({ case: name });
       for (const name of ["b", "c", "d"] as const) expect(records[name].streamErrors).toEqual([]);
       expect(records.e.readErrors).toEqual([]);
+      for (const name of ["e-sse", "e-sse-client"] as const) {
+        expect({ case: name, readErrors: records[name].readErrors }).toEqual({ case: name, readErrors: [] });
+        expect({ case: name, sseParseErrors: records[name].sseParseErrors }).toEqual({ case: name, sseParseErrors: [] });
+      }
       expect(records.summary.unhandledRejections).toEqual([]);
     });
 
@@ -172,6 +182,53 @@ describe("anthropic wire probe (A1 C4)", () => {
       expect(e.finalMetadata).toEqual(expect.objectContaining({ errorCode: "PROVIDER_TIMEOUT", threadId: "t1" }));
       // Content above the timeout is kept.
       expect(e.finalText).toBe("ok");
+    });
+
+    test("e-sse: the same timeout over the REAL SSE encoding and DefaultChatTransport's parse reaches the client", () => {
+      const r = records["e-sse"];
+      // The abort was real (the signal reached the provider fetch, fired after the first
+      // delta), and the client half was the real transport: one POST to the client host.
+      expect(r.requests?.[0].signalPassed).toBe(true);
+      expect(r.abortedAfterFirstDelta).toBe(true);
+      expect(r.clientRequests).toEqual([
+        { url: `https://${CLIENT_HOST}/api/assistant`, host: CLIENT_HOST, method: "POST" },
+      ]);
+      expect(r.responseHeaders).toEqual({
+        "content-type": "text/event-stream",
+        "x-vercel-ai-ui-message-stream": "v1",
+      });
+
+      // The raw wire: an `abort` data line, then a `message-metadata` line carrying the
+      // timeout, then the encoder's [DONE].
+      const wire = r.sseDataTypes as string[];
+      expect(wire.indexOf("abort")).toBeGreaterThan(wire.indexOf("text-delta"));
+      expect(wire.slice(wire.indexOf("abort"))).toEqual(["abort", "message-metadata", "[DONE]"]);
+      expect(r.sseMetadataAfterAbort).toEqual([{ errorCode: "PROVIDER_TIMEOUT", threadId: "t1" }]);
+      expect(r.sseAbortBeforeTimeoutMetadata).toBe(true);
+
+      // The client parse (`uiMessageChunkSchema`, strict objects) kept both chunks, and
+      // the merged message carries the timeout.
+      expect(r.abortChunkSeen).toBe(true);
+      const parsed = r.clientChunkTypes as string[];
+      expect(parsed.slice(parsed.indexOf("abort"))).toEqual(["abort", "message-metadata"]);
+      expect(r.finalMetadata).toEqual(expect.objectContaining({ errorCode: "PROVIDER_TIMEOUT", threadId: "t1" }));
+      expect(r.readErrors).toEqual([]);
+      expect(r.finalText).toBe("ok");
+    });
+
+    test("e-sse-client (control): a user Stop carries the abort over the same wire with NO timeout metadata", () => {
+      // Non-vacuity of e-sse: the same chain with the latch's cause "client".
+      const r = records["e-sse-client"];
+      expect(r.abortedAfterFirstDelta).toBe(true);
+      expect(r.abortChunkSeen).toBe(true);
+      const wire = r.sseDataTypes as string[];
+      expect(wire.slice(wire.indexOf("abort"))).toEqual(["abort", "[DONE]"]);
+      expect(r.sseMetadataAfterAbort).toEqual([]);
+      expect(r.sseAbortBeforeTimeoutMetadata).toBe(false);
+      const parsed = r.clientChunkTypes as string[];
+      expect(parsed.slice(parsed.indexOf("abort"))).toEqual(["abort"]);
+      expect(r.finalMetadata).toEqual({ threadId: "t1" });
+      expect(r.readErrors).toEqual([]);
     });
   });
 });

@@ -5,10 +5,11 @@
  * D-B2, security-relevant; assistant A1 pack C1/C2).
  *
  * Contract:
- *   - element allowlist ONLY: p/br/h1-h6/hr/ul/ol/li/strong/em/a/code/pre and the
- *     table family (table/thead/tbody/tr/th/td). Tables, every heading level and
- *     `hr` are inert structure: no attribute is allowed on any of them (h1 renders
- *     as an h2, h4-h6 as an h3);
+ *   - element allowlist ONLY: p/br/h1-h6/hr/ul/ol/li/strong/em/del/a/code/pre and
+ *     the table family (table/thead/tbody/tr/th/td). Tables, every heading level,
+ *     `hr` and `del` are inert structure: no attribute is allowed on any of them (h1
+ *     renders as an h2, h4-h6 as an h3; `del` is GFM strikethrough, so a struck
+ *     figure renders struck instead of reading as a second real figure);
  *   - raw HTML in model output is REMOVED, never shown: there is no rehype-raw, and
  *     rehype-sanitize drops `raw` nodes before react-markdown's raw->text step, so a
  *     model-authored `<script>` or `<table onclick>` never becomes a node or a
@@ -20,7 +21,11 @@
  *     ("text" when absent), internal horizontal scroll, and a 44px Copy button;
  *     `code` alone is inline code only;
  *   - a soft line break (a single newline inside a paragraph) renders as a `br`
- *     (`remarkSoftBreaks`), so model lines never collapse into one run-on line.
+ *     (`remarkSoftBreaks`), so model lines never collapse into one run-on line;
+ *   - the ONE raw-HTML exception: a bare `<br>` tag (any case, `<br/>`, attributes
+ *     dropped) becomes a markdown line break (`remarkSoftBreaks`) before the
+ *     sanitizer runs, so `10<br>20` in a table cell renders two figures on two lines,
+ *     never "1020". Nothing of the tag survives; every other raw HTML is removed.
  *
  * Untrusted tool fields (product names) render only through ToolResultTable, as
  * escaped React text (D13). Product names the model echoes into its prose do pass
@@ -69,6 +74,7 @@ export const MARKDOWN_SANITIZE_SCHEMA = {
     "li",
     "strong",
     "em",
+    "del",
     "a",
     "code",
     "pre",
@@ -90,13 +96,20 @@ type MdastNode = { type: string; value?: string; children?: MdastNode[] };
 
 const SOFT_BREAK = /\r?\n/;
 
+/** A raw `<br>` tag alone: `<br>`, `<br/>`, `<BR>`, `<br class="x">` — nothing else. */
+const BR_TAG = /^<br\b[^>]*>$/i;
+
 function splitSoftBreaks(node: MdastNode): void {
   const children = node.children;
   if (!children) return;
   let changed = false;
   const next: MdastNode[] = [];
   for (const child of children) {
-    if (child.type === "text" && typeof child.value === "string" && SOFT_BREAK.test(child.value)) {
+    if (child.type === "html" && typeof child.value === "string" && BR_TAG.test(child.value)) {
+      // A fresh node: the tag's text and attributes are dropped, never carried.
+      next.push({ type: "break" });
+      changed = true;
+    } else if (child.type === "text" && typeof child.value === "string" && SOFT_BREAK.test(child.value)) {
       child.value.split(SOFT_BREAK).forEach((piece, i) => {
         if (i > 0) next.push({ type: "break" });
         if (piece !== "") next.push({ type: "text", value: piece });
@@ -117,6 +130,12 @@ function splitSoftBreaks(node: MdastNode): void {
  * split on `\r\n` / `\n` into its pieces interleaved with `break` nodes, in sibling
  * order. `code` / `inlineCode` hold literal values (not `text` children) and are
  * untouched.
+ *
+ * Also (A1 pack C2 REV 7): an `html` node, inline or block, whose value is a bare
+ * `<br>` tag (`/^<br\b[^>]*>$/i`) is replaced by a `break` — nothing of the tag (no
+ * attribute) survives. GFM table cells cannot hold a newline, so a model writes
+ * `10<br>20`; the sanitizer would drop the tag and fuse the figures into "1020".
+ * Every other `html` node is left as it is (the sanitizer removes it).
  */
 export function remarkSoftBreaks() {
   return (tree: MdastNode) => {

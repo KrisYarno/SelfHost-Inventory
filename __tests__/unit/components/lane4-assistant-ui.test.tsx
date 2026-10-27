@@ -261,26 +261,26 @@ describe("MessageTurn", () => {
   });
 
   test.each<TurnStatus>(["timed-out", "stopped", "failed-after-content"])(
-    "a settled %s turn with an input-only tool part: 'Did not finish', no spinner",
+    "a settled %s turn with an input-only tool part: 'Did not finish reading sales', no spinner",
     (status) => {
       const { container } = render(
         <ul>
           <MessageTurn user={userMsg("q") as never} assistant={inputOnly("input-available") as never} status={status} onRetry={noop} />
         </ul>,
       );
-      expect(screen.getByText("Did not finish")).toBeInTheDocument();
+      expect(screen.getByText("Did not finish reading sales")).toBeInTheDocument();
       expect(screen.queryByText("Looking up sales…")).toBeNull();
       expect(container.querySelector(".animate-spin")).toBeNull();
     },
   );
 
-  test("a settled turn with a still-streaming-input tool part is also 'Did not finish'", () => {
+  test("a settled turn with a still-streaming-input tool part is also 'Did not finish reading sales'", () => {
     const { container } = render(
       <ul>
         <MessageTurn user={userMsg("q") as never} assistant={inputOnly("input-streaming") as never} status="timed-out" onRetry={noop} />
       </ul>,
     );
-    expect(screen.getByText("Did not finish")).toBeInTheDocument();
+    expect(screen.getByText("Did not finish reading sales")).toBeInTheDocument();
     expect(container.querySelector(".animate-spin")).toBeNull();
   });
 
@@ -292,7 +292,7 @@ describe("MessageTurn", () => {
     );
     expect(screen.getByText("Looking up sales…")).toBeInTheDocument();
     expect(container.querySelector(".animate-spin")).toBeTruthy();
-    expect(screen.queryByText("Did not finish")).toBeNull();
+    expect(screen.queryByText(/Did not finish/)).toBeNull();
   });
 });
 
@@ -344,9 +344,11 @@ describe("ToolDisclosure", () => {
   });
 
   // A1 pack C6 (FR1, A1-OCC-5): a tool part a settled turn left without output.
-  test("incomplete: muted 'Did not finish', NO spinner, no live role, the pending row's height", () => {
+  // A1 pack C6 REV 7 (FR2, A1-CRS-11): it names WHICH lookup did not finish — the same
+  // failureNoun the error badge ("Couldn't read sales") uses.
+  test("incomplete: muted 'Did not finish reading sales', NO spinner, no live role, the pending row's height", () => {
     const { container } = render(<ToolDisclosure tool={{ name: "get_sales", status: "incomplete", input: {} }} />);
-    const text = screen.getByText("Did not finish");
+    const text = screen.getByText("Did not finish reading sales");
     expect(text.closest(".text-muted-foreground")).toBeTruthy();
     expect(container.querySelector(".animate-spin")).toBeNull();
     expect(container.querySelector("svg")).toBeNull();
@@ -642,7 +644,7 @@ describe("Composer", () => {
 describe("markdown sanitize schema (D-B2)", () => {
   test("allows exactly the D-B2 + A1 C1 element set", () => {
     expect([...MARKDOWN_SANITIZE_SCHEMA.tagNames]).toEqual([
-      "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "ul", "ol", "li", "strong", "em", "a",
+      "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "ul", "ol", "li", "strong", "em", "del", "a",
       "code", "pre", "table", "thead", "tbody", "tr", "th", "td",
     ]);
   });
@@ -654,8 +656,8 @@ describe("markdown sanitize schema (D-B2)", () => {
       expect(MARKDOWN_SANITIZE_SCHEMA.tagNames).toContain(ok);
     }
   });
-  test("still excludes img/script/style/iframe/input/blockquote/del", () => {
-    for (const bad of ["img", "script", "style", "iframe", "input", "blockquote", "del"]) {
+  test("still excludes img/script/style/iframe/input/blockquote", () => {
+    for (const bad of ["img", "script", "style", "iframe", "input", "blockquote"]) {
       expect(MARKDOWN_SANITIZE_SCHEMA.tagNames).not.toContain(bad);
     }
   });

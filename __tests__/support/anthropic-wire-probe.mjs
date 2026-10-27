@@ -32,7 +32,16 @@
  *       signal aborts and ERRORS with `signal.reason` (as undici does). The probe aborts
  *       once the first text delta is read; the result goes through
  *       `toUIMessageStream({ messageMetadata })` with the route's rule and back through
- *       `readUIMessageStream`.
+ *       `readUIMessageStream`;
+ *   e-sse  the same abort chain over the REAL wire (pack C4 REV 7, A1-CRS-1): the UI
+ *       chunks go through `createUIMessageStreamResponse` (the SSE encoder the route's
+ *       `toUIMessageStreamResponse` uses); the Response body is teed — one branch read
+ *       as raw SSE text, the other handed to a REAL `DefaultChatTransport` whose
+ *       `fetch` returns it (an `api` on the `.invalid` client host) — and the stream
+ *       `sendMessages` returns (parsed with `uiMessageChunkSchema`) is read with
+ *       `readUIMessageStream`;
+ *   e-sse-client  control (non-vacuity): the same with cause "client" (a user Stop) —
+ *       the abort still arrives, with NO timeout metadata behind it.
  * Plus a "bundles" line first (what each leaf bundle contains) and a "summary" line
  * last (stray fetches, unhandled rejections).
  *
@@ -44,7 +53,16 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createAnthropic } from "@ai-sdk/anthropic";
-import { generateText, jsonSchema, readUIMessageStream, stepCountIs, streamText, tool } from "ai";
+import {
+  createUIMessageStreamResponse,
+  DefaultChatTransport,
+  generateText,
+  jsonSchema,
+  readUIMessageStream,
+  stepCountIs,
+  streamText,
+  tool,
+} from "ai";
 import { bundleToCache } from "./esm-bundle.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -52,6 +70,9 @@ const LEAVES = ["lib/assistant/model-options.ts", "lib/assistant/stream-metadata
 
 const CAPTURE_HOST = "anthropic-wire-probe.invalid";
 const BASE_URL = `https://${CAPTURE_HOST}/v1`;
+/** Case e-sse's client side: the transport's `api` (its `fetch` is in-process). */
+const CLIENT_HOST = "wire-probe.invalid";
+const CLIENT_API = `https://${CLIENT_HOST}/api/assistant`;
 const API_KEY = "test-key";
 const WATCHDOG_MS = 10_000;
 
@@ -442,6 +463,166 @@ function abortCase(model) {
   };
 }
 
+/** @param {ReadableStream<Uint8Array>} stream @returns {Promise<string>} */
+async function readAllText(stream) {
+  const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+  let text = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return text;
+    text += value;
+  }
+}
+
+/**
+ * The `data:` payloads of an SSE text, in order: the chunk `type` of each JSON line
+ * (`[DONE]` kept as itself) plus the parsed chunks; a line that does not parse is
+ * recorded, never dropped.
+ * @param {string} text
+ */
+function sseData(text) {
+  /** @type {string[]} */
+  const types = [];
+  /** @type {any[]} */
+  const chunks = [];
+  /** @type {string[]} */
+  const parseErrors = [];
+  for (const line of text.split("\n")) {
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (payload === "[DONE]") {
+      types.push("[DONE]");
+      continue;
+    }
+    try {
+      const chunk = JSON.parse(payload);
+      chunks.push(chunk);
+      types.push(String(chunk?.type));
+    } catch {
+      parseErrors.push(payload.slice(0, 120));
+    }
+  }
+  return { types, chunks, parseErrors };
+}
+
+/**
+ * Case e-sse (and its control): case e's abort chain carried over the REAL SSE
+ * encoding and the REAL client transport's parse — what the browser's `useChat`
+ * transport actually reads.
+ * @param {string} model
+ * @param {"provider-timeout" | "client"} cause the latch's cause when the abort part arrives
+ */
+function abortSseCase(model, cause) {
+  /** @param {Record<string, any>} record */
+  return async (record) => {
+    const { capture, requests } = makeCapture(holdOpenReply);
+    const controller = new AbortController();
+    /** @type {string[]} */
+    const clientChunkTypes = [];
+    /** @type {string[]} */
+    const readErrors = [];
+    /** @type {Array<Record<string, unknown>>} */
+    const clientRequests = [];
+    record.model = model;
+    record.cause = cause;
+    record.requests = requests;
+    record.clientRequests = clientRequests;
+    record.clientChunkTypes = clientChunkTypes;
+    record.readErrors = readErrors;
+    record.abortedAfterFirstDelta = false;
+
+    const options = modelOptions.modelCallOptions({ kind: "ANTHROPIC", model, surface: "assistant" });
+    const result = streamText({
+      model: anthropicWith(capture)(model),
+      system: SYSTEM,
+      prompt: PROMPT,
+      abortSignal: controller.signal,
+      ...callParams(options),
+      onError: () => {},
+    });
+    const uiChunks = result
+      .toUIMessageStream({
+        // The route's rule, with the latch's cause.
+        messageMetadata: ({ part }) => streamMetadata.turnMessageMetadata(part, cause, "t1"),
+      })
+      .pipeThrough(
+        new TransformStream({
+          transform(chunk, out) {
+            out.enqueue(chunk);
+            if (chunk.type === "text-delta" && !controller.signal.aborted) {
+              record.abortedAfterFirstDelta = true;
+              controller.abort();
+            }
+          },
+        }),
+      );
+
+    // The wire: the SSE encoder, then the body teed — raw text on one branch, the
+    // client transport on the other.
+    const response = createUIMessageStreamResponse({ stream: uiChunks });
+    if (response.body === null) throw new Error("createUIMessageStreamResponse returned no body");
+    const [rawBranch, clientBranch] = response.body.tee();
+    const rawText = readAllText(rawBranch);
+    record.responseHeaders = {
+      "content-type": response.headers.get("content-type"),
+      "x-vercel-ai-ui-message-stream": response.headers.get("x-vercel-ai-ui-message-stream"),
+    };
+
+    const transport = new DefaultChatTransport({
+      api: CLIENT_API,
+      fetch: async (input, init = {}) => {
+        const url = urlOf(input);
+        clientRequests.push({ url, host: new URL(url).host, method: init.method });
+        return new Response(clientBranch, { status: response.status, headers: response.headers });
+      },
+    });
+    const parsed = await transport.sendMessages({
+      trigger: "submit-message",
+      chatId: "t1",
+      messageId: undefined,
+      messages: [{ id: "u1", role: "user", parts: [{ type: "text", text: PROMPT }] }],
+      abortSignal: undefined,
+    });
+
+    /** @type {any} */
+    let last = null;
+    for await (const message of readUIMessageStream({
+      stream: parsed.pipeThrough(
+        new TransformStream({
+          transform(chunk, out) {
+            clientChunkTypes.push(chunk.type);
+            out.enqueue(chunk);
+          },
+        }),
+      ),
+      onError: (err) => readErrors.push(describeError(err)),
+    })) {
+      last = message;
+    }
+    record.abortChunkSeen = clientChunkTypes.includes("abort");
+    record.finalMetadata = last?.metadata ?? null;
+    record.finalText = (last?.parts ?? [])
+      .filter((/** @type {any} */ part) => part.type === "text")
+      .map((/** @type {any} */ part) => part.text)
+      .join("");
+
+    const sse = sseData(await rawText);
+    record.sseDataTypes = sse.types;
+    record.sseParseErrors = sse.parseErrors;
+    const abortAt = sse.chunks.findIndex((chunk) => chunk?.type === "abort");
+    record.sseMetadataAfterAbort =
+      abortAt < 0
+        ? []
+        : sse.chunks
+            .slice(abortAt + 1)
+            .filter((chunk) => chunk?.type === "message-metadata")
+            .map((chunk) => chunk.messageMetadata);
+    record.sseAbortBeforeTimeoutMetadata = record.sseMetadataAfterAbort.some(
+      (/** @type {any} */ metadata) => metadata?.errorCode === "PROVIDER_TIMEOUT",
+    );
+  };
+}
+
 const titleParams = (/** @type {string} */ model) =>
   callParams(modelOptions.modelCallOptions({ kind: "ANTHROPIC", model, surface: "title" }));
 // The PRE-A1 title call, literally (titles.ts before A1): the non-vacuity control.
@@ -456,5 +637,7 @@ await runCase("b", chatCase("claude-opus-5-5"));
 await runCase("c", chatCase("claude-opus-5"));
 await runCase("d", chatCase("claude-sonnet-4-5"));
 await runCase("e", abortCase("claude-opus-5-5"));
+await runCase("e-sse", abortSseCase("claude-opus-5-5", "provider-timeout"));
+await runCase("e-sse-client", abortSseCase("claude-opus-5-5", "client"));
 
 emit({ case: "summary", captureHost: CAPTURE_HOST, strayFetches, unhandledRejections });

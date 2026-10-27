@@ -103,11 +103,12 @@ export function rowsToHtmlTable(rows: string[][]): string {
 }
 
 /**
- * Copy a fenced block. A `csv` block with the rich clipboard API available and at
- * least one parsed row is written ONCE as `text/plain` (the exact value) plus
- * `text/html` (its table); if that write rejects — or for any other language or a
- * missing API — the exact value is written with `writeText`. Rejects only when
- * `writeText` itself does (the caller shows "Could not copy").
+ * Copy a fenced block. A `csv` block (the language matched case-insensitively, so
+ * ```CSV too) with the rich clipboard API available and at least one parsed row is
+ * written ONCE as `text/plain` (the exact value) plus `text/html` (its table); if
+ * that write rejects — or for any other language or a missing API — the exact value
+ * is written with `writeText`. Rejects only when `writeText` itself does (the caller
+ * shows "Could not copy").
  */
 export async function copyCodeBlock(
   value: string,
@@ -118,7 +119,7 @@ export async function copyCodeBlock(
   },
 ): Promise<void> {
   const { clipboard, ClipboardItem } = env;
-  if (language === "csv" && typeof clipboard.write === "function" && typeof ClipboardItem === "function") {
+  if (language.toLowerCase() === "csv" && typeof clipboard.write === "function" && typeof ClipboardItem === "function") {
     const rows = parseCsv(value);
     if (rows.length > 0) {
       try {
