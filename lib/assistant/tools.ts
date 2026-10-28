@@ -1801,7 +1801,8 @@ const REORDER_COUNTS_NOTE =
   "count rows yourself.";
 
 /** A2 C4: what the order signal is — and the three things it is NOT. A2 C17 (A2-QA-5): the
- *  newest orders are not facts until the next sales rebuild, so a 0 is "none recorded before". */
+ *  newest orders are not facts until the next sales rebuild, so a 0 covers only earlier
+ *  orders (A2 FR6: a scope, not a claim — the unlinked-orders note can say a 0 hides orders). */
 const ORDER_SIGNAL_DEFINITION =
   "orderSignal = units and orders attributed to this product in your companies' order " +
   "records over a 90-day calendar window (coverage.orderSignalWindow), shown only for " +

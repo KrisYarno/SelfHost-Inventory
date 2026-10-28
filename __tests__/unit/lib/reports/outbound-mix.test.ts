@@ -1820,7 +1820,7 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       );
     });
 
-    it("the description's two amended sentences, exactly (and the old flag sentence is gone)", () => {
+    it("the description's amended per-day sentences, exactly (and the old flag sentence is gone)", () => {
       const d = assistantTools.compare_periods.description.replace(/\s+/g, " ");
       expect(d).toContain(
         "for PER-PRODUCT deltas ranked server-side by |delta| (by the per-day change when " +

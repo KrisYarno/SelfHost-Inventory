@@ -1454,12 +1454,14 @@ describe("A2 C17 — find_product's remaining count and the composites' newest-o
     "recent day or two may be partial.";
   const descOf = (name: string) => assistantTools[name].description.replace(/\s+/g, " ");
 
-  it("find_product: remainingRows counts only the matches after nextOffset, byteSkipped the rest", () => {
+  it("find_product: remainingRows counts only the matches after nextOffset; the byteSkipped ones are named, never added", () => {
     expect(descOf("find_product")).toContain(
       "follow coverage.byteNote (same offset, smaller limit) to read them instead of walking on. " +
         "remainingRows counts only the matches after nextOffset; the coverage.byteSkipped matches " +
         "this page dropped are not in it — read them with coverage.byteNote.",
     );
+    // A2 FR6 (A2-FD4-1): no arithmetic is asked of the model.
+    expect(descOf("find_product")).not.toContain("add coverage.byteSkipped");
   });
 
   it("the sentence is get_sales' own, verbatim", () => {

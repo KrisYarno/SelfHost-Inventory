@@ -1090,7 +1090,7 @@ describe("A2 C4 — mixed scope", () => {
     expect(meta.scope).toBe("mixed");
     expect(TOOL_SCOPES.reorder_report).toBe("global");
     expect(data.coverage.sectionScopes).toEqual({ rows: "global", orderSignal: "company" });
-    // A2 C17 (A2-QA-5): the newest orders are not facts yet, so a 0 is "none recorded before then".
+    // A2 C17 (A2-QA-5) + FR6: the newest orders are not facts yet, so a 0 covers only earlier orders.
     expect(data.coverage.orderSignalDefinition).toBe(
       "orderSignal = units and orders attributed to this product in your companies' order " +
         "records over a 90-day calendar window (coverage.orderSignalWindow), shown only for " +
