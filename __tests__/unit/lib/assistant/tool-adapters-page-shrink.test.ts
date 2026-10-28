@@ -493,11 +493,13 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
     // A2 FR3 (pack C16) — RECORDED: the counts note's totals-fallback sentence and the perDay
     // key in the reasonsKeys legend add ~265 B: the one-row floors now weigh 5,551 B, ok from
     // 5,560 B (still never over budget below it — the adapter's truncated downgrade).
+    // A2 FR4 (pack row 16) — RECORDED: the totals-fallback sentence now covers equal lengths
+    // and says the partial period's total is still partial (+~50 B): 5,602 B, ok from 5,610 B.
     const floor = (await runOnce("compare_periods", compareArgs, CRAMPED)) as ExecResult & {
       meta?: { bytes: number };
     };
     expect(floor.status).toBe("truncated");
-    const BOTH_FLOOR = 5_600;
+    const BOTH_FLOOR = 5_650;
     const tight = (await runOnce("compare_periods", compareArgs, BOTH_FLOOR)) as ExecResult & {
       data?: { rows?: unknown[]; unranked?: unknown[]; unrankedTotal?: number };
       meta?: { bytes: number };

@@ -1549,7 +1549,8 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       "sales rebuild succeeds, recent days' sales — are still arriving. Values of 1 or more " +
       "are rounded to 2 decimals, smaller values to 3 significant figures, so a small non-zero " +
       "rate never shows as 0; perDayDirection is the sign of the unrounded change. When the " +
-      "rate periods differ in length, rows are ranked and filtered by the per-day change, " +
+      "rate periods differ in length and both have a complete day, rows are ranked and " +
+      "filtered by the per-day change, " +
       "because totals of periods of different lengths are not comparable; delta and pctChange " +
       "stay the change in the full periods' totals. This is a calendar rate — the low-stock " +
       "and reorder rates divide by the days a product's outbound data covers, so they are not " +
@@ -1560,8 +1561,8 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       "decreased and unchanged count every product with activity in either period that both " +
       "periods can measure, before that filter; unranked counts the products not comparable. " +
       "Under rankedBy 'per_day', increased and decreased follow the per-day change, not delta. " +
-      "When the periods differ in length and one has no complete day yet (reasons.perDay), rows " +
-      "rank by the change in totals, which is not like-for-like. " +
+      "When a period has no complete day yet (reasons.perDay), rows rank by the change in " +
+      "totals, and that period's total is still partial, so the change is not like-for-like. " +
       "Use these for how many; never count rows yourself.";
 
     /** Nine months vs last month, fully covered:
@@ -1820,8 +1821,16 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       expect(d).toContain(
         "When periodA and periodB differ in length (unequalLengths), compare the per-day figures " +
           "(aPerDay, bPerDay, perDayDelta, perDayDirection). Rows are ranked and filtered by the " +
-          "per-day change (rankedBy: 'per_day') when the lengths differ, or when one period " +
-          "reaches past the last complete day and so has fewer complete days (coverage.rateWindows).",
+          "per-day change (rankedBy: 'per_day') when both periods have a complete day and the " +
+          "lengths differ, or one period reaches past the last complete day and so has fewer " +
+          "complete days (coverage.rateWindows); a period with no complete day yet ranks by " +
+          "totals (countsNote).",
+      );
+      // A2 FR4 (A2-FD2-2): the description's own reasons-keys list names the per-day keys too.
+      expect(d).toContain(
+        "delta = the coverageShift qualification (BOTH modes, present only with coverageShift), " +
+          "perDayPctChange = per-day percent change, perDay = why the per-day figures are missing " +
+          "(present only when a period has no complete day yet).",
       );
       // A2 C16 (A2-FD1-4): the old "today or later" missed the sales frontier's other cut-off.
       expect(d).not.toContain("reaches today or later");

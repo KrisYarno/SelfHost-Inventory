@@ -106,7 +106,7 @@ export interface PerDayFigures {
 
 /** The reason beside a null `perDayPctChange` when period A is a measured zero — the same
  *  words as the totals' `reasons.pctChange`. */
-const PER_DAY_PCT_ZERO_REASON = "period A is zero — percent change undefined";
+const PER_DAY_PCT_ZERO_REASON = "period A's per-day figure is zero — per-day percent change undefined";
 
 /** A2 C14: the reason beside null per-day figures when a period has no complete day. */
 const PER_DAY_NO_COMPLETE_DAY_REASON = "this period has no complete day yet";

@@ -1577,7 +1577,7 @@ describe("A2 C3 — per-day rates, per-day ranking and directionCounts", () => {
       expect(res.perDayDelta).toBe(2.14);
       expect(res.perDayDirection).toBe("increase");
       expect(res.perDayPctChange).toBeNull();
-      expect(res.reasons.perDayPctChange).toBe("period A is zero — percent change undefined");
+      expect(res.reasons.perDayPctChange).toBe("period A's per-day figure is zero — per-day percent change undefined");
       // The existing reason is unchanged beside it.
       expect(res.reasons.pctChange).toBe("period A is zero — percent change undefined");
     });
@@ -1727,7 +1727,7 @@ describe("A2 C3 — per-day rates, per-day ranking and directionCounts", () => {
       expect(p3).toMatchObject({ a: 0, b: 3, aPerDay: 0, bPerDay: 0.1, perDayPctChange: null, pctChange: null });
       expect(p3.reasons).toEqual({
         pctChange: "period A is zero — percent change undefined",
-        perDayPctChange: "period A is zero — percent change undefined",
+        perDayPctChange: "period A's per-day figure is zero — per-day percent change undefined",
       });
       // A row with a non-zero a carries no reasons at all, as before.
       expect(res.ranked.find((r) => r.productId === 1)!.reasons).toBeUndefined();
@@ -2145,6 +2145,7 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
   // the pctChange reason (still the period total, `a === 0`).
   describe("A2 C16 — by_product row reasons: the per-day zero reason follows the rate numerator", () => {
     const ZERO = "period A is zero — percent change undefined";
+    const PER_DAY_ZERO = "period A's per-day figure is zero — per-day percent change undefined";
 
     it("A's total > 0 only from the incomplete day (rate numerator 0), B measured -> the per-day reason, NO pctChange reason", async () => {
       seedSalesTable([
@@ -2160,7 +2161,7 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
       });
       const p2 = res.ranked.find((r) => r.productId === 2)!;
       expect(p2).toMatchObject({ a: 5, b: 7, pctChange: 0.4, aPerDay: 0, bPerDay: 1, perDayPctChange: null });
-      expect(p2.reasons).toEqual({ perDayPctChange: ZERO });
+      expect(p2.reasons).toEqual({ perDayPctChange: PER_DAY_ZERO });
     });
 
     it("a period with no complete day: no row-level perDayPctChange reason (the envelope's reasons.perDay explains)", async () => {
@@ -2188,7 +2189,7 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
       });
       const p2 = res.ranked.find((r) => r.productId === 2)!;
       expect(p2).toMatchObject({ a: 0, b: 6, pctChange: null, aPerDay: 0, bPerDay: 1, perDayPctChange: null });
-      expect(p2.reasons).toEqual({ pctChange: ZERO, perDayPctChange: ZERO });
+      expect(p2.reasons).toEqual({ pctChange: ZERO, perDayPctChange: PER_DAY_ZERO });
     });
 
     it("a row whose rate numerator is not zero carries no reason (unranked rows keep their period reasons)", async () => {
