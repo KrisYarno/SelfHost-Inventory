@@ -19,7 +19,14 @@ jest.mock("@/lib/api-utils", () => ({
 
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
-  default: { $transaction: jest.fn(async (fn: any) => fn({})) },
+  default: {
+    $transaction: jest.fn(async (fn: any) => fn({})),
+    // A2: the real-module block at the bottom reads the population, the demand ledger
+    // and the global reorder settings through these.
+    product: { findMany: jest.fn() },
+    inventory_logs: { findMany: jest.fn() },
+    globalReorderSettings: { findUnique: jest.fn() },
+  },
 }));
 
 jest.mock("@/lib/change-tracking", () => ({
@@ -36,8 +43,11 @@ import { NextRequest } from "next/server";
 import { GET } from "@/app/api/reports/reorder-recommendations/export/route";
 import { getReorderReport } from "@/lib/reports/reorder";
 import { recordChange } from "@/lib/change-tracking";
+import prisma from "@/lib/prisma";
 
 const mockReport = getReorderReport as jest.Mock;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const db = prisma as any;
 const mockRecord = recordChange as jest.Mock;
 
 beforeEach(() => jest.clearAllMocks());
@@ -155,4 +165,86 @@ test("the requested-id variants export as BLANK cells, never 'null' and never 0"
   // unknown_id: no name, no stock — two empty leading cells, reason intact.
   expect(unknown.startsWith(",unavailable,unknown_id,,")).toBe(true);
   expect(unknown).not.toMatch(/null/);
+});
+
+// ---------------------------------------------------------------------------
+// A2 pack C5 — the reorder module's rows gained `reorderPointSource` and its note changed
+// (a DECLARED web-body change). The CSV export is pinned UNCHANGED through the REAL
+// module: the same header, the same cells (no new column), and the same DATA_EXPORT
+// record (coverage + assumptions — never the note, never a tool-layer key).
+// ---------------------------------------------------------------------------
+
+describe("A2 C5: the CSV and its audit record are unchanged (real module)", () => {
+  const recent = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000);
+  const HEADER =
+    "Product,State,Reason,Urgency,Current Stock,Avg Daily Demand,Days Covered,Lead Time Days," +
+    "Lead Time Source,Buffer Days,Reorder Point,Target Level,Suggested Order Qty,Min Order Qty," +
+    "Cost Price,Order Value";
+
+  beforeEach(() => {
+    mockReport.mockImplementation(jest.requireActual("@/lib/reports/reorder").getReorderReport);
+    db.globalReorderSettings.findUnique.mockResolvedValue(null); // built-in defaults
+    db.product.findMany.mockResolvedValue([
+      // 30 units over 30 covered days => 1/day: lead 14 + buffer 7 => point 21, target 28.
+      { id: 1, name: "Computed", costPrice: "2.00", product_locations: [{ quantity: 0 }], reorderConfig: null },
+      // The same demand with a hand-set point of 40 => target max(40, 28) = 40, need 35.
+      {
+        id: 2,
+        name: "Pinned",
+        costPrice: null,
+        product_locations: [{ quantity: 5 }],
+        reorderConfig: { leadTimeDays: null, customSafetyStockDays: null, minOrderQuantity: null, reorderPointOverride: 40 },
+      },
+      { id: 3, name: "Idle", costPrice: "1.00", product_locations: [{ quantity: 4 }], reorderConfig: null },
+    ]);
+    db.inventory_logs.findMany.mockResolvedValue(
+      [1, 2].flatMap((productId) =>
+        [30, 20, 10].map((daysAgo) => ({
+          productId,
+          delta: -10,
+          // The first event exactly 30 days back (minus a minute, so it is inside the window).
+          changeTime: new Date(recent(daysAgo).getTime() + 60_000),
+          logType: "SALE",
+          reasonCode: null,
+        })),
+      ),
+    );
+  });
+
+  it("header and every cell are byte-identical to the pre-A2 export (no reorderPointSource column)", async () => {
+    const res = await GET(new NextRequest("http://x/api/reports/reorder-recommendations/export"));
+    expect(res.status).toBe(200);
+    const lines = (await res.text()).trim().split("\n");
+    expect(lines).toEqual([
+      HEADER,
+      "Computed,suggested,,OUT,0,1,30,14,default,7,21,28,28,1,2,56",
+      // Stock 5 is below lead-time demand (14): CRITICAL is checked before the hand-set point.
+      "Pinned,suggested,,CRITICAL,5,1,30,14,default,7,40,40,35,1,,",
+      "Idle,unavailable,no_demand_signal,,4,,,,,,,,,,,",
+    ]);
+    expect(lines.join("\n")).not.toMatch(/computed|override|orderSignal/);
+  });
+
+  it("the DATA_EXPORT record carries exactly coverage + assumptions (no note, no new key)", async () => {
+    await GET(new NextRequest("http://x/api/reports/reorder-recommendations/export"));
+    expect(mockRecord).toHaveBeenCalledTimes(1);
+    const record = mockRecord.mock.calls[0][1];
+    expect(record).toMatchObject({
+      actor: { userId: 7 },
+      actionType: "DATA_EXPORT",
+      entityType: "SYSTEM",
+      entityId: null,
+      action: "Exported reorder report CSV",
+    });
+    expect(record.details).toEqual({
+      export: "reorder-report",
+      coverage: { total: 3, suggested: 2, unavailable: 1, healthy: 0, approachingOmitted: 0, costed: 1 },
+      assumptions: {
+        windowDays: 90,
+        bufferDaysDefault: 7,
+        targetCoverageMultiple: 2,
+        demandDefinition: jest.requireActual("@/lib/reports/metrics-contract").REORDER_DEMAND_DEFINITION,
+      },
+    });
+  });
 });

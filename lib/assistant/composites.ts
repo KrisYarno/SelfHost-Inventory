@@ -34,7 +34,7 @@ import { getValuation } from "@/lib/analytics/valuation";
 import { getPolicy } from "@/lib/reports/policy";
 import { getMovementSeries } from "@/lib/reports/movement";
 import { getInventorySummary } from "@/lib/reports/inventory-summary";
-import { getReorderReport } from "@/lib/reports/reorder";
+import { getReorderReport, REORDER_COSTED_NOTE } from "@/lib/reports/reorder";
 import { getFreshness } from "@/lib/assistant/freshness";
 import { getOrderPipeline } from "@/lib/reports/order-pipeline";
 import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
@@ -445,7 +445,12 @@ export async function getBusinessSnapshot(
     // from the reorder report's own coverage — deep dive is reorder_report.
     runSection("global", async () => {
       const report = await getReorderReport({ includeOkay: false });
-      return { reorderNowCount: report.coverage.suggested, coverage: report.coverage };
+      // A2 C5 (A2-G2S-20): the same costed label the reorder tool carries — `costed` counts
+      // the suggested rows, never the catalog.
+      return {
+        reorderNowCount: report.coverage.suggested,
+        coverage: { ...report.coverage, costedNote: REORDER_COSTED_NOTE },
+      };
     }),
 
     // sales 7/30d totals (COMPANY-scoped): two separate windows + caller-scoped coverage.

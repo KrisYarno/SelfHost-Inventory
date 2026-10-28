@@ -44,8 +44,20 @@ import {
 import { serializeSalesRows } from "@/lib/analytics/serialize";
 import { toDayKey } from "@/lib/analytics/dates";
 import { weekStartKey, monthKey, byStringKey } from "@/lib/analytics/date-grain";
-import { getLowStockReport } from "@/lib/reports/low-stock";
-import { getReorderReport } from "@/lib/reports/reorder";
+import { getLowStockReport, LOW_STOCK_USAGE_WINDOW_DAYS } from "@/lib/reports/low-stock";
+import {
+  getReorderReport,
+  REORDER_COSTED_NOTE,
+  REORDER_POINT_DEFINITION,
+  REORDER_URGENCY_DEFINITION,
+  type ReorderRow,
+} from "@/lib/reports/reorder";
+// A2 pack C4: the recorded-order figures for the reorder rows the report cannot size.
+import {
+  orderSignal,
+  ORDER_SIGNAL_WINDOW_DAYS,
+  type OrderSignalResult,
+} from "@/lib/reports/order-signal";
 import {
   effectiveLowStockThreshold,
   getLowStockDefault,
@@ -56,13 +68,13 @@ import { resolveAssistantProduct, resolveAssistantProducts } from "@/lib/assista
 import {
   callerScopedSalesCoverage,
   callerWindowCoverage,
-  companyCoverageDetail,
+  salesCoverageReason,
   SALES_ROWS_NOTE,
   SALES_COMPANY_COVERAGE_NOTE,
+  SALES_COMPANY_COVERAGE_MEASURED_NOTE,
   type CallerScopedSalesCoverage,
 } from "@/lib/assistant/sales-coverage";
 import {
-  classifyWindowCoverage,
   SHRINKAGE_CLASSIFICATION_DEFINITION,
   type WindowCoverage,
 } from "@/lib/reports/metrics-contract";
@@ -931,14 +943,9 @@ async function withZeroSalesRows(
   // is false on its face when the caller-wide start is years before the window: it sends
   // the reader to widen a window that is already covered instead of at the company that
   // never recorded. The companies are named, because their ids are right here.
-  const reason =
-    salesDataStart == null
-      ? // No truthful substitution exists for the starts-<date> template.
-        "no attributed sales data recorded"
-      : classifyWindowCoverage(salesDataStart, windowFrom) === "full"
-        ? `sales data is not recorded in every company for this window ` +
-          `(${companyCoverageDetail(coverage.companyCoverage)}; ${SALES_COMPANY_COVERAGE_NOTE})`
-        : `window predates/straddles sales data (starts ${salesDataStart})`;
+  // A2 C4: the three sentences live in salesCoverageReason (shared with the reorder order
+  // signal), byte-identical to the inline strings they replace.
+  const reason = salesCoverageReason(salesDataStart, windowFrom, coverage.companyCoverage);
   const zeros: ZeroSalesRow[] = missing.map((id) => {
     const identity = identities.get(id);
     const row: ZeroSalesRow = {
@@ -1614,6 +1621,104 @@ function toolRow(row: AttributionRow): Record<string, unknown> {
     sentence: row.how.sentence,
     order: row.order,
   };
+}
+
+// ---------------------------------------------------------------------------
+// A2 M2 — the low_stock_report and reorder_report envelopes (pack C2, C4, C5): counts the
+// model reads instead of counting, the rules stated beside the rows, and the recorded-order
+// signal for the products the reorder report cannot size.
+// ---------------------------------------------------------------------------
+
+/** A2 C2: the scope of each low-stock count — the listed alerts vs the whole catalog. */
+const LOW_STOCK_COUNTS_NOTE =
+  "alerts, outOfStockAlerts, lowAlerts, productOverride and systemDefault count the listed " +
+  "alerts (products with a threshold above 0), over every alert, not only this page; " +
+  "alertsOff counts products whose alerts are off (threshold 0), which are never listed, " +
+  "and alertsOffAtZeroStock those of them with no stock. outOfStockAllProducts counts every " +
+  "product with no stock, alerts on or off (the same figure as the inventory summary's " +
+  "stockStateCounts.out); low products are the same set in both tools. Use these for how " +
+  "many; never count rows yourself.";
+
+/** A2 C5: the alert rule and the usage window, in plain words (FD5-4 / FD5b-4). */
+const LOW_STOCK_ALERT_RULE =
+  "listed when current stock is at or below the product's effective threshold; a threshold " +
+  "of 0 turns alerts off and the product is never listed. averageDailyUsage looks back " +
+  "usageWindowDays days and divides by the days outbound data actually covers in that " +
+  "window (velocityDefinition); a small non-zero rate is never shown as 0.";
+
+/** A2 C2: the scope of each reorder count (whole result; the omitted tiers live in coverage). */
+const REORDER_COUNTS_NOTE =
+  "counts cover every row of this result, not only this page; approaching and healthy " +
+  "products that are not listed are counted in coverage.approachingOmitted and " +
+  "coverage.healthy. Under partial order-record coverage outOfStockWithOrders is a lower " +
+  "bound (orderSignalUnknown counts the products the records cannot tell about). Use these " +
+  "for how many; never count rows yourself.";
+
+/** A2 C4: what the order signal is — and the three things it is NOT. */
+const ORDER_SIGNAL_DEFINITION =
+  "orderSignal = units and orders attributed to this product in your companies' order " +
+  "records over a 90-day calendar window (coverage.orderSignalWindow), shown only for " +
+  "products the report cannot size. These are recorded orders, fulfilled or not — not a " +
+  "count of currently open orders, and not the stock-outflow figures the report sizes from; " +
+  "they are never added to them and never used to suggest a quantity. outOfStockWithOrders " +
+  "marks a product with no stock now and recorded orders in that window: the report cannot " +
+  "suggest a quantity, so it needs a manual decision. null = the order records cannot tell " +
+  "(orderSignalReason says why); orderSignalRecordedSince = the figures cover only the days " +
+  "since order records began.";
+
+/** A2 C4: how many out-of-stock-with-orders products the envelope lists on every page. */
+const ORDER_SIGNAL_LIST_MAX = 20;
+
+/** A2 C4: a caller with no company membership has no order records to read. */
+const NO_COMPANY_ACCESS_REASON = "no company access";
+
+/** The reorder rows the report cannot size (pack C4) — the requested-id variants
+ *  (`not_active`, `unknown_id`) are never decorated. */
+type UnsizedReorderRow = Extract<ReorderRow, { reason: "no_demand_signal" | "insufficient_history" }>;
+
+function isUnsizedReorderRow(row: ReorderRow): row is UnsizedReorderRow {
+  return (
+    row.status === "unavailable" &&
+    (row.reason === "no_demand_signal" || row.reason === "insufficient_history")
+  );
+}
+
+type OrderSignalRow = UnsizedReorderRow & {
+  orderSignal: { orderedUnits: number; orders: number } | null;
+  orderSignalReason?: string;
+  orderSignalRecordedSince?: string | null;
+  outOfStockWithOrders: boolean | null;
+};
+
+/**
+ * Attach the order signal to ONE unsized reorder row (pack C4). Decorated BEFORE paging
+ * (the shape-before-fit rule), so the fitter measures the row the caller receives.
+ *
+ * Silence is a MEASURED zero only under `full` coverage; under `partial` a recorded sum
+ * stands (and, for the window kind, says since when) while a missing fact row is unknown;
+ * under `none` everything is unknown. `outOfStockWithOrders` follows: false with stock on
+ * hand, unknown when the signal is, else whether any units were ordered.
+ */
+function withOrderSignal(
+  row: UnsizedReorderRow,
+  signal: OrderSignalResult,
+  noCompanyAccess: boolean,
+): OrderSignalRow {
+  const recorded = signal.byProduct.get(row.productId);
+  let value: OrderSignalRow["orderSignal"];
+  const extra: Pick<OrderSignalRow, "orderSignalReason" | "orderSignalRecordedSince"> = {};
+  if (signal.windowCoverage === "full") {
+    value = recorded ?? { orderedUnits: 0, orders: 0 };
+  } else if (signal.windowCoverage === "partial" && recorded != null) {
+    value = recorded;
+    if (signal.partialKind === "window") extra.orderSignalRecordedSince = signal.salesDataStart;
+  } else {
+    value = null;
+    extra.orderSignalReason = noCompanyAccess ? NO_COMPANY_ACCESS_REASON : signal.reason;
+  }
+  const outOfStockWithOrders =
+    row.currentStock > 0 ? false : value === null ? null : value.orderedUnits > 0;
+  return { ...row, orderSignal: value, ...extra, outOfStockWithOrders };
 }
 
 export const assistantTools: Record<string, AssistantToolDef> = {
@@ -2573,12 +2678,26 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // Coverage envelope (spec §3 E1 / §7): how many alerts carry a KNOWN usage rate
       // (the rest are usage-unknown — never a fabricated 0/day) + the shop default.
       const usageKnownCount = report.alerts.filter((a) => a.usageKnown === true).length;
+      // A2 C2: counted over EVERY alert (never the page); the last three are the module's
+      // catalog counts — the alerts-off products are never rows, so only the module sees them.
+      const counts = {
+        alerts: alerts.length,
+        outOfStockAlerts: alerts.filter((a) => a.currentStock <= 0).length,
+        lowAlerts: alerts.filter((a) => a.currentStock > 0).length,
+        productOverride: alerts.filter((a) => a.thresholdSource === "product_override").length,
+        systemDefault: alerts.filter((a) => a.thresholdSource === "system_default").length,
+        alertsOff: report.alertsOff,
+        alertsOffAtZeroStock: report.alertsOffAtZeroStock,
+        outOfStockAllProducts: report.outOfStockAllProducts,
+      };
       const data: Record<string, unknown> = {
         systemDefaultThreshold,
         alerts: page.rows,
         returned: page.returned,
         totalRows: page.totalRows,
         nextOffset: page.nextOffset,
+        counts,
+        countsNote: LOW_STOCK_COUNTS_NOTE,
         coverage: {
           totalAlerts: page.totalRows,
           usageKnown: usageKnownCount,
@@ -2588,6 +2707,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       };
       // Relay the report-level usage definition (W0-1 produces it; spec §2 D3 / §7).
       if (report.velocityDefinition) data.velocityDefinition = report.velocityDefinition;
+      // A2 C5: the look-back the usage rate reads over, and the alert rule in plain words.
+      data.usageWindowDays = LOW_STOCK_USAGE_WINDOW_DAYS;
+      data.alertRule = LOW_STOCK_ALERT_RULE;
       return ok(data, { scope: "global" });
     },
   },
@@ -2612,8 +2734,14 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `outboundMix30 includes them, and mixes use a ROLLING window ending now with ` +
       `ABSOLUTE units while get_movement_series uses CALENDAR-DAY buckets and SIGNED ` +
       `sums — divergence between them is the DEFINITIONS, not a contradiction. ` +
-      `'unavailable' rows carry NO numbers — only a reason (no_demand_signal | ` +
-      `insufficient_history). Quantities are GROSS: inventoryPositionKnown is false, so ` +
+      `'unavailable' rows carry no sizing numbers — only a reason (no_demand_signal | ` +
+      `insufficient_history) and, from your companies' order records over a 90-day ` +
+      `calendar window, orderSignal (units and orders recorded) with outOfStockWithOrders ` +
+      `when stock is 0; up to 20 out-of-stock-with-orders products are listed on every ` +
+      `page (counts.outOfStockWithOrders counts all). Recorded orders are a separate fact ` +
+      `family — never added to the stock-outflow figures and never a quantity. Results ` +
+      `are mixed-scope: rows are global, orderSignal is your companies'. ` +
+      `Quantities are GROSS: inventoryPositionKnown is false, so ` +
       `they do NOT subtract stock already on order. costPrice/orderValue are null when ` +
       `unknown (NEVER shown as $0). 'assumptions' states the demand window, default ` +
       `bufferDays, targetCoverageMultiple, and demand definition — relay them. The rules: ` +
@@ -2646,32 +2774,139 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       assertReorderProductIds(args.productIds);
       const limit = args.limit ?? REORDER_MAX;
       const offset = args.offset ?? 0;
+      const includeOkay = args.includeOkay ?? true;
+      // Deduped at the boundary so `coverage.requested.requested` counts DISTINCT ids
+      // (a repeated id is one question, not two).
+      const productIds = args.productIds ? Array.from(new Set(args.productIds)) : undefined;
       // Fetch the whole report (worklist + approaching + excluded) so offset paging is
       // meaningful; the shop's approved set is small, so this stays cheap.
       const report = await getReorderReport({
-        includeOkay: args.includeOkay ?? true,
+        includeOkay,
         includeHealthy: args.includeHealthy,
-        // Deduped at the boundary so `coverage.requested.requested` counts DISTINCT ids
-        // (a repeated id is one question, not two).
-        productIds: args.productIds ? Array.from(new Set(args.productIds)) : undefined,
+        productIds,
       });
-      // W3 seam-fix item 1: ctx-aware reserved budget (was the fixed row budget).
-      const page = paginate(report.rows, offset, limit, Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES));
-      return ok(
-        {
-          rows: page.rows,
-          returned: page.returned,
-          totalRows: page.totalRows,
-          nextOffset: page.nextOffset,
-          inventoryPositionKnown: report.inventoryPositionKnown,
-          assumptions: report.assumptions,
-          // This envelope is a MANUAL projection (G2-7): a new report field is invisible
-          // to the assistant/MCP surface until it is relayed HERE.
-          coverage: report.coverage,
-          coverageNote: report.coverageNote,
-        },
-        { scope: "global" },
+
+      // A2 C4: the recorded-order signal for the rows the report cannot size, over a
+      // 90-day CALENDAR window (not the demand's rolling window — echoed so it is never
+      // read as the same one), in the caller's companies only. The sizing is untouched;
+      // every key below is decorated onto the row BEFORE paging (shape-before-fit).
+      const resolved = resolveWindow({ relativeDays: ORDER_SIGNAL_WINDOW_DAYS }, new Date());
+      const orderSignalWindow = { from: resolved.from, to: resolved.to, days: ORDER_SIGNAL_WINDOW_DAYS };
+      const signal = await orderSignal(
+        report.rows.filter(isUnsizedReorderRow).map((row) => row.productId),
+        ctx.companyIds,
+        orderSignalWindow,
       );
+      const noCompanyAccess = ctx.companyIds.length === 0;
+      const rows: Array<ReorderRow | OrderSignalRow> = report.rows.map((row) =>
+        isUnsizedReorderRow(row) ? withOrderSignal(row, signal, noCompanyAccess) : row,
+      );
+      const signalRows = rows.filter((row): row is OrderSignalRow => "orderSignal" in row);
+      // The module short-circuits to "none" when no row needs a signal; that is not a
+      // statement about the order records, so it is not shown as one.
+      const signalNeeded = signalRows.length > 0;
+      // Every flagged product, on EVERY page (rows sort them after the sized ones, so a
+      // model reading page 1 would otherwise never meet them): most units first.
+      const flagged = signalRows
+        .filter((row) => row.outOfStockWithOrders === true)
+        .sort(
+          (a, b) =>
+            (b.orderSignal?.orderedUnits ?? 0) - (a.orderSignal?.orderedUnits ?? 0) ||
+            a.productId - b.productId,
+        );
+
+      // A2 C2: counted over report.rows (the whole result, never the page). A tier key is
+      // present only when the call EMITS that tier's rows, so a 0 there is a measured 0 —
+      // never "not listed" (those stay in coverage.approachingOmitted / healthy).
+      const emitApproaching = includeOkay || productIds != null;
+      const emitHealthy = args.includeHealthy === true || productIds != null;
+      const tierCount = (urgency: string) =>
+        rows.filter((row) => row.status === "suggested" && row.urgency === urgency).length;
+      const suggestedCounts: Record<string, number> = {
+        OUT: tierCount("OUT"),
+        CRITICAL: tierCount("CRITICAL"),
+        REORDER_NOW: tierCount("REORDER_NOW"),
+      };
+      if (emitApproaching) suggestedCounts.APPROACHING = tierCount("APPROACHING");
+      if (emitHealthy) suggestedCounts.OK = tierCount("OK");
+      const counts = {
+        suggested: suggestedCounts,
+        unavailable: {
+          no_demand_signal: signalRows.filter((row) => row.reason === "no_demand_signal").length,
+          insufficient_history: signalRows.filter((row) => row.reason === "insufficient_history").length,
+        },
+        unavailableAtZeroStock: signalRows.filter((row) => row.currentStock <= 0).length,
+        // Unknown for every row when the records cannot tell at all; a lower bound under
+        // partial coverage (orderSignalUnknown says how many the records cannot tell about).
+        // No unsized row at all = nothing needed a signal: a measured 0, never "unknown".
+        outOfStockWithOrders: !signalNeeded ? 0 : signal.windowCoverage === "none" ? null : flagged.length,
+        orderSignalUnknown: signalRows.filter((row) => row.orderSignal === null).length,
+      };
+
+      const partial = signal.windowCoverage === "partial";
+      const envelopeOf = (page: Page<ReorderRow | OrderSignalRow>) => ({
+        rows: page.rows,
+        returned: page.returned,
+        totalRows: page.totalRows,
+        nextOffset: page.nextOffset,
+        inventoryPositionKnown: report.inventoryPositionKnown,
+        assumptions: report.assumptions,
+        outOfStockWithOrdersProducts: flagged.slice(0, ORDER_SIGNAL_LIST_MAX).map((row) => ({
+          productId: row.productId,
+          productName: row.productName,
+          orderedUnits: row.orderSignal?.orderedUnits ?? 0,
+          orders: row.orderSignal?.orders ?? 0,
+        })),
+        outOfStockWithOrdersOmitted: Math.max(0, flagged.length - ORDER_SIGNAL_LIST_MAX),
+        counts,
+        countsNote: REORDER_COUNTS_NOTE,
+        // This envelope is a MANUAL projection (G2-7): a new report field is invisible
+        // to the assistant/MCP surface until it is relayed HERE.
+        coverage: {
+          ...report.coverage,
+          // A2 C5 (R4-10): costed counts suggested rows, never the catalog.
+          costedNote: REORDER_COSTED_NOTE,
+          orderSignalWindow,
+          ...(signalNeeded ? { orderSignalCoverage: signal.windowCoverage } : {}),
+          // A member company not recording (or staggered starts inside the window): the
+          // per-company starts, and — for the company kind — the measured-sums rule.
+          ...(partial && signal.companyCoverage
+            ? { orderSignalCompanyCoverage: signal.companyCoverage }
+            : {}),
+          ...(partial && signal.partialKind === "company"
+            ? { orderSignalCompanyCoverageNote: SALES_COMPANY_COVERAGE_MEASURED_NOTE }
+            : {}),
+          sectionScopes: { rows: "global", orderSignal: "company" },
+          orderSignalDefinition: ORDER_SIGNAL_DEFINITION,
+        },
+        coverageNote: report.coverageNote,
+        // A2 C5: the rules the rows were classified by, stated beside them.
+        definitions: { urgency: REORDER_URGENCY_DEFINITION, reorderPoint: REORDER_POINT_DEFINITION },
+      });
+
+      // W3 seam-fix item 1: ctx-aware reserved budget (was the fixed row budget). A2 C4
+      // (A2-G2S-22): the envelope now carries up to 20 named products, and at the schema's
+      // 255-character names it outweighs the fixed reserve (~10.4 KB measured). When it
+      // does, the page is fit into the room the MEASURED envelope leaves — widest counters,
+      // so the estimate is never smaller than what ships — instead of the reserve, so the
+      // completed result still fits its budget (paginate keeps at least one row). With
+      // ordinary names the envelope is under the reserve and the fit is unchanged.
+      // (`null` serializes wider than any cursor under 1000, so it is the widest nextOffset.)
+      const envelopeBytes = byteLengthOf(
+        envelopeOf({
+          rows: [],
+          returned: rows.length,
+          totalRows: rows.length,
+          nextOffset: rows.length >= 1000 ? rows.length : null,
+        }),
+      );
+      const rowBudget =
+        envelopeBytes > ENVELOPE_RESERVE_BYTES
+          ? Math.max(byteBudget(ctx) - envelopeBytes, 0)
+          : Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES);
+      const page = paginate(rows, offset, limit, rowBudget);
+      // A2 C4: the rows are global, the order signal is the caller's companies'.
+      return ok(envelopeOf(page), { scope: "mixed" });
     },
   },
 

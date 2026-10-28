@@ -315,8 +315,17 @@ describe("MATRIX ROW 3 — the MCP member-token matrix", () => {
       expect(toolEnvelope(memberSales)).toMatchObject({ meta: { scope: "company" } });
     });
 
-    it("ZERO company-B sentinel bytes reach memberA's token — with a positive control", () => {
-      for (const sentinel of GATE_SEED.sentinels.companyB) {
+    it("ZERO company-B sentinel bytes reach memberA's token — with a positive control", async () => {
+      // A2 C4's seed adds a company-B sales fact (the ordered-out product), so company B's
+      // per-company TOTAL is no longer the bare sentinel quantity. Scan for that live total
+      // too (recomputed from SQL): it is the figure a company-B leak through this grouped
+      // call would actually carry, and it is what the positive control must find.
+      const bUnits = (await salesUnitsByCompany([GATE_SEED.companies.B], relativeWindow(60))).get(
+        GATE_SEED.companies.B,
+      );
+      expect(bUnits).toBeGreaterThan(0);
+      const bTotal = String(bUnits);
+      for (const sentinel of [...GATE_SEED.sentinels.companyB, bTotal]) {
         const at = memberSales.raw.indexOf(sentinel);
         if (at !== -1) {
           throw new Error(
@@ -326,7 +335,7 @@ describe("MATRIX ROW 3 — the MCP member-token matrix", () => {
         }
       }
       // Without this the scan above would pass on a sidecar that returned nothing.
-      expect(adminSales.raw).toContain(GATE_SEED.sentinels.companyB[0]);
+      expect(adminSales.raw).toContain(bTotal);
     });
   });
 

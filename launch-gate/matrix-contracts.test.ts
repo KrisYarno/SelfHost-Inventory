@@ -1541,7 +1541,185 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
       expect((ops.rows as Array<{ outboundMix30: unknown }>)[0].outboundMix30).toBeDefined();
       const reorder = okData(callWithInput(turns.echoes, "reorder_report", IN.reorderDefault));
       expect((reorder.assumptions as { demandDefinition?: string }).demandDefinition).toBeDefined();
-      expect(String(reorder.coverageNote)).toContain("healthy = final urgency null");
+      // A2 pack C5: healthy in plain words (the note no longer names an internal function).
+      expect(String(reorder.coverageNote)).toContain("healthy = none of the urgency tiers applies");
+      expect(String(reorder.coverageNote)).not.toContain("classifyUrgency");
+    });
+  });
+
+  // =========================================================================
+  // Assistant A2 (pack C4, A2-OCR2-1 / A2-G1R2-17): the reorder ORDER SIGNAL against the
+  // real database. The seeded ordered-out product (0 on hand, no outbound, facts in A and B)
+  // is flagged for BOTH callers with the sums of THEIR OWN companies' facts. Neither caller's
+  // records cover the whole 90-day window (A begins 40 days back), so this is the WINDOW-kind
+  // partial branch; the full branch is a unit pin (no caller here has full coverage).
+  describe("A2 C4 — reorder order signal: the window-kind partial over two companies", () => {
+    const ORDERED_OUT = FIXTURES.orderedOutProductId;
+    const callers = [
+      { label: "memberA", turn: () => turns.echoes, input: IN.reorderDefault, companyIds: MEMBER_A.companyIds },
+      { label: "admin", turn: () => turns.reorder, input: IN.reorderNoOkay, companyIds: ADMIN.companyIds },
+    ] as const;
+    type SignalRow = Record<string, unknown> & {
+      productId: number;
+      orderSignal: { orderedUnits: number; orders: number } | null;
+    };
+    const dataOf = (caller: (typeof callers)[number]) =>
+      okData(callWithInput(caller.turn(), "reorder_report", caller.input));
+    const rowOf = (caller: (typeof callers)[number]) =>
+      (dataOf(caller).rows as SignalRow[]).find((row) => row.productId === ORDERED_OUT);
+
+    /** SUM over the product's facts in the given companies and window (raw SQL). */
+    async function recorded(companyIds: readonly string[], window: { from: string; to: string }) {
+      const [row] = await oracleQuery<{ units: number | null; orders: number | null }>(
+        `SELECT SUM(orderedQty) AS units, SUM(orderCount) AS orders FROM product_sales_facts
+          WHERE productId = ? AND companyId IN (${inList(companyIds)}) AND dayKey >= ? AND dayKey <= ?`,
+        [ORDERED_OUT, ...companyIds, window.from, window.to],
+      );
+      return { units: Number(row.units ?? 0), orders: Number(row.orders ?? 0) };
+    }
+
+    /** First approved-ACTIVE fact day per company (the order signal's coverage scope). */
+    async function startsOf(companyIds: readonly string[]) {
+      return oracleQuery<{ companyId: string; start: string | null }>(
+        `SELECT c.id AS companyId,
+                (SELECT MIN(f.dayKey) FROM product_sales_facts f
+                   JOIN products p ON p.id = f.productId
+                  WHERE f.companyId = c.id AND p.approvalStatus = 'APPROVED' AND p.deletedAt IS NULL) AS start
+           FROM companies c WHERE c.id IN (${inList(companyIds)}) ORDER BY c.id`,
+        [...companyIds],
+      );
+    }
+
+    it("both callers flag the product with their OWN companies' SQL sums — figures, never a quantity", async () => {
+      const window = relativeWindow(90);
+      for (const caller of callers) {
+        const data = dataOf(caller);
+        const coverage = coverageOf(callWithInput(caller.turn(), "reorder_report", caller.input));
+        expect(coverage.orderSignalWindow).toEqual({ ...window, days: 90 });
+        const sql = await recorded(caller.companyIds, window);
+        expect({ caller: caller.label, positive: sql.units > 0 }).toEqual({ caller: caller.label, positive: true });
+        const row = rowOf(caller);
+        expect(row).toMatchObject({
+          status: "unavailable",
+          reason: "no_demand_signal",
+          currentStock: 0,
+          orderSignal: { orderedUnits: sql.units, orders: sql.orders },
+          outOfStockWithOrders: true,
+        });
+        for (const key of ["reorderPoint", "targetLevel", "grossReplenishmentNeed", "avgDailyDemand", "urgency"]) {
+          expect(row).not.toHaveProperty(key);
+        }
+        // Listed in the envelope with the same figures (every page carries the list).
+        expect(data.outOfStockWithOrdersProducts).toContainEqual({
+          productId: ORDERED_OUT,
+          productName: "Gate Ordered Out 3 mg",
+          orderedUnits: sql.units,
+          orders: sql.orders,
+        });
+      }
+    });
+
+    it("admin's figures exceed memberA's by EXACTLY company B's share", async () => {
+      const window = relativeWindow(90);
+      const bShare = await recorded([GATE_SEED.companies.B], window);
+      expect(bShare.units).toBeGreaterThan(0); // non-vacuity: B really recorded orders
+      const member = rowOf(callers[0])!.orderSignal!;
+      const admin = rowOf(callers[1])!.orderSignal!;
+      expect(admin.orderedUnits - member.orderedUnits).toBe(bShare.units);
+      expect(admin.orders - member.orders).toBe(bShare.orders);
+    });
+
+    it("the WINDOW kind: partial, and orderSignalRecordedSince is company A's first fact day", async () => {
+      const window = relativeWindow(90);
+      const [aStart] = await startsOf([GATE_SEED.companies.A]);
+      // The discriminator: the records themselves begin inside the 90 days.
+      expect(String(aStart.start) > window.from).toBe(true);
+      for (const caller of callers) {
+        const coverage = coverageOf(callWithInput(caller.turn(), "reorder_report", caller.input));
+        expect(coverage.orderSignalCoverage).toBe("partial");
+        expect(rowOf(caller)!.orderSignalRecordedSince).toBe(aStart.start);
+        // The company kind's measured-sums note does not ride the window kind...
+        expect(coverage.orderSignalCompanyCoverageNote).toBeUndefined();
+        // ...but the companies' starts differ, so each is listed (SQL recompute).
+        const expected = await startsOf(caller.companyIds);
+        expect(
+          (coverage.orderSignalCompanyCoverage as Array<{ companyId: string; salesDataStart: string | null }>).map(
+            (entry) => ({ companyId: entry.companyId, salesDataStart: entry.salesDataStart }),
+          ),
+        ).toEqual(expected.map((row) => ({ companyId: row.companyId, salesDataStart: row.start })));
+      }
+    });
+
+    it("counts.outOfStockWithOrders and orderSignalUnknown match the SQL recompute (a lower bound)", async () => {
+      const window = relativeWindow(90);
+      const oracle = await reorderOracle();
+      const unsized = oracle.rows.filter((row) => row.emitted === "unavailable");
+      for (const caller of callers) {
+        const withFacts = await oracleQuery<{ productId: number; units: number }>(
+          `SELECT productId, SUM(orderedQty) AS units FROM product_sales_facts
+            WHERE companyId IN (${inList(caller.companyIds)}) AND dayKey >= ? AND dayKey <= ?
+              AND productId IN (${inList(unsized.map((row) => row.productId))}) GROUP BY productId`,
+          [...caller.companyIds, window.from, window.to, ...unsized.map((row) => row.productId)],
+        );
+        const units = new Map(withFacts.map((row) => [Number(row.productId), Number(row.units)]));
+        const flagged = unsized.filter((row) => row.currentStock <= 0 && (units.get(row.productId) ?? 0) > 0);
+        const unknown = unsized.filter((row) => !units.has(row.productId));
+        const counts = dataOf(caller).counts as Record<string, unknown>;
+        expect({
+          caller: caller.label,
+          outOfStockWithOrders: counts.outOfStockWithOrders,
+          orderSignalUnknown: counts.orderSignalUnknown,
+        }).toEqual({
+          caller: caller.label,
+          outOfStockWithOrders: flagged.length,
+          orderSignalUnknown: unknown.length,
+        });
+        expect(flagged.length).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  // =========================================================================
+  // Assistant A2 (pack C2, A2-OCR2-16): low_stock_report's counts against SQL, and the
+  // stock-state identity against get_inventory_summary's census — two tools, one catalog.
+  describe("A2 C2 — low-stock counts and the stock-state identity, against SQL", () => {
+    it("the counts match the SQL recompute, and low/out agree with stockStateCounts", async () => {
+      const lowStock = okData(callWithInput(turns.echoes, "low_stock_report", IN.lowStock));
+      const summary = okData(callWithInput(turns.lifecycle, "get_inventory_summary", IN.summary));
+      const [setting] = await oracleQuery<{ value: string }>(
+        "SELECT value FROM system_settings WHERE `key` = 'lowStockDefaultThreshold'",
+      );
+      const systemDefault = Number(setting.value);
+      const products = (
+        await oracleQuery<{ raw: number | null; stock: number }>(
+          `SELECT p.lowStockThreshold AS raw,
+                  (SELECT COALESCE(SUM(pl.quantity), 0) FROM product_locations pl WHERE pl.productId = p.id) AS stock
+             FROM products p WHERE p.approvalStatus = 'APPROVED' AND p.deletedAt IS NULL`,
+        )
+      ).map((row) => {
+        const raw = row.raw === null ? null : Number(row.raw);
+        return { raw, effective: raw === null ? systemDefault : raw, stock: Number(row.stock) };
+      });
+      const alerts = products.filter((row) => row.effective > 0 && row.stock <= row.effective);
+      const off = products.filter((row) => row.effective <= 0);
+      expect(lowStock.counts).toEqual({
+        alerts: alerts.length,
+        outOfStockAlerts: alerts.filter((row) => row.stock <= 0).length,
+        lowAlerts: alerts.filter((row) => row.stock > 0).length,
+        productOverride: alerts.filter((row) => row.raw !== null).length,
+        systemDefault: alerts.filter((row) => row.raw === null).length,
+        alertsOff: off.length,
+        alertsOffAtZeroStock: off.filter((row) => row.stock <= 0).length,
+        outOfStockAllProducts: products.filter((row) => row.stock <= 0).length,
+      });
+      const counts = lowStock.counts as Record<string, number>;
+      const census = summary.stockStateCounts as Record<string, number>;
+      expect(census.low).toBe(counts.lowAlerts);
+      expect(census.out).toBe(counts.outOfStockAllProducts);
+      expect(counts.outOfStockAllProducts).toBe(counts.outOfStockAlerts + counts.alertsOffAtZeroStock);
+      // Non-vacuity: the seed really has products out of stock (the ordered-out one among them).
+      expect(census.out).toBeGreaterThan(0);
+      expect(lowStock.usageWindowDays).toBe(30);
     });
   });
 

@@ -92,6 +92,13 @@ export type GateSeedManifest = {
      *  config, and no ledger row beyond the two batches — so rows 2f/2g ("the seeded
      *  fixtures move EXACTLY their buckets") cannot move [OCk-21]. */
     reconciliationProductIds: readonly number[];
+    // --- ADDITIVE (assistant A2 M2, declared — pack C4) ---
+    /** The out-of-stock product still being ORDERED (review #4's CJC/IPA shape): approved,
+     *  active, 0 on hand, NO outbound (so the reorder report files it `unavailable /
+     *  no_demand_signal`), with sales facts 6-29 days back in company A and 6-10 days back
+     *  in company B — inside period A of the 30/5-day compare windows, after B's first
+     *  fact day, never in the last 5 days. The reorder tool's order signal flags it. */
+    orderedOutProductId: number;
   };
   sentinels: { companyA: readonly string[]; companyB: readonly string[] };
 };
@@ -178,6 +185,8 @@ export const GATE_SEED: GateSeedManifest = {
     // ADDITIVE (reconciliation lane M5a) — see the manifest type above.
     reconciliationBatchIds: { a: "gate-recon-a", b: "gate-recon-b" },
     reconciliationProductIds: [9107, 9110],
+    // ADDITIVE (assistant A2 M2) — see the manifest type above.
+    orderedOutProductId: 9111,
   },
   sentinels: {
     // A: product_sales_facts.orderedQty · external_order_items.quantity ·
@@ -403,6 +412,17 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           location: 1,
           approvalStatus: "APPROVED",
         },
+        // ADDITIVE (assistant A2 M2, pack C4): out of stock, never shipped, still ordered.
+        // No threshold override (it inherits the default, so it is a low-stock ALERT at 0),
+        // no reorder config, no ledger row — its only data is the sales facts below.
+        {
+          id: GATE_SEED.fixtures.orderedOutProductId,
+          name: "Gate Ordered Out 3 mg",
+          baseName: "Gate Ordered Out",
+          variant: "3 mg",
+          location: 1,
+          approvalStatus: "APPROVED",
+        },
       ],
     });
     await prisma.product_locations.createMany({
@@ -424,6 +444,13 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
         },
         {
           productId: GATE_SEED.fixtures.reconciliationProductIds[1],
+          locationId: 1,
+          quantity: 0,
+          minQuantity: 0,
+        },
+        // ADDITIVE (assistant A2 M2) — the ordered-out product: ONE zero-quantity row.
+        {
+          productId: GATE_SEED.fixtures.orderedOutProductId,
           locationId: 1,
           quantity: 0,
           minQuantity: 0,
@@ -750,6 +777,44 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           fulfilledQty: 0,
           revenue: "99.00",
           orderCount: 1,
+        },
+        // ADDITIVE (assistant A2 M2, pack C4): the ordered-out product's recorded orders.
+        // A: 22 and 9 days back (14 units / 7 orders — the CJC/IPA shape). B: 7 days back
+        // (5 units / 2 orders). Every day is INSIDE compare's 30-day period A and OUTSIDE
+        // its 5-day period B, and B's fact is after B's first fact day (10 back), so no
+        // existing start or period classification moves. Neither caller's records cover
+        // the whole 90-day window (A begins 40 back), so the oracle meets the window-kind
+        // partial branch; the full branch is a unit pin. Quantities are small and outside
+        // both sentinel bands.
+        {
+          productId: GATE_SEED.fixtures.orderedOutProductId,
+          companyId: COMPANY_A,
+          integrationId: integrationOf(COMPANY_A),
+          dayKey: dayKey(22),
+          orderedQty: 6,
+          fulfilledQty: 0,
+          revenue: "84.00",
+          orderCount: 3,
+        },
+        {
+          productId: GATE_SEED.fixtures.orderedOutProductId,
+          companyId: COMPANY_A,
+          integrationId: integrationOf(COMPANY_A),
+          dayKey: dayKey(9),
+          orderedQty: 8,
+          fulfilledQty: 0,
+          revenue: "112.00",
+          orderCount: 4,
+        },
+        {
+          productId: GATE_SEED.fixtures.orderedOutProductId,
+          companyId: COMPANY_B,
+          integrationId: integrationOf(COMPANY_B),
+          dayKey: dayKey(7),
+          orderedQty: 5,
+          fulfilledQty: 0,
+          revenue: "70.00",
+          orderCount: 2,
         },
       ],
     });

@@ -249,6 +249,21 @@ const RIDE_ALONG_COVERAGE: RowCoverage[] = [
       "RIDE-ALONG R1 — get_order_reconciliation: the orderNumber filter is member-scoped",
     ],
   },
+  // Assistant A2 (its own plan + pack; the multiuser spec is NOT amended): nested inside
+  // MATRIX ROW 2, registered here for the same reason as the R1 rows — real, claimed
+  // coverage the C7 matrix never promised.
+  {
+    row: "A2-C4-order-signal",
+    claim:
+      "assistant A2 pack C4: reorder_report flags the out-of-stock product still being ordered with each caller's own SQL-summed figures (window-kind partial over two companies), never a quantity",
+    describes: ["A2 C4 — reorder order signal: the window-kind partial over two companies"],
+  },
+  {
+    row: "A2-C2-low-stock-counts",
+    claim:
+      "assistant A2 pack C2: low_stock_report's counts match SQL, and low/out agree with get_inventory_summary's stockStateCounts",
+    describes: ["A2 C2 — low-stock counts and the stock-state identity, against SQL"],
+  },
   {
     row: "R1-tool-zerouser",
     claim:

@@ -131,6 +131,33 @@ export function companyCoverageDetail(
 }
 
 /**
+ * WHY a window's silence is unknown, in get_sales' own words (A2 pack C4, A2-OCR2-17 /
+ * A2-G2S-9) — extracted from get_sales' zero-row synthesis so the reorder order signal
+ * states an unknown exactly as get_sales does, never in a new paraphrase. The same
+ * three-way discrimination: no data at all / the WINDOW predates or straddles the data /
+ * the window is covered caller-wide but a MEMBER COMPANY was not recording (named).
+ *
+ * Only the third sentence carries the per-company detail, and it never ships an empty
+ * parenthesis: when the detail would be "" the sentence carries the rule alone.
+ */
+export function salesCoverageReason(
+  salesDataStart: string | null,
+  windowFrom: string,
+  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null; name?: string | null }>,
+): string {
+  // No truthful substitution exists for the starts-<date> template.
+  if (salesDataStart == null) return "no attributed sales data recorded";
+  if (classifyWindowCoverage(salesDataStart, windowFrom) === "full") {
+    const detail = companyCoverageDetail(companyCoverage);
+    return detail === ""
+      ? `sales data is not recorded in every company for this window (${SALES_COMPANY_COVERAGE_NOTE})`
+      : `sales data is not recorded in every company for this window ` +
+          `(${detail}; ${SALES_COMPANY_COVERAGE_NOTE})`;
+  }
+  return `window predates/straddles sales data (starts ${salesDataStart})`;
+}
+
+/**
  * The caller-scoped windowCoverage (OC-3). `salesDataStart` alone classifies the EARLIEST
  * company's coverage; when the caller's companies start at DIFFERENT days, the window is
  * only fully covered if the LATEST-starting one covers it too — so a staggered caller

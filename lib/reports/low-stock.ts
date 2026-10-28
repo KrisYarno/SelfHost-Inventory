@@ -28,7 +28,11 @@ import prisma from "@/lib/prisma";
 import { LowStockResponse, LowStockAlert } from "@/types/reports";
 import { getLowStockDefault, effectiveLowStockThreshold } from "@/lib/stock-threshold";
 import { outboundVelocity } from "@/lib/reports/demand";
-import { OUTBOUND_USAGE_DEFINITION } from "@/lib/reports/metrics-contract";
+import { OUTBOUND_USAGE_DEFINITION, rate } from "@/lib/reports/metrics-contract";
+
+/** The usage look-back (A2 pack C5): the days the per-row usage rate reads back over —
+ *  a named constant the tool relays as `usageWindowDays`, never a bare 30. */
+export const LOW_STOCK_USAGE_WINDOW_DAYS = 30;
 
 /**
  * Shared reorder predicate. INCLUSIVE boundary (R-L13); a 0 effective threshold
@@ -45,7 +49,9 @@ export function needsReorderAttention(quantity: number, effectiveThreshold: numb
  *     inherited default for NULL-threshold products (route `?threshold=` path).
  *   - `limit`: cap the returned alerts (the tool's ≤50 bound); omitted = all
  *     (the route passes no limit, so its response stays byte-identical).
- * Response shape is exactly `LowStockResponse` ({ alerts, threshold }).
+ * Response shape is exactly `LowStockResponse` ({ alerts, threshold, velocityDefinition,
+ * alertsOff, alertsOffAtZeroStock, outOfStockAllProducts }). The three counts (A2 pack C2)
+ * describe the whole approved catalog, never the `limit`ed alert list.
  */
 export async function getLowStockReport(
   opts: { limit?: number; thresholdOverride?: number } = {},
@@ -86,15 +92,28 @@ export async function getLowStockReport(
   // product with no outbound reports no usage rather than a fabricated 0/day).
   const velocityMap = await outboundVelocity(
     products.map((p) => p.id),
-    30,
+    LOW_STOCK_USAGE_WINDOW_DAYS,
   );
 
   // Build low stock alerts
   const alerts: LowStockAlert[] = [];
+  // A2 pack C2: the catalog counts beside the alert list, over EVERY approved, non-deleted
+  // product (never the limited page). `alertsOff` is the complement of the alert
+  // predicate's threshold half (`effectiveThreshold > 0`), so every product is either
+  // eligible to alert or counted here; `outOfStockAllProducts` is every product with no
+  // stock, alerts on or off — the inventory summary's `stockStateCounts.out`.
+  let alertsOff = 0;
+  let alertsOffAtZeroStock = 0;
+  let outOfStockAllProducts = 0;
 
   products.forEach((product) => {
     const currentStock = stockMap.get(product.id) || 0;
     const productThreshold = effectiveLowStockThreshold(product.lowStockThreshold, defaultThreshold);
+    if (currentStock <= 0) outOfStockAllProducts += 1;
+    if (productThreshold <= 0) {
+      alertsOff += 1;
+      if (currentStock <= 0) alertsOffAtZeroStock += 1;
+    }
 
     // INCLUSIVE boundary (R-L13); a 0 effective threshold (disabled) never alerts.
     // Out-of-stock (0) stays in this reorder-oriented report as the most critical.
@@ -108,8 +127,10 @@ export async function getLowStockReport(
       // Compute daysUntilEmpty from the SAME rounded figure the report displays
       // (Lane 6 / review M2): the TESA incoherence was 0.0667/day (unrounded) giving
       // 150 days next to a displayed "0.1/day" that implies 100. Round once, use it
-      // for both, so a reader can reproduce the number.
-      const averageDailyUsage = usageKnown ? Math.round(rawDailyUsage! * 10) / 10 : null;
+      // for both, so a reader can reproduce the number. A2 pack C5 (declared change):
+      // the ONE shared rate() rounding — 2 decimals at 1 or more, 3 significant figures
+      // below — replaces the 1-decimal round that showed a slow mover as 0.0/day.
+      const averageDailyUsage = usageKnown ? rate(rawDailyUsage) : null;
       const daysUntilEmpty =
         averageDailyUsage !== null && averageDailyUsage > 0
           ? Math.floor(currentStock / averageDailyUsage)
@@ -148,5 +169,8 @@ export async function getLowStockReport(
     // Report-level definition of the usage rate (spec §2 D3): units/day = physical
     // outbound over the days actually covered, null when there is no movement.
     velocityDefinition: OUTBOUND_USAGE_DEFINITION,
+    alertsOff,
+    alertsOffAtZeroStock,
+    outOfStockAllProducts,
   };
 }

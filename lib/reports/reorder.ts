@@ -56,6 +56,9 @@ export type ReorderRow =
       leadTimeSource: "product" | "default";
       bufferDays: number;
       reorderPoint: number;
+      /** A2 C5: 'computed' = average daily demand × (lead + buffer), rounded up;
+       *  'override' = a reorder point set by hand on the product. */
+      reorderPointSource: "computed" | "override";
       targetLevel: number;
       grossReplenishmentNeed: number;
       minOrderQuantity: number;
@@ -138,12 +141,37 @@ export interface ReorderReport {
   coverageNote: string;
 }
 
-/** Spec C5 verbatim. `healthy` is defined by FINAL urgency null, never by a
- *  stock-vs-reorderPoint phrase (which would overlap APPROACHING's band). */
+/** `healthy` = FINAL urgency null — none of the tiers applies — stated in plain words
+ *  (A2 pack C5: the note used to name the internal function). Never a bare
+ *  stock-vs-reorderPoint phrase, which would overlap APPROACHING's band. */
 export const REORDER_COVERAGE_NOTE =
-  "healthy = final urgency null (classifyUrgency returned null — stock comfortably " +
-  "above 1.2x the reorder point) — counted, and a row ONLY when explicitly requested " +
-  "(productIds) or includeHealthy is set.";
+  "healthy = none of the urgency tiers applies (stock above 1.2 × the reorder point and not " +
+  "below lead-time demand) — counted, and a row ONLY when explicitly requested " +
+  "(productIds) or includeHealthy is set, then with urgency OK.";
+
+/**
+ * The rule definitions the reorder TOOL relays beside its rows (A2 pack C5, FD5-4 /
+ * FD5b-4): the model restates urgency and reorder points, so the payload states them —
+ * the same order `classifyUrgency` checks them in. Defined here, beside the computation
+ * they describe; the web route and the CSV export do not carry them.
+ */
+export const REORDER_URGENCY_DEFINITION =
+  "OUT = stock 0 or less. CRITICAL = stock below lead-time demand (average daily demand × " +
+  "lead time). REORDER_NOW = stock at or below the reorder point. APPROACHING = stock above " +
+  "the reorder point but at or below 1.2 × it. Checked in that order; a product none of them " +
+  "fits is healthy, and appears as a row (urgency OK) only when requested or includeHealthy " +
+  "is set.";
+
+export const REORDER_POINT_DEFINITION =
+  "reorderPointSource 'computed' = average daily demand × (lead time + buffer days), " +
+  "rounded up; 'override' = a reorder point set by hand on the product.";
+
+/** What `coverage.costed` counts (A2 pack C5, review #4 R4-10): suggested rows, not the
+ *  catalog. Relayed by the reorder tool AND by the snapshot's reorderNow coverage. */
+export const REORDER_COSTED_NOTE =
+  "costed counts the suggested rows that have a cost price, out of the suggested rows " +
+  "(coverage.suggested) — not out of the whole catalog (coverage.total). Every product's " +
+  "unit cost is on the valuation tool's product rows.";
 
 // The reorder-demand definition prose now lives in the metrics contract (spec §2 D3)
 // so reorder, low-stock, ops, and every tool draw the same text. The duplicate string
@@ -361,6 +389,7 @@ export async function getReorderReport(
       leadTimeSource: config.leadTimeSource,
       bufferDays: config.bufferDays,
       reorderPoint,
+      reorderPointSource: config.reorderPointOverride != null ? "override" : "computed",
       targetLevel,
       grossReplenishmentNeed,
       minOrderQuantity: config.minOrderQuantity,

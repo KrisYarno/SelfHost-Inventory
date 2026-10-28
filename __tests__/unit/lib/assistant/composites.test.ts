@@ -33,7 +33,12 @@ jest.mock("@/lib/analytics/valuation", () => ({ __esModule: true, getValuation: 
 jest.mock("@/lib/reports/policy", () => ({ __esModule: true, getPolicy: jest.fn() }));
 jest.mock("@/lib/reports/movement", () => ({ __esModule: true, getMovementSeries: jest.fn() }));
 jest.mock("@/lib/reports/inventory-summary", () => ({ __esModule: true, getInventorySummary: jest.fn() }));
-jest.mock("@/lib/reports/reorder", () => ({ __esModule: true, getReorderReport: jest.fn() }));
+// The report is stubbed; its note constants (A2 C5's costedNote) are the real ones.
+jest.mock("@/lib/reports/reorder", () => ({
+  __esModule: true,
+  ...jest.requireActual("@/lib/reports/reorder"),
+  getReorderReport: jest.fn(),
+}));
 jest.mock("@/lib/assistant/freshness", () => ({ __esModule: true, getFreshness: jest.fn() }));
 jest.mock("@/lib/reports/order-pipeline", () => ({ __esModule: true, getOrderPipeline: jest.fn() }));
 jest.mock("@/lib/assistant/sales-coverage", () => ({ __esModule: true, callerScopedSalesCoverage: jest.fn() }));
@@ -348,6 +353,25 @@ describe("getBusinessSnapshot — composition (spec §5 T-SNAP)", () => {
 
     expect(s.coverage.sectionScopes.sales).toBe("company");
     expect(s.coverage.degradedSections).toEqual([]);
+  });
+
+  // A2 pack C5 (A2-G2S-20): the snapshot relays reorder coverage too, so the same costed
+  // label rides beside it — on a fixture where total (80), suggested (5) and costed (3)
+  // all differ, the one shape in which "3 costed" can be misread as 3 of 80.
+  it("reorderNow.coverage carries costedNote beside costed (total, suggested and costed all differ)", async () => {
+    const s = await getBusinessSnapshot(CTX, NOW);
+    const coverage = s.reorderNow.coverage as Record<string, unknown>;
+    expect(coverage).toEqual({
+      total: 80,
+      suggested: 5,
+      unavailable: 20,
+      costed: 3,
+      costedNote:
+        "costed counts the suggested rows that have a cost price, out of the suggested rows " +
+        "(coverage.suggested) — not out of the whole catalog (coverage.total). Every product's " +
+        "unit cost is on the valuation tool's product rows.",
+    });
+    expect(s.reorderNow.reorderNowCount).toBe(5);
   });
 
   it("sales 7d + 30d are TWO separate windows (7d aggregate distinct from 30d)", async () => {

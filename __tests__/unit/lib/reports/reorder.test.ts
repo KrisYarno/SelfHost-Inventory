@@ -40,7 +40,7 @@ jest.mock("@/lib/reorder-config", () => {
 import prisma from "@/lib/prisma";
 import { reorderDemand } from "@/lib/reports/demand";
 import { getGlobalReorderSettings } from "@/lib/reorder-config";
-import { getReorderReport, type ReorderRow } from "@/lib/reports/reorder";
+import { getReorderReport, REORDER_COVERAGE_NOTE, type ReorderRow } from "@/lib/reports/reorder";
 import type { ProductDemand } from "@/lib/reports/demand";
 import type { OutboundMix } from "@/lib/reports/outbound-mix";
 
@@ -379,5 +379,106 @@ describe("OC-8 deterministic ordering", () => {
     const report = await getReorderReport({});
     // OUT (stock 0) outranks CRITICAL regardless of id or name.
     expect(report.rows.map((r) => r.productId)).toEqual([2, 1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 pack C5 — the rules ride with the rows. Each tier at its EXACT boundary (the checks
+// run OUT -> CRITICAL -> REORDER_NOW -> APPROACHING, first match wins), whether a row's
+// reorder point was computed or set by hand, and the healthy definition in plain words.
+// ---------------------------------------------------------------------------
+
+describe("A2 C5 urgency tiers at their exact boundaries", () => {
+  // avgDaily 1, lead 13, buffer 7 => leadTimeDemand 13, reorderPoint ceil(13 + 7) = 20,
+  // and 1.2 x 20 = 24 exactly — so every boundary below is an integer stock level.
+  const at = (stock: number, override: number | null = null): SeedProduct => ({
+    id: 1,
+    name: "B",
+    costPrice: null,
+    stock,
+    reorderConfig: { leadTimeDays: 13, customSafetyStockDays: 7, minOrderQuantity: 1, reorderPointOverride: override },
+    demand: { avgDailyDemand: 1, outboundEvents: 10, daysCovered: 30 },
+  });
+  const urgencyAt = async (stock: number, override: number | null = null) => {
+    seed([at(stock, override)]);
+    const report = await getReorderReport({ includeOkay: true, includeHealthy: true });
+    return asSuggested(report.rows[0]).urgency;
+  };
+
+  it("OUT at stock 0 (and below)", async () => {
+    expect(await urgencyAt(0)).toBe("OUT");
+    expect(await urgencyAt(-3)).toBe("OUT");
+  });
+
+  it("CRITICAL just below lead-time demand; AT lead-time demand it is no longer critical", async () => {
+    expect(await urgencyAt(12)).toBe("CRITICAL"); // 12 < 13
+    expect(await urgencyAt(13)).toBe("REORDER_NOW"); // 13 is not below 13
+  });
+
+  it("REORDER_NOW up to AND including the reorder point", async () => {
+    expect(await urgencyAt(20)).toBe("REORDER_NOW"); // 20 <= 20
+    expect(await urgencyAt(21)).toBe("APPROACHING");
+  });
+
+  it("APPROACHING up to AND including 1.2 x the reorder point; above it is healthy (OK)", async () => {
+    expect(await urgencyAt(24)).toBe("APPROACHING"); // 24 <= 1.2 x 20
+    expect(await urgencyAt(25)).toBe("OK");
+  });
+
+  it("an OVERRIDE below lead-time demand: CRITICAL is checked first, so stock above the override is still critical", async () => {
+    // leadTimeDemand 13, override 5 (1.2 x 5 = 6): stock 12 sits ABOVE the reorder point
+    // and is still CRITICAL — the tiers are checked in order, CRITICAL before REORDER_NOW.
+    expect(await urgencyAt(12, 5)).toBe("CRITICAL");
+    // At lead-time demand none of the tiers fits (13 > 5 and 13 > 6): healthy.
+    expect(await urgencyAt(13, 5)).toBe("OK");
+    // At or below the override it is REORDER_NOW only if not already critical — never here.
+    expect(await urgencyAt(5, 5)).toBe("CRITICAL");
+  });
+});
+
+describe("A2 C5 reorderPointSource — computed or set by hand", () => {
+  it("'computed' when the point is average daily demand x (lead + buffer), rounded up", async () => {
+    seed([{ id: 1, name: "P", costPrice: null, stock: 0, demand: { avgDailyDemand: 1.5, outboundEvents: 10, daysCovered: 30 } }]);
+    const row = asSuggested((await getReorderReport({ includeOkay: true })).rows[0]);
+    expect(row.reorderPoint).toBe(32);
+    expect(row.reorderPointSource).toBe("computed");
+  });
+
+  it("'override' when a reorder point is set on the product (even an override of 0)", async () => {
+    for (const override of [100, 0]) {
+      seed([
+        {
+          id: 1,
+          name: "Pinned",
+          costPrice: null,
+          stock: 5,
+          reorderConfig: { leadTimeDays: 14, customSafetyStockDays: 7, minOrderQuantity: 1, reorderPointOverride: override },
+          demand: { avgDailyDemand: 1, outboundEvents: 10, daysCovered: 30 },
+        },
+      ]);
+      const row = asSuggested((await getReorderReport({ includeOkay: true, includeHealthy: true })).rows[0]);
+      expect(row.reorderPoint).toBe(override);
+      expect(row.reorderPointSource).toBe("override");
+    }
+  });
+
+  it("unavailable rows carry no reorderPointSource (no numbers, still)", async () => {
+    seed([{ id: 1, name: "Idle", costPrice: 5, stock: 0, demand: { avgDailyDemand: null, outboundEvents: 0, daysCovered: 0 } }]);
+    const row = asUnavailable((await getReorderReport({ includeOkay: true })).rows[0]);
+    expect(row).not.toHaveProperty("reorderPointSource");
+  });
+});
+
+describe("A2 C5 coverageNote — healthy in plain words", () => {
+  it("is exactly the contract's sentence (no internal function name)", async () => {
+    expect(REORDER_COVERAGE_NOTE).toBe(
+      "healthy = none of the urgency tiers applies (stock above 1.2 × the reorder point and not " +
+        "below lead-time demand) — counted, and a row ONLY when explicitly requested " +
+        "(productIds) or includeHealthy is set, then with urgency OK.",
+    );
+    seed([{ id: 1, name: "P", costPrice: null, stock: 0 }]);
+    const report = await getReorderReport({});
+    expect(report.coverageNote).toBe(REORDER_COVERAGE_NOTE);
+    expect(report.coverageNote).not.toContain("classifyUrgency");
   });
 });

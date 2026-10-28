@@ -31,7 +31,12 @@ jest.mock("@/lib/analytics/queries", () => ({
   getShrinkageSummary: jest.fn(),
   getValuationSummary: jest.fn(),
 }));
-jest.mock("@/lib/reports/low-stock", () => ({ __esModule: true, getLowStockReport: jest.fn() }));
+// A2 C5: the real module's constants (the usage window) ride along; only the report is stubbed.
+jest.mock("@/lib/reports/low-stock", () => ({
+  __esModule: true,
+  ...jest.requireActual("@/lib/reports/low-stock"),
+  getLowStockReport: jest.fn(),
+}));
 
 import prisma from "@/lib/prisma";
 import {
@@ -355,6 +360,110 @@ describe("low_stock_report naming (review M1)", () => {
     expect(deriveThresholdSource({ rawThreshold: 0 })).toBe("product_override");
     expect(deriveThresholdSource({ rawThreshold: null })).toBe("system_default");
     expect(deriveThresholdSource({ rawThreshold: 10 })).toBe("product_override");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 pack C2 + C5 — low_stock_report counts instead of counting, and states its rules.
+// ---------------------------------------------------------------------------
+
+describe("A2 C2/C5 low_stock_report: counts over the whole result + the alert rule", () => {
+  const LOW_STOCK_COUNTS_NOTE =
+    "alerts, outOfStockAlerts, lowAlerts, productOverride and systemDefault count the listed " +
+    "alerts (products with a threshold above 0), over every alert, not only this page; " +
+    "alertsOff counts products whose alerts are off (threshold 0), which are never listed, " +
+    "and alertsOffAtZeroStock those of them with no stock. outOfStockAllProducts counts every " +
+    "product with no stock, alerts on or off (the same figure as the inventory summary's " +
+    "stockStateCounts.out); low products are the same set in both tools. Use these for how " +
+    "many; never count rows yourself.";
+  const ALERT_RULE =
+    "listed when current stock is at or below the product's effective threshold; a threshold " +
+    "of 0 turns alerts off and the product is never listed. averageDailyUsage looks back " +
+    "usageWindowDays days and divides by the days outbound data actually covers in that " +
+    "window (velocityDefinition); a small non-zero rate is never shown as 0.";
+
+  const alert = (productId: number, currentStock: number, rawThreshold: number | null) => ({
+    productId,
+    productName: `P${productId}`,
+    currentStock,
+    threshold: rawThreshold ?? 10,
+    rawThreshold,
+    percentageRemaining: Math.round((currentStock / (rawThreshold ?? 10)) * 100),
+    averageDailyUsage: null,
+    usageKnown: false,
+    daysUntilEmpty: null,
+  });
+
+  function seedReport() {
+    mockGetLowStock.mockResolvedValue({
+      threshold: 10,
+      // Five alerts: three out of stock (one at negative stock), two low; three inherit
+      // the default, two carry an override.
+      alerts: [alert(1, 0, null), alert(2, 0, 5), alert(3, -1, null), alert(4, 3, 5), alert(5, 8, null)],
+      velocityDefinition: "usage def",
+      alertsOff: 4,
+      alertsOffAtZeroStock: 2,
+      outOfStockAllProducts: 5,
+    });
+  }
+
+  it("counts every alert, not the page (a 2-row page of a 5-alert result)", async () => {
+    seedReport();
+    const result = await assistantTools.low_stock_report.run({ limit: 2 }, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as Record<string, unknown>;
+    expect((data.alerts as unknown[]).length).toBe(2);
+    expect(data.totalRows).toBe(5);
+    expect(data.counts).toEqual({
+      alerts: 5,
+      outOfStockAlerts: 3, // stock 0, 0 and -1
+      lowAlerts: 2,
+      productOverride: 2,
+      systemDefault: 3,
+      alertsOff: 4,
+      alertsOffAtZeroStock: 2,
+      outOfStockAllProducts: 5,
+    });
+    expect(data.countsNote).toBe(LOW_STOCK_COUNTS_NOTE);
+    // The counts sit before coverage, the M1 placement.
+    const keys = Object.keys(data);
+    expect(keys.indexOf("counts")).toBeLessThan(keys.indexOf("coverage"));
+    expect(keys.indexOf("countsNote")).toBe(keys.indexOf("counts") + 1);
+  });
+
+  it("states the usage window and the alert rule exactly", async () => {
+    seedReport();
+    const result = await assistantTools.low_stock_report.run({}, CTX);
+    if (result.status !== "ok") throw new Error("expected ok");
+    const data = result.data as Record<string, unknown>;
+    expect(data.usageWindowDays).toBe(30);
+    expect(data.alertRule).toBe(ALERT_RULE);
+    // The rule names the field it qualifies, and that field is in the payload.
+    expect(data.velocityDefinition).toBe("usage def");
+  });
+
+  it("an empty alert list counts zeros and still relays the catalog counts", async () => {
+    mockGetLowStock.mockResolvedValue({
+      threshold: 10,
+      alerts: [],
+      velocityDefinition: "usage def",
+      alertsOff: 1,
+      alertsOffAtZeroStock: 1,
+      outOfStockAllProducts: 1,
+    });
+    const result = await assistantTools.low_stock_report.run({}, CTX);
+    if (result.status !== "ok") throw new Error("expected ok");
+    expect((result.data as Record<string, unknown>).counts).toEqual({
+      alerts: 0,
+      outOfStockAlerts: 0,
+      lowAlerts: 0,
+      productOverride: 0,
+      systemDefault: 0,
+      alertsOff: 1,
+      alertsOffAtZeroStock: 1,
+      outOfStockAllProducts: 1,
+    });
   });
 });
 

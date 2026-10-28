@@ -8,9 +8,10 @@ export const dynamic = "force-dynamic";
 // lib/reports/low-stock.ts so the assistant/MCP reorder tool shares it. This
 // response preserved the prior inline implementation byte-for-byte, including the
 // `?threshold=` override path and the deliberate inclusion of out-of-stock rows —
-// with ONE consciously amended exception (spec C8): each alert row additionally
-// carries `rawThreshold` (the per-product column verbatim, null = inherited). The
-// addition is purely additive; no existing field changed name, order, or value.
+// with consciously amended exceptions: each alert row carries `rawThreshold` (spec C8;
+// the per-product column verbatim, null = inherited); the body carries `alertsOff`,
+// `alertsOffAtZeroStock` and `outOfStockAllProducts` (A2 C2); and `averageDailyUsage`
+// uses the shared rate rounding, so a slow mover's small rate is never shown as 0 (A2 C5).
 export const GET = apiHandler(async (request: NextRequest) => {
   await requireApproved();
 

@@ -151,6 +151,12 @@ export interface LowStockResponse {
   threshold: number;
   // Definition of the per-row usage rate (spec §2 D3 = OUTBOUND_USAGE_DEFINITION).
   velocityDefinition: string;
+  // A2 pack C2 — catalog counts over every approved, non-deleted product (never the
+  // limited alert list): products whose alerts are OFF (effective threshold <= 0, so never
+  // listed), those of them with no stock, and every product with no stock, alerts on or off.
+  alertsOff: number;
+  alertsOffAtZeroStock: number;
+  outOfStockAllProducts: number;
 }
 
 export interface UserActivityResponse {

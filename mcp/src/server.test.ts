@@ -786,7 +786,16 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
 
     const toolResult = await roundTrip("reorder_report", {});
     expect(toolResult.status).toBe("ok");
-    expect(toolResult.data.coverage).toEqual({
+    // A2 (pack C4/C5) adds labelled keys BESIDE the six buckets; the buckets are unchanged.
+    const {
+      costedNote,
+      orderSignalWindow,
+      orderSignalCoverage,
+      sectionScopes,
+      orderSignalDefinition,
+      ...buckets
+    } = toolResult.data.coverage;
+    expect(buckets).toEqual({
       total: 2,
       suggested: 0,
       unavailable: 1, // product 1: no_demand_signal
@@ -794,10 +803,77 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
       approachingOmitted: 0,
       costed: 0,
     });
-    expect(toolResult.data.coverageNote).toContain("healthy = final urgency null");
+    expect(costedNote).toContain("costed counts the suggested rows that have a cost price");
+    expect(orderSignalWindow.days).toBe(90);
+    expect(orderSignalCoverage).toBe("none"); // this token's owner has no companies
+    expect(sectionScopes).toEqual({ rows: "global", orderSignal: "company" });
+    expect(orderSignalDefinition).toContain("never used to suggest a quantity");
+    expect(toolResult.data.coverageNote).toContain("healthy = none of the urgency tiers applies");
     // The NORMATIVE invariant, asserted on the wire payload itself.
     const c = toolResult.data.coverage;
     expect(c.suggested + c.unavailable + c.healthy + c.approachingOmitted).toBe(c.total);
+  });
+
+  // Assistant A2 (pack C4, C2, C5): the order signal on the wire, for a caller WITH a
+  // company — the out-of-stock product still being ordered is flagged with its recorded
+  // figures, never a quantity, and listed in the envelope.
+  it("reorder_report: the order signal, counts and definitions reach the wire (A2 C4/C2/C5)", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    // One delegate, two reads: the reorder population (selects product_locations) and the
+    // order signal's approved-active scope (selects id).
+    p.product.findMany.mockImplementation(async (args: Record<string, unknown>) => {
+      const select = (args.select ?? {}) as { product_locations?: unknown };
+      return select.product_locations
+        ? [
+            { id: 5, name: "CJC/IPA 10mg", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
+            { id: 6, name: "Shelf Sitter", costPrice: null, product_locations: [{ quantity: 4 }], reorderConfig: null },
+          ]
+        : [{ id: 5 }, { id: 6 }];
+    });
+    // c1 has recorded since 2019 => full coverage: silence is a measured zero.
+    p.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: "2019-01-01" } });
+    p.productSalesFact.groupBy.mockImplementation(async (args: Record<string, unknown>) =>
+      (args.by as string[])[0] === "companyId"
+        ? [{ companyId: "c1", _min: { dayKey: "2019-01-01" } }]
+        : [{ productId: 5, _sum: { orderedQty: 14, orderCount: 7 } }],
+    );
+
+    const toolResult = await roundTrip("reorder_report", {});
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.meta.scope).toBe("mixed");
+    const data = toolResult.data;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const byId = Object.fromEntries((data.rows as any[]).map((r) => [r.productId, r]));
+    expect(byId[5]).toEqual({
+      status: "unavailable",
+      productId: 5,
+      productName: "CJC/IPA 10mg",
+      currentStock: 0,
+      reason: "no_demand_signal",
+      orderSignal: { orderedUnits: 14, orders: 7 },
+      outOfStockWithOrders: true,
+    });
+    expect(byId[6]).toMatchObject({ orderSignal: { orderedUnits: 0, orders: 0 }, outOfStockWithOrders: false });
+    expect(data.outOfStockWithOrdersProducts).toEqual([
+      { productId: 5, productName: "CJC/IPA 10mg", orderedUnits: 14, orders: 7 },
+    ]);
+    expect(data.outOfStockWithOrdersOmitted).toBe(0);
+    expect(data.counts).toEqual({
+      suggested: { OUT: 0, CRITICAL: 0, REORDER_NOW: 0, APPROACHING: 0 },
+      unavailable: { no_demand_signal: 2, insufficient_history: 0 },
+      unavailableAtZeroStock: 1,
+      outOfStockWithOrders: 1,
+      orderSignalUnknown: 0,
+    });
+    expect(data.countsNote).toContain("never count rows yourself");
+    expect(data.coverage.orderSignalCoverage).toBe("full");
+    expect(data.definitions.urgency).toContain("Checked in that order");
+    expect(data.definitions.reorderPoint).toContain("reorderPointSource 'computed'");
+    // The signal read is the caller's companies' only.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const signalRead = (p.productSalesFact.groupBy.mock.calls as any[]).map((c) => c[0]).find((a) => a.by[0] === "productId");
+    expect(signalRead.where.companyId).toEqual({ in: ["c1"] });
+    expect(signalRead.where.productId).toEqual({ in: [5, 6] });
   });
 
   it("get_sales: coverage carries salesDataStart + windowCoverage + rowsNote (C6)", async () => {
@@ -1334,6 +1410,41 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     expect(byId[2].effectiveThreshold).toBe(10);
     expect(byId[2].rawThreshold).toBeNull();
     expect(byId[2].thresholdSource).toBe("system_default");
+  });
+
+  // Assistant A2 (pack C2, C5): the counts block, the usage window and the alert rule on
+  // the wire, over the real module (one alerts-off product at no stock, one slow mover).
+  it("low_stock_report: counts, usageWindowDays and alertRule reach the wire (A2 C2/C5)", async () => {
+    p.product.findMany.mockResolvedValueOnce([
+      { id: 1, name: "Out", lowStockThreshold: 5, product_locations: [{ quantity: 0 }] },
+      { id: 2, name: "Slow", lowStockThreshold: null, product_locations: [{ quantity: 5 }] },
+      { id: 3, name: "Off", lowStockThreshold: 0, product_locations: [{ quantity: 0 }] },
+    ]);
+    // Slow: 1 unit, first outbound 30 days back => 1/30 => 0.0333/day (it read 0.0).
+    p.inventory_logs.findMany.mockResolvedValueOnce([
+      { productId: 2, delta: -1, changeTime: new Date(Date.now() - 30 * 86_400_000), logType: "SALE", reasonCode: null },
+    ]);
+
+    const toolResult = await roundTrip("low_stock_report", {});
+    expect(toolResult.status).toBe("ok");
+    const data = toolResult.data;
+    expect(data.counts).toEqual({
+      alerts: 2,
+      outOfStockAlerts: 1,
+      lowAlerts: 1,
+      productOverride: 1,
+      systemDefault: 1,
+      alertsOff: 1,
+      alertsOffAtZeroStock: 1,
+      outOfStockAllProducts: 2,
+    });
+    expect(data.countsNote).toContain("stockStateCounts.out");
+    expect(data.usageWindowDays).toBe(30);
+    expect(data.alertRule).toContain("a threshold of 0 turns alerts off");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const slow = (data.alerts as any[]).find((a) => a.productId === 2);
+    expect(slow.averageDailyUsage).toBe(0.0333);
+    expect(slow.daysUntilEmpty).toBe(150);
   });
 });
 

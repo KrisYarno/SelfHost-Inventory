@@ -25,8 +25,10 @@ import prisma from "@/lib/prisma";
 import {
   callerScopedSalesCoverage,
   callerWindowCoverage,
+  salesCoverageReason,
   BUNDLE_REVENUE_DISCLOSURE,
   SALES_ATTRIBUTION_NOTE,
+  SALES_COMPANY_COVERAGE_NOTE,
 } from "@/lib/assistant/sales-coverage";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
@@ -301,5 +303,56 @@ describe("FD-2 callerWindowCoverage — the governing start, including the null 
         "2026-07-01",
       ),
     ).toBe("full");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 pack C4 (A2-OCR2-17 / A2-G2S-9): the zero-row reason, EXTRACTED from get_sales so the
+// reorder order signal states an unknown in exactly the words get_sales uses. The strings
+// are get_sales' inline ones, byte for byte (its own suites pin them through the tool).
+// ---------------------------------------------------------------------------
+
+describe("A2 C4 salesCoverageReason — get_sales' three reason strings, extracted", () => {
+  const perCompany = (starts: Array<[string, string | null]>) =>
+    starts.map(([companyId, salesDataStart]) => ({ companyId, salesDataStart }));
+
+  it("no recorded start at all -> the no-data sentence (no date to quote)", () => {
+    expect(salesCoverageReason(null, "2026-07-01")).toBe("no attributed sales data recorded");
+    // ...whatever the per-company list says: there is no start to describe.
+    expect(salesCoverageReason(null, "2026-07-01", perCompany([["c1", null]]))).toBe(
+      "no attributed sales data recorded",
+    );
+  });
+
+  it("the window predates or straddles the caller-wide start -> the starts-<date> sentence", () => {
+    expect(salesCoverageReason("2026-07-10", "2026-07-01")).toBe(
+      "window predates/straddles sales data (starts 2026-07-10)",
+    );
+    // The per-company list does not change the window-level sentence.
+    expect(
+      salesCoverageReason("2026-07-10", "2026-07-01", perCompany([["c1", "2026-07-10"], ["c2", null]])),
+    ).toBe("window predates/straddles sales data (starts 2026-07-10)");
+  });
+
+  it("covered caller-wide but a member company not recording -> the per-company sentence, named", () => {
+    expect(
+      salesCoverageReason("2020-01-01", "2026-07-01", perCompany([["c1", "2020-01-01"], ["c2", null]])),
+    ).toBe(
+      "sales data is not recorded in every company for this window " +
+        `(no sales data recorded for company c2; latest company start 2020-01-01; ${SALES_COMPANY_COVERAGE_NOTE})`,
+    );
+    expect(
+      salesCoverageReason("2020-01-01", "2026-07-01", perCompany([["c1", "2020-01-01"], ["c2", "2026-07-09"]])),
+    ).toBe(
+      "sales data is not recorded in every company for this window " +
+        `(latest company start 2026-07-09; ${SALES_COMPANY_COVERAGE_NOTE})`,
+    );
+  });
+
+  it("the per-company sentence never ships an empty detail (the guard)", () => {
+    const expected =
+      `sales data is not recorded in every company for this window (${SALES_COMPANY_COVERAGE_NOTE})`;
+    expect(salesCoverageReason("2020-01-01", "2026-07-01")).toBe(expected);
+    expect(salesCoverageReason("2020-01-01", "2026-07-01", [])).toBe(expected);
   });
 });

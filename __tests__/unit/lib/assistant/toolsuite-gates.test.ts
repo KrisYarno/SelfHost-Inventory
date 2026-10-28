@@ -500,6 +500,26 @@ describe("tool descriptions carry their disambiguation + truthfulness cues", () 
     expect(d).toMatch(/a = periodA/); // reasons-key mapping
   });
 
+  // Assistant A2 (pack C4, A2-G1R3-16): reorder_report's RESULT is mixed-scope now — its
+  // rows are the global physical pool, the order signal on its unsized rows is the caller's
+  // companies' — so its description says so, like the other mixed-scope tools above.
+  it("reorder_report discloses mixed scope: rows global, orderSignal your companies'", () => {
+    const d = desc("reorder_report");
+    expect(d).toMatch(/mixed/i); // mixed-scope result
+    expect(d).toMatch(/your companies/i); // the order signal = caller companies
+    expect(d).toMatch(/global/i); // the rows = global
+    expect(d).toContain(
+      "Results are mixed-scope: rows are global, orderSignal is your companies'.",
+    );
+    // ...and the signal is a separate fact family: never summed, never a quantity.
+    expect(d).toContain(
+      "Recorded orders are a separate fact family — never added to the stock-outflow " +
+        "figures and never a quantity.",
+    );
+    // The STATIC entry stays the outer physical-pool label ("mixed" is never a TOOL_SCOPES value).
+    expect(TOOL_SCOPES.reorder_report).toBe("global");
+  });
+
   it("compare_periods cross-references the two documented ledger divergences (W2 seam-fix item 3)", () => {
     const d = desc("compare_periods");
     // NEW-1: get_operations sums outbound over a ROLLING-INSTANT window ending now;
@@ -796,6 +816,36 @@ describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)
     expect(writeCalls()).toEqual([]);
   });
 
+  // Assistant A2 (pack C4): the benign proxy's empty population never reaches the order
+  // signal, so the fixture above cannot see that read. Seeded: one approved product with no
+  // outbound (an unsized row) and a recorded fact start — the signal's reads really run,
+  // and they still write nothing.
+  it("reorder_report's ORDER-SIGNAL read path runs and issues zero write calls (A2 C4)", async () => {
+    prismaCtl.__reset();
+    prismaCtl.__overrides["product.findMany"] = [
+      { id: 1, name: "Gate Unsized", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
+    ];
+    prismaCtl.__overrides["productSalesFact.aggregate"] = { _min: { dayKey: "2020-01-01" } };
+    const result = await assistantTools.reorder_report.run({}, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    // Non-vacuity: the signal's grouped fact read happened, over the caller's companies.
+    const signalRead = prismaCtl.__calls.find(
+      (c) =>
+        c.model === "productSalesFact" &&
+        c.method === "groupBy" &&
+        (c.args as { by: string[] }).by[0] === "productId",
+    );
+    expect(signalRead).toBeDefined();
+    expect((signalRead!.args as { where: { companyId: unknown } }).where.companyId).toEqual({ in: CTX.companyIds });
+    expect((result.data as { rows: Array<Record<string, unknown>> }).rows[0]).toMatchObject({
+      productId: 1,
+      orderSignal: { orderedUnits: 0, orders: 0 },
+      outOfStockWithOrders: false,
+    });
+    expect(writeCalls()).toEqual([]);
+  });
+
   // FIX 4d: the empty-companyIds context (a caller with no company access) must complete
   // and issue zero writes — get_sales takes the []-fast path (no query) rather than throwing.
   it("get_sales with EMPTY companyIds completes without throwing and issues zero writes", async () => {
@@ -927,6 +977,9 @@ describe("READ-ONLY gate — static source check (spec §7 layer 2)", () => {
     // A2 (pack CA2.3): the producer the report calls, registered BY HAND for the
     // same reason — the meta-test below reads only `tools.ts`'s direct imports.
     "lib/reconciliation/match-producer.ts",
+    // Assistant A2 (pack C4): the reorder order signal — a NEW company-scoped read in a
+    // global tool, so it is scanned from birth (the meta-test below also demands it).
+    "lib/reports/order-signal.ts",
   ];
   const WRITE_TOKEN_SRC =
     "\\.\\s*(create|createMany|update|updateMany|upsert|delete|deleteMany)\\s*\\(|" +

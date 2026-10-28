@@ -55,7 +55,12 @@ import { reorderDemand } from "@/lib/reports/demand";
 import { getGlobalReorderSettings } from "@/lib/reorder-config";
 // The second binding is the SAME function under the name the skipped C5xC11 family
 // re-types locally (Task 2.5 widens the real signature and deletes the alias).
-import { getReorderReport, getReorderReport as getReorderReportW1 } from "@/lib/reports/reorder";
+import {
+  getReorderReport,
+  getReorderReport as getReorderReportW1,
+  REORDER_COSTED_NOTE,
+  REORDER_COVERAGE_NOTE,
+} from "@/lib/reports/reorder";
 import { assistantTools, testCtx } from "@/lib/assistant/tools";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
@@ -238,13 +243,15 @@ describe("coverageNote — healthy is DEFINED by final urgency null (spec C5)", 
     const report = await getReorderReport({ includeOkay: true });
     const note = report.coverageNote;
 
-    expect(note).toContain("healthy = final urgency null");
-    expect(note).toContain("classifyUrgency returned null");
-    // NORMATIVE: never phrased as a stock-vs-reorderPoint band (that overlaps
-    // APPROACHING's reorderPoint < stock <= 1.2x band).
-    expect(note).toContain("1.2");
+    // A2 pack C5: final urgency null, said in plain words — "none of the urgency tiers
+    // applies" — instead of naming the internal function the model cannot see.
+    expect(note).toContain("healthy = none of the urgency tiers applies");
+    expect(note).not.toContain("classifyUrgency");
+    // NORMATIVE: never phrased as a bare stock-vs-reorderPoint band (that overlaps
+    // APPROACHING's reorderPoint < stock <= 1.2x band) — BOTH halves of "no tier" are said.
+    expect(note).toContain("stock above 1.2 × the reorder point and not below lead-time demand");
     // Conditional, not unconditional: C11 makes a healthy row requestable.
-    expect(note).toMatch(/a row ONLY when explicitly requested \(productIds\) or includeHealthy is set/);
+    expect(note).toMatch(/a row ONLY when explicitly requested \(productIds\) or includeHealthy is set, then with urgency OK\./);
   });
 });
 
@@ -411,10 +418,20 @@ describe("the TOOL envelope surfaces the coverage additions (G2-7)", () => {
     const result = await assistantTools.reorder_report.run({}, CTX);
     expect(result.status).toBe("ok");
     if (result.status !== "ok") return;
-    const data = result.data as { coverage: Record<string, number>; coverageNote: string };
+    const data = result.data as { coverage: Record<string, unknown>; coverageNote: string };
 
+    // A2 (pack C4/C5) adds labelled keys BESIDE the buckets — the costed label and the
+    // order-signal coverage — and nothing else; the six buckets themselves are unchanged.
+    const {
+      costedNote,
+      orderSignalWindow,
+      orderSignalCoverage,
+      sectionScopes,
+      orderSignalDefinition,
+      ...buckets
+    } = data.coverage;
     // The tool defaults includeOkay to TRUE (the report module defaults to false).
-    expect(data.coverage).toEqual({
+    expect(buckets).toEqual({
       total: 5,
       suggested: 2,
       unavailable: 2,
@@ -422,7 +439,13 @@ describe("the TOOL envelope surfaces the coverage additions (G2-7)", () => {
       approachingOmitted: 0,
       costed: 1,
     });
-    expect(data.coverageNote).toContain("healthy = final urgency null");
+    expect(costedNote).toBe(REORDER_COSTED_NOTE);
+    expect(orderSignalWindow).toMatchObject({ days: 90 });
+    // A caller with no companies (testCtx's default): the records cannot tell.
+    expect(orderSignalCoverage).toBe("none");
+    expect(sectionScopes).toEqual({ rows: "global", orderSignal: "company" });
+    expect(typeof orderSignalDefinition).toBe("string");
+    expect(data.coverageNote).toBe(REORDER_COVERAGE_NOTE);
   });
 
   it("reorder_report with includeOkay:false relays the approachingOmitted count", async () => {
