@@ -13,6 +13,12 @@
  * only, the clarifying-answer rule, "outstock") — and the tool-description lines plus
  * the ONE result-data note (`coverage.unrankedNote`) that contradicted them (seam S8).
  *
+ * A2 M5 (contract pack C12): the four rules and three routing lines that point the model
+ * at the figures A2's tools now return (counts, per-day rates, the out-of-stock-with-orders
+ * flag, unit prices), find_product's "at or below", the strict-"below" scan over every
+ * description (A1 FD5b-1), and seam S8 — every name those rules cite is read out of a
+ * payload a tool actually ships.
+ *
  * Assertions are WHITESPACE-COLLAPSED on purpose: the prompt is a \n-joined array
  * of ~78-char lines, so every multi-word phrase must survive natural wrapping.
  */
@@ -22,13 +28,21 @@
 jest.mock("ai", () => ({ __esModule: true, tool: (def: unknown) => def }));
 // The by-product compare read below reaches exactly three prisma delegates (the identity
 // lookup, the post-pagination first-sale evidence and — A2 C7, a sales metric — the sales
-// rebuild run history behind the freshness note); nothing else here touches prisma.
+// rebuild run history behind the freshness note). A2 M5 (seam S8): the shipped-payload
+// fixtures at the end run the REAL valuation, inventory-summary, low-stock and
+// order-signal modules over the rest; they seed these delegates and put the defaults back.
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {
     product: { findMany: jest.fn(async () => []) },
-    productSalesFact: { groupBy: jest.fn(async () => []) },
+    productSalesFact: {
+      groupBy: jest.fn(async () => []),
+      aggregate: jest.fn(async () => ({ _min: { dayKey: null } })),
+    },
     analyticsRebuildRun: { findMany: jest.fn(async () => []) },
+    company: { findMany: jest.fn(async () => []) },
+    systemSetting: { findUnique: jest.fn(async () => null) },
+    inventory_logs: { groupBy: jest.fn(async () => []), findMany: jest.fn(async () => []) },
   },
 }));
 // The module result is injected so the pin reads the note the TOOL ships, not the module.
@@ -37,11 +51,23 @@ jest.mock("@/lib/reports/compare-periods", () => ({
   ...jest.requireActual("@/lib/reports/compare-periods"),
   comparePeriodsByProduct: jest.fn(),
 }));
+// A2 M5 (seam S8): the reorder report is stubbed (its sizing reads are not under test); the
+// order signal, the counts and the flag it feeds are the tool's own, over the real modules.
+jest.mock("@/lib/reports/reorder", () => ({
+  __esModule: true,
+  ...jest.requireActual("@/lib/reports/reorder"),
+  getReorderReport: jest.fn(),
+}));
 
+import prisma from "@/lib/prisma";
 import { buildSystemPrompt } from "@/lib/assistant/prompt";
 import { assistantTools, testCtx } from "@/lib/assistant/tools";
 import { createAiTools } from "@/lib/assistant/tool-adapters";
-import { comparePeriodsByProduct } from "@/lib/reports/compare-periods";
+import {
+  comparePeriodsByProduct,
+  type ComparePeriodsByProductResult,
+} from "@/lib/reports/compare-periods";
+import { getReorderReport, REORDER_COVERAGE_NOTE, type ReorderReport } from "@/lib/reports/reorder";
 import { BUCKET_KEYS } from "@/lib/reports/movement";
 import type { ToolContext as ResolvedContext } from "@/lib/assistant/context";
 
@@ -634,5 +660,325 @@ describe("A1 C8: the by-product compare result's coverage.unrankedNote (the ONE 
     // The substrings other suites pin survive unchanged (outbound-mix, MCP server).
     expect(note).toContain("COVERAGE artifact");
     expect(note).toContain("first page only");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 M5 (pack C12): the rules that point the model at the figures A2's tools return.
+// ---------------------------------------------------------------------------
+
+/** The four TRUTHFULNESS bullets (pack C12), joined, in their placement order. */
+const C12_TRUTHFULNESS = [
+  "- When you say how many, use a count the tool returned (totalRows, remainingRows, a " +
+    "counts block, or a coverage count) and keep its scope — an alert count is not a count " +
+    "of every product. Never count rows or items yourself; if no returned count covers it, " +
+    "list the items without a number.",
+  "- When two periods differ in length, compare the per-day figures a tool returned; if " +
+    "none were returned, give both totals with their lengths and say they are not " +
+    "comparable as rates.",
+  "- A product out of stock with recorded orders (outOfStockWithOrders): say it is out of " +
+    "stock now, give its ordered units and orders for the window, and say the report " +
+    "cannot suggest a quantity, so it needs your decision.",
+  "- A price is a unit price field (unit cost or unit retail) — never a money total; a " +
+    "total of 0 on a row with no units is not a price.",
+];
+
+/** The three ROUTING lines (pack C12), joined, in their placement order. */
+const C12_ROUTING = [
+  "- \"What does X cost or sell for, per unit?\" -> get_valuation with groupBy 'product'.",
+  "- \"How many products are out of stock (all products)?\" -> get_inventory_summary " +
+    "(stockStateCounts.out); low_stock_report's out-of-stock count covers only products " +
+    "with alerts on.",
+  "- \"What was the stock at one location on a past day?\" -> get_stock_asof with locationId.",
+];
+
+/** A C12 line's opening words: enough for `bulletStartingWith` to find it, and inside its
+ *  first prompt line. */
+const openingOf = (line: string) => line.slice(0, 40);
+
+describe("A2 C12 TRUTHFULNESS: returned counts, per-day rates, the order flag, unit prices", () => {
+  it("states each rule exactly once, as a bullet of its own", () => {
+    for (const rule of C12_TRUTHFULNESS) {
+      expect(p.split(rule).length - 1).toBe(1);
+      expect(bulletStartingWith(openingOf(rule))).toBe(rule);
+    }
+  });
+
+  it("sits immediately after the 'Totals come from the grain' bullet, in order, before 'State only'", () => {
+    const totals = bulletStartingWith("- Totals come from the grain");
+    expect(totals).toBe(
+      "- Totals come from the grain that returns them. Never sum, subtract, or average rows yourself.",
+    );
+    const next = bulletStartingWith("- State only what a tool returned");
+    expect(next).not.toBe(""); // non-vacuity
+    expect(p).toContain(`${totals} ${C12_TRUTHFULNESS.join(" ")} ${next}`);
+  });
+});
+
+describe("A2 C12 ROUTING: unit prices, the all-products out-of-stock count, one location's past stock", () => {
+  it("routes each question exactly once, as a line of its own", () => {
+    for (const route of C12_ROUTING) {
+      expect(p.split(route).length - 1).toBe(1);
+      expect(bulletStartingWith(openingOf(route))).toBe(route);
+    }
+  });
+
+  it("sits right after the 'How many should I order?' line, in order, before the low-stock line", () => {
+    expect(p).toContain(
+      `- "How many should I order?" -> reorder_report. ${C12_ROUTING.join(" ")} ` +
+        '- "What is at or below its alert threshold?" -> low_stock_report.',
+    );
+  });
+});
+
+// A2 pack C12 (A2-G1R3-6) + the A1 carry-over FD5b-1: the strict-"below" lookbehind A1
+// C13b pinned on the prompt alone, case-sensitively, now covers every tool description in
+// any case — which is why find_product's "at/below" had to become "at or below".
+describe("A2 C12: 'at or below' everywhere — find_product, and a strict-'below' scan (A1 FD5b-1)", () => {
+  const CTX = { userId: 1, tokenId: null, surface: "web", companyIds: ["c1"] } as unknown as ResolvedContext;
+  const set = createAiTools(CTX, { remaining: 65_536 }, jest.fn() as never);
+  const descriptions = Object.entries(set).map(
+    ([name, t]) =>
+      [name, (t as unknown as { description: string }).description.replace(/\s+/g, " ")] as const,
+  );
+  const STRICT_BELOW = /(?<!at or )below its alert threshold/i;
+
+  it("find_product defines low as 'at or below its alert threshold'", () => {
+    const d = descriptions.find(([name]) => name === "find_product")?.[1] ?? "";
+    expect(d).toContain("low means at or below its alert threshold");
+    expect(d).not.toContain("at/below");
+  });
+
+  it("no tool description, and not the prompt, says a strict 'below' its alert threshold, in any case", () => {
+    expect(descriptions.length).toBe(Object.keys(assistantTools).length); // every tool
+    // Non-vacuity: the phrase is in use where the scan must hold.
+    const naming = descriptions.filter(([, d]) => /below its alert threshold/i.test(d)).map(([n]) => n);
+    expect(naming).toEqual(expect.arrayContaining(["find_product", "low_stock_report"]));
+    for (const [name, d] of descriptions) {
+      expect({ name, hit: STRICT_BELOW.test(d) }).toEqual({ name, hit: false });
+    }
+    expect(STRICT_BELOW.test(p)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 M5 (seam S8): every name the C12 rules cite exists in a payload a tool ships — read
+// out of the tools' real results (the valuation, inventory-summary, low-stock and
+// order-signal modules run for real over the mocked delegates; the reorder and compare
+// module results are typed against their modules' own result types).
+// ---------------------------------------------------------------------------
+
+const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
+
+/** Two approved, active products, both out of stock; Widget has a stored cost and retail.
+ *  Each module read takes the fields it selects from these rows. */
+const S8_PRODUCTS = [
+  {
+    id: 1,
+    name: "Widget",
+    deletedAt: null,
+    approvalStatus: "APPROVED",
+    costPrice: 2.5,
+    retailPrice: 4,
+    lowStockThreshold: null,
+    product_locations: [{ locationId: 1, quantity: 0, locations: { name: "Main" } }],
+  },
+  {
+    id: 2,
+    name: "Gadget",
+    deletedAt: null,
+    approvalStatus: "APPROVED",
+    costPrice: null,
+    retailPrice: null,
+    lowStockThreshold: null,
+    product_locations: [{ locationId: 1, quantity: 0, locations: { name: "Main" } }],
+  },
+];
+
+/** Widget cannot be sized (no outflow) and has no stock; its orders come from the real
+ *  order-signal module below. */
+const S8_REORDER = {
+  rows: [
+    { status: "unavailable", productId: 1, productName: "Widget", currentStock: 0, reason: "no_demand_signal" },
+  ],
+  inventoryPositionKnown: false,
+  assumptions: { windowDays: 90, bufferDaysDefault: 7, targetCoverageMultiple: 2, demandDefinition: "outflow" },
+  coverage: { total: 2, suggested: 0, unavailable: 1, healthy: 1, approachingOmitted: 0, costed: 0 },
+  coverageNote: REORDER_COVERAGE_NOTE,
+} satisfies ReorderReport;
+
+/** Periods of different lengths: fewer units in total, more per day. */
+const S8_COMPARE = {
+  ranked: [
+    {
+      productId: 1,
+      a: 30,
+      b: 14,
+      delta: -16,
+      pctChange: -16 / 30,
+      aPerDay: 1,
+      bPerDay: 2,
+      perDayDelta: 1,
+      perDayPctChange: 1,
+      perDayDirection: "increase",
+    },
+  ],
+  unranked: [],
+  reasons: {},
+  periodCoverage: { a: "full", b: "full" },
+  unequalLengths: true,
+  rankedBy: "per_day",
+  directionCounts: { increased: 1, decreased: 0, unchanged: 0 },
+  excludedUnapprovedProducts: 0,
+} satisfies ComparePeriodsByProductResult;
+
+/** The tool calls whose results S8 reads. */
+const S8_RUNS: Record<string, Record<string, unknown>> = {
+  low_stock_report: { limit: 1 },
+  reorder_report: {},
+  get_inventory_summary: {},
+  get_valuation: { groupBy: "product" },
+  compare_periods: {
+    metric: "sales_units",
+    periodA: { relativeDays: 30 },
+    periodB: { relativeDays: 7 },
+    groupBy: "product",
+  },
+};
+
+/** Each name a C12 line cites — or, for a rule worded in plain words, the field behind it —
+ *  with the tool that ships it, the path, and the fixture's value there (so a key that
+ *  exists but is never filled cannot pass). */
+const S8_FIELDS: Array<{ cites: string; tool: string; path: string; value: unknown }> = [
+  // "use a count the tool returned (totalRows, remainingRows, a counts block, or a coverage count)"
+  { cites: "totalRows", tool: "low_stock_report", path: "totalRows", value: 2 },
+  { cites: "remainingRows", tool: "low_stock_report", path: "remainingRows", value: 1 },
+  { cites: "counts", tool: "low_stock_report", path: "counts.alerts", value: 2 },
+  { cites: "counts", tool: "reorder_report", path: "counts.unavailable.no_demand_signal", value: 1 },
+  { cites: "counts", tool: "compare_periods", path: "counts.ranked", value: 1 },
+  { cites: "coverage", tool: "low_stock_report", path: "coverage.totalAlerts", value: 2 },
+  // "compare the per-day figures a tool returned"
+  { cites: "per-day figures", tool: "compare_periods", path: "rankedBy", value: "per_day" },
+  { cites: "per-day figures", tool: "compare_periods", path: "rows.0.aPerDay", value: 1 },
+  { cites: "per-day figures", tool: "compare_periods", path: "rows.0.bPerDay", value: 2 },
+  { cites: "per-day figures", tool: "compare_periods", path: "rows.0.perDayDelta", value: 1 },
+  { cites: "per-day figures", tool: "compare_periods", path: "rows.0.perDayDirection", value: "increase" },
+  // "(outOfStockWithOrders): ... give its ordered units and orders for the window"
+  { cites: "outOfStockWithOrders", tool: "reorder_report", path: "rows.0.outOfStockWithOrders", value: true },
+  { cites: "outOfStockWithOrders", tool: "reorder_report", path: "counts.outOfStockWithOrders", value: 1 },
+  { cites: "ordered units", tool: "reorder_report", path: "rows.0.orderSignal.orderedUnits", value: 14 },
+  { cites: "orders", tool: "reorder_report", path: "rows.0.orderSignal.orders", value: 7 },
+  { cites: "outOfStockWithOrders", tool: "reorder_report", path: "outOfStockWithOrdersProducts.0.orderedUnits", value: 14 },
+  { cites: "the window", tool: "reorder_report", path: "coverage.orderSignalWindow.days", value: 90 },
+  // "A price is a unit price field (unit cost or unit retail) — never a money total; a total
+  // of 0 on a row with no units is not a price." (Widget: 0 units, a stored cost and retail.)
+  { cites: "unit cost", tool: "get_valuation", path: "rows.0.currentUnitCostCents", value: 250 },
+  { cites: "unit retail", tool: "get_valuation", path: "rows.0.unitRetailCents", value: 400 },
+  { cites: "a total of 0 on a row with no units", tool: "get_valuation", path: "rows.0.units", value: 0 },
+  { cites: "a total of 0 on a row with no units", tool: "get_valuation", path: "rows.0.atCurrentCostCents", value: 0 },
+  // "-> get_inventory_summary (stockStateCounts.out); low_stock_report's out-of-stock count
+  // covers only products with alerts on."
+  { cites: "stockStateCounts.out", tool: "get_inventory_summary", path: "stockStateCounts.out", value: 2 },
+  { cites: "low_stock_report's out-of-stock count", tool: "low_stock_report", path: "counts.outOfStockAlerts", value: 2 },
+];
+
+/** The input names the routing lines cite: the tool, and an input using it that parses. */
+const S8_INPUTS: Record<string, { tool: string; input: Record<string, unknown> }> = {
+  groupBy: { tool: "get_valuation", input: { groupBy: "product" } },
+  locationId: { tool: "get_stock_asof", input: { dayKey: "2026-08-01", locationId: 3 } },
+};
+
+/** camelCase identifiers, with an optional `.key` — the field and input names a line cites. */
+const CITED_NAME = /\b[a-z]+(?:[A-Z][a-z0-9]*)+(?:\.[a-z_]+)?\b/g;
+
+/** The value at a dotted path (a numeric step indexes an array); undefined when absent. */
+function valueAt(data: unknown, path: string): unknown {
+  return path.split(".").reduce<unknown>(
+    (node, step) =>
+      node !== null && typeof node === "object" ? (node as Record<string, unknown>)[step] : undefined,
+    data,
+  );
+}
+
+function seedS8Reads(): void {
+  db.product.findMany.mockImplementation(async () => S8_PRODUCTS);
+  // Order records begin years before any window: the order signal reads FULL coverage.
+  db.productSalesFact.aggregate.mockImplementation(async () => ({ _min: { dayKey: "2020-01-01" } }));
+  db.productSalesFact.groupBy.mockImplementation(async (args: { by: string[]; _sum?: unknown }) => {
+    if (args.by[0] === "companyId") return [{ companyId: "c1", _min: { dayKey: "2020-01-01" } }];
+    // The order signal's sums; compare's first-sale evidence (a `_min` read) finds none.
+    return args._sum ? [{ productId: 1, _sum: { orderedQty: 14, orderCount: 7 } }] : [];
+  });
+  db.company.findMany.mockImplementation(async () => [{ id: "c1", name: "Company One" }]);
+  // A successful sales rebuild two hours ago: fresh, so no freshness note rides along.
+  const finishedAt = new Date(Date.now() - 2 * 3_600_000);
+  db.analyticsRebuildRun.findMany.mockImplementation(async () => [
+    { status: "SUCCEEDED", startedAt: new Date(finishedAt.getTime() - 60_000), finishedAt, skippedReason: null },
+  ]);
+  (getReorderReport as jest.Mock).mockResolvedValue(S8_REORDER);
+  (comparePeriodsByProduct as jest.Mock).mockResolvedValue(S8_COMPARE);
+}
+
+/** The mock factory's defaults, put back so no later case inherits the fixture. */
+function resetS8Reads(): void {
+  db.product.findMany.mockImplementation(async () => []);
+  db.productSalesFact.aggregate.mockImplementation(async () => ({ _min: { dayKey: null } }));
+  db.productSalesFact.groupBy.mockImplementation(async () => []);
+  db.company.findMany.mockImplementation(async () => []);
+  db.analyticsRebuildRun.findMany.mockImplementation(async () => []);
+  (getReorderReport as jest.Mock).mockReset();
+  (comparePeriodsByProduct as jest.Mock).mockReset();
+}
+
+describe("A2 seam S8: every name the C12 rules cite exists in a payload a tool ships", () => {
+  const payloads = new Map<string, unknown>();
+
+  beforeAll(async () => {
+    seedS8Reads();
+    try {
+      for (const [tool, input] of Object.entries(S8_RUNS)) {
+        const result = await assistantTools[tool].run(input, testCtx({ companyIds: ["c1"] }));
+        if (result.status !== "ok") throw new Error(`${tool} did not return ok: ${JSON.stringify(result)}`);
+        payloads.set(tool, result.data);
+      }
+    } finally {
+      resetS8Reads();
+    }
+  });
+
+  it("covers every camelCase name the C12 lines cite, read from the built prompt", () => {
+    const lines = [...C12_TRUTHFULNESS, ...C12_ROUTING].map((line) => bulletStartingWith(openingOf(line)));
+    const cited = Array.from(new Set(lines.join(" ").match(CITED_NAME) ?? [])).sort();
+    expect(cited).toEqual([
+      "groupBy",
+      "locationId",
+      "outOfStockWithOrders",
+      "remainingRows",
+      "stockStateCounts.out",
+      "totalRows",
+    ]);
+    const verified = new Set([...S8_FIELDS.map((field) => field.cites), ...Object.keys(S8_INPUTS)]);
+    for (const name of cited) {
+      expect({ name, verified: verified.has(name) }).toEqual({ name, verified: true });
+    }
+  });
+
+  it.each(S8_FIELDS)("$cites: $tool ships $path", ({ tool, path, value }) => {
+    expect(payloads.has(tool)).toBe(true);
+    expect(valueAt(payloads.get(tool), path)).toEqual(value);
+  });
+
+  it("each routing target is a registered tool whose input takes the name the line cites", () => {
+    for (const [name, { tool, input }] of Object.entries(S8_INPUTS)) {
+      const schema = assistantTools[tool]?.inputSchema as unknown as {
+        shape: Record<string, unknown>;
+        safeParse: (value: unknown) => { success: boolean };
+      };
+      expect({ name, tool, has: schema !== undefined && name in schema.shape }).toEqual({ name, tool, has: true });
+      expect({ name, tool, parses: schema.safeParse(input).success }).toEqual({ name, tool, parses: true });
+    }
+    for (const tool of ["get_valuation", "get_inventory_summary", "low_stock_report", "get_stock_asof"]) {
+      expect(assistantTools).toHaveProperty(tool);
+    }
   });
 });

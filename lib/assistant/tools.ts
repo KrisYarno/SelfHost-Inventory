@@ -1809,7 +1809,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
     description:
       `Find products by name (approved products only). Returns id, name, baseName, ` +
       `variant, current global stock, a low-stock flag, stockState ` +
-      `(in_stock | low | out — out means stock 0, low means at/below its alert ` +
+      `(in_stock | low | out — out means stock 0, low means at or below its alert ` +
       `threshold), and lifecycle ('active' or 'deleted'). DELETED products are ABSENT ` +
       `by default — pass includeArchived:true to list them, which is the ONLY way to ` +
       `find a deleted product's id. Their rows come back with currentStock, lowStock ` +

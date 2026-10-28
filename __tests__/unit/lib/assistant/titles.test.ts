@@ -36,6 +36,8 @@ jest.mock("@/lib/assistant/requests", () => ({
   finalizeTitleRequest: (...args: unknown[]) => mockFinalizeTitleRequest(...args),
 }));
 
+import fs from "fs";
+import path from "path";
 import prisma from "@/lib/prisma";
 import { generateThreadTitle } from "@/lib/assistant/titles";
 import { TITLE_SYSTEM_PREFIX } from "@/launch-gate/shim";
@@ -158,6 +160,26 @@ describe('generateThreadTitle "creating-model" (C6): the detached model call', (
     // launch-gate/shim.ts recognises a title call by this prefix on the system message;
     // a reworded opening would route every gate title call to the scenario path.
     expect(generateArgs().system.startsWith(TITLE_SYSTEM_PREFIX)).toBe(true);
+  });
+
+  // A1 FD5-6 (registered; A2 pack C12, test-only): the Spike A title probe runs outside
+  // the TypeScript graph and cannot import titles.ts, so it carries its OWN copy of the
+  // title prompt — and nothing kept the two in step. The copy is read out of the script
+  // (its string literals, joined) and must equal what the module actually sends.
+  it("launch-gate/spike-a-title.mjs carries exactly the title prompt the module sends (A1 FD5-6)", async () => {
+    const script = fs.readFileSync(
+      path.resolve(__dirname, "../../../../launch-gate/spike-a-title.mjs"),
+      "utf8",
+    );
+    const LITERAL = /"(?:[^"\\\n]|\\.)*"/g;
+    const system = /\bsystem:\s*((?:"(?:[^"\\\n]|\\.)*"\s*\+\s*)*"(?:[^"\\\n]|\\.)*")\s*,/.exec(script);
+    expect(system).not.toBeNull(); // the probe still passes `system` as joined string literals
+    const copy = (system?.[1].match(LITERAL) ?? []).map((literal) => JSON.parse(literal) as string).join("");
+
+    await generateThreadTitle(CREATING_JOB);
+
+    expect(copy.startsWith(TITLE_SYSTEM_PREFIX)).toBe(true); // non-vacuity
+    expect(copy).toBe(generateArgs().system);
   });
 
   it("sends effort LOW (and nothing else) for a current Anthropic id; no thinking anywhere", async () => {
