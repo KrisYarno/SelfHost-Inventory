@@ -860,9 +860,28 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
 
   // =========================================================================
   describe("2e — compare by_product ranked / unranked split (C9)", () => {
+    /** A2 C3's rate rounding, restated as the ORACLE (the module is prisma-bound, so it is
+     *  never imported here): 2 decimals at 1 or more, 3 significant figures below, so a
+     *  non-zero rate never reads 0; -0 normalized to 0. */
+    const oracleRate = (x: number): number => {
+      const out = x === 0 ? 0 : Math.abs(x) >= 1 ? Math.round(x * 100) / 100 : Number(x.toPrecision(3));
+      return out === 0 ? 0 : out;
+    };
+    const directionOf = (change: number) => (change > 0 ? "increase" : change < 0 ? "decrease" : "unchanged");
+
     it("admin: both sides measured -> a RANKED row whose values match the SQL recompute", async () => {
       const data = okData(callWithInput(turns.lifecycle, "compare_periods", IN.compareByProduct));
-      const rows = data.rows as Array<{ productId: number; a: number; b: number; delta: number; lifecycle: string }>;
+      const rows = data.rows as Array<{
+        productId: number;
+        a: number;
+        b: number;
+        delta: number;
+        lifecycle: string;
+        aPerDay: number;
+        bPerDay: number;
+        perDayDelta: number;
+        perDayDirection: string;
+      }>;
       expect(rows.length).toBeGreaterThan(0);
       expect(data.unranked).toEqual([]);
 
@@ -875,13 +894,43 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
         [...ADMIN.companyIds, windowA.from, windowA.to, ...ids],
       );
       const expectedA = new Map(perProductA.map((row) => [Number(row.productId), Number(row.units)]));
+      // A2 C3: period B's sums too, so the per-day oracle divides SQL figures on BOTH sides.
+      const windowB = relativeWindow(5);
+      const perProductB = await oracleQuery<{ productId: number; units: number }>(
+        `SELECT productId, SUM(orderedQty) AS units FROM product_sales_facts
+          WHERE companyId IN (${inList(ADMIN.companyIds)}) AND dayKey >= ? AND dayKey <= ?
+            AND productId IN (${inList(ids)}) GROUP BY productId`,
+        [...ADMIN.companyIds, windowB.from, windowB.to, ...ids],
+      );
+      const expectedB = new Map(perProductB.map((row) => [Number(row.productId), Number(row.units)]));
+      // The windows' lengths, as echoed — the denominators of every per-day figure.
+      const daysA = (data.periodA as { days: number }).days;
+      const daysB = (data.periodB as { days: number }).days;
+      expect(daysA).toBe(PERIOD_A.relativeDays);
+      expect(daysB).toBe(PERIOD_B.relativeDays);
+      // 30 vs 5 days: the lengths differ, so the rows are ranked by the per-day change.
+      expect(data.rankedBy).toBe("per_day");
       for (const row of rows) {
         expect(row.a).toBe(expectedA.get(row.productId));
         // periodB is fully covered for admin, so silence there is a MEASURED zero.
         expect(row.b).toBe(0);
         expect(row.delta).toBe(row.b - row.a);
+        const aRaw = (expectedA.get(row.productId) ?? 0) / daysA;
+        const bRaw = (expectedB.get(row.productId) ?? 0) / daysB;
+        expect(row.aPerDay).toBe(oracleRate(aRaw));
+        expect(row.bPerDay).toBe(oracleRate(bRaw));
+        expect(row.perDayDelta).toBe(oracleRate(bRaw - aRaw));
+        expect(row.perDayDirection).toBe(directionOf(bRaw - aRaw));
       }
       expect(data.totalRows).toBe(rows.length);
+      // A2 C2: every ranked row is a per-day decrease here (b = 0), counted over the result.
+      expect(data.counts).toEqual({
+        ranked: rows.length,
+        increased: 0,
+        decreased: rows.length,
+        unchanged: 0,
+        unranked: 0,
+      });
     });
 
     it("memberA: a period whose absence is UNKNOWN unranks the row instead of ranking it on a base nobody measured", () => {
@@ -895,8 +944,13 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
         expect(row.b).toBeNull();
         expect(row.reasons.b).toBeDefined();
         expect(row.reasons.a).toBeUndefined();
+        // A2 C3: the null period has no per-day figure, so there is no per-day comparison.
+        expect((row as unknown as Record<string, unknown>).bPerDay).toBeNull();
+        expect((row as unknown as Record<string, unknown>).perDayDelta).toBeNull();
+        expect((row as unknown as Record<string, unknown>).perDayDirection).toBeNull();
       }
       expect(data.unrankedTotal).toBe(unranked.length);
+      expect((data.counts as Record<string, number>).unranked).toBe(data.unrankedTotal);
       expect(String(coverageOf(callWithInput(turns.modes, "compare_periods", IN.compareByProduct)).unrankedNote)).toContain(
         "COVERAGE artifact",
       );
@@ -909,6 +963,10 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
       expect(allRows.every((row) => row.delta < 0)).toBe(true);
       expect(increases.totalRows).toBe(0);
       expect(increases.rows).toEqual([]);
+      // A2 C2: the direction counts are taken BEFORE the filter, so the empty increase call
+      // still says how many decreased — the same count the unfiltered call ranks.
+      expect((increases.counts as Record<string, number>).ranked).toBe(increases.totalRows);
+      expect((increases.counts as Record<string, number>).decreased).toBe(all.totalRows);
     });
 
     it("rows carry identity + the nullable evidence fields, with the not-a-creation-date note", () => {

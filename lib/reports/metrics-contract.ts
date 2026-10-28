@@ -240,3 +240,16 @@ export const OUTBOUND_USAGE_DEFINITION =
   "corrections included; NOT evidence of verified sales) over the days actually covered " +
   "by outbound data in the window — not a flat divide by the full window, and null " +
   "(unknown) when there is no outbound movement.";
+
+/**
+ * Rate rounding (A2 pack Conventions — used for every per-day figure A2 emits): values of 1
+ * or more round to 2 decimals, smaller ones to 3 significant figures, so a non-zero raw
+ * value never emits 0 (1 unit over 274 days reads 0.00365, not 0.00). `-0` is normalized to
+ * `0`; null in, null out. Signs and orderings are NEVER read off the rounded value — they
+ * come from the unrounded one (`perDayDirection`, the per-day ranking).
+ */
+export function rate(x: number | null): number | null {
+  if (x == null) return null;
+  const out = x === 0 ? 0 : Math.abs(x) >= 1 ? Math.round(x * 100) / 100 : Number(x.toPrecision(3));
+  return out === 0 ? 0 : out;
+}

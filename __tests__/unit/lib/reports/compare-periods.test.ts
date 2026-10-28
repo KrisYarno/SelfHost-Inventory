@@ -28,7 +28,7 @@ jest.mock("@/lib/prisma", () => {
 });
 
 import prisma from "@/lib/prisma";
-import { comparePeriods, comparePeriodsByProduct } from "@/lib/reports/compare-periods";
+import { comparePeriods, comparePeriodsByProduct, rate } from "@/lib/reports/compare-periods";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 
@@ -1456,5 +1456,383 @@ describe("FD4-3 row reasons carry the PERIOD vocabulary only", () => {
     const shift = res.coverageShift as string;
     expect(occurrences(JSON.stringify(res.unranked), shift)).toBe(0);
     expect(occurrences(JSON.stringify(res), shift)).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 C3 — per-day rates (R4-7). A 30-day total is almost always smaller than a 274-day
+// total, so ranking by the change in TOTALS read a product that sells faster as a
+// decline. The module now returns per-day figures for both periods on every row (and on
+// the totals result), ranks and filters by the per-day change when the lengths differ
+// (`rankedBy`), and counts each direction BEFORE the filter (`directionCounts`). Rates
+// are rounded so a non-zero value never reads 0; every SIGN comes from the unrounded
+// change.
+// ---------------------------------------------------------------------------
+
+describe("A2 C3 — per-day rates, per-day ranking and directionCounts", () => {
+  /** "The previous nine months" vs "last month" — the two lengths the pins name. */
+  const NINE_MONTHS = win("2025-09-01", "2026-06-01");
+  const LAST_MONTH = win("2026-06-02", "2026-07-01");
+  const WEEK_A = win("2026-06-01", "2026-06-07");
+  const WEEK_B = win("2026-06-08", "2026-06-14");
+
+  /** By-product ledger seed: one dataStart, per-product |delta| sums per period. The
+   *  groupBy delegate is shared by both periods, so it dispatches on the window each call
+   *  sends (never on call order). */
+  function seedLedgerByProduct(opts: {
+    dataStart: Date | null;
+    periodA: ResolvedWindow;
+    a: Record<number, number>;
+    b: Record<number, number>;
+  }) {
+    db.inventory_logs.aggregate.mockResolvedValue({ _min: { changeTime: opts.dataStart } } as never);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.inventory_logs.groupBy.mockImplementation((args: any) => {
+      const from = (args?.where?.changeTime?.gte as Date | undefined)?.toISOString().slice(0, 10);
+      const sums = from === opts.periodA.from ? opts.a : opts.b;
+      return Promise.resolve(
+        Object.entries(sums).map(([id, units]) => ({ productId: Number(id), _sum: { delta: -units } })),
+      ) as never;
+    });
+    const ids = Array.from(new Set([...Object.keys(opts.a), ...Object.keys(opts.b)])).map(Number);
+    db.product.findMany.mockResolvedValue(ids.map((id) => ({ id })) as never);
+  }
+
+  const SINCE_2020 = new Date("2020-01-01T00:00:00.000Z");
+
+  it("the fixtures are the lengths the pins name (274 and 30 day-keys)", () => {
+    expect(NINE_MONTHS.days).toBe(274);
+    expect(LAST_MONTH.days).toBe(30);
+  });
+
+  describe("rate() — the pack's rounding convention", () => {
+    it.each([
+      [1 / 274, 0.00365],
+      [-1 / 274, -0.00365],
+      [1 / 30, 0.0333],
+      [0.1, 0.1],
+      [2 / 7, 0.286],
+      [1, 1],
+      [10 / 7, 1.43],
+      [41.152, 41.15],
+      [-2.5, -2.5],
+      [1234.5678, 1234.57],
+    ])("rate(%s) = %s", (raw, expected) => {
+      expect(rate(raw)).toBe(expected);
+    });
+
+    it("null in -> null out; 0 and -0 -> 0; a non-zero raw value never emits 0", () => {
+      expect(rate(null)).toBeNull();
+      expect(Object.is(rate(0), 0)).toBe(true);
+      expect(Object.is(rate(-0), 0)).toBe(true);
+      for (const raw of [1e-9, -1e-9, 1 / 366, 0.0049, -0.0049, 0.004999]) {
+        expect(rate(raw)).not.toBe(0);
+        expect(Math.sign(rate(raw) as number)).toBe(Math.sign(raw));
+      }
+    });
+  });
+
+  describe("totals mode", () => {
+    it("1 unit / 274 days vs 0 / 30: 0.00365 vs 0, a decrease — never two zeros", async () => {
+      mockLedger(SINCE_2020, -1, null);
+      const res = await comparePeriods({
+        metric: "outbound_units",
+        periodA: NINE_MONTHS,
+        periodB: LAST_MONTH,
+        companyIds: ["co-1"],
+      });
+      expect(res.a).toBe(1);
+      expect(res.b).toBe(0);
+      expect(res.aPerDay).toBe(0.00365);
+      expect(res.bPerDay).toBe(0);
+      expect(res.perDayDelta).toBe(-0.00365);
+      expect(res.perDayDirection).toBe("decrease");
+      expect(res.perDayPctChange).toBe(-1);
+      // The totals fields are untouched: still the change in TOTALS.
+      expect(res.delta).toBe(-1);
+      expect(res.pctChange).toBe(-1);
+      expect(res.reasons).toEqual({});
+    });
+
+    it("a measured 0 in period A: per-day 0, perDayPctChange null with its own reason", async () => {
+      mockLedger(SINCE_2020, null, 30);
+      const res = await comparePeriods({
+        metric: "inbound_units",
+        periodA: WEEK_A, // 7 days
+        periodB: win("2026-06-08", "2026-06-21"), // 14 days
+        companyIds: ["co-1"],
+      });
+      expect(res.aPerDay).toBe(0);
+      expect(res.bPerDay).toBe(2.14); // 30 / 14 = 2.142857…
+      expect(res.perDayDelta).toBe(2.14);
+      expect(res.perDayDirection).toBe("increase");
+      expect(res.perDayPctChange).toBeNull();
+      expect(res.reasons.perDayPctChange).toBe("period A is zero — percent change undefined");
+      // The existing reason is unchanged beside it.
+      expect(res.reasons.pctChange).toBe("period A is zero — percent change undefined");
+    });
+
+    it("a null period gives null per-day fields and perDayDirection null (the measured side keeps its rate)", async () => {
+      mockSales("2026-06-01", null, 50, "orderedQty");
+      const res = await comparePeriods({
+        metric: "sales_units",
+        periodA: win("2026-05-01", "2026-05-07"),
+        periodB: win("2026-06-10", "2026-06-16"),
+        companyIds: ["co-1"],
+      });
+      expect(res.a).toBeNull();
+      expect(res.aPerDay).toBeNull();
+      expect(res.bPerDay).toBe(7.14); // 50 / 7 = 7.142857…
+      expect(res.perDayDelta).toBeNull();
+      expect(res.perDayPctChange).toBeNull();
+      expect(res.perDayDirection).toBeNull();
+      expect(res.reasons.perDayPctChange).toBeUndefined();
+    });
+
+    it("both periods null: every per-day field null", async () => {
+      mockSales(null, null, null, "revenue");
+      const res = await comparePeriods({
+        metric: "sales_revenue",
+        periodA: WEEK_A,
+        periodB: WEEK_B,
+        companyIds: ["co-1"],
+      });
+      expect(res).toMatchObject({
+        aPerDay: null,
+        bPerDay: null,
+        perDayDelta: null,
+        perDayPctChange: null,
+        perDayDirection: null,
+      });
+    });
+  });
+
+  describe("by_product", () => {
+    /** Four products over 274 vs 30 days whose per-day order differs from their total order:
+     *   p1 274 -> 60   (1/day -> 2/day): FEWER total units, MORE per day — an increase
+     *   p2 548 -> 30   (2/day -> 1/day): a decrease
+     *   p3   0 -> 3    (0 -> 0.1/day):   an increase from a measured 0
+     *   p4 274 -> 30   (1/day -> 1/day): unchanged per day, though the total fell by 244 */
+    const seedFour = () =>
+      seedLedgerByProduct({
+        dataStart: SINCE_2020,
+        periodA: NINE_MONTHS,
+        a: { 1: 274, 2: 548, 4: 274 },
+        b: { 1: 60, 2: 30, 3: 3, 4: 30 },
+      });
+
+    it("unequal lengths rank by |per-day change|, say so, and count each direction before any filter", async () => {
+      seedFour();
+      const res = await comparePeriodsByProduct({
+        metric: "outbound_units",
+        periodA: NINE_MONTHS,
+        periodB: LAST_MONTH,
+        companyIds: [],
+      });
+      expect(res.rankedBy).toBe("per_day");
+      // By |delta| this would be [2, 4, 1, 3]; by the per-day change it is p1 (+1) and p2
+      // (-1) tied on magnitude, the increase first, then p3 (+0.1), then p4 (0).
+      expect(res.ranked.map((r) => r.productId)).toEqual([1, 2, 3, 4]);
+      expect(res.ranked[0]).toMatchObject({
+        productId: 1,
+        a: 274,
+        b: 60,
+        delta: -214,
+        aPerDay: 1,
+        bPerDay: 2,
+        perDayDelta: 1,
+        perDayPctChange: 1,
+        perDayDirection: "increase",
+      });
+      expect(res.ranked[3]).toMatchObject({ productId: 4, perDayDelta: 0, perDayDirection: "unchanged" });
+      expect(res.directionCounts).toEqual({ increased: 2, decreased: 1, unchanged: 1 });
+    });
+
+    it("30 vs 274 days: a product with FEWER total units but MORE per day passes direction 'increase'", async () => {
+      seedFour();
+      const res = await comparePeriodsByProduct({
+        metric: "outbound_units",
+        periodA: NINE_MONTHS,
+        periodB: LAST_MONTH,
+        companyIds: [],
+        direction: "increase",
+      });
+      expect(res.ranked.map((r) => r.productId)).toEqual([1, 3]);
+      expect(res.ranked[0].delta).toBeLessThan(0); // its TOTAL fell…
+      expect(res.ranked[0].perDayDirection).toBe("increase"); // …and it sells faster
+      // Counted BEFORE the filter: the decrease and the unchanged product are still counted.
+      expect(res.directionCounts).toEqual({ increased: 2, decreased: 1, unchanged: 1 });
+    });
+
+    it("direction 'decrease' filters on the per-day sign, not the total's", async () => {
+      seedFour();
+      const res = await comparePeriodsByProduct({
+        metric: "outbound_units",
+        periodA: NINE_MONTHS,
+        periodB: LAST_MONTH,
+        companyIds: [],
+        direction: "decrease",
+      });
+      // Every product's total fell, but only p2 sells slower per day.
+      expect(res.ranked.map((r) => r.productId)).toEqual([2]);
+    });
+
+    it("1 unit / 274 days vs 0 / 30: 0.00365 vs 0, counted decreased and kept by direction 'decrease'", async () => {
+      seedLedgerByProduct({
+        dataStart: SINCE_2020,
+        periodA: NINE_MONTHS,
+        a: { 9: 1 },
+        b: { 1: 60 },
+      });
+      const res = await comparePeriodsByProduct({
+        metric: "outbound_units",
+        periodA: NINE_MONTHS,
+        periodB: LAST_MONTH,
+        companyIds: [],
+        direction: "decrease",
+      });
+      expect(res.ranked).toHaveLength(1);
+      expect(res.ranked[0]).toMatchObject({
+        productId: 9,
+        a: 1,
+        b: 0,
+        aPerDay: 0.00365,
+        bPerDay: 0,
+        perDayDelta: -0.00365,
+        perDayDirection: "decrease",
+      });
+      expect(res.directionCounts).toEqual({ increased: 1, decreased: 1, unchanged: 0 });
+      expect(res.directionCounts.decreased).toBe(res.ranked.length);
+    });
+
+    it("a measured a of 0 carries BOTH zero reasons on the row", async () => {
+      seedFour();
+      const res = await comparePeriodsByProduct({
+        metric: "outbound_units",
+        periodA: NINE_MONTHS,
+        periodB: LAST_MONTH,
+        companyIds: [],
+      });
+      const p3 = res.ranked.find((r) => r.productId === 3)!;
+      expect(p3).toMatchObject({ a: 0, b: 3, aPerDay: 0, bPerDay: 0.1, perDayPctChange: null, pctChange: null });
+      expect(p3.reasons).toEqual({
+        pctChange: "period A is zero — percent change undefined",
+        perDayPctChange: "period A is zero — percent change undefined",
+      });
+      // A row with a non-zero a carries no reasons at all, as before.
+      expect(res.ranked.find((r) => r.productId === 1)!.reasons).toBeUndefined();
+    });
+
+    it("equal windows keep today's |delta| order exactly, with rankedBy 'total'", async () => {
+      seedLedgerByProduct({
+        dataStart: SINCE_2020,
+        periodA: WEEK_A,
+        a: { 1: 10, 2: 10, 3: 10 },
+        b: { 1: 30, 2: 5, 3: 15 },
+      });
+      const res = await comparePeriodsByProduct({
+        metric: "outbound_units",
+        periodA: WEEK_A,
+        periodB: WEEK_B,
+        companyIds: [],
+      });
+      expect(res.rankedBy).toBe("total");
+      expect(res.ranked.map((r) => r.productId)).toEqual([1, 3, 2]);
+      expect(res.ranked.map((r) => r.delta)).toEqual([20, 5, -5]);
+      // Per-day figures still ride on every row.
+      expect(res.ranked[0]).toMatchObject({ aPerDay: 1.43, bPerDay: 4.29, perDayDelta: 2.86, perDayDirection: "increase" });
+      expect(res.directionCounts).toEqual({ increased: 2, decreased: 1, unchanged: 0 });
+    });
+
+    it("unranked rows: null per-day for the null period, perDayDirection null, ordering unchanged", async () => {
+      // The ledger source starts inside period A: the WINDOW predates the data, so every
+      // product is unranked at once, exactly as before.
+      seedLedgerByProduct({
+        dataStart: new Date("2026-01-01T00:00:00.000Z"),
+        periodA: NINE_MONTHS,
+        a: { 2: 5 },
+        b: { 2: 6, 1: 3 },
+      });
+      const res = await comparePeriodsByProduct({
+        metric: "outbound_units",
+        periodA: NINE_MONTHS,
+        periodB: LAST_MONTH,
+        companyIds: [],
+      });
+      expect(res.ranked).toEqual([]);
+      expect(res.unranked.map((r) => r.productId)).toEqual([1, 2]);
+      for (const row of res.unranked) {
+        expect(row).toMatchObject({
+          a: null,
+          delta: null,
+          pctChange: null,
+          aPerDay: null,
+          perDayDelta: null,
+          perDayPctChange: null,
+          perDayDirection: null,
+        });
+        expect(row.reasons).not.toHaveProperty("perDayPctChange");
+      }
+      expect(res.unranked[0].bPerDay).toBe(0.1); // 3 / 30
+      expect(res.unranked[1].bPerDay).toBe(0.2); // 6 / 30
+      // Nothing comparable, so nothing is counted in any direction.
+      expect(res.directionCounts).toEqual({ increased: 0, decreased: 0, unchanged: 0 });
+      // rankedBy follows the lengths alone.
+      expect(res.rankedBy).toBe("per_day");
+    });
+  });
+
+  describe("the coverage-shift clause names the per-day figures", () => {
+    const SHIFT =
+      "period B includes company c2 (sales facts begin 2026-06-08) that period A does not " +
+      "— delta and the per-day figures are not like-for-like growth";
+
+    function seedJoinAtB() {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      db.productSalesFact.aggregate.mockImplementation((args: any) =>
+        Promise.resolve(
+          args?._min
+            ? { _min: { dayKey: "2020-01-01" } }
+            : { _sum: { orderedQty: args?.where?.dayKey?.gte === WEEK_A.from ? 100 : 160 } },
+        ) as never,
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      db.productSalesFact.groupBy.mockImplementation((args: any) => {
+        if (args?.by?.[0] === "companyId") {
+          return Promise.resolve([
+            { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+            { companyId: "c2", _min: { dayKey: "2026-06-08" } },
+          ]) as never;
+        }
+        return Promise.resolve([
+          { productId: 1, _sum: { orderedQty: args?.where?.dayKey?.gte === WEEK_A.from ? 10 : 25 } },
+        ]) as never;
+      });
+      db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+    }
+
+    it("totals mode: the exact sentence, mirrored into reasons.delta", async () => {
+      seedJoinAtB();
+      const res = await comparePeriods({
+        metric: "sales_units",
+        periodA: WEEK_A,
+        periodB: WEEK_B,
+        companyIds: ["c1", "c2"],
+      });
+      expect(res.coverageShift).toBe(SHIFT);
+      expect(res.reasons.delta).toBe(SHIFT);
+    });
+
+    it("by_product: the same exact sentence on the envelope", async () => {
+      seedJoinAtB();
+      const res = await comparePeriodsByProduct({
+        metric: "sales_units",
+        periodA: WEEK_A,
+        periodB: WEEK_B,
+        companyIds: ["c1", "c2"],
+      });
+      expect(res.coverageShift).toBe(SHIFT);
+      expect(res.reasons.delta).toBe(SHIFT);
+    });
   });
 });

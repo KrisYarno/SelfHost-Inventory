@@ -280,6 +280,23 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
   const CRAMPED = 5_000;
   const RANKED_ROWS = 400;
 
+  /** The module's per-day row fields (A2 C3), at their widest realistic values: 3
+   *  significant figures below 1, 2 decimals above. */
+  function perDayOf(a: number | null, b: number | null, daysA: number, daysB: number) {
+    const r = (x: number | null) =>
+      x == null ? null : x === 0 ? 0 : Math.abs(x) >= 1 ? Math.round(x * 100) / 100 : Number(x.toPrecision(3));
+    const aRaw = a == null ? null : a / daysA;
+    const bRaw = b == null ? null : b / daysB;
+    const change = aRaw == null || bRaw == null ? null : bRaw - aRaw;
+    return {
+      aPerDay: r(aRaw),
+      bPerDay: r(bRaw),
+      perDayDelta: r(change),
+      perDayPctChange: change == null || aRaw === 0 ? null : change / (aRaw as number),
+      perDayDirection: change == null ? null : change > 0 ? "increase" : change < 0 ? "decrease" : "unchanged",
+    };
+  }
+
   beforeEach(() => {
     // 255-char names: the widest a product name can be, so a handful of rows is already
     // more than the budget holds.
@@ -288,17 +305,22 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
     );
     compareByProductMock.mockReset();
     compareByProductMock.mockResolvedValue({
+      // A2 C3: the module's rows carry the per-day figures, and its result says how it
+      // ranked and how many moved each way — the shape the fitter must measure.
       ranked: Array.from({ length: RANKED_ROWS }, (_v, i) => ({
         productId: i + 1,
         a: i,
         b: i * 2,
         delta: i,
         pctChange: 1,
+        ...perDayOf(i, i * 2, 7, 7),
       })),
       unranked: [],
       reasons: { a: "measured", b: "measured" },
       periodCoverage: { a: "full", b: "full" },
       unequalLengths: false,
+      rankedBy: "total",
+      directionCounts: { increased: RANKED_ROWS - 1, decreased: 0, unchanged: 1 },
       excludedUnapprovedProducts: 0,
     });
     // The post-pagination evidence fill returns a REAL day-key for every page id, so the
@@ -370,6 +392,7 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
         b: i * 2,
         delta: i,
         pctChange: 1,
+        ...perDayOf(i, i * 2, 7, 7),
       })),
       // Products with no row in period A: unknown-base under degradation, never ranked.
       unranked: Array.from({ length: 200 }, (_v, i) => ({
@@ -378,11 +401,14 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
         b: i,
         delta: null,
         pctChange: null,
+        ...perDayOf(null, i, 7, 7),
         reasons: { a: "period A is not fully covered by sales_units data in every company" },
       })),
       reasons: { a: "period A is not fully covered by sales_units data in every company" },
       periodCoverage: { a: "partial", b: "partial" },
       unequalLengths: false,
+      rankedBy: "total",
+      directionCounts: { increased: 199, decreased: 0, unchanged: 1 },
       companyCoverage: [
         { companyId: "c1", salesDataStart: "2019-01-01" },
         { companyId: "c2", salesDataStart: null },
@@ -407,6 +433,56 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
     expect(tight.data!.unranked!.length).toBeLessThan(200);
     expect(tight.data!.unrankedTotal).toBe(200);
     // ...and the completed payload fits the budget the adapter threaded in.
+    expect(tight.meta!.bytes).toBeLessThanOrEqual(CRAMPED);
+  });
+
+  // A2 C3/C2: periods of different lengths rank by the per-day change, and the envelope
+  // grows by rankedBy, counts + countsNote and coverage.rateDefinition. The measured
+  // envelope must absorb all of it at the tightest budget: still an ok page, still fits.
+  it("per-day ranking at a 5KB budget: rankedBy, counts and rateDefinition ride and the payload fits", async () => {
+    compareByProductMock.mockResolvedValue({
+      ranked: Array.from({ length: RANKED_ROWS }, (_v, i) => ({
+        productId: i + 1,
+        a: 274 + i,
+        b: 31 + i,
+        delta: 31 + i - (274 + i),
+        pctChange: (31 + i - (274 + i)) / (274 + i),
+        ...perDayOf(274 + i, 31 + i, 274, 30),
+      })),
+      unranked: [],
+      reasons: {},
+      periodCoverage: { a: "full", b: "full" },
+      unequalLengths: true,
+      rankedBy: "per_day",
+      directionCounts: { increased: RANKED_ROWS, decreased: 0, unchanged: 0 },
+      excludedUnapprovedProducts: 0,
+    });
+    const tight = (await runOnce(
+      "compare_periods",
+      {
+        metric: "sales_units",
+        periodA: { relativeDays: 274 },
+        periodB: { relativeDays: 30 },
+        groupBy: "product",
+      },
+      CRAMPED,
+    )) as ExecResult & {
+      data?: { rankedBy?: string; counts?: Record<string, number>; coverage?: Record<string, unknown> };
+      meta?: { bytes: number };
+    };
+    expect(tight.status).toBe("ok");
+    expect(tight.notice).toBeUndefined();
+    expect(tight.data!.rows!.length).toBeGreaterThan(0);
+    expect(tight.data!.rows!.length).toBeLessThan(RANKED_ROWS);
+    expect(tight.data!.rankedBy).toBe("per_day");
+    expect(tight.data!.counts).toEqual({
+      ranked: RANKED_ROWS,
+      increased: RANKED_ROWS,
+      decreased: 0,
+      unchanged: 0,
+      unranked: 0,
+    });
+    expect(typeof tight.data!.coverage!.rateDefinition).toBe("string");
     expect(tight.meta!.bytes).toBeLessThanOrEqual(CRAMPED);
   });
 });

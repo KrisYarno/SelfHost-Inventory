@@ -900,6 +900,10 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     expect(toolResult.data.unranked).toEqual([]);
     expect(toolResult.data.coverage.periodCoverage).toEqual({ a: "full", b: "full" });
     expect(toolResult.data.coverage.unrankedNote).toContain("COVERAGE artifact");
+    // A2 C3/C2: equal lengths keep the |delta| ranking and say so; the counts cross too.
+    expect(toolResult.data.rankedBy).toBe("total");
+    expect(toolResult.data.counts).toEqual({ ranked: 2, increased: 1, decreased: 1, unchanged: 0, unranked: 0 });
+    expect(toolResult.data.rows[0]).toMatchObject({ aPerDay: 0.333, bPerDay: 1.33, perDayDelta: 1, perDayDirection: "increase" });
   });
 
   // FD2-2 on the WIRE: degraded per-company coverage governs zero legality only, so the
@@ -1006,6 +1010,68 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     expect(toolResult.data.coverage.periodCoverage).toEqual({ a: "full", b: "full" });
     // Equally-covered periods: the comparability qualification stays OFF.
     expect(toolResult.data.coverage.coverageShift).toBeUndefined();
+    // A2 C3 on the WIRE: the totals payload carries the per-day figures and their definition
+    // (no rankedBy, no counts — those are by_product's).
+    expect(toolResult.data).toMatchObject({
+      aPerDay: 0.333,
+      bPerDay: 0.833,
+      perDayDelta: 0.5,
+      perDayPctChange: 1.5,
+      perDayDirection: "increase",
+    });
+    expect(toolResult.data.coverage.rateDefinition).toContain(
+      "perDayDirection is the sign of the unrounded change.",
+    );
+    expect(toolResult.data.rankedBy).toBeUndefined();
+    expect(toolResult.data.counts).toBeUndefined();
+  });
+
+  // A2 C3/C2 on the WIRE: the review-#4 question ("which products sold faster last month
+  // than over the previous nine months?") — periods of different lengths rank and filter by
+  // the per-day change, say so, and carry the counts over the whole result.
+  it("compare_periods by_product over 274 vs 30 days: per-day ranking, rankedBy and counts cross the boundary", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    p.productSalesFact.aggregate.mockResolvedValueOnce({ _min: { dayKey: "2019-01-01" } });
+    p.productSalesFact.groupBy
+      .mockResolvedValueOnce([{ companyId: "c1", _min: { dayKey: "2019-01-01" } }])
+      .mockResolvedValueOnce([
+        { productId: 1, _sum: { orderedQty: 274 } }, // 1/day over the nine months
+        { productId: 2, _sum: { orderedQty: 548 } }, // 2/day
+      ])
+      .mockResolvedValueOnce([
+        { productId: 1, _sum: { orderedQty: 60 } }, // 2/day last month: FEWER units, faster
+        { productId: 2, _sum: { orderedQty: 30 } }, // 1/day
+      ])
+      .mockResolvedValueOnce([]); // post-pagination firstSaleDayKey lookup
+    p.product.findMany.mockResolvedValue([
+      { id: 1, name: "Faster", deletedAt: null },
+      { id: 2, name: "Slower", deletedAt: null },
+    ]);
+
+    const toolResult = await roundTrip("compare_periods", {
+      metric: "sales_units",
+      periodA: { from: "2025-09-01", to: "2026-06-01" },
+      periodB: { from: "2026-06-02", to: "2026-07-01" },
+      groupBy: "product",
+      direction: "increase",
+    });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.rankedBy).toBe("per_day");
+    expect(toolResult.data.rows.map((r: { productId: number }) => r.productId)).toEqual([1]);
+    expect(toolResult.data.rows[0]).toMatchObject({
+      name: "Faster",
+      delta: -214,
+      aPerDay: 1,
+      bPerDay: 2,
+      perDayDelta: 1,
+      perDayDirection: "increase",
+    });
+    expect(toolResult.data.counts).toEqual({ ranked: 1, increased: 1, decreased: 1, unchanged: 0, unranked: 0 });
+    expect(toolResult.data.countsNote).toContain("never count rows yourself");
+    expect(toolResult.data.coverage.rateDefinition).toContain(
+      "rows are ranked and filtered by the per-day change",
+    );
+    expect(toolResult.data.coverage.reasonsKeys).toContain("perDayPctChange = per-day percent change");
   });
 
   it("get_movement_series breakdownBy:'product': per-product rows + a rejected-id echo (C10)", async () => {

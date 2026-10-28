@@ -573,12 +573,20 @@ describe("A1 C8: the by-product compare result's coverage.unrankedNote (the ONE 
           b: 3,
           delta: null,
           pctChange: null,
+          // A2 C3: the module's row shape now carries the per-day figures.
+          aPerDay: null,
+          bPerDay: 0.429,
+          perDayDelta: null,
+          perDayPctChange: null,
+          perDayDirection: null,
           reasons: { a: "period A predates the sales data" },
         },
       ],
       reasons: { a: "period A predates the sales data" },
       periodCoverage: { a: "none", b: "full" },
       unequalLengths: false,
+      rankedBy: "total",
+      directionCounts: { increased: 0, decreased: 0, unchanged: 0 },
       excludedUnapprovedProducts: 0,
     });
 

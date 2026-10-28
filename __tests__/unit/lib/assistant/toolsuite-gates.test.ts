@@ -1101,7 +1101,25 @@ describe("COVERAGE gate (spec §7 — validates CoverageSchema)", () => {
 // (3) DEFINITION gate — a rate field carries a definition string.
 // ---------------------------------------------------------------------------
 
-const RATE_FIELD = /avgDaily|velocity|Usage|Demand/;
+// A2 C3: compare_periods' per-day figures (aPerDay, bPerDay, perDayDelta, perDayPctChange,
+// perDayDirection) are rates too, so `perDay` / `PerDay` joins the pattern.
+const RATE_FIELD = /avgDaily|velocity|Usage|Demand|[pP]erDay/;
+
+/**
+ * Per-tool prisma seeds for the DEFINITION gate's happy-path run (A2 C3). The benign proxy
+ * returns an EMPTY aggregate, so compare_periods' fixture[0] (outbound_units totals, two
+ * 7-day periods) resolves both periods to null and every per-day field to null — a gate run
+ * over keys whose values are all null checks nothing a reader would see. Seeded: the ledger
+ * source starts in 2020 and each period sums 7 units, so the per-day fields carry numbers.
+ */
+const DEFINITION_GATE_SEEDS: Record<string, Record<string, unknown>> = {
+  compare_periods: {
+    "inventory_logs.aggregate": {
+      _min: { changeTime: new Date("2020-01-01T00:00:00.000Z") },
+      _sum: { delta: -7 },
+    },
+  },
+};
 
 function collectKeys(data: unknown, pred: (k: string) => boolean): string[] {
   const out: string[] = [];
@@ -1124,12 +1142,67 @@ describe("DEFINITION gate (spec §7 — rate field ⇒ definition string)", () =
     prismaCtl.__reset();
     // See the coverage gate: resolve the productId fixture to an approved product.
     prismaCtl.__overrides["product.findFirst"] = { id: 1, name: "Gate Fixture Product" };
+    Object.assign(prismaCtl.__overrides, DEFINITION_GATE_SEEDS[name] ?? {});
     const result = await assistantTools[name].run(TOOL_GATE_FIXTURES[name][0], CTX);
     if (result.status !== "ok") return;
     const rateKeys = collectKeys(result.data, (k) => RATE_FIELD.test(k) && !/Definition$/i.test(k));
     if (rateKeys.length === 0) return; // proxy yields empty data — no rate emitted, nothing to define
     const defKeys = collectKeys(result.data, (k) => /Definition$/i.test(k));
     expect(defKeys.length).toBeGreaterThan(0);
+  });
+
+  /** Every value under `key` anywhere in the payload (rows, envelope, nested blocks). */
+  function valuesOf(data: unknown, key: string): unknown[] {
+    const out: unknown[] = [];
+    const visit = (v: unknown) => {
+      if (Array.isArray(v)) v.forEach(visit);
+      else if (v && typeof v === "object") {
+        for (const [k, val] of Object.entries(v)) {
+          if (k === key) out.push(val);
+          visit(val);
+        }
+      }
+    };
+    visit(data);
+    return out;
+  }
+
+  // A2 C3 non-vacuity + teeth: the seeded compare payloads (totals, and by_product over
+  // periods of different lengths) really carry POPULATED per-day fields, so the gate above
+  // is checking numbers rather than absent keys; and the same payload with rateDefinition
+  // stripped leaves no definition string at all — the exact condition the gate fails on.
+  it.each([
+    ["totals (fixture[0])", TOOL_GATE_FIXTURES.compare_periods[0]],
+    [
+      "by_product, 30 vs 7 days",
+      { metric: "outbound_units", periodA: { relativeDays: 30 }, periodB: { relativeDays: 7 }, groupBy: "product" },
+    ],
+  ])("compare_periods %s: populated per-day fields ride with rateDefinition", async (_mode, args) => {
+    prismaCtl.__reset();
+    Object.assign(prismaCtl.__overrides, DEFINITION_GATE_SEEDS.compare_periods, {
+      // by_product only: one product with 3 units in each period.
+      "inventory_logs.groupBy": [{ productId: 1, _sum: { delta: -3 } }],
+      "product.findMany": [{ id: 1, name: "Gate Fixture Product", deletedAt: null }],
+    });
+    const result = await assistantTools.compare_periods.run(args, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const rateKeys = collectKeys(result.data, (k) => RATE_FIELD.test(k) && !/Definition$/i.test(k));
+    expect(rateKeys).toEqual(
+      expect.arrayContaining(["aPerDay", "bPerDay", "perDayDelta", "perDayPctChange", "perDayDirection"]),
+    );
+    for (const key of ["aPerDay", "bPerDay", "perDayDelta"]) {
+      const values = valuesOf(result.data, key);
+      expect(values.length).toBeGreaterThan(0);
+      for (const v of values) expect(typeof v).toBe("number");
+    }
+    for (const v of valuesOf(result.data, "perDayDirection")) {
+      expect(["increase", "decrease", "unchanged"]).toContain(v);
+    }
+    expect(collectKeys(result.data, (k) => /Definition$/i.test(k))).toEqual(["rateDefinition"]);
+    const stripped = JSON.parse(JSON.stringify(result.data)) as { coverage: Record<string, unknown> };
+    delete stripped.coverage.rateDefinition;
+    expect(collectKeys(stripped, (k) => /Definition$/i.test(k))).toEqual([]);
   });
 });
 

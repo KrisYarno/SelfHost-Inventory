@@ -71,7 +71,68 @@ export interface ComparePeriodsOpts {
   companyIds: string[];
 }
 
-export interface ComparePeriodsResult {
+// A2 Conventions: the ONE rate-rounding owner lives in metrics-contract (shared with the
+// low-stock usage rate, M2); re-exported here for this module's callers and its pins.
+import { rate } from "./metrics-contract";
+export { rate };
+
+export type PerDayDirection = "increase" | "decrease" | "unchanged";
+
+/**
+ * A2 C3 — the per-day figures for one comparison (a row, or the totals result). A 30-day
+ * total is almost always smaller than a 274-day one, so a change in TOTALS reads a product
+ * that sells faster as a decline whenever the lengths differ; dividing by each period's
+ * length makes the two comparable. `delta` / `pctChange` stay the change in totals.
+ */
+export interface PerDayFigures {
+  /** `a / periodA.days`, rounded with `rate()`; null when `a` is null. */
+  aPerDay: number | null;
+  /** `b / periodB.days`, rounded with `rate()`; null when `b` is null. */
+  bPerDay: number | null;
+  /** `b / periodB.days − a / periodA.days`, computed from the unrounded values and then
+   *  rounded with `rate()`; null when either period is null. */
+  perDayDelta: number | null;
+  /** The UNROUNDED per-day percent change (like `pctChange`); null when either period is
+   *  null or period A is zero. */
+  perDayPctChange: number | null;
+  /** The sign of the UNROUNDED per-day change; null when either period is null. */
+  perDayDirection: PerDayDirection | null;
+}
+
+/** The reason beside a null `perDayPctChange` when period A is a measured zero — the same
+ *  words as the totals' `reasons.pctChange`. */
+const PER_DAY_PCT_ZERO_REASON = "period A is zero — percent change undefined";
+
+/**
+ * The per-day figures for one (a, b) pair, plus the UNROUNDED change the sign, the counts
+ * and the per-day ranking read (`rawChange`; null when either side is null) and whether the
+ * zero-base reason applies (`aIsZero`: period A measured 0 with B measured — exactly when
+ * `perDayPctChange` is null for that reason).
+ */
+function perDayFigures(
+  a: number | null,
+  b: number | null,
+  periodA: ResolvedWindow,
+  periodB: ResolvedWindow,
+): { figures: PerDayFigures; rawChange: number | null; aIsZero: boolean } {
+  const aRaw = a == null ? null : a / periodA.days;
+  const bRaw = b == null ? null : b / periodB.days;
+  const rawChange = aRaw == null || bRaw == null ? null : bRaw - aRaw;
+  return {
+    figures: {
+      aPerDay: rate(aRaw),
+      bPerDay: rate(bRaw),
+      perDayDelta: rawChange == null ? null : rate(rawChange),
+      perDayPctChange: rawChange == null || aRaw === 0 ? null : rawChange / (aRaw as number),
+      perDayDirection:
+        rawChange == null ? null : rawChange > 0 ? "increase" : rawChange < 0 ? "decrease" : "unchanged",
+    },
+    rawChange,
+    aIsZero: aRaw === 0 && bRaw != null,
+  };
+}
+
+export interface ComparePeriodsResult extends PerDayFigures {
   a: number | null;
   b: number | null;
   delta: number | null;
@@ -586,14 +647,16 @@ function coverageShiftNote(
   // qualified a delta that does not exist. Under the callers' `delta != null` gate it is
   // unreachable besides, so it is deleted rather than left as a trap.
   if (shifted.length === 0) return undefined;
-  return `${shifted.join("; ")} — delta is not like-for-like growth`;
+  // A2 C3: the per-day figures divide the same shifted sums, so they share the qualification.
+  return `${shifted.join("; ")} — delta and the per-day figures are not like-for-like growth`;
 }
 
 /**
  * Compare a metric across two resolved windows. Server-computed absolute delta
  * (`b - a`) and percent change (`(b - a) / a`) — the model never does this
- * arithmetic itself. `unequalLengths` is a disclosure flag only; the comparison
- * still runs (spec §5 T-CMP: "unequal lengths allowed but flagged").
+ * arithmetic itself. `unequalLengths` is a disclosure flag; the comparison
+ * still runs (spec §5 T-CMP: "unequal lengths allowed but flagged"), and the per-day
+ * figures (A2 C3) are what make two periods of different lengths comparable.
  */
 export async function comparePeriods(opts: ComparePeriodsOpts): Promise<ComparePeriodsResult> {
   const { metric, periodA, periodB, productId, companyIds } = opts;
@@ -631,6 +694,9 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
       pctChange = (b - a) / a;
     }
   }
+  // A2 C3: the per-day figures beside the totals (the totals fields above are unchanged).
+  const perDay = perDayFigures(a, b, periodA, periodB);
+  if (perDay.aIsZero) reasons.perDayPctChange = PER_DAY_PCT_ZERO_REASON;
 
   // FD3-3: the delta is NEVER nulled for a coverage shift (the sums are measured) — it is
   // qualified, in both the reason vocabulary and the coverage block.
@@ -647,6 +713,7 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
     b,
     delta,
     pctChange,
+    ...perDay.figures,
     reasons,
     unequalLengths: periodA.days !== periodB.days,
     periodCoverage: { a: coverageA, b: coverageB },
@@ -684,7 +751,7 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
 
 /** One product's cross-period comparison. `name`/`lifecycle` and the evidence fields
  *  are filled by the TOOL layer (identity + post-pagination evidence). */
-export interface ComparePeriodsProductRow {
+export interface ComparePeriodsProductRow extends PerDayFigures {
   productId: number;
   a: number | null;
   b: number | null;
@@ -694,8 +761,11 @@ export interface ComparePeriodsProductRow {
 }
 
 export interface ComparePeriodsByProductResult {
-  /** Both sides measured: ranked |delta| desc (ties delta desc, then productId asc),
-   *  with `direction` ALREADY applied — so a caller's totalRows is post-direction. */
+  /** Both sides measured, with `direction` ALREADY applied — so a caller's totalRows is
+   *  post-direction. `rankedBy: "total"`: |delta| desc (ties delta desc, then productId
+   *  asc). `rankedBy: "per_day"` (A2 C3): |unrounded per-day change| desc (ties the
+   *  per-day change desc, then productId asc), and `direction` filters on
+   *  `perDayDirection`. */
   ranked: ComparePeriodsProductRow[];
   /** Either side unknown: the period is not fully covered at the WINDOW level (then every
    *  product lands here at once), or coverage is degraded per company and this product has
@@ -709,6 +779,14 @@ export interface ComparePeriodsByProductResult {
   reasons: Record<string, string>;
   periodCoverage: { a: WindowCoverage; b: WindowCoverage };
   unequalLengths: boolean;
+  /** A2 C3: how `ranked` is ordered and filtered. "per_day" exactly when the two periods
+   *  differ in length (totals of different lengths are not comparable); "total" otherwise,
+   *  which is the |delta| pipeline unchanged. */
+  rankedBy: "total" | "per_day";
+  /** A2 C3 / C2: the comparable (ranked) products by the sign of the UNROUNDED ranking
+   *  change — the per-day change when `rankedBy` is "per_day", else `delta` — counted
+   *  BEFORE `direction`, so a filtered call still says how many moved each way. */
+  directionCounts: { increased: number; decreased: number; unchanged: number };
   /** FD2-2 disclosure, identical to the scalar mode's: the per-company starts + their
    *  sentence, present ONLY when the caller's companies do not share one. */
   companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
@@ -872,13 +950,29 @@ export async function comparePeriodsByProduct(opts: {
     return null;
   };
 
+  // A2 C3: periods of different lengths are ranked and filtered by the per-day change —
+  // their totals are not comparable. Equal lengths keep the |delta| pipeline untouched.
+  const rankedBy: "total" | "per_day" = periodA.days !== periodB.days ? "per_day" : "total";
   const ranked: ComparePeriodsProductRow[] = [];
   const unranked: ComparePeriodsProductRow[] = [];
+  /** Each ranked row's UNROUNDED per-day change: the per-day sort, filter and counts read
+   *  this, never the rounded `perDayDelta` (two rates that round alike still order). */
+  const rawPerDayChange = new Map<number, number>();
   for (const productId of productIds) {
     const a = valueOf(coverageA, callerWideA, aByProduct, productId);
     const b = valueOf(coverageB, callerWideB, bByProduct, productId);
+    const perDay = perDayFigures(a, b, periodA, periodB);
     if (a == null || b == null) {
-      unranked.push({ productId, a, b, delta: null, pctChange: null, reasons: reasonsFor(a, b) });
+      // The null period's per-day figure is null too; the measured side keeps its rate.
+      unranked.push({
+        productId,
+        a,
+        b,
+        delta: null,
+        pctChange: null,
+        ...perDay.figures,
+        reasons: reasonsFor(a, b),
+      });
       continue;
     }
     const delta = b - a;
@@ -888,23 +982,56 @@ export async function comparePeriodsByProduct(opts: {
       b,
       delta,
       pctChange: a === 0 ? null : delta / a,
+      ...perDay.figures,
     };
-    if (a === 0) row.reasons = { pctChange: "period A is zero — percent change undefined" };
+    if (a === 0) {
+      row.reasons = {
+        pctChange: "period A is zero — percent change undefined",
+        // b is measured on every ranked row, so a measured-zero A is the per-day case too.
+        perDayPctChange: PER_DAY_PCT_ZERO_REASON,
+      };
+    }
+    rawPerDayChange.set(productId, perDay.rawChange as number);
     ranked.push(row);
+  }
+
+  /** The unrounded change this result ranks by: per-day under "per_day", else `delta`. */
+  const rankingChange = (r: ComparePeriodsProductRow): number =>
+    rankedBy === "per_day" ? (rawPerDayChange.get(r.productId) as number) : (r.delta ?? 0);
+  // Counted over every comparable product BEFORE `direction` (A2 C3 / C2), by the same raw
+  // sign the filter reads — so a filtered call's counts and rows can never disagree.
+  const directionCounts = { increased: 0, decreased: 0, unchanged: 0 };
+  for (const r of ranked) {
+    const change = rankingChange(r);
+    if (change > 0) directionCounts.increased++;
+    else if (change < 0) directionCounts.decreased++;
+    else directionCounts.unchanged++;
   }
 
   // Pipeline order (normative): direction FIRST, then rank — so a caller's totalRows is
   // the post-direction count and paging never walks rows the filter already removed.
-  const directed =
-    direction == null
-      ? ranked
-      : ranked.filter((r) => (direction === "increase" ? (r.delta ?? 0) > 0 : (r.delta ?? 0) < 0));
-  directed.sort(
-    (x, y) =>
-      Math.abs(y.delta ?? 0) - Math.abs(x.delta ?? 0) ||
-      (y.delta ?? 0) - (x.delta ?? 0) ||
-      x.productId - y.productId,
-  );
+  let directed: ComparePeriodsProductRow[];
+  if (rankedBy === "total") {
+    directed =
+      direction == null
+        ? ranked
+        : ranked.filter((r) => (direction === "increase" ? (r.delta ?? 0) > 0 : (r.delta ?? 0) < 0));
+    directed.sort(
+      (x, y) =>
+        Math.abs(y.delta ?? 0) - Math.abs(x.delta ?? 0) ||
+        (y.delta ?? 0) - (x.delta ?? 0) ||
+        x.productId - y.productId,
+    );
+  } else {
+    // The same pattern over the unrounded per-day change: |change| desc, change desc,
+    // productId asc; `direction` filters on `perDayDirection` (that change's sign).
+    directed = direction == null ? ranked : ranked.filter((r) => r.perDayDirection === direction);
+    directed.sort((x, y) => {
+      const cx = rankingChange(x);
+      const cy = rankingChange(y);
+      return Math.abs(cy) - Math.abs(cx) || cy - cx || x.productId - y.productId;
+    });
+  }
   unranked.sort((x, y) => x.productId - y.productId);
 
   // FD4-2, the by_product reading of "only when there is a delta": the deltas this
@@ -927,6 +1054,8 @@ export async function comparePeriodsByProduct(opts: {
     reasons,
     periodCoverage: { a: coverageA, b: coverageB },
     unequalLengths: periodA.days !== periodB.days,
+    rankedBy,
+    directionCounts,
     ...companyCoverageDisclosure(starts, [coverageA, coverageB], [callerWideA, callerWideB]),
     ...(coverageShift ? { coverageShift } : {}),
     excludedUnapprovedProducts,

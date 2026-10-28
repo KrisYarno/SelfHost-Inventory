@@ -1011,6 +1011,25 @@ const COMPARE_UNRANKED_NOTE =
   "or 'newly active'. unranked is listed (up to limit) on the first page only — " +
   "unrankedTotal counts all.";
 
+/** A2 C3: what the per-day figures are, how they round, and what ranks when the periods
+ *  differ in length. Rides in coverage in BOTH modes (the DEFINITION gate's rate rule). */
+const COMPARE_RATE_DEFINITION =
+  "per day = a period's total divided by its length in days (periodA.days, periodB.days); " +
+  "values of 1 or more are rounded to 2 decimals, smaller values to 3 significant figures, " +
+  "so a small non-zero rate never shows as 0. perDayDirection is the sign of the unrounded " +
+  "change. When the two periods differ in length, rows are ranked and filtered by the " +
+  "per-day change, because totals of periods of different lengths are not comparable; " +
+  "delta and pctChange stay the change in totals. A period that ends today counts today as " +
+  "a full day although today's figures are still partial, so its per-day figure is slightly " +
+  "low. Under partial company coverage these are rates of what was recorded.";
+
+/** A2 C2: the scope of each by_product count, so the model never counts rows itself. */
+const COMPARE_COUNTS_NOTE =
+  "ranked counts the rows this call ranks (after any direction filter); increased, " +
+  "decreased and unchanged count every product with activity in either period that both " +
+  "periods can measure, before that filter; unranked counts the products not comparable. " +
+  "Use these for how many; never count rows yourself.";
+
 /** Attach identity to every row BEFORE byte-fitting, so the fitter measures the shape
  *  the caller actually receives. Evidence fields ride as null placeholders here and are
  *  VALUE-filled post-pagination (OC-14) — same bytes, one bounded extra read. */
@@ -1108,6 +1127,18 @@ async function compareByProduct(
   const rankedShaped = await shapeCompareRows(result.ranked);
   const unrankedShaped = await shapeCompareRows(result.unranked);
 
+  // A2 C2: counted over the WHOLE result, never the page — `ranked` is `totalRows` (post-
+  // direction), the three directions are the module's pre-filter `directionCounts`, and
+  // `unranked` is `unrankedTotal`. Page-independent, so the envelope measurement below
+  // weighs exactly the bytes that ship.
+  const counts = {
+    ranked: rankedShaped.length,
+    increased: result.directionCounts.increased,
+    decreased: result.directionCounts.decreased,
+    unchanged: result.directionCounts.unchanged,
+    unranked: unrankedShaped.length,
+  };
+
   // The period-reason vocabulary WITHOUT the envelope-level shift key (QA-2): the module
   // adds `reasons.delta` whenever the RESULT has a delta, and this page may not.
   const periodReasons: Record<string, string> = {};
@@ -1132,6 +1163,8 @@ async function compareByProduct(
       periodA,
       periodB,
       unequalLengths: result.unequalLengths,
+      // A2 C3: how the rows below are ranked and filtered ("per_day" when the lengths differ).
+      rankedBy: result.rankedBy,
       rows: ranked.rows,
       returned: ranked.returned,
       totalRows: ranked.totalRows,
@@ -1140,6 +1173,8 @@ async function compareByProduct(
       unrankedReturned: unranked.returned,
       unrankedTotal: unranked.totalRows,
       reasons: coverageShift ? result.reasons : periodReasons,
+      counts,
+      countsNote: COMPARE_COUNTS_NOTE,
       coverage: {
         metricScope: metricScopeNote,
         metricScopes: { sales: "company", ledger: "global" },
@@ -1156,9 +1191,11 @@ async function compareByProduct(
         // on the pages that carry a delta at all (QA-2).
         ...(coverageShift ? { coverageShift } : {}),
         reasonsKeys: coverageShift
-          ? "a = periodA, b = periodB, pctChange = percent change, delta = the coverageShift qualification"
-          : "a = periodA, b = periodB, pctChange = percent change",
+          ? "a = periodA, b = periodB, pctChange = percent change, delta = the coverageShift " +
+            "qualification, perDayPctChange = per-day percent change"
+          : "a = periodA, b = periodB, pctChange = percent change, perDayPctChange = per-day percent change",
         unequalLengths: result.unequalLengths,
+        rateDefinition: COMPARE_RATE_DEFINITION,
         unrankedNote: COMPARE_UNRANKED_NOTE,
         evidenceNote: COMPARE_EVIDENCE_NOTE,
         // G5 disclosure (spec C13): PRODUCT grain, so the archived half is a JS count
@@ -1172,7 +1209,9 @@ async function compareByProduct(
   };
 
   // Measured with the WIDEST counters this call can emit (the real array lengths), so the
-  // envelope estimate is never smaller than the envelope actually shipped.
+  // envelope estimate is never smaller than the envelope actually shipped. (A2's rankedBy,
+  // counts, countsNote and rateDefinition do not depend on the page, so they weigh the same
+  // here as in the shipped envelope — no placeholder needed.)
   const counterOf = (rows: CompareProductToolRow[]): Page<CompareProductToolRow> => ({
     rows: [],
     returned: rows.length,
@@ -1206,8 +1245,19 @@ async function compareByProduct(
   // RE-FIT the now-populated rows (G2-5): evidence can only make a row bigger, so the
   // page can only shrink — and the cursor must follow it, or `nextOffset` would skip the
   // rows the re-fit dropped.
-  const rankedPage = refitPage(rankedFit, offset, rankedBudget);
-  const unrankedPage = refitPage(unrankedFit, 0, Math.max(budget - byteLengthOf(rankedPage.rows), 0));
+  const refitRanked = refitPage(rankedFit, offset, rankedBudget);
+  const unrankedPage = refitPage(unrankedFit, 0, Math.max(budget - byteLengthOf(refitRanked.rows), 0));
+  // A2 (M1): the unranked page always keeps its first row (paginate's at-least-one rule),
+  // so when the ranked share already took its rows the two pages together can overshoot the
+  // room this result has — and the adapter then discards the WHOLE result. A2's envelope
+  // (counts, countsNote, rateDefinition) made that reachable at a 5 KB late-turn budget.
+  // The ranked page gives back what the unranked row needs, never below one row; when the
+  // pages already fit this is a no-op.
+  const unrankedBytes = byteLengthOf(unrankedPage.rows);
+  const rankedPage =
+    refitRanked.returned > 1 && byteLengthOf(refitRanked.rows) + unrankedBytes > budget
+      ? refitPage(refitRanked, offset, Math.max(budget - unrankedBytes, 0))
+      : refitRanked;
 
   return ok(envelopeOf(rankedPage, unrankedPage), { scope: "mixed" });
 }
@@ -2709,7 +2759,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `global for the ledger metrics); pass one only to narrow BOTH periods to that ` +
       `product, and only when you resolved it via find_product. Pass ` +
       `groupBy:'product' (no productId) for PER-PRODUCT deltas ranked server-side by ` +
-      `|delta| — that is the ONE call that answers "which products grew, declined, ` +
+      `|delta| (by the per-day change when the periods differ in length) — that is the ONE ` +
+      `call that answers "which products grew, declined, ` +
       `started or stopped moving"; never loop a per-product tool or rank deltas ` +
       `yourself. direction:'increase'|'decrease' filters the ranked set BEFORE paging, ` +
       `and limit/offset page it. A ranked row with a MEASURED a of 0 and b > 0 is the ` +
@@ -2734,7 +2785,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `period A is zero. reasons keys: a = periodA, b = periodB, pctChange = percent ` +
       `change, delta = the coverageShift qualification (BOTH modes, present only with ` +
       `coverageShift). ` +
-      `unequalLengths flags mismatched window lengths (comparison still runs). ` +
+      `When periodA and periodB differ in length (unequalLengths), compare the per-day ` +
+      `figures (aPerDay, bPerDay, perDayDelta, perDayDirection) — rows are then ranked and ` +
+      `filtered by the per-day change (rankedBy: 'per_day'). ` +
       `outbound_units/inbound_units use a SIGN-FIRST ledger predicate over CALENDAR-DAY ` +
       `windows; a gap from get_operations is that tool's ROLLING-INSTANT window ` +
       `(ending now), and a gap from get_movement_series is that movement FOLDS a ` +
@@ -2790,6 +2843,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           b: result.b,
           delta: result.delta,
           pctChange: result.pctChange,
+          // A2 C3: the per-day figures beside the totals (rateDefinition in coverage).
+          aPerDay: result.aPerDay,
+          bPerDay: result.bPerDay,
+          perDayDelta: result.perDayDelta,
+          perDayPctChange: result.perDayPctChange,
+          perDayDirection: result.perDayDirection,
           reasons: result.reasons,
           unequalLengths: result.unequalLengths,
           periodA,
@@ -2825,8 +2884,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             // sentence. Neither describes a key it never emits.
             reasonsKeys:
               "a = periodA, b = periodB, pctChange = percent change, delta = why this " +
-              "delta is not like-for-like (present only with coverageShift)",
+              "delta is not like-for-like (present only with coverageShift), perDayPctChange " +
+              "= per-day percent change",
             unequalLengths: result.unequalLengths,
+            rateDefinition: COMPARE_RATE_DEFINITION,
             // G5 disclosure (spec C13): totals mode is a non-product grain, so both
             // counts are the module's contributor census over BOTH periods.
             excludedUnapprovedProducts: result.excludedUnapprovedProducts,
