@@ -42,7 +42,7 @@ import {
   type SalesGroupBy,
 } from "@/lib/analytics/queries";
 import { serializeSalesRows } from "@/lib/analytics/serialize";
-import { toDayKey } from "@/lib/analytics/dates";
+import { toDayKey, lastCompletedDayKey } from "@/lib/analytics/dates";
 import { weekStartKey, monthKey, byStringKey } from "@/lib/analytics/date-grain";
 import { getLowStockReport, LOW_STOCK_USAGE_WINDOW_DAYS } from "@/lib/reports/low-stock";
 import {
@@ -75,6 +75,7 @@ import {
   SALES_COMPANY_COVERAGE_NOTE,
   SALES_COMPANY_COVERAGE_MEASURED_NOTE,
   type CallerScopedSalesCoverage,
+  type SalesRebuildState,
 } from "@/lib/assistant/sales-coverage";
 import {
   SHRINKAGE_CLASSIFICATION_DEFINITION,
@@ -1012,18 +1013,41 @@ async function fillFirstSaleDayKeys(rows: object[], companyIds: string[]): Promi
 }
 
 /**
- * The sales-freshness note for a caller's order figures (A2 pack C7), or undefined. Never
- * for a caller with no companies — no read at all, as there are no order figures to
- * qualify — and NON-FATAL: a failed run-history read leaves the figures without a note;
- * it never fails the tool.
+ * The sales rebuild state behind a caller's order figures (A2 pack C7), or undefined. Never
+ * read for a caller with no companies — there are no order figures to qualify — and
+ * NON-FATAL: a failed run-history read is undefined; it never fails the tool.
  */
-async function salesFreshnessNoteFor(companyIds: string[], now: Date = new Date()): Promise<string | undefined> {
+async function salesRebuildStateFor(companyIds: string[]): Promise<SalesRebuildState | undefined> {
   if (companyIds.length === 0) return undefined;
   try {
-    return salesFreshnessNote(await salesRebuildState(), now);
+    return await salesRebuildState();
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The sales-freshness note for a caller's order figures (A2 pack C7), or undefined — under
+ * `salesRebuildStateFor`'s rules (no companies: no read; a failed read: no note).
+ */
+async function salesFreshnessNoteFor(companyIds: string[], now: Date = new Date()): Promise<string | undefined> {
+  const state = await salesRebuildStateFor(companyIds);
+  return state === undefined ? undefined : salesFreshnessNote(state, now);
+}
+
+/**
+ * A2 pack C14 (A2-OCC-2): the last COMPLETE day compare_periods measures its per-day
+ * figures through. Ledger metrics: yesterday UTC (today is still being written). Sales
+ * metrics: the EARLIER of yesterday and the day before the UTC day the newest SUCCESSFUL
+ * sales rebuild started — a run that started on day D re-read every order updated before
+ * it, so D−1 is complete, while before the nightly run yesterday's sales are still missing.
+ * No success on record, or no state (no companies, or a failed read): yesterday.
+ */
+function compareRateThrough(isSales: boolean, state: SalesRebuildState | undefined, now: Date): string {
+  const yesterday = lastCompletedDayKey(now);
+  if (!isSales || state?.lastSucceededStartedAt == null) return yesterday;
+  const beforeRun = lastCompletedDayKey(new Date(state.lastSucceededStartedAt));
+  return beforeRun < yesterday ? beforeRun : yesterday;
 }
 
 /** `coverage.salesFreshnessNote`, present only when there is a note (A2 pack C7). */
@@ -1060,22 +1084,29 @@ const COMPARE_UNRANKED_NOTE =
   "unrankedTotal counts all.";
 
 /** A2 C3: what the per-day figures are, how they round, and what ranks when the periods
- *  differ in length. Rides in coverage in BOTH modes (the DEFINITION gate's rate rule). */
+ *  differ in length. Rides in coverage in BOTH modes (the DEFINITION gate's rate rule).
+ *  A2 C14 (A2-OCC-2 / A2-OCC-9): over COMPLETE days only (coverage.rateWindows), and a
+ *  calendar rate — not the days-covered rates of the low-stock and reorder tools. */
 const COMPARE_RATE_DEFINITION =
-  "per day = a period's total divided by its length in days (periodA.days, periodB.days); " +
-  "values of 1 or more are rounded to 2 decimals, smaller values to 3 significant figures, " +
-  "so a small non-zero rate never shows as 0. perDayDirection is the sign of the unrounded " +
-  "change. When the two periods differ in length, rows are ranked and filtered by the " +
-  "per-day change, because totals of periods of different lengths are not comparable; " +
-  "delta and pctChange stay the change in totals. A period that ends today counts today as " +
-  "a full day although today's figures are still partial, so its per-day figure is slightly " +
-  "low. Under partial company coverage these are rates of what was recorded.";
+  "per day = a period's total over its COMPLETE days divided by those days " +
+  "(coverage.rateWindows): a period that reaches today or later is measured for its per-day " +
+  "figure only through the last complete day, because today's figures — and, before the " +
+  "nightly rebuild, yesterday's sales — are still arriving. Values of 1 or more are rounded " +
+  "to 2 decimals, smaller values to 3 significant figures, so a small non-zero rate never " +
+  "shows as 0; perDayDirection is the sign of the unrounded change. When the rate periods " +
+  "differ in length, rows are ranked and filtered by the per-day change, because totals of " +
+  "periods of different lengths are not comparable; delta and pctChange stay the change in " +
+  "the full periods' totals. This is a calendar rate — the low-stock and reorder rates " +
+  "divide by the days a product's outbound data covers, so they are not directly comparable " +
+  "to it. Under partial company coverage these are rates of what was recorded.";
 
-/** A2 C2: the scope of each by_product count, so the model never counts rows itself. */
+/** A2 C2: the scope of each by_product count, so the model never counts rows itself.
+ *  A2 C14 (A2-OCC-8): under per-day ranking the direction counts follow the per-day change. */
 const COMPARE_COUNTS_NOTE =
   "ranked counts the rows this call ranks (after any direction filter); increased, " +
   "decreased and unchanged count every product with activity in either period that both " +
   "periods can measure, before that filter; unranked counts the products not comparable. " +
+  "Under rankedBy 'per_day', increased and decreased follow the per-day change, not delta. " +
   "Use these for how many; never count rows yourself.";
 
 /** Attach identity to every row BEFORE byte-fitting, so the fitter measures the shape
@@ -1159,9 +1190,14 @@ async function compareByProduct(
     ctx: ToolContext;
     isSales: boolean;
     metricScopeNote: string;
+    /** A2 C14: the last complete day the per-day figures are measured through. */
+    rateThrough: string;
+    /** A2 C7: the freshness note for a sales metric's figures (page-independent, so the
+     *  envelope measurement below weighs it), from the SAME state read as `rateThrough`. */
+    salesFreshness: string | undefined;
   },
 ): Promise<ToolResult> {
-  const { periodA, periodB, ctx, isSales, metricScopeNote } = env;
+  const { periodA, periodB, ctx, isSales, metricScopeNote, rateThrough, salesFreshness } = env;
   const limit = args.limit ?? COMPARE_ROWS_DEFAULT;
   const offset = args.offset ?? 0;
   const result = await comparePeriodsByProduct({
@@ -1170,13 +1206,11 @@ async function compareByProduct(
     periodB,
     companyIds: ctx.companyIds,
     direction: args.direction,
+    rateThrough,
   });
 
   const rankedShaped = await shapeCompareRows(result.ranked);
   const unrankedShaped = await shapeCompareRows(result.unranked);
-  // A2 C7: order figures carry the freshness note when the sales facts are materially
-  // stale. Page-independent, so the envelope measurement below weighs it.
-  const salesFreshness = isSales ? await salesFreshnessNoteFor(ctx.companyIds) : undefined;
 
   // A2 C2: counted over the WHOLE result, never the page — `ranked` is `totalRows` (post-
   // direction), the three directions are the module's pre-filter `directionCounts`, and
@@ -1253,6 +1287,8 @@ async function compareByProduct(
             "qualification, perDayPctChange = per-day percent change"
           : "a = periodA, b = periodB, pctChange = percent change, perDayPctChange = per-day percent change",
         unequalLengths: result.unequalLengths,
+        // A2 C14: the complete days each period's per-day figures are measured over.
+        rateWindows: result.rateWindows,
         rateDefinition: COMPARE_RATE_DEFINITION,
         unrankedNote: COMPARE_UNRANKED_NOTE,
         evidenceNote: COMPARE_EVIDENCE_NOTE,
@@ -1733,9 +1769,9 @@ const LOW_STOCK_ALERT_RULE =
 const REORDER_COUNTS_NOTE =
   "counts cover every row of this result, not only this page; approaching and healthy " +
   "products that are not listed are counted in coverage.approachingOmitted and " +
-  "coverage.healthy. Under partial order-record coverage outOfStockWithOrders is a lower " +
-  "bound (orderSignalUnknown counts the products the records cannot tell about). Use these " +
-  "for how many; never count rows yourself.";
+  "coverage.healthy. outOfStockWithOrders is a lower bound whenever " +
+  "outOfStockWithOrdersUnknown is above 0 — it counts the out-of-stock products the order " +
+  "records cannot tell about. Use these for how many; never count rows yourself.";
 
 /** A2 C4: what the order signal is — and the three things it is NOT. */
 const ORDER_SIGNAL_DEFINITION =
@@ -1745,15 +1781,37 @@ const ORDER_SIGNAL_DEFINITION =
   "count of currently open orders, and not the stock-outflow figures the report sizes from; " +
   "they are never added to them and never used to suggest a quantity. outOfStockWithOrders " +
   "marks a product with no stock now and recorded orders in that window: the report cannot " +
-  "suggest a quantity, so it needs a manual decision. null = the order records cannot tell " +
-  "(orderSignalReason says why); orderSignalRecordedSince = the figures cover only the days " +
-  "since order records began.";
+  "suggest a quantity, so it needs a manual decision. null = the order records cannot tell; " +
+  "orderSignalReason is a code that coverage.orderSignalReasons explains; " +
+  "orderSignalRecordedSince = the figures cover only the days since order records began.";
 
 /** A2 C4: how many out-of-stock-with-orders products the envelope lists on every page. */
 const ORDER_SIGNAL_LIST_MAX = 20;
 
-/** A2 C4: a caller with no company membership has no order records to read. */
+/**
+ * A2 C14 (A2-OCC-5): why a row's order signal is null, as a SHORT code — the sentence
+ * rides once in `coverage.orderSignalReasons`, not on every unknown row.
+ *  - `no_company_access`: the caller has no company membership, so no order records;
+ *  - `not_recorded`: the records do not cover the window (get_sales' own sentence);
+ *  - `not_linked` (A2-OCC-1): no listing on the caller's stores is linked to the product,
+ *    so its orders could never have become facts.
+ */
+type OrderSignalReasonCode = "no_company_access" | "not_recorded" | "not_linked";
+
+/** A2 C14: the fixed sentences for the two codes whose text does not depend on the result
+ *  (`not_recorded` carries the coverage reason the order-signal module returned). */
 const NO_COMPANY_ACCESS_REASON = "no company access";
+const NOT_LINKED_REASON =
+  "not linked to a store listing in your companies, so its orders cannot be attributed";
+
+/** A2 C14 (A2-OCC-1): the envelope's sentence beside `coverage.orderSignalUnlinkedOrders`. */
+function orderSignalUnlinkedNote(orders: number): string {
+  return (
+    `${orders} orders in this window have at least one line on a store listing that is not ` +
+    `linked to a product; those lines are not in orderSignal, so a 0 can hide orders for an ` +
+    `unlinked listing.`
+  );
+}
 
 /** The reorder rows the report cannot size (pack C4) — the requested-id variants
  *  (`not_active`, `unknown_id`) are never decorated. */
@@ -1768,7 +1826,7 @@ function isUnsizedReorderRow(row: ReorderRow): row is UnsizedReorderRow {
 
 type OrderSignalRow = UnsizedReorderRow & {
   orderSignal: { orderedUnits: number; orders: number } | null;
-  orderSignalReason?: string;
+  orderSignalReason?: OrderSignalReasonCode;
   orderSignalRecordedSince?: string | null;
   outOfStockWithOrders: boolean | null;
 };
@@ -1777,10 +1835,12 @@ type OrderSignalRow = UnsizedReorderRow & {
  * Attach the order signal to ONE unsized reorder row (pack C4). Decorated BEFORE paging
  * (the shape-before-fit rule), so the fitter measures the row the caller receives.
  *
- * Silence is a MEASURED zero only under `full` coverage; under `partial` a recorded sum
- * stands (and, for the window kind, says since when) while a missing fact row is unknown;
- * under `none` everything is unknown. `outOfStockWithOrders` follows: false with stock on
- * hand, unknown when the signal is, else whether any units were ordered.
+ * Silence is a MEASURED zero only under `full` coverage AND only for a product linked on
+ * one of the caller's stores (A2 C14 — an unlinked product's orders never become facts, so
+ * its silence is `not_linked`, never a 0); under `partial` a recorded sum stands (and, for
+ * the window kind, says since when) while a missing fact row is unknown — `not_linked` or
+ * `not_recorded`; under `none` everything is unknown. `outOfStockWithOrders` follows: false
+ * with stock on hand, unknown when the signal is, else whether any units were ordered.
  */
 function withOrderSignal(
   row: UnsizedReorderRow,
@@ -1790,14 +1850,20 @@ function withOrderSignal(
   const recorded = signal.byProduct.get(row.productId);
   let value: OrderSignalRow["orderSignal"];
   const extra: Pick<OrderSignalRow, "orderSignalReason" | "orderSignalRecordedSince"> = {};
-  if (signal.windowCoverage === "full") {
-    value = recorded ?? { orderedUnits: 0, orders: 0 };
-  } else if (signal.windowCoverage === "partial" && recorded != null) {
+  if (signal.windowCoverage === "partial" && recorded != null) {
     value = recorded;
     if (signal.partialKind === "window") extra.orderSignalRecordedSince = signal.salesDataStart;
+  } else if (signal.windowCoverage === "full" && recorded != null) {
+    value = recorded;
+  } else if (signal.windowCoverage !== "none" && signal.unlinked.has(row.productId)) {
+    // Covered or partly covered, no fact row, and no listing of it on the caller's stores.
+    value = null;
+    extra.orderSignalReason = "not_linked";
+  } else if (signal.windowCoverage === "full") {
+    value = { orderedUnits: 0, orders: 0 };
   } else {
     value = null;
-    extra.orderSignalReason = noCompanyAccess ? NO_COMPANY_ACCESS_REASON : signal.reason;
+    extra.orderSignalReason = noCompanyAccess ? "no_company_access" : "not_recorded";
   }
   const outOfStockWithOrders =
     row.currentStock > 0 ? false : value === null ? null : value.orderedUnits > 0;
@@ -2436,7 +2502,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `current unit cost and retail (0 = recorded as free, null = not set); unit prices ` +
       `are on groupBy 'product' rows. Money totals count only products with a positive ` +
       `cost or a set retail, and a money total of 0 on a row whose units is 0 means ` +
-      `nothing is on hand — never a free or unpriced product. 'coverage' counts BOTH ` +
+      `nothing is on hand — never a free or unpriced product. unitRetailCents is the one ` +
+      `stored retail price (synced from one store listing), not necessarily each store's ` +
+      `live price. 'coverage' counts BOTH ` +
       `products AND on-hand units per dimension, so ` +
       `you can see exactly which units lack costs (costedUnits of ofUnits) instead of a ` +
       `misleading product percentage. Receipt cost is product-level only — location ` +
@@ -2849,8 +2917,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `'unavailable' rows carry no sizing numbers — only a reason (no_demand_signal | ` +
       `insufficient_history) and, from your companies' order records over a 90-day ` +
       `calendar window, orderSignal (units and orders recorded) with outOfStockWithOrders ` +
-      `when stock is 0; up to 20 out-of-stock-with-orders products are listed on every ` +
-      `page (counts.outOfStockWithOrders counts all). Recorded orders are a separate fact ` +
+      `when stock is 0; up to 20 out-of-stock-with-orders products — among the products ` +
+      `the report cannot size — are listed on every page (counts.outOfStockWithOrders ` +
+      `counts all of those). Recorded orders are a separate fact ` +
       `family — never added to the stock-outflow figures and never a quantity. Results ` +
       `are mixed-scope: rows are global, orderSignal is your companies'. ` +
       `Quantities are GROSS: inventoryPositionKnown is false, so ` +
@@ -2951,11 +3020,29 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         },
         unavailableAtZeroStock: signalRows.filter((row) => row.currentStock <= 0).length,
         // Unknown for every row when the records cannot tell at all; a lower bound under
-        // partial coverage (orderSignalUnknown says how many the records cannot tell about).
+        // partial coverage (outOfStockWithOrdersUnknown says how many the records cannot tell about).
         // No unsized row at all = nothing needed a signal: a measured 0, never "unknown".
         outOfStockWithOrders: !signalNeeded ? 0 : signal.windowCoverage === "none" ? null : flagged.length,
+        // A2 C14 (A2-OCC-3): the gap in the count above — the rows whose flag is unknown (out
+        // of stock, signal null). orderSignalUnknown also counts in-stock rows.
+        outOfStockWithOrdersUnknown: signalRows.filter((row) => row.outOfStockWithOrders === null).length,
         orderSignalUnknown: signalRows.filter((row) => row.orderSignal === null).length,
       };
+
+      // A2 C14 (A2-OCC-5): one sentence per reason code present on the RESULT (every row, not
+      // only this page), so a page's codes are always explained.
+      const reasonSentences: Record<OrderSignalReasonCode, string | undefined> = {
+        no_company_access: NO_COMPANY_ACCESS_REASON,
+        not_recorded: signal.reason,
+        not_linked: NOT_LINKED_REASON,
+      };
+      const orderSignalReasons: Partial<Record<OrderSignalReasonCode, string>> = {};
+      for (const row of signalRows) {
+        const code = row.orderSignalReason;
+        const sentence = code == null ? undefined : reasonSentences[code];
+        if (code != null && sentence != null) orderSignalReasons[code] = sentence;
+      }
+      const hasReasons = Object.keys(orderSignalReasons).length > 0;
 
       const partial = signal.windowCoverage === "partial";
       // `measuredRemainingRows` is the measurement's placeholder ONLY (A2 C1); the shipped
@@ -2992,6 +3079,15 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             : {}),
           ...(partial && signal.partialKind === "company"
             ? { orderSignalCompanyCoverageNote: SALES_COMPANY_COVERAGE_MEASURED_NOTE }
+            : {}),
+          // A2 C14: what each row's orderSignalReason code means, once.
+          ...(hasReasons ? { orderSignalReasons } : {}),
+          // A2 C14 (A2-OCC-1): orders whose lines on unlinked listings never became facts.
+          ...(signal.unlinkedOrders > 0
+            ? {
+                orderSignalUnlinkedOrders: signal.unlinkedOrders,
+                orderSignalUnlinkedNote: orderSignalUnlinkedNote(signal.unlinkedOrders),
+              }
             : {}),
           sectionScopes: { rows: "global", orderSignal: "company" },
           orderSignalDefinition: ORDER_SIGNAL_DEFINITION,
@@ -3135,7 +3231,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `global for the ledger metrics); pass one only to narrow BOTH periods to that ` +
       `product, and only when you resolved it via find_product. Pass ` +
       `groupBy:'product' (no productId) for PER-PRODUCT deltas ranked server-side by ` +
-      `|delta| (by the per-day change when the periods differ in length) — that is the ONE ` +
+      `|delta| (by the per-day change when rankedBy is 'per_day') — that is the ONE ` +
       `call that answers "which products grew, declined, ` +
       `started or stopped moving"; never loop a per-product tool or rank deltas ` +
       `yourself. direction:'increase'|'decrease' filters the ranked set BEFORE paging, ` +
@@ -3163,8 +3259,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `change, delta = the coverageShift qualification (BOTH modes, present only with ` +
       `coverageShift). ` +
       `When periodA and periodB differ in length (unequalLengths), compare the per-day ` +
-      `figures (aPerDay, bPerDay, perDayDelta, perDayDirection) — rows are then ranked and ` +
-      `filtered by the per-day change (rankedBy: 'per_day'). ` +
+      `figures (aPerDay, bPerDay, perDayDelta, perDayDirection). Rows are ranked and ` +
+      `filtered by the per-day change (rankedBy: 'per_day') when the lengths differ, or ` +
+      `when one period reaches today or later and so has fewer complete days ` +
+      `(coverage.rateWindows). ` +
       `outbound_units/inbound_units use a SIGN-FIRST ledger predicate over CALENDAR-DAY ` +
       `windows; a gap from get_operations is that tool's ROLLING-INSTANT window ` +
       `(ending now), and a gap from get_movement_series is that movement FOLDS a ` +
@@ -3194,22 +3292,33 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         ? "sales metric — scoped to your companies"
         : "physical-ledger metric — global (inventory has no company dimension)";
 
+      // A2 C7 + C14: ONE run-history read for a sales metric serves both the freshness note
+      // (material staleness) and the last complete day the per-day figures run through.
+      const salesState = isSales ? await salesRebuildStateFor(ctx.companyIds) : undefined;
+      const rateThrough = compareRateThrough(isSales, salesState, now);
+      const salesFreshness = salesState === undefined ? undefined : salesFreshnessNote(salesState, now);
+
       if (args.groupBy === "product") {
-        return compareByProduct(args, { periodA, periodB, ctx, isSales, metricScopeNote });
-      }
-      // Sales metrics are company-scoped INSIDE the module (mandatory) — pass ctx.companyIds;
-      // ledger metrics ignore it (no company dimension). A2 C7: a sales metric's figures carry
-      // the freshness note when the sales facts are materially stale.
-      const [result, salesFreshness] = await Promise.all([
-        comparePeriods({
-          metric: args.metric,
+        return compareByProduct(args, {
           periodA,
           periodB,
-          productId: args.productId,
-          companyIds: ctx.companyIds,
-        }),
-        isSales ? salesFreshnessNoteFor(ctx.companyIds) : Promise.resolve(undefined),
-      ]);
+          ctx,
+          isSales,
+          metricScopeNote,
+          rateThrough,
+          salesFreshness,
+        });
+      }
+      // Sales metrics are company-scoped INSIDE the module (mandatory) — pass ctx.companyIds;
+      // ledger metrics ignore it (no company dimension).
+      const result = await comparePeriods({
+        metric: args.metric,
+        periodA,
+        periodB,
+        productId: args.productId,
+        companyIds: ctx.companyIds,
+        rateThrough,
+      });
       // Mixed-scope result envelope (spec §6): meta.scope "mixed"; coverage labels the
       // metric's real scope so a consumer never reads a global ledger number as
       // company-scoped (or vice versa).
@@ -3268,6 +3377,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
               "delta is not like-for-like (present only with coverageShift), perDayPctChange " +
               "= per-day percent change",
             unequalLengths: result.unequalLengths,
+            // A2 C14: the complete days each period's per-day figures are measured over.
+            rateWindows: result.rateWindows,
             rateDefinition: COMPARE_RATE_DEFINITION,
             // G5 disclosure (spec C13): totals mode is a non-product grain, so both
             // counts are the module's contributor census over BOTH periods.
@@ -3322,7 +3433,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `(effective threshold/lead time + true per-field source), movement30 (30-day ` +
       `ledger TOTALS in/out/net), and sales30 (30-day ordered units/revenue). Its ` +
       `valuation row carries the stored unit cost and retail (currentUnitCostCents / ` +
-      `unitRetailCents: 0 = recorded as free, null = not set). Each ` +
+      `unitRetailCents: 0 = recorded as free, null = not set; the retail is the one stored ` +
+      `price, synced from one store listing, not necessarily each store's live price). Each ` +
       `section is a SUMMARY — go deeper with the per-topic tools (get_stock, ` +
       `get_valuation, get_inventory_policy, get_movement_series, get_sales). This is a ` +
       `MIXED-scope tool: sales30 is scoped to YOUR companies; every other section is ` +

@@ -356,6 +356,11 @@ export interface SalesRebuildState {
   lastSucceededAt: string | null;
   /** A FAILED or ABORTED run (lock-held skips excluded) started after that success. */
   latestAttemptFailedAfterSuccess: boolean;
+  /** A2 pack C14 (internal): the same success's `startedAt` (ISO UTC), or null. A run that
+   *  started on day D re-read every order updated before it, so D−1 is the last day whose
+   *  sales are complete — compare_periods measures its per-day figures through it. Never
+   *  shown to the model (`get_data_freshness` relays `lastSucceededAt` only). */
+  lastSucceededStartedAt: string | null;
 }
 
 /** How many of the newest sales runs `salesRebuildState` reads (A2 pack C7). */
@@ -387,7 +392,9 @@ export async function salesRebuildState(): Promise<SalesRebuildState> {
   // Guards a deep-mocked prisma returning undefined (as the tool layer's name helpers do).
   const attempts = (runs ?? []).filter((run) => run.skippedReason !== LOCK_HELD_SKIP);
   const success = attempts.find((run) => run.status === "SUCCEEDED" && run.finishedAt != null);
-  if (!success) return { lastSucceededAt: null, latestAttemptFailedAfterSuccess: false };
+  if (!success) {
+    return { lastSucceededAt: null, latestAttemptFailedAfterSuccess: false, lastSucceededStartedAt: null };
+  }
   const latestAttemptFailedAfterSuccess = attempts.some(
     (run) =>
       (run.status === "FAILED" || run.status === "ABORTED") &&
@@ -396,6 +403,7 @@ export async function salesRebuildState(): Promise<SalesRebuildState> {
   return {
     lastSucceededAt: (success.finishedAt as Date).toISOString(),
     latestAttemptFailedAfterSuccess,
+    lastSucceededStartedAt: success.startedAt.toISOString(),
   };
 }
 

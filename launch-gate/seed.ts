@@ -99,6 +99,21 @@ export type GateSeedManifest = {
      *  in company B — inside period A of the 30/5-day compare windows, after B's first
      *  fact day, never in the last 5 days. The reorder tool's order signal flags it. */
     orderedOutProductId: number;
+    // --- ADDITIVE (assistant A2 FR1, declared — pack C14) ---
+    /** An unsized, no-fact product LINKED ONLY through a bundle component of a bundle
+     *  listing on company A's store (9109, the explicit-threshold low-stock product): the
+     *  order signal reads it as linked (`not_recorded` under the gate's window-kind partial)
+     *  for both callers. */
+    orderSignalBundleLinkedProductId: number;
+    /** An unsized, no-fact product linked by a direct listing on company B's store ONLY
+     *  (9108, the inherit-threshold product): `not_linked` for memberA (no B orders, so no B
+     *  store), `not_recorded` for admin — the store-scoping proof. */
+    orderSignalStoreBLinkedProductId: number;
+    /** Orders inside the 90-day order-signal window carrying a line the fact rebuild cannot
+     *  attribute: A's and B's (each an unmapped line) are counted; A's CANCELLED one (an
+     *  unmapped line too) is not. None is stamped on a ledger
+     *  row and none has a sales fact. */
+    unlinkedOrderIds: { a: string; aCancelled: string; b: string };
   };
   sentinels: { companyA: readonly string[]; companyB: readonly string[] };
 };
@@ -187,6 +202,14 @@ export const GATE_SEED: GateSeedManifest = {
     reconciliationProductIds: [9107, 9110],
     // ADDITIVE (assistant A2 M2) — see the manifest type above.
     orderedOutProductId: 9111,
+    // ADDITIVE (assistant A2 FR1) — see the manifest type above.
+    orderSignalBundleLinkedProductId: 9109,
+    orderSignalStoreBLinkedProductId: 9108,
+    unlinkedOrderIds: {
+      a: "gateorder-companya-unlinked",
+      aCancelled: "gateorder-companya-cancelled",
+      b: "gateorder-companyb-unlinked",
+    },
   },
   sentinels: {
     // A: product_sales_facts.orderedQty · external_order_items.quantity ·
@@ -632,6 +655,47 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
       })),
     });
 
+    // --- ADDITIVE (assistant A2 FR1, declared — pack C14) — LISTINGS the order signal's
+    //     link check reads. WHY: an order line on a listing that is not linked to a product
+    //     never becomes a sales fact, so the order signal must tell "linked, nothing
+    //     recorded" from "not linked at all" — and the gate had one listing shape (a direct
+    //     link to 9101) on which neither branch is observable.
+    //  · a BUNDLE listing on A's store (no product of its own, as the bundle route writes
+    //    it) whose one component is 9109 -> 9109 is linked through a bundle only;
+    //  · a direct listing of 9108 on B's store only -> linked for admin, not for memberA.
+    // (A NON-bundle listing with no product cannot exist: the product_links trigger,
+    // migration 20260520_bundle_product_link_invariant, rejects it — so the count's
+    // `isBundle: false, internalProductId: null` branch is belt-and-braces only.)
+    // No order line points at either, so no fact, total or count elsewhere moves.
+    const bundleLinkId = `gatelink-bundle-${COMPANY_A.slice(-6)}`;
+    await prisma.productLink.createMany({
+      data: [
+        {
+          id: bundleLinkId,
+          integrationId: integrationOf(COMPANY_A),
+          internalProductId: null,
+          externalProductId: "gate-ext-bundle-a",
+          externalTitle: "Gate Bundle A",
+          isBundle: true,
+        },
+        {
+          id: `gatelink-9108-${COMPANY_B.slice(-6)}`,
+          integrationId: integrationOf(COMPANY_B),
+          internalProductId: GATE_SEED.fixtures.orderSignalStoreBLinkedProductId,
+          externalProductId: "gate-ext-9108-b",
+          externalTitle: "Gate Threshold Inherit (B listing)",
+        },
+      ],
+    });
+    await prisma.bundleComponent.create({
+      data: {
+        id: "gatebundlecomponent-9109",
+        productLinkId: bundleLinkId,
+        internalProductId: GATE_SEED.fixtures.orderSignalBundleLinkedProductId,
+        quantity: 1,
+      },
+    });
+
     // --- External orders: the orderNumber + item-quantity sentinels ----------
     await prisma.externalOrder.createMany({
       data: [
@@ -687,6 +751,51 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           internalStatus: "pending",
           externalCreatedAt: daysAgo(4),
         },
+        // ADDITIVE (assistant A2 FR1, declared — pack C14): three orders 20 days back —
+        // inside the 90-day order-signal window, outside every 5-day window — each with ONE
+        // line the fact rebuild cannot attribute (see the items below). The existing unmapped
+        // order sits 200 days back, OUTSIDE the window, so the window's count was
+        // structurally 0. Every order-count oracle (2h, the pipeline, the scoping recount)
+        // recomputes from SQL; the 200-day order keeps "windowed < all-time" true.
+        {
+          id: GATE_SEED.fixtures.unlinkedOrderIds.a,
+          companyId: COMPANY_A,
+          integrationId: integrationOf(COMPANY_A),
+          externalId: "gate-a-unlinked-1",
+          orderNumber: "gate-a-unlinked-1",
+          nativeStatus: "processing",
+          total: "15.00",
+          currency: "USD",
+          rawPayload: {},
+          internalStatus: "pending",
+          externalCreatedAt: daysAgo(20),
+        },
+        {
+          id: GATE_SEED.fixtures.unlinkedOrderIds.aCancelled,
+          companyId: COMPANY_A,
+          integrationId: integrationOf(COMPANY_A),
+          externalId: "gate-a-cancelled-1",
+          orderNumber: "gate-a-cancelled-1",
+          nativeStatus: "cancelled",
+          total: "15.00",
+          currency: "USD",
+          rawPayload: {},
+          internalStatus: "cancelled",
+          externalCreatedAt: daysAgo(20),
+        },
+        {
+          id: GATE_SEED.fixtures.unlinkedOrderIds.b,
+          companyId: COMPANY_B,
+          integrationId: integrationOf(COMPANY_B),
+          externalId: "gate-b-unlinked-1",
+          orderNumber: "gate-b-unlinked-1",
+          nativeStatus: "processing",
+          total: "15.00",
+          currency: "USD",
+          rawPayload: {},
+          internalStatus: "pending",
+          externalCreatedAt: daysAgo(20),
+        },
       ],
     });
     await prisma.externalOrderItem.createMany({
@@ -724,6 +833,38 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           price: "19.00",
           productLinkId: `gatelink-${COMPANY_B.slice(-6)}`,
           isMapped: true,
+        },
+        // ADDITIVE (assistant A2 FR1): the three unattributable lines, each with NO listing
+        // (unmapped). Quantities and prices are small and outside both sentinel bands.
+        {
+          id: "gateitem-companya-unlinked",
+          orderId: GATE_SEED.fixtures.unlinkedOrderIds.a,
+          externalItemId: "gate-a-unlinked-item-1",
+          externalProductId: "gate-ext-unmapped-a",
+          name: "Gate Unmapped Line A",
+          quantity: 2,
+          price: "7.50",
+          isMapped: false,
+        },
+        {
+          id: "gateitem-companya-cancelled",
+          orderId: GATE_SEED.fixtures.unlinkedOrderIds.aCancelled,
+          externalItemId: "gate-a-cancelled-item-1",
+          externalProductId: "gate-ext-unmapped-a",
+          name: "Gate Unmapped Line A (cancelled)",
+          quantity: 2,
+          price: "7.50",
+          isMapped: false,
+        },
+        {
+          id: "gateitem-companyb-unlinked",
+          orderId: GATE_SEED.fixtures.unlinkedOrderIds.b,
+          externalItemId: "gate-b-unlinked-item-1",
+          externalProductId: "gate-ext-unmapped-b",
+          name: "Gate Unmapped Line B",
+          quantity: 1,
+          price: "15.00",
+          isMapped: false,
         },
       ],
     });

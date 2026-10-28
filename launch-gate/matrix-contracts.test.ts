@@ -41,6 +41,7 @@ import {
   callWithInput,
   compareRoundTrip,
   coverageOf,
+  dayKeyBack,
   daysCovered,
   errorHint,
   eventsOfType,
@@ -169,6 +170,35 @@ async function approvedIds(includeArchived: boolean): Promise<number[]> {
     `SELECT id FROM products WHERE approvalStatus = 'APPROVED'${includeArchived ? "" : " AND deletedAt IS NULL"} ORDER BY id`,
   );
   return rows.map((row) => Number(row.id));
+}
+
+/**
+ * A2 pack C14 (A2-OCC-2), restated as the ORACLE: the last COMPLETE day a SALES metric's
+ * per-day figures run through — yesterday, or earlier when the newest successful sales
+ * rebuild (lock-held skips are not runs) started before today: a run that started on day D
+ * covers D-1. Read from the run table with raw SQL; the gate's table may well be empty, and
+ * then it is yesterday.
+ */
+async function salesRateThrough(): Promise<string> {
+  const yesterday = dayKeyBack(1);
+  const [run] = await oracleQuery<{ startedAt: string | null }>(
+    `SELECT startedAt FROM analytics_rebuild_runs
+      WHERE job = 'sales' AND status = 'SUCCEEDED' AND finishedAt IS NOT NULL
+        AND (skippedReason IS NULL OR skippedReason <> 'lock-held')
+      ORDER BY startedAt DESC LIMIT 1`,
+  );
+  if (run?.startedAt == null) return yesterday;
+  // `dateStrings: true`: the stored UTC wall clock, "YYYY-MM-DD hh:mm:ss.mmm".
+  const startedDay = new Date(`${String(run.startedAt).slice(0, 10)}T00:00:00.000Z`);
+  const beforeRun = new Date(startedDay.getTime() - 86_400_000).toISOString().slice(0, 10);
+  return beforeRun < yesterday ? beforeRun : yesterday;
+}
+
+/** A2 C14: a period's rate window — `[from, min(to, rateThrough)]`, with its day count. */
+function rateWindowOracle(window: { from: string; to: string }, rateThrough: string) {
+  const to = window.to <= rateThrough ? window.to : rateThrough;
+  const days = Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${window.from}T00:00:00Z`)) / 86_400_000) + 1;
+  return { from: window.from, to, days: Math.max(0, days) };
 }
 
 type OracleLedgerRow = {
@@ -907,29 +937,43 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
         [...ADMIN.companyIds, windowA.from, windowA.to, ...ids],
       );
       const expectedA = new Map(perProductA.map((row) => [Number(row.productId), Number(row.units)]));
-      // A2 C3: period B's sums too, so the per-day oracle divides SQL figures on BOTH sides.
       const windowB = relativeWindow(5);
-      const perProductB = await oracleQuery<{ productId: number; units: number }>(
-        `SELECT productId, SUM(orderedQty) AS units FROM product_sales_facts
-          WHERE companyId IN (${inList(ADMIN.companyIds)}) AND dayKey >= ? AND dayKey <= ?
-            AND productId IN (${inList(ids)}) GROUP BY productId`,
-        [...ADMIN.companyIds, windowB.from, windowB.to, ...ids],
-      );
-      const expectedB = new Map(perProductB.map((row) => [Number(row.productId), Number(row.units)]));
-      // The windows' lengths, as echoed — the denominators of every per-day figure.
-      const daysA = (data.periodA as { days: number }).days;
-      const daysB = (data.periodB as { days: number }).days;
-      expect(daysA).toBe(PERIOD_A.relativeDays);
-      expect(daysB).toBe(PERIOD_B.relativeDays);
-      // 30 vs 5 days: the lengths differ, so the rows are ranked by the per-day change.
+      // The windows' lengths, as echoed — the requested lengths.
+      expect((data.periodA as { days: number }).days).toBe(PERIOD_A.relativeDays);
+      expect((data.periodB as { days: number }).days).toBe(PERIOD_B.relativeDays);
+      // A2 C14 (A2-OCC-2): both periods end TODAY, so each per-day figure is measured over
+      // its RATE window — the period's complete days — recomputed here from the run table
+      // and the calendar, and the sums re-read from SQL over those windows (today excluded).
+      const rateThrough = await salesRateThrough();
+      const rateA = rateWindowOracle(windowA, rateThrough);
+      const rateB = rateWindowOracle(windowB, rateThrough);
+      expect(coverageOf(callWithInput(turns.lifecycle, "compare_periods", IN.compareByProduct)).rateWindows).toEqual({
+        a: rateA,
+        b: rateB,
+      });
+      expect(rateA.days).toBeLessThan(PERIOD_A.relativeDays); // non-vacuity: today really is cut
+      const rateSums = async (rate: { from: string; to: string }) =>
+        new Map(
+          (
+            await oracleQuery<{ productId: number; units: number }>(
+              `SELECT productId, SUM(orderedQty) AS units FROM product_sales_facts
+                WHERE companyId IN (${inList(ADMIN.companyIds)}) AND dayKey >= ? AND dayKey <= ?
+                  AND productId IN (${inList(ids)}) GROUP BY productId`,
+              [...ADMIN.companyIds, rate.from, rate.to, ...ids],
+            )
+          ).map((row) => [Number(row.productId), Number(row.units)]),
+        );
+      const rateSumsA = await rateSums(rateA);
+      const rateSumsB = await rateSums(rateB);
+      // 29 vs 4 complete days (30 vs 5 requested): ranked by the per-day change.
       expect(data.rankedBy).toBe("per_day");
       for (const row of rows) {
         expect(row.a).toBe(expectedA.get(row.productId));
         // periodB is fully covered for admin, so silence there is a MEASURED zero.
         expect(row.b).toBe(0);
         expect(row.delta).toBe(row.b - row.a);
-        const aRaw = (expectedA.get(row.productId) ?? 0) / daysA;
-        const bRaw = (expectedB.get(row.productId) ?? 0) / daysB;
+        const aRaw = (rateSumsA.get(row.productId) ?? 0) / rateA.days;
+        const bRaw = (rateSumsB.get(row.productId) ?? 0) / rateB.days;
         expect(row.aPerDay).toBe(oracleRate(aRaw));
         expect(row.bPerDay).toBe(oracleRate(bRaw));
         expect(row.perDayDelta).toBe(oracleRate(bRaw - aRaw));
@@ -1701,6 +1745,145 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
         });
         expect(flagged.length).toBeGreaterThan(0);
       }
+    });
+
+    // -----------------------------------------------------------------------
+    // A2 FR1 (pack C14, A2-OCC-1/3/5) on real MySQL: a no-fact product is `not_linked` when no
+    // listing of it (direct, or a bundle component) is on one of the caller's stores — the
+    // stores being the integrationIds of the caller's OWN orders — else `not_recorded` under
+    // this window-kind partial; the window's orders with an unattributable line are counted.
+    // -----------------------------------------------------------------------
+
+    /** The caller's stores (from its orders) and which of `ids` has a listing on one. */
+    async function linkedOnCallerStores(companyIds: readonly string[], ids: number[]): Promise<Set<number>> {
+      const stores = (
+        await oracleQuery<{ integrationId: string }>(
+          `SELECT DISTINCT integrationId FROM external_orders WHERE companyId IN (${inList(companyIds)})`,
+          [...companyIds],
+        )
+      ).map((row) => row.integrationId);
+      if (stores.length === 0 || ids.length === 0) return new Set();
+      const rows = await oracleQuery<{ productId: number }>(
+        `SELECT pl.internalProductId AS productId FROM product_links pl
+          WHERE pl.internalProductId IN (${inList(ids)}) AND pl.integrationId IN (${inList(stores)})
+         UNION
+         SELECT bc.internalProductId AS productId FROM bundle_components bc
+           JOIN product_links pl ON pl.id = bc.productLinkId
+          WHERE bc.internalProductId IN (${inList(ids)}) AND pl.integrationId IN (${inList(stores)})`,
+        [...ids, ...stores, ...ids, ...stores],
+      );
+      return new Set(rows.map((row) => Number(row.productId)));
+    }
+
+    /** The unsized rows with NO fact row in the window for this caller (the unknowns). */
+    async function noFactUnsized(companyIds: readonly string[]) {
+      const window = relativeWindow(90);
+      const unsized = (await reorderOracle()).rows.filter((row) => row.emitted === "unavailable");
+      const withFacts = await oracleQuery<{ productId: number }>(
+        `SELECT DISTINCT productId FROM product_sales_facts
+          WHERE companyId IN (${inList(companyIds)}) AND dayKey >= ? AND dayKey <= ?
+            AND productId IN (${inList(unsized.map((row) => row.productId))})`,
+        [...companyIds, window.from, window.to, ...unsized.map((row) => row.productId)],
+      );
+      const facts = new Set(withFacts.map((row) => Number(row.productId)));
+      return unsized.filter((row) => !facts.has(row.productId));
+    }
+
+    it("A2 C14: each unknown row's reason code matches the SQL link recompute (not_linked vs not_recorded)", async () => {
+      const codesBy: Record<string, Map<number, unknown>> = {};
+      for (const caller of callers) {
+        const data = dataOf(caller);
+        const coverage = coverageOf(callWithInput(caller.turn(), "reorder_report", caller.input));
+        expect(coverage.orderSignalCoverage).toBe("partial");
+        const unknowns = await noFactUnsized(caller.companyIds);
+        const linked = await linkedOnCallerStores(caller.companyIds, unknowns.map((row) => row.productId));
+        const payloadRows = data.rows as SignalRow[];
+        const codes = new Map<number, unknown>();
+        for (const unknown of unknowns) {
+          const row = payloadRows.find((candidate) => candidate.productId === unknown.productId);
+          const expected = linked.has(unknown.productId) ? "not_recorded" : "not_linked";
+          expect({ caller: caller.label, productId: unknown.productId, orderSignal: row?.orderSignal, code: row?.orderSignalReason }).toEqual({
+            caller: caller.label,
+            productId: unknown.productId,
+            orderSignal: null,
+            code: expected,
+          });
+          codes.set(unknown.productId, row?.orderSignalReason);
+        }
+        codesBy[caller.label] = codes;
+        // Non-vacuity: BOTH codes on real rows, for each caller.
+        expect(new Set(codes.values())).toEqual(new Set(["not_linked", "not_recorded"]));
+        // One sentence per code present: not_linked's fixed text; not_recorded is get_sales'
+        // window-kind sentence over the caller-wide approved-active start.
+        const starts = (await startsOf(caller.companyIds)).map((row) => row.start).filter((d): d is string => d != null);
+        const start = starts.reduce((a, b) => (a <= b ? a : b));
+        expect(coverage.orderSignalReasons).toEqual({
+          not_linked: "not linked to a store listing in your companies, so its orders cannot be attributed",
+          not_recorded: `window predates/straddles sales data (starts ${start})`,
+        });
+      }
+      // The bundle-only link reads as linked for both callers; the B-store-only listing is
+      // linked for admin (who has B orders) and not for memberA — store scoping on real rows.
+      const bundleOnly = FIXTURES.orderSignalBundleLinkedProductId;
+      const bOnly = FIXTURES.orderSignalStoreBLinkedProductId;
+      expect(codesBy.memberA.get(bundleOnly)).toBe("not_recorded");
+      expect(codesBy.admin.get(bundleOnly)).toBe("not_recorded");
+      expect(codesBy.memberA.get(bOnly)).toBe("not_linked");
+      expect(codesBy.admin.get(bOnly)).toBe("not_recorded");
+    });
+
+    it("A2 C14: outOfStockWithOrdersUnknown counts the OUT-OF-STOCK unknowns only (SQL recompute)", async () => {
+      for (const caller of callers) {
+        const unknowns = await noFactUnsized(caller.companyIds);
+        const outOfStock = unknowns.filter((row) => row.currentStock <= 0);
+        const counts = dataOf(caller).counts as Record<string, number>;
+        expect({ caller: caller.label, n: counts.outOfStockWithOrdersUnknown }).toEqual({
+          caller: caller.label,
+          n: outOfStock.length,
+        });
+        expect(outOfStock.length).toBeGreaterThan(0);
+        // In-stock unknowns are counted in orderSignalUnknown, never in the out-of-stock gap.
+        expect(counts.orderSignalUnknown).toBeGreaterThan(counts.outOfStockWithOrdersUnknown);
+      }
+    });
+
+    it("A2 C14: the window's unlinked orders match SQL — cancelled and out-of-window orders excluded", async () => {
+      const window = relativeWindow(90);
+      const unlinkedLine =
+        "EXISTS (SELECT 1 FROM external_order_items i LEFT JOIN product_links l ON l.id = i.productLinkId " +
+        "WHERE i.orderId = o.id AND (i.productLinkId IS NULL OR (l.isBundle = 0 AND l.internalProductId IS NULL)))";
+      const inWindow =
+        "COALESCE(o.externalCreatedAt, o.createdAt) >= ? AND COALESCE(o.externalCreatedAt, o.createdAt) < DATE_ADD(?, INTERVAL 1 DAY)";
+      const counted: Record<string, number> = {};
+      for (const caller of callers) {
+        const [row] = await oracleQuery<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM external_orders o
+            WHERE o.companyId IN (${inList(caller.companyIds)}) AND o.internalStatus <> 'cancelled'
+              AND ${inWindow} AND ${unlinkedLine}`,
+          [...caller.companyIds, `${window.from} 00:00:00`, `${window.to} 00:00:00`],
+        );
+        const n = Number(row.n);
+        counted[caller.label] = n;
+        const coverage = coverageOf(callWithInput(caller.turn(), "reorder_report", caller.input));
+        expect({ caller: caller.label, n: coverage.orderSignalUnlinkedOrders }).toEqual({ caller: caller.label, n });
+        expect(coverage.orderSignalUnlinkedNote).toBe(
+          `${n} orders in this window have at least one line on a store listing that is not linked to a ` +
+            `product; those lines are not in orderSignal, so a 0 can hide orders for an unlinked listing.`,
+        );
+      }
+      // Non-vacuity: memberA counts A's unmapped order; admin also counts B's unmapped line.
+      expect(counted.memberA).toBeGreaterThan(0);
+      expect(counted.admin).toBeGreaterThan(counted.memberA);
+      // ...and the exclusions are real rows: a CANCELLED unattributable order in the window,
+      // and an unattributable order OUTSIDE it, both in company A.
+      const [excluded] = await oracleQuery<{ cancelled: number; outside: number }>(
+        `SELECT SUM(o.internalStatus = 'cancelled' AND ${inWindow}) AS cancelled,
+                SUM(COALESCE(o.externalCreatedAt, o.createdAt) < ?) AS outside
+           FROM external_orders o WHERE o.companyId = ? AND ${unlinkedLine}`,
+        [`${window.from} 00:00:00`, `${window.to} 00:00:00`, `${window.from} 00:00:00`, GATE_SEED.companies.A],
+      );
+      expect(Number(excluded.cancelled)).toBeGreaterThan(0);
+      expect(Number(excluded.outside)).toBeGreaterThan(0);
     });
   });
 

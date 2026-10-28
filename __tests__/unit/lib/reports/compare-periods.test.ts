@@ -1866,3 +1866,277 @@ describe("A2 C3 — per-day rates, per-day ranking and directionCounts", () => {
     });
   });
 });
+
+// ===========================================================================
+// A2 pack C14 (A2-OCC-2) — per-day figures over COMPLETE days: each period's RATE window
+// is [from, min(to, rateThrough)], echoed; a period that reaches past the last complete
+// day gets a SECOND read of the same metric over that window (never a scaled total).
+// ===========================================================================
+
+describe("A2 C14 — per-day over complete days (rate windows)", () => {
+  const DAY = 86_400_000;
+  /** A UTC day key `n` days from today (negative = back). */
+  const day = (n: number) => new Date(Date.now() + n * DAY).toISOString().slice(0, 10);
+  const today = day(0);
+
+  type SalesFact = { productId: number; companyId: string; dayKey: string; orderedQty: number };
+  /** A sales fact table the mocks answer FROM, honoring every where clause the module sends
+   *  (company, product equals/in, day keys) — so a read over the wrong window returns the
+   *  wrong sum instead of the fixture's intent. */
+  function seedSalesTable(facts: SalesFact[]) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inScope = (where: any) =>
+      facts.filter(
+        (f) =>
+          (where?.companyId?.in == null || where.companyId.in.includes(f.companyId)) &&
+          (where?.productId?.in == null || where.productId.in.includes(f.productId)) &&
+          (where?.productId?.equals == null || where.productId.equals === f.productId) &&
+          (where?.dayKey?.gte == null || f.dayKey >= where.dayKey.gte) &&
+          (where?.dayKey?.lte == null || f.dayKey <= where.dayKey.lte),
+      );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) => {
+      const rows = inScope(args.where);
+      if (args._min) return Promise.resolve({ _min: { dayKey: rows.map((r) => r.dayKey).sort()[0] ?? null } }) as never;
+      return Promise.resolve({
+        _sum: { orderedQty: rows.length === 0 ? null : rows.reduce((sum, r) => sum + r.orderedQty, 0) },
+      }) as never;
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.groupBy.mockImplementation((args: any) => {
+      const rows = inScope(args.where);
+      if (args.by[0] === "companyId") {
+        const starts = new Map<string, string>();
+        for (const r of rows) if (!starts.has(r.companyId) || r.dayKey < starts.get(r.companyId)!) starts.set(r.companyId, r.dayKey);
+        return Promise.resolve(Array.from(starts, ([companyId, dayKey]) => ({ companyId, _min: { dayKey } }))) as never;
+      }
+      const sums = new Map<number, number>();
+      for (const r of rows) sums.set(r.productId, (sums.get(r.productId) ?? 0) + r.orderedQty);
+      return Promise.resolve(Array.from(sums, ([productId, units]) => ({ productId, _sum: { orderedQty: units } }))) as never;
+    });
+    const ids = Array.from(new Set(facts.map((f) => f.productId)));
+    db.product.findMany.mockResolvedValue(ids.map((id) => ({ id })) as never);
+  }
+  /** The VALUE reads (sums over a window), as opposed to the coverage `_min` reads. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sumReads = () => db.productSalesFact.aggregate.mock.calls.map((c) => c[0] as any).filter((a) => a._sum);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const productReads = () => db.productSalesFact.groupBy.mock.calls.map((c) => c[0] as any).filter((a) => a.by[0] === "productId");
+
+  /** c1 has recorded since 2020, so every recent period is fully covered. */
+  const START = { productId: 1, companyId: "c1", dayKey: "2020-01-01", orderedQty: 1 };
+  const LAST_WEEK = win(day(-13), day(-7)); // complete: ends a week ago
+  const THIS_WEEK = win(day(-6), today); // 7 day keys, the last one today
+
+  it("a 7-day period ending today: rate window through yesterday (6 days), today's facts EXCLUDED", async () => {
+    seedSalesTable([
+      START,
+      { productId: 1, companyId: "c1", dayKey: day(-10), orderedQty: 7 },
+      { productId: 1, companyId: "c1", dayKey: day(-3), orderedQty: 6 },
+      { productId: 1, companyId: "c1", dayKey: today, orderedQty: 100 }, // still arriving
+    ]);
+    const res = await comparePeriods({ metric: "sales_units", periodA: LAST_WEEK, periodB: THIS_WEEK, companyIds: ["c1"] });
+    // The totals are the full periods' (today's 100 included) — unchanged.
+    expect(res.a).toBe(7);
+    expect(res.b).toBe(106);
+    expect(res.delta).toBe(99);
+    // The per-day figures are over complete days: B = 6 units / 6 days, never 106 / 7.
+    expect(res.rateWindows).toEqual({
+      a: { from: LAST_WEEK.from, to: LAST_WEEK.to, days: 7 },
+      b: { from: THIS_WEEK.from, to: day(-1), days: 6 },
+    });
+    expect(res.aPerDay).toBe(1);
+    expect(res.bPerDay).toBe(1);
+    expect(res.perDayDelta).toBe(0);
+    expect(res.perDayDirection).toBe("unchanged");
+    // ONE extra read, for B only, over its rate window — the same metric, never a scaled total.
+    expect(sumReads().map((a) => a.where.dayKey)).toEqual([
+      { gte: LAST_WEEK.from, lte: LAST_WEEK.to },
+      { gte: THIS_WEEK.from, lte: THIS_WEEK.to },
+      { gte: THIS_WEEK.from, lte: day(-1) },
+    ]);
+  });
+
+  it("periods wholly in the past: NO extra read, and the per-day figures are total / days as before", async () => {
+    seedSalesTable([START, { productId: 1, companyId: "c1", dayKey: day(-10), orderedQty: 14 }]);
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: LAST_WEEK,
+      periodB: win(day(-20), day(-14)),
+      companyIds: ["c1"],
+    });
+    expect(sumReads()).toHaveLength(2);
+    expect(res.aPerDay).toBe(2);
+    expect(res.bPerDay).toBe(0);
+    expect(res.rateWindows.b).toEqual({ from: day(-20), to: day(-14), days: 7 });
+  });
+
+  it("a `to` 4 days in the future: the rate window runs through yesterday", async () => {
+    seedSalesTable([
+      START,
+      { productId: 1, companyId: "c1", dayKey: day(-2), orderedQty: 4 },
+      { productId: 1, companyId: "c1", dayKey: day(-1), orderedQty: 2 },
+    ]);
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: LAST_WEEK,
+      periodB: win(day(-2), day(4)), // 7 day keys, 5 of them not complete
+      companyIds: ["c1"],
+    });
+    expect(res.rateWindows.b).toEqual({ from: day(-2), to: day(-1), days: 2 });
+    expect(res.bPerDay).toBe(3); // 6 units / 2 complete days, never 6 / 7
+  });
+
+  it("a 1-day period of today: per-day fields null with reasons.perDay, and no rate read", async () => {
+    seedSalesTable([START, { productId: 1, companyId: "c1", dayKey: today, orderedQty: 5 }]);
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: win(day(-1), day(-1)),
+      periodB: win(today, today),
+      companyIds: ["c1"],
+    });
+    expect(res.b).toBe(5); // the total still stands
+    expect(res).toMatchObject({ bPerDay: null, perDayDelta: null, perDayPctChange: null, perDayDirection: null });
+    expect(res.aPerDay).toBe(0);
+    expect(res.reasons.perDay).toBe("this period has no complete day yet");
+    expect(res.rateWindows.b).toEqual({ from: today, to: day(-1), days: 0 });
+    expect(sumReads()).toHaveLength(2);
+  });
+
+  it("rateThrough is honoured as given (the tool passes an earlier day before the nightly sales rebuild)", async () => {
+    seedSalesTable([
+      START,
+      { productId: 1, companyId: "c1", dayKey: "2026-06-10", orderedQty: 10 },
+      { productId: 1, companyId: "c1", dayKey: "2026-06-13", orderedQty: 90 }, // after rateThrough
+    ]);
+    const res = await comparePeriods({
+      metric: "sales_units",
+      periodA: win("2026-06-01", "2026-06-07"),
+      periodB: win("2026-06-08", "2026-06-14"),
+      companyIds: ["c1"],
+      rateThrough: "2026-06-12",
+    });
+    expect(res.b).toBe(100);
+    expect(res.rateWindows.b).toEqual({ from: "2026-06-08", to: "2026-06-12", days: 5 });
+    expect(res.bPerDay).toBe(2); // 10 / 5
+  });
+
+  it("a null period stays null per day (the zero-vs-unknown rule decided it), with no fabricated rate", async () => {
+    // The source starts today: THIS_WEEK predates it -> b null; its rate read finds nothing.
+    seedSalesTable([{ productId: 1, companyId: "c1", dayKey: today, orderedQty: 3 }]);
+    const res = await comparePeriods({ metric: "sales_units", periodA: LAST_WEEK, periodB: THIS_WEEK, companyIds: ["c1"] });
+    expect(res.b).toBeNull();
+    expect(res.bPerDay).toBeNull();
+  });
+
+  describe("by_product", () => {
+    it("equal requested lengths, both ending today: equal rate days -> rankedBy 'total', the |delta| order", async () => {
+      seedSalesTable([
+        START,
+        { productId: 2, companyId: "c1", dayKey: day(-2), orderedQty: 6 },
+        { productId: 3, companyId: "c1", dayKey: day(-2), orderedQty: 12 },
+      ]);
+      const res = await comparePeriodsByProduct({
+        metric: "sales_units",
+        periodA: THIS_WEEK,
+        periodB: THIS_WEEK,
+        companyIds: ["c1"],
+      });
+      expect(res.rateWindows.a.days).toBe(6);
+      expect(res.rateWindows.b.days).toBe(6);
+      expect(res.rankedBy).toBe("total");
+    });
+
+    it("equal lengths where one ends today and the other in the past: rankedBy 'per_day' (6 vs 7 complete days)", async () => {
+      seedSalesTable([
+        START,
+        // p2: 7 in the past week (1/day) and 6 + 50 today this week — 1/day over complete days.
+        { productId: 2, companyId: "c1", dayKey: day(-10), orderedQty: 7 },
+        { productId: 2, companyId: "c1", dayKey: day(-4), orderedQty: 6 },
+        { productId: 2, companyId: "c1", dayKey: today, orderedQty: 50 },
+        // p3: 14 then 18 (2/day -> 3/day).
+        { productId: 3, companyId: "c1", dayKey: day(-10), orderedQty: 14 },
+        { productId: 3, companyId: "c1", dayKey: day(-4), orderedQty: 18 },
+      ]);
+      const res = await comparePeriodsByProduct({
+        metric: "sales_units",
+        periodA: LAST_WEEK,
+        periodB: THIS_WEEK,
+        companyIds: ["c1"],
+      });
+      expect(res.unequalLengths).toBe(false); // the REQUESTED lengths are equal...
+      expect(res.rankedBy).toBe("per_day"); // ...the complete days are not
+      const p2 = res.ranked.find((r) => r.productId === 2)!;
+      const p3 = res.ranked.find((r) => r.productId === 3)!;
+      // The totals still include today; the per-day numerator does not.
+      expect(p2).toMatchObject({ a: 7, b: 56, delta: 49, aPerDay: 1, bPerDay: 1, perDayDirection: "unchanged" });
+      expect(p3).toMatchObject({ a: 14, b: 18, aPerDay: 2, bPerDay: 3, perDayDirection: "increase" });
+      // Ranked by the per-day change: p3 (+1/day) before p2 (0), though p2's |delta| is larger.
+      expect(res.ranked.map((r) => r.productId)).toEqual([3, 2]);
+      expect(res.directionCounts).toEqual({ increased: 1, decreased: 0, unchanged: 1 });
+      // The rate read is the per-product read over B's rate window.
+      expect(productReads().map((a) => a.where.dayKey)).toEqual([
+        { gte: LAST_WEEK.from, lte: LAST_WEEK.to },
+        { gte: THIS_WEEK.from, lte: THIS_WEEK.to },
+        { gte: THIS_WEEK.from, lte: day(-1) },
+      ]);
+    });
+
+    it("a period with no complete day: per-day null on every row, ranked by total, reasons.perDay on the envelope", async () => {
+      seedSalesTable([
+        START,
+        { productId: 2, companyId: "c1", dayKey: day(-2), orderedQty: 9 },
+        { productId: 3, companyId: "c1", dayKey: today, orderedQty: 4 },
+      ]);
+      const res = await comparePeriodsByProduct({
+        metric: "sales_units",
+        periodA: win(day(-3), day(-1)), // 3 complete days
+        periodB: win(today, today), // none
+        companyIds: ["c1"],
+      });
+      expect(res.unequalLengths).toBe(true);
+      expect(res.rankedBy).toBe("total");
+      expect(res.reasons.perDay).toBe("this period has no complete day yet");
+      for (const row of res.ranked) {
+        expect(row).toMatchObject({ bPerDay: null, perDayDelta: null, perDayDirection: null });
+        expect(row.reasons?.perDay).toBeUndefined(); // a PERIOD fact, never on a row
+      }
+      // |delta| order: p2 (-9) before p3 (+4).
+      expect(res.ranked.map((r) => r.productId)).toEqual([2, 3]);
+      expect(productReads()).toHaveLength(2); // no rate read for a period with no complete day
+    });
+
+    it("a LEDGER metric's rate read is the same predicate over the rate window (changeTime before the day after it)", async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      db.inventory_logs.aggregate.mockResolvedValue({ _min: { changeTime: new Date("2020-01-01T00:00:00.000Z") } } as any);
+      db.inventory_logs.groupBy.mockResolvedValue([{ productId: 1, _sum: { delta: -6 } }] as never);
+      db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+      await comparePeriodsByProduct({ metric: "outbound_units", periodA: LAST_WEEK, periodB: THIS_WEEK, companyIds: [] });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const windows = db.inventory_logs.groupBy.mock.calls.map((c) => (c[0] as any).where.changeTime);
+      expect(windows).toHaveLength(3);
+      expect(windows[2]).toEqual({
+        gte: new Date(`${THIS_WEEK.from}T00:00:00.000Z`),
+        lt: new Date(`${today}T00:00:00.000Z`),
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((db.inventory_logs.groupBy.mock.calls[2][0] as any).where.delta).toEqual({ lt: 0 });
+    });
+
+    it("an unclamped equal-length pair is unchanged: rate windows = the periods, per-day = total / days", async () => {
+      seedSalesTable([
+        START,
+        { productId: 1, companyId: "c1", dayKey: "2026-06-03", orderedQty: 10 },
+        { productId: 1, companyId: "c1", dayKey: "2026-06-10", orderedQty: 30 },
+      ]);
+      const A = win("2026-06-01", "2026-06-07");
+      const B = win("2026-06-08", "2026-06-14");
+      const res = await comparePeriodsByProduct({ metric: "sales_units", periodA: A, periodB: B, companyIds: ["c1"] });
+      expect(res.rateWindows).toEqual({ a: { from: A.from, to: A.to, days: 7 }, b: { from: B.from, to: B.to, days: 7 } });
+      expect(res.rankedBy).toBe("total");
+      const p1 = res.ranked.find((r) => r.productId === 1)!;
+      expect(p1).toMatchObject({ a: 10, b: 30, aPerDay: rate(10 / 7), bPerDay: rate(30 / 7) });
+      expect(productReads()).toHaveLength(2);
+    });
+  });
+});

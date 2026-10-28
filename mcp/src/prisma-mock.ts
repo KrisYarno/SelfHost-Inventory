@@ -21,6 +21,9 @@
  *     company names on every per-company sales coverage entry.
  *   - analyticsRebuildRun.findMany — assistant A2 (pack C7): the sales rebuild's run
  *     history behind the freshness note and get_data_freshness' lastSucceededAt.
+ *   - externalOrder.groupBy / productLink.findMany / bundleComponent.findMany — assistant
+ *     A2 FR1 (pack C14): the reorder order signal's link check (the caller's stores from its
+ *     orders, then the listings on them) and its unlinked-order count (externalOrder.count).
  *   - $queryRaw            — the /healthz SELECT 1 probe AND the reconciliation totals
  *     read, told apart by the statement text (see the dispatcher below).
  */
@@ -96,6 +99,8 @@ const prismaMock: any = {
     count: async () => 0,
     // Wave-2: get_order_pipeline reads orders through the PII allowlist.
     findMany: async () => [],
+    // A2 C14: the caller's stores, as the integrationIds of its own orders (ids only).
+    groupBy: async () => [],
   },
   // Wave-2: get_order_pipeline reads order items through the PII allowlist.
   externalOrderItem: {
@@ -113,6 +118,13 @@ const prismaMock: any = {
   // A2 C8: the company names on every per-company sales coverage entry ({ id, name } only,
   // over the caller's own companies).
   company: {
+    findMany: async () => [],
+  },
+  // A2 C14: the listings that make a no-fact product LINKED (internalProductId only).
+  productLink: {
+    findMany: async () => [],
+  },
+  bundleComponent: {
     findMany: async () => [],
   },
   // Wave-3 composites (get_product_overview / get_business_snapshot) fan out to the

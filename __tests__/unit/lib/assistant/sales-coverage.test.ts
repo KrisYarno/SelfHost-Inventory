@@ -513,6 +513,7 @@ describe("A2 C7 salesRebuildState — the newest 50 sales runs, lock-held skips 
     expect(await salesRebuildState()).toEqual({
       lastSucceededAt: "2026-10-27T03:08:00.000Z",
       latestAttemptFailedAfterSuccess: false,
+      lastSucceededStartedAt: "2026-10-27T03:00:00.000Z",
     });
   });
 
@@ -521,6 +522,7 @@ describe("A2 C7 salesRebuildState — the newest 50 sales runs, lock-held skips 
     expect(await salesRebuildState()).toEqual({
       lastSucceededAt: "2026-10-27T02:07:31.250Z",
       latestAttemptFailedAfterSuccess: false,
+      lastSucceededStartedAt: "2026-10-27T02:00:00.000Z",
     });
   });
 
@@ -540,6 +542,7 @@ describe("A2 C7 salesRebuildState — the newest 50 sales runs, lock-held skips 
     expect(await salesRebuildState()).toEqual({
       lastSucceededAt: "2026-10-26T02:06:00.000Z",
       latestAttemptFailedAfterSuccess: true,
+      lastSucceededStartedAt: "2026-10-26T02:00:00.000Z",
     });
   });
 
@@ -559,6 +562,7 @@ describe("A2 C7 salesRebuildState — the newest 50 sales runs, lock-held skips 
     expect(await salesRebuildState()).toEqual({
       lastSucceededAt: "2026-10-26T02:06:00.000Z",
       latestAttemptFailedAfterSuccess: false,
+      lastSucceededStartedAt: "2026-10-26T02:00:00.000Z",
     });
   });
 
@@ -576,9 +580,24 @@ describe("A2 C7 salesRebuildState — the newest 50 sales runs, lock-held skips 
       { status: "FAILED", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: at("2026-10-27T02:00:09.000Z"), skippedReason: null },
       { status: "ABORTED", startedAt: at("2026-10-27T03:00:00.000Z"), finishedAt: at("2026-10-27T03:00:00.000Z"), skippedReason: "lock-held" },
     ]);
-    expect(await salesRebuildState()).toEqual({ lastSucceededAt: null, latestAttemptFailedAfterSuccess: false });
+    const none = { lastSucceededAt: null, latestAttemptFailedAfterSuccess: false, lastSucceededStartedAt: null };
+    expect(await salesRebuildState()).toEqual(none);
     db.analyticsRebuildRun.findMany.mockResolvedValue(undefined as never); // a deep-mock read
-    expect(await salesRebuildState()).toEqual({ lastSucceededAt: null, latestAttemptFailedAfterSuccess: false });
+    expect(await salesRebuildState()).toEqual(none);
+  });
+
+  // A2 C14 (A2-OCC-2): the success's START is what bounds the complete sales days (a run
+  // that started on day D re-read every order updated before it) — internal, never shown.
+  it("lastSucceededStartedAt is the SAME (newest, non-skipped) success run's startedAt", async () => {
+    seedRuns([
+      success("2026-10-25T02:00:00.000Z", "2026-10-25T02:05:00.000Z"),
+      success("2026-10-26T02:59:59.000Z", "2026-10-26T03:06:00.000Z"),
+      { status: "ABORTED", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: at("2026-10-27T02:00:00.000Z"), skippedReason: "lock-held" },
+      { status: "FAILED", startedAt: at("2026-10-27T03:00:00.000Z"), finishedAt: at("2026-10-27T03:00:09.000Z"), skippedReason: null },
+    ]);
+    const state = await salesRebuildState();
+    expect(state.lastSucceededStartedAt).toBe("2026-10-26T02:59:59.000Z");
+    expect(state.lastSucceededAt).toBe("2026-10-26T03:06:00.000Z");
   });
 });
 
@@ -588,6 +607,7 @@ describe("A2 C7 salesFreshnessNote — a note only on material staleness", () =>
   const state = (lastSucceededAt: string | null, failed = false): SalesRebuildState => ({
     lastSucceededAt,
     latestAttemptFailedAfterSuccess: failed,
+    lastSucceededStartedAt: null, // A2 C14: internal — the note never reads it
   });
 
   it("no successful rebuild on record -> the missing-figures sentence", () => {

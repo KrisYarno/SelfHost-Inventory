@@ -41,7 +41,7 @@
 import prisma from "@/lib/prisma";
 import { Prisma, inventory_logs_logType } from "@prisma/client";
 import type { ResolvedWindow } from "@/lib/assistant/window";
-import { toDayKey, dayKeyStart, nextDayStart } from "@/lib/analytics/dates";
+import { toDayKey, dayKeyStart, nextDayStart, lastCompletedDayKey } from "@/lib/analytics/dates";
 import {
   PHYSICAL_OUTBOUND_WHERE,
   classifyWindowCoverage,
@@ -70,6 +70,10 @@ export interface ComparePeriodsOpts {
   periodB: ResolvedWindow;
   productId?: number;
   companyIds: string[];
+  /** A2 C14: the last COMPLETE day key; the per-day figures are measured through it.
+   *  Absent → yesterday UTC (`lastCompletedDayKey`). The tool passes an earlier day for a
+   *  sales metric whose nightly rebuild has not yet covered yesterday. */
+  rateThrough?: string;
 }
 
 // A2 Conventions: the ONE rate-rounding owner lives in metrics-contract (shared with the
@@ -104,20 +108,83 @@ export interface PerDayFigures {
  *  words as the totals' `reasons.pctChange`. */
 const PER_DAY_PCT_ZERO_REASON = "period A is zero — percent change undefined";
 
+/** A2 C14: the reason beside null per-day figures when a period has no complete day. */
+const PER_DAY_NO_COMPLETE_DAY_REASON = "this period has no complete day yet";
+
+/** A2 C14: one period's RATE window as echoed (`coverage.rateWindows`): the period's days
+ *  through the last complete day. `days` is 0 when the period has no complete day yet. */
+export interface RateWindowEcho {
+  from: string;
+  to: string;
+  days: number;
+}
+
+/**
+ * A2 C14 (A2-OCC-2): one period's rate window `[from, min(to, rateThrough)]`. Today's
+ * figures — and, before the nightly rebuild, yesterday's sales — are still arriving, so a
+ * period that reaches past the last complete day is measured for its per-day figure only
+ * through it. `clamped` = the window is shorter than the period (the numerator then needs
+ * its own read); `days < 1` = no complete day at all (no per-day figure).
+ */
+interface RateWindow {
+  window: ResolvedWindow;
+  days: number;
+  clamped: boolean;
+}
+
+/** Inclusive day-key count between two ISO day keys (lib/assistant/window.ts's rule);
+ *  0 or negative when `to` precedes `from`. */
+function inclusiveDays(from: string, to: string): number {
+  return Math.round((dayKeyStart(to).getTime() - dayKeyStart(from).getTime()) / 86_400_000) + 1;
+}
+
+function rateWindowOf(period: ResolvedWindow, rateThrough: string): RateWindow {
+  const rateTo = period.to <= rateThrough ? period.to : rateThrough;
+  const clamped = rateTo !== period.to;
+  return {
+    window: clamped ? { ...period, to: rateTo, days: inclusiveDays(period.from, rateTo) } : period,
+    days: clamped ? inclusiveDays(period.from, rateTo) : period.days,
+    clamped,
+  };
+}
+
+function rateWindowEcho(rate: RateWindow): RateWindowEcho {
+  return { from: rate.window.from, to: rate.window.to, days: Math.max(0, rate.days) };
+}
+
+/**
+ * A2 C14: the per-day NUMERATOR for one period. Null when the period has no complete day, or
+ * when the period itself is null (the zero-vs-unknown rule already decided it). An
+ * unclamped period divides its own total (no extra read); a clamped one divides the SAME
+ * metric re-read over its rate window — never a scaled total — where an absent sum is the
+ * measured 0 of the recorded rows (the period's own value already settled zero legality).
+ */
+function rateNumerator(
+  total: number | null,
+  rate: RateWindow,
+  rateSum: number | null | undefined,
+): number | null {
+  if (rate.days < 1 || total == null) return null;
+  return rate.clamped ? rateSum ?? 0 : total;
+}
+
 /**
  * The per-day figures for one (a, b) pair, plus the UNROUNDED change the sign, the counts
  * and the per-day ranking read (`rawChange`; null when either side is null) and whether the
  * zero-base reason applies (`aIsZero`: period A measured 0 with B measured — exactly when
  * `perDayPctChange` is null for that reason).
+ *
+ * A2 C14: `a` / `b` are the rate-window numerators (`rateNumerator`) and the divisors are
+ * the rate windows' complete days, never the periods' requested lengths.
  */
 function perDayFigures(
   a: number | null,
   b: number | null,
-  periodA: ResolvedWindow,
-  periodB: ResolvedWindow,
+  daysA: number,
+  daysB: number,
 ): { figures: PerDayFigures; rawChange: number | null; aIsZero: boolean } {
-  const aRaw = a == null ? null : a / periodA.days;
-  const bRaw = b == null ? null : b / periodB.days;
+  const aRaw = a == null ? null : a / daysA;
+  const bRaw = b == null ? null : b / daysB;
   const rawChange = aRaw == null || bRaw == null ? null : bRaw - aRaw;
   return {
     figures: {
@@ -140,6 +207,8 @@ export interface ComparePeriodsResult extends PerDayFigures {
   pctChange: number | null;
   reasons: Record<string, string>;
   unequalLengths: boolean;
+  /** A2 C14: the complete days each per-day figure is measured over. */
+  rateWindows: { a: RateWindowEcho; b: RateWindowEcho };
   /** FD2-2 disclosure: the per-company sales starts, present ONLY when they differ (a
    *  degraded window). It rides even when both periods are MEASURED — that is precisely
    *  the case a reader cannot otherwise see. Absent for the ledger metrics (no company
@@ -671,12 +740,21 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
   // read since birth — active+archived, because both periods are HISTORICAL facts.
   const approvedIds = await approvedProductIds({ includeArchived: true });
   const source = metricSource(metric, companyIds, productId, approvedIds);
+  // A2 C14: the per-day figures are measured over COMPLETE days only.
+  const rateThrough = opts.rateThrough ?? lastCompletedDayKey(new Date());
+  const rateA = rateWindowOf(periodA, rateThrough);
+  const rateB = rateWindowOf(periodB, rateThrough);
+  /** The SECOND read of the same metric, only for a period that reaches past rateThrough. */
+  const rateRead = (rate: RateWindow) =>
+    rate.clamped && rate.days >= 1 ? source.value(rate.window) : Promise.resolve(undefined);
 
-  const [starts, rawA, rawB, disclosure] = await Promise.all([
+  const [starts, rawA, rawB, disclosure, rateSumA, rateSumB] = await Promise.all([
     source.starts(),
     source.value(periodA),
     source.value(periodB),
     approvalDisclosure(comparisonCensusScope(metric, companyIds, periodA, periodB, productId)),
+    rateRead(rateA),
+    rateRead(rateB),
   ]);
 
   const reasons: Record<string, string> = {};
@@ -702,8 +780,15 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
     }
   }
   // A2 C3: the per-day figures beside the totals (the totals fields above are unchanged).
-  const perDay = perDayFigures(a, b, periodA, periodB);
+  // A2 C14: over each period's complete days (its rate window).
+  const perDay = perDayFigures(
+    rateNumerator(a, rateA, rateSumA),
+    rateNumerator(b, rateB, rateSumB),
+    rateA.days,
+    rateB.days,
+  );
   if (perDay.aIsZero) reasons.perDayPctChange = PER_DAY_PCT_ZERO_REASON;
+  if (rateA.days < 1 || rateB.days < 1) reasons.perDay = PER_DAY_NO_COMPLETE_DAY_REASON;
 
   // FD3-3: the delta is NEVER nulled for a coverage shift (the sums are measured) — it is
   // qualified, in both the reason vocabulary and the coverage block.
@@ -723,6 +808,7 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
     ...perDay.figures,
     reasons,
     unequalLengths: periodA.days !== periodB.days,
+    rateWindows: { a: rateWindowEcho(rateA), b: rateWindowEcho(rateB) },
     periodCoverage: { a: coverageA, b: coverageB },
     ...(coverageShift ? { coverageShift } : {}),
     ...companyCoverageDisclosure(starts, [coverageA, coverageB], [callerWideA, callerWideB]),
@@ -786,9 +872,12 @@ export interface ComparePeriodsByProductResult {
   reasons: Record<string, string>;
   periodCoverage: { a: WindowCoverage; b: WindowCoverage };
   unequalLengths: boolean;
-  /** A2 C3: how `ranked` is ordered and filtered. "per_day" exactly when the two periods
-   *  differ in length (totals of different lengths are not comparable); "total" otherwise,
-   *  which is the |delta| pipeline unchanged. */
+  /** A2 C14: the complete days each period's per-day figures are measured over. */
+  rateWindows: { a: RateWindowEcho; b: RateWindowEcho };
+  /** A2 C3: how `ranked` is ordered and filtered. A2 C14: "per_day" when both periods have
+   *  at least one complete day AND their rate windows or their requested lengths differ
+   *  (totals of different lengths are not comparable); "total" otherwise, which is the
+   *  |delta| pipeline unchanged. */
   rankedBy: "total" | "per_day";
   /** A2 C3 / C2: the comparable (ranked) products by the sign of the UNROUNDED ranking
    *  change — the per-day change when `rankedBy` is "per_day", else `delta` — counted
@@ -867,12 +956,30 @@ export async function comparePeriodsByProduct(opts: {
   periodB: ResolvedWindow;
   companyIds: string[];
   direction?: "increase" | "decrease";
+  /** A2 C14: the last COMPLETE day key (see `ComparePeriodsOpts.rateThrough`). */
+  rateThrough?: string;
 }): Promise<ComparePeriodsByProductResult> {
   const { metric, periodA, periodB, companyIds, direction } = opts;
   const approvedIds = await approvedProductIds({ includeArchived: true });
   const isSales = metric === "sales_units" || metric === "sales_revenue";
+  // A2 C14: the per-day figures are measured over COMPLETE days only.
+  const rateThrough = opts.rateThrough ?? lastCompletedDayKey(new Date());
+  const rateA = rateWindowOf(periodA, rateThrough);
+  const rateB = rateWindowOf(periodB, rateThrough);
+  /** One period's per-product sums, from the metric's own source. */
+  const sumsOver = (window: ResolvedWindow) =>
+    isSales
+      ? salesUnitsByProduct(companyIds, approvedIds, window, metric === "sales_units" ? "orderedQty" : "revenue")
+      : ledgerByProduct(
+          metric === "outbound_units" ? PHYSICAL_OUTBOUND_WHERE : INBOUND_UNITS_WHERE,
+          approvedIds,
+          window,
+        );
+  /** The SECOND per-product read, only for a period that reaches past rateThrough. */
+  const rateRead = (rate: RateWindow) =>
+    rate.clamped && rate.days >= 1 ? sumsOver(rate.window) : Promise.resolve(undefined);
 
-  const [starts, aByProduct, bByProduct, excludedUnapprovedProducts] = await Promise.all([
+  const [starts, aByProduct, bByProduct, excludedUnapprovedProducts, rateSumsA, rateSumsB] = await Promise.all([
     // FD-1: the SAME coverage source the scalar mode resolves — including the per-company
     // starts for a sales metric. A by_product row carrying a measured 0 under a staggered
     // membership is precisely the manufactured zero this rule exists to prevent, per
@@ -885,21 +992,11 @@ export async function comparePeriodsByProduct(opts: {
           undefined,
           approvedIds,
         ).then((dataStart) => ({ dataStart })),
-    isSales
-      ? salesUnitsByProduct(companyIds, approvedIds, periodA, metric === "sales_units" ? "orderedQty" : "revenue")
-      : ledgerByProduct(
-          metric === "outbound_units" ? PHYSICAL_OUTBOUND_WHERE : INBOUND_UNITS_WHERE,
-          approvedIds,
-          periodA,
-        ),
-    isSales
-      ? salesUnitsByProduct(companyIds, approvedIds, periodB, metric === "sales_units" ? "orderedQty" : "revenue")
-      : ledgerByProduct(
-          metric === "outbound_units" ? PHYSICAL_OUTBOUND_WHERE : INBOUND_UNITS_WHERE,
-          approvedIds,
-          periodB,
-        ),
+    sumsOver(periodA),
+    sumsOver(periodB),
     excludedUnapprovedProductCount(comparisonCensusScope(metric, companyIds, periodA, periodB)),
+    rateRead(rateA),
+    rateRead(rateB),
   ]);
 
   // Source-level coverage, computed ONCE per period (the erratum's all-or-nothing).
@@ -909,6 +1006,9 @@ export async function comparePeriodsByProduct(opts: {
   // Reuse the scalar reason vocabulary verbatim: same strings, same meanings.
   resolvePeriod(null, periodA, "a", starts, metric, reasons);
   resolvePeriod(null, periodB, "b", starts, metric, reasons);
+  // A2 C14: a period with no complete day has no per-day figure on any row — a PERIOD fact,
+  // so it rides in the envelope vocabulary (never on a row; `reasonsFor` reads a/b only).
+  if (rateA.days < 1 || rateB.days < 1) reasons.perDay = PER_DAY_NO_COMPLETE_DAY_REASON;
   // FD4-3: the rows get a SNAPSHOT of that vocabulary, taken while it is still PERIOD
   // reasons alone. The rows used to alias this very object, so `reasons.delta` — added
   // below, after the split — appeared on every unranked row, each of which has a null
@@ -959,7 +1059,11 @@ export async function comparePeriodsByProduct(opts: {
 
   // A2 C3: periods of different lengths are ranked and filtered by the per-day change —
   // their totals are not comparable. Equal lengths keep the |delta| pipeline untouched.
-  const rankedBy: "total" | "per_day" = periodA.days !== periodB.days ? "per_day" : "total";
+  // A2 C14: "different lengths" includes the rate windows (one period ending today, the
+  // other in the past), and a period with no complete day has no per-day figure to rank by.
+  const bothComplete = rateA.days >= 1 && rateB.days >= 1;
+  const rankedBy: "total" | "per_day" =
+    bothComplete && (rateA.days !== rateB.days || periodA.days !== periodB.days) ? "per_day" : "total";
   const ranked: ComparePeriodsProductRow[] = [];
   const unranked: ComparePeriodsProductRow[] = [];
   /** Each ranked row's UNROUNDED per-day change: the per-day sort, filter and counts read
@@ -968,7 +1072,13 @@ export async function comparePeriodsByProduct(opts: {
   for (const productId of productIds) {
     const a = valueOf(coverageA, callerWideA, aByProduct, productId);
     const b = valueOf(coverageB, callerWideB, bByProduct, productId);
-    const perDay = perDayFigures(a, b, periodA, periodB);
+    // A2 C14: over each period's complete days (its rate window).
+    const perDay = perDayFigures(
+      rateNumerator(a, rateA, rateSumsA?.get(productId)),
+      rateNumerator(b, rateB, rateSumsB?.get(productId)),
+      rateA.days,
+      rateB.days,
+    );
     if (a == null || b == null) {
       // The null period's per-day figure is null too; the measured side keeps its rate.
       unranked.push({
@@ -1061,6 +1171,7 @@ export async function comparePeriodsByProduct(opts: {
     reasons,
     periodCoverage: { a: coverageA, b: coverageB },
     unequalLengths: periodA.days !== periodB.days,
+    rateWindows: { a: rateWindowEcho(rateA), b: rateWindowEcho(rateB) },
     rankedBy,
     directionCounts,
     ...companyCoverageDisclosure(starts, [coverageA, coverageB], [callerWideA, callerWideB]),

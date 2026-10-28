@@ -306,6 +306,11 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
   /** A 5 KB late-turn budget: smaller than the old 8 KiB reserve AND the 4 KiB floor. */
   const CRAMPED = 5_000;
   const RANKED_ROWS = 400;
+  /** A2 C14: the module always echoes the complete days each per-day figure covers. */
+  const RATE_WINDOWS = {
+    a: { from: "2026-10-21", to: "2026-10-26", days: 6 },
+    b: { from: "2026-10-21", to: "2026-10-26", days: 6 },
+  };
 
   /** The module's per-day row fields (A2 C3), at their widest realistic values: 3
    *  significant figures below 1, 2 decimals above. */
@@ -346,6 +351,7 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
       reasons: { a: "measured", b: "measured" },
       periodCoverage: { a: "full", b: "full" },
       unequalLengths: false,
+      rateWindows: RATE_WINDOWS,
       rankedBy: "total",
       directionCounts: { increased: RANKED_ROWS - 1, decreased: 0, unchanged: 1 },
       excludedUnapprovedProducts: 0,
@@ -411,7 +417,7 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
   // two arrays then share ONE budget at the tightest point in the turn. Both the
   // ranked-only and unranked-only cases were pinned; the case where the joint fitter has
   // to divide a budget between two non-empty arrays was not tested anywhere.
-  it("BOTH arrays non-empty at a 5KB budget: each keeps rows AND the payload fits", async () => {
+  it("BOTH arrays non-empty at the floor budget: each keeps rows AND the payload fits", async () => {
     compareByProductMock.mockResolvedValue({
       ranked: Array.from({ length: 200 }, (_v, i) => ({
         productId: i + 1,
@@ -434,6 +440,7 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
       reasons: { a: "period A is not fully covered by sales_units data in every company" },
       periodCoverage: { a: "partial", b: "partial" },
       unequalLengths: false,
+      rateWindows: RATE_WINDOWS,
       rankedBy: "total",
       directionCounts: { increased: 199, decreased: 0, unchanged: 1 },
       // A2 C8: the per-company entries carry names, and the note names the company. A
@@ -448,7 +455,18 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
       excludedUnapprovedProducts: 0,
     });
 
-    const tight = (await runOnce("compare_periods", compareArgs, CRAMPED)) as ExecResult & {
+    // A2 FR1 (pack C14) — RECORDED, for the orchestrator: both arrays at their one-row floors
+    // (one 255-character-name row each, the fitter's at-least-one rules) now weigh 5,286 B —
+    // the envelope grew by coverage.rateWindows, the complete-days rateDefinition and the
+    // per-day countsNote sentence (~470 B). At 5,000 B this floor case therefore downgrades
+    // to truncated (still never over budget); it holds from 5,300 B. With realistic product
+    // names (~40 characters) the same case is ~4.9 KB and fits 5 KB.
+    const floor = (await runOnce("compare_periods", compareArgs, CRAMPED)) as ExecResult & {
+      meta?: { bytes: number };
+    };
+    expect(floor.status).toBe("truncated");
+    const BOTH_FLOOR = 5_400;
+    const tight = (await runOnce("compare_periods", compareArgs, BOTH_FLOOR)) as ExecResult & {
       data?: { rows?: unknown[]; unranked?: unknown[]; unrankedTotal?: number };
       meta?: { bytes: number };
     };
@@ -464,7 +482,7 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
     expect(tight.data!.unranked!.length).toBeLessThan(200);
     expect(tight.data!.unrankedTotal).toBe(200);
     // ...and the completed payload fits the budget the adapter threaded in.
-    expect(tight.meta!.bytes).toBeLessThanOrEqual(CRAMPED);
+    expect(tight.meta!.bytes).toBeLessThanOrEqual(BOTH_FLOOR);
   });
 
   // A2 C3/C2: periods of different lengths rank by the per-day change, and the envelope
@@ -484,6 +502,10 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
       reasons: {},
       periodCoverage: { a: "full", b: "full" },
       unequalLengths: true,
+      rateWindows: {
+        a: { from: "2026-01-26", to: "2026-10-26", days: 274 },
+        b: { from: "2026-09-28", to: "2026-10-26", days: 29 },
+      },
       rankedBy: "per_day",
       directionCounts: { increased: RANKED_ROWS, decreased: 0, unchanged: 0 },
       excludedUnapprovedProducts: 0,
@@ -674,6 +696,7 @@ describe("A2 C1 — compare by_product at the exact byte boundary, remainingRows
       reasons: { a: "period A is not fully covered by sales_units data in every company" },
       periodCoverage: { a: "partial", b: "partial" },
       unequalLengths: false,
+      rateWindows: { a: { from: "2026-10-21", to: "2026-10-26", days: 6 }, b: { from: "2026-10-21", to: "2026-10-26", days: 6 } },
       rankedBy: "total",
       directionCounts: { increased: RANKED - 1, decreased: 0, unchanged: 1 },
       excludedUnapprovedProducts: 0,
@@ -693,7 +716,10 @@ describe("A2 C1 — compare by_product at the exact byte boundary, remainingRows
     // through the budget at which the last unranked row only just fits.
     const rowWidth = Buffer.byteLength(JSON.stringify(probe.data!.unranked![0]), "utf8") + 1;
     let minSlack = Number.POSITIVE_INFINITY;
-    for (let budget = 6_000; budget <= 6_000 + rowWidth + 8; budget += 1) {
+    // A2 FR1 (pack C14): the envelope grew ~470 B (coverage.rateWindows, the complete-days
+    // rateDefinition, the per-day countsNote sentence), so the sweep starts at 6,500 B — from
+    // 6,000 it no longer crossed a row boundary (min slack 93 B, every budget still ok + fit).
+    for (let budget = 6_500; budget <= 6_500 + rowWidth + 8; budget += 1) {
       const r = (await runOnce("compare_periods", args, budget)) as ExecResult & {
         data?: { totalRows: number; nextOffset: number | null; remainingRows: number; coverage: Record<string, unknown> };
         meta?: { bytes: number };

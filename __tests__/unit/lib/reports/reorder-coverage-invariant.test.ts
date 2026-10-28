@@ -422,10 +422,12 @@ describe("the TOOL envelope surfaces the coverage additions (G2-7)", () => {
 
     // A2 (pack C4/C5) adds labelled keys BESIDE the buckets — the costed label and the
     // order-signal coverage — and nothing else; the six buckets themselves are unchanged.
+    // A2 FR1 (pack C14): plus the one sentence per order-signal reason code on the result.
     const {
       costedNote,
       orderSignalWindow,
       orderSignalCoverage,
+      orderSignalReasons,
       sectionScopes,
       orderSignalDefinition,
       ...buckets
@@ -443,6 +445,7 @@ describe("the TOOL envelope surfaces the coverage additions (G2-7)", () => {
     expect(orderSignalWindow).toMatchObject({ days: 90 });
     // A caller with no companies (testCtx's default): the records cannot tell.
     expect(orderSignalCoverage).toBe("none");
+    expect(orderSignalReasons).toEqual({ no_company_access: "no company access" });
     expect(sectionScopes).toEqual({ rows: "global", orderSignal: "company" });
     expect(typeof orderSignalDefinition).toBe("string");
     expect(data.coverageNote).toBe(REORDER_COVERAGE_NOTE);

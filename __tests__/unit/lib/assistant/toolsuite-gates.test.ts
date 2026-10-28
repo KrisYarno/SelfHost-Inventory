@@ -824,15 +824,22 @@ describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)
   });
 
   // Assistant A2 (pack C4): the benign proxy's empty population never reaches the order
-  // signal, so the fixture above cannot see that read. Seeded: one approved product with no
-  // outbound (an unsized row) and a recorded fact start — the signal's reads really run,
+  // signal, so the fixture above cannot see that read. Seeded: approved products with no
+  // outbound (unsized rows) and a recorded fact start — the signal's reads really run,
   // and they still write nothing.
-  it("reorder_report's ORDER-SIGNAL read path runs and issues zero write calls (A2 C4)", async () => {
+  // A2 FR1 (pack C14): and the LINK check runs too, over a REAL mix — product 1 is linked on
+  // the caller's one store (a measured 0), product 2 is not (null + not_linked) — plus the
+  // window's unlinked-order count; none of it writes, and none of it reads `integration`.
+  it("reorder_report's ORDER-SIGNAL read path runs and issues zero write calls (A2 C4 + C14)", async () => {
     prismaCtl.__reset();
     prismaCtl.__overrides["product.findMany"] = [
       { id: 1, name: "Gate Unsized", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
+      { id: 2, name: "Gate Unlinked", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
     ];
     prismaCtl.__overrides["productSalesFact.aggregate"] = { _min: { dayKey: "2020-01-01" } };
+    prismaCtl.__overrides["externalOrder.groupBy"] = [{ integrationId: "gate-store" }];
+    prismaCtl.__overrides["productLink.findMany"] = [{ internalProductId: 1 }];
+    prismaCtl.__overrides["externalOrder.count"] = 2;
     const result = await assistantTools.reorder_report.run({}, CTX);
     expect(result.status).toBe("ok");
     if (result.status !== "ok") return;
@@ -845,11 +852,37 @@ describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)
     );
     expect(signalRead).toBeDefined();
     expect((signalRead!.args as { where: { companyId: unknown } }).where.companyId).toEqual({ in: CTX.companyIds });
-    expect((result.data as { rows: Array<Record<string, unknown>> }).rows[0]).toMatchObject({
-      productId: 1,
+    const rows = (result.data as { rows: Array<Record<string, unknown>> }).rows;
+    expect(rows.find((row) => row.productId === 1)).toMatchObject({
       orderSignal: { orderedUnits: 0, orders: 0 },
       outOfStockWithOrders: false,
     });
+    // Non-vacuity: the same real run sees an unlinked product — never a measured 0.
+    expect(rows.find((row) => row.productId === 2)).toMatchObject({
+      orderSignal: null,
+      orderSignalReason: "not_linked",
+      outOfStockWithOrders: null,
+    });
+    const coverage = (result.data as { coverage: Record<string, unknown> }).coverage;
+    expect(coverage.orderSignalUnlinkedOrders).toBe(2);
+    // The link reads ran (stores from the caller's ORDERS, the listing reads ids only)...
+    const linkReads = prismaCtl.__calls.filter(
+      (c) =>
+        (c.model === "externalOrder" && (c.method === "groupBy" || c.method === "count")) ||
+        c.model === "productLink" ||
+        c.model === "bundleComponent",
+    );
+    expect(linkReads.map((c) => `${c.model}.${c.method}`).sort()).toEqual([
+      "bundleComponent.findMany",
+      "externalOrder.count",
+      "externalOrder.groupBy",
+      "productLink.findMany",
+    ]);
+    for (const c of linkReads.filter((call) => call.method === "findMany")) {
+      expect((c.args as { select: unknown }).select).toEqual({ internalProductId: true });
+    }
+    // ...and NO read touched the Integration table (the encrypted store keys live there).
+    expect(prismaCtl.__calls.some((c) => c.model === "integration")).toBe(false);
     expect(writeCalls()).toEqual([]);
   });
 

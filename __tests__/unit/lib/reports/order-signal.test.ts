@@ -14,6 +14,12 @@
  *    member company not recording ("company");
  *  - the reason is get_sales' own sentence (salesCoverageReason), never a new paraphrase;
  *  - empty products or companies: no query at all.
+ *
+ * A2 pack C14 (A2-OCC-1): a product with no fact row is checked for a LINK on the caller's
+ * stores (a ProductLink, or a bundle component of a listing there), the stores coming from
+ * the caller's own order records (never the Integration table); the window's orders with an
+ * unattributable line are counted. Both only when coverage is not `none` and some product
+ * has no fact row.
  */
 
 import { mockReset, type DeepMockProxy } from "jest-mock-extended";
@@ -25,6 +31,8 @@ jest.mock("@/lib/prisma", () => {
   return { __esModule: true, default: md() };
 });
 
+import fs from "fs";
+import path from "path";
 import prisma from "@/lib/prisma";
 import { orderSignal, ORDER_SIGNAL_WINDOW_DAYS } from "@/lib/reports/order-signal";
 import { salesCoverageReason } from "@/lib/assistant/sales-coverage";
@@ -237,5 +245,278 @@ describe("A2 C4 orderSignal — sums and coverage", () => {
     // Non-vacuity: with the unapproved product in scope the start WOULD be 2019 (full).
     seed({ approvedActiveIds: [1, 99], facts });
     expect((await orderSignal([1], ["c1"], WINDOW)).windowCoverage).toBe("full");
+  });
+});
+
+// ===========================================================================
+// A2 pack C14 (A2-OCC-1) — an unlinked product or order line is never a measured 0
+// ===========================================================================
+
+type Order = {
+  companyId: string;
+  integrationId: string;
+  internalStatus: string;
+  externalCreatedAt: Date | null;
+  createdAt: Date;
+  items: Array<{ productLinkId: string | null; productLink: { isBundle: boolean; internalProductId: number | null } | null }>;
+};
+type Link = { internalProductId: number | null; integrationId: string; isBundle?: boolean };
+
+/** An item predicate, evaluated over a seeded order line (the shapes C14 names only). */
+function itemMatches(item: Order["items"][number], where: Record<string, any>): boolean {
+  if (Array.isArray(where.OR)) return where.OR.some((w: Record<string, any>) => itemMatches(item, w));
+  if ("productLinkId" in where) return item.productLinkId === where.productLinkId;
+  if (where.productLink) {
+    const link = item.productLink;
+    return (
+      link != null &&
+      Object.entries(where.productLink).every(([key, value]) => (link as Record<string, unknown>)[key] === value)
+    );
+  }
+  throw new Error(`unexpected item predicate ${JSON.stringify(where)}`);
+}
+
+/** A date predicate ({ gte, lt } or null) over one column. */
+function dateMatches(value: Date | null, where: any): boolean {
+  if (where === null) return value === null;
+  if (value === null) return false;
+  return (where.gte == null || value >= where.gte) && (where.lt == null || value < where.lt);
+}
+
+/** The order-record + listing reads, answered FROM seeded rows and honoring each where. */
+function seedOrders(opts: { orders: Order[]; links?: Link[]; components?: Link[] }) {
+  db.externalOrder.groupBy.mockImplementation((async (args: { by: string[]; where: Record<string, any> }) => {
+    const ids = new Set(
+      opts.orders.filter((o) => args.where.companyId.in.includes(o.companyId)).map((o) => o.integrationId),
+    );
+    return Array.from(ids, (integrationId) => ({ integrationId }));
+  }) as never);
+  const listingRead = (rows: Link[]) =>
+    (async (args: { where: Record<string, any> }) =>
+      rows
+        .filter(
+          (row) =>
+            args.where.internalProductId.in.includes(row.internalProductId) &&
+            (args.where.integrationId ?? args.where.productLink.integrationId).in.includes(row.integrationId) &&
+            (args.where.isBundle === undefined || (row.isBundle ?? false) === args.where.isBundle),
+        )
+        .map((row) => ({ internalProductId: row.internalProductId }))) as never;
+  db.productLink.findMany.mockImplementation(listingRead(opts.links ?? []));
+  db.bundleComponent.findMany.mockImplementation(listingRead(opts.components ?? []));
+  db.externalOrder.count.mockImplementation((async (args: { where: Record<string, any> }) => {
+    const w = args.where;
+    return opts.orders.filter(
+      (o) =>
+        w.companyId.in.includes(o.companyId) &&
+        o.internalStatus !== w.internalStatus.not &&
+        w.OR.some(
+          (branch: Record<string, any>) =>
+            dateMatches(o.externalCreatedAt, branch.externalCreatedAt) &&
+            (branch.createdAt == null || dateMatches(o.createdAt, branch.createdAt)),
+        ) &&
+        o.items.some((item) => itemMatches(item, w.items.some)),
+    ).length;
+  }) as never);
+}
+
+/** A covered caller (c1 recording since 2020) where product 1 has a fact and 2-4 do not. */
+const COVERED: Fact[] = [
+  { productId: 9, companyId: "c1", dayKey: "2020-01-01", orderedQty: 1, orderCount: 1 },
+  { productId: 1, companyId: "c1", dayKey: "2026-09-01", orderedQty: 4, orderCount: 2 },
+];
+const at = (iso: string) => new Date(iso);
+const order = (over: Partial<Order> & { items?: Order["items"] }): Order => ({
+  companyId: "c1",
+  integrationId: "store-c1",
+  internalStatus: "pending",
+  externalCreatedAt: at("2026-10-01T12:00:00.000Z"),
+  createdAt: at("2026-10-01T12:00:00.000Z"),
+  items: [{ productLinkId: "link-ok", productLink: { isBundle: false, internalProductId: 1 } }],
+  ...over,
+});
+const UNMAPPED = [{ productLinkId: null, productLink: null }];
+
+describe("A2 C14 orderSignal — the link check", () => {
+  it("a REAL mix: a linked no-fact product is not in `unlinked`, an unlinked one is (non-vacuity)", async () => {
+    seed({ approvedActiveIds: [1, 2, 3, 9], facts: COVERED });
+    seedOrders({
+      orders: [order({})],
+      links: [{ internalProductId: 2, integrationId: "store-c1" }],
+    });
+    const out = await orderSignal([1, 2, 3], ["c1"], WINDOW);
+    expect(out.windowCoverage).toBe("full");
+    expect(out.byProduct.get(1)).toEqual({ orderedUnits: 4, orders: 2 });
+    // 2 is linked on c1's store; 3 has no listing anywhere; 1 has a fact row (never checked).
+    expect(Array.from(out.unlinked)).toEqual([3]);
+  });
+
+  it("a product linked ONLY through a bundle component of a listing on the caller's store is linked", async () => {
+    seed({ approvedActiveIds: [1, 2, 3, 9], facts: COVERED });
+    seedOrders({
+      orders: [order({})],
+      components: [{ internalProductId: 3, integrationId: "store-c1" }],
+    });
+    const out = await orderSignal([2, 3], ["c1"], WINDOW);
+    expect(Array.from(out.unlinked)).toEqual([2]);
+  });
+
+  it("a BUNDLE listing whose own internalProductId names the product is not a direct link (attribution credits direct links only when not a bundle)", async () => {
+    seed({ approvedActiveIds: [1, 2, 3, 9], facts: COVERED });
+    seedOrders({
+      orders: [order({})],
+      links: [
+        { internalProductId: 2, integrationId: "store-c1", isBundle: true }, // drift: bundle row carrying a product id
+        { internalProductId: 3, integrationId: "store-c1", isBundle: false },
+      ],
+    });
+    const out = await orderSignal([2, 3], ["c1"], WINDOW);
+    expect(Array.from(out.unlinked)).toEqual([2]);
+  });
+
+  it("a product linked ONLY on another company's store is not linked (stores come from the caller's orders)", async () => {
+    seed({ approvedActiveIds: [1, 2, 3, 9], facts: COVERED });
+    seedOrders({
+      orders: [order({}), order({ companyId: "c2", integrationId: "store-c2" })],
+      links: [{ internalProductId: 2, integrationId: "store-c2" }],
+      components: [{ internalProductId: 3, integrationId: "store-c2" }],
+    });
+    const out = await orderSignal([2, 3], ["c1"], WINDOW);
+    expect(Array.from(out.unlinked).sort()).toEqual([2, 3]);
+    // Non-vacuity: for a caller in c2 the same listings ARE linked.
+    const both = await orderSignal([2, 3], ["c1", "c2"], WINDOW);
+    expect(both.unlinked.size).toBe(0);
+  });
+
+  it("the reads: stores by integrationId over the caller's orders; each listing read selects internalProductId only", async () => {
+    seed({ approvedActiveIds: [1, 2, 3, 9], facts: COVERED });
+    seedOrders({ orders: [order({})] });
+    await orderSignal([1, 2, 3], ["c1"], WINDOW);
+    expect(db.externalOrder.groupBy.mock.calls.map((c) => c[0])).toEqual([
+      { by: ["integrationId"], where: { companyId: { in: ["c1"] } } },
+    ]);
+    expect(db.productLink.findMany.mock.calls.map((c) => c[0])).toEqual([
+      {
+        where: { internalProductId: { in: [2, 3] }, integrationId: { in: ["store-c1"] }, isBundle: false },
+        select: { internalProductId: true },
+      },
+    ]);
+    expect(db.bundleComponent.findMany.mock.calls.map((c) => c[0])).toEqual([
+      {
+        where: { internalProductId: { in: [2, 3] }, productLink: { integrationId: { in: ["store-c1"] } } },
+        select: { internalProductId: true },
+      },
+    ]);
+  });
+
+  it("no order on any of the caller's stores: every no-fact product is unlinked, no listing read", async () => {
+    seed({ approvedActiveIds: [1, 2, 3, 9], facts: COVERED });
+    seedOrders({ orders: [], links: [{ internalProductId: 2, integrationId: "store-c1" }] });
+    const out = await orderSignal([2, 3], ["c1"], WINDOW);
+    expect(Array.from(out.unlinked).sort()).toEqual([2, 3]);
+    expect(db.productLink.findMany).not.toHaveBeenCalled();
+    expect(db.bundleComponent.findMany).not.toHaveBeenCalled();
+  });
+
+  it("runs ONLY when coverage is not none AND some product has no fact row", async () => {
+    // Every requested product has a fact row: nothing to check.
+    seed({ approvedActiveIds: [1, 9], facts: COVERED });
+    seedOrders({ orders: [order({ items: UNMAPPED })] });
+    const allFacts = await orderSignal([1], ["c1"], WINDOW);
+    expect(allFacts.unlinked.size).toBe(0);
+    expect(allFacts.unlinkedOrders).toBe(0);
+    // Coverage none (no facts at all): nothing to check either — absence is already unknown.
+    mockReset(db);
+    seed({ approvedActiveIds: [2], facts: [] });
+    seedOrders({ orders: [order({ items: UNMAPPED })] });
+    const none = await orderSignal([2], ["c1"], WINDOW);
+    expect(none.windowCoverage).toBe("none");
+    expect(none.unlinked.size).toBe(0);
+    expect(none.unlinkedOrders).toBe(0);
+    for (const read of [db.externalOrder.groupBy, db.externalOrder.count, db.productLink.findMany, db.bundleComponent.findMany]) {
+      expect(read).not.toHaveBeenCalled();
+    }
+    // Empty inputs: the short-circuit carries the two keys too.
+    const empty = await orderSignal([], ["c1"], WINDOW);
+    expect(empty.unlinked.size).toBe(0);
+    expect(empty.unlinkedOrders).toBe(0);
+  });
+
+  it("partial coverage runs the check too (a no-fact product there is not_linked or not_recorded)", async () => {
+    seed({
+      approvedActiveIds: [1, 2],
+      facts: [{ productId: 1, companyId: "c1", dayKey: "2026-09-15", orderedQty: 5, orderCount: 2 }],
+    });
+    seedOrders({ orders: [order({})] });
+    const out = await orderSignal([1, 2], ["c1"], WINDOW);
+    expect(out.windowCoverage).toBe("partial");
+    expect(Array.from(out.unlinked)).toEqual([2]);
+  });
+});
+
+describe("A2 C14 orderSignal — the window's orders with an unattributable line", () => {
+  it("the count's where clause is exactly C14's (attribution's skip + its unattributed branches, the rebuild's day predicate)", async () => {
+    seed({ approvedActiveIds: [1, 2, 9], facts: COVERED });
+    seedOrders({ orders: [order({})] });
+    await orderSignal([1, 2], ["c1", "c2"], WINDOW);
+    expect(db.externalOrder.count.mock.calls.map((c) => c[0])).toEqual([
+      {
+        where: {
+          companyId: { in: ["c1", "c2"] },
+          internalStatus: { not: "cancelled" },
+          OR: [
+            { externalCreatedAt: { gte: at("2026-07-30T00:00:00.000Z"), lt: at("2026-10-28T00:00:00.000Z") } },
+            {
+              externalCreatedAt: null,
+              createdAt: { gte: at("2026-07-30T00:00:00.000Z"), lt: at("2026-10-28T00:00:00.000Z") },
+            },
+          ],
+          items: {
+            some: { OR: [{ productLinkId: null }, { productLink: { isBundle: false, internalProductId: null } }] },
+          },
+        },
+      },
+    ]);
+  });
+
+  it("counts an unmapped line and a productless listing in the window; never a cancelled, out-of-window, other-company or attributable order", async () => {
+    seed({ approvedActiveIds: [1, 2, 9], facts: COVERED });
+    seedOrders({
+      orders: [
+        order({ items: UNMAPPED }), // counted: no listing
+        order({ items: [{ productLinkId: "link-null", productLink: { isBundle: false, internalProductId: null } }] }), // counted
+        // counted: createdAt fallback inside the window (externalCreatedAt null)
+        order({ externalCreatedAt: null, createdAt: at("2026-10-27T23:59:59.000Z"), items: UNMAPPED }),
+        order({ internalStatus: "cancelled", items: UNMAPPED }), // attribution skips it
+        order({ externalCreatedAt: at("2026-07-29T23:59:59.000Z"), items: UNMAPPED }), // before the window
+        order({ externalCreatedAt: at("2026-10-28T00:00:00.000Z"), items: UNMAPPED }), // after it
+        // externalCreatedAt outside wins over a createdAt inside (the rebuild's sale day)
+        order({ externalCreatedAt: at("2026-06-01T00:00:00.000Z"), createdAt: at("2026-10-01T00:00:00.000Z"), items: UNMAPPED }),
+        order({ companyId: "c2", integrationId: "store-c2", items: UNMAPPED }), // another company
+        order({}), // every line attributable
+        // a bundle listing with no product is attributed through its frozen snapshot
+        order({ items: [{ productLinkId: "bundle", productLink: { isBundle: true, internalProductId: null } }] }),
+      ],
+    });
+    const out = await orderSignal([1, 2], ["c1"], WINDOW);
+    expect(out.unlinkedOrders).toBe(3);
+  });
+
+  it("is 0, with no read, when every requested product has a fact row", async () => {
+    seed({ approvedActiveIds: [1, 9], facts: COVERED });
+    seedOrders({ orders: [order({ items: UNMAPPED })] });
+    expect((await orderSignal([1], ["c1"], WINDOW)).unlinkedOrders).toBe(0);
+    expect(db.externalOrder.count).not.toHaveBeenCalled();
+  });
+});
+
+describe("A2 C14 — no read touches the Integration table (source pin)", () => {
+  it("order-signal.ts names no `integration` model or relation (the store ids are order columns)", () => {
+    const src = fs.readFileSync(path.resolve(__dirname, "../../../../lib/reports/order-signal.ts"), "utf8");
+    // `integrationId` (an order / listing COLUMN) is fine; the model or the relation is not.
+    expect(src).not.toMatch(/\bintegration\b(?!Id)/);
+    expect(src).not.toMatch(/prisma\s*\.\s*integration\b/i);
+    expect(src).not.toMatch(/\binclude\s*:/);
+    // Non-vacuity: the file really does derive the stores from integrationId.
+    expect(src).toMatch(/by: \["integrationId"\]/);
   });
 });

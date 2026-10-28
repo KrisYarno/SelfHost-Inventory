@@ -63,6 +63,9 @@ jest.mock("@/lib/prisma", () => ({
       count: jest.fn(async () => 0),
       // Wave-2: get_order_pipeline reads orders through the PII allowlist.
       findMany: jest.fn(async () => []),
+      // A2 FR1 (pack C14): the reorder order signal's stores (integrationIds of the
+      // caller's own orders — never the Integration table).
+      groupBy: jest.fn(async () => []),
     },
     // Wave-2: get_order_pipeline reads order items through the PII allowlist.
     externalOrderItem: { findMany: jest.fn(async () => []) },
@@ -72,6 +75,9 @@ jest.mock("@/lib/prisma", () => ({
     // the caller's companies (company.findMany, { id, name } only).
     location: { findMany: jest.fn(async () => []), findUnique: jest.fn(async () => null) },
     company: { findMany: jest.fn(async () => []) },
+    // A2 FR1 (pack C14): the listings that make a no-fact product LINKED.
+    productLink: { findMany: jest.fn(async () => []) },
+    bundleComponent: { findMany: jest.fn(async () => []) },
     // Reconciliation lane (pack C5.1): get_order_reconciliation reads the recording
     // boundary through orderAttributionAttempt and the drill-down reads audit_logs.
     // Mirrored EXACTLY in mcp/src/prisma-mock.ts — the parity test at the bottom of this
@@ -822,6 +828,7 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
       costedNote,
       orderSignalWindow,
       orderSignalCoverage,
+      orderSignalReasons,
       sectionScopes,
       orderSignalDefinition,
       ...buckets
@@ -837,6 +844,8 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     expect(costedNote).toContain("costed counts the suggested rows that have a cost price");
     expect(orderSignalWindow.days).toBe(90);
     expect(orderSignalCoverage).toBe("none"); // this token's owner has no companies
+    // A2 C14: the unsized row's short reason code, explained once.
+    expect(orderSignalReasons).toEqual({ no_company_access: "no company access" });
     expect(sectionScopes).toEqual({ rows: "global", orderSignal: "company" });
     expect(orderSignalDefinition).toContain("never used to suggest a quantity");
     expect(toolResult.data.coverageNote).toContain("healthy = none of the urgency tiers applies");
@@ -858,9 +867,16 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
         ? [
             { id: 5, name: "CJC/IPA 10mg", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
             { id: 6, name: "Shelf Sitter", costPrice: null, product_locations: [{ quantity: 4 }], reorderConfig: null },
+            // A2 FR1: out of stock, no fact row, no listing on the caller's store.
+            { id: 7, name: "Unlinked Lot", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
           ]
-        : [{ id: 5 }, { id: 6 }];
+        : [{ id: 5 }, { id: 6 }, { id: 7 }];
     });
+    // A2 FR1 (pack C14): c1's one store (from its orders) lists product 6, not product 7; 4
+    // orders in the window carry a line on an unlinked listing.
+    p.externalOrder.groupBy.mockResolvedValueOnce([{ integrationId: "store-c1" }]);
+    p.productLink.findMany.mockResolvedValueOnce([{ internalProductId: 6 }]);
+    p.externalOrder.count.mockResolvedValueOnce(4);
     // c1 has recorded since 2019 => full coverage: silence is a measured zero.
     p.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: "2019-01-01" } });
     p.productSalesFact.groupBy.mockImplementation(async (args: Record<string, unknown>) =>
@@ -885,16 +901,24 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
       outOfStockWithOrders: true,
     });
     expect(byId[6]).toMatchObject({ orderSignal: { orderedUnits: 0, orders: 0 }, outOfStockWithOrders: false });
+    // A2 C14: unlinked -> unknown, never a measured 0; the code is explained once.
+    expect(byId[7]).toMatchObject({ orderSignal: null, orderSignalReason: "not_linked", outOfStockWithOrders: null });
+    expect(data.coverage.orderSignalReasons).toEqual({
+      not_linked: "not linked to a store listing in your companies, so its orders cannot be attributed",
+    });
+    expect(data.coverage.orderSignalUnlinkedOrders).toBe(4);
+    expect(data.coverage.orderSignalUnlinkedNote).toContain("4 orders in this window");
     expect(data.outOfStockWithOrdersProducts).toEqual([
       { productId: 5, productName: "CJC/IPA 10mg", orderedUnits: 14, orders: 7 },
     ]);
     expect(data.outOfStockWithOrdersOmitted).toBe(0);
     expect(data.counts).toEqual({
       suggested: { OUT: 0, CRITICAL: 0, REORDER_NOW: 0, APPROACHING: 0 },
-      unavailable: { no_demand_signal: 2, insufficient_history: 0 },
-      unavailableAtZeroStock: 1,
+      unavailable: { no_demand_signal: 3, insufficient_history: 0 },
+      unavailableAtZeroStock: 2,
       outOfStockWithOrders: 1,
-      orderSignalUnknown: 0,
+      outOfStockWithOrdersUnknown: 1,
+      orderSignalUnknown: 1,
     });
     expect(data.countsNote).toContain("never count rows yourself");
     expect(data.coverage.orderSignalCoverage).toBe("full");
@@ -904,7 +928,7 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const signalRead = (p.productSalesFact.groupBy.mock.calls as any[]).map((c) => c[0]).find((a) => a.by[0] === "productId");
     expect(signalRead.where.companyId).toEqual({ in: ["c1"] });
-    expect(signalRead.where.productId).toEqual({ in: [5, 6] });
+    expect(signalRead.where.productId).toEqual({ in: [5, 6, 7] });
   });
 
   it("get_sales: coverage carries salesDataStart + windowCoverage + rowsNote (C6)", async () => {
@@ -982,6 +1006,16 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
         { productId: 1, _sum: { orderedQty: 40 } }, // +30
         { productId: 2, _sum: { orderedQty: 4 } }, // -6
       ])
+      // A2 C14: both 30-day periods end TODAY, so each per-day numerator is a second read
+      // over its rate window (through yesterday, 29 complete days) — today's units excluded.
+      .mockResolvedValueOnce([
+        { productId: 1, _sum: { orderedQty: 9 } },
+        { productId: 2, _sum: { orderedQty: 10 } },
+      ])
+      .mockResolvedValueOnce([
+        { productId: 1, _sum: { orderedQty: 29 } },
+        { productId: 2, _sum: { orderedQty: 4 } },
+      ])
       .mockResolvedValueOnce([]); // post-pagination firstSaleDayKey lookup
     p.product.findMany.mockResolvedValue([
       { id: 1, name: "Grower", deletedAt: null },
@@ -1010,7 +1044,11 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     // A2 C3/C2: equal lengths keep the |delta| ranking and say so; the counts cross too.
     expect(toolResult.data.rankedBy).toBe("total");
     expect(toolResult.data.counts).toEqual({ ranked: 2, increased: 1, decreased: 1, unchanged: 0, unranked: 0 });
-    expect(toolResult.data.rows[0]).toMatchObject({ aPerDay: 0.333, bPerDay: 1.33, perDayDelta: 1, perDayDirection: "increase" });
+    // A2 C14: over the complete days only (9 / 29 and 29 / 29), the windows echoed.
+    expect(toolResult.data.rows[0]).toMatchObject({ aPerDay: 0.31, bPerDay: 1, perDayDelta: 0.69, perDayDirection: "increase" });
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    expect(toolResult.data.coverage.rateWindows.a).toMatchObject({ to: yesterday, days: 29 });
+    expect(toolResult.data.coverage.rateWindows.b).toMatchObject({ to: yesterday, days: 29 });
   });
 
   // FD2-2 on the WIRE: degraded per-company coverage governs zero legality only, so the
@@ -1274,7 +1312,10 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     p.inventory_logs.aggregate
       .mockResolvedValueOnce({ _min: { changeTime: new Date("2020-01-01T00:00:00.000Z") } })
       .mockResolvedValueOnce({ _sum: { delta: -10 } })
-      .mockResolvedValueOnce({ _sum: { delta: -25 } });
+      .mockResolvedValueOnce({ _sum: { delta: -25 } })
+      // A2 C14: the rate-window re-reads (through yesterday — today's ledger rows excluded).
+      .mockResolvedValueOnce({ _sum: { delta: -9 } })
+      .mockResolvedValueOnce({ _sum: { delta: -23 } });
 
     const toolResult = await roundTrip("compare_periods", {
       metric: "outbound_units",
@@ -1292,16 +1333,23 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     expect(toolResult.data.coverage.coverageShift).toBeUndefined();
     // A2 C3 on the WIRE: the totals payload carries the per-day figures and their definition
     // (no rankedBy, no counts — those are by_product's).
+    // A2 C14: over the 29 complete days of each period (9 / 29 vs 23 / 29).
     expect(toolResult.data).toMatchObject({
-      aPerDay: 0.333,
-      bPerDay: 0.833,
-      perDayDelta: 0.5,
-      perDayPctChange: 1.5,
+      aPerDay: 0.31,
+      bPerDay: 0.793,
+      perDayDelta: 0.483,
       perDayDirection: "increase",
     });
+    expect(toolResult.data.perDayPctChange).toBeCloseTo(14 / 9, 10);
     expect(toolResult.data.coverage.rateDefinition).toContain(
       "perDayDirection is the sign of the unrounded change.",
     );
+    expect(toolResult.data.coverage.rateDefinition).toContain("over its COMPLETE days");
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    expect(toolResult.data.coverage.rateWindows).toEqual({
+      a: { from: toolResult.data.periodA.from, to: yesterday, days: 29 },
+      b: { from: toolResult.data.periodB.from, to: yesterday, days: 29 },
+    });
     expect(toolResult.data.rankedBy).toBeUndefined();
     expect(toolResult.data.counts).toBeUndefined();
   });

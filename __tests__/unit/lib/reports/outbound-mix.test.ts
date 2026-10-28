@@ -857,7 +857,10 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
           opts.companyStarts ?? [{ companyId: "c1", _min: { dayKey: opts.dataStart } }],
         ) as never;
       }
-      return Promise.resolve(call++ === 0 ? opts.a : opts.b) as never;
+      // A2 C14: a period ending today is re-read over its rate window (through yesterday), in
+      // the same A-then-B order — so reads alternate A, B (, rate A, rate B). The fixture has
+      // no separate "today" facts, so each rate read returns its period's sums.
+      return Promise.resolve(call++ % 2 === 0 ? opts.a : opts.b) as never;
     });
     db.product.findMany.mockResolvedValue((opts.names ?? []) as never);
   }
@@ -1536,20 +1539,26 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
   describe("A2 C3/C2 — per-day figures, rankedBy, counts and the rate definition", () => {
     const NINE_MONTHS = { from: "2025-09-01", to: "2026-06-01" }; // 274 day-keys
     const LAST_MONTH = { from: "2026-06-02", to: "2026-07-01" }; // 30 day-keys
+    // A2 C14 (A2-OCC-2 / OCC-8 / OCC-9): complete days only, a calendar rate, and the
+    // direction counts follow the per-day change under per-day ranking.
     const RATE_DEFINITION =
-      "per day = a period's total divided by its length in days (periodA.days, periodB.days); " +
-      "values of 1 or more are rounded to 2 decimals, smaller values to 3 significant " +
-      "figures, so a small non-zero rate never shows as 0. perDayDirection is the sign of the " +
-      "unrounded change. When the two periods differ in length, rows are ranked and filtered " +
-      "by the per-day change, because totals of periods of different lengths are not " +
-      "comparable; delta and pctChange stay the change in totals. A period that ends today " +
-      "counts today as a full day although today's figures are still partial, so its per-day " +
-      "figure is slightly low. Under partial company coverage these are rates of what was " +
+      "per day = a period's total over its COMPLETE days divided by those days " +
+      "(coverage.rateWindows): a period that reaches today or later is measured for its " +
+      "per-day figure only through the last complete day, because today's figures — and, " +
+      "before the nightly rebuild, yesterday's sales — are still arriving. Values of 1 or more " +
+      "are rounded to 2 decimals, smaller values to 3 significant figures, so a small non-zero " +
+      "rate never shows as 0; perDayDirection is the sign of the unrounded change. When the " +
+      "rate periods differ in length, rows are ranked and filtered by the per-day change, " +
+      "because totals of periods of different lengths are not comparable; delta and pctChange " +
+      "stay the change in the full periods' totals. This is a calendar rate — the low-stock " +
+      "and reorder rates divide by the days a product's outbound data covers, so they are not " +
+      "directly comparable to it. Under partial company coverage these are rates of what was " +
       "recorded.";
     const COUNTS_NOTE =
       "ranked counts the rows this call ranks (after any direction filter); increased, " +
       "decreased and unchanged count every product with activity in either period that both " +
       "periods can measure, before that filter; unranked counts the products not comparable. " +
+      "Under rankedBy 'per_day', increased and decreased follow the per-day change, not delta. " +
       "Use these for how many; never count rows yourself.";
 
     /** Nine months vs last month, fully covered:
@@ -1668,12 +1677,13 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       expect(first.counts).toEqual({ ranked: 1, increased: 1, decreased: 0, unchanged: 0, unranked: 1 });
       expect((first.counts as Record<string, number>).unranked).toBe(first.unrankedTotal);
       // The unranked row carries the per-day figure it HAS and null for the one it lacks.
+      // A2 C14: the 7-day periods end today, so the per-day figure is over 6 complete days.
       expect((first.unranked as Array<Record<string, unknown>>)[0]).toMatchObject({
         productId: 2,
         a: null,
         b: 12,
         aPerDay: null,
-        bPerDay: 1.71, // 12 / 7
+        bPerDay: 2, // 12 / 6
         perDayDelta: null,
         perDayPctChange: null,
         perDayDirection: null,
@@ -1712,7 +1722,12 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       expect(data.rankedBy).toBe("total");
       const rows = data.rows as Array<Record<string, unknown>>;
       expect(rows.map((r) => r.productId)).toEqual([1, 3, 2]);
-      expect(rows[0]).toMatchObject({ aPerDay: 1.43, bPerDay: 4.29, perDayDelta: 2.86, perDayDirection: "increase" });
+      // A2 C14: both 7-day periods end today — 6 complete days each, so still ranked by total.
+      expect(rows[0]).toMatchObject({ aPerDay: 1.67, bPerDay: 5, perDayDelta: 3.33, perDayDirection: "increase" });
+      expect((data.coverage as Record<string, unknown>).rateWindows).toMatchObject({
+        a: { days: 6 },
+        b: { days: 6 },
+      });
       expect(data.counts).toEqual({ ranked: 3, increased: 2, decreased: 1, unchanged: 0, unranked: 0 });
     });
 
@@ -1793,13 +1808,14 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     it("the description's two amended sentences, exactly (and the old flag sentence is gone)", () => {
       const d = assistantTools.compare_periods.description.replace(/\s+/g, " ");
       expect(d).toContain(
-        "for PER-PRODUCT deltas ranked server-side by |delta| (by the per-day change when the " +
-          "periods differ in length) — that is the ONE call",
+        "for PER-PRODUCT deltas ranked server-side by |delta| (by the per-day change when " +
+          "rankedBy is 'per_day') — that is the ONE call",
       );
       expect(d).toContain(
         "When periodA and periodB differ in length (unequalLengths), compare the per-day figures " +
-          "(aPerDay, bPerDay, perDayDelta, perDayDirection) — rows are then ranked and filtered by " +
-          "the per-day change (rankedBy: 'per_day').",
+          "(aPerDay, bPerDay, perDayDelta, perDayDirection). Rows are ranked and filtered by the " +
+          "per-day change (rankedBy: 'per_day') when the lengths differ, or when one period " +
+          "reaches today or later and so has fewer complete days (coverage.rateWindows).",
       );
       expect(d).not.toContain("unequalLengths flags mismatched window lengths (comparison still runs).");
     });

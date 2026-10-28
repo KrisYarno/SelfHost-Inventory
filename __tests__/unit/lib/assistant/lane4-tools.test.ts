@@ -1130,3 +1130,156 @@ describe("A2 C7 — get_sales carries the sales-freshness note", () => {
     expect(d).toContain("coverage.lastRebuildAt is when the last rebuild attempt finished, whatever its outcome.");
   });
 });
+
+// ===========================================================================
+// A2 pack C14 (A2-OCC-2) — compare_periods measures its per-day figures through the last
+// COMPLETE day: yesterday for a ledger metric; for a sales metric, also never past the day
+// before the newest successful sales rebuild STARTED (one run-history read serves both
+// that and the freshness note). The module is REAL here, over deep-mocked prisma.
+// ===========================================================================
+
+describe("A2 C14 — compare_periods' rate windows (the tool's last complete day)", () => {
+  const DAY = 86_400_000;
+  const day = (n: number) => new Date(Date.now() + n * DAY).toISOString().slice(0, 10);
+  /** Today at hh:00 UTC. */
+  const todayAt = (hh: number) => new Date(`${day(0)}T${String(hh).padStart(2, "0")}:00:00.000Z`);
+  const success = (startedAt: Date) => ({
+    status: "SUCCEEDED",
+    startedAt,
+    finishedAt: new Date(startedAt.getTime() + 5 * 60_000),
+    skippedReason: null,
+  });
+  const RATE_DEFINITION =
+    "per day = a period's total over its COMPLETE days divided by those days " +
+    "(coverage.rateWindows): a period that reaches today or later is measured for its per-day " +
+    "figure only through the last complete day, because today's figures — and, before the " +
+    "nightly rebuild, yesterday's sales — are still arriving. Values of 1 or more are rounded " +
+    "to 2 decimals, smaller values to 3 significant figures, so a small non-zero rate never " +
+    "shows as 0; perDayDirection is the sign of the unrounded change. When the rate periods " +
+    "differ in length, rows are ranked and filtered by the per-day change, because totals of " +
+    "periods of different lengths are not comparable; delta and pctChange stay the change in " +
+    "the full periods' totals. This is a calendar rate — the low-stock and reorder rates " +
+    "divide by the days a product's outbound data covers, so they are not directly comparable " +
+    "to it. Under partial company coverage these are rates of what was recorded.";
+
+  /** c1 recording since 2020; 7 units on every day of the last fortnight, today included. */
+  function seedDailySales() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.aggregate.mockImplementation((args: any) => {
+      if (args._min) return Promise.resolve({ _min: { dayKey: "2020-01-01" } }) as never;
+      const { gte, lte } = args.where.dayKey as { gte: string; lte: string };
+      const days = Math.round((Date.parse(`${lte}T00:00:00Z`) - Date.parse(`${gte}T00:00:00Z`)) / DAY) + 1;
+      return Promise.resolve({ _sum: { orderedQty: 7 * days } }) as never;
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.productSalesFact.groupBy.mockImplementation((args: any) =>
+      Promise.resolve(args.by[0] === "companyId" ? [{ companyId: "c1", _min: { dayKey: "2020-01-01" } }] : []) as never,
+    );
+    db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+    db.company.findMany.mockResolvedValue([{ id: "c1", name: "Acme" }] as never);
+  }
+  const WEEK_TO_TODAY = { from: day(-6), to: day(0) };
+  const LAST_WEEK = { from: day(-13), to: day(-7) };
+
+  async function compare(args: Record<string, unknown>, ctx = CTX): Promise<Record<string, any>> {
+    const result = await assistantTools.compare_periods.run(args, ctx);
+    if (result.status !== "ok") throw new Error(`not ok: ${JSON.stringify(result)}`);
+    return result.data as Record<string, any>;
+  }
+
+  it("a sales period after a rebuild that started at 03:00 today: rate window through yesterday", async () => {
+    seedDailySales();
+    db.analyticsRebuildRun.findMany.mockResolvedValue([success(todayAt(3))] as never);
+    const data = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
+    expect(data.coverage.rateWindows).toEqual({
+      a: { ...LAST_WEEK, days: 7 },
+      b: { from: WEEK_TO_TODAY.from, to: day(-1), days: 6 },
+    });
+    expect(data.b).toBe(49); // the total keeps today
+    expect(data.bPerDay).toBe(7); // 42 units over 6 complete days
+    expect(data.coverage.rateDefinition).toBe(RATE_DEFINITION);
+  });
+
+  it("before the nightly run (the newest success started yesterday): sales rate windows end the day before yesterday", async () => {
+    seedDailySales();
+    db.analyticsRebuildRun.findMany.mockResolvedValue([success(new Date(todayAt(3).getTime() - DAY))] as never);
+    const data = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
+    expect(data.coverage.rateWindows.b).toEqual({ from: WEEK_TO_TODAY.from, to: day(-2), days: 5 });
+    expect(data.bPerDay).toBe(7);
+    // ONE run-history read serves both the rate day and the freshness note.
+    expect(db.analyticsRebuildRun.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("no success on record, or a throwing read: yesterday (and the figures intact)", async () => {
+    seedDailySales();
+    db.analyticsRebuildRun.findMany.mockResolvedValue([] as never);
+    const none = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
+    expect(none.coverage.rateWindows.b.to).toBe(day(-1));
+    expect(none.coverage.salesFreshnessNote).toBe(
+      "No successful sales rebuild is on record — order figures may be missing.",
+    );
+    db.analyticsRebuildRun.findMany.mockRejectedValue(new Error("analytics_rebuild_runs unreachable") as never);
+    const thrown = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
+    expect(thrown.coverage.rateWindows.b.to).toBe(day(-1));
+    expect(thrown.coverage).not.toHaveProperty("salesFreshnessNote");
+    expect(thrown.b).toBe(49);
+  });
+
+  it("a ledger metric: yesterday, whatever the sales rebuild did — and NO run-history read", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    db.inventory_logs.aggregate.mockImplementation((args: any) =>
+      Promise.resolve(
+        args._min ? { _min: { changeTime: new Date("2020-01-01T00:00:00.000Z") } } : { _sum: { delta: -12 } },
+      ) as never,
+    );
+    db.product.findMany.mockResolvedValue([] as never);
+    db.analyticsRebuildRun.findMany.mockResolvedValue([success(new Date(todayAt(3).getTime() - 3 * DAY))] as never);
+    const data = await compare({ metric: "outbound_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
+    expect(data.coverage.rateWindows.b).toEqual({ from: WEEK_TO_TODAY.from, to: day(-1), days: 6 });
+    expect(data.bPerDay).toBe(2); // the second read's 12 units over 6 complete days
+    expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+  });
+
+  it("by_product carries rateWindows + the rate definition, and the counts note names per-day ranking", async () => {
+    seedDailySales();
+    db.analyticsRebuildRun.findMany.mockResolvedValue([success(todayAt(3))] as never);
+    const data = await compare({
+      metric: "sales_units",
+      periodA: LAST_WEEK,
+      periodB: WEEK_TO_TODAY,
+      groupBy: "product",
+    });
+    expect(data.mode).toBe("by_product");
+    // Equal requested lengths, 7 vs 6 complete days: ranked by the per-day change.
+    expect(data.rankedBy).toBe("per_day");
+    expect(data.coverage.rateWindows).toEqual({
+      a: { ...LAST_WEEK, days: 7 },
+      b: { from: WEEK_TO_TODAY.from, to: day(-1), days: 6 },
+    });
+    expect(data.coverage.rateDefinition).toBe(RATE_DEFINITION);
+    expect(data.countsNote).toBe(
+      "ranked counts the rows this call ranks (after any direction filter); increased, " +
+        "decreased and unchanged count every product with activity in either period that both " +
+        "periods can measure, before that filter; unranked counts the products not comparable. " +
+        "Under rankedBy 'per_day', increased and decreased follow the per-day change, not delta. " +
+        "Use these for how many; never count rows yourself.",
+    );
+  });
+
+  it("a caller with no companies: no run-history read; the rate windows still end yesterday", async () => {
+    seedDailySales();
+    const data = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY }, CTX_NO_COMPANY);
+    expect(data.coverage.rateWindows.b.to).toBe(day(-1));
+    expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("A2 C14 (A2-OCC-12) — get_valuation says whose retail price unitRetailCents is", () => {
+  it("the description appends the stored-retail sentence after the money-totals rule", () => {
+    const d = assistantTools.get_valuation.description.replace(/\s+/g, " ");
+    expect(d).toContain(
+      "nothing is on hand — never a free or unpriced product. unitRetailCents is the one stored " +
+        "retail price (synced from one store listing), not necessarily each store's live price.",
+    );
+  });
+});

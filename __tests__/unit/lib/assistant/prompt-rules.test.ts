@@ -673,9 +673,10 @@ const C12_TRUTHFULNESS = [
     "counts block, or a coverage count) and keep its scope — an alert count is not a count " +
     "of every product. Never count rows or items yourself; if no returned count covers it, " +
     "list the items without a number.",
+  // A2 C14 (A2-OCC-7): the fallback no longer reads as a claim about rates.
   "- When two periods differ in length, compare the per-day figures a tool returned; if " +
-    "none were returned, give both totals with their lengths and say they are not " +
-    "comparable as rates.",
+    "none were returned, give both totals with their lengths and say that totals over " +
+    "different lengths cannot be compared directly.",
   "- A product out of stock with recorded orders (outOfStockWithOrders): say it is out of " +
     "stock now, give its ordered units and orders for the window, and say the report " +
     "cannot suggest a quantity, so it needs your decision.",
@@ -702,6 +703,14 @@ describe("A2 C12 TRUTHFULNESS: returned counts, per-day rates, the order flag, u
       expect(p.split(rule).length - 1).toBe(1);
       expect(bulletStartingWith(openingOf(rule))).toBe(rule);
     }
+  });
+
+  it("A2 C14 (A2-OCC-7): the per-day fallback says totals over different lengths cannot be compared directly", () => {
+    expect(p).toContain(
+      "if none were returned, give both totals with their lengths and say that totals over " +
+        "different lengths cannot be compared directly.",
+    );
+    expect(p).not.toContain("not comparable as rates");
   });
 
   it("sits immediately after the 'Totals come from the grain' bullet, in order, before 'State only'", () => {
@@ -827,6 +836,11 @@ const S8_COMPARE = {
   reasons: {},
   periodCoverage: { a: "full", b: "full" },
   unequalLengths: true,
+  // A2 C14: the complete days each period's per-day figure is measured over.
+  rateWindows: {
+    a: { from: "2026-07-01", to: "2026-07-30", days: 30 },
+    b: { from: "2026-08-01", to: "2026-08-07", days: 7 },
+  },
   rankedBy: "per_day",
   directionCounts: { increased: 1, decreased: 0, unchanged: 0 },
   excludedUnapprovedProducts: 0,

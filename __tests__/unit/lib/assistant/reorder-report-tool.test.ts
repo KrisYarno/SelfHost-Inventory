@@ -17,6 +17,9 @@
  * definitions, the costed label, the mixed-scope envelope and its worst-case size.
  * A2 M4 (pack C1, C7): remainingRows, and the sales-freshness note on the order figures
  * (the REAL run-history read over a mocked delegate) — both inside the worst case.
+ * A2 FR1 (pack C14): an unlinked product is `not_linked`, never a measured 0; the window's
+ * unlinked orders are counted; short reason codes explained once in the envelope; the
+ * unknown-flag count — all through the REAL order-signal module, inside the worst case.
  */
 
 // The report is stubbed; the module's constants (definitions, notes) are the real ones.
@@ -36,6 +39,11 @@ jest.mock("@/lib/prisma", () => ({
     company: { findMany: jest.fn() },
     // A2 C7: the sales rebuild run history behind the freshness note.
     analyticsRebuildRun: { findMany: jest.fn() },
+    // A2 C14: the caller's stores (from its orders), the listing reads behind "linked", and
+    // the window's orders with an unattributable line.
+    externalOrder: { groupBy: jest.fn(), count: jest.fn() },
+    productLink: { findMany: jest.fn() },
+    bundleComponent: { findMany: jest.fn() },
   },
 }));
 jest.mock("@/lib/products", () => ({ __esModule: true, getProductsWithQuantities: jest.fn() }));
@@ -109,6 +117,19 @@ beforeEach(() => {
   // A2 C7: a 2-hour-old successful sales rebuild — fresh, so no note unless a test says so.
   db.analyticsRebuildRun.findMany.mockReset();
   db.analyticsRebuildRun.findMany.mockResolvedValue([salesRun("SUCCEEDED", 2)]);
+  // A2 C14: by default every product is LINKED on the caller's one store and no order has an
+  // unattributable line, so a missing fact row under full coverage is a measured 0 unless a
+  // test seeds otherwise (seedListings).
+  db.externalOrder.groupBy.mockReset();
+  db.externalOrder.groupBy.mockResolvedValue([{ integrationId: "store-1" }]);
+  db.externalOrder.count.mockReset();
+  db.externalOrder.count.mockResolvedValue(0);
+  db.productLink.findMany.mockReset();
+  db.productLink.findMany.mockImplementation(async (args: { where: { internalProductId: { in: number[] } } }) =>
+    args.where.internalProductId.in.map((internalProductId) => ({ internalProductId })),
+  );
+  db.bundleComponent.findMany.mockReset();
+  db.bundleComponent.findMany.mockResolvedValue([]);
 });
 
 describe("reorder_report tool", () => {
@@ -135,9 +156,11 @@ describe("reorder_report tool", () => {
     expect(data.rows[1]).toEqual({
       ...REPORT.rows[1],
       orderSignal: null,
-      orderSignalReason: "no company access",
+      // A2 C14: a short code on the row; its sentence rides once in coverage.
+      orderSignalReason: "no_company_access",
       outOfStockWithOrders: false, // stock 5 on hand
     });
+    expect(data.coverage.orderSignalReasons).toEqual({ no_company_access: "no company access" });
   });
 
   it("paginates with the Lane-6 limit/offset shape", async () => {
@@ -419,14 +442,19 @@ describe("A2 C4 — partial and absent coverage", () => {
     // A recorded sum stands (a true statement about recorded facts)...
     expect(rowOf(data, 2)).toMatchObject({ orderSignal: { orderedUnits: 4, orders: 2 }, outOfStockWithOrders: true });
     expect(rowOf(data, 2)).not.toHaveProperty("orderSignalRecordedSince");
-    // ...a missing one is UNKNOWN, in get_sales' own words over the same inputs.
+    // ...a missing one is UNKNOWN (A2 C14: a short code on the row), explained once in the
+    // envelope in get_sales' own words over the same inputs.
     expect(rowOf(data, 5)).toEqual({
       ...unsized(5, 0),
       orderSignal: null,
-      orderSignalReason: salesCoverageReason("2020-01-01", window.from, perCompany),
+      orderSignalReason: "not_recorded",
       outOfStockWithOrders: null,
     });
+    expect(data.coverage.orderSignalReasons).toEqual({
+      not_recorded: salesCoverageReason("2020-01-01", window.from, perCompany),
+    });
     expect(data.counts.outOfStockWithOrders).toBe(1); // a lower bound
+    expect(data.counts.outOfStockWithOrdersUnknown).toBe(1); // ...and the gap in it
     expect(data.counts.orderSignalUnknown).toBe(1);
   });
 
@@ -447,8 +475,11 @@ describe("A2 C4 — partial and absent coverage", () => {
     // Without a fact row the window kind is unknown too — never a zero.
     expect(rowOf(data, 5)).toMatchObject({
       orderSignal: null,
-      orderSignalReason: salesCoverageReason(start, signalWindow().from),
+      orderSignalReason: "not_recorded",
       outOfStockWithOrders: null,
+    });
+    expect(data.coverage.orderSignalReasons).toEqual({
+      not_recorded: salesCoverageReason(start, signalWindow().from),
     });
     // One company: nothing staggered, so no per-company list and no measured note.
     expect(data.coverage).not.toHaveProperty("orderSignalCompanyCoverage");
@@ -476,32 +507,47 @@ describe("A2 C4 — partial and absent coverage", () => {
     expect(data.coverage).not.toHaveProperty("orderSignalCompanyCoverageNote");
   });
 
-  it("no company access: null + 'no company access' on every unsized row, the count null, NO read", async () => {
+  it("no company access: null + 'no_company_access' on every unsized row, the count null, NO read", async () => {
     mockReport.mockResolvedValue(reportOf([unsized(2, 0), unsized(5, 3)]));
     const { data } = await run({}, []);
     expect(rowOf(data, 2)).toMatchObject({
       orderSignal: null,
-      orderSignalReason: "no company access",
+      orderSignalReason: "no_company_access",
       outOfStockWithOrders: null,
     });
-    expect(rowOf(data, 5)).toMatchObject({ orderSignal: null, outOfStockWithOrders: false });
+    expect(rowOf(data, 5)).toMatchObject({
+      orderSignal: null,
+      orderSignalReason: "no_company_access",
+      outOfStockWithOrders: false,
+    });
+    expect(data.coverage.orderSignalReasons).toEqual({ no_company_access: "no company access" });
     expect(data.coverage.orderSignalCoverage).toBe("none");
     expect(data.counts.outOfStockWithOrders).toBeNull();
+    // A2 C14: only the out-of-stock row's flag is unknown; the in-stock one is false.
+    expect(data.counts.outOfStockWithOrdersUnknown).toBe(1);
     expect(data.counts.orderSignalUnknown).toBe(2);
     expect(data.outOfStockWithOrdersProducts).toEqual([]);
+    expect(data.coverage).not.toHaveProperty("orderSignalUnlinkedOrders");
     expect(db.product.findMany).not.toHaveBeenCalled();
     expect(db.productSalesFact.aggregate).not.toHaveBeenCalled();
     expect(db.productSalesFact.groupBy).not.toHaveBeenCalled();
+    expect(db.externalOrder.groupBy).not.toHaveBeenCalled();
+    expect(db.externalOrder.count).not.toHaveBeenCalled();
   });
 
   it("no unsized row at all: nothing needed a signal — a measured 0, no coverage class, NO read", async () => {
     mockReport.mockResolvedValue(reportOf([suggested(1, "OUT"), suggested(2, "REORDER_NOW")]));
     const { data } = await run({}, ["c1"]);
     expect(data.counts.outOfStockWithOrders).toBe(0);
+    // A2 C14: the unknown-flag count follows the same rule (the D5 signalNeeded rule).
+    expect(data.counts.outOfStockWithOrdersUnknown).toBe(0);
     expect(data.counts.orderSignalUnknown).toBe(0);
     expect(data.coverage).not.toHaveProperty("orderSignalCoverage");
+    expect(data.coverage).not.toHaveProperty("orderSignalReasons");
+    expect(data.coverage).not.toHaveProperty("orderSignalUnlinkedOrders");
     expect(data.outOfStockWithOrdersProducts).toEqual([]);
     expect(db.productSalesFact.groupBy).not.toHaveBeenCalled();
+    expect(db.externalOrder.groupBy).not.toHaveBeenCalled();
   });
 
   it("companies with no order records at all: none, get_sales' no-data reason", async () => {
@@ -509,11 +555,14 @@ describe("A2 C4 — partial and absent coverage", () => {
     mockReport.mockResolvedValue(reportOf([unsized(2, 0)]));
     const { data } = await run({}, ["c1"]);
     expect(data.coverage.orderSignalCoverage).toBe("none");
-    expect(rowOf(data, 2)).toMatchObject({
-      orderSignal: null,
-      orderSignalReason: salesCoverageReason(null, signalWindow().from),
+    expect(rowOf(data, 2)).toMatchObject({ orderSignal: null, orderSignalReason: "not_recorded" });
+    expect(data.coverage.orderSignalReasons).toEqual({
+      not_recorded: salesCoverageReason(null, signalWindow().from),
     });
     expect(data.counts.outOfStockWithOrders).toBeNull();
+    // Coverage none: absence is already unknown, so no link check and no unlinked count.
+    expect(db.externalOrder.groupBy).not.toHaveBeenCalled();
+    expect(db.externalOrder.count).not.toHaveBeenCalled();
   });
 
   it("an UNAPPROVED product's older fact does not move the start (it would have read full)", async () => {
@@ -531,6 +580,137 @@ describe("A2 C4 — partial and absent coverage", () => {
     // Non-vacuity: were 99 in the approved-active scope, the same rows would read full.
     seedFacts({ approvedActiveIds: [2, 5, 99], facts });
     expect((await run({}, ["c1"])).data.coverage.orderSignalCoverage).toBe("full");
+  });
+});
+
+// ===========================================================================
+// A2 pack C14 (A2-OCC-1 / OCC-3 / OCC-5) — an unlinked product is never a measured 0; the
+// unlinked orders are counted; short codes explained once; the unknown-flag count
+// ===========================================================================
+
+/** The caller's stores (by company, from its orders), its listings, and the window's
+ *  unlinked-order count — answered honoring the where clauses the module sends. */
+function seedListings(opts: {
+  stores: Record<string, string[]>;
+  links?: Array<{ productId: number; store: string }>;
+  components?: Array<{ productId: number; store: string }>;
+  unlinkedOrders?: number;
+}) {
+  db.externalOrder.groupBy.mockImplementation(async (args: { where: { companyId: { in: string[] } } }) =>
+    Object.entries(opts.stores)
+      .filter(([companyId]) => args.where.companyId.in.includes(companyId))
+      .flatMap(([, stores]) => stores)
+      .map((integrationId) => ({ integrationId })),
+  );
+  const listingRead =
+    (rows: Array<{ productId: number; store: string }>) => async (args: { where: Record<string, any> }) =>
+      rows
+        .filter(
+          (row) =>
+            args.where.internalProductId.in.includes(row.productId) &&
+            (args.where.integrationId ?? args.where.productLink.integrationId).in.includes(row.store),
+        )
+        .map((row) => ({ internalProductId: row.productId }));
+  db.productLink.findMany.mockImplementation(listingRead(opts.links ?? []));
+  db.bundleComponent.findMany.mockImplementation(listingRead(opts.components ?? []));
+  db.externalOrder.count.mockResolvedValue(opts.unlinkedOrders ?? 0);
+}
+
+const NOT_LINKED_SENTENCE =
+  "not linked to a store listing in your companies, so its orders cannot be attributed";
+
+describe("A2 C14 — not_linked: an unlinked product is never a measured 0", () => {
+  /** c1 has recorded since 2020 (full coverage); products 3 and 4 have no fact in the window. */
+  const FULL = {
+    approvedActiveIds: [3, 4],
+    facts: [{ productId: 3, companyId: "c1", dayKey: "2020-01-01", orderedQty: 1, orderCount: 1 }] as Fact[],
+  };
+
+  it("full coverage, out of stock, unlinked, no fact row -> null + not_linked + flag null; its LINKED sibling is a measured {0, 0}", async () => {
+    seedFacts(FULL);
+    seedListings({ stores: { c1: ["s1"] }, links: [{ productId: 3, store: "s1" }] });
+    mockReport.mockResolvedValue(reportOf([unsized(3, 0), unsized(4, 0)]));
+    const { data } = await run({}, ["c1"]);
+    expect(data.coverage.orderSignalCoverage).toBe("full");
+    expect(rowOf(data, 3)).toEqual({ ...unsized(3, 0), orderSignal: { orderedUnits: 0, orders: 0 }, outOfStockWithOrders: false });
+    expect(rowOf(data, 4)).toEqual({
+      ...unsized(4, 0),
+      orderSignal: null,
+      orderSignalReason: "not_linked",
+      outOfStockWithOrders: null,
+    });
+    expect(data.coverage.orderSignalReasons).toEqual({ not_linked: NOT_LINKED_SENTENCE });
+    expect(data.counts).toMatchObject({ outOfStockWithOrders: 0, outOfStockWithOrdersUnknown: 1, orderSignalUnknown: 1 });
+  });
+
+  it("a product linked ONLY through a bundle component on the caller's store is linked: a measured 0", async () => {
+    seedFacts(FULL);
+    seedListings({ stores: { c1: ["s1"] }, components: [{ productId: 4, store: "s1" }] });
+    mockReport.mockResolvedValue(reportOf([unsized(4, 0)]));
+    const { data } = await run({}, ["c1"]);
+    expect(rowOf(data, 4)).toMatchObject({ orderSignal: { orderedUnits: 0, orders: 0 }, outOfStockWithOrders: false });
+    expect(rowOf(data, 4)).not.toHaveProperty("orderSignalReason");
+    expect(data.coverage).not.toHaveProperty("orderSignalReasons");
+  });
+
+  it("a product linked ONLY on another company's store is not_linked (non-vacuity: on the caller's store it is a 0)", async () => {
+    seedFacts(FULL);
+    mockReport.mockResolvedValue(reportOf([unsized(4, 0)]));
+    seedListings({ stores: { c1: ["s1"], c2: ["s2"] }, links: [{ productId: 4, store: "s2" }] });
+    expect(rowOf((await run({}, ["c1"])).data, 4)).toMatchObject({ orderSignal: null, orderSignalReason: "not_linked" });
+    seedListings({ stores: { c1: ["s1"], c2: ["s2"] }, links: [{ productId: 4, store: "s1" }] });
+    expect(rowOf((await run({}, ["c1"])).data, 4)).toMatchObject({ orderSignal: { orderedUnits: 0, orders: 0 } });
+  });
+
+  it("partial coverage: unlinked -> not_linked, linked -> not_recorded; both sentences ride once", async () => {
+    const start = daysBack(20);
+    seedFacts({
+      approvedActiveIds: [2, 3, 4],
+      facts: [{ productId: 2, companyId: "c1", dayKey: start, orderedQty: 9, orderCount: 3 }],
+    });
+    seedListings({ stores: { c1: ["s1"] }, links: [{ productId: 3, store: "s1" }] });
+    mockReport.mockResolvedValue(reportOf([unsized(2, 0), unsized(3, 0), unsized(4, 6)]));
+    const { data } = await run({}, ["c1"]);
+    expect(data.coverage.orderSignalCoverage).toBe("partial");
+    expect(rowOf(data, 2)).toMatchObject({ orderSignal: { orderedUnits: 9, orders: 3 }, orderSignalRecordedSince: start });
+    expect(rowOf(data, 3)).toMatchObject({ orderSignal: null, orderSignalReason: "not_recorded", outOfStockWithOrders: null });
+    expect(rowOf(data, 4)).toMatchObject({ orderSignal: null, orderSignalReason: "not_linked", outOfStockWithOrders: false });
+    expect(data.coverage.orderSignalReasons).toEqual({
+      not_recorded: salesCoverageReason(start, signalWindow().from),
+      not_linked: NOT_LINKED_SENTENCE,
+    });
+    // OCC-3: the in-stock unknown (4) is in orderSignalUnknown only.
+    expect(data.counts).toMatchObject({ outOfStockWithOrders: 1, outOfStockWithOrdersUnknown: 1, orderSignalUnknown: 2 });
+  });
+
+  it("the reasons cover the RESULT, not the page: a page of sized rows still explains the codes beyond it", async () => {
+    seedFacts(FULL);
+    seedListings({ stores: { c1: ["s1"] } });
+    mockReport.mockResolvedValue(reportOf([suggested(1, "OUT"), unsized(4, 0)]));
+    const page1 = (await run({ limit: 1 }, ["c1"])).data;
+    expect(page1.rows.map((r: any) => r.productId)).toEqual([1]);
+    expect(page1.coverage.orderSignalReasons).toEqual({ not_linked: NOT_LINKED_SENTENCE });
+    expect(page1.counts.outOfStockWithOrdersUnknown).toBe(1);
+  });
+
+  it("the window's unlinked orders: coverage.orderSignalUnlinkedOrders + the note, exactly; none -> neither key", async () => {
+    seedFacts(FULL);
+    seedListings({ stores: { c1: ["s1"] }, links: [{ productId: 3, store: "s1" }], unlinkedOrders: 3 });
+    mockReport.mockResolvedValue(reportOf([unsized(3, 0)]));
+    const { data } = await run({}, ["c1"]);
+    expect(data.coverage.orderSignalUnlinkedOrders).toBe(3);
+    expect(data.coverage.orderSignalUnlinkedNote).toBe(
+      "3 orders in this window have at least one line on a store listing that is not linked to a " +
+        "product; those lines are not in orderSignal, so a 0 can hide orders for an unlinked listing.",
+    );
+    // The count is the caller's companies' over the echoed window (the module pins the rest).
+    const where = db.externalOrder.count.mock.calls[0][0].where;
+    expect(where.companyId).toEqual({ in: ["c1"] });
+    expect(where.OR[0].externalCreatedAt.gte).toEqual(new Date(`${signalWindow().from}T00:00:00.000Z`));
+    seedListings({ stores: { c1: ["s1"] }, links: [{ productId: 3, store: "s1" }], unlinkedOrders: 0 });
+    const clean = (await run({}, ["c1"])).data;
+    expect(clean.coverage).not.toHaveProperty("orderSignalUnlinkedOrders");
+    expect(clean.coverage).not.toHaveProperty("orderSignalUnlinkedNote");
   });
 });
 
@@ -662,8 +842,9 @@ describe("A2 C4 — mixed scope", () => {
         "from; they are never added to them and never used to suggest a quantity. " +
         "outOfStockWithOrders marks a product with no stock now and recorded orders in that " +
         "window: the report cannot suggest a quantity, so it needs a manual decision. null = " +
-        "the order records cannot tell (orderSignalReason says why); orderSignalRecordedSince = " +
-        "the figures cover only the days since order records began.",
+        "the order records cannot tell; orderSignalReason is a code that " +
+        "coverage.orderSignalReasons explains; orderSignalRecordedSince = the figures cover " +
+        "only the days since order records began.",
     );
   });
 
@@ -673,12 +854,15 @@ describe("A2 C4 — mixed scope", () => {
       "'unavailable' rows carry no sizing numbers — only a reason (no_demand_signal | " +
         "insufficient_history) and, from your companies' order records over a 90-day calendar " +
         "window, orderSignal (units and orders recorded) with outOfStockWithOrders when stock is " +
-        "0; up to 20 out-of-stock-with-orders products are listed on every page " +
-        "(counts.outOfStockWithOrders counts all). Recorded orders are a separate fact family — " +
+        "0; up to 20 out-of-stock-with-orders products — among the products the report cannot " +
+        "size — are listed on every page (counts.outOfStockWithOrders counts all of those). " +
+        "Recorded orders are a separate fact family — " +
         "never added to the stock-outflow figures and never a quantity. Results are mixed-scope: " +
         "rows are global, orderSignal is your companies'.",
     );
     expect(d).not.toContain("'unavailable' rows carry NO numbers");
+    // A2 C14 (A2-OCC-6): the old "counts all" overstated the count's scope.
+    expect(d).not.toContain("(counts.outOfStockWithOrders counts all).");
   });
 });
 
@@ -710,14 +894,16 @@ describe("A2 C2 — reorder counts", () => {
       unavailable: { no_demand_signal: 2, insufficient_history: 1 },
       unavailableAtZeroStock: 2,
       outOfStockWithOrders: null, // no company access
+      // A2 C14: the two zero-stock unsized rows (6, 8); the in-stock one (7) is false.
+      outOfStockWithOrdersUnknown: 2,
       orderSignalUnknown: 3,
     });
     expect(data.countsNote).toBe(
       "counts cover every row of this result, not only this page; approaching and healthy " +
         "products that are not listed are counted in coverage.approachingOmitted and " +
-        "coverage.healthy. Under partial order-record coverage outOfStockWithOrders is a lower " +
-        "bound (orderSignalUnknown counts the products the records cannot tell about). Use " +
-        "these for how many; never count rows yourself.",
+        "coverage.healthy. outOfStockWithOrders is a lower bound whenever " +
+        "outOfStockWithOrdersUnknown is above 0 — it counts the out-of-stock products the order " +
+        "records cannot tell about. Use these for how many; never count rows yourself.",
     );
     const keys = Object.keys(data);
     expect(keys.indexOf("counts")).toBeLessThan(keys.indexOf("coverage"));
@@ -806,6 +992,8 @@ describe("A2 C4 — the worst-case envelope", () => {
   const ENVELOPE_RESERVE_BYTES = 8_192;
   let NAME = "N".repeat(255);
   const ids = Array.from({ length: 25 }, (_, i) => 1000 + i);
+  /** A2 C14: two unsized products with no fact row — one linked, one not. */
+  const NO_FACT_IDS = [2000, 2001];
   const envelopeBytesOf = (data: any) => Buffer.byteLength(JSON.stringify({ ...data, rows: [] }), "utf8");
   afterEach(() => {
     NAME = "N".repeat(255);
@@ -828,11 +1016,20 @@ describe("A2 C4 — the worst-case envelope", () => {
         })),
       ],
     });
-    db.product.findMany.mockResolvedValue([1, ...ids].map((id) => ({ id })));
+    db.product.findMany.mockResolvedValue([1, ...ids, ...NO_FACT_IDS].map((id) => ({ id })));
     // A2 M4 (pack C7): the LONGEST freshness note — a stale success with a newer attempt
     // that did not succeed (the stale sentence + "The latest rebuild attempt did not succeed.").
     db.analyticsRebuildRun.findMany.mockResolvedValue([salesRun("FAILED", 1), salesRun("SUCCEEDED", 30)]);
-    const rows = ids.map((id) => ({ ...unsized(id, 0), productName: NAME }));
+    // A2 FR1 (pack C14): BOTH reason codes a covered caller can carry — a linked no-fact
+    // product (not_recorded: get_sales' company-kind sentence, naming the four silent
+    // 191-character companies) and an unlinked one (not_linked) — plus the unlinked-orders
+    // note at a seven-digit count.
+    seedListings({
+      stores: { [companies[0]]: ["s0"] },
+      links: [{ productId: NO_FACT_IDS[0], store: "s0" }],
+      unlinkedOrders: 9_999_999,
+    });
+    const rows = [...ids, ...NO_FACT_IDS].map((id) => ({ ...unsized(id, 0), productName: NAME }));
     mockReport.mockResolvedValue(
       reportOf(rows, { requested: { requested: 20, notActive: 20, unknownIds: 20 } }),
     );
@@ -853,6 +1050,11 @@ describe("A2 C4 — the worst-case envelope", () => {
     expect(data.coverage.orderSignalCompanyCoverage.every((c: any) => c.name.length === 191)).toBe(true);
     expect(data.coverage.orderSignalCompanyCoverageNote).toBe(SALES_COMPANY_COVERAGE_MEASURED_NOTE);
     expect(data.coverage.requested).toBeDefined();
+    // A2 FR1: both codes' sentences (the long one names the companies) and the unlinked note.
+    expect(Object.keys(data.coverage.orderSignalReasons).sort()).toEqual(["not_linked", "not_recorded"]);
+    expect(data.coverage.orderSignalReasons.not_recorded).toContain("C".repeat(191));
+    expect(data.coverage.orderSignalUnlinkedOrders).toBe(9_999_999);
+    expect(data.coverage.orderSignalUnlinkedNote).toContain("9999999 orders in this window");
     // A2 M4: the two keys M4 adds ride in the worst case — the freshness note at its longest.
     expect(data.coverage.salesFreshnessNote).toMatch(
       /^The last successful sales rebuild finished at .+, more than a day ago; orders recorded after that are not counted yet\. The latest rebuild attempt did not succeed\.$/,
@@ -867,8 +1069,14 @@ describe("A2 C4 — the worst-case envelope", () => {
   // Recorded (A2 M4): remainingRows (~19 B) and the longest freshness note (~190 B, the
   // stale sentence + "did not succeed") move it again, to 80 characters: 8,175 B at 80,
   // 8,195 B at 81, 8,375 B at 90 (11,675 B at 255).
-  it("names up to 80 characters: the WHOLE worst-case envelope stays under the fixed reserve", async () => {
-    NAME = "N".repeat(80);
+  // Recorded (A2 FR1, pack C14): the worst case now also carries both reason codes' sentences
+  // once — not_recorded is get_sales' company-kind sentence, which names the four silent
+  // 191-character companies (~0.98 KB) — the not_linked sentence, the unlinked-orders note at
+  // a seven-digit count and outOfStockWithOrdersUnknown: +1,468 B at 80 characters (9,643 B).
+  // The threshold moves to 7 characters: 8,043 B at 0, 8,183 B at 7, 8,203 B at 8, 9,643 B at
+  // 80 (13,143 B at 255). Past it the page is fit to the MEASURED envelope, as before.
+  it("names up to 7 characters: the WHOLE worst-case envelope stays under the fixed reserve", async () => {
+    NAME = "N".repeat(7);
     const { data } = (await worstCase()) as { data: any };
     expect(data.outOfStockWithOrdersProducts).toHaveLength(20);
     expect(envelopeBytesOf(data)).toBeLessThan(ENVELOPE_RESERVE_BYTES);
@@ -878,13 +1086,14 @@ describe("A2 C4 — the worst-case envelope", () => {
     // Recorded (A2 M2): ~10.4 KB at 20 x 255-character names — the list alone is ~6.5 KB,
     // so no envelope carrying it can sit under the 8 KiB reserve. The page gives way.
     // (A2 M3: ~11.4 KB once the five company names ride in orderSignalCompanyCoverage;
-    // A2 M4: 11,675 B with remainingRows and the longest freshness note.)
+    // A2 M4: 11,675 B with remainingRows and the longest freshness note; A2 FR1: 13,143 B
+    // with both reason sentences and the unlinked-orders note.)
     const { data, meta } = (await worstCase()) as { data: any; meta: { bytes: number } };
     const envelope = envelopeBytesOf(data);
     expect(envelope).toBeGreaterThan(ENVELOPE_RESERVE_BYTES);
     expect(meta.bytes).toBeLessThanOrEqual(65_536);
-    // All 25 rows fit the full budget beside it here; the tight budgets below shrink them.
-    expect(data.returned).toBe(25);
+    // All 27 rows fit the full budget beside it here; the tight budgets below shrink them.
+    expect(data.returned).toBe(27);
   });
 
   it("the result never exceeds the byte budget it was given, at full and at tight budgets", async () => {
