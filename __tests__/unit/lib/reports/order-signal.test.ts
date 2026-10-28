@@ -25,10 +25,13 @@
  * newest link on the caller's stores was made (`newestLinkAt`) — the listing's own
  * `createdAt`, for a bundle component its bundle listing's — so the tool can tell a link the
  * last full sales rebuild has not seen yet. No rebuild knowledge here.
+ *
+ * A2 pack C17 (A2-QA-2): a bundle line whose frozen component snapshot is NULL is unattributed
+ * too (attribution.ts), so the unattributable-orders count carries that branch.
  */
 
 import { mockReset, type DeepMockProxy } from "jest-mock-extended";
-import type { PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 
 jest.mock("@/lib/prisma", () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -263,25 +266,38 @@ type Order = {
   internalStatus: string;
   externalCreatedAt: Date | null;
   createdAt: Date;
-  items: Array<{ productLinkId: string | null; productLink: { isBundle: boolean; internalProductId: number | null } | null }>;
+  items: Array<{
+    productLinkId: string | null;
+    productLink: { isBundle: boolean; internalProductId: number | null } | null;
+    /** A2 C17: the frozen bundle snapshot; absent = the column's NULL (as intake leaves it). */
+    bundleComponentSnapshot?: unknown;
+  }>;
 };
 type Link = { internalProductId: number | null; integrationId: string; isBundle?: boolean; createdAt?: Date };
 
 /** A2 C16: a seeded listing's creation instant when the fixture does not name one. */
 const LISTED_LONG_AGO = new Date("2025-01-01T00:00:00.000Z");
 
-/** An item predicate, evaluated over a seeded order line (the shapes C14 names only). */
+/** An item predicate, evaluated over a seeded order line (the shapes C14 and C17 name only):
+ *  every key of one branch must hold (Prisma ANDs them); an unmodelled key or operator throws. */
 function itemMatches(item: Order["items"][number], where: Record<string, any>): boolean {
   if (Array.isArray(where.OR)) return where.OR.some((w: Record<string, any>) => itemMatches(item, w));
-  if ("productLinkId" in where) return item.productLinkId === where.productLinkId;
-  if (where.productLink) {
-    const link = item.productLink;
-    return (
-      link != null &&
-      Object.entries(where.productLink).every(([key, value]) => (link as Record<string, unknown>)[key] === value)
-    );
-  }
-  throw new Error(`unexpected item predicate ${JSON.stringify(where)}`);
+  return Object.entries(where).every(([key, cond]) => {
+    if (key === "productLinkId") return item.productLinkId === cond;
+    if (key === "productLink") {
+      const link = item.productLink;
+      return (
+        link != null &&
+        Object.entries(cond as Record<string, unknown>).every(([k, v]) => (link as Record<string, unknown>)[k] === v)
+      );
+    }
+    // A2 C17: Prisma.AnyNull matches the column's NULL and a stored JSON null alike.
+    if (key === "bundleComponentSnapshot" && Object.keys(cond as object).join() === "equals") {
+      if ((cond as { equals: unknown }).equals !== Prisma.AnyNull) throw new Error("unexpected snapshot filter");
+      return item.bundleComponentSnapshot == null;
+    }
+    throw new Error(`unexpected item predicate ${JSON.stringify(where)}`);
+  });
 }
 
 /** A date predicate ({ gte, lt } or null) over one column. */
@@ -352,6 +368,8 @@ const order = (over: Partial<Order> & { items?: Order["items"] }): Order => ({
   ...over,
 });
 const UNMAPPED = [{ productLinkId: null, productLink: null }];
+/** A2 C17: a valid frozen bundle snapshot (what intake writes for a bundle line). */
+const SNAPSHOT = [{ internalProductId: 2, internalProductName: "Two", quantity: 1, sortOrder: 0 }];
 
 describe("A2 C14 orderSignal — the link check", () => {
   it("a REAL mix: a linked no-fact product is not in `unlinked`, an unlinked one is (non-vacuity)", async () => {
@@ -554,11 +572,21 @@ describe("A2 C14 orderSignal — the window's orders with an unattributable line
             },
           ],
           items: {
-            some: { OR: [{ productLinkId: null }, { productLink: { isBundle: false, internalProductId: null } }] },
+            some: {
+              OR: [
+                { productLinkId: null },
+                { productLink: { isBundle: false, internalProductId: null } },
+                // A2 C17 (A2-QA-2): a bundle line recorded without its components.
+                { productLink: { isBundle: true }, bundleComponentSnapshot: { equals: Prisma.AnyNull } },
+              ],
+            },
           },
         },
       },
     ]);
+    // AnyNull (DB NULL or JSON null) — not DbNull alone, since attribution reads either as none.
+    const branch = (db.externalOrder.count.mock.calls[0][0] as any).where.items.some.OR[2];
+    expect(branch.bundleComponentSnapshot.equals).toBe(Prisma.AnyNull);
   });
 
   it("counts an unmapped line and a productless listing in the window; never a cancelled, out-of-window, other-company or attributable order", async () => {
@@ -577,11 +605,29 @@ describe("A2 C14 orderSignal — the window's orders with an unattributable line
         order({ companyId: "c2", integrationId: "store-c2", items: UNMAPPED }), // another company
         order({}), // every line attributable
         // a bundle listing with no product is attributed through its frozen snapshot
-        order({ items: [{ productLinkId: "bundle", productLink: { isBundle: true, internalProductId: null } }] }),
+        order({ items: [{ productLinkId: "bundle", productLink: { isBundle: true, internalProductId: null }, bundleComponentSnapshot: SNAPSHOT }] }),
       ],
     });
     const out = await orderSignal([1, 2], ["c1"], WINDOW);
     expect(out.unlinkedOrders).toBe(3);
+  });
+
+  it("A2 C17: a bundle line recorded WITHOUT its components (NULL snapshot) is counted; one with them is not", async () => {
+    seed({ approvedActiveIds: [1, 2, 9], facts: COVERED });
+    const bundle = { productLinkId: "bundle", productLink: { isBundle: true, internalProductId: null } };
+    seedOrders({
+      orders: [
+        order({ items: [bundle] }), // counted: the column is NULL (a re-sync linked it after intake)
+        order({ items: [{ ...bundle, bundleComponentSnapshot: null }] }), // counted: a stored JSON null
+        order({ items: [{ ...bundle, bundleComponentSnapshot: SNAPSHOT }] }), // attributed: not counted
+        // a non-bundle line with no snapshot is the normal shape — attributed, not counted
+        order({ items: [{ productLinkId: "link-ok", productLink: { isBundle: false, internalProductId: 1 } }] }),
+        order({ internalStatus: "cancelled", items: [bundle] }), // attribution skips it
+        order({ companyId: "c2", integrationId: "store-c2", items: [bundle] }), // another company
+      ],
+    });
+    const out = await orderSignal([1, 2], ["c1"], WINDOW);
+    expect(out.unlinkedOrders).toBe(2);
   });
 
   it("is 0, with no read, when every requested product has a fact row", async () => {

@@ -1849,9 +1849,12 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
 
     it("A2 C14: the window's unlinked orders match SQL — cancelled and out-of-window orders excluded", async () => {
       const window = relativeWindow(90);
+      // A2 C17 (A2-QA-2): attribution's third unattributed branch — a bundle line recorded with
+      // a NULL frozen component snapshot (the seed's company-A bundle line has the column NULL).
       const unlinkedLine =
         "EXISTS (SELECT 1 FROM external_order_items i LEFT JOIN product_links l ON l.id = i.productLinkId " +
-        "WHERE i.orderId = o.id AND (i.productLinkId IS NULL OR (l.isBundle = 0 AND l.internalProductId IS NULL)))";
+        "WHERE i.orderId = o.id AND (i.productLinkId IS NULL OR (l.isBundle = 0 AND l.internalProductId IS NULL) " +
+        "OR (l.isBundle = 1 AND i.bundleComponentSnapshot IS NULL)))";
       const inWindow =
         "COALESCE(o.externalCreatedAt, o.createdAt) >= ? AND COALESCE(o.externalCreatedAt, o.createdAt) < DATE_ADD(?, INTERVAL 1 DAY)";
       const counted: Record<string, number> = {};
@@ -1867,13 +1870,28 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
         const coverage = coverageOf(callWithInput(caller.turn(), "reorder_report", caller.input));
         expect({ caller: caller.label, n: coverage.orderSignalUnlinkedOrders }).toEqual({ caller: caller.label, n });
         expect(coverage.orderSignalUnlinkedNote).toBe(
-          `${n} orders in this window have at least one line on a store listing that is not linked to a ` +
-            `product; those lines are not in orderSignal, so a 0 can hide orders for an unlinked listing.`,
+          `${n} orders in this window have at least one line the sales figures cannot attribute to a ` +
+            `product (a store listing not linked to a product, or a bundle line recorded without its ` +
+            `components); those lines are not in orderSignal, so a 0 can hide orders.`,
         );
       }
-      // Non-vacuity: memberA counts A's unmapped order; admin also counts B's unmapped line.
-      expect(counted.memberA).toBeGreaterThan(0);
-      expect(counted.admin).toBeGreaterThan(counted.memberA);
+      // Non-vacuity: memberA counts A's unmapped order and A's NULL-snapshot bundle order (A2
+      // C17); admin also counts B's unmapped line. The seed's exact counts: 2 and 3.
+      expect(counted).toEqual({ memberA: 2, admin: 3 });
+      // A2 C17 on real MySQL: the NULL-snapshot bundle order is one of them — Prisma's
+      // `equals: Prisma.AnyNull` inside the relation filter matched the JSON column's NULL — and
+      // the C14 predicate alone (without the bundle branch) would not count it.
+      const [bundleOrder] = await oracleQuery<{ withBranch: number; withoutBranch: number }>(
+        `SELECT SUM(${unlinkedLine}) AS withBranch,
+                SUM(EXISTS (SELECT 1 FROM external_order_items i LEFT JOIN product_links l ON l.id = i.productLinkId
+                     WHERE i.orderId = o.id AND (i.productLinkId IS NULL OR (l.isBundle = 0 AND l.internalProductId IS NULL)))) AS withoutBranch
+           FROM external_orders o WHERE o.id = ?`,
+        [GATE_SEED.fixtures.unlinkedOrderIds.aBundleNoSnapshot],
+      );
+      expect({ withBranch: Number(bundleOrder.withBranch), withoutBranch: Number(bundleOrder.withoutBranch) }).toEqual({
+        withBranch: 1,
+        withoutBranch: 0,
+      });
       // ...and the exclusions are real rows: a CANCELLED unattributable order in the window,
       // and an unattributable order OUTSIDE it, both in company A.
       const [excluded] = await oracleQuery<{ cancelled: number; outside: number }>(

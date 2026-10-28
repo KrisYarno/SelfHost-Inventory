@@ -1454,6 +1454,10 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     });
     expect(toolResult.data.rankedBy).toBeUndefined();
     expect(toolResult.data.counts).toBeUndefined();
+    // A2 C17 (A2-QA-1): the "compare per day" signal crosses the boundary in totals mode too —
+    // two identical 30-day periods, 29 complete days each: compare the totals.
+    expect(toolResult.data.unequalLengths).toBe(false);
+    expect(toolResult.data.comparableBy).toBe("total");
   });
 
   // A2 C3/C2 on the WIRE: the review-#4 question ("which products sold faster last month
@@ -1487,6 +1491,8 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     });
     expect(toolResult.status).toBe("ok");
     expect(toolResult.data.rankedBy).toBe("per_day");
+    // A2 C17: and the signal beside unequalLengths says the same.
+    expect(toolResult.data.comparableBy).toBe("per_day");
     expect(toolResult.data.rows.map((r: { productId: number }) => r.productId)).toEqual([1]);
     expect(toolResult.data.rows[0]).toMatchObject({
       name: "Faster",

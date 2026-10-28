@@ -778,9 +778,11 @@ describe("A2 C14 — not_linked: an unlinked product is never a measured 0", () 
     mockReport.mockResolvedValue(reportOf([unsized(3, 0)]));
     const { data } = await run({}, ["c1"]);
     expect(data.coverage.orderSignalUnlinkedOrders).toBe(3);
+    // A2 C17 (A2-QA-2): the note names both unattributable line kinds the count now covers.
     expect(data.coverage.orderSignalUnlinkedNote).toBe(
-      "3 orders in this window have at least one line on a store listing that is not linked to a " +
-        "product; those lines are not in orderSignal, so a 0 can hide orders for an unlinked listing.",
+      "3 orders in this window have at least one line the sales figures cannot attribute to a " +
+        "product (a store listing not linked to a product, or a bundle line recorded without its " +
+        "components); those lines are not in orderSignal, so a 0 can hide orders.",
     );
     // The count is the caller's companies' over the echoed window (the module pins the rest).
     const where = db.externalOrder.count.mock.calls[0][0].where;
@@ -1088,10 +1090,13 @@ describe("A2 C4 — mixed scope", () => {
     expect(meta.scope).toBe("mixed");
     expect(TOOL_SCOPES.reorder_report).toBe("global");
     expect(data.coverage.sectionScopes).toEqual({ rows: "global", orderSignal: "company" });
+    // A2 C17 (A2-QA-5): the newest orders are not facts yet, so a 0 is "none recorded before then".
     expect(data.coverage.orderSignalDefinition).toBe(
       "orderSignal = units and orders attributed to this product in your companies' order " +
         "records over a 90-day calendar window (coverage.orderSignalWindow), shown only for " +
-        "products the report cannot size. These are recorded orders, fulfilled or not — not a " +
+        "products the report cannot size. Orders since the last sales rebuild (usually today's, " +
+        "and before the nightly rebuild yesterday's too) are not counted yet, so a 0 means none " +
+        "recorded before then. These are recorded orders, fulfilled or not — not a " +
         "count of currently open orders, and not the stock-outflow figures the report sizes " +
         "from; they are never added to them and never used to suggest a quantity. " +
         "outOfStockWithOrders marks a product with no stock now and recorded orders in that " +
@@ -1437,7 +1442,14 @@ describe("A2 C15 — reorder's page fits the measured room, through the adapter"
    * A2 FR3 (pack C16): `notYetAttributed` adds one no-fact product at 0 stock whose listing was
    * made after the last FULL sales success started — so the sweep also weighs C16's code and
    * sentence (the plain probe has a fact row for every product and never reaches them).
+   *
+   * A2 FR5 (pack C17) — RECORDED: the order-signal definition's newest-orders sentence moved
+   * the 80-character probe OVER the reserve (8,351 B), so the just-under probe now uses
+   * `UNDER_RESERVE_NAMES` = 70-character names: 8,151 B (41 B under; 72 characters is 8,191 B),
+   * and 8,307 B with the not-yet-attributed product (over, as FR3's case needs). Each character
+   * of name length is 20 B here (the 20 listed out-of-stock-with-orders products).
    */
+  const UNDER_RESERVE_NAMES = 70;
   function seedProbe(nameLength: number, notYetAttributed = false) {
     const ids = Array.from({ length: 25 }, (_, i) => 1000 + i);
     const extra = notYetAttributed ? [2002] : [];
@@ -1479,7 +1491,7 @@ describe("A2 C15 — reorder's page fits the measured room, through the adapter"
   }
 
   it("codex's probe at a 12,000 B budget: ok, within budget, with rows — never discarded whole", async () => {
-    seedProbe(80);
+    seedProbe(UNDER_RESERVE_NAMES);
     const result = await viaAdapter(12_000);
     expect({ status: result.status, bytes: result.meta.bytes }).toEqual({
       status: "ok",
@@ -1495,11 +1507,11 @@ describe("A2 C15 — reorder's page fits the measured room, through the adapter"
   });
 
   it.each([
-    ["just under the reserve (80-character names)", 80, "under", false],
+    ["just under the reserve (70-character names)", UNDER_RESERVE_NAMES, "under", false],
     ["over the reserve (255-character names)", 255, "over", false],
-    // A2 FR3 (pack C16): the 80-character probe plus a not-yet-attributed product — its code's
+    // A2 FR3 (pack C16): the just-under probe plus a not-yet-attributed product — its code's
     // sentence takes the envelope over the reserve.
-    ["over the reserve with a not-yet-attributed product (80-character names)", 80, "over", true],
+    ["over the reserve with a not-yet-attributed product (70-character names)", UNDER_RESERVE_NAMES, "over", true],
   ])("a 250 B budget sweep with the envelope %s: every result ok and within budget, and the page shrinks", async (_label, nameLength, side, notYetAttributed) => {
     seedProbe(nameLength, notYetAttributed);
     const full = await viaAdapter(65_536);

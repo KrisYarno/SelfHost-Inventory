@@ -1087,24 +1087,28 @@ const COMPARE_UNRANKED_NOTE =
  *  differ in length. Rides in coverage in BOTH modes (the DEFINITION gate's rate rule).
  *  A2 C14 (A2-OCC-2 / A2-OCC-9): over COMPLETE days only (coverage.rateWindows), and a
  *  calendar rate — not the days-covered rates of the low-stock and reorder tools. A2 C16
- *  (A2-FD1-4): the last complete day can be earlier than yesterday for sales. */
+ *  (A2-FD1-4): the last complete day can be earlier than yesterday for sales. A2 C17
+ *  (A2-FD3-1): both per-day triggers (requested lengths or rate windows), and the
+ *  `comparableBy` signal they set. */
 const COMPARE_RATE_DEFINITION =
   "per day = a period's total over its COMPLETE days divided by those days " +
   "(coverage.rateWindows): a period that reaches past the last complete day is measured for " +
   "its per-day figure only through it, because today's figures — and, until the nightly sales " +
   "rebuild succeeds, recent days' sales — are still arriving. Values of 1 or more are rounded " +
   "to 2 decimals, smaller values to 3 significant figures, so a small non-zero rate never " +
-  "shows as 0; perDayDirection is the sign of the unrounded change. When the rate periods " +
-  "differ in length and both have a complete day, rows are ranked and filtered by the " +
-  "per-day change, because totals of " +
-  "periods of different lengths are not comparable; delta and pctChange stay the change in " +
+  "shows as 0; perDayDirection is the sign of the unrounded change. When the periods or their " +
+  "rate windows differ in length and both have a complete day, comparableBy is 'per_day' and " +
+  "rows are ranked and filtered by the per-day change, because totals over different spans of " +
+  "complete days are not comparable; delta and pctChange stay the change in " +
   "the full periods' totals. This is a calendar rate — the low-stock and reorder rates " +
   "divide by the days a product's outbound data covers, so they are not directly comparable " +
   "to it. Under partial company coverage these are rates of what was recorded.";
 
 /** A2 C2: the scope of each by_product count, so the model never counts rows itself.
  *  A2 C14 (A2-OCC-8): under per-day ranking the direction counts follow the per-day change.
- *  A2 C16 (A2-FD1-3): and the totals fallback across different lengths is said out loud. */
+ *  A2 C16 / row 16 (A2-FD1-3, A2-FD2-1): and the totals fallback when a period has no
+ *  complete day yet — at any lengths ("today vs yesterday" too) — is said out loud, with
+ *  that period's total still partial. */
 const COMPARE_COUNTS_NOTE =
   "ranked counts the rows this call ranks (after any direction filter); increased, " +
   "decreased and unchanged count every product with activity in either period that both " +
@@ -1262,6 +1266,9 @@ async function compareByProduct(
       periodA,
       periodB,
       unequalLengths: result.unequalLengths,
+      // A2 C17 (A2-QA-1): compare per day or by totals — the same rule as rankedBy, so equal
+      // lengths read "per_day" too when one period reaches past the last complete day.
+      comparableBy: result.comparableBy,
       // A2 C3: how the rows below are ranked and filtered ("per_day" when the lengths differ).
       rankedBy: result.rankedBy,
       rows: ranked.rows,
@@ -1315,9 +1322,10 @@ async function compareByProduct(
   };
 
   // Measured with the WIDEST counters this call can emit (the real array lengths), so the
-  // envelope estimate is never smaller than the envelope actually shipped. (A2's rankedBy,
-  // counts, countsNote, rateDefinition and salesFreshnessNote do not depend on the page, so
-  // they weigh the same here as in the shipped envelope — no placeholder needed.) A2 C1:
+  // envelope estimate is never smaller than the envelope actually shipped. (A2's
+  // comparableBy, rankedBy, counts, countsNote, rateDefinition and salesFreshnessNote do not
+  // depend on the page, so they weigh the same here as in the shipped envelope — no
+  // placeholder needed.) A2 C1:
   // `remainingRows` DOES depend on the page, so it is measured at its widest, `totalRows`
   // — the formula over these counters would read 0 and under-weigh a deeper cursor.
   const counterOf = (rows: CompareProductToolRow[]): Page<CompareProductToolRow> => ({
@@ -1679,6 +1687,13 @@ const PAGING_POSTURE =
   "there are, never compute it. When `nextOffset` is not null, more rows exist — call " +
   "again with that `offset` when you need the remaining rows.";
 
+/** A2 C7: get_sales' standing disclosure on the newest orders (a description sentence, not a
+ *  per-answer note). A2 C17 (A2-QA-5): the composites quote it verbatim after their first sales
+ *  section — ONE constant, so the three copies cannot drift apart. */
+const NEWEST_ORDERS_SENTENCE =
+  "Orders recorded since the last successful nightly rebuild are not counted yet, so the most " +
+  "recent day or two may be partial.";
+
 /** The find_product row note for a soft-deleted product (spec C13, verbatim). */
 const FIND_PRODUCT_DELETED_NOTE =
   "deleted product — current stock not reported; history remains queryable";
@@ -1785,11 +1800,14 @@ const REORDER_COUNTS_NOTE =
   "out-of-stock products the order records cannot tell about. Use these for how many; never " +
   "count rows yourself.";
 
-/** A2 C4: what the order signal is — and the three things it is NOT. */
+/** A2 C4: what the order signal is — and the three things it is NOT. A2 C17 (A2-QA-5): the
+ *  newest orders are not facts until the next sales rebuild, so a 0 is "none recorded before". */
 const ORDER_SIGNAL_DEFINITION =
   "orderSignal = units and orders attributed to this product in your companies' order " +
   "records over a 90-day calendar window (coverage.orderSignalWindow), shown only for " +
-  "products the report cannot size. These are recorded orders, fulfilled or not — not a " +
+  "products the report cannot size. Orders since the last sales rebuild (usually today's, and " +
+  "before the nightly rebuild yesterday's too) are not counted yet, so a 0 means none recorded " +
+  "before then. These are recorded orders, fulfilled or not — not a " +
   "count of currently open orders, and not the stock-outflow figures the report sizes from; " +
   "they are never added to them and never used to suggest a quantity. outOfStockWithOrders " +
   "marks a product with no stock now and recorded orders in that window: the report cannot " +
@@ -1824,12 +1842,14 @@ const NOT_YET_ATTRIBUTED_REASON =
   "linked to a store listing after the last full sales rebuild, so orders on that listing may " +
   "not be counted yet";
 
-/** A2 C14 (A2-OCC-1): the envelope's sentence beside `coverage.orderSignalUnlinkedOrders`. */
+/** A2 C14 (A2-OCC-1): the envelope's sentence beside `coverage.orderSignalUnlinkedOrders`.
+ *  A2 C17 (A2-QA-2): it names both line kinds the count covers — an unlinked listing, and a
+ *  bundle line recorded without its components (a NULL frozen snapshot). */
 function orderSignalUnlinkedNote(orders: number): string {
   return (
-    `${orders} orders in this window have at least one line on a store listing that is not ` +
-    `linked to a product; those lines are not in orderSignal, so a 0 can hide orders for an ` +
-    `unlinked listing.`
+    `${orders} orders in this window have at least one line the sales figures cannot attribute ` +
+    `to a product (a store listing not linked to a product, or a bundle line recorded without ` +
+    `its components); those lines are not in orderSignal, so a 0 can hide orders.`
   );
 }
 
@@ -1923,8 +1943,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `compare_periods, and get_stock_asof with that productId all answer for it). ` +
       `If coverage.byteSkipped is present, this page dropped that many matched products ` +
       `to fit the response size and nextOffset skips past them — follow coverage.byteNote ` +
-      `(same offset, smaller limit) to read them instead of walking on. ` +
-      `${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `(same offset, smaller limit) to read them instead of walking on. remainingRows counts ` +
+      `only the matches after nextOffset; add coverage.byteSkipped for every match not yet ` +
+      `shown. ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: findProductSchema,
     run: async (input, ctx) => {
       const args = findProductSchema.parse(input);
@@ -2234,9 +2255,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `(at every other grain it is null, because a multi-product order counts once per ` +
       `product). Omitting dates uses relativeDays (default ` +
       `30) ending today; the resolved window (from/to/days/source) is returned. Figures ` +
-      `are GROSS ordered, attributed; refunds are not netted. Orders recorded since the ` +
-      `last successful nightly rebuild are not counted yet, so the most recent day or two ` +
-      `may be partial. Revenue is a string. coverage.unattributedOrders is caller-scoped. ` +
+      `are GROSS ordered, attributed; refunds are not netted. ${NEWEST_ORDERS_SENTENCE} ` +
+      `Revenue is a string. coverage.unattributedOrders is caller-scoped. ` +
       `coverage.lastRebuildAt is when the last rebuild attempt finished, whatever its ` +
       `outcome. Products with NO attributed sales ` +
       `in the window are ABSENT by default — pass includeZeroRows:true (groupBy:'product', ` +
@@ -3312,12 +3332,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `change, delta = the coverageShift qualification (BOTH modes, present only with ` +
       `coverageShift), perDayPctChange = per-day percent change, perDay = why the per-day ` +
       `figures are missing (present only when a period has no complete day yet). ` +
-      `When periodA and periodB differ in length (unequalLengths), compare the per-day ` +
-      `figures (aPerDay, bPerDay, perDayDelta, perDayDirection). Rows are ranked and ` +
-      `filtered by the per-day change (rankedBy: 'per_day') when both periods have a ` +
-      `complete day and the lengths differ, or one period reaches past the last complete ` +
-      `day and so has fewer complete days (coverage.rateWindows); a period with no complete ` +
-      `day yet ranks by totals (countsNote). ` +
+      `Whenever comparableBy is 'per_day' — the periods differ in length, or one reaches past ` +
+      `the last complete day so its total still includes days being recorded ` +
+      `(coverage.rateWindows) — compare the per-day figures (aPerDay, bPerDay, perDayDelta, ` +
+      `perDayDirection), not delta or pctChange; in groupBy 'product' mode the rows are then ` +
+      `ranked and filtered by the per-day change (rankedBy: 'per_day'). A period with no ` +
+      `complete day yet has no per-day figure (reasons.perDay) and comparableBy is 'total'. ` +
       `outbound_units/inbound_units use a SIGN-FIRST ledger predicate over CALENDAR-DAY ` +
       `windows; a gap from get_operations is that tool's ROLLING-INSTANT window ` +
       `(ending now), and a gap from get_movement_series is that movement FOLDS a ` +
@@ -3396,6 +3416,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           perDayDirection: result.perDayDirection,
           reasons: result.reasons,
           unequalLengths: result.unequalLengths,
+          // A2 C17 (A2-QA-1): which change to compare — the by_product ranking rule, in totals
+          // mode too (an equal-length pair whose current period is still being recorded).
+          comparableBy: result.comparableBy,
           periodA,
           periodB,
           coverage: {
@@ -3487,7 +3510,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `stockByLocation (top 3 locations), velocity (physical-outbound units/day + ` +
       `definition), valuation (cost/receipt/retail/margin + coverage), policy ` +
       `(effective threshold/lead time + true per-field source), movement30 (30-day ` +
-      `ledger TOTALS in/out/net), and sales30 (30-day ordered units/revenue). Its ` +
+      `ledger TOTALS in/out/net), and sales30 (30-day ordered units/revenue). ` +
+      `${NEWEST_ORDERS_SENTENCE} Its ` +
       `valuation row carries the stored unit cost and retail (currentUnitCostCents / ` +
       `unitRetailCents: 0 = recorded as free, null = not set; the retail is the one stored ` +
       `price, set by hand or copied from one store listing, not necessarily each store's live ` +
@@ -3529,6 +3553,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `reorderNow (count of products on the buying worklist), sales (7-day and 30-day ` +
       `ordered units/revenue), orderPipeline (order counts + revenue by status + ` +
       `open-order aging), and freshness (rebuild recency + the fulfillment-sync note). ` +
+      `The sales section comes from the nightly sales rebuild: ${NEWEST_ORDERS_SENTENCE} ` +
+      `orderPipeline reads the order records directly, not through the rebuild. ` +
       `freshness.lastRunAt is when the last rebuild attempt finished, whatever its outcome; ` +
       `freshness.lastSucceededAt is when the last successful rebuild finished. ` +
       `Each section is a SUMMARY — go deeper with get_inventory_summary, reorder_report, ` +

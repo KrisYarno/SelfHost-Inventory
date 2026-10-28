@@ -104,12 +104,15 @@ export interface PerDayFigures {
   perDayDirection: PerDayDirection | null;
 }
 
-/** The reason beside a null `perDayPctChange` when period A is a measured zero — the same
- *  words as the totals' `reasons.pctChange`. */
+/** The reason beside a null `perDayPctChange` when period A's per-day NUMERATOR (its rate
+ *  window's sum, `aIsZero`) is a measured zero with B measured — its own words, because it can
+ *  sit beside a non-zero total (A2 C16 / row 16); `reasons.pctChange` keeps "period A is zero". */
 const PER_DAY_PCT_ZERO_REASON = "period A's per-day figure is zero — per-day percent change undefined";
 
-/** A2 C14: the reason beside null per-day figures when a period has no complete day. */
-const PER_DAY_NO_COMPLETE_DAY_REASON = "this period has no complete day yet";
+/** A2 C14: the reason beside null per-day figures when a period has no complete day. A2 C17
+ *  (A2-FD3-2): it also says that period's total is still partial, in both modes. */
+const PER_DAY_NO_COMPLETE_DAY_REASON =
+  "this period has no complete day yet, so its total is still partial";
 
 /** A2 C14: one period's RATE window as echoed (`coverage.rateWindows`): the period's days
  *  through the last complete day. `days` is 0 when the period has no complete day yet. */
@@ -150,6 +153,24 @@ function rateWindowOf(period: ResolvedWindow, rateThrough: string): RateWindow {
 
 function rateWindowEcho(rate: RateWindow): RateWindowEcho {
   return { from: rate.window.from, to: rate.window.to, days: Math.max(0, rate.days) };
+}
+
+/**
+ * A2 C14 / C17 (A2-QA-1): which change the two periods are compared by. "per_day" when both
+ * periods have at least one complete day AND their rate windows or their requested lengths
+ * differ — totals over different spans of complete days are not comparable, and that covers
+ * "this week vs last week" (equal lengths, the current one still being recorded); "total"
+ * otherwise, including a period with no complete day (it has no per-day figure). by_product
+ * ranks and filters by exactly this (`rankedBy`); both modes return it as `comparableBy`.
+ */
+function comparableByOf(
+  periodA: ResolvedWindow,
+  periodB: ResolvedWindow,
+  rateA: RateWindow,
+  rateB: RateWindow,
+): "per_day" | "total" {
+  const bothComplete = rateA.days >= 1 && rateB.days >= 1;
+  return bothComplete && (rateA.days !== rateB.days || periodA.days !== periodB.days) ? "per_day" : "total";
 }
 
 /**
@@ -207,6 +228,10 @@ export interface ComparePeriodsResult extends PerDayFigures {
   pctChange: number | null;
   reasons: Record<string, string>;
   unequalLengths: boolean;
+  /** A2 C17 (A2-QA-1): compare the per-day figures ("per_day") or the totals ("total") —
+   *  by_product's `rankedBy` rule (`comparableByOf`), so it is "per_day" for equal lengths too
+   *  when one period reaches past the last complete day. */
+  comparableBy: "per_day" | "total";
   /** A2 C14: the complete days each per-day figure is measured over. */
   rateWindows: { a: RateWindowEcho; b: RateWindowEcho };
   /** FD2-2 disclosure: the per-company sales starts, present ONLY when they differ (a
@@ -789,6 +814,8 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
   );
   if (perDay.aIsZero) reasons.perDayPctChange = PER_DAY_PCT_ZERO_REASON;
   if (rateA.days < 1 || rateB.days < 1) reasons.perDay = PER_DAY_NO_COMPLETE_DAY_REASON;
+  // A2 C17: the same rule by_product ranks by, computed once here.
+  const comparableBy = comparableByOf(periodA, periodB, rateA, rateB);
 
   // FD3-3: the delta is NEVER nulled for a coverage shift (the sums are measured) — it is
   // qualified, in both the reason vocabulary and the coverage block.
@@ -808,6 +835,7 @@ export async function comparePeriods(opts: ComparePeriodsOpts): Promise<CompareP
     ...perDay.figures,
     reasons,
     unequalLengths: periodA.days !== periodB.days,
+    comparableBy,
     rateWindows: { a: rateWindowEcho(rateA), b: rateWindowEcho(rateB) },
     periodCoverage: { a: coverageA, b: coverageB },
     ...(coverageShift ? { coverageShift } : {}),
@@ -872,6 +900,8 @@ export interface ComparePeriodsByProductResult {
   reasons: Record<string, string>;
   periodCoverage: { a: WindowCoverage; b: WindowCoverage };
   unequalLengths: boolean;
+  /** A2 C17 (A2-QA-1): the scalar mode's signal, by the same rule — always `rankedBy`. */
+  comparableBy: "per_day" | "total";
   /** A2 C14: the complete days each period's per-day figures are measured over. */
   rateWindows: { a: RateWindowEcho; b: RateWindowEcho };
   /** A2 C3: how `ranked` is ordered and filtered. A2 C14: "per_day" when both periods have
@@ -1061,9 +1091,9 @@ export async function comparePeriodsByProduct(opts: {
   // their totals are not comparable. Equal lengths keep the |delta| pipeline untouched.
   // A2 C14: "different lengths" includes the rate windows (one period ending today, the
   // other in the past), and a period with no complete day has no per-day figure to rank by.
-  const bothComplete = rateA.days >= 1 && rateB.days >= 1;
-  const rankedBy: "total" | "per_day" =
-    bothComplete && (rateA.days !== rateB.days || periodA.days !== periodB.days) ? "per_day" : "total";
+  // A2 C17: the rule is `comparableByOf`, shared with the scalar mode; here it also ranks.
+  const comparableBy = comparableByOf(periodA, periodB, rateA, rateB);
+  const rankedBy: "total" | "per_day" = comparableBy;
   const ranked: ComparePeriodsProductRow[] = [];
   const unranked: ComparePeriodsProductRow[] = [];
   /** Each ranked row's UNROUNDED per-day change: the per-day sort, filter and counts read
@@ -1172,6 +1202,7 @@ export async function comparePeriodsByProduct(opts: {
     reasons,
     periodCoverage: { a: coverageA, b: coverageB },
     unequalLengths: periodA.days !== periodB.days,
+    comparableBy,
     rateWindows: { a: rateWindowEcho(rateA), b: rateWindowEcho(rateB) },
     rankedBy,
     directionCounts,

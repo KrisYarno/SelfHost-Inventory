@@ -380,6 +380,8 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
       reasons: { a: "measured", b: "measured" },
       periodCoverage: { a: "full", b: "full" },
       unequalLengths: false,
+      // A2 C17: the module's "compare per day" signal (always rankedBy in this mode).
+      comparableBy: "total",
       rateWindows: RATE_WINDOWS,
       rankedBy: "total",
       directionCounts: { increased: RANKED_ROWS - 1, decreased: 0, unchanged: 1 },
@@ -469,6 +471,7 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
       reasons: { a: "period A is not fully covered by sales_units data in every company" },
       periodCoverage: { a: "partial", b: "partial" },
       unequalLengths: false,
+      comparableBy: "total", // A2 C17
       rateWindows: RATE_WINDOWS,
       rankedBy: "total",
       directionCounts: { increased: 199, decreased: 0, unchanged: 1 },
@@ -495,11 +498,15 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
     // 5,560 B (still never over budget below it — the adapter's truncated downgrade).
     // A2 FR4 (pack row 16) — RECORDED: the totals-fallback sentence now covers equal lengths
     // and says the partial period's total is still partial (+~50 B): 5,602 B, ok from 5,610 B.
+    // A2 FR5 (pack C17) — RECORDED: the comparableBy key beside unequalLengths (+23 B) and the
+    // rate definition naming both per-day triggers and comparableBy (+53 B): the one-row floors
+    // now weigh 5,678 B, ok from 5,678 B (measured budget by budget from 5,500 B); 5,000 B
+    // still truncates, never over budget.
     const floor = (await runOnce("compare_periods", compareArgs, CRAMPED)) as ExecResult & {
       meta?: { bytes: number };
     };
     expect(floor.status).toBe("truncated");
-    const BOTH_FLOOR = 5_650;
+    const BOTH_FLOOR = 5_700;
     const tight = (await runOnce("compare_periods", compareArgs, BOTH_FLOOR)) as ExecResult & {
       data?: { rows?: unknown[]; unranked?: unknown[]; unrankedTotal?: number };
       meta?: { bytes: number };
@@ -536,6 +543,7 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
       reasons: {},
       periodCoverage: { a: "full", b: "full" },
       unequalLengths: true,
+      comparableBy: "per_day", // A2 C17
       rateWindows: {
         a: { from: "2026-01-26", to: "2026-10-26", days: 274 },
         b: { from: "2026-09-28", to: "2026-10-26", days: 29 },
@@ -730,6 +738,7 @@ describe("A2 C1 — compare by_product at the exact byte boundary, remainingRows
       reasons: { a: "period A is not fully covered by sales_units data in every company" },
       periodCoverage: { a: "partial", b: "partial" },
       unequalLengths: false,
+      comparableBy: "total", // A2 C17
       rateWindows: { a: { from: "2026-10-21", to: "2026-10-26", days: 6 }, b: { from: "2026-10-21", to: "2026-10-26", days: 6 } },
       rankedBy: "total",
       directionCounts: { increased: RANKED - 1, decreased: 0, unchanged: 1 },
@@ -753,7 +762,10 @@ describe("A2 C1 — compare by_product at the exact byte boundary, remainingRows
     // A2 FR1 (pack C14): the envelope grew ~470 B (coverage.rateWindows, the complete-days
     // rateDefinition, the per-day countsNote sentence), so the sweep starts at 6,500 B — from
     // 6,000 it no longer crossed a row boundary (min slack 93 B, every budget still ok + fit).
-    for (let budget = 6_500; budget <= 6_500 + rowWidth + 8; budget += 1) {
+    // A2 FR5 (pack C17): +76 B more (comparableBy, the rate definition) moved the one
+    // boundary between 6,000 and 7,600 B to 7,098-7,102 B (slack < 16 B), past the old sweep's
+    // end (7,087 B with a 579 B row) — so the sweep starts at 6,600 B; every budget still ok + fit.
+    for (let budget = 6_600; budget <= 6_600 + rowWidth + 8; budget += 1) {
       const r = (await runOnce("compare_periods", args, budget)) as ExecResult & {
         data?: { totalRows: number; nextOffset: number | null; remainingRows: number; coverage: Record<string, unknown> };
         meta?: { bytes: number };

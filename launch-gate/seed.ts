@@ -112,8 +112,11 @@ export type GateSeedManifest = {
     /** Orders inside the 90-day order-signal window carrying a line the fact rebuild cannot
      *  attribute: A's and B's (each an unmapped line) are counted; A's CANCELLED one (an
      *  unmapped line too) is not. None is stamped on a ledger
-     *  row and none has a sales fact. */
-    unlinkedOrderIds: { a: string; aCancelled: string; b: string };
+     *  row and none has a sales fact.
+     *  ADDITIVE (assistant A2 FR5, declared — pack C17): `aBundleNoSnapshot` — A's order whose
+     *  one line is on A's BUNDLE listing with a NULL frozen component snapshot (a line linked
+     *  to a bundle after intake): attribution counts it unattributed, so the count does too. */
+    unlinkedOrderIds: { a: string; aCancelled: string; b: string; aBundleNoSnapshot: string };
   };
   sentinels: { companyA: readonly string[]; companyB: readonly string[] };
 };
@@ -209,6 +212,8 @@ export const GATE_SEED: GateSeedManifest = {
       a: "gateorder-companya-unlinked",
       aCancelled: "gateorder-companya-cancelled",
       b: "gateorder-companyb-unlinked",
+      // ADDITIVE (assistant A2 FR5) — see the manifest type above.
+      aBundleNoSnapshot: "gateorder-companya-bundle-nosnap",
     },
   },
   sentinels: {
@@ -667,6 +672,9 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
     // migration 20260520_bundle_product_link_invariant, rejects it — so the count's
     // `isBundle: false, internalProductId: null` branch is belt-and-braces only.)
     // No order line points at either, so no fact, total or count elsewhere moves.
+    // (A2 FR5, pack C17: one line now points at the BUNDLE listing — the NULL-snapshot order
+    // below; it changes no link (the link check reads listings and components, not lines), no
+    // fact and no ledger row — only the unattributable-orders count, by design.)
     const bundleLinkId = `gatelink-bundle-${COMPANY_A.slice(-6)}`;
     await prisma.productLink.createMany({
       data: [
@@ -796,6 +804,30 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           internalStatus: "pending",
           externalCreatedAt: daysAgo(20),
         },
+        // ADDITIVE (assistant A2 FR5, declared — pack C17, A2-QA-2): ONE more company-A order 20
+        // days back (inside the 90-day order-signal window, outside every 5-day window). WHY:
+        // attribution counts a bundle line whose frozen component snapshot is NULL as
+        // unattributed (lib/analytics/attribution.ts), and intake writes the snapshot on create
+        // only — so a line linked to a bundle by a later re-sync carries none. The count's new
+        // NULL-snapshot branch (`Prisma.AnyNull` on a MySQL JSON column) was otherwise never
+        // exercised on MySQL: no seeded line was on a bundle listing.
+        // Its line is MAPPED (isMapped true, on A's bundle listing), so get_sales'
+        // unattributedOrders (isMapped = 0) does not move; it is stamped on no ledger row and has
+        // no sales fact. Every order-count oracle (2h, the pipeline, the scoping recount)
+        // recomputes from SQL.
+        {
+          id: GATE_SEED.fixtures.unlinkedOrderIds.aBundleNoSnapshot,
+          companyId: COMPANY_A,
+          integrationId: integrationOf(COMPANY_A),
+          externalId: "gate-a-bundle-nosnap-1",
+          orderNumber: "gate-a-bundle-nosnap-1",
+          nativeStatus: "processing",
+          total: "12.00",
+          currency: "USD",
+          rawPayload: {},
+          internalStatus: "pending",
+          externalCreatedAt: daysAgo(20),
+        },
       ],
     });
     await prisma.externalOrderItem.createMany({
@@ -865,6 +897,21 @@ export async function seedGateDatabase(databaseUrl: string): Promise<void> {
           quantity: 1,
           price: "15.00",
           isMapped: false,
+        },
+        // ADDITIVE (assistant A2 FR5, pack C17): the bundle line recorded WITHOUT its
+        // components — on A's bundle listing (FR1's), mapped, and `bundleComponentSnapshot`
+        // OMITTED so the column is NULL (as a re-sync leaves it; intake's own create would have
+        // written the components). Quantity and price are small, outside both sentinel bands.
+        {
+          id: "gateitem-companya-bundle-nosnap",
+          orderId: GATE_SEED.fixtures.unlinkedOrderIds.aBundleNoSnapshot,
+          externalItemId: "gate-a-bundle-nosnap-item-1",
+          externalProductId: "gate-ext-bundle-a",
+          name: "Gate Bundle A",
+          quantity: 1,
+          price: "12.00",
+          productLinkId: bundleLinkId,
+          isMapped: true,
         },
       ],
     });

@@ -1204,16 +1204,17 @@ describe("A2 C14 — compare_periods' rate windows (the tool's last complete day
     skippedReason: null,
   });
   // A2 C16 (A2-FD1-4): "past the last complete day" — the sales frontier is a cut-off too.
+  // A2 C17 (A2-FD3-1): both per-day triggers, and the comparableBy signal they set.
   const RATE_DEFINITION =
     "per day = a period's total over its COMPLETE days divided by those days " +
     "(coverage.rateWindows): a period that reaches past the last complete day is measured for " +
     "its per-day figure only through it, because today's figures — and, until the nightly sales " +
     "rebuild succeeds, recent days' sales — are still arriving. Values of 1 or more are rounded " +
     "to 2 decimals, smaller values to 3 significant figures, so a small non-zero rate never " +
-    "shows as 0; perDayDirection is the sign of the unrounded change. When the rate periods " +
-    "differ in length and both have a complete day, rows are ranked and filtered by the " +
-    "per-day change, because totals of " +
-    "periods of different lengths are not comparable; delta and pctChange stay the change in " +
+    "shows as 0; perDayDirection is the sign of the unrounded change. When the periods or " +
+    "their rate windows differ in length and both have a complete day, comparableBy is " +
+    "'per_day' and rows are ranked and filtered by the per-day change, because totals over " +
+    "different spans of complete days are not comparable; delta and pctChange stay the change in " +
     "the full periods' totals. This is a calendar rate — the low-stock and reorder rates " +
     "divide by the days a product's outbound data covers, so they are not directly comparable " +
     "to it. Under partial company coverage these are rates of what was recorded.";
@@ -1332,6 +1333,90 @@ describe("A2 C14 — compare_periods' rate windows (the tool's last complete day
     expect(data.coverage.rateWindows.b.to).toBe(day(-1));
     expectNoRunRead();
   });
+
+  // A2 C17 (A2-QA-1, Med): "this week vs last week" has equal lengths, so unequalLengths was
+  // false and the model read a flat product's delta over a week still being recorded as a
+  // decline. comparableBy rides beside unequalLengths in BOTH modes, by the rankedBy rule.
+  describe("A2 C17 — comparableBy beside unequalLengths, in both modes", () => {
+    const NOW = new Date("2026-10-28T15:00:00.000Z"); // the last complete day is 2026-10-27
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(NOW);
+    });
+    afterEach(() => jest.useRealTimers());
+
+    /** Complete days of a day-key window (today, 2026-10-28, is still being recorded). */
+    const completeDays = (gte: string, lte: string) => {
+      const last = lte < "2026-10-28" ? lte : "2026-10-27";
+      return Math.max(0, Math.round((Date.parse(`${last}T00:00:00Z`) - Date.parse(`${gte}T00:00:00Z`)) / DAY) + 1);
+    };
+    /** c1 recording since 2020: exactly 2 units on every complete day, none yet today. */
+    function seedFlatTwoPerDay() {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      db.productSalesFact.aggregate.mockImplementation((args: any) => {
+        if (args._min) return Promise.resolve({ _min: { dayKey: "2020-01-01" } }) as never;
+        return Promise.resolve({ _sum: { orderedQty: 2 * completeDays(args.where.dayKey.gte, args.where.dayKey.lte) } }) as never;
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      db.productSalesFact.groupBy.mockImplementation((args: any) => {
+        if (args.by[0] === "companyId") return Promise.resolve([{ companyId: "c1", _min: { dayKey: "2020-01-01" } }]) as never;
+        if (!args._sum) return Promise.resolve([]) as never; // the first-sale evidence lookup
+        const units = 2 * completeDays(args.where.dayKey.gte, args.where.dayKey.lte);
+        return Promise.resolve([{ productId: 1, _sum: { orderedQty: units } }]) as never;
+      });
+      db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+      db.company.findMany.mockResolvedValue([{ id: "c1", name: "Acme" }] as never);
+      seedRuns([success(new Date("2026-10-28T03:00:00.000Z"))]);
+    }
+    const nextKeyAfter = (data: Record<string, unknown>, key: string) => {
+      const keys = Object.keys(data);
+      return keys[keys.indexOf(key) + 1];
+    };
+    const THIS_VS_LAST_WEEK = {
+      metric: "sales_units",
+      periodA: { relativeDays: 7, to: "2026-10-21" },
+      periodB: { relativeDays: 7 },
+    };
+
+    it("this week vs last week (relativeDays 7 each), a flat 2/day product: 'per_day' in both modes, perDayDirection unchanged", async () => {
+      seedFlatTwoPerDay();
+      const totals = await compare(THIS_VS_LAST_WEEK);
+      expect(totals.mode).toBe("totals");
+      // The change in totals reads a decline ("down 14%") over a week still being recorded...
+      expect(totals).toMatchObject({ a: 14, b: 12, delta: -2, unequalLengths: false });
+      expect(totals.pctChange).toBeCloseTo(-1 / 7, 10);
+      // ...and the signal says to compare per day, where nothing changed.
+      expect(totals.comparableBy).toBe("per_day");
+      expect(totals).toMatchObject({ aPerDay: 2, bPerDay: 2, perDayDelta: 0, perDayDirection: "unchanged" });
+      expect(nextKeyAfter(totals, "unequalLengths")).toBe("comparableBy");
+
+      const byProduct = await compare({ ...THIS_VS_LAST_WEEK, groupBy: "product" });
+      expect(byProduct).toMatchObject({ mode: "by_product", unequalLengths: false, comparableBy: "per_day", rankedBy: "per_day" });
+      expect(nextKeyAfter(byProduct, "unequalLengths")).toBe("comparableBy");
+      expect(byProduct.rows).toHaveLength(1);
+      expect(byProduct.rows[0]).toMatchObject({ productId: 1, delta: -2, perDayDirection: "unchanged" });
+      expect(byProduct.counts).toMatchObject({ increased: 0, decreased: 0, unchanged: 1 });
+    });
+
+    it("equal lengths both in the past: 'total' in both modes", async () => {
+      seedFlatTwoPerDay();
+      const args = { metric: "sales_units", periodA: { relativeDays: 7, to: "2026-10-14" }, periodB: { relativeDays: 7, to: "2026-10-21" } };
+      expect((await compare(args)).comparableBy).toBe("total");
+      const byProduct = await compare({ ...args, groupBy: "product" });
+      expect(byProduct).toMatchObject({ comparableBy: "total", rankedBy: "total" });
+    });
+
+    it("today vs yesterday (no complete day in one period): 'total', and the reason says the total is still partial", async () => {
+      seedFlatTwoPerDay();
+      const args = { metric: "sales_units", periodA: { relativeDays: 1, to: "2026-10-27" }, periodB: { relativeDays: 1 } };
+      const totals = await compare(args);
+      expect(totals.comparableBy).toBe("total");
+      expect(totals.reasons.perDay).toBe("this period has no complete day yet, so its total is still partial");
+      const byProduct = await compare({ ...args, groupBy: "product" });
+      expect(byProduct).toMatchObject({ comparableBy: "total", rankedBy: "total" });
+      expect(byProduct.reasons.perDay).toBe("this period has no complete day yet, so its total is still partial");
+    });
+  });
 });
 
 describe("A2 C14 (A2-OCC-12) / C16 (A2-FD1-6) — get_valuation says whose retail price unitRetailCents is", () => {
@@ -1354,5 +1439,46 @@ describe("A2 C14 (A2-OCC-12) / C16 (A2-FD1-6) — get_valuation says whose retai
         "each store's live price)",
     );
     expect(d).not.toContain("synced from one store listing");
+  });
+});
+
+// ===========================================================================
+// A2 pack C17 (A2-QA-4 / A2-QA-5) — wording: find_product's remaining count names the rows
+// its byte fit skipped; the composites carry get_sales' standing "newest day or two" sentence.
+// ===========================================================================
+
+describe("A2 C17 — find_product's remaining count and the composites' newest-orders sentence", () => {
+  /** get_sales' standing disclosure, quoted from its own description (pack C7). */
+  const NEWEST_ORDERS =
+    "Orders recorded since the last successful nightly rebuild are not counted yet, so the most " +
+    "recent day or two may be partial.";
+  const descOf = (name: string) => assistantTools[name].description.replace(/\s+/g, " ");
+
+  it("find_product: remainingRows counts only the matches after nextOffset, byteSkipped the rest", () => {
+    expect(descOf("find_product")).toContain(
+      "follow coverage.byteNote (same offset, smaller limit) to read them instead of walking on. " +
+        "remainingRows counts only the matches after nextOffset; add coverage.byteSkipped for every " +
+        "match not yet shown.",
+    );
+  });
+
+  it("the sentence is get_sales' own, verbatim", () => {
+    expect(descOf("get_sales")).toContain(NEWEST_ORDERS);
+  });
+
+  it("get_product_overview: right after the sentence that first names its sales section", () => {
+    expect(descOf("get_product_overview")).toContain(
+      "and sales30 (30-day ordered units/revenue). " + NEWEST_ORDERS + " Its valuation row",
+    );
+  });
+
+  it("get_business_snapshot: right after the sentence that first names its sales section", () => {
+    expect(descOf("get_business_snapshot")).toContain(
+      "sales (7-day and 30-day ordered units/revenue), orderPipeline (order counts + revenue by " +
+        "status + open-order aging), and freshness (rebuild recency + the fulfillment-sync note). " +
+        "The sales section comes from the nightly sales rebuild: " +
+        NEWEST_ORDERS +
+        " orderPipeline reads the order records directly, not through the rebuild. freshness.lastRunAt",
+    );
   });
 });

@@ -29,6 +29,7 @@ jest.mock("@/lib/prisma", () => {
 
 import prisma from "@/lib/prisma";
 import { comparePeriods, comparePeriodsByProduct, rate } from "@/lib/reports/compare-periods";
+import { resolveWindow } from "@/lib/assistant/window";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 
@@ -1562,6 +1563,8 @@ describe("A2 C3 — per-day rates, per-day ranking and directionCounts", () => {
       expect(res.delta).toBe(-1);
       expect(res.pctChange).toBe(-1);
       expect(res.reasons).toEqual({});
+      // A2 C17: lengths differ and both periods have complete days -> compare per day.
+      expect(res.comparableBy).toBe("per_day");
     });
 
     it("a measured 0 in period A: per-day 0, perDayPctChange null with its own reason", async () => {
@@ -1640,6 +1643,7 @@ describe("A2 C3 — per-day rates, per-day ranking and directionCounts", () => {
         companyIds: [],
       });
       expect(res.rankedBy).toBe("per_day");
+      expect(res.comparableBy).toBe(res.rankedBy); // A2 C17: one rule, one signal
       // By |delta| this would be [2, 4, 1, 3]; by the per-day change it is p1 (+1) and p2
       // (-1) tied on magnitude, the increase first, then p3 (+0.1), then p4 (0).
       expect(res.ranked.map((r) => r.productId)).toEqual([1, 2, 3, 4]);
@@ -1747,6 +1751,7 @@ describe("A2 C3 — per-day rates, per-day ranking and directionCounts", () => {
         companyIds: [],
       });
       expect(res.rankedBy).toBe("total");
+      expect(res.comparableBy).toBe(res.rankedBy); // A2 C17
       expect(res.ranked.map((r) => r.productId)).toEqual([1, 3, 2]);
       expect(res.ranked.map((r) => r.delta)).toEqual([20, 5, -5]);
       // Per-day figures still ride on every row.
@@ -1789,6 +1794,7 @@ describe("A2 C3 — per-day rates, per-day ranking and directionCounts", () => {
       expect(res.directionCounts).toEqual({ increased: 0, decreased: 0, unchanged: 0 });
       // rankedBy follows the lengths alone.
       expect(res.rankedBy).toBe("per_day");
+      expect(res.comparableBy).toBe(res.rankedBy); // A2 C17
     });
   });
 
@@ -1998,7 +2004,7 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
     expect(res.b).toBe(5); // the total still stands
     expect(res).toMatchObject({ bPerDay: null, perDayDelta: null, perDayPctChange: null, perDayDirection: null });
     expect(res.aPerDay).toBe(0);
-    expect(res.reasons.perDay).toBe("this period has no complete day yet");
+    expect(res.reasons.perDay).toBe("this period has no complete day yet, so its total is still partial");
     expect(res.rateWindows.b).toEqual({ from: today, to: day(-1), days: 0 });
     expect(sumReads()).toHaveLength(2);
   });
@@ -2045,6 +2051,7 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
       expect(res.rateWindows.a.days).toBe(6);
       expect(res.rateWindows.b.days).toBe(6);
       expect(res.rankedBy).toBe("total");
+      expect(res.comparableBy).toBe(res.rankedBy); // A2 C17
     });
 
     it("equal lengths where one ends today and the other in the past: rankedBy 'per_day' (6 vs 7 complete days)", async () => {
@@ -2066,6 +2073,7 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
       });
       expect(res.unequalLengths).toBe(false); // the REQUESTED lengths are equal...
       expect(res.rankedBy).toBe("per_day"); // ...the complete days are not
+      expect(res.comparableBy).toBe(res.rankedBy); // A2 C17
       const p2 = res.ranked.find((r) => r.productId === 2)!;
       const p3 = res.ranked.find((r) => r.productId === 3)!;
       // The totals still include today; the per-day numerator does not.
@@ -2096,7 +2104,8 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
       });
       expect(res.unequalLengths).toBe(true);
       expect(res.rankedBy).toBe("total");
-      expect(res.reasons.perDay).toBe("this period has no complete day yet");
+      expect(res.comparableBy).toBe(res.rankedBy); // A2 C17: unequal, but no complete day in B
+      expect(res.reasons.perDay).toBe("this period has no complete day yet, so its total is still partial");
       for (const row of res.ranked) {
         expect(row).toMatchObject({ bPerDay: null, perDayDelta: null, perDayDirection: null });
         expect(row.reasons?.perDay).toBeUndefined(); // a PERIOD fact, never on a row
@@ -2134,6 +2143,7 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
       const res = await comparePeriodsByProduct({ metric: "sales_units", periodA: A, periodB: B, companyIds: ["c1"] });
       expect(res.rateWindows).toEqual({ a: { from: A.from, to: A.to, days: 7 }, b: { from: B.from, to: B.to, days: 7 } });
       expect(res.rankedBy).toBe("total");
+      expect(res.comparableBy).toBe(res.rankedBy); // A2 C17
       const p1 = res.ranked.find((r) => r.productId === 1)!;
       expect(p1).toMatchObject({ a: 10, b: 30, aPerDay: rate(10 / 7), bPerDay: rate(30 / 7) });
       expect(productReads()).toHaveLength(2);
@@ -2172,7 +2182,7 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
         periodB: win(day(-3), day(-1)),
         companyIds: ["c1"],
       });
-      expect(res.reasons.perDay).toBe("this period has no complete day yet");
+      expect(res.reasons.perDay).toBe("this period has no complete day yet, so its total is still partial");
       const p2 = res.ranked.find((r) => r.productId === 2)!;
       expect(p2).toMatchObject({ a: 0, b: 9, pctChange: null, aPerDay: null, perDayPctChange: null });
       // The TOTAL is zero, so the pctChange reason stands; the per-day one is the envelope's.
@@ -2205,6 +2215,97 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
         companyIds: ["c1"],
       });
       expect(res.ranked.find((r) => r.productId === 2)!.reasons).toBeUndefined();
+    });
+  });
+
+  // A2 C17 (A2-QA-1, Med): since FR1 an equal-length pair where one period reaches past the
+  // last complete day ranks per day, but only `unequalLengths` told the model to compare per
+  // day — so a flat product's delta / pctChange over a period still being recorded read as a
+  // decline ("down 14%"). `comparableBy` is the ONE signal, in BOTH modes, by the rankedBy rule.
+  describe("A2 C17 — comparableBy: when to compare per day, in both modes", () => {
+    const NOW = new Date("2026-10-28T15:00:00.000Z"); // today 2026-10-28; last complete day 10-27
+    const NO_COMPLETE_DAY = "this period has no complete day yet, so its total is still partial";
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(NOW);
+    });
+    afterEach(() => jest.useRealTimers());
+
+    /** Every day key from `from` to `to`, inclusive. */
+    const daysFrom = (from: string, to: string) => {
+      const out: string[] = [];
+      for (let t = Date.parse(`${from}T00:00:00Z`); t <= Date.parse(`${to}T00:00:00Z`); t += DAY) {
+        out.push(new Date(t).toISOString().slice(0, 10));
+      }
+      return out;
+    };
+    /** Exactly 2 a day on every COMPLETE day; today (still being recorded) has none yet. */
+    const flatTwoPerDay = () =>
+      seedSalesTable([
+        START,
+        ...daysFrom("2026-10-08", "2026-10-27").map((dayKey) => ({ productId: 1, companyId: "c1", dayKey, orderedQty: 2 })),
+      ]);
+    /** "This week vs last week" as the tool resolves it: relativeDays 7 each. */
+    const thisWeek = () => resolveWindow({ relativeDays: 7 }, new Date(), 30);
+    const lastWeek = () => resolveWindow({ relativeDays: 7, to: "2026-10-21" }, new Date(), 30);
+
+    it("this week vs last week, a flat 2/day product: comparableBy 'per_day' in BOTH modes, perDayDirection unchanged", async () => {
+      flatTwoPerDay();
+      const periodA = lastWeek();
+      const periodB = thisWeek();
+      expect([periodA.from, periodA.to, periodA.days]).toEqual(["2026-10-15", "2026-10-21", 7]);
+      expect([periodB.from, periodB.to, periodB.days]).toEqual(["2026-10-22", "2026-10-28", 7]);
+
+      const totals = await comparePeriods({ metric: "sales_units", periodA, periodB, companyIds: ["c1"] });
+      // The requested lengths are equal, so unequalLengths alone would send the model to delta...
+      expect(totals.unequalLengths).toBe(false);
+      // ...which reads a decline over a period still being recorded:
+      expect(totals).toMatchObject({ a: 14, b: 12, delta: -2 });
+      expect(totals.pctChange).toBeCloseTo(-1 / 7, 10);
+      // The signal says compare per day, and per day nothing changed.
+      expect(totals.comparableBy).toBe("per_day");
+      expect(totals).toMatchObject({ aPerDay: 2, bPerDay: 2, perDayDelta: 0, perDayDirection: "unchanged" });
+      expect(totals.rateWindows).toEqual({
+        a: { from: "2026-10-15", to: "2026-10-21", days: 7 },
+        b: { from: "2026-10-22", to: "2026-10-27", days: 6 },
+      });
+
+      const byProduct = await comparePeriodsByProduct({ metric: "sales_units", periodA, periodB, companyIds: ["c1"] });
+      expect(byProduct.unequalLengths).toBe(false);
+      expect(byProduct.comparableBy).toBe("per_day");
+      expect(byProduct.comparableBy).toBe(byProduct.rankedBy);
+      expect(byProduct.ranked).toHaveLength(1);
+      expect(byProduct.ranked[0]).toMatchObject({ productId: 1, a: 14, b: 12, delta: -2, perDayDirection: "unchanged" });
+      expect(byProduct.directionCounts).toEqual({ increased: 0, decreased: 0, unchanged: 1 });
+    });
+
+    it("equal lengths both in the past: comparableBy 'total' in both modes (the |delta| pipeline)", async () => {
+      flatTwoPerDay();
+      const periodA = resolveWindow({ relativeDays: 7, to: "2026-10-14" }, new Date(), 30);
+      const periodB = lastWeek();
+      const totals = await comparePeriods({ metric: "sales_units", periodA, periodB, companyIds: ["c1"] });
+      expect(totals.comparableBy).toBe("total");
+      expect(totals).toMatchObject({ a: 14, b: 14, delta: 0, perDayDirection: "unchanged" });
+      const byProduct = await comparePeriodsByProduct({ metric: "sales_units", periodA, periodB, companyIds: ["c1"] });
+      expect(byProduct.comparableBy).toBe("total");
+      expect(byProduct.rankedBy).toBe("total");
+    });
+
+    it("a period with no complete day: comparableBy 'total' and the reason says its total is still partial (both modes)", async () => {
+      flatTwoPerDay();
+      // "Today vs yesterday" (equal lengths) and "the last 3 days vs today" (unequal lengths):
+      // neither has a per-day figure for today, so neither compares per day.
+      for (const periodA of [resolveWindow({ relativeDays: 1, to: "2026-10-27" }, new Date(), 30), resolveWindow({ relativeDays: 3, to: "2026-10-27" }, new Date(), 30)]) {
+        const periodB = resolveWindow({ relativeDays: 1 }, new Date(), 30);
+        const totals = await comparePeriods({ metric: "sales_units", periodA, periodB, companyIds: ["c1"] });
+        expect({ days: periodA.days, comparableBy: totals.comparableBy }).toEqual({ days: periodA.days, comparableBy: "total" });
+        expect(totals.reasons.perDay).toBe(NO_COMPLETE_DAY);
+        expect(totals.unequalLengths).toBe(periodA.days !== 1);
+        const byProduct = await comparePeriodsByProduct({ metric: "sales_units", periodA, periodB, companyIds: ["c1"] });
+        expect(byProduct.comparableBy).toBe("total");
+        expect(byProduct.rankedBy).toBe("total");
+        expect(byProduct.reasons.perDay).toBe(NO_COMPLETE_DAY);
+      }
     });
   });
 });

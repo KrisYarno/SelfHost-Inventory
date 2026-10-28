@@ -678,10 +678,12 @@ const C12_TRUTHFULNESS = [
     "counts block, or a coverage count) and keep its scope — an alert count is not a count " +
     "of every product. Never count rows or items yourself; if no returned count covers it, " +
     "list the items without a number.",
-  // A2 C14 (A2-OCC-7): the fallback no longer reads as a claim about rates.
-  "- When two periods differ in length, compare the per-day figures a tool returned; if " +
-    "none were returned, give both totals with their lengths and say that totals over " +
-    "different lengths cannot be compared directly.",
+  // A2 C14 (A2-OCC-7): the fallback no longer reads as a claim about rates. A2 C17 (A2-QA-1):
+  // the per-day figures also when the tool says so (comparableBy) — equal lengths included.
+  "- When two periods differ in length, or a tool returns comparableBy 'per_day', compare " +
+    "the per-day figures it returned, not the change in totals; if none were returned, give " +
+    "both totals with their lengths and say that totals over different lengths cannot be " +
+    "compared directly.",
   "- A product out of stock with recorded orders (outOfStockWithOrders): say it is out of " +
     "stock now, give its ordered units and orders for the window, and say the report " +
     "cannot suggest a quantity, so it needs your decision.",
@@ -718,6 +720,22 @@ describe("A2 C12 TRUTHFULNESS: returned counts, per-day rates, the order flag, u
         "different lengths cannot be compared directly.",
     );
     expect(p).not.toContain("not comparable as rates");
+  });
+
+  it("A2 C17 (A2-QA-1): the per-day rule follows comparableBy — the four lines exactly, the old line gone", () => {
+    const lines = raw.split("\n");
+    const start = lines.indexOf(
+      "- When two periods differ in length, or a tool returns comparableBy 'per_day', compare",
+    );
+    expect(start).toBeGreaterThan(0);
+    expect(lines.slice(start, start + 4)).toEqual([
+      "- When two periods differ in length, or a tool returns comparableBy 'per_day', compare",
+      "  the per-day figures it returned, not the change in totals; if none were returned, give",
+      "  both totals with their lengths and say that totals over different lengths cannot be",
+      "  compared directly.",
+    ]);
+    expect(lines[start + 4].startsWith("- ")).toBe(true); // a bullet of its own
+    expect(p).not.toContain("compare the per-day figures a tool returned;");
   });
 
   it("sits immediately after the 'Totals come from the grain' bullet, in order, before 'State only'", () => {
@@ -905,6 +923,8 @@ const S8_COMPARE = {
     a: { from: "2026-07-01", to: "2026-07-30", days: 30 },
     b: { from: "2026-08-01", to: "2026-08-07", days: 7 },
   },
+  // A2 C17: the "compare per day" signal the prompt now cites (always rankedBy in this mode).
+  comparableBy: "per_day",
   rankedBy: "per_day",
   directionCounts: { increased: 1, decreased: 0, unchanged: 0 },
   excludedUnapprovedProducts: 0,
@@ -935,7 +955,8 @@ const S8_FIELDS: Array<{ cites: string; tool: string; path: string; value: unkno
   { cites: "counts", tool: "reorder_report", path: "counts.unavailable.no_demand_signal", value: 1 },
   { cites: "counts", tool: "compare_periods", path: "counts.ranked", value: 1 },
   { cites: "coverage", tool: "low_stock_report", path: "coverage.totalAlerts", value: 2 },
-  // "compare the per-day figures a tool returned"
+  // "or a tool returns comparableBy 'per_day', compare the per-day figures it returned"
+  { cites: "comparableBy", tool: "compare_periods", path: "comparableBy", value: "per_day" },
   { cites: "per-day figures", tool: "compare_periods", path: "rankedBy", value: "per_day" },
   { cites: "per-day figures", tool: "compare_periods", path: "rows.0.aPerDay", value: 1 },
   { cites: "per-day figures", tool: "compare_periods", path: "rows.0.bPerDay", value: 2 },
@@ -1034,6 +1055,7 @@ describe("A2 seam S8: every name the C12 rules cite exists in a payload a tool s
     const lines = [...C12_TRUTHFULNESS, ...C12_ROUTING].map((line) => bulletStartingWith(openingOf(line)));
     const cited = Array.from(new Set(lines.join(" ").match(CITED_NAME) ?? [])).sort();
     expect(cited).toEqual([
+      "comparableBy",
       "groupBy",
       "locationId",
       "outOfStockAlerts",

@@ -21,7 +21,8 @@
  *    not linked to a product never becomes a sales fact (`lib/analytics/attribution.ts`),
  *    so a product with no fact row reads a measured zero only when it HAS a link on one of
  *    the caller's stores. Its unlinked case is returned in `unlinked`, and the window's
- *    orders carrying an unattributable line are counted (`unlinkedOrders`).
+ *    orders carrying an unattributable line are counted (`unlinkedOrders`; A2 C17: a bundle
+ *    line recorded without its components among them).
  *  - NO read touches the `Integration` table (it holds the encrypted store keys and the
  *    webhook secret) — not even a relation filter. The caller's stores are the
  *    `integrationId`s of the caller's own order records.
@@ -35,6 +36,7 @@
  */
 
 import prisma from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import { dayKeyStart, nextDayStart } from "@/lib/analytics/dates";
 import { approvedProductIds } from "@/lib/reports/outbound-mix";
 import {
@@ -210,11 +212,15 @@ async function linkCheck(
  * A2 C14: the window's orders in the caller's companies with at least one line the fact
  * rebuild cannot attribute — attribution's own predicates (`lib/analytics/attribution.ts`):
  * a cancelled order is skipped, and a line is unattributable when it has no listing or a
- * non-bundle listing with no product. A bundle line whose frozen snapshot is malformed is
- * also unattributed there, but the snapshot is JSON and not filterable — the rebuild's own
- * `unattributed` counter covers it. The day predicate is the rebuild's
- * (`lib/analytics/rebuild-sales.ts`: `externalCreatedAt`, else `createdAt`, over the UTC
- * day keys), so the count covers exactly the days the facts do.
+ * non-bundle listing with no product. A2 C17 (A2-QA-2): or a bundle line whose frozen
+ * component snapshot is NULL — intake writes the snapshot on create only, so a line linked to
+ * a bundle later (a re-sync) carries none, and attribution counts it unattributed.
+ * `Prisma.AnyNull` matches the column's NULL and a stored JSON null alike (attribution reads
+ * both as no components). A snapshot that is present but empty or malformed is unattributed
+ * there too; this count does not read the snapshot's contents (pack C17 names the NULL branch
+ * only) — the rebuild's own `unattributed` counter covers it. The day predicate is the
+ * rebuild's (`lib/analytics/rebuild-sales.ts`: `externalCreatedAt`, else `createdAt`, over
+ * the UTC day keys), so the count covers exactly the days the facts do.
  */
 async function unlinkedOrderCount(
   companyIds: string[],
@@ -233,7 +239,11 @@ async function unlinkedOrderCount(
       ],
       items: {
         some: {
-          OR: [{ productLinkId: null }, { productLink: { isBundle: false, internalProductId: null } }],
+          OR: [
+            { productLinkId: null },
+            { productLink: { isBundle: false, internalProductId: null } },
+            { productLink: { isBundle: true }, bundleComponentSnapshot: { equals: Prisma.AnyNull } },
+          ],
         },
       },
     },

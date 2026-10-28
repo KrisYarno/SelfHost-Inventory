@@ -1542,6 +1542,7 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     // A2 C14 (A2-OCC-2 / OCC-8 / OCC-9): complete days only, a calendar rate, and the
     // direction counts follow the per-day change under per-day ranking. A2 C16 (A2-FD1-3 /
     // -4): the sales frontier's other cut-off, and the totals-ranking fallback's warning.
+    // A2 C17 (A2-FD3-1): both per-day triggers, and the comparableBy signal they set.
     const RATE_DEFINITION =
       "per day = a period's total over its COMPLETE days divided by those days " +
       "(coverage.rateWindows): a period that reaches past the last complete day is measured for " +
@@ -1549,9 +1550,9 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       "sales rebuild succeeds, recent days' sales — are still arriving. Values of 1 or more " +
       "are rounded to 2 decimals, smaller values to 3 significant figures, so a small non-zero " +
       "rate never shows as 0; perDayDirection is the sign of the unrounded change. When the " +
-      "rate periods differ in length and both have a complete day, rows are ranked and " +
-      "filtered by the per-day change, " +
-      "because totals of periods of different lengths are not comparable; delta and pctChange " +
+      "periods or their rate windows differ in length and both have a complete day, " +
+      "comparableBy is 'per_day' and rows are ranked and filtered by the per-day change, " +
+      "because totals over different spans of complete days are not comparable; delta and pctChange " +
       "stay the change in the full periods' totals. This is a calendar rate — the low-stock " +
       "and reorder rates divide by the days a product's outbound data covers, so they are not " +
       "directly comparable to it. Under partial company coverage these are rates of what was " +
@@ -1599,6 +1600,9 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       seedUnequal();
       const data = await okData(unequalArgs({ direction: "increase" }));
       expect(data.rankedBy).toBe("per_day");
+      // A2 C17: the "compare per day" signal rides beside unequalLengths, by the same rule.
+      expect(data.unequalLengths).toBe(true);
+      expect(data.comparableBy).toBe("per_day");
       expect((data.periodA as { days: number }).days).toBe(274);
       expect((data.periodB as { days: number }).days).toBe(30);
       const rows = data.rows as Array<Record<string, unknown>>;
@@ -1724,6 +1728,7 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
         groupBy: "product",
       });
       expect(data.rankedBy).toBe("total");
+      expect(data.comparableBy).toBe("total"); // A2 C17: equal rate days, equal lengths
       const rows = data.rows as Array<Record<string, unknown>>;
       expect(rows.map((r) => r.productId)).toEqual([1, 3, 2]);
       // A2 C14: both 7-day periods end today — 6 complete days each, so still ranked by total.
@@ -1803,6 +1808,9 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       expect(data).not.toHaveProperty("rankedBy");
       expect(data).not.toHaveProperty("counts");
       expect(data).not.toHaveProperty("countsNote");
+      // A2 C17 (A2-QA-1): totals mode now says when to compare per day, too.
+      expect(data.unequalLengths).toBe(true);
+      expect(data.comparableBy).toBe("per_day");
       const coverage = data.coverage as Record<string, unknown>;
       expect(coverage.rateDefinition).toBe(RATE_DEFINITION);
       expect(coverage.reasonsKeys).toBe(
@@ -1818,14 +1826,17 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
         "for PER-PRODUCT deltas ranked server-side by |delta| (by the per-day change when " +
           "rankedBy is 'per_day') — that is the ONE call",
       );
+      // A2 C17 (A2-QA-1): the per-day sentence follows comparableBy in BOTH modes, not
+      // unequalLengths alone ("this week vs last week" has equal lengths).
       expect(d).toContain(
-        "When periodA and periodB differ in length (unequalLengths), compare the per-day figures " +
-          "(aPerDay, bPerDay, perDayDelta, perDayDirection). Rows are ranked and filtered by the " +
-          "per-day change (rankedBy: 'per_day') when both periods have a complete day and the " +
-          "lengths differ, or one period reaches past the last complete day and so has fewer " +
-          "complete days (coverage.rateWindows); a period with no complete day yet ranks by " +
-          "totals (countsNote).",
+        "Whenever comparableBy is 'per_day' — the periods differ in length, or one reaches past " +
+          "the last complete day so its total still includes days being recorded " +
+          "(coverage.rateWindows) — compare the per-day figures (aPerDay, bPerDay, perDayDelta, " +
+          "perDayDirection), not delta or pctChange; in groupBy 'product' mode the rows are then " +
+          "ranked and filtered by the per-day change (rankedBy: 'per_day'). A period with no " +
+          "complete day yet has no per-day figure (reasons.perDay) and comparableBy is 'total'.",
       );
+      expect(d).not.toContain("When periodA and periodB differ in length (unequalLengths), compare");
       // A2 FR4 (A2-FD2-2): the description's own reasons-keys list names the per-day keys too.
       expect(d).toContain(
         "delta = the coverageShift qualification (BOTH modes, present only with coverageShift), " +
