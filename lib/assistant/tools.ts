@@ -94,7 +94,9 @@ import {
   getMovementSeries,
   getReceipts,
   getMovementByProduct,
+  locationNameEcho,
   type MovementEnvelope,
+  type MovementProductRow,
 } from "@/lib/reports/movement";
 import { getInventorySummary } from "@/lib/reports/inventory-summary";
 import { getPolicy } from "@/lib/reports/policy";
@@ -562,11 +564,17 @@ function ok(data: unknown, opts: { scope: ToolScope; dataStart?: string }): Tool
  * The ONE not-found result shape (spec §4 W0-PROD). A productId-taking tool that
  * resolves through resolveAssistantProduct returns this when the ID is absent /
  * pending-review / soft-deleted — never a `currentStock: 0` for an unapproved ID.
+ *
+ * A2 pack C9: a location id has no approval state, so its message says only that no
+ * such location exists.
  */
-export function notFound(entity: "product", id: number): ToolResult {
+export function notFound(entity: "product" | "location", id: number): ToolResult {
   return {
     status: "error",
-    error: { code: "NOT_FOUND", message: `No approved ${entity} with id ${id}.` },
+    error: {
+      code: "NOT_FOUND",
+      message: entity === "location" ? `No location with id ${id}.` : `No approved ${entity} with id ${id}.`,
+    },
   };
 }
 
@@ -1286,6 +1294,28 @@ function refitPage<T>(page: Page<T>, offset: number, byteBudget: number): Page<T
   };
 }
 
+/** A2 C2: the scope of each by-product movement count, so the model never counts rows. */
+const MOVEMENT_COUNTS_NOTE =
+  "counts cover every row of this result, not only this page; withInbound means a positive " +
+  "received, adjustment-in, count-up or correction-up figure (transfers excluded). Use these " +
+  "for how many; never count rows yourself.";
+
+/** A2 C2: the by-product counts, over EVERY row of the result (never the page). Inbound is
+ *  the four non-transfer inbound buckets; outbound is the ranking magnitude itself. */
+function movementCountsOf(rows: MovementProductRow[]): {
+  products: number;
+  withOutbound: number;
+  withInbound: number;
+} {
+  return {
+    products: rows.length,
+    withOutbound: rows.filter((r) => r.outboundUnits > 0).length,
+    withInbound: rows.filter(
+      (r) => r.stockIn > 0 || r.correctionIn > 0 || r.adjustmentIn > 0 || r.countIn > 0,
+    ).length,
+  };
+}
+
 /**
  * get_movement_series `breakdownBy:'product'` (spec C10). ONE call answers "which
  * products moved, and how" — with the FULL signed 12-bucket partition per product, so
@@ -1346,6 +1376,9 @@ async function movementByProduct(
       returned: page.returned,
       totalRows: page.totalRows,
       nextOffset: page.nextOffset,
+      // A2 C2: whole-result counts (result.rows, not page.rows), beside coverage.
+      counts: movementCountsOf(result.rows),
+      countsNote: MOVEMENT_COUNTS_NOTE,
       coverage: {
         ...result.coverage,
         rankNote:
@@ -1443,6 +1476,8 @@ const getMovementSeriesSchema = z.object({
 const getStockAsofSchema = z.object({
   dayKey: isoDay,
   productId: positiveInt.optional(),
+  // A2 C9: one location's stock on that day (otherwise the sum across locations).
+  locationId: positiveInt.optional(),
   limit: z.number().int().positive().max(STOCK_ASOF_MAX).optional(),
   offset: nonNegInt.optional(),
 });
@@ -2299,9 +2334,10 @@ export const assistantTools: Record<string, AssistantToolDef> = {
     description:
       `Shrinkage bucketed by the 4 classified loss reasons (damage/theft/expiry/count) ` +
       `over 30/90/365 days. All OTHER negative movement — bare corrections and ` +
-      `reason-less rows (how this shop ships pre-Lane-4) — is surfaced as ` +
-      `coverage.unclassifiedOutboundUnits, NEVER as loss. valueAtCurrentCostCents is a ` +
-      `known-cost subtotal — check costCoverage. UNCLASSIFIED is always relayed. ` +
+      `reason-less rows (outbound adjustments recorded without a reason code) — is ` +
+      `surfaced as coverage.unclassifiedOutboundUnits, NEVER as loss. ` +
+      `valueAtCurrentCostCents is a known-cost subtotal — check costCoverage. ` +
+      `UNCLASSIFIED is always relayed. ` +
       `scope echoes the effective { days } this result covers. ` +
       // W2-1 (design REV-2 disclosure): the intent chip makes the DAMAGE bucket
       // step up on its deploy date. Carried in the DESCRIPTION, not in the tool's
@@ -2333,8 +2369,12 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `price, and MARGIN (retail − cost, only where BOTH are known). groupBy ` +
       `total (default) | product | location; product/location grains are paginated. ` +
       `Each money field is a KNOWN-subtotal — null (never $0.00) when nothing in scope ` +
-      `carries that price; retail 0 means genuinely free, retail null means price ` +
-      `unknown. 'coverage' counts BOTH products AND on-hand units per dimension, so ` +
+      `carries that price; currentUnitCostCents / unitRetailCents are the stored ` +
+      `current unit cost and retail (0 = recorded as free, null = not set); unit prices ` +
+      `are on groupBy 'product' rows. Money totals count only products with a positive ` +
+      `cost or a set retail, and a money total of 0 on a row whose units is 0 means ` +
+      `nothing is on hand — never a free or unpriced product. 'coverage' counts BOTH ` +
+      `products AND on-hand units per dimension, so ` +
       `you can see exactly which units lack costs (costedUnits of ofUnits) instead of a ` +
       `misleading product percentage. Receipt cost is product-level only — location ` +
       `rows carry atReceiptCostCents null with a reason. Answers "what is my inventory ` +
@@ -2399,8 +2439,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `SEPARATE because a TRANSFER is an INTERNAL relocation between locations, never a ` +
       `real gain or loss). net === SUM of every bucket. A period ABSENT from 'points' ` +
       `had ZERO movement (points are sparse — only active periods appear). coverage ` +
-      `relays the legacy note (pre-Lane-4 negative ADJUSTMENT is how this shop shipped ` +
-      `— unclassified outbound, NOT sales) and the reasonCode-null count. The honest ` +
+      `relays the unclassified-outbound note (unclassifiedLegacyNote — the key name is ` +
+      `historical, the note is not about age: outbound adjustments without a reason code ` +
+      `are unclassified outbound, NOT sales) and the reasonCode-null count. The honest ` +
       `home for "outbound as demand" while SALE history is thin. Buckets are keyed by ` +
       `CALENDAR DAY (a wrong-signed row folds into its natural bucket to keep net exact); ` +
       `get_operations instead sums ALL negative non-transfer deltas over a ROLLING instant ` +
@@ -2468,6 +2509,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             productId: args.productId ?? null,
             productIds: null,
             locationId: args.locationId ?? null,
+            // A2 C8: the location's name, only when a location scopes the listing.
+            ...(await locationNameEcho(args.locationId)),
             mode: "receipts",
           },
         };
@@ -2914,7 +2957,11 @@ export const assistantTools: Record<string, AssistantToolDef> = {
     description:
       `As-of stock on a COMPLETED past day (dayKey, YYYY-MM-DD) from the nightly ` +
       `snapshot table — answers "what was my stock on day D?". Catalog-wide ` +
-      `(paginated) or one product via productId. 'units' is null with reason "no ` +
+      `(paginated) or one product via productId. Pass locationId for one location's ` +
+      `stock on that day (otherwise all locations are summed); with locationId, only ` +
+      `products recorded at that location on or before that day are listed ` +
+      `(coverage.notRecordedHere counts the rest — unknown, not zero). Location ids and ` +
+      `names: the valuation tool with groupBy 'location'. 'units' is null with reason "no ` +
       `snapshot recorded for that day" when no row exists for that (product, day) — ` +
       `NEVER a fabricated 0 (a genuine 0-on-hand day has a real row summing to 0, kept ` +
       `distinct). When only SOME of a product's known locations have a row for day D, ` +
@@ -2940,6 +2987,17 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         if (!product) return notFound("product", args.productId);
         productLifecycle = product.lifecycle;
       }
+      // A2 C9: a locationId is resolved before any snapshot read — an unknown one is
+      // notFound("location"), never an empty page that reads as "nothing stocked there".
+      // Locations are global (as in every stock tool); the name rides back in the echo.
+      let location: { id: number; name: string } | null = null;
+      if (args.locationId != null) {
+        location = await prisma.location.findUnique({
+          where: { id: args.locationId },
+          select: { id: true, name: true },
+        });
+        if (!location) return notFound("location", args.locationId);
+      }
       // getStockAsOf self-validates dayKey and THROWS AppError(VALIDATION,400) on
       // today/future/malformed — that propagates to the adapter, which surfaces the
       // adapter's error result. The reserved byte budget (below) is threaded into the
@@ -2947,6 +3005,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       const page = await getStockAsOf({
         dayKey: args.dayKey,
         productId: args.productId,
+        locationId: args.locationId,
         limit: args.limit,
         offset: args.offset,
         // Byte-reserve pattern (W1 seam-fix, applied here in W2 seam-fix item 6): the
@@ -2960,6 +3019,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       return ok(
         {
           dayKey: args.dayKey,
+          ...(location ? { location: { id: location.id, name: location.name } } : {}),
           ...(productLifecycle ? { lifecycle: productLifecycle } : {}),
           rows: page.rows,
           returned: page.returned,
@@ -3173,7 +3233,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `stockByLocation (top 3 locations), velocity (physical-outbound units/day + ` +
       `definition), valuation (cost/receipt/retail/margin + coverage), policy ` +
       `(effective threshold/lead time + true per-field source), movement30 (30-day ` +
-      `ledger TOTALS in/out/net), and sales30 (30-day ordered units/revenue). Each ` +
+      `ledger TOTALS in/out/net), and sales30 (30-day ordered units/revenue). Its ` +
+      `valuation row carries the stored unit cost and retail (currentUnitCostCents / ` +
+      `unitRetailCents: 0 = recorded as free, null = not set). Each ` +
       `section is a SUMMARY — go deeper with the per-topic tools (get_stock, ` +
       `get_valuation, get_inventory_policy, get_movement_series, get_sales). This is a ` +
       `MIXED-scope tool: sales30 is scoped to YOUR companies; every other section is ` +
@@ -3299,8 +3361,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             exclusionsNote:
               `excluded from this window: ${nonAttributable} batches with no population ` +
               `row (transfers, counts, corrections, positive-only adjusts), ` +
-              `${historicalMassUpdate} pre-lane mass-update batches, and ${noBatchRows} ` +
-              `outbound rows carrying no batch id`,
+              `${historicalMassUpdate} older mass-update sessions recorded under one batch ` +
+              `id, and ${noBatchRows} outbound rows carrying no batch id`,
             moreCount: report.moreCount,
             // The paging AFFORDANCE beside the bound it qualifies (OC-5). A
             // coverage block that said "N more" without the cursor told the

@@ -59,8 +59,16 @@ function mockLedger(dataStartChangeTime: Date | null, deltaA: number | null, del
     .mockResolvedValueOnce({ _sum: { delta: deltaB } } as never);
 }
 
+/** A2 C8: the caller's companies by name (one company read inside the coverage source). */
+const COMPANY_NAMES = [
+  { id: "c1", name: "Acme Peptides" },
+  { id: "c2", name: "Beta Labs" },
+];
+const NAME_OF: Record<string, string> = { c1: "Acme Peptides", c2: "Beta Labs" };
+
 beforeEach(() => {
   mockReset(db);
+  db.company.findMany.mockResolvedValue(COMPANY_NAMES as never);
 });
 
 describe("zero-vs-unknown rule", () => {
@@ -533,8 +541,8 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
     expect(res.reasons.a).toBeUndefined();
     // FD3-1: the staggering is DISCLOSED (the starts really do differ)...
     expect(res.companyCoverage).toEqual([
-      { companyId: "c1", salesDataStart: "2020-01-01" },
-      { companyId: "c2", salesDataStart: "2021-06-01" },
+      { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: "2021-06-01", name: "Beta Labs" },
     ]);
     expect(res.companyCoverageNote).toContain("latest-starting company governs zero legality");
     // ...but NEITHER period classified "partial", so the MEASURED-note sentence — which
@@ -590,8 +598,8 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
     expect(res.reasons.a).toContain("in every company");
     // The null-start/late company is NAMED, not just alluded to.
     expect(res.companyCoverage).toEqual([
-      { companyId: "c1", salesDataStart: "2020-01-01" },
-      { companyId: "c2", salesDataStart: "2099-01-01" },
+      { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: "2099-01-01", name: "Beta Labs" },
     ]);
   });
 
@@ -721,10 +729,10 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
     expect(res.reasons.b).toBeUndefined();
     // ...the degradation rides as a DISCLOSURE instead, naming the null-start company.
     expect(res.companyCoverage).toEqual([
-      { companyId: "c1", salesDataStart: "2020-01-01" },
-      { companyId: "c2", salesDataStart: null },
+      { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: null, name: "Beta Labs" },
     ]);
-    expect(res.companyCoverageNote).toContain("c2");
+    expect(res.companyCoverageNote).toContain(NAME_OF.c2); // A2 C8: named, not by id
     expect(res.companyCoverageNote).toContain("latest-starting company governs zero legality");
     // FD3-1 (the other direction): here a period REALLY IS partial, so the measured-note
     // sentence is a true statement about this answer and must ship.
@@ -749,7 +757,7 @@ describe("FD-1 staggered company starts — the latest company governs in BOTH m
 
     expect(res.a).toBeNull();
     expect(res.reasons.a).toContain("in every company");
-    expect(res.reasons.a).toContain("c2");
+    expect(res.reasons.a).toContain(NAME_OF.c2); // A2 C8: named, not by id
     // ...and B, which HAS rows, keeps its measured sum. No delta: one side is unknown, so
     // "growth from zero" is exactly what must not be computed.
     expect(res.b).toBe(60);
@@ -950,7 +958,9 @@ describe("FD3-3 coverage shift between the two periods", () => {
     // the two classifications DIFFER, which is the machine-readable half of the signal.
     expect(res.periodCoverage).toEqual({ a: "partial", b: "full" });
     // The prose half NAMES the company and its date, and says what the delta is not.
-    expect(res.coverageShift).toContain("c2");
+    // A2 C8: the company is NAMED, never shown by its id.
+    expect(res.coverageShift).toContain(NAME_OF.c2);
+    expect(res.coverageShift).not.toContain("c2 ");
     expect(res.coverageShift).toContain("2026-06-08");
     expect(res.coverageShift).toContain("period B");
     expect(res.coverageShift).toContain("period A");
@@ -975,7 +985,7 @@ describe("FD3-3 coverage shift between the two periods", () => {
 
     expect(res.periodCoverage).toEqual({ a: "partial", b: "partial" });
     expect(res.delta).toBe(60);
-    expect(res.coverageShift).toContain("c2");
+    expect(res.coverageShift).toContain(NAME_OF.c2);
     expect(res.coverageShift).toContain("2026-06-10");
     expect(res.reasons.delta).toBe(res.coverageShift);
   });
@@ -1145,7 +1155,7 @@ describe("FD3-3 mirrored to by_product (orchestrator seam-fix): the shift is env
       periodB: PERIOD_B,
       companyIds: ["c1", "c2"],
     });
-    expect(res.coverageShift).toEqual(expect.stringContaining("c2"));
+    expect(res.coverageShift).toEqual(expect.stringContaining(NAME_OF.c2));
     expect(res.reasons.delta).toBe(res.coverageShift);
   });
 
@@ -1258,8 +1268,8 @@ describe("FD4-1 the companyCoverage pair follows PER-COMPANY degradation, not an
 
     expect(res.periodCoverage).toEqual({ a: "partial", b: "full" });
     expect(res.companyCoverage).toEqual([
-      { companyId: "c1", salesDataStart: "2020-01-01" },
-      { companyId: "c2", salesDataStart: "2026-01-15" },
+      { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: "2026-01-15", name: "Beta Labs" },
     ]);
     expect(res.companyCoverageNote).toContain("MEASURED");
   });
@@ -1783,8 +1793,9 @@ describe("A2 C3 — per-day rates, per-day ranking and directionCounts", () => {
   });
 
   describe("the coverage-shift clause names the per-day figures", () => {
+    // A2 C8: the joining company is named alone (its id only when the name is gone).
     const SHIFT =
-      "period B includes company c2 (sales facts begin 2026-06-08) that period A does not " +
+      "period B includes Beta Labs (sales facts begin 2026-06-08) that period A does not " +
       "— delta and the per-day figures are not like-for-like growth";
 
     function seedJoinAtB() {
@@ -1833,6 +1844,25 @@ describe("A2 C3 — per-day rates, per-day ranking and directionCounts", () => {
       });
       expect(res.coverageShift).toBe(SHIFT);
       expect(res.reasons.delta).toBe(SHIFT);
+    });
+
+    it("A2 C8: a company whose name is gone (deleted) is said as 'company <id>'", async () => {
+      seedJoinAtB();
+      db.company.findMany.mockResolvedValue([{ id: "c1", name: "Acme Peptides" }] as never);
+      const res = await comparePeriods({
+        metric: "sales_units",
+        periodA: WEEK_A,
+        periodB: WEEK_B,
+        companyIds: ["c1", "c2"],
+      });
+      expect(res.coverageShift).toBe(
+        "period B includes company c2 (sales facts begin 2026-06-08) that period A does not " +
+          "— delta and the per-day figures are not like-for-like growth",
+      );
+      expect(res.companyCoverage).toEqual([
+        { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+        { companyId: "c2", salesDataStart: "2026-06-08", name: null },
+      ]);
     });
   });
 });

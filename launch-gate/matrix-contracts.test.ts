@@ -760,10 +760,15 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
       const coverage = coverageOf(callWithInput(turns.echoes, "get_sales", IN.salesZeroDegraded));
       expect(coverage.windowCoverage).toBe("partial");
 
-      // Per-company disclosure, EVERY requested company materialized (FD-2).
-      const perCompany = coverage.companyCoverage as Array<{ companyId: string; salesDataStart: string | null }>;
-      const expected = await oracleQuery<{ companyId: string; start: string | null }>(
-        `SELECT c.id AS companyId,
+      // Per-company disclosure, EVERY requested company materialized (FD-2) — and, A2 C8,
+      // each one NAMED from the companies table.
+      const perCompany = coverage.companyCoverage as Array<{
+        companyId: string;
+        salesDataStart: string | null;
+        name: string | null;
+      }>;
+      const expected = await oracleQuery<{ companyId: string; start: string | null; name: string }>(
+        `SELECT c.id AS companyId, c.name AS name,
                 (SELECT MIN(f.dayKey) FROM product_sales_facts f
                    JOIN products p ON p.id = f.productId
                   WHERE f.companyId = c.id AND p.approvalStatus = 'APPROVED') AS start
@@ -771,8 +776,9 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
         [...MEMBER_A.companyIds],
       );
       expect(perCompany).toEqual(
-        expected.map((row) => ({ companyId: row.companyId, salesDataStart: row.start })),
+        expected.map((row) => ({ companyId: row.companyId, salesDataStart: row.start, name: row.name })),
       );
+      expect(perCompany.every((entry) => typeof entry.name === "string" && entry.name !== "")).toBe(true);
       expect(perCompany.some((entry) => entry.salesDataStart === null)).toBe(true);
       // THE DISCRIMINATOR: the caller-wide start is on or before the window's first day,
       // so the window-level classification is `full` and the ONLY thing degrading it is
@@ -790,7 +796,7 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
 
   // =========================================================================
   describe("2d — periodCoverage + coverageShift on BOTH compare modes (C9/FD3-3)", () => {
-    it("totals mode classifies EACH period and (for the staggered admin) names the shift", () => {
+    it("totals mode classifies EACH period and (for the staggered admin) names the shift", async () => {
       const call = callWithInput(turns.lifecycle, "compare_periods", IN.compareTotals);
       const data = okData(call);
       const coverage = coverageOf(call);
@@ -798,7 +804,14 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
       // periodA reaches back before company B started recording; periodB does not.
       expect(coverage.periodCoverage).toEqual({ a: "partial", b: "full" });
       expect(typeof coverage.coverageShift).toBe("string");
-      expect(String(coverage.coverageShift)).toContain(GATE_SEED.companies.B);
+      // A2 C8: the shift NAMES company B (its name from the companies table, "Gate Company
+      // B" in the seed) — never its id.
+      const [companyB] = await oracleQuery<{ name: string }>("SELECT name FROM companies WHERE id = ?", [
+        GATE_SEED.companies.B,
+      ]);
+      expect(companyB.name).toBe("Gate Company B");
+      expect(String(coverage.coverageShift)).toContain(`includes ${companyB.name} (sales facts begin`);
+      expect(String(coverage.coverageShift)).not.toContain(GATE_SEED.companies.B);
       expect(String(coverage.coverageShift)).toContain("not like-for-like growth");
       // …mirrored into the reason vocabulary and named by the CONDITIONAL legend.
       expect((data.reasons as Record<string, string>).delta).toBe(coverage.coverageShift);
@@ -1269,7 +1282,11 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
       expect(rows.find((row) => row.productId === ACTIVE)?.firstSaleDayKey).toBe(first.start);
     });
 
-    it("windowCoverage `partial` via per-company degradation: nulls + the THIRD reason (FD2-3)", () => {
+    it("windowCoverage `partial` via per-company degradation: nulls + the THIRD reason (FD2-3)", async () => {
+      // A2 C8: the not-recording company is named from the companies table.
+      const [noSales] = await oracleQuery<{ name: string }>("SELECT name FROM companies WHERE id = ?", [
+        GATE_SEED.companies.noSales,
+      ]);
       const call = callWithInput(turns.echoes, "get_sales", IN.salesZeroDegraded);
       expect(coverageOf(call).windowCoverage).toBe("partial");
       const rows = okData(call).rows as Array<{
@@ -1284,7 +1301,8 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
         // NOT the predates/straddles sentence: the caller-wide window IS covered, a
         // MEMBER COMPANY simply never recorded — and the company is NAMED.
         expect(row.reason).toContain("sales data is not recorded in every company for this window");
-        expect(row.reason).toContain(GATE_SEED.companies.noSales);
+        expect(row.reason).toContain(`no sales data recorded for ${noSales.name}`);
+        expect(row.reason).not.toContain(GATE_SEED.companies.noSales);
         expect(row.reason).not.toContain("predates/straddles");
       }
     });
@@ -1578,10 +1596,11 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
       return { units: Number(row.units ?? 0), orders: Number(row.orders ?? 0) };
     }
 
-    /** First approved-ACTIVE fact day per company (the order signal's coverage scope). */
+    /** First approved-ACTIVE fact day per company (the order signal's coverage scope), with
+     *  the company's name (A2 C8: the relayed per-company starts carry it). */
     async function startsOf(companyIds: readonly string[]) {
-      return oracleQuery<{ companyId: string; start: string | null }>(
-        `SELECT c.id AS companyId,
+      return oracleQuery<{ companyId: string; start: string | null; name: string }>(
+        `SELECT c.id AS companyId, c.name AS name,
                 (SELECT MIN(f.dayKey) FROM product_sales_facts f
                    JOIN products p ON p.id = f.productId
                   WHERE f.companyId = c.id AND p.approvalStatus = 'APPROVED' AND p.deletedAt IS NULL) AS start
@@ -1643,10 +1662,16 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
         // ...but the companies' starts differ, so each is listed (SQL recompute).
         const expected = await startsOf(caller.companyIds);
         expect(
-          (coverage.orderSignalCompanyCoverage as Array<{ companyId: string; salesDataStart: string | null }>).map(
-            (entry) => ({ companyId: entry.companyId, salesDataStart: entry.salesDataStart }),
-          ),
-        ).toEqual(expected.map((row) => ({ companyId: row.companyId, salesDataStart: row.start })));
+          (
+            coverage.orderSignalCompanyCoverage as Array<{
+              companyId: string;
+              salesDataStart: string | null;
+              name: string | null;
+            }>
+          ).map((entry) => ({ companyId: entry.companyId, salesDataStart: entry.salesDataStart, name: entry.name })),
+        ).toEqual(
+          expected.map((row) => ({ companyId: row.companyId, salesDataStart: row.start, name: row.name })),
+        );
       }
     });
 

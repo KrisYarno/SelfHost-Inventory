@@ -56,6 +56,7 @@ import {
 import {
   callerWindowCoverage,
   companyCoverageDetail,
+  companyLabel,
   salesDataStartsByCompany,
   SALES_COMPANY_COVERAGE_NOTE,
   SALES_COMPANY_COVERAGE_MEASURED_NOTE,
@@ -143,7 +144,7 @@ export interface ComparePeriodsResult extends PerDayFigures {
    *  degraded window). It rides even when both periods are MEASURED — that is precisely
    *  the case a reader cannot otherwise see. Absent for the ledger metrics (no company
    *  dimension) and for callers whose companies share one start. */
-  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
+  companyCoverage?: NamedCompanyCoverage;
   /** The sentence that goes with it: which companies degrade the window, and what the
    *  degradation does (zero legality only). Present exactly when companyCoverage is. */
   companyCoverageNote?: string;
@@ -210,6 +211,10 @@ function productFilter(
   };
 }
 
+/** A2 C8: the per-company starts with each company's name (null when its row is gone), as
+ *  `salesDataStartsByCompany` returns them — so every disclosure names, never ids. */
+type NamedCompanyCoverage = Array<{ companyId: string; salesDataStart: string | null; name: string | null }>;
+
 /**
  * A metric's coverage SOURCE: the caller-wide data-start, plus (sales metrics only) the
  * PER-COMPANY starts that govern zero legality (FD-1, seam S8).
@@ -219,7 +224,7 @@ function productFilter(
  */
 interface MetricCoverageSource {
   dataStart: string | null;
-  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
+  companyCoverage?: NamedCompanyCoverage;
   /** FD3-7: the SOURCE-level caller-wide first fact (sales metrics only), read for the
    *  per-company question anyway. Under a `productId` the `dataStart` above is the
    *  PRODUCT's own first fact, and a reason quoting it alone reads as a statement about
@@ -614,7 +619,8 @@ function coverageShiftNote(
   coverageB: WindowCoverage,
 ): string | undefined {
   const entries = (source.companyCoverage ?? []).filter(
-    (c): c is { companyId: string; salesDataStart: string } => c.salesDataStart != null,
+    (c): c is { companyId: string; salesDataStart: string; name: string | null } =>
+      c.salesDataStart != null,
   );
   const insidePeriod = entries.some(
     (c) =>
@@ -624,9 +630,10 @@ function coverageShiftNote(
   if (coverageA === coverageB && !insidePeriod) return undefined;
   // Name every company whose contribution differs between the two periods, with the date
   // a reader can check. A start that covers both periods identically is not named.
+  // A2 C8: by its NAME alone (`companyLabel`) — the id only when the name is gone.
   const shifted = entries
     .map((c) => ({
-      companyId: c.companyId,
+      label: companyLabel(c),
       start: c.salesDataStart,
       a: contributionLevel(c.salesDataStart, periodA),
       b: contributionLevel(c.salesDataStart, periodB),
@@ -636,7 +643,7 @@ function coverageShiftNote(
       const [more, less] = c.b > c.a ? (["B", "A"] as const) : (["A", "B"] as const);
       const partly = Math.max(c.a, c.b) === 1 ? "partially " : "";
       return (
-        `period ${more} ${partly}includes company ${c.companyId} ` +
+        `period ${more} ${partly}includes ${c.label} ` +
         `(sales facts begin ${c.start}) that period ${less} does not`
       );
     });
@@ -789,7 +796,7 @@ export interface ComparePeriodsByProductResult {
   directionCounts: { increased: number; decreased: number; unchanged: number };
   /** FD2-2 disclosure, identical to the scalar mode's: the per-company starts + their
    *  sentence, present ONLY when the caller's companies do not share one. */
-  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
+  companyCoverage?: NamedCompanyCoverage;
   companyCoverageNote?: string;
   /** FD3-3 mirrored to by_product (orchestrator seam-fix): a coverage shift is an
    *  ENVELOPE-level fact — the joining company changes the denominator of EVERY row —

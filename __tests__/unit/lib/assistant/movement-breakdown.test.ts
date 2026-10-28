@@ -341,11 +341,14 @@ describe("the bounded batch — resolution, zero rows, and the rejected echo", (
     seedLedger([]);
     // 4242 is unresolvable: it is accounted for in coverage.requested, but it must NOT
     // appear in the scope echo — that echo claims what the ROWS cover.
+    db.location.findUnique.mockResolvedValue({ name: "Back room" } as never);
     const data = await okData({ breakdownBy: "product", productIds: [1, 4242], locationId: 3 });
+    // A2 C8: with a locationId the echo names the location too.
     expect(data.filters).toEqual({
       productId: null,
       productIds: [1],
       locationId: 3,
+      locationName: "Back room",
       mode: "by_product",
     });
     expect((data.filters as { mode: string }).mode).toBe(data.mode);
@@ -496,5 +499,123 @@ describe("resolveAssistantProducts — the batch resolver contract (T3)", () => 
     const batch = await resolveAssistantProducts([]);
     expect(batch).toEqual({ resolved: [], rejected: [] });
     expect(db.product.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 pack C2 (movement) + C10 + C8 at the tool layer: the by-product counts the model
+// reads instead of counting rows, the unclassified-outbound note only when it applies,
+// and the receipts echo naming its location.
+// ---------------------------------------------------------------------------
+
+const MOVEMENT_COUNTS_NOTE =
+  "counts cover every row of this result, not only this page; withInbound means a positive " +
+  "received, adjustment-in, count-up or correction-up figure (transfers excluded). Use these " +
+  "for how many; never count rows yourself.";
+
+describe("A2 C2 — by_product counts over the WHOLE result", () => {
+  function seedMixed() {
+    seedCatalog(Array.from({ length: 8 }, (_v, i) => ({ id: i + 1, name: `P${i + 1}` })));
+    seedLedger([
+      { productId: 1, delta: -5, logType: "SALE" }, // outbound only
+      { productId: 2, delta: -2, logType: "ADJUSTMENT", reasonCode: null }, // outbound (reason-less)
+      { productId: 2, delta: 4, logType: "STOCK_IN" }, // ...and received
+      { productId: 3, delta: 3, logType: "CORRECTION" }, // correction-up
+      { productId: 4, delta: 2, logType: "ADJUSTMENT", reasonCode: null }, // adjustment-in
+      { productId: 5, delta: 1, logType: "COUNT" }, // count-up
+      { productId: 6, delta: 7, logType: "TRANSFER" }, // a transfer-in alone is NOT inbound
+      { productId: 6, delta: -7, logType: "TRANSFER" }, // ...and a transfer-out is NOT outbound
+      { productId: 7, delta: -1, logType: "STOCK_IN" }, // a receipt reversal: outbound, not inbound
+    ]);
+  }
+
+  it("products / withOutbound / withInbound count every row, not the page (limit 2 of 7)", async () => {
+    seedMixed();
+    const data = await okData({ breakdownBy: "product", limit: 2 });
+    expect(data.totalRows).toBe(7);
+    expect(data.returned).toBe(2);
+    expect(data.counts).toEqual({ products: 7, withOutbound: 3, withInbound: 4 });
+    expect(data.countsNote).toBe(MOVEMENT_COUNTS_NOTE);
+    // Placement (the M1/M2 convention): counts + countsNote right before coverage.
+    const keys = Object.keys(data);
+    expect(keys.slice(keys.indexOf("counts"), keys.indexOf("counts") + 3)).toEqual([
+      "counts",
+      "countsNote",
+      "coverage",
+    ]);
+  });
+
+  it("every page carries the same whole-result counts", async () => {
+    seedMixed();
+    const page2 = await okData({ breakdownBy: "product", limit: 2, offset: 2 });
+    expect(page2.counts).toEqual({ products: 7, withOutbound: 3, withInbound: 4 });
+  });
+
+  it("a bounded request counts its all-zero rows as products, moving neither way", async () => {
+    seedCatalog([
+      { id: 1, name: "Moved" },
+      { id: 2, name: "Silent" },
+    ]);
+    seedLedger([{ productId: 1, delta: -3, logType: "SALE" }]);
+    const data = await okData({ breakdownBy: "product", productIds: [1, 2] });
+    expect(data.counts).toEqual({ products: 2, withOutbound: 1, withInbound: 0 });
+  });
+
+  it("A2 C10: the unclassified-outbound note rides only when a reason-less outbound row is in the result", async () => {
+    seedMixed();
+    const withNote = await okData({ breakdownBy: "product" });
+    const coverage = withNote.coverage as Record<string, unknown>;
+    expect(coverage.reasonCodeNullRows).toBe(1);
+    expect(coverage.unclassifiedLegacyNote).toBe(
+      "Outbound adjustments without a reason code (deductions recorded against an order, or with " +
+        "no reason given) are counted as unclassified outbound here — not as sales and not as loss " +
+        "in these figures.",
+    );
+
+    seedCatalog([{ id: 1, name: "Sold" }]);
+    seedLedger([{ productId: 1, delta: -3, logType: "SALE" }]);
+    const without = await okData({ breakdownBy: "product" });
+    expect((without.coverage as Record<string, unknown>).reasonCodeNullRows).toBe(0);
+    expect(without.coverage).not.toHaveProperty("unclassifiedLegacyNote");
+  });
+});
+
+describe("A2 C8 — the receipts echo names its location", () => {
+  it("receipts:true with a locationId: filters.locationName; rows name their location", async () => {
+    seedCatalog([{ id: 1, name: "Received" }]);
+    db.location.findUnique.mockResolvedValue({ name: "Back room" } as never);
+    db.inventory_logs.count.mockResolvedValue(1 as never);
+    db.inventory_logs.findMany.mockResolvedValue([
+      {
+        productId: 1,
+        locationId: 3,
+        locations: { name: "Back room" },
+        delta: 4,
+        unitCostCents: 120,
+        batchId: "b-1",
+        changeTime: new Date("2026-07-10T12:00:00.000Z"),
+      },
+    ] as never);
+    const data = await okData({ receipts: true, locationId: 3 });
+    expect(data.filters).toEqual({
+      productId: null,
+      productIds: null,
+      locationId: 3,
+      locationName: "Back room",
+      mode: "receipts",
+    });
+    expect((data.rows as Array<Record<string, unknown>>)[0]).toMatchObject({ locationId: 3, locationName: "Back room" });
+    expect(data.definitions).toEqual({
+      receiptEvent: "a receipt event = one stock-in batch; a five-batch delivery is five events",
+    });
+  });
+
+  it("receipts:true without a locationId: no locationName in the echo", async () => {
+    seedCatalog([{ id: 1, name: "Received" }]);
+    db.inventory_logs.count.mockResolvedValue(0 as never);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+    const data = await okData({ receipts: true });
+    expect(data.filters).not.toHaveProperty("locationName");
+    expect(db.location.findUnique).not.toHaveBeenCalled();
   });
 });

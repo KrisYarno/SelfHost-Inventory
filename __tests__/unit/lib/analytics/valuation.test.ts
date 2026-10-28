@@ -256,3 +256,90 @@ describe("getValuation — deterministic product ordering + productId narrowing"
     expect(r.coverage.receiptCostedProducts).toBe(0);
   });
 });
+
+// A2 pack C6 (R4-13, A1 c4/c5): the unit prices a row was built from. A 0-unit product's
+// money totals are 0 — and the model read that 0 as a price. The STORED unit values ride
+// on PRODUCT rows (a location row sums several products, so it has no single unit price),
+// while the money totals keep today's rules unchanged.
+describe("getValuation — A2 C6 unit prices on product rows", () => {
+  test("a 0-unit product with known cost and retail: totals 0, unit prices non-null", async () => {
+    setupVal({
+      products: [prod({ id: 1, costPrice: 2.5, retailPrice: 9, product_locations: [at(1, 0, "Main")] })],
+    });
+    const r = await getValuation({ groupBy: "product" });
+    expect(r.rows[0].units).toBe(0);
+    expect(r.rows[0].atCurrentCostCents).toBe(0);
+    expect(r.rows[0].atRetailCents).toBe(0);
+    expect(r.rows[0].currentUnitCostCents).toBe(250);
+    expect(r.rows[0].unitRetailCents).toBe(900);
+  });
+
+  test("cost 0 -> currentUnitCostCents 0 (recorded as free) while atCurrentCostCents keeps today's rule (uncosted)", async () => {
+    setupVal({
+      products: [prod({ id: 1, costPrice: 0, retailPrice: 9, product_locations: [at(1, 4, "Main")] })],
+    });
+    const r = await getValuation({ groupBy: "product" });
+    expect(r.rows[0].currentUnitCostCents).toBe(0);
+    // centsFromCostPrice maps a stored 0 to null for the totals (lib/inventory.ts) — stated, not changed.
+    expect(r.rows[0].atCurrentCostCents).toBeNull();
+    expect(r.rows[0].marginCents).toBeNull();
+    expect(r.coverage.costedProducts).toBe(0);
+  });
+
+  test("retail 0 -> unitRetailCents 0; NULL cost and retail -> both null", async () => {
+    setupVal({
+      products: [
+        prod({ id: 1, costPrice: 2.5, retailPrice: 0, product_locations: [at(1, 4, "Main")] }),
+        prod({ id: 2, costPrice: null, retailPrice: null, product_locations: [at(1, 4, "Main")] }),
+      ],
+    });
+    const r = await getValuation({ groupBy: "product" });
+    const byId = Object.fromEntries(r.rows.map((row) => [row.productId, row]));
+    expect(byId[1].unitRetailCents).toBe(0);
+    expect(byId[1].currentUnitCostCents).toBe(250);
+    expect(byId[2]).toHaveProperty("currentUnitCostCents", null);
+    expect(byId[2]).toHaveProperty("unitRetailCents", null);
+  });
+
+  test("a two-product location row carries no unit keys (it has no single unit price)", async () => {
+    setupVal({
+      products: [
+        prod({ id: 1, costPrice: 2, retailPrice: 5, product_locations: [at(1, 7, "A-loc")] }),
+        prod({ id: 2, costPrice: 3, retailPrice: 6, product_locations: [at(1, 4, "A-loc")] }),
+      ],
+    });
+    const r = await getValuation({ groupBy: "location" });
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0]).not.toHaveProperty("currentUnitCostCents");
+    expect(r.rows[0]).not.toHaveProperty("unitRetailCents");
+  });
+
+  test("the same location grain WITH a productId carries that product's unit prices on every location row", async () => {
+    setupVal({
+      products: [
+        prod({ id: 7, costPrice: 0, retailPrice: 5, product_locations: [at(2, 3, "B-loc"), at(1, 0, "A-loc")] }),
+      ],
+    });
+    const r = await getValuation({ productId: 7, groupBy: "location" });
+    expect(r.rows.map((row) => row.locationId)).toEqual([1, 2]);
+    for (const row of r.rows) {
+      expect(row.currentUnitCostCents).toBe(0);
+      expect(row.unitRetailCents).toBe(500);
+    }
+    // The location row's money totals keep today's rules (cost 0 -> uncosted).
+    expect(r.rows[1].atCurrentCostCents).toBeNull();
+    expect(r.rows[1].atRetailCents).toBe(1500);
+  });
+
+  test("total rows carry neither key, with or without a productId", async () => {
+    setupVal({
+      products: [prod({ id: 1, costPrice: 2.5, retailPrice: 9, product_locations: [at(1, 2, "Main")] })],
+    });
+    const t = await getValuation({ groupBy: "total" });
+    expect(t.rows[0]).not.toHaveProperty("currentUnitCostCents");
+    expect(t.rows[0]).not.toHaveProperty("unitRetailCents");
+    const one = await getValuation({ productId: 1, groupBy: "total" });
+    expect(one.rows[0]).not.toHaveProperty("currentUnitCostCents");
+    expect(one.rows[0]).not.toHaveProperty("unitRetailCents");
+  });
+});

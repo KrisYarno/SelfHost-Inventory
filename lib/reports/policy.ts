@@ -76,7 +76,9 @@ export interface ProductPolicy {
   safetyStockDays: PolicyField<number>;
   minOrderQuantity: PolicyField<number | null>;
   reorderPointOverride: number | null;
-  locationMinimums: Array<{ locationId: number; minQuantity: number }>;
+  /** A2 pack C8: each minimum names its location (`null` when the location row is gone),
+   *  so a policy answer never shows a bare location id. */
+  locationMinimums: Array<{ locationId: number; minQuantity: number; locationName: string | null }>;
 }
 
 /**
@@ -184,9 +186,11 @@ export async function getPolicy(opts: {
   // the module-header SCHEMA FINDINGS note on product_reorder_configs.minOrderQuantity).
   const rawMinOrderQuantity = product.reorderConfig ? product.reorderConfig.minOrderQuantity : null;
 
+  // A2 C8: the location's name rides on the same read, through the relation (locations
+  // are global, as in every stock tool).
   const locationRows = await prisma.product_locations.findMany({
     where: { productId: resolved.id, minQuantity: { gt: 0 } },
-    select: { locationId: true, minQuantity: true },
+    select: { locationId: true, minQuantity: true, locations: { select: { name: true } } },
     orderBy: { locationId: "asc" },
   });
 
@@ -217,6 +221,7 @@ export async function getPolicy(opts: {
     locationMinimums: locationRows.map((row) => ({
       locationId: row.locationId,
       minQuantity: row.minQuantity,
+      locationName: row.locations?.name ?? null,
     })),
   };
 

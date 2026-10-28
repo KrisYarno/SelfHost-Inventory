@@ -53,8 +53,9 @@ function receipts(over: Record<string, unknown> = {}) {
       coverage: "5 of 5 receipt events record a receipt cost.",
       contributingRows: 5,
     }),
+    // A2 C10: the definition the route serves, without the internal design reference.
     definition:
-      "a receipt event = one stock-in batch; a five-batch delivery is five events (D12)",
+      "a receipt event = one stock-in batch; a five-batch delivery is five events",
     ...over,
   };
 }
@@ -222,7 +223,7 @@ describe("the receipts row (D10)", () => {
     const row = await screen.findByTestId("supply-orders-receipts");
     expect(
       within(row).getByText(
-        "a receipt event = one stock-in batch; a five-batch delivery is five events (D12)",
+        "a receipt event = one stock-in batch; a five-batch delivery is five events",
       ),
     ).toBeInTheDocument();
   });

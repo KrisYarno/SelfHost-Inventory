@@ -432,3 +432,203 @@ describe("getStockAsOf — scope + coverage", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// A2 pack C9 (R4-13, review #3 F7): one location's stock on a past day. Review #4 saw 43
+// calls over 75 minutes rebuild one location's stock product by product. These pins run
+// over a small in-memory snapshot TABLE whose mocks evaluate the `where` they are handed,
+// so the location filter, the "recorded on or before the day" population and the global
+// watermark are each exercised as queries, not as canned answers.
+// ---------------------------------------------------------------------------
+
+type Snap = { productId: number; locationId: number; dayKey: string; quantity: number };
+
+function setupTable(f: {
+  products: Prod[];
+  snaps: Snap[];
+  state?: { lastWindowTo: string | null; flaggedPairs: number } | null;
+}) {
+  const recordedAt = (productId: number, cond: any) =>
+    f.snaps.some(
+      (s) => s.productId === productId && s.locationId === cond.locationId && s.dayKey <= cond.dayKey.lte,
+    );
+  const matches = (p: Prod, where: any): boolean => {
+    if (typeof where?.id === "number" && p.id !== where.id) return false;
+    if (where?.id?.in && !where.id.in.includes(p.id)) return false;
+    const sn = where?.stockSnapshots;
+    if (sn?.some && !recordedAt(p.id, sn.some)) return false;
+    if (sn?.none && recordedAt(p.id, sn.none)) return false;
+    return true;
+  };
+  m.product.count.mockImplementation(async (args: any) => f.products.filter((p) => matches(p, args?.where)).length);
+  m.product.findMany.mockImplementation(async (args: any) => {
+    const rows = f.products.filter((p) => matches(p, args?.where));
+    const skip = args?.skip ?? 0;
+    return rows.slice(skip, skip + (args?.take ?? rows.length));
+  });
+  const days = f.snaps.map((s) => s.dayKey).sort();
+  m.productStockSnapshot.aggregate.mockImplementation(async (args: any) => {
+    // The watermark inputs are GLOBAL: a location filter here would be a bug.
+    if (args?.where) throw new Error("the snapshot aggregate must stay unfiltered (global)");
+    return { _min: { dayKey: days[0] ?? null }, _max: { dayKey: days[days.length - 1] ?? null } };
+  });
+  m.productStockSnapshot.groupBy.mockImplementation(async (args: any) => {
+    const w = args.where;
+    const rows = f.snaps.filter(
+      (s) =>
+        w.productId.in.includes(s.productId) &&
+        (w.dayKey == null || s.dayKey === w.dayKey) &&
+        (w.locationId == null || s.locationId === w.locationId),
+    );
+    const groups = new Map<string, Snap[]>();
+    for (const s of rows) {
+      const key = args.by.map((k: keyof Snap) => s[k]).join("|");
+      groups.set(key, [...(groups.get(key) ?? []), s]);
+    }
+    return Array.from(groups.values()).map((g) => {
+      if (args._sum) {
+        return { productId: g[0].productId, _sum: { quantity: g.reduce((a, s) => a + s.quantity, 0) }, _count: g.length };
+      }
+      const ds = g.map((s) => s.dayKey).sort();
+      return {
+        productId: g[0].productId,
+        locationId: g[0].locationId,
+        _max: { dayKey: ds[ds.length - 1] },
+        _min: { dayKey: ds[0] },
+      };
+    });
+  });
+  m.analyticsRebuildState.findUnique.mockResolvedValue(f.state ?? null);
+}
+
+const NOT_RECORDED_HERE_NOTE =
+  "products not recorded at this location on or before that day are not listed — their " +
+  "stock there is unknown, not zero.";
+
+describe("getStockAsOf — A2 C9 locationId", () => {
+  // P1 at both locations, P2 at location 1 only, P3 first recorded at location 2 AFTER the day.
+  const products: Prod[] = [
+    { id: 1, name: "Two locations" },
+    { id: 2, name: "Location 1 only" },
+    { id: 3, name: "Location 2 later" },
+  ];
+  const snaps: Snap[] = [
+    { productId: 1, locationId: 1, dayKey: EARLY, quantity: 1 },
+    { productId: 1, locationId: 1, dayKey: DAY, quantity: 5 },
+    { productId: 1, locationId: 2, dayKey: EARLY, quantity: 1 },
+    { productId: 1, locationId: 2, dayKey: DAY, quantity: 7 },
+    { productId: 2, locationId: 1, dayKey: EARLY, quantity: 2 },
+    { productId: 2, locationId: 1, dayKey: DAY, quantity: 3 },
+    { productId: 3, locationId: 2, dayKey: "2026-07-12", quantity: 9 },
+  ];
+
+  test("two locations: each location alone, and the sum across them without locationId", async () => {
+    setupTable({ products, snaps });
+    const all = await getStockAsOf({ dayKey: DAY, byteBudget: BUDGET }, NOW);
+    const allById = Object.fromEntries(all.rows.map((r) => [r.productId, r]));
+    expect(allById[1].units).toBe(12);
+    expect(allById[2].units).toBe(3);
+
+    setupTable({ products, snaps });
+    const loc1 = await getStockAsOf({ dayKey: DAY, locationId: 1, byteBudget: BUDGET }, NOW);
+    expect(loc1.rows.map((r) => [r.productId, r.units])).toEqual([[1, 5], [2, 3]]);
+    expect(loc1.rows[0]).toMatchObject({ pairsPresentOnDay: 1, knownPairs: 1 });
+    expect(loc1.rows[0].reason).toBeUndefined();
+
+    setupTable({ products, snaps });
+    const loc2 = await getStockAsOf({ dayKey: DAY, locationId: 2, byteBudget: BUDGET }, NOW);
+    expect(loc2.rows.map((r) => [r.productId, r.units])).toEqual([[1, 7]]);
+    expect(loc2.totalRows).toBe(1);
+  });
+
+  test("a product first recorded at the location AFTER the day is omitted and counted in notRecordedHere", async () => {
+    setupTable({ products, snaps });
+    const loc2 = await getStockAsOf({ dayKey: DAY, locationId: 2, byteBudget: BUDGET }, NOW);
+    expect(loc2.rows.map((r) => r.productId)).toEqual([1]); // P2 never there, P3 only later
+    expect(loc2.coverage.notRecordedHere).toBe(2);
+    expect(loc2.coverage.notRecordedHereNote).toBe(NOT_RECORDED_HERE_NOTE);
+    // The population is a DB query over the scope ("on or before that day"), not a JS filter.
+    expect(m.product.count).toHaveBeenCalledWith({
+      where: {
+        approvalStatus: "APPROVED",
+        deletedAt: null,
+        stockSnapshots: { some: { locationId: 2, dayKey: { lte: DAY } } },
+      },
+    });
+  });
+
+  test("recorded at the location before the day but no row ON it: listed with the no-snapshot reason", async () => {
+    setupTable({
+      products: [{ id: 1, name: "Gap at L1" }],
+      snaps: [
+        { productId: 1, locationId: 1, dayKey: EARLY, quantity: 4 },
+        { productId: 1, locationId: 1, dayKey: "2026-07-12", quantity: 4 },
+      ],
+    });
+    const page = await getStockAsOf({ dayKey: DAY, locationId: 1, byteBudget: BUDGET }, NOW);
+    expect(page.rows[0]).toMatchObject({ units: null, reason: NO_SNAPSHOT_REASON, knownPairs: 1, pairsPresentOnDay: 0 });
+    expect(page.coverage.notRecordedHere).toBe(0);
+  });
+
+  test("productId + locationId for a product not recorded there: ONE row, units null, the exact reason", async () => {
+    setupTable({ products, snaps });
+    const page = await getStockAsOf({ dayKey: DAY, productId: 3, locationId: 2, byteBudget: BUDGET }, NOW);
+    expect(page.totalRows).toBe(1);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).toMatchObject({
+      productId: 3,
+      name: "Location 2 later",
+      units: null,
+      reason: "not recorded at this location on or before that day",
+      pairsPresentOnDay: 0,
+      knownPairs: 0,
+    });
+    // The named product IS listed (with its reason), so nothing is omitted or counted.
+    expect(page.coverage).not.toHaveProperty("notRecordedHere");
+    expect(page.coverage).not.toHaveProperty("notRecordedHereNote");
+  });
+
+  test("productId + locationId for a product recorded there: that location's figures", async () => {
+    setupTable({ products, snaps });
+    const page = await getStockAsOf({ dayKey: DAY, productId: 1, locationId: 2, byteBudget: BUDGET }, NOW);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).toMatchObject({ productId: 1, units: 7, pairsPresentOnDay: 1, knownPairs: 1 });
+    expect(page.rows[0].reason).toBeUndefined();
+  });
+
+  test("a stale location: possiblyStale stays true against the GLOBAL watermark; watermarkScope labels it", async () => {
+    setupTable({
+      products: [{ id: 1, name: "L1 fresh, L2 stale" }],
+      snaps: [
+        { productId: 1, locationId: 1, dayKey: EARLY, quantity: 1 },
+        { productId: 1, locationId: 1, dayKey: "2026-07-14", quantity: 1 },
+        { productId: 1, locationId: 2, dayKey: EARLY, quantity: 1 },
+        { productId: 1, locationId: 2, dayKey: DAY, quantity: 6 },
+      ],
+      state: { lastWindowTo: "2026-07-14", flaggedPairs: 3 },
+    });
+    const page = await getStockAsOf({ dayKey: DAY, locationId: 2, byteBudget: BUDGET }, NOW);
+    expect(page.rows[0]).toMatchObject({ units: 6, seriesEndsAt: DAY, possiblyStale: true });
+    expect(page.coverage).toEqual({
+      dayKey: DAY,
+      snapshotWatermark: "2026-07-14",
+      snapshotDataStart: EARLY,
+      flaggedPairs: 3,
+      watermarkScope: "all locations",
+      notRecordedHere: 0,
+      notRecordedHereNote: NOT_RECORDED_HERE_NOTE,
+    });
+  });
+
+  test("without locationId the reads and the coverage are today's (no location filter, no new keys)", async () => {
+    setupTable({ products, snaps });
+    const page = await getStockAsOf({ dayKey: DAY, byteBudget: BUDGET }, NOW);
+    expect(page.coverage).not.toHaveProperty("watermarkScope");
+    expect(page.coverage).not.toHaveProperty("notRecordedHere");
+    for (const call of m.productStockSnapshot.groupBy.mock.calls) {
+      expect(call[0].where).not.toHaveProperty("locationId");
+    }
+    expect(m.product.count).toHaveBeenCalledTimes(1);
+    expect(m.product.count).toHaveBeenCalledWith({ where: { deletedAt: null, approvalStatus: "APPROVED" } });
+  });
+});

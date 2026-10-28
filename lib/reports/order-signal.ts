@@ -28,6 +28,7 @@ import {
   callerWindowCoverage,
   salesCoverageReason,
   salesDataStartsByCompany,
+  type CompanyCoverageEntry,
 } from "@/lib/assistant/sales-coverage";
 import type { WindowCoverage } from "@/lib/reports/metrics-contract";
 
@@ -47,7 +48,7 @@ export interface OrderSignalResult {
   reason?: string;
   /** The per-company first-fact days, present only when the companies do not share one
    *  start — the tool relays them (pack C4: `coverage.orderSignalCompanyCoverage`). */
-  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
+  companyCoverage?: CompanyCoverageEntry[];
 }
 
 /**

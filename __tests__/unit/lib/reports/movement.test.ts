@@ -32,9 +32,17 @@ import prisma from "@/lib/prisma";
 import {
   getMovementSeries,
   getReceipts,
+  RECEIPT_EVENT_DEFINITION,
+  UNCLASSIFIED_LEGACY_NOTE,
   type MovementFilters,
   type MovementEnvelope,
 } from "@/lib/reports/movement";
+
+/** A2 C10: the unclassified-outbound note, exactly — time-neutral, no internal names. */
+const UNCLASSIFIED_NOTE =
+  "Outbound adjustments without a reason code (deductions recorded against an order, or with " +
+  "no reason given) are counted as unclassified outbound here — not as sales and not as loss " +
+  "in these figures.";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 
@@ -135,7 +143,22 @@ describe("reconciliation — net === SUM(delta) over every logType × sign", () 
     // adjustment has a reason, the positive ADJUSTMENT/CORRECTION are inbound,
     // and the zero-delta row is skipped.
     expect(res.coverage.reasonCodeNullRows).toBe(2);
-    expect(res.coverage.unclassifiedLegacyNote).toMatch(/pre-Lane-4/i);
+    // A2 C10: reason-less deductions are written TODAY (the order / other intents carry
+    // reasonCode null), so the note makes no time claim and names no internal lane.
+    expect(res.coverage.unclassifiedLegacyNote).toBe(UNCLASSIFIED_NOTE);
+    expect(UNCLASSIFIED_LEGACY_NOTE).toBe(UNCLASSIFIED_NOTE);
+    expect(res.coverage.unclassifiedLegacyNote).not.toMatch(/\blane\b|legacy|pre-|\(D\d+\)/i);
+  });
+
+  it("A2 C10: no reason-less outbound row in the window -> no note at all (the key is absent)", async () => {
+    setRows([
+      { delta: -3, changeTime: at("2026-07-02"), logType: "ADJUSTMENT", reasonCode: "DAMAGE" },
+      { delta: -1, changeTime: at("2026-07-02"), logType: "SALE", reasonCode: null },
+      { delta: 2, changeTime: at("2026-07-03"), logType: "ADJUSTMENT", reasonCode: null }, // inbound
+    ]);
+    const res = await series({ window: win("2026-07-01", "2026-07-31"), grain: "day" });
+    expect(res.coverage.reasonCodeNullRows).toBe(0);
+    expect(res.coverage).not.toHaveProperty("unclassifiedLegacyNote");
   });
 });
 
@@ -234,7 +257,8 @@ describe("empty window & query shape", () => {
       expect((res.totals as unknown as Record<string, number>)[k]).toBe(0);
     }
     expect(res.coverage.reasonCodeNullRows).toBe(0);
-    expect(res.coverage.unclassifiedLegacyNote).toEqual(expect.any(String));
+    // A2 C10: the note rides only when a reason-less outbound row is in the window.
+    expect(res.coverage).not.toHaveProperty("unclassifiedLegacyNote");
   });
 
   it("queries the ledger over the window's changeTime range with optional filters, no logType/delta filter", async () => {
@@ -286,6 +310,7 @@ describe("getReceipts -- DB-side paged STOCK_IN receipts detail", () => {
     over: Partial<{
       productId: number;
       locationId: number | null;
+      locations: { name: string } | null;
       delta: number;
       unitCostCents: number | null;
       batchId: string | null;
@@ -294,6 +319,7 @@ describe("getReceipts -- DB-side paged STOCK_IN receipts detail", () => {
   ) => ({
     productId: 1,
     locationId: 2,
+    locations: { name: "Annex" },
     delta: 5,
     unitCostCents: 350,
     batchId: "batch-1",
@@ -337,7 +363,8 @@ describe("getReceipts -- DB-side paged STOCK_IN receipts detail", () => {
   it("relays null unitCostCents, null locationId, and null batchId AS NULL -- never coerced to 0", async () => {
     db.inventory_logs.count.mockResolvedValue(1);
     db.inventory_logs.findMany.mockResolvedValue([
-      receiptRow({ unitCostCents: null, locationId: null, batchId: null }),
+      // A null locationId has no location relation either (what the database returns).
+      receiptRow({ unitCostCents: null, locationId: null, locations: null, batchId: null }),
     ] as never);
 
     const res = await receipts({ window: win("2026-07-01", "2026-07-31"), byteBudget: 100_000 });
@@ -345,6 +372,30 @@ describe("getReceipts -- DB-side paged STOCK_IN receipts detail", () => {
     expect(res.rows[0].unitCostCents).toBeNull();
     expect(res.rows[0].locationId).toBeNull();
     expect(res.rows[0].batchId).toBeNull();
+    // A2 C8: a null-location receipt has no location name either — null, never invented.
+    expect(res.rows[0].locationName).toBeNull();
+  });
+
+  it("A2 C8: each receipt row names its location, read through the relation on the SAME query", async () => {
+    db.inventory_logs.count.mockResolvedValue(1);
+    db.inventory_logs.findMany.mockResolvedValue([receiptRow()] as never);
+    const res = await receipts({ window: win("2026-07-01", "2026-07-31"), byteBudget: 100_000 });
+    expect(res.rows[0]).toMatchObject({ locationId: 2, locationName: "Annex" });
+    expect(Object.keys(res.rows[0]).slice(3, 5)).toEqual(["locationId", "locationName"]);
+    const select = db.inventory_logs.findMany.mock.calls[0][0]!.select as Record<string, unknown>;
+    expect(select.locations).toEqual({ select: { name: true } });
+    // The relation object itself never rides on the row.
+    expect(res.rows[0]).not.toHaveProperty("locations");
+  });
+
+  it("A2 C10: the receipt-event definition carries no design reference", async () => {
+    db.inventory_logs.count.mockResolvedValue(0);
+    db.inventory_logs.findMany.mockResolvedValue([] as never);
+    const res = await receipts({ window: win("2026-07-01", "2026-07-31"), byteBudget: 100_000 });
+    expect(res.definitions.receiptEvent).toBe(
+      "a receipt event = one stock-in batch; a five-batch delivery is five events",
+    );
+    expect(RECEIPT_EVENT_DEFINITION).not.toMatch(/\(D\d+\)/);
   });
 
   it("quantity is the positive delta; changeTime is relayed as an ISO string", async () => {
@@ -547,5 +598,39 @@ describe("OC-9 classifier parity: movement's classify matches outbound-mix case-
     const r = await series({ window: win("2026-08-01", "2026-08-01"), grain: "day" });
     expect(r.totals.classifiedLoss).toBe(-3);
     expect(r.totals.adjustmentUnclassified).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 pack C8 — the filters echo names its location, and ONLY when a locationId is set.
+// ---------------------------------------------------------------------------
+
+describe("A2 C8 — filters.locationName", () => {
+  it("series with a locationId: the echo carries the location's name, read once", async () => {
+    setRows([]);
+    db.location.findUnique.mockResolvedValue({ name: "Back room" } as never);
+    const res = await series({ window: win("2026-07-01", "2026-07-31"), grain: "day", locationId: 3 });
+    expect(res.filters).toEqual({
+      productId: null,
+      productIds: null,
+      locationId: 3,
+      locationName: "Back room",
+      mode: "series",
+    });
+    expect(db.location.findUnique).toHaveBeenCalledWith({ where: { id: 3 }, select: { name: true } });
+  });
+
+  it("a location id with no row: locationName null (the echo never invents a name)", async () => {
+    setRows([]);
+    db.location.findUnique.mockResolvedValue(null as never);
+    const res = await series({ window: win("2026-07-01", "2026-07-31"), grain: "day", locationId: 9 });
+    expect(res.filters.locationName).toBeNull();
+  });
+
+  it("without a locationId: no locationName key and no location read", async () => {
+    setRows([]);
+    const res = await series({ window: win("2026-07-01", "2026-07-31"), grain: "day" });
+    expect(res.filters).not.toHaveProperty("locationName");
+    expect(db.location.findUnique).not.toHaveBeenCalled();
   });
 });

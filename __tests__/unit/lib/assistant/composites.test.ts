@@ -24,7 +24,9 @@ jest.mock("@/lib/prisma", () => ({
     product: { findUnique: jest.fn(), findMany: jest.fn(async () => []) },
     product_locations: { findMany: jest.fn() },
     location: { findMany: jest.fn() },
-    inventory_logs: { aggregate: jest.fn() },
+    // A2 C6 / C10: the REAL valuation and movement modules are swapped in by the pins that
+    // need them (the latest-receipt read and the ledger read); benign defaults otherwise.
+    inventory_logs: { aggregate: jest.fn(), groupBy: jest.fn(async () => []), findMany: jest.fn(async () => []) },
     productSalesFact: { aggregate: jest.fn() },
   },
 }));
@@ -201,6 +203,86 @@ describe("getProductOverview — composition (spec §5 T-360)", () => {
     expect(r.coverage.degradedSections).toEqual([]);
   });
 
+  // A2 pack C6 (seam S10): the overview's valuation row is getValuation's PRODUCT row, so it
+  // carries the stored unit prices — pinned through the REAL module, on the review #4 shape:
+  // a product with nothing on hand, whose money totals are 0 and whose prices are not.
+  it("valuation.row carries currentUnitCostCents / unitRetailCents from the REAL valuation module", async () => {
+    const real = jest.requireActual("@/lib/analytics/valuation") as {
+      getValuation: (opts: { productId?: number; groupBy?: string }) => Promise<unknown>;
+    };
+    mVal.mockImplementation(real.getValuation);
+    db.product.findMany.mockResolvedValue([
+      {
+        id: 1,
+        name: "TIRZ 30",
+        costPrice: 0,
+        retailPrice: 89.5,
+        product_locations: [{ locationId: 1, quantity: 0, locations: { name: "Main" } }],
+      },
+    ]);
+    const r = await getProductOverview(1, CTX, NOW);
+    expect(r.found).toBe(true);
+    if (!r.found) return;
+    expect(r.valuation.status).toBe("ok");
+    expect(mVal).toHaveBeenCalledWith({ productId: 1, groupBy: "product" });
+    expect(r.valuation.row).toEqual({
+      productId: 1,
+      name: "TIRZ 30",
+      units: 0,
+      atCurrentCostCents: null, // a stored cost of 0 adds no cost total (today's rule)
+      atReceiptCostCents: null,
+      atRetailCents: 0,
+      marginCents: null,
+      currentUnitCostCents: 0, // recorded as free
+      unitRetailCents: 8950,
+    });
+  });
+
+  // A2 pack C10 (seam S11): movement30 relays the module's coverage, whose unclassified-
+  // outbound note is now OPTIONAL — present only when a reason-less outbound row is in the
+  // 30 days. Pinned through the REAL movement module both ways.
+  describe("movement30 relays the optional unclassified-outbound note (REAL movement module)", () => {
+    const NOTE =
+      "Outbound adjustments without a reason code (deductions recorded against an order, or " +
+      "with no reason given) are counted as unclassified outbound here — not as sales and not " +
+      "as loss in these figures.";
+    const useRealMovement = () => {
+      const real = jest.requireActual("@/lib/reports/movement") as {
+        getMovementSeries: (opts: unknown) => Promise<unknown>;
+      };
+      mMove.mockImplementation(real.getMovementSeries);
+    };
+    const at = new Date(NOW.getTime() - 3 * DAY_MS);
+
+    it("a reason-less outbound adjustment in the window: the note rides, with its count", async () => {
+      useRealMovement();
+      db.inventory_logs.findMany.mockResolvedValue([
+        { delta: -4, changeTime: at, logType: "ADJUSTMENT", reasonCode: null },
+        { delta: -1, changeTime: at, logType: "SALE", reasonCode: null },
+      ]);
+      const r = await getProductOverview(1, CTX, NOW);
+      expect(r.found).toBe(true);
+      if (!r.found) return;
+      expect(r.movement30.status).toBe("ok");
+      const coverage = r.movement30.coverage as Record<string, unknown>;
+      expect(coverage.reasonCodeNullRows).toBe(1);
+      expect(coverage.unclassifiedLegacyNote).toBe(NOTE);
+    });
+
+    it("none in the window: no note key at all", async () => {
+      useRealMovement();
+      db.inventory_logs.findMany.mockResolvedValue([
+        { delta: -3, changeTime: at, logType: "ADJUSTMENT", reasonCode: "DAMAGE" },
+      ]);
+      const r = await getProductOverview(1, CTX, NOW);
+      expect(r.found).toBe(true);
+      if (!r.found) return;
+      const coverage = r.movement30.coverage as Record<string, unknown>;
+      expect(coverage.reasonCodeNullRows).toBe(0);
+      expect(coverage).not.toHaveProperty("unclassifiedLegacyNote");
+    });
+  });
+
   it("out-of-stock product reads stockState 'out' (0 wins over low)", async () => {
     db.product.findUnique.mockResolvedValue({ name: "X", baseName: null, variant: null, lowStockThreshold: 5, product_locations: [{ quantity: 0 }] });
     const r = await getProductOverview(1, CTX, NOW);
@@ -247,11 +329,11 @@ describe("getProductOverview — composition (spec §5 T-360)", () => {
         name: "TIRZ 30",
         lowStockThreshold: { effective: 10, raw: null, source: "system_default" },
         locationMinimums: [
-          { locationId: 1, minQuantity: 5 },
-          { locationId: 2, minQuantity: 4 },
-          { locationId: 3, minQuantity: 3 },
-          { locationId: 4, minQuantity: 2 },
-          { locationId: 5, minQuantity: 1 },
+          { locationId: 1, minQuantity: 5, locationName: "Main" },
+          { locationId: 2, minQuantity: 4, locationName: "Annex" },
+          { locationId: 3, minQuantity: 3, locationName: "Back room" },
+          { locationId: 4, minQuantity: 2, locationName: "Van" },
+          { locationId: 5, minQuantity: 1, locationName: null },
         ],
       },
     });
@@ -261,6 +343,12 @@ describe("getProductOverview — composition (spec §5 T-360)", () => {
     expect(r.policy.status).toBe("ok");
     const product = r.policy.product as { locationMinimums: unknown[] };
     expect(product.locationMinimums.length).toBe(3);
+    // A2 C8: the relayed minimums keep their location names.
+    expect(product.locationMinimums).toEqual([
+      { locationId: 1, minQuantity: 5, locationName: "Main" },
+      { locationId: 2, minQuantity: 4, locationName: "Annex" },
+      { locationId: 3, minQuantity: 3, locationName: "Back room" },
+    ]);
     // The note discloses the TRUE total so the cap is never silent.
     expect(typeof r.policy.note).toBe("string");
     expect(r.policy.note as string).toContain("5");

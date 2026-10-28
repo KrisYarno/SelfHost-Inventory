@@ -349,19 +349,43 @@ describe("getPolicy — locationMinimums (product_locations.minQuantity)", () =>
       reorderConfig: null,
     } as never);
     db.product_locations.findMany.mockResolvedValue([
-      { locationId: 1, minQuantity: 5 },
-      { locationId: 3, minQuantity: 2 },
+      { locationId: 1, minQuantity: 5, locations: { name: "Main" } },
+      { locationId: 3, minQuantity: 2, locations: { name: "Annex" } },
     ] as never);
 
     const result = await getPolicy({ productId: 12 });
 
+    // A2 C8: each minimum names its location (the same one read, through the relation).
     expect(result.product?.locationMinimums).toEqual([
-      { locationId: 1, minQuantity: 5 },
-      { locationId: 3, minQuantity: 2 },
+      { locationId: 1, minQuantity: 5, locationName: "Main" },
+      { locationId: 3, minQuantity: 2, locationName: "Annex" },
     ]);
+    expect(db.product_locations.findMany).toHaveBeenCalledTimes(1);
     const arg = db.product_locations.findMany.mock.calls[0][0];
     expect(arg?.where).toEqual({ productId: 12, minQuantity: { gt: 0 } });
     expect(arg?.orderBy).toEqual({ locationId: "asc" });
+    expect(arg?.select).toEqual({
+      locationId: true,
+      minQuantity: true,
+      locations: { select: { name: true } },
+    });
+  });
+
+  it("A2 C8: a minimum whose location row is gone reads locationName null (never a fabricated name)", async () => {
+    db.product.findFirst.mockResolvedValue({ id: 12, name: "Multi-location" } as never);
+    db.product.findUnique.mockResolvedValue({
+      id: 12,
+      name: "Multi-location",
+      lowStockThreshold: null,
+      reorderConfig: null,
+    } as never);
+    db.product_locations.findMany.mockResolvedValue([
+      { locationId: 9, minQuantity: 4, locations: null },
+    ] as never);
+    const result = await getPolicy({ productId: 12 });
+    expect(result.product?.locationMinimums).toEqual([
+      { locationId: 9, minQuantity: 4, locationName: null },
+    ]);
   });
 
   it("no locations with a set minimum: empty array, not omitted", async () => {

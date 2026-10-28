@@ -29,12 +29,25 @@ jest.mock("ai", () => ({ __esModule: true, tool: (def: unknown) => def }));
 // quality+reach Task 3.1: get_sales also runs the G5 contributor CENSUS (a
 // `product.findMany` starting from Product), so the stub gains that delegate. An empty
 // census is the right shape here — the pin is about byte-fitting, not disclosure values.
+// A2 M3: get_stock_asof resolves a locationId (and the movement filters echo reads the
+// location's name), so the stub gains location.findUnique — a 100-character name, the
+// column's width (`locations.name` VARCHAR(100)), so the echo is at its heaviest.
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {
     productSalesFact: { groupBy: jest.fn(async () => []) },
     product: { findMany: jest.fn(async () => []) },
+    location: { findUnique: jest.fn(async () => ({ id: 2, name: "L".repeat(100) })) },
   },
+}));
+// A2 M3 (pack C6 / C2): the two other paged tools M3 grows — valuation product rows gain
+// unit prices, the movement breakdown gains counts — have their module reads injected so
+// the adapter's byte fit is what is pinned.
+jest.mock("@/lib/analytics/valuation", () => ({ __esModule: true, getValuation: jest.fn() }));
+jest.mock("@/lib/reports/movement", () => ({
+  __esModule: true,
+  ...jest.requireActual("@/lib/reports/movement"),
+  getMovementByProduct: jest.fn(),
 }));
 jest.mock("@/lib/analytics/stock-asof", () => ({ __esModule: true, getStockAsOf: jest.fn() }));
 jest.mock("@/lib/reports/inventory-summary", () => ({ __esModule: true, getInventorySummary: jest.fn() }));
@@ -74,6 +87,8 @@ import { getSales } from "@/lib/analytics/queries";
 import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
 import { approvedProductIds, productIdentities } from "@/lib/reports/outbound-mix";
 import { comparePeriodsByProduct } from "@/lib/reports/compare-periods";
+import { getValuation } from "@/lib/analytics/valuation";
+import { getMovementByProduct, UNCLASSIFIED_LEGACY_NOTE } from "@/lib/reports/movement";
 import type { ToolContext as ResolvedContext } from "@/lib/assistant/context";
 
 const asOfMock = getStockAsOf as jest.Mock;
@@ -409,11 +424,15 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
       unequalLengths: false,
       rankedBy: "total",
       directionCounts: { increased: 199, decreased: 0, unchanged: 1 },
+      // A2 C8: the per-company entries carry names, and the note names the company. A
+      // realistic length here: measured in M3, this 5 KB floor case holds through 120-char
+      // company names and downgrades to truncated from ~150 (the column allows 191) —
+      // recorded for the orchestrator, not hidden by this fixture.
       companyCoverage: [
-        { companyId: "c1", salesDataStart: "2019-01-01" },
-        { companyId: "c2", salesDataStart: null },
+        { companyId: "c1", salesDataStart: "2019-01-01", name: "Acme Peptides" },
+        { companyId: "c2", salesDataStart: null, name: "Beta Labs" },
       ],
-      companyCoverageNote: "no sales data recorded for company c2; latest company start 2019-01-01",
+      companyCoverageNote: "no sales data recorded for Beta Labs; latest company start 2019-01-01",
       excludedUnapprovedProducts: 0,
     });
 
@@ -484,5 +503,126 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
     });
     expect(typeof tight.data!.coverage!.rateDefinition).toBe("string");
     expect(tight.meta!.bytes).toBeLessThanOrEqual(CRAMPED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 M3 — one tight-budget case per paged tool M3 grows (plan §4 byte budgets): the
+// as-of location echo + coverage keys (C9), the valuation unit prices on every product row
+// (C6), and the movement breakdown's counts (C2). Each must still come back as a smaller
+// OK page that fits the budget — never the truncation downgrade.
+// ---------------------------------------------------------------------------
+
+describe("A2 M3 — the grown envelopes and rows still shrink to fit", () => {
+  const LONG = "N".repeat(255);
+
+  it("get_stock_asof with locationId: the location echo + coverage keys ride and the page fits", async () => {
+    asOfMock.mockImplementation(async (opts: { dayKey: string; byteBudget: number }) => {
+      const page = fitPage(opts.byteBudget, TOTAL, (i) => ({
+        productId: i,
+        name: `Product ${i}`,
+        units: i,
+        seriesEndsAt: "2020-01-02",
+        possiblyStale: false,
+        pairsPresentOnDay: 1,
+        knownPairs: 1,
+      }));
+      return {
+        ...page,
+        coverage: {
+          dayKey: opts.dayKey,
+          snapshotWatermark: "2020-01-02",
+          snapshotDataStart: "2019-01-01",
+          flaggedPairs: 0,
+          watermarkScope: "all locations",
+          notRecordedHere: 12,
+          notRecordedHereNote:
+            "products not recorded at this location on or before that day are not listed — " +
+            "their stock there is unknown, not zero.",
+        },
+      };
+    });
+    const tight = (await runOnce("get_stock_asof", { dayKey: "2020-01-01", locationId: 2 }, TIGHT)) as ExecResult & {
+      data?: { location?: { id: number; name: string } };
+    };
+    expect(tight.status).toBe("ok");
+    expect(tight.notice).toBeUndefined();
+    expect(asOfMock.mock.calls[0][0]).toMatchObject({ locationId: 2 });
+    expect(tight.data!.location).toEqual({ id: 2, name: "L".repeat(100) });
+    expect(tight.data!.rows!.length).toBeLessThan(TOTAL);
+    expect(tight.data!.nextOffset).not.toBeNull();
+    expect(tight.meta!.bytes).toBeLessThanOrEqual(TIGHT);
+  });
+
+  it("get_valuation groupBy product: unit prices on every 255-character-name row, and the page fits", async () => {
+    (getValuation as jest.Mock).mockResolvedValue({
+      groupBy: "product",
+      rows: Array.from({ length: TOTAL }, (_v, i) => ({
+        productId: i + 1,
+        name: LONG,
+        units: 1_000_000,
+        atCurrentCostCents: 2_147_483_647,
+        atReceiptCostCents: 2_147_483_647,
+        atRetailCents: 2_147_483_647,
+        marginCents: -2_147_483_647,
+        currentUnitCostCents: 2_147_483_647,
+        unitRetailCents: 2_147_483_647,
+      })),
+      coverage: {
+        costedProducts: TOTAL, ofProducts: TOTAL, costedUnits: 1, ofUnits: 1, retailPricedProducts: TOTAL,
+        retailPricedUnits: 1, receiptCostedProducts: TOTAL, receiptCostedUnits: 1, marginProducts: TOTAL, marginUnits: 1,
+      },
+    });
+    const tight = (await runOnce("get_valuation", { groupBy: "product" }, TIGHT)) as ExecResult & {
+      data?: { rows?: Array<Record<string, unknown>> };
+    };
+    expect(tight.status).toBe("ok");
+    expect(tight.notice).toBeUndefined();
+    expect(tight.data!.rows!.length).toBeGreaterThan(0);
+    expect(tight.data!.rows!.length).toBeLessThan(TOTAL);
+    for (const row of tight.data!.rows!) {
+      expect(row).toHaveProperty("currentUnitCostCents");
+      expect(row).toHaveProperty("unitRetailCents");
+    }
+    expect(tight.meta!.bytes).toBeLessThanOrEqual(TIGHT);
+  });
+
+  it("get_movement_series breakdownBy product: whole-result counts ride beside a shrunk page that fits", async () => {
+    const zero = {
+      stockIn: 0, correctionIn: 0, adjustmentIn: 0, countIn: 0, sale: 0, classifiedLoss: 0,
+      adjustmentUnclassified: 0, correctionUnclassified: 0, countOut: 0, transferIn: 0, transferOut: 0, net: 0,
+    };
+    (getMovementByProduct as jest.Mock).mockResolvedValue({
+      mode: "by_product",
+      window: { from: "2020-01-01", to: "2020-01-30", days: 30, source: "relative" },
+      filters: { productId: null, productIds: null, locationId: 2, locationName: "L".repeat(100), mode: "by_product" },
+      rows: Array.from({ length: TOTAL }, (_v, i) => ({
+        productId: i + 1,
+        name: LONG,
+        lifecycle: "active",
+        outboundUnits: i % 2 === 0 ? 5 : 0,
+        ...zero,
+        sale: i % 2 === 0 ? -5 : 0,
+        stockIn: i % 3 === 0 ? 4 : 0,
+        net: (i % 2 === 0 ? -5 : 0) + (i % 3 === 0 ? 4 : 0),
+      })),
+      coverage: {
+        unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE,
+        reasonCodeNullRows: 3,
+        excludedUnapprovedProducts: 0,
+        archivedProductsIncluded: 0,
+        approvalNote: "approved products only",
+      },
+    });
+    const tight = (await runOnce("get_movement_series", { breakdownBy: "product", locationId: 2 }, TIGHT)) as ExecResult & {
+      data?: { counts?: Record<string, number>; countsNote?: string };
+    };
+    expect(tight.status).toBe("ok");
+    expect(tight.notice).toBeUndefined();
+    expect(tight.data!.rows!.length).toBeGreaterThan(0);
+    expect(tight.data!.rows!.length).toBeLessThan(TOTAL);
+    expect(tight.data!.counts).toEqual({ products: TOTAL, withOutbound: TOTAL / 2, withInbound: TOTAL / 3 });
+    expect(typeof tight.data!.countsNote).toBe("string");
+    expect(tight.meta!.bytes).toBeLessThanOrEqual(TIGHT);
   });
 });

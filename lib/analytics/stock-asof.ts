@@ -47,6 +47,16 @@
  * flaggedPairs). When both are absent the watermark is `null` and NO row is flagged
  * (there is no frontier to lag).
  *
+ * ONE LOCATION (A2 pack C9): with a `locationId`, every per-product figure — `units`,
+ * `pairsPresentOnDay`, `knownPairs`, `seriesEndsAt` — is that location's alone, and the
+ * catalog page lists only the products recorded THERE on or before day D (a DB-side
+ * `stockSnapshots: { some }` population, so paging stays exact); the rest are counted in
+ * `coverage.notRecordedHere` — unknown there, never zero. The watermark and
+ * `flaggedPairs` deliberately stay GLOBAL (`coverage.watermarkScope: "all locations"`):
+ * a location whose series stalled must still read `possiblyStale` against the catalog
+ * frontier, which a location-scoped watermark would quietly move back to meet it.
+ * Without a `locationId` nothing here changes.
+ *
  * Scope: approved, non-deleted products (the SAME predicate as lib/analytics/
  * valuation.ts). `productId` narrows to one product; an unknown/out-of-scope id yields
  * an empty page here — resolution + NOT_FOUND is the tool's job (W2-INT), mirroring
@@ -77,6 +87,15 @@ export const NO_SNAPSHOT_REASON = "no snapshot recorded for that day";
 export function partialDayReason(missing: number, known: number): string {
   return `${missing} of ${known} locations have no snapshot for that day — total may be partial`;
 }
+
+/** A2 C9: the reason a NAMED product's row carries when, at the requested location, it has
+ *  no snapshot on or before day D — its stock there is unknown, not zero. */
+export const NOT_RECORDED_HERE_REASON = "not recorded at this location on or before that day";
+
+/** A2 C9: why a location-scoped catalog page is shorter than the catalog. */
+export const NOT_RECORDED_HERE_NOTE =
+  "products not recorded at this location on or before that day are not listed — their " +
+  "stock there is unknown, not zero.";
 
 /** Default page size when the caller (tests / direct calls) omits `limit`. The tool
  *  layer (W2-INT) always passes an explicit bound; this covers the ~80-product catalog
@@ -131,6 +150,14 @@ export interface StockAsOfCoverage {
   snapshotWatermark: string | null;
   snapshotDataStart: string | null;
   flaggedPairs: number;
+  /** A2 C9 — present only with a `locationId`: the watermark and `flaggedPairs` above are
+   *  the catalog's, not the location's (so a stalled location is still flagged). */
+  watermarkScope?: "all locations";
+  /** A2 C9 — present only on a location-scoped CATALOG page: approved products with no
+   *  snapshot at that location on or before day D, which the page does not list. (A named
+   *  `productId` is always listed — with NOT_RECORDED_HERE_REASON when it applies.) */
+  notRecordedHere?: number;
+  notRecordedHereNote?: string;
 }
 
 /**
@@ -209,6 +236,9 @@ export async function getStockAsOf(
     byteBudget: number;
     /** spec C13 — honored ONLY together with an explicit productId (see productScope). */
     includeArchived?: boolean;
+    /** A2 C9: one location's stock on day D instead of the sum across locations. An
+     *  ALREADY-VALID id (not-found is the tool's job, as for productId). */
+    locationId?: number;
   },
   now: Date = new Date(),
 ): Promise<StockAsOfPage> {
@@ -218,9 +248,19 @@ export async function getStockAsOf(
   const scope = productScope(opts.productId, opts.includeArchived);
   const limit = opts.limit ?? DEFAULT_LIMIT;
   const offset = opts.offset ?? 0;
+  const locationId = opts.locationId;
+  // A2 C9: "recorded at this location on or before day D". A location-scoped CATALOG page
+  // lists only those products; a named productId is always listed (it gets a reason row
+  // when this does not hold), so the population narrows the catalog page alone.
+  const recordedHere = locationId != null ? { locationId, dayKey: { lte: dayKey } } : null;
+  const locationCatalog = recordedHere != null && opts.productId == null;
+  const listScope = locationCatalog ? { ...scope, stockSnapshots: { some: recordedHere } } : scope;
+  // Every per-product snapshot read below carries the location when one is named.
+  const atLocation = locationId != null ? { locationId } : {};
 
   // ---- GLOBAL reads (once): watermark inputs + coverage. Both fall out of two reads. ----
-  const [snapAgg, snapState] = await Promise.all([
+  // A2 C9: these stay GLOBAL with a locationId — the frontier a location is compared to.
+  const [snapAgg, snapState, notRecordedHere] = await Promise.all([
     // Earliest + latest snapshot dayKey across the WHOLE table (global — no company col).
     prisma.productStockSnapshot.aggregate({ _min: { dayKey: true }, _max: { dayKey: true } }),
     // The snapshots-job rebuild-state row — read the SAME row lib/assistant/freshness.ts
@@ -230,6 +270,11 @@ export async function getStockAsOf(
       where: { job: "snapshots" },
       select: { lastWindowTo: true, flaggedPairs: true },
     }),
+    // A2 C9: the products a location-scoped catalog page leaves out, counted (never listed
+    // as zero). One count, the complement of the page's own population.
+    locationCatalog
+      ? prisma.product.count({ where: { ...scope, stockSnapshots: { none: recordedHere } } })
+      : Promise.resolve(null),
   ]);
 
   const snapshotDataStart = snapAgg?._min?.dayKey ?? null;
@@ -242,15 +287,19 @@ export async function getStockAsOf(
     snapshotWatermark,
     snapshotDataStart,
     flaggedPairs,
+    ...(locationId != null ? { watermarkScope: "all locations" as const } : {}),
+    ...(notRecordedHere != null
+      ? { notRecordedHere, notRecordedHereNote: NOT_RECORDED_HERE_NOTE }
+      : {}),
   };
 
   // ---- Paged, DB-side, per-product assembly (spec "never materialize" rule). ----
   const page = await pageFromDb<StockAsOfRow>({
     // count = in-scope product count (drives totalRows exactly; deterministic paging).
-    count: () => prisma.product.count({ where: scope }),
+    count: () => prisma.product.count({ where: listScope }),
     fetch: async (skip, take) => {
       const products = await prisma.product.findMany({
-        where: scope,
+        where: listScope,
         orderBy: { id: "asc" }, // deterministic paging
         skip,
         take,
@@ -271,7 +320,7 @@ export async function getStockAsOf(
         // unique, that equals the number of LOCATIONS present on day D (pairsPresentOnDay).
         prisma.productStockSnapshot.groupBy({
           by: ["productId"],
-          where: { productId: { in: ids }, dayKey },
+          where: { productId: { in: ids }, dayKey, ...atLocation },
           _sum: { quantity: true },
           _count: true,
         }),
@@ -281,7 +330,7 @@ export async function getStockAsOf(
         // stale one); knownPairs = pairs whose _min <= day D (the location existed by D).
         prisma.productStockSnapshot.groupBy({
           by: ["productId", "locationId"],
-          where: { productId: { in: ids } },
+          where: { productId: { in: ids }, ...atLocation },
           _max: { dayKey: true },
           _min: { dayKey: true },
         }),
@@ -330,7 +379,12 @@ export async function getStockAsOf(
           pairsPresentOnDay,
           knownPairs,
         };
-        if (units === null) {
+        if (locationId != null && knownPairs === 0) {
+          // A2 C9: a NAMED product with no snapshot at this location on or before day D
+          // (units is necessarily null) — unknown there, not zero, and not merely "no row
+          // that day": the location has no series for it by then at all.
+          row.reason = NOT_RECORDED_HERE_REASON;
+        } else if (units === null) {
           // Fully absent for day D (no location has a row) — the day is unknown, not partial.
           row.reason = NO_SNAPSHOT_REASON;
         } else if (pairsPresentOnDay < knownPairs) {

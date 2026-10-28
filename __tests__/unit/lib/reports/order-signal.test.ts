@@ -42,6 +42,11 @@ type Fact = { productId: number; companyId: string; dayKey: string; orderedQty: 
 function seed(opts: { facts: Fact[]; approvedActiveIds: number[] }) {
   // approvedProductIds({ includeArchived: false }) — the coverage scope.
   db.product.findMany.mockResolvedValue(opts.approvedActiveIds.map((id) => ({ id })) as never);
+  // A2 C8: the per-company starts carry each company's name (one company read).
+  db.company.findMany.mockResolvedValue([
+    { id: "c1", name: "Acme Peptides" },
+    { id: "c2", name: "Beta Labs" },
+  ] as never);
   const inScope = (where: Record<string, any>) =>
     opts.facts.filter(
       (f) =>
@@ -184,13 +189,15 @@ describe("A2 C4 orderSignal — sums and coverage", () => {
     });
     const out = await orderSignal([1], ["c1", "c2"], WINDOW);
     const perCompany = [
-      { companyId: "c1", salesDataStart: "2020-01-01" },
-      { companyId: "c2", salesDataStart: null },
+      { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: null, name: "Beta Labs" },
     ];
     expect(out.windowCoverage).toBe("partial");
     expect(out.partialKind).toBe("company");
     expect(out.companyCoverage).toEqual(perCompany);
     expect(out.reason).toBe(salesCoverageReason("2020-01-01", WINDOW.from, perCompany));
+    // A2 C8: the not-recording company is named, never shown by its id.
+    expect(out.reason).toContain("no sales data recorded for Beta Labs");
   });
 
   it("window-kind wins when BOTH hold: the caller-wide start is itself inside the window", async () => {
@@ -201,8 +208,8 @@ describe("A2 C4 orderSignal — sums and coverage", () => {
     const out = await orderSignal([1], ["c1", "c2"], WINDOW);
     expect(out.partialKind).toBe("window");
     expect(out.companyCoverage).toEqual([
-      { companyId: "c1", salesDataStart: "2026-09-01" },
-      { companyId: "c2", salesDataStart: null },
+      { companyId: "c1", salesDataStart: "2026-09-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: null, name: "Beta Labs" },
     ]);
   });
 

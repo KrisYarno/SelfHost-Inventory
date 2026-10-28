@@ -214,6 +214,10 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
     // C10 (Task 2.4): the per-product breakdown — catalog-wide and bounded-batch.
     { breakdownBy: "product" },
     { breakdownBy: "product", productIds: [1, 2] },
+    // A2 C8: the location-scoped variants read the location's name for the filters echo.
+    { locationId: 2 },
+    { receipts: true, locationId: 2 },
+    { breakdownBy: "product", locationId: 2 },
   ],
   get_inventory_summary: [
     {},
@@ -239,6 +243,9 @@ const TOOL_GATE_FIXTURES: Record<string, unknown[]> = {
   get_stock_asof: [
     { dayKey: "2026-01-01" },
     { dayKey: "2026-01-01", productId: PENDING_REVIEW_FIXTURE_ID },
+    // A2 C9: the location resolve (benign null -> notFound("location")) is a read path too;
+    // the seeded C10 scan below drives its resolved branch.
+    { dayKey: "2026-01-01", locationId: 2 },
   ],
   compare_periods: [
     { metric: "outbound_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 } },
@@ -1563,18 +1570,33 @@ describe("SCOPE ECHO gate (spec C4 — effective-scope echoes)", () => {
   it("get_movement_series (series) carries mode 'series' + filters, and filters.mode === mode", async () => {
     prismaCtl.__reset();
     prismaCtl.__overrides["product.findFirst"] = { id: 3, name: "P" };
+    prismaCtl.__overrides["location.findUnique"] = { name: "Gate Annex" };
     const data = await okData("get_movement_series", { productId: 3, locationId: 2 });
     expect(data.mode).toBe("series");
-    expect(data.filters).toEqual({ productId: 3, productIds: null, locationId: 2, mode: "series" });
+    // A2 C8: a location-scoped echo names the location.
+    expect(data.filters).toEqual({
+      productId: 3,
+      productIds: null,
+      locationId: 2,
+      locationName: "Gate Annex",
+      mode: "series",
+    });
     expect((data.filters as { mode: string }).mode).toBe(data.mode);
   });
 
   it("get_movement_series (receipts) carries mode 'receipts' + the SAME filters shape", async () => {
     prismaCtl.__reset();
     prismaCtl.__overrides["product.findFirst"] = { id: 3, name: "P" };
+    prismaCtl.__overrides["location.findUnique"] = { name: "Gate Annex" };
     const data = await okData("get_movement_series", { productId: 3, locationId: 2, receipts: true });
     expect(data.mode).toBe("receipts");
-    expect(data.filters).toEqual({ productId: 3, productIds: null, locationId: 2, mode: "receipts" });
+    expect(data.filters).toEqual({
+      productId: 3,
+      productIds: null,
+      locationId: 2,
+      locationName: "Gate Annex",
+      mode: "receipts",
+    });
     expect((data.filters as { mode: string }).mode).toBe(data.mode);
   });
 
@@ -1982,5 +2004,123 @@ describe("C2 envelope pins (contract pack T0 — requestSchema)", () => {
     const overCap = { ...validMessage, parts: [textPart("x".repeat(24_577))] };
     expect(requestSchema.safeParse({ threadId: null, message: atCap }).success).toBe(true);
     expect(requestSchema.safeParse({ threadId: null, message: overCap }).success).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 pack C10 — model-facing text carries no internal lane or design-reference names.
+//
+// Review #4 found "pre-Lane-4" (an internal lane name AND a false time claim: reason-less
+// deductions are written today) in a coverage note and two descriptions, "(D12)" in a
+// definition and "pre-lane" in a disclosure. The scan covers every tool DESCRIPTION and
+// every serialized GATE-FIXTURE payload: a benign pass over the whole matrix, plus a
+// seeded pass that makes the data-dependent notes (the unclassified-outbound note rides
+// only when a reason-less outbound row exists) and the location-resolved branches appear.
+// The only exemptions are the two reconciliation sentences B3 owns (shared with the
+// reconciliation pages), by exact string.
+// ---------------------------------------------------------------------------
+
+describe("A2 C10 — no internal lane or design-reference names in model-facing text", () => {
+  const LANE = /\b(pre-|post-)?lane\b/i;
+  const DESIGN_REF = /\(D\d+\)/;
+  /** B3-registered (lib/reconciliation/derive.ts:85 and attribution.ts:396-398). */
+  const B3_EXEMPT = [
+    "unknown — before the lane",
+    "computed at read time because no attempt row exists — before the lane, or a path that did not record",
+  ];
+  const violationsIn = (label: string, text: string): string[] => {
+    let scanned = text;
+    for (const exempt of B3_EXEMPT) scanned = scanned.split(exempt).join("");
+    const found: string[] = [];
+    for (const re of [LANE, DESIGN_REF]) {
+      const hit = scanned.match(re);
+      if (hit) {
+        const at = hit.index ?? 0;
+        found.push(`${label}: ${JSON.stringify(scanned.slice(Math.max(0, at - 60), at + 40))}`);
+      }
+    }
+    return found;
+  };
+
+  it("the patterns have teeth (the strings review #4 found) and the exemptions are live B3 strings", () => {
+    expect(LANE.test("how this shop ships pre-Lane-4")).toBe(true);
+    expect(LANE.test("pre-lane mass-update batches")).toBe(true);
+    expect(LANE.test("the post-lane rows")).toBe(true);
+    expect(DESIGN_REF.test("five events (D12)")).toBe(true);
+    expect(LANE.test("unclassified outbound, landing page")).toBe(false);
+    const recon = ["lib/reconciliation/derive.ts", "lib/reconciliation/attribution.ts"]
+      .map((f) => fs.readFileSync(path.join(process.cwd(), f), "utf8"))
+      .join("\n");
+    for (const exempt of B3_EXEMPT) expect(recon).toContain(exempt);
+  });
+
+  it("every tool description is clean", () => {
+    const violations = TOOL_NAMES.flatMap((name) =>
+      violationsIn(`${name} description`, assistantTools[name].description),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  it("every serialized gate-fixture payload is clean (benign pass over the whole matrix)", async () => {
+    const violations: string[] = [];
+    for (const name of TOOL_NAMES) {
+      for (const fixture of TOOL_GATE_FIXTURES[name]) {
+        prismaCtl.__reset();
+        const result = await assistantTools[name].run(fixture, CTX);
+        violations.push(...violationsIn(`${name} ${JSON.stringify(fixture)}`, JSON.stringify(result)));
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it("the seeded pass: the unclassified-outbound note and the location branches appear, and are clean", async () => {
+    const seed = () => {
+      prismaCtl.__reset();
+      prismaCtl.__overrides["product.findFirst"] = { id: 1, name: "Gate Fixture Product" };
+      prismaCtl.__overrides["location.findUnique"] = { id: 2, name: "Gate Annex" };
+      // One reason-less outbound adjustment: the row the note describes.
+      prismaCtl.__overrides["inventory_logs.findMany"] = [
+        {
+          id: 1,
+          productId: 1,
+          locationId: 2,
+          locations: { name: "Gate Annex" },
+          delta: -2,
+          logType: "ADJUSTMENT",
+          reasonCode: null,
+          unitCostCents: null,
+          batchId: null,
+          changeTime: new Date("2026-01-01T12:00:00.000Z"),
+        },
+      ];
+      prismaCtl.__overrides["inventory_logs.groupBy"] = [
+        { productId: 1, logType: "ADJUSTMENT", reasonCode: null, _sum: { delta: -2 }, _count: 1 },
+      ];
+    };
+    const seeded: Array<[string, Record<string, unknown>]> = [
+      ["get_movement_series", {}],
+      ["get_movement_series", { breakdownBy: "product" }],
+      ["get_movement_series", { breakdownBy: "product", locationId: 2 }],
+      ["get_movement_series", { receipts: true, locationId: 2 }],
+      ["get_product_overview", { productId: 1 }],
+      ["get_stock_asof", { dayKey: "2026-01-01", locationId: 2 }],
+      ["get_shrinkage", { days: 30 }],
+    ];
+    const violations: string[] = [];
+    const payloads: string[] = [];
+    for (const [name, fixture] of seeded) {
+      seed();
+      const result = await assistantTools[name].run(fixture, CTX);
+      expect({ name, fixture, status: result.status }).toEqual({ name, fixture, status: "ok" });
+      const text = JSON.stringify(result);
+      payloads.push(text);
+      violations.push(...violationsIn(`${name} ${JSON.stringify(fixture)} (seeded)`, text));
+    }
+    expect(violations).toEqual([]);
+    // Non-vacuity: the note really rode (series, breakdown and the overview's movement30).
+    const withNote = payloads.filter((p) => p.includes('"unclassifiedLegacyNote"'));
+    expect(withNote.length).toBeGreaterThanOrEqual(3);
+    expect(payloads.some((p) => p.includes('"locationName":"Gate Annex"'))).toBe(true);
+    expect(payloads.some((p) => p.includes('"watermarkScope":"all locations"'))).toBe(true);
   });
 });

@@ -155,7 +155,34 @@ export interface ValuationRow {
   atReceiptCostCents: number | null;
   atRetailCents: number | null;
   marginCents: number | null;
+  /**
+   * A2 pack C6: the STORED unit cost and retail the row was built from (cents) — so a
+   * 0-unit product's money totals of 0 can never be read as its price. `null` = not set,
+   * `0` = recorded as free (the Lane 6 rule for both columns). Present on PRODUCT rows,
+   * and on location rows only when the call names a `productId` (then every location row
+   * is that one product); a multi-product location row and the total row carry neither
+   * key, because they have no single unit price. Named `current…` because receipts already
+   * use `unitCostCents` for the cost frozen at receipt.
+   *
+   * The money totals above keep their own rule and are NOT derived from these: a stored
+   * cost of 0 contributes no cost total (`centsFromCostPrice` maps it to null), while the
+   * unit cost reads 0 here.
+   */
+  currentUnitCostCents?: number | null;
+  unitRetailCents?: number | null;
   reasons?: Record<string, string>;
+}
+
+/**
+ * The stored unit cost in cents (A2 pack C6): NULL -> null, an explicit 0 -> 0 (recorded
+ * as free), otherwise the same conversion the totals use. Deliberately NOT
+ * `centsFromCostPrice` alone, which maps 0 to null — right for a cost TOTAL (a free item
+ * adds no cost to value), wrong for the unit price a reader asks about.
+ */
+function storedUnitCostCents(costPrice: Parameters<typeof centsFromCostPrice>[0]): number | null {
+  if (costPrice === null) return null;
+  if (Number(costPrice) === 0) return 0;
+  return centsFromCostPrice(costPrice);
 }
 
 export interface ValuationResult {
@@ -239,6 +266,8 @@ export async function getValuation(opts: {
     hasRetail: boolean;
     margin: number;
     hasMargin: boolean;
+    /** C6: set ONLY when the call names a productId — the location then holds one product. */
+    unitPrices?: { currentUnitCostCents: number | null; unitRetailCents: number | null };
   }
   const locMap = new Map<number, LocAcc>();
 
@@ -252,6 +281,11 @@ export async function getValuation(opts: {
     // receipt is meaningful only for in-stock products (mirrors getValuationSummary).
     const receiptKnown = units > 0 && receiptCents != null;
     const marginKnown = costKnown && retailKnown;
+    // C6: the stored unit values (0 = recorded as free), independent of the totals' rules.
+    const unitPrices = {
+      currentUnitCostCents: storedUnitCostCents(p.costPrice),
+      unitRetailCents: retailCents,
+    };
 
     // --- coverage ---
     coverage.ofProducts += 1;
@@ -296,6 +330,7 @@ export async function getValuation(opts: {
         atReceiptCostCents: rowReceipt,
         atRetailCents: rowRetail,
         marginCents: rowMargin,
+        ...unitPrices,
       });
     }
 
@@ -315,6 +350,7 @@ export async function getValuation(opts: {
             hasRetail: false,
             margin: 0,
             hasMargin: false,
+            ...(opts.productId != null ? { unitPrices } : {}),
           };
           locMap.set(pl.locationId, e);
         }
@@ -353,6 +389,7 @@ export async function getValuation(opts: {
         atReceiptCostCents: null, // receipt is not location-attributable
         atRetailCents: e.hasRetail ? e.retail : null,
         marginCents: e.hasMargin ? e.margin : null,
+        ...(e.unitPrices ?? {}),
         reasons: { atReceiptCostCents: RECEIPT_NOT_LOCATION_ATTRIBUTABLE },
       }));
   } else {

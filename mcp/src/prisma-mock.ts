@@ -16,6 +16,9 @@
  *   - product / product_locations / systemSetting — find_product's read graph.
  *   - orderAttributionAttempt / auditLog — the reconciliation lane's recording boundary
  *     and drill-down (pack C5.1).
+ *   - location.findUnique / company.findMany — assistant A2 (pack C8 / C9): the
+ *     get_stock_asof location resolve + the movement filters' location name, and the
+ *     company names on every per-company sales coverage entry.
  *   - $queryRaw            — the /healthz SELECT 1 probe AND the reconciliation totals
  *     read, told apart by the statement text (see the dispatcher below).
  */
@@ -96,6 +99,14 @@ const prismaMock: any = {
     findUnique: async () => null,
   },
   location: {
+    findMany: async () => [],
+    // A2 C9 / C8: the get_stock_asof locationId resolve (null -> notFound("location")) and
+    // the movement filters echo's location name.
+    findUnique: async () => null,
+  },
+  // A2 C8: the company names on every per-company sales coverage entry ({ id, name } only,
+  // over the caller's own companies).
+  company: {
     findMany: async () => [],
   },
   // Wave-3 composites (get_product_overview / get_business_snapshot) fan out to the

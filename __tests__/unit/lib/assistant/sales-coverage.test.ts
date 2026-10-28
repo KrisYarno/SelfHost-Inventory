@@ -25,6 +25,8 @@ import prisma from "@/lib/prisma";
 import {
   callerScopedSalesCoverage,
   callerWindowCoverage,
+  companyCoverageDetail,
+  salesDataStartsByCompany,
   salesCoverageReason,
   BUNDLE_REVENUE_DISCLOSURE,
   SALES_ATTRIBUTION_NOTE,
@@ -208,6 +210,11 @@ describe("FD-2 companyCoverage — a company with NO facts is a null start, not 
     db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
     db.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: callerWide } } as never);
     db.productSalesFact.groupBy.mockResolvedValue(groups as never);
+    // A2 C8: the names come from ONE read over the requested ids.
+    db.company.findMany.mockResolvedValue([
+      { id: "c1", name: "Acme Peptides" },
+      { id: "c2", name: "Beta Labs" },
+    ] as never);
   }
 
   it("lists the silent company with salesDataStart null and DEGRADES the window", async () => {
@@ -218,8 +225,8 @@ describe("FD-2 companyCoverage — a company with NO facts is a null start, not 
 
     expect(coverage.salesDataStart).toBe("2020-01-01");
     expect(coverage.companyCoverage).toEqual([
-      { companyId: "c1", salesDataStart: "2020-01-01" },
-      { companyId: "c2", salesDataStart: null },
+      { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: null, name: "Beta Labs" },
     ]);
     // The caller-wide start alone says "full"; the silent company makes it partial —
     // NOT "none" (c1's data really does cover the window, and saying otherwise would be
@@ -313,8 +320,10 @@ describe("FD-2 callerWindowCoverage — the governing start, including the null 
 // ---------------------------------------------------------------------------
 
 describe("A2 C4 salesCoverageReason — get_sales' three reason strings, extracted", () => {
+  // A2 C8: the entries carry their company's name, as salesDataStartsByCompany returns them.
+  const NAMES: Record<string, string> = { c1: "Acme Peptides", c2: "Beta Labs" };
   const perCompany = (starts: Array<[string, string | null]>) =>
-    starts.map(([companyId, salesDataStart]) => ({ companyId, salesDataStart }));
+    starts.map(([companyId, salesDataStart]) => ({ companyId, salesDataStart, name: NAMES[companyId] ?? null }));
 
   it("no recorded start at all -> the no-data sentence (no date to quote)", () => {
     expect(salesCoverageReason(null, "2026-07-01")).toBe("no attributed sales data recorded");
@@ -339,7 +348,14 @@ describe("A2 C4 salesCoverageReason — get_sales' three reason strings, extract
       salesCoverageReason("2020-01-01", "2026-07-01", perCompany([["c1", "2020-01-01"], ["c2", null]])),
     ).toBe(
       "sales data is not recorded in every company for this window " +
-        `(no sales data recorded for company c2; latest company start 2020-01-01; ${SALES_COMPANY_COVERAGE_NOTE})`,
+        `(no sales data recorded for Beta Labs; latest company start 2020-01-01; ${SALES_COMPANY_COVERAGE_NOTE})`,
+    );
+    // A company whose name is gone (deleted) falls back to its id, said as "company <id>".
+    expect(
+      salesCoverageReason("2020-01-01", "2026-07-01", perCompany([["c1", "2020-01-01"], ["c9", null]])),
+    ).toBe(
+      "sales data is not recorded in every company for this window " +
+        `(no sales data recorded for company c9; latest company start 2020-01-01; ${SALES_COMPANY_COVERAGE_NOTE})`,
     );
     expect(
       salesCoverageReason("2020-01-01", "2026-07-01", perCompany([["c1", "2020-01-01"], ["c2", "2026-07-09"]])),
@@ -354,5 +370,99 @@ describe("A2 C4 salesCoverageReason — get_sales' three reason strings, extract
       `sales data is not recorded in every company for this window (${SALES_COMPANY_COVERAGE_NOTE})`;
     expect(salesCoverageReason("2020-01-01", "2026-07-01")).toBe(expected);
     expect(salesCoverageReason("2020-01-01", "2026-07-01", [])).toBe(expected);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 pack C8 (R4-12/13): names for ids. Every companyCoverage array is built from
+// salesDataStartsByCompany, so its entries carry the company's NAME (one read, scoped to
+// the caller's own companies), and the prose names the company alone — the id only when
+// the name is gone.
+// ---------------------------------------------------------------------------
+
+describe("A2 C8 salesDataStartsByCompany — entries carry the company name", () => {
+  function seedFacts(names: Array<{ id: string; name: string }> | undefined) {
+    db.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: "2020-01-01" } } as never);
+    db.productSalesFact.groupBy.mockResolvedValue([
+      { companyId: "c1", _min: { dayKey: "2020-01-01" } },
+      { companyId: "c2", _min: { dayKey: "2026-07-09" } },
+    ] as never);
+    db.company.findMany.mockResolvedValue(names as never);
+  }
+
+  it("one company read over the requested ids, selecting id + name only; each entry gains its name", async () => {
+    seedFacts([
+      { id: "c2", name: "Beta Labs" },
+      { id: "c1", name: "Acme Peptides" },
+    ]);
+    const starts = await salesDataStartsByCompany(["c2", "c1"]);
+    expect(db.company.findMany).toHaveBeenCalledTimes(1);
+    expect(db.company.findMany).toHaveBeenCalledWith({
+      where: { id: { in: ["c2", "c1"] } },
+      select: { id: true, name: true },
+    });
+    expect(starts.perCompany).toEqual([
+      { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: "2026-07-09", name: "Beta Labs" },
+    ]);
+  });
+
+  it("a deleted company (no name row) reads name: null; an undefined read is guarded", async () => {
+    seedFacts([{ id: "c1", name: "Acme Peptides" }]);
+    const starts = await salesDataStartsByCompany(["c1", "c2"]);
+    expect(starts.perCompany[1]).toEqual({ companyId: "c2", salesDataStart: "2026-07-09", name: null });
+
+    seedFacts(undefined);
+    const guarded = await salesDataStartsByCompany(["c1", "c2"]);
+    expect(guarded.perCompany.map((c) => c.name)).toEqual([null, null]);
+  });
+
+  it("no companies: no read at all (names included)", async () => {
+    await salesDataStartsByCompany([]);
+    expect(db.company.findMany).not.toHaveBeenCalled();
+  });
+
+  it("callerScopedSalesCoverage relays the named entries in companyCoverage", async () => {
+    seed({ unattributed: 0, total: 0 });
+    db.product.findMany.mockResolvedValue([{ id: 1 }] as never);
+    seedFacts([
+      { id: "c1", name: "Acme Peptides" },
+      { id: "c2", name: "Beta Labs" },
+    ]);
+    const coverage = await callerScopedSalesCoverage(["c1", "c2"]);
+    expect(coverage.companyCoverage).toEqual([
+      { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: "2026-07-09", name: "Beta Labs" },
+    ]);
+  });
+});
+
+describe("A2 C8 companyCoverageDetail — the name alone, the id only as a fallback", () => {
+  it("names each silent company alone; a missing name falls back to 'company <id>'", () => {
+    expect(
+      companyCoverageDetail([
+        { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+        { companyId: "c2", salesDataStart: null, name: "Beta Labs" },
+      ]),
+    ).toBe("no sales data recorded for Beta Labs; latest company start 2020-01-01");
+    expect(
+      companyCoverageDetail([
+        { companyId: "c1", salesDataStart: null, name: "Acme Peptides" },
+        { companyId: "c2", salesDataStart: null, name: null },
+      ]),
+    ).toBe("no sales data recorded for Acme Peptides, company c2");
+    // Entries without a name key (an unnamed producer) read exactly as a null name.
+    expect(companyCoverageDetail([{ companyId: "c2", salesDataStart: null }])).toBe(
+      "no sales data recorded for company c2",
+    );
+  });
+
+  it("never prints a company id when the name is known", () => {
+    const detail = companyCoverageDetail([
+      { companyId: "cmp_123", salesDataStart: null, name: "Acme Peptides" },
+      { companyId: "cmp_456", salesDataStart: "2026-07-09", name: "Beta Labs" },
+    ]);
+    expect(detail).not.toContain("cmp_");
+    expect(detail).toBe("no sales data recorded for Acme Peptides; latest company start 2026-07-09");
   });
 });

@@ -63,9 +63,12 @@ const RECEIPTS_DEFAULT_LIMIT = 50;
  * "receipts" and means deliveries reports a different number off the same rows,
  * which is why this string lives in ONE place and the supply-order analytics
  * roll-up imports it rather than re-spelling it.
+ *
+ * A2 pack C10: model- and user-facing (the receipts payload AND the supply-orders card),
+ * so it carries no internal design reference.
  */
 export const RECEIPT_EVENT_DEFINITION =
-  "a receipt event = one stock-in batch; a five-batch delivery is five events (D12)";
+  "a receipt event = one stock-in batch; a five-batch delivery is five events";
 
 export interface MovementBuckets {
   stockIn: number;
@@ -92,12 +95,30 @@ export type MovementMode = "series" | "receipts" | "by_product";
  *
  *  G2-4: the mode is a TYPE PARAMETER, so each envelope pins its own literal and tsc
  *  rejects a mismatched pair at compile time. The equality used to be a convention three
- *  runtime tests policed; now the type system enforces it and the tests confirm it. */
+ *  runtime tests policed; now the type system enforces it and the tests confirm it.
+ *
+ *  A2 pack C8: `locationName` is present ONLY when `locationId` is set (null when that
+ *  location has no row), so a location-scoped answer names its location. */
 export interface MovementFilters<M extends MovementMode> {
   productId: number | null;
   productIds: number[] | null;
   locationId: number | null;
+  locationName?: string | null;
   mode: M;
+}
+
+/**
+ * The location-name half of the filters echo (A2 pack C8): `{ locationName }` when a
+ * location scopes the read, `{}` otherwise — so an unscoped echo is byte-for-byte what it
+ * was. Locations are global, as in every stock tool. Exported for the receipts envelope,
+ * which the tool layer assembles.
+ */
+export async function locationNameEcho(
+  locationId: number | null | undefined,
+): Promise<{ locationName?: string | null }> {
+  if (locationId == null) return {};
+  const row = await prisma.location.findUnique({ where: { id: locationId }, select: { name: true } });
+  return { locationName: row?.name ?? null };
 }
 
 /**
@@ -121,7 +142,8 @@ export interface MovementSeriesResult extends MovementEnvelope<"series"> {
   points: Array<{ key: string } & MovementBuckets>;
   totals: MovementBuckets;
   coverage: {
-    unclassifiedLegacyNote: string;
+    /** A2 C10: present ONLY when `reasonCodeNullRows > 0` (the key name is historical). */
+    unclassifiedLegacyNote?: string;
     reasonCodeNullRows: number;
     // G5 disclosure (spec C13). ALWAYS present since G2-3 made `approvedIds` required:
     // every caller of this read is on the assistant surface, so every result states the
@@ -133,11 +155,23 @@ export interface MovementSeriesResult extends MovementEnvelope<"series"> {
   };
 }
 
-/** Fixed coverage note: legacy negative ADJUSTMENT is this shop's pre-Lane-4
- *  shipping record — unclassified outbound, NOT sales (spec §5 T-MOVE). */
-const UNCLASSIFIED_LEGACY_NOTE =
-  "Legacy negative ADJUSTMENT is how this shop shipped product pre-Lane-4 — " +
-  "unclassified outbound, not classifiable as sales.";
+/**
+ * The unclassified-outbound note (spec §5 T-MOVE; A2 pack C10). Reason-less negative
+ * adjustments are written TODAY — the order and other deduction intents carry
+ * `reasonCode: null` (lib/inventory/intent.ts) — so the note makes no claim about their
+ * age and names no internal lane: it says what the rows are and how they are counted.
+ * Attached only when the window has such a row (`reasonCodeNullRows > 0`); the coverage
+ * key keeps its historical name, `unclassifiedLegacyNote`, for shape stability.
+ */
+export const UNCLASSIFIED_LEGACY_NOTE =
+  "Outbound adjustments without a reason code (deductions recorded against an order, or " +
+  "with no reason given) are counted as unclassified outbound here — not as sales and not " +
+  "as loss in these figures.";
+
+/** The note, as an optional coverage key: present exactly when it describes a row here. */
+function unclassifiedNoteFor(reasonCodeNullRows: number): { unclassifiedLegacyNote?: string } {
+  return reasonCodeNullRows > 0 ? { unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE } : {};
+}
 
 /** The 11 signed-sum buckets (everything except the derived `net`). */
 export const BUCKET_KEYS = [
@@ -292,13 +326,16 @@ export async function getMovementSeries(opts: {
 
   // Series points/totals carry NO product ids, so the archived half is the same
   // window-scoped census as the excluded half (spec G5, non-product grain).
-  const disclosure = await approvalDisclosure({
-    relation: "inventory_logs",
-    some: windowPredicate,
-    productId,
-  });
+  const [disclosure, locationEcho] = await Promise.all([
+    approvalDisclosure({
+      relation: "inventory_logs",
+      some: windowPredicate,
+      productId,
+    }),
+    locationNameEcho(locationId),
+  ]);
   const coverage: MovementSeriesResult["coverage"] = {
-    unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE,
+    ...unclassifiedNoteFor(reasonCodeNullRows),
     reasonCodeNullRows,
     excludedUnapprovedProducts: disclosure.excludedUnapprovedProducts,
     archivedProductsIncluded: disclosure.archivedProductsIncluded,
@@ -315,6 +352,7 @@ export async function getMovementSeries(opts: {
       productId: productId ?? null,
       productIds: null,
       locationId: locationId ?? null,
+      ...locationEcho,
       mode: "series",
     },
     points,
@@ -325,7 +363,8 @@ export async function getMovementSeries(opts: {
 
 /** One STOCK_IN receipt row (W2-RCPT, spec §5 T-RCPT). `unitCostCents`/`batchId`
  *  relayed as-is — null means "no frozen cost/batch on this row", NEVER coerced
- *  to 0; `locationId` is nullable too (legacy null-location receipts exist). */
+ *  to 0; `locationId` is nullable too (legacy null-location receipts exist), and so
+ *  is its `locationName` (A2 pack C8 — null with no location, or no location row). */
 export interface ReceiptRow {
   productId: number;
   /** Identity (spec C13, seam S14): receipts used to be productId-only, which made an
@@ -334,6 +373,7 @@ export interface ReceiptRow {
   name: string | null;
   lifecycle: "active" | "deleted" | null;
   locationId: number | null;
+  locationName: string | null;
   quantity: number;
   unitCostCents: number | null;
   batchId: string | null;
@@ -419,6 +459,8 @@ export async function getReceipts(opts: {
         select: {
           productId: true,
           locationId: true,
+          // A2 C8: the name rides on the same read (decorated BEFORE the page is byte-fit).
+          locations: { select: { name: true } },
           delta: true,
           unitCostCents: true,
           batchId: true,
@@ -433,6 +475,7 @@ export async function getReceipts(opts: {
         name: identities.get(row.productId)?.name ?? null,
         lifecycle: identities.get(row.productId)?.lifecycle ?? null,
         locationId: row.locationId,
+        locationName: row.locations?.name ?? null,
         quantity: row.delta,
         unitCostCents: row.unitCostCents,
         batchId: row.batchId,
@@ -471,7 +514,8 @@ export interface MovementByProductResult extends MovementEnvelope<"by_product"> 
   window: ResolvedWindow;
   rows: MovementProductRow[];
   coverage: {
-    unclassifiedLegacyNote: string;
+    /** A2 C10: present ONLY when `reasonCodeNullRows > 0` (the key name is historical). */
+    unclassifiedLegacyNote?: string;
     reasonCodeNullRows: number;
     excludedUnapprovedProducts: number;
     archivedProductsIncluded: number;
@@ -627,11 +671,14 @@ export async function getMovementByProduct(opts: {
   // contribution, and folding it in made the count read as "N archived products' history
   // is in these figures" when the honest answer was 0. That population is disclosed
   // SEPARATELY (`archivedZeroRows`), so nothing is hidden by the correction.
-  const excludedUnapprovedProducts = await excludedUnapprovedProductCount({
-    relation: "inventory_logs",
-    some: windowPredicate,
-    productIds,
-  });
+  const [excludedUnapprovedProducts, locationEcho] = await Promise.all([
+    excludedUnapprovedProductCount({
+      relation: "inventory_logs",
+      some: windowPredicate,
+      productIds,
+    }),
+    locationNameEcho(locationId),
+  ]);
 
   return {
     mode: "by_product",
@@ -640,11 +687,12 @@ export async function getMovementByProduct(opts: {
       productId: null,
       productIds: productIds ?? null,
       locationId: locationId ?? null,
+      ...locationEcho,
       mode: "by_product",
     },
     rows: productRows,
     coverage: {
-      unclassifiedLegacyNote: UNCLASSIFIED_LEGACY_NOTE,
+      ...unclassifiedNoteFor(reasonCodeNullRows),
       reasonCodeNullRows,
       excludedUnapprovedProducts,
       archivedProductsIncluded: archivedCountOf(contributingRows),

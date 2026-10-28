@@ -217,7 +217,9 @@ export const TOOL_PRESENTATION: Record<string, ToolPresentation> = {
     summarizeArgs: (input) => {
       const day = str(input, "dayKey");
       const id = num(input, "productId");
-      const parts = [day ? `on ${day}` : "", id ? `product #${id}` : ""].filter(Boolean);
+      // A2 C9: a one-location read must not render the same row as an all-locations one.
+      const loc = num(input, "locationId");
+      const parts = [day ? `on ${day}` : "", id ? `product #${id}` : "", loc ? `location #${loc}` : ""].filter(Boolean);
       return parts.join(", ");
     },
   },

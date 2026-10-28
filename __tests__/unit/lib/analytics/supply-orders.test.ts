@@ -783,8 +783,9 @@ describe('the receipts roll-up (D10)', () => {
     // ONE definition home for the grain: the roll-up imports the string, so the
     // two surfaces cannot end up meaning different things by "a receipt".
     expect(receipts.definition).toBe(RECEIPT_EVENT_DEFINITION);
+    // A2 C10: the shared definition carries no internal design reference.
     expect(receipts.definition).toBe(
-      'a receipt event = one stock-in batch; a five-batch delivery is five events (D12)',
+      'a receipt event = one stock-in batch; a five-batch delivery is five events',
     );
   });
 });

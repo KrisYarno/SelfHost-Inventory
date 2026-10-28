@@ -64,6 +64,9 @@ describe("get_movement_series disclosure row (spec C4)", () => {
     expect(summarize("get_movement_series", { relativeDays: 90 })).toContain("last 90 days");
     expect(summarize("get_movement_series", {})).toContain("last 30 days (default)");
     expect(summarize("get_movement_series", { locationId: 4 })).toContain("location #4");
+    // A2 C9: the as-of row names the location, so it never reads like an all-locations one.
+    expect(summarize("get_stock_asof", { dayKey: "2026-09-30", locationId: 2 })).toBe("on 2026-09-30, location #2");
+    expect(summarize("get_stock_asof", { dayKey: "2026-09-30" })).toBe("on 2026-09-30");
   });
 
   it("keeps the receipts / groupBy discriminant", () => {

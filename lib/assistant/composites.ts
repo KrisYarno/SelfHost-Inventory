@@ -268,6 +268,8 @@ export async function getProductOverview(
 
     // valuation (global): the product's own row + coverage, relayed verbatim from
     // getValuation (cost/receipt/retail/margin, each null-with-coverage where unknown).
+    // A2 C6: a PRODUCT row, so it also carries the stored unit prices
+    // (currentUnitCostCents / unitRetailCents — 0 = recorded as free, null = not set).
     runSection("global", async () => {
       const result = await getValuation({ productId, groupBy: "product" });
       return { row: result.rows[0] ?? null, coverage: result.coverage };
@@ -296,7 +298,9 @@ export async function getProductOverview(
     }),
 
     // movement30 (global): 30-day ledger partition TOTALS only (a summary — the point
-    // series is get_movement_series). Coverage relays the legacy-unclassified note.
+    // series is get_movement_series). Coverage is relayed verbatim, so the
+    // unclassified-outbound note rides exactly when the module attaches it (A2 C10: only
+    // when a reason-less outbound row is in the 30 days).
     //
     // G2-3: the approved id set is passed like every other historical read on this
     // surface — active+archived, because a ledger partition is HISTORY. The product is

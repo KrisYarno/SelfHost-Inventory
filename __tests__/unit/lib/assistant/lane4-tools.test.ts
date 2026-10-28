@@ -846,6 +846,96 @@ describe("get_stock_asof: reserves envelope bytes so a tight budget still return
   });
 });
 
+// A2 pack C9: get_stock_asof by location — the tool resolves the id (an unknown one is
+// NOT_FOUND with its own message), threads it into the module, and echoes the location by
+// name so the answer never shows a bare id.
+describe("get_stock_asof: locationId (A2 C9)", () => {
+  function seedAsof() {
+    db.product.count.mockResolvedValue(1 as never);
+    db.product.findMany.mockImplementation((async (args: { where?: { id?: { in?: number[] } } }) =>
+      args?.where?.id?.in
+        ? [{ id: 1, name: "TIRZ 10mg", deletedAt: null }]
+        : [{ id: 1, name: "TIRZ 10mg" }]) as never);
+    db.productStockSnapshot.aggregate.mockResolvedValue({ _min: { dayKey: "2026-01-01" }, _max: { dayKey: "2026-06-30" } } as never);
+    db.productStockSnapshot.groupBy.mockImplementation((async (args: { _sum?: unknown }) =>
+      args._sum
+        ? [{ productId: 1, _sum: { quantity: 4 }, _count: 1 }]
+        : [{ productId: 1, locationId: 2, _max: { dayKey: "2026-06-30" }, _min: { dayKey: "2026-01-01" } }]) as never);
+    db.analyticsRebuildState.findUnique.mockResolvedValue({ lastWindowTo: "2026-06-30", flaggedPairs: 0 } as never);
+  }
+
+  it("an unknown locationId is NOT_FOUND with the location message, before any snapshot read", async () => {
+    seedAsof();
+    db.location.findUnique.mockResolvedValue(null as never);
+    const result = await assistantTools.get_stock_asof.run({ dayKey: "2026-06-15", locationId: 99 }, CTX);
+    expect(result).toEqual({
+      status: "error",
+      error: { code: "NOT_FOUND", message: "No location with id 99." },
+    });
+    expect(db.productStockSnapshot.aggregate).not.toHaveBeenCalled();
+    expect(db.product.count).not.toHaveBeenCalled();
+  });
+
+  it("a known locationId reaches the module and is echoed as { id, name }; the watermark is labelled global", async () => {
+    seedAsof();
+    db.location.findUnique.mockResolvedValue({ id: 2, name: "Annex" } as never);
+    const result = await assistantTools.get_stock_asof.run({ dayKey: "2026-06-15", locationId: 2 }, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as {
+      dayKey: string;
+      location: { id: number; name: string };
+      coverage: Record<string, unknown>;
+      rows: Array<{ units: number | null }>;
+    };
+    expect(Object.keys(data).slice(0, 2)).toEqual(["dayKey", "location"]);
+    expect(data.location).toEqual({ id: 2, name: "Annex" });
+    expect(data.coverage.watermarkScope).toBe("all locations");
+    expect(data.coverage.notRecordedHere).toBe(1);
+    expect(data.rows[0].units).toBe(4);
+    for (const call of db.productStockSnapshot.groupBy.mock.calls) {
+      expect((call[0] as { where: Record<string, unknown> }).where).toMatchObject({ locationId: 2 });
+    }
+    expect(db.location.findUnique).toHaveBeenCalledWith({ where: { id: 2 }, select: { id: true, name: true } });
+  });
+
+  it("without locationId: no location read, no echo, no location keys in coverage", async () => {
+    seedAsof();
+    const result = await assistantTools.get_stock_asof.run({ dayKey: "2026-06-15" }, CTX);
+    expect(result.status).toBe("ok");
+    if (result.status !== "ok") return;
+    const data = result.data as Record<string, unknown> & { coverage: Record<string, unknown> };
+    expect(data).not.toHaveProperty("location");
+    expect(data.coverage).not.toHaveProperty("watermarkScope");
+    expect(db.location.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("an unknown productId keeps the product message", async () => {
+    db.product.findFirst.mockResolvedValue(null as never);
+    const result = await assistantTools.get_stock_asof.run({ dayKey: "2026-06-15", productId: 5, locationId: 2 }, CTX);
+    expect(result).toEqual({
+      status: "error",
+      error: { code: "NOT_FOUND", message: "No approved product with id 5." },
+    });
+  });
+
+  it("the schema takes locationId as an optional positive int, and the description says how to use it", () => {
+    const schema = assistantTools.get_stock_asof.inputSchema as unknown as {
+      shape: Record<string, unknown>;
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    expect(Object.keys(schema.shape)).toContain("locationId");
+    expect(schema.safeParse({ dayKey: "2026-06-15", locationId: 0 }).success).toBe(false);
+    expect(schema.safeParse({ dayKey: "2026-06-15" }).success).toBe(true);
+    expect(assistantTools.get_stock_asof.description).toContain(
+      "Pass locationId for one location's stock on that day (otherwise all locations are " +
+        "summed); with locationId, only products recorded at that location on or before that " +
+        "day are listed (coverage.notRecordedHere counts the rest — unknown, not zero). Location " +
+        "ids and names: the valuation tool with groupBy 'location'.",
+    );
+  });
+});
+
 describe("low_stock_report: fetches the full report and paginates at the tool", () => {
   it("fetches all alerts (no limit passed down) and surfaces systemDefaultThreshold", async () => {
     mockGetLowStock.mockResolvedValue({ alerts: [], threshold: 10 });

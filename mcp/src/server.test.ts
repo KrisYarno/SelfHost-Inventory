@@ -65,7 +65,11 @@ jest.mock("@/lib/prisma", () => ({
     // Wave-2: get_order_pipeline reads order items through the PII allowlist.
     externalOrderItem: { findMany: jest.fn(async () => []) },
     globalReorderSettings: { findUnique: jest.fn(async () => null) },
-    location: { findMany: jest.fn(async () => []) },
+    // A2 M3 (pack C8 / C9): get_stock_asof resolves a locationId and the movement filters
+    // echo names its location (findUnique); the per-company sales coverage names each of
+    // the caller's companies (company.findMany, { id, name } only).
+    location: { findMany: jest.fn(async () => []), findUnique: jest.fn(async () => null) },
+    company: { findMany: jest.fn(async () => []) },
     // Reconciliation lane (pack C5.1): get_order_reconciliation reads the recording
     // boundary through orderAttributionAttempt and the drill-down reads audit_logs.
     // Mirrored EXACTLY in mcp/src/prisma-mock.ts — the parity test at the bottom of this
@@ -632,6 +636,11 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     p.systemSetting.findUnique.mockResolvedValue(null);
     p.globalReorderSettings.findUnique.mockReset();
     p.globalReorderSettings.findUnique.mockResolvedValue(null);
+    // A2 M3: the location resolve / echo and the company names, isolated per test too.
+    p.location.findUnique.mockReset();
+    p.location.findUnique.mockResolvedValue(null);
+    p.company.findMany.mockReset();
+    p.company.findMany.mockResolvedValue([]);
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -705,16 +714,21 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     p.inventory_logs.findMany.mockResolvedValueOnce([
       { delta: -5, changeTime: when, logType: "SALE", reasonCode: null },
     ]);
+    p.location.findUnique.mockResolvedValueOnce({ name: "Back room" });
 
     const toolResult = await roundTrip("get_movement_series", { productId: 3, locationId: 2 });
     expect(toolResult.status).toBe("ok");
     expect(toolResult.data.mode).toBe("series");
+    // A2 C8: a location-scoped echo names its location.
     expect(toolResult.data.filters).toEqual({
       productId: 3,
       productIds: null,
       locationId: 2,
+      locationName: "Back room",
       mode: "series",
     });
+    // A2 C10: no reason-less outbound row in the window -> no unclassified-outbound note.
+    expect(toolResult.data.coverage).not.toHaveProperty("unclassifiedLegacyNote");
     expect(toolResult.data.filters.mode).toBe(toolResult.data.mode);
     expect(toolResult.data.totals.sale).toBe(-5);
   });
@@ -726,12 +740,14 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
       {
         productId: 3,
         locationId: 2,
+        locations: { name: "Back room" },
         delta: 20,
         unitCostCents: 500,
         batchId: "B1",
         changeTime: new Date("2026-07-01T00:00:00.000Z"),
       },
     ]);
+    p.location.findUnique.mockResolvedValueOnce({ name: "Back room" });
 
     const toolResult = await roundTrip("get_movement_series", {
       productId: 3,
@@ -744,10 +760,16 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
       productId: 3,
       productIds: null,
       locationId: 2,
+      locationName: "Back room",
       mode: "receipts",
     });
     expect(toolResult.data.filters.mode).toBe(toolResult.data.mode);
     expect(toolResult.data.rows[0].quantity).toBe(20);
+    // A2 C8 / C10: the row names its location; the definition carries no design reference.
+    expect(toolResult.data.rows[0].locationName).toBe("Back room");
+    expect(toolResult.data.definitions.receiptEvent).toBe(
+      "a receipt event = one stock-in batch; a five-batch delivery is five events",
+    );
   });
 
   it("get_operations: scope echoes the REAL windowDays (default 90, explicit 30)", async () => {
@@ -987,6 +1009,11 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
   // why one product is ranked and another is not.
   it("compare_periods by_product: degraded coverage ships MEASURED rows + companyCoverage", async () => {
     p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }, { companyId: "c2" }]);
+    // A2 C8: the companies' names (read once, over the caller's own companies).
+    p.company.findMany.mockResolvedValueOnce([
+      { id: "c1", name: "Acme Peptides" },
+      { id: "c2", name: "Beta Labs" },
+    ]);
     p.productSalesFact.aggregate.mockResolvedValueOnce({ _min: { dayKey: "2019-01-01" } });
     p.productSalesFact.groupBy
       // c2 returns NO group: it has never recorded a fact, so the window is degraded.
@@ -1018,10 +1045,111 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     // ...and the disclosure names the company that degrades the window.
     expect(toolResult.data.coverage.periodCoverage).toEqual({ a: "partial", b: "partial" });
     expect(toolResult.data.coverage.companyCoverage).toEqual([
-      { companyId: "c1", salesDataStart: "2019-01-01" },
-      { companyId: "c2", salesDataStart: null },
+      { companyId: "c1", salesDataStart: "2019-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: null, name: "Beta Labs" },
     ]);
-    expect(toolResult.data.coverage.companyCoverageNote).toContain("c2");
+    // A2 C8: the company is NAMED in the prose, never shown by its id.
+    expect(toolResult.data.coverage.companyCoverageNote).toContain("no sales data recorded for Beta Labs");
+    expect(toolResult.data.coverage.companyCoverageNote).not.toContain("company c2");
+  });
+
+  // ---------------------------------------------------------------------------
+  // A2 M3 on the WIRE (pack C6, C9, C2): unit prices, the as-of location read and the
+  // by-product counts cross the MCP boundary with real values.
+  // ---------------------------------------------------------------------------
+
+  it("get_valuation groupBy product: currentUnitCostCents / unitRetailCents on the wire (A2 C6)", async () => {
+    p.product.findMany.mockResolvedValueOnce([
+      {
+        id: 1,
+        name: "Nothing on hand",
+        costPrice: 0,
+        retailPrice: 12.5,
+        product_locations: [{ locationId: 1, quantity: 0, locations: { name: "Main" } }],
+      },
+    ]);
+    const toolResult = await roundTrip("get_valuation", { groupBy: "product" });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.rows[0]).toMatchObject({
+      productId: 1,
+      units: 0,
+      atRetailCents: 0, // a money total of 0: nothing on hand
+      currentUnitCostCents: 0, // recorded as free
+      unitRetailCents: 1250, // the price is not 0
+    });
+  });
+
+  it("get_stock_asof locationId: the location echo + its coverage keys on the wire (A2 C9)", async () => {
+    p.location.findUnique.mockResolvedValueOnce({ id: 2, name: "Annex" });
+    // Two counts: the page's population ("recorded here on or before the day") and its
+    // complement (notRecordedHere) — told apart by the where clause, not by call order.
+    p.product.count.mockImplementation(async (args: { where?: { stockSnapshots?: { none?: unknown } } }) =>
+      args?.where?.stockSnapshots?.none ? 3 : 1,
+    );
+    p.product.findMany.mockResolvedValueOnce([{ id: 1, name: "TIRZ" }]);
+    p.productStockSnapshot.aggregate.mockResolvedValueOnce({
+      _min: { dayKey: "2026-06-01" },
+      _max: { dayKey: "2026-06-30" },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    p.productStockSnapshot.groupBy.mockImplementation(async (args: any) =>
+      args._sum
+        ? [{ productId: 1, _sum: { quantity: 7 }, _count: 1 }]
+        : [{ productId: 1, locationId: 2, _max: { dayKey: "2026-06-20" }, _min: { dayKey: "2026-06-01" } }],
+    );
+    const toolResult = await roundTrip("get_stock_asof", { dayKey: "2026-06-15", locationId: 2 });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.location).toEqual({ id: 2, name: "Annex" });
+    expect(toolResult.data.rows[0]).toMatchObject({ productId: 1, units: 7, possiblyStale: true });
+    expect(toolResult.data.coverage).toMatchObject({
+      snapshotWatermark: "2026-06-30",
+      watermarkScope: "all locations",
+      notRecordedHere: 3,
+    });
+    expect(typeof toolResult.data.coverage.notRecordedHereNote).toBe("string");
+    expect(toolResult.data.totalRows).toBe(1);
+    p.productStockSnapshot.groupBy.mockReset();
+    p.productStockSnapshot.groupBy.mockResolvedValue([]);
+    p.product.count.mockReset();
+    p.product.count.mockResolvedValue(0);
+  });
+
+  it("get_stock_asof with an unknown locationId: NOT_FOUND with the location message (A2 C9)", async () => {
+    const toolResult = await roundTrip("get_stock_asof", { dayKey: "2026-06-15", locationId: 99 });
+    expect(toolResult).toEqual({
+      status: "error",
+      error: { code: "NOT_FOUND", message: "No location with id 99." },
+    });
+  });
+
+  it("get_movement_series breakdownBy:'product': whole-result counts + countsNote on the wire (A2 C2)", async () => {
+    p.product.findMany.mockImplementation(async (args: Record<string, unknown>) => {
+      const where = (args.where ?? {}) as { id?: { in: number[] } };
+      const catalog = [
+        { id: 1, name: "Shipper", deletedAt: null },
+        { id: 2, name: "Receiver", deletedAt: null },
+      ];
+      return where.id?.in ? catalog.filter((c) => where.id!.in.includes(c.id)) : catalog;
+    });
+    p.inventory_logs.groupBy.mockImplementation(async (args: Record<string, unknown>) => {
+      const where = (args.where ?? {}) as { delta?: { lt?: number; gt?: number } };
+      if (where.delta?.lt != null) {
+        return [{ productId: 1, logType: "ADJUSTMENT", reasonCode: null, _sum: { delta: -3 }, _count: 1 }];
+      }
+      return [{ productId: 2, logType: "STOCK_IN", reasonCode: null, _sum: { delta: 9 } }];
+    });
+    const toolResult = await roundTrip("get_movement_series", { breakdownBy: "product", limit: 1 });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.returned).toBe(1);
+    expect(toolResult.data.counts).toEqual({ products: 2, withOutbound: 1, withInbound: 1 });
+    expect(toolResult.data.countsNote).toContain("never count rows yourself");
+    // The reason-less outbound adjustment makes the note ride.
+    expect(toolResult.data.coverage.reasonCodeNullRows).toBe(1);
+    expect(toolResult.data.coverage.unclassifiedLegacyNote).toContain("without a reason code");
+    p.product.findMany.mockReset();
+    p.product.findMany.mockResolvedValue([]);
+    p.inventory_logs.groupBy.mockReset();
+    p.inventory_logs.groupBy.mockResolvedValue([]);
   });
 
   // FD4-7 on the WIRE: the FD3 round mirrored `coverageShift` onto the by_product envelope
@@ -1591,6 +1719,42 @@ describe("POST /mcp — Wave-3 composite round-trips assert REAL section values"
 });
 
 describe("POST /mcp — tools/list advertised schema shape (item 8)", () => {
+  it("get_stock_asof advertises the optional locationId input (A2 C9)", async () => {
+    const server = createMcpHttpServer();
+    const port = await listen(server);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: MCP_HEADERS,
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      expect(res.status).toBe(200);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rpc = (await res.json()) as any;
+      const tools = rpc.result.tools as Array<{ name: string; inputSchema: any; description: string }>;
+      const asof = tools.find((t) => t.name === "get_stock_asof");
+      expect(asof).toBeDefined();
+      const root = asof!.inputSchema;
+      // The converter dedups identical sub-schemas into a local `$ref` (locationId ->
+      // productId, both positive ints), so resolve it against the root.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resolve = (node: any): any => {
+        if (node && node.$ref) {
+          let cur = root;
+          for (const seg of String(node.$ref).replace(/^#\//, "").split("/")) cur = cur[seg];
+          return cur;
+        }
+        return node;
+      };
+      expect(root.properties.locationId).toBeDefined();
+      expect(resolve(root.properties.locationId)).toEqual({ type: "integer", exclusiveMinimum: 0 });
+      expect(asof!.inputSchema.required ?? []).not.toContain("locationId");
+      expect(asof!.description).toContain("Pass locationId for one location's stock on that day");
+    } finally {
+      await close(server);
+    }
+  });
+
   it("compare_periods advertises nested periodA/periodB object schemas with from/to/relativeDays", async () => {
     const server = createMcpHttpServer();
     const port = await listen(server);

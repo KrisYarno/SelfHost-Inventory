@@ -70,9 +70,15 @@ const ZERO: OutboundMix = {
 
 const sumOf = (m: OutboundMix): number => Object.values(m).reduce((a, b) => a + b, 0);
 
+/** A2 C8: the companies' names, read once inside the per-company coverage source. */
+const NAME_OF: Record<string, string> = { c1: "Acme Peptides", c2: "Beta Labs" };
+
 beforeEach(() => {
   mockReset(db);
   jest.clearAllMocks();
+  db.company.findMany.mockResolvedValue(
+    Object.entries(NAME_OF).map(([id, name]) => ({ id, name })) as never,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -692,8 +698,8 @@ describe("C6 get_sales — salesDataStart / windowCoverage / includeZeroRows (Ta
       // The earliest start alone would have said "full" — and manufactured zeros.
       expect(coverage.windowCoverage).toBe("partial");
       expect(coverage.companyCoverage).toEqual([
-        { companyId: "c1", salesDataStart: "2020-01-01" },
-        { companyId: "c2", salesDataStart: "2099-01-01" },
+        { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+        { companyId: "c2", salesDataStart: "2099-01-01", name: "Beta Labs" },
       ]);
       expect(coverage.rowsNote).toContain(
         "coverage classified per company; the latest-starting company governs zero legality",
@@ -740,8 +746,8 @@ describe("C6 get_sales — salesDataStart / windowCoverage / includeZeroRows (Ta
 
       expect(coverage.windowCoverage).toBe("partial");
       expect(coverage.companyCoverage).toEqual([
-        { companyId: "c1", salesDataStart: "2020-01-01" },
-        { companyId: "c2", salesDataStart: null },
+        { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+        { companyId: "c2", salesDataStart: null, name: "Beta Labs" },
       ]);
       expect(coverage.rowsNote).toContain("coverage classified per company");
 
@@ -767,8 +773,10 @@ describe("C6 get_sales — salesDataStart / windowCoverage / includeZeroRows (Ta
       const reason = zero.reason as string;
       expect(reason).not.toContain("predates");
       expect(reason).not.toContain("straddles");
-      // The window IS covered caller-wide (2020-01-01) — what is not covered is c2.
-      expect(reason).toContain("c2");
+      // The window IS covered caller-wide (2020-01-01) — what is not covered is c2, NAMED
+      // (A2 C8: the company's name alone, never its id).
+      expect(reason).toContain(NAME_OF.c2);
+      expect(reason).not.toContain("company c2");
       expect(reason).toContain("in every company");
       expect(reason).toContain("latest-starting company governs zero legality");
     });
@@ -1105,10 +1113,10 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     // ...and BOTH arrays are non-empty at once, which the disclosure explains.
     expect(coverage.periodCoverage).toEqual({ a: "partial", b: "partial" });
     expect(coverage.companyCoverage).toEqual([
-      { companyId: "c1", salesDataStart: "2020-01-01" },
-      { companyId: "c2", salesDataStart: null },
+      { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: null, name: "Beta Labs" },
     ]);
-    expect(coverage.companyCoverageNote).toContain("c2");
+    expect(coverage.companyCoverageNote).toContain(NAME_OF.c2); // A2 C8: named
     expect(coverage.companyCoverageNote).toContain("MEASURED");
   });
 
@@ -1153,10 +1161,10 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     expect(data.b).toBe(7);
     const coverage = data.coverage as Record<string, unknown>;
     expect(coverage.companyCoverage).toEqual([
-      { companyId: "c1", salesDataStart: "2020-01-01" },
-      { companyId: "c2", salesDataStart: null },
+      { companyId: "c1", salesDataStart: "2020-01-01", name: "Acme Peptides" },
+      { companyId: "c2", salesDataStart: null, name: "Beta Labs" },
     ]);
-    expect(coverage.companyCoverageNote).toContain("c2");
+    expect(coverage.companyCoverageNote).toContain(NAME_OF.c2); // A2 C8: named
   });
 
   // FD3-3 at the TOOL layer: the module's parity fields have to reach the envelope, or a
@@ -1194,7 +1202,7 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     // The delta is NEVER nulled for this (FD2-2): both sums are measured.
     expect(data.delta).toBe(60);
     expect(coverage.periodCoverage).toEqual({ a: "partial", b: "full" });
-    expect(coverage.coverageShift).toContain("c2");
+    expect(coverage.coverageShift).toContain(NAME_OF.c2); // A2 C8: named
     expect(coverage.coverageShift).toContain("2026-06-08");
     expect(coverage.coverageShift).toContain("not like-for-like");
     expect((data.reasons as Record<string, string>).delta).toBe(coverage.coverageShift);
@@ -1245,7 +1253,7 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     expect((data.unranked as Array<Record<string, unknown>>).map((r) => r.productId)).toEqual([2]);
     // The mirror: the same sentence totals mode ships, on the ENVELOPE (never per row).
     expect(coverage.periodCoverage).toEqual({ a: "partial", b: "full" });
-    expect(coverage.coverageShift).toContain("c2");
+    expect(coverage.coverageShift).toContain(NAME_OF.c2); // A2 C8: named
     expect(coverage.coverageShift).toContain("2026-06-08");
     expect(coverage.coverageShift).toContain("not like-for-like");
     expect((data.reasons as Record<string, string>).delta).toBe(coverage.coverageShift);

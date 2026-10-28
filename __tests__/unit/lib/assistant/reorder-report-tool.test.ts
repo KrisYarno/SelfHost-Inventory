@@ -23,14 +23,15 @@ jest.mock("@/lib/reports/reorder", () => ({
   ...jest.requireActual("@/lib/reports/reorder"),
   getReorderReport: jest.fn(),
 }));
-// The order-signal read graph (approved-active scope + the per-company starts + the one
-// grouped fact read) runs for real over these three delegates; the other data-layer
-// imports of tools.ts are unused by this suite.
+// The order-signal read graph (approved-active scope + the per-company starts and, A2 C8,
+// their names + the one grouped fact read) runs for real over these delegates; the other
+// data-layer imports of tools.ts are unused by this suite.
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {
     product: { findMany: jest.fn() },
     productSalesFact: { aggregate: jest.fn(), groupBy: jest.fn() },
+    company: { findMany: jest.fn() },
   },
 }));
 jest.mock("@/lib/products", () => ({ __esModule: true, getProductsWithQuantities: jest.fn() }));
@@ -91,6 +92,11 @@ beforeEach(() => {
   db.product.findMany.mockReset();
   db.productSalesFact.aggregate.mockReset();
   db.productSalesFact.groupBy.mockReset();
+  db.company.findMany.mockReset();
+  // A2 C8: the caller's companies by name (the per-company starts carry them).
+  db.company.findMany.mockImplementation(async (args: { where: { id: { in: string[] } } }) =>
+    args.where.id.in.map((id) => ({ id, name: `Company ${id}` })),
+  );
 });
 
 describe("reorder_report tool", () => {
@@ -706,7 +712,9 @@ describe("A2 C5 — definitions and the costed label", () => {
 // A2 pack C4 (A2-G2S-22 / A2-G1R3-13) — the envelope's WORST case still leaves the rows
 // their page: a full 20-entry list with 255-character names (schema.prisma:55), every note
 // at its longest (company-kind partial: the per-company starts + the measured note), and
-// the requested block.
+// the requested block. A2 C8 (M3): the per-company starts now carry each company's NAME,
+// so the worst case also gives every company a 191-character name (`companies.name` is
+// VARCHAR(191), migration 20251212_add_multitenancy_tables).
 // ===========================================================================
 
 describe("A2 C4 — the worst-case envelope", () => {
@@ -723,6 +731,7 @@ describe("A2 C4 — the worst-case envelope", () => {
   async function worstCase(remainingBytes?: number) {
     // Company-kind partial over five companies: c0 records since 2020, the rest never did.
     const companies = ["c0", "c1", "c2", "c3", "c4"].map((c) => `${c}${"x".repeat(23)}`);
+    db.company.findMany.mockResolvedValue(companies.map((id) => ({ id, name: "C".repeat(191) })));
     seedFacts({
       approvedActiveIds: ids,
       facts: [
@@ -755,12 +764,17 @@ describe("A2 C4 — the worst-case envelope", () => {
     expect(data.outOfStockWithOrdersOmitted).toBe(5);
     expect(data.outOfStockWithOrdersProducts.every((p: any) => p.productName.length === 255)).toBe(true);
     expect(data.coverage.orderSignalCompanyCoverage).toHaveLength(5);
+    expect(data.coverage.orderSignalCompanyCoverage.every((c: any) => c.name.length === 191)).toBe(true);
     expect(data.coverage.orderSignalCompanyCoverageNote).toBe(SALES_COMPANY_COVERAGE_MEASURED_NOTE);
     expect(data.coverage.requested).toBeDefined();
   });
 
-  it("names up to 120 characters: the WHOLE worst-case envelope stays under the fixed reserve", async () => {
-    NAME = "N".repeat(120);
+  // Recorded (A2 M3): the five 191-character company names add ~0.95 KB, so the product-
+  // name length up to which the whole worst case stays under the reserve fell from 120
+  // (M2, no company names: ~7.8 KB) to ~92 (at 120 it is now ~8.7 KB). Past it the page is
+  // fit to the MEASURED envelope (the two pins below) — the budget is never exceeded.
+  it("names up to 90 characters: the WHOLE worst-case envelope stays under the fixed reserve", async () => {
+    NAME = "N".repeat(90);
     const { data } = (await worstCase()) as { data: any };
     expect(data.outOfStockWithOrdersProducts).toHaveLength(20);
     expect(envelopeBytesOf(data)).toBeLessThan(ENVELOPE_RESERVE_BYTES);
@@ -769,6 +783,7 @@ describe("A2 C4 — the worst-case envelope", () => {
   it("255-character names outweigh the reserve, so the page is fit to the MEASURED envelope", async () => {
     // Recorded (A2 M2): ~10.4 KB at 20 x 255-character names — the list alone is ~6.5 KB,
     // so no envelope carrying it can sit under the 8 KiB reserve. The page gives way.
+    // (A2 M3: ~11.4 KB once the five company names ride in orderSignalCompanyCoverage.)
     const { data, meta } = (await worstCase()) as { data: any; meta: { bytes: number } };
     const envelope = envelopeBytesOf(data);
     expect(envelope).toBeGreaterThan(ENVELOPE_RESERVE_BYTES);

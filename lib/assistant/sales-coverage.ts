@@ -78,8 +78,28 @@ export interface CallerScopedSalesCoverage {
    * absent from this list too, so it silently INHERITED the recording company's start
    * and its window read as fully covered: exactly the manufactured-zero the per-company
    * rule exists to prevent, in the one case where nothing was ever recorded.
+   *
+   * A2 pack C8: each entry carries the company's `name` (null when the company row is
+   * gone), so a reader is never handed a bare id.
    */
-  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null }>;
+  companyCoverage?: CompanyCoverageEntry[];
+}
+
+/**
+ * One per-company coverage entry (A2 pack C8). `name` is optional on INPUT — the prose
+ * helpers below read an absent name exactly as a null one (the id fallback) — and
+ * `salesDataStartsByCompany`, the only producer, always sets it.
+ */
+export interface CompanyCoverageEntry {
+  companyId: string;
+  salesDataStart: string | null;
+  name?: string | null;
+}
+
+/** How company prose names a company (A2 pack C8): its name alone when known, else
+ *  `company <id>` — never "name (id X)", and never an id where the name is known. */
+export function companyLabel(entry: { companyId: string; name?: string | null }): string {
+  return entry.name != null && entry.name !== "" ? entry.name : `company ${entry.companyId}`;
 }
 
 /** The extra sentence that rides with a staggered-start disclosure (OC-3). */
@@ -103,26 +123,25 @@ export const SALES_COMPANY_COVERAGE_MEASURED_NOTE =
 /**
  * WHICH companies degrade the window, NAMED (FD2-2 / FD2-3). A disclosure that says
  * "some company started later" sends the reader to look for a company it will not name;
- * the ids are already in hand, so they are said out loud — the companies with NO
+ * the companies are already in hand, so they are said out loud — the companies with NO
  * recorded facts first (they degrade hardest), then the latest start among those that do
  * record (the day that actually governs zero legality).
+ *
+ * A2 pack C8: each company is named by its name alone (`companyLabel`); only a company
+ * whose name is gone is said as `company <id>`.
  *
  * Empty/absent input yields "" — every caller only builds this string when the
  * degradation it describes is real.
  */
-export function companyCoverageDetail(
-  companyCoverage: Array<{ companyId: string; salesDataStart: string | null }> | undefined,
-): string {
+export function companyCoverageDetail(companyCoverage: CompanyCoverageEntry[] | undefined): string {
   const entries = companyCoverage ?? [];
-  const silent = entries.filter((c) => c.salesDataStart == null).map((c) => c.companyId);
+  const silent = entries.filter((c) => c.salesDataStart == null).map(companyLabel);
   const starts = entries
     .map((c) => c.salesDataStart)
     .filter((day): day is string => day != null);
   const parts: string[] = [];
   if (silent.length > 0) {
-    parts.push(
-      `no sales data recorded for ${silent.length === 1 ? "company" : "companies"} ${silent.join(", ")}`,
-    );
+    parts.push(`no sales data recorded for ${silent.join(", ")}`);
   }
   if (starts.length > 0) {
     parts.push(`latest company start ${starts.reduce((a, b) => (a >= b ? a : b))}`);
@@ -143,7 +162,7 @@ export function companyCoverageDetail(
 export function salesCoverageReason(
   salesDataStart: string | null,
   windowFrom: string,
-  companyCoverage?: Array<{ companyId: string; salesDataStart: string | null; name?: string | null }>,
+  companyCoverage?: CompanyCoverageEntry[],
 ): string {
   // No truthful substitution exists for the starts-<date> template.
   if (salesDataStart == null) return "no attributed sales data recorded";
@@ -184,8 +203,9 @@ export function callerWindowCoverage(
 export interface SalesDataStarts {
   /** The EARLIEST start across the caller's companies; null when none recorded. */
   salesDataStart: string | null;
-  /** EVERY requested company, in id order — a company with no facts carries null. */
-  perCompany: Array<{ companyId: string; salesDataStart: string | null }>;
+  /** EVERY requested company, in id order — a company with no facts carries null. A2 C8:
+   *  `name` is the company's name, null when its row is gone. */
+  perCompany: Array<{ companyId: string; salesDataStart: string | null; name: string | null }>;
   /** True when the companies do NOT share one start (a null start counts as different). */
   staggered: boolean;
 }
@@ -201,6 +221,10 @@ export interface SalesDataStarts {
  *
  * `scopeWhere` is the CALLER's own narrowing (approved-id set, optional productId). The
  * company predicate is applied HERE and cannot be widened by a caller.
+ *
+ * A2 pack C8: the names are read here too — one `company.findMany` over exactly the
+ * requested ids (the caller's own companies; `{ id, name }` only), so every
+ * `companyCoverage` array built from this carries them.
  */
 export async function salesDataStartsByCompany(
   companyIds: string[],
@@ -211,7 +235,7 @@ export async function salesDataStartsByCompany(
     ...scopeWhere,
     companyId: { in: companyIds },
   };
-  const [row, groups] = await Promise.all([
+  const [row, groups, companies] = await Promise.all([
     prisma.productSalesFact.aggregate({ where, _min: { dayKey: true } }),
     // PER-COMPANY starts (OC-3): the earliest day alone cannot tell a caller whose second
     // company started recording last month that half their window is uncovered there.
@@ -220,7 +244,10 @@ export async function salesDataStartsByCompany(
       where,
       _min: { dayKey: true },
     }) as unknown as Promise<Array<{ companyId: string; _min: { dayKey: string | null } }>>,
+    prisma.company.findMany({ where: { id: { in: companyIds } }, select: { id: true, name: true } }),
   ]);
+  // Guards a deep-mocked prisma returning undefined (as the tool layer's name helpers do).
+  const names = new Map<string, string>((companies ?? []).map((c) => [c.id, c.name]));
   const found = new Map<string, string | null>(
     (groups ?? []).map((g) => [g.companyId, g?._min?.dayKey ?? null]),
   );
@@ -229,7 +256,11 @@ export async function salesDataStartsByCompany(
   // the recording company's start.
   const perCompany = Array.from(new Set(companyIds))
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-    .map((companyId) => ({ companyId, salesDataStart: found.get(companyId) ?? null }));
+    .map((companyId) => ({
+      companyId,
+      salesDataStart: found.get(companyId) ?? null,
+      name: names.get(companyId) ?? null,
+    }));
   // "Staggered" = the companies do not share ONE start. A null start (no facts at all) is
   // a DIFFERENT start, not an absent one: it is the strongest possible degradation.
   const staggered =
