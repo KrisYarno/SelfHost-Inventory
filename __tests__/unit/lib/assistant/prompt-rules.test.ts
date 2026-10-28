@@ -19,6 +19,11 @@
  * description (A1 FD5b-1), and seam S8 — every name those rules cite is read out of a
  * payload a tool actually ships.
  *
+ * A2 FR2 (contract pack C15): the low-stock routing clause names its two out-of-stock counts
+ * (counts.outOfStockAlerts, counts.outOfStockAllProducts) — the S8 fixture gains an
+ * out-of-stock product with alerts OFF, so the two differ there — and the run-history fake
+ * is query-faithful.
+ *
  * Assertions are WHITESPACE-COLLAPSED on purpose: the prompt is a \n-joined array
  * of ~78-char lines, so every multi-word phrase must survive natural wrapping.
  */
@@ -39,7 +44,7 @@ jest.mock("@/lib/prisma", () => ({
       groupBy: jest.fn(async () => []),
       aggregate: jest.fn(async () => ({ _min: { dayKey: null } })),
     },
-    analyticsRebuildRun: { findMany: jest.fn(async () => []) },
+    analyticsRebuildRun: { findFirst: jest.fn(async () => null), findMany: jest.fn(async () => []) },
     company: { findMany: jest.fn(async () => []) },
     systemSetting: { findUnique: jest.fn(async () => null) },
     inventory_logs: { groupBy: jest.fn(async () => []), findMany: jest.fn(async () => []) },
@@ -687,9 +692,10 @@ const C12_TRUTHFULNESS = [
 /** The three ROUTING lines (pack C12), joined, in their placement order. */
 const C12_ROUTING = [
   "- \"What does X cost or sell for, per unit?\" -> get_valuation with groupBy 'product'.",
+  // A2 C15 (A2-CR-7): the clause names both low-stock out-of-stock counts.
   "- \"How many products are out of stock (all products)?\" -> get_inventory_summary " +
-    "(stockStateCounts.out); low_stock_report's out-of-stock count covers only products " +
-    "with alerts on.",
+    "(stockStateCounts.out). In low_stock_report, counts.outOfStockAlerts covers only " +
+    "products with alerts on, and counts.outOfStockAllProducts counts every product.",
   "- \"What was the stock at one location on a past day?\" -> get_stock_asof with locationId.",
 ];
 
@@ -779,7 +785,53 @@ describe("A2 C12: 'at or below' everywhere — find_product, and a strict-'below
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
-/** Two approved, active products, both out of stock; Widget has a stored cost and retail.
+type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+type RunQuery = {
+  where?: Record<string, unknown>;
+  orderBy?: Record<string, string>;
+  take?: number;
+  select?: Record<string, boolean>;
+};
+/**
+ * A2 C15: the sales run table, answered QUERY-FAITHFULLY — `where` (equality, `in`, `gt`, and
+ * `not` with SQL's NULL rule: a NULL column never matches `<>`), `orderBy` startedAt, `take`
+ * and `select` — so a read that asks the wrong question gets the wrong answer here too. An
+ * operator it does not model throws rather than matching silently.
+ */
+function seedRuns(runs: RunRow[]) {
+  const scalar = (v: unknown) => (v instanceof Date ? v.getTime() : v);
+  const holds = (field: unknown, cond: unknown): boolean =>
+    cond === null || typeof cond !== "object" || cond instanceof Date
+      ? scalar(field) === scalar(cond)
+      : Object.entries(cond).every(([op, arg]) => {
+          if (op === "in") return (arg as unknown[]).some((v) => scalar(v) === scalar(field));
+          if (op === "gt") return field != null && (scalar(field) as number) > (scalar(arg) as number);
+          if (op === "not") return arg === null ? field != null : field != null && scalar(field) !== scalar(arg);
+          throw new Error(`run fake: unmodelled operator ${op}`);
+        });
+  const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
+    const rows: Array<Record<string, unknown>> = runs
+      .map((run) => ({ job: "sales", ...run }))
+      .filter((run: Record<string, unknown>) =>
+        Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
+      );
+    for (const [key, dir] of Object.entries(orderBy ?? {})) {
+      if (key !== "startedAt") throw new Error(`run fake: unmodelled orderBy ${key}`);
+      const sign = dir === "asc" ? 1 : -1;
+      rows.sort((a, b) => sign * ((a.startedAt as Date).getTime() - (b.startedAt as Date).getTime()));
+    }
+    const page = take == null ? rows : rows.slice(0, take);
+    if (!select) return page;
+    const keys = Object.keys(select).filter((k) => select[k]);
+    return page.map((row) => Object.fromEntries(keys.map((k) => [k, row[k]])));
+  };
+  db.analyticsRebuildRun.findFirst.mockImplementation(async (args?: RunQuery) => query({ ...args, take: 1 })[0] ?? null);
+  db.analyticsRebuildRun.findMany.mockImplementation(async (args?: RunQuery) => query(args));
+}
+
+/** Three approved, active products, all out of stock; Widget has a stored cost and retail.
+ *  A2 C15: Spare has its alerts OFF (threshold 0), so low-stock's out-of-stock alert count (2)
+ *  and its every-product out-of-stock count (3) differ, as the routing clause says they can.
  *  Each module read takes the fields it selects from these rows. */
 const S8_PRODUCTS = [
   {
@@ -800,6 +852,16 @@ const S8_PRODUCTS = [
     costPrice: null,
     retailPrice: null,
     lowStockThreshold: null,
+    product_locations: [{ locationId: 1, quantity: 0, locations: { name: "Main" } }],
+  },
+  {
+    id: 3,
+    name: "Spare",
+    deletedAt: null,
+    approvalStatus: "APPROVED",
+    costPrice: null,
+    retailPrice: null,
+    lowStockThreshold: 0,
     product_locations: [{ locationId: 1, quantity: 0, locations: { name: "Main" } }],
   },
 ];
@@ -890,10 +952,13 @@ const S8_FIELDS: Array<{ cites: string; tool: string; path: string; value: unkno
   { cites: "unit retail", tool: "get_valuation", path: "rows.0.unitRetailCents", value: 400 },
   { cites: "a total of 0 on a row with no units", tool: "get_valuation", path: "rows.0.units", value: 0 },
   { cites: "a total of 0 on a row with no units", tool: "get_valuation", path: "rows.0.atCurrentCostCents", value: 0 },
-  // "-> get_inventory_summary (stockStateCounts.out); low_stock_report's out-of-stock count
-  // covers only products with alerts on."
-  { cites: "stockStateCounts.out", tool: "get_inventory_summary", path: "stockStateCounts.out", value: 2 },
-  { cites: "low_stock_report's out-of-stock count", tool: "low_stock_report", path: "counts.outOfStockAlerts", value: 2 },
+  // "-> get_inventory_summary (stockStateCounts.out). In low_stock_report,
+  // counts.outOfStockAlerts covers only products with alerts on, and
+  // counts.outOfStockAllProducts counts every product." (A2 C15: Spare's alerts are off.)
+  { cites: "stockStateCounts.out", tool: "get_inventory_summary", path: "stockStateCounts.out", value: 3 },
+  { cites: "outOfStockAlerts", tool: "low_stock_report", path: "counts.outOfStockAlerts", value: 2 },
+  { cites: "outOfStockAllProducts", tool: "low_stock_report", path: "counts.outOfStockAllProducts", value: 3 },
+  { cites: "outOfStockAllProducts", tool: "low_stock_report", path: "counts.alertsOffAtZeroStock", value: 1 },
 ];
 
 /** The input names the routing lines cite: the tool, and an input using it that parses. */
@@ -924,9 +989,10 @@ function seedS8Reads(): void {
     return args._sum ? [{ productId: 1, _sum: { orderedQty: 14, orderCount: 7 } }] : [];
   });
   db.company.findMany.mockImplementation(async () => [{ id: "c1", name: "Company One" }]);
-  // A successful sales rebuild two hours ago: fresh, so no freshness note rides along.
+  // A successful sales rebuild two hours ago: fresh, so no freshness note rides along. A2
+  // C15: answered query-faithfully — the newest success, then the attempts after it (none).
   const finishedAt = new Date(Date.now() - 2 * 3_600_000);
-  db.analyticsRebuildRun.findMany.mockImplementation(async () => [
+  seedRuns([
     { status: "SUCCEEDED", startedAt: new Date(finishedAt.getTime() - 60_000), finishedAt, skippedReason: null },
   ]);
   (getReorderReport as jest.Mock).mockResolvedValue(S8_REORDER);
@@ -939,6 +1005,7 @@ function resetS8Reads(): void {
   db.productSalesFact.aggregate.mockImplementation(async () => ({ _min: { dayKey: null } }));
   db.productSalesFact.groupBy.mockImplementation(async () => []);
   db.company.findMany.mockImplementation(async () => []);
+  db.analyticsRebuildRun.findFirst.mockImplementation(async () => null);
   db.analyticsRebuildRun.findMany.mockImplementation(async () => []);
   (getReorderReport as jest.Mock).mockReset();
   (comparePeriodsByProduct as jest.Mock).mockReset();
@@ -966,6 +1033,8 @@ describe("A2 seam S8: every name the C12 rules cite exists in a payload a tool s
     expect(cited).toEqual([
       "groupBy",
       "locationId",
+      "outOfStockAlerts",
+      "outOfStockAllProducts",
       "outOfStockWithOrders",
       "remainingRows",
       "stockStateCounts.out",

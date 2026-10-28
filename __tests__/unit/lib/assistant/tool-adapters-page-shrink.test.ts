@@ -34,24 +34,52 @@ jest.mock("ai", () => ({ __esModule: true, tool: (def: unknown) => def }));
 // column's width (`locations.name` VARCHAR(100)), so the echo is at its heaviest.
 // A2 M4 (pack C7): the sales tools read the sales rebuild run history for the freshness
 // note; the stub answers with the LONGEST note (a stale success, then a newer attempt that
-// did not succeed), so every sales envelope here carries it at its heaviest.
-jest.mock("@/lib/prisma", () => ({
-  __esModule: true,
-  default: {
-    productSalesFact: { groupBy: jest.fn(async () => []) },
-    product: { findMany: jest.fn(async () => []) },
-    location: { findUnique: jest.fn(async () => ({ id: 2, name: "L".repeat(100) })) },
-    analyticsRebuildRun: {
-      findMany: jest.fn(async () => {
-        const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
-        return [
-          { status: "FAILED", startedAt: hoursAgo(1), finishedAt: hoursAgo(1), skippedReason: null },
-          { status: "SUCCEEDED", startedAt: hoursAgo(31), finishedAt: hoursAgo(30), skippedReason: null },
-        ];
-      }),
+// did not succeed), so every sales envelope here carries it at its heaviest. A2 C15: the
+// history is two reads (the newest success, then the attempts after it), answered
+// query-faithfully over that two-run table (`where` equality / `in` / `gt` / `not`, `orderBy`
+// startedAt, `take`, `select`; an unmodelled operator throws).
+jest.mock("@/lib/prisma", () => {
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
+  type Q = { where?: Record<string, unknown>; orderBy?: Record<string, string>; take?: number; select?: Record<string, boolean> };
+  const runs = (): Array<Record<string, unknown>> => [
+    { job: "sales", status: "FAILED", startedAt: hoursAgo(1), finishedAt: hoursAgo(1), skippedReason: null },
+    { job: "sales", status: "SUCCEEDED", startedAt: hoursAgo(31), finishedAt: hoursAgo(30), skippedReason: null },
+  ];
+  const scalar = (v: unknown) => (v instanceof Date ? v.getTime() : v);
+  const holds = (field: unknown, cond: unknown): boolean =>
+    cond === null || typeof cond !== "object" || cond instanceof Date
+      ? scalar(field) === scalar(cond)
+      : Object.entries(cond).every(([op, arg]) => {
+          if (op === "in") return (arg as unknown[]).some((v) => scalar(v) === scalar(field));
+          if (op === "gt") return field != null && (scalar(field) as number) > (scalar(arg) as number);
+          if (op === "not") return arg === null ? field != null : field != null && scalar(field) !== scalar(arg);
+          throw new Error(`run fake: unmodelled operator ${op}`);
+        });
+  const query = ({ where = {}, orderBy, take, select }: Q = {}) => {
+    const rows = runs().filter((run) => Object.entries(where).every(([key, cond]) => holds(run[key], cond)));
+    for (const [key, dir] of Object.entries(orderBy ?? {})) {
+      if (key !== "startedAt") throw new Error(`run fake: unmodelled orderBy ${key}`);
+      const sign = dir === "asc" ? 1 : -1;
+      rows.sort((a, b) => sign * ((a.startedAt as Date).getTime() - (b.startedAt as Date).getTime()));
+    }
+    const page = take == null ? rows : rows.slice(0, take);
+    if (!select) return page;
+    const keys = Object.keys(select).filter((k) => select[k]);
+    return page.map((row) => Object.fromEntries(keys.map((k) => [k, row[k]])));
+  };
+  return {
+    __esModule: true,
+    default: {
+      productSalesFact: { groupBy: jest.fn(async () => []) },
+      product: { findMany: jest.fn(async () => []) },
+      location: { findUnique: jest.fn(async () => ({ id: 2, name: "L".repeat(100) })) },
+      analyticsRebuildRun: {
+        findFirst: jest.fn(async (args?: Q) => query({ ...args, take: 1 })[0] ?? null),
+        findMany: jest.fn(async (args?: Q) => query(args)),
+      },
     },
-  },
-}));
+  };
+});
 // A2 M3 (pack C6 / C2): the two other paged tools M3 grows — valuation product rows gain
 // unit prices, the movement breakdown gains counts — have their module reads injected so
 // the adapter's byte fit is what is pinned.

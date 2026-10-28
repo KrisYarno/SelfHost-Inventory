@@ -3119,10 +3119,18 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           rows.length,
         ),
       );
-      const rowBudget =
+      // A2 C15 (A2-CR-3): the page never takes more than the room the measured envelope
+      // leaves. The reserve rule stays wherever it fits, but its 4 KiB floor no longer
+      // outruns an envelope just under the reserve: at a 12,000 B budget that floor shipped
+      // 12,058 B (codex's probe), and the adapter discarded the whole result. paginate keeps
+      // its one row.
+      const measuredRoom = Math.max(byteBudget(ctx) - envelopeBytes, 0);
+      const rowBudget = Math.min(
         envelopeBytes > ENVELOPE_RESERVE_BYTES
-          ? Math.max(byteBudget(ctx) - envelopeBytes, 0)
-          : Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES);
+          ? measuredRoom
+          : Math.max(byteBudget(ctx) - ENVELOPE_RESERVE_BYTES, MIN_RANK_PAGE_BYTES),
+        measuredRoom,
+      );
       const page = paginate(rows, offset, limit, rowBudget);
       // A2 C4: the rows are global, the order signal is the caller's companies'.
       return ok(envelopeOf(page), { scope: "mixed" });

@@ -69,6 +69,57 @@ const mockGetValuation = getValuation as jest.Mock;
 const CTX = testCtx({ companyIds: ["c1"] });
 const CTX_NO_COMPANY = testCtx({ companyIds: [] });
 
+type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+type RunQuery = {
+  where?: Record<string, unknown>;
+  orderBy?: Record<string, string>;
+  take?: number;
+  select?: Record<string, boolean>;
+};
+/**
+ * A2 C15: the sales run table, answered QUERY-FAITHFULLY — `where` (equality, `in`, `gt`, and
+ * `not` with SQL's NULL rule: a NULL column never matches `<>`), `orderBy` startedAt, `take`
+ * and `select` — so a read that asks the wrong question gets the wrong answer here too. An
+ * operator it does not model throws rather than matching silently.
+ */
+function seedRuns(runs: RunRow[]) {
+  const scalar = (v: unknown) => (v instanceof Date ? v.getTime() : v);
+  const holds = (field: unknown, cond: unknown): boolean =>
+    cond === null || typeof cond !== "object" || cond instanceof Date
+      ? scalar(field) === scalar(cond)
+      : Object.entries(cond).every(([op, arg]) => {
+          if (op === "in") return (arg as unknown[]).some((v) => scalar(v) === scalar(field));
+          if (op === "gt") return field != null && (scalar(field) as number) > (scalar(arg) as number);
+          if (op === "not") return arg === null ? field != null : field != null && scalar(field) !== scalar(arg);
+          throw new Error(`run fake: unmodelled operator ${op}`);
+        });
+  const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
+    const rows: Array<Record<string, unknown>> = runs
+      .map((run) => ({ job: "sales", ...run }))
+      .filter((run: Record<string, unknown>) =>
+        Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
+      );
+    for (const [key, dir] of Object.entries(orderBy ?? {})) {
+      if (key !== "startedAt") throw new Error(`run fake: unmodelled orderBy ${key}`);
+      const sign = dir === "asc" ? 1 : -1;
+      rows.sort((a, b) => sign * ((a.startedAt as Date).getTime() - (b.startedAt as Date).getTime()));
+    }
+    const page = take == null ? rows : rows.slice(0, take);
+    if (!select) return page;
+    const keys = Object.keys(select).filter((k) => select[k]);
+    return page.map((row) => Object.fromEntries(keys.map((k) => [k, row[k]])));
+  };
+  db.analyticsRebuildRun.findFirst.mockImplementation(
+    (async (args?: RunQuery) => query({ ...args, take: 1 })[0] ?? null) as never,
+  );
+  db.analyticsRebuildRun.findMany.mockImplementation((async (args?: RunQuery) => query(args)) as never);
+}
+/** A2 C15: neither run-history read was issued. */
+function expectNoRunRead() {
+  expect(db.analyticsRebuildRun.findFirst).not.toHaveBeenCalled();
+  expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+}
+
 function product(over: Record<string, unknown> = {}) {
   return {
     id: 1,
@@ -1067,13 +1118,13 @@ describe("A2 C7 — get_sales carries the sales-freshness note", () => {
   }
 
   it("a 20-hour-old success: no note", async () => {
-    db.analyticsRebuildRun.findMany.mockResolvedValue([success(20)] as never);
+    seedRuns([success(20)]);
     expect(await salesCoverage()).not.toHaveProperty("salesFreshnessNote");
   });
 
   it("a 30-hour-old success: the stale note, naming the success's finishedAt", async () => {
     const run = success(30);
-    db.analyticsRebuildRun.findMany.mockResolvedValue([run] as never);
+    seedRuns([run]);
     expect((await salesCoverage()).salesFreshnessNote).toBe(
       `The last successful sales rebuild finished at ${run.finishedAt.toISOString()}, more than a ` +
         `day ago; orders recorded after that are not counted yet.`,
@@ -1082,39 +1133,41 @@ describe("A2 C7 — get_sales carries the sales-freshness note", () => {
 
   it("a FAILED run (NULL skippedReason) after a recent success: 'did not succeed'; a lock-held skip is ignored", async () => {
     const run = success(20);
-    db.analyticsRebuildRun.findMany.mockResolvedValue([
+    seedRuns([
       { status: "ABORTED", startedAt: hoursAgo(1), finishedAt: hoursAgo(1), skippedReason: "lock-held" },
       { status: "FAILED", startedAt: hoursAgo(2), finishedAt: hoursAgo(2), skippedReason: null },
       run,
-    ] as never);
+    ]);
+    // A2 C15 (A2-CR-4): no "as of" claim — a failed attempt can leave some days rebuilt.
     expect((await salesCoverage()).salesFreshnessNote).toBe(
-      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
-        `rebuild, finished at ${run.finishedAt.toISOString()}.`,
+      `The latest sales rebuild attempt did not succeed; the last successful rebuild finished at ` +
+        `${run.finishedAt.toISOString()}, and orders recorded since then may be missing or only ` +
+        `partly counted.`,
     );
-    db.analyticsRebuildRun.findMany.mockResolvedValue([
+    seedRuns([
       { status: "ABORTED", startedAt: hoursAgo(1), finishedAt: hoursAgo(1), skippedReason: "lock-held" },
       run,
-    ] as never);
+    ]);
     expect(await salesCoverage()).not.toHaveProperty("salesFreshnessNote");
   });
 
   it("no successful rebuild on record: the missing-figures note", async () => {
-    db.analyticsRebuildRun.findMany.mockResolvedValue([] as never);
+    seedRuns([]);
     expect((await salesCoverage()).salesFreshnessNote).toBe(
       "No successful sales rebuild is on record — order figures may be missing.",
     );
   });
 
   it("no company access: no note and NO run-history read", async () => {
-    db.analyticsRebuildRun.findMany.mockResolvedValue([success(30)] as never);
+    seedRuns([success(30)]);
     const result = await assistantTools.get_sales.run({}, CTX_NO_COMPANY);
     if (result.status !== "ok") throw new Error("not ok");
     expect((result.data as { coverage: object }).coverage).not.toHaveProperty("salesFreshnessNote");
-    expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+    expectNoRunRead();
   });
 
   it("a throwing run-history read: no note, and the result is still the full OK answer", async () => {
-    db.analyticsRebuildRun.findMany.mockRejectedValue(new Error("analytics_rebuild_runs unreachable") as never);
+    db.analyticsRebuildRun.findFirst.mockRejectedValue(new Error("analytics_rebuild_runs unreachable") as never);
     const coverage = await salesCoverage();
     expect(coverage).not.toHaveProperty("salesFreshnessNote");
     expect(coverage).toHaveProperty("windowCoverage");
@@ -1189,7 +1242,7 @@ describe("A2 C14 — compare_periods' rate windows (the tool's last complete day
 
   it("a sales period after a rebuild that started at 03:00 today: rate window through yesterday", async () => {
     seedDailySales();
-    db.analyticsRebuildRun.findMany.mockResolvedValue([success(todayAt(3))] as never);
+    seedRuns([success(todayAt(3))]);
     const data = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
     expect(data.coverage.rateWindows).toEqual({
       a: { ...LAST_WEEK, days: 7 },
@@ -1202,23 +1255,25 @@ describe("A2 C14 — compare_periods' rate windows (the tool's last complete day
 
   it("before the nightly run (the newest success started yesterday): sales rate windows end the day before yesterday", async () => {
     seedDailySales();
-    db.analyticsRebuildRun.findMany.mockResolvedValue([success(new Date(todayAt(3).getTime() - DAY))] as never);
+    seedRuns([success(new Date(todayAt(3).getTime() - DAY))]);
     const data = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
     expect(data.coverage.rateWindows.b).toEqual({ from: WEEK_TO_TODAY.from, to: day(-2), days: 5 });
     expect(data.bPerDay).toBe(7);
-    // ONE run-history read serves both the rate day and the freshness note.
+    // ONE run-history read (A2 C15: the success, then the attempts after it) serves both the
+    // rate day and the freshness note.
+    expect(db.analyticsRebuildRun.findFirst).toHaveBeenCalledTimes(1);
     expect(db.analyticsRebuildRun.findMany).toHaveBeenCalledTimes(1);
   });
 
   it("no success on record, or a throwing read: yesterday (and the figures intact)", async () => {
     seedDailySales();
-    db.analyticsRebuildRun.findMany.mockResolvedValue([] as never);
+    seedRuns([]);
     const none = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
     expect(none.coverage.rateWindows.b.to).toBe(day(-1));
     expect(none.coverage.salesFreshnessNote).toBe(
       "No successful sales rebuild is on record — order figures may be missing.",
     );
-    db.analyticsRebuildRun.findMany.mockRejectedValue(new Error("analytics_rebuild_runs unreachable") as never);
+    db.analyticsRebuildRun.findFirst.mockRejectedValue(new Error("analytics_rebuild_runs unreachable") as never);
     const thrown = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
     expect(thrown.coverage.rateWindows.b.to).toBe(day(-1));
     expect(thrown.coverage).not.toHaveProperty("salesFreshnessNote");
@@ -1233,16 +1288,16 @@ describe("A2 C14 — compare_periods' rate windows (the tool's last complete day
       ) as never,
     );
     db.product.findMany.mockResolvedValue([] as never);
-    db.analyticsRebuildRun.findMany.mockResolvedValue([success(new Date(todayAt(3).getTime() - 3 * DAY))] as never);
+    seedRuns([success(new Date(todayAt(3).getTime() - 3 * DAY))]);
     const data = await compare({ metric: "outbound_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
     expect(data.coverage.rateWindows.b).toEqual({ from: WEEK_TO_TODAY.from, to: day(-1), days: 6 });
     expect(data.bPerDay).toBe(2); // the second read's 12 units over 6 complete days
-    expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+    expectNoRunRead();
   });
 
   it("by_product carries rateWindows + the rate definition, and the counts note names per-day ranking", async () => {
     seedDailySales();
-    db.analyticsRebuildRun.findMany.mockResolvedValue([success(todayAt(3))] as never);
+    seedRuns([success(todayAt(3))]);
     const data = await compare({
       metric: "sales_units",
       periodA: LAST_WEEK,
@@ -1270,7 +1325,7 @@ describe("A2 C14 — compare_periods' rate windows (the tool's last complete day
     seedDailySales();
     const data = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY }, CTX_NO_COMPANY);
     expect(data.coverage.rateWindows.b.to).toBe(day(-1));
-    expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+    expectNoRunRead();
   });
 });
 

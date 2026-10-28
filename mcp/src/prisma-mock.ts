@@ -19,8 +19,9 @@
  *   - location.findUnique / company.findMany — assistant A2 (pack C8 / C9): the
  *     get_stock_asof location resolve + the movement filters' location name, and the
  *     company names on every per-company sales coverage entry.
- *   - analyticsRebuildRun.findMany — assistant A2 (pack C7): the sales rebuild's run
- *     history behind the freshness note and get_data_freshness' lastSucceededAt.
+ *   - analyticsRebuildRun.findFirst / findMany — assistant A2 (pack C7, C15): the sales
+ *     rebuild's run history behind the freshness note and get_data_freshness'
+ *     lastSucceededAt — the newest success read directly, then the attempts after it.
  *   - externalOrder.groupBy / productLink.findMany / bundleComponent.findMany — assistant
  *     A2 FR1 (pack C14): the reorder order signal's link check (the caller's stores from its
  *     orders, then the listings on them) and its unlinked-order count (externalOrder.count).
@@ -71,8 +72,10 @@ const prismaMock: any = {
   analyticsRebuildState: {
     findUnique: async () => null,
   },
-  // A2 C7: the sales rebuild run history (no runs on record in the mock build).
+  // A2 C7: the sales rebuild run history (no runs on record in the mock build). A2 C15: the
+  // two reads answer that empty table faithfully — no success (null), no attempts ([]).
   analyticsRebuildRun: {
+    findFirst: async () => null,
     findMany: async () => [],
   },
   fulfillmentSyncState: {

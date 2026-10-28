@@ -43,7 +43,8 @@ jest.mock("@/lib/prisma", () => ({
     },
     analyticsRebuildState: { findUnique: jest.fn(async () => null) },
     // A2 M4 (pack C7): the sales rebuild run history (the freshness note + lastSucceededAt).
-    analyticsRebuildRun: { findMany: jest.fn(async () => []) },
+    // A2 C15: two reads — the newest success (findFirst), then the attempts after it.
+    analyticsRebuildRun: { findFirst: jest.fn(async () => null), findMany: jest.fn(async () => []) },
     fulfillmentSyncState: { findMany: jest.fn(async () => []) },
     productStockSnapshot: {
       // Wave-2: get_stock_asof reads _min AND _max for dataStart + watermark.
@@ -103,6 +104,50 @@ import prismaMock from "./prisma-mock";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const p: any = prisma;
+
+type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+type RunQuery = {
+  where?: Record<string, unknown>;
+  orderBy?: Record<string, string>;
+  take?: number;
+  select?: Record<string, boolean>;
+};
+/**
+ * A2 C15: the sales run table, answered QUERY-FAITHFULLY — `where` (equality, `in`, `gt`, and
+ * `not` with SQL's NULL rule: a NULL column never matches `<>`), `orderBy` startedAt, `take`
+ * and `select` — so a read that asks the wrong question gets the wrong answer here too. An
+ * operator it does not model throws rather than matching silently.
+ */
+function seedRuns(runs: RunRow[]) {
+  const scalar = (v: unknown) => (v instanceof Date ? v.getTime() : v);
+  const holds = (field: unknown, cond: unknown): boolean =>
+    cond === null || typeof cond !== "object" || cond instanceof Date
+      ? scalar(field) === scalar(cond)
+      : Object.entries(cond).every(([op, arg]) => {
+          if (op === "in") return (arg as unknown[]).some((v) => scalar(v) === scalar(field));
+          if (op === "gt") return field != null && (scalar(field) as number) > (scalar(arg) as number);
+          if (op === "not") return arg === null ? field != null : field != null && scalar(field) !== scalar(arg);
+          throw new Error(`run fake: unmodelled operator ${op}`);
+        });
+  const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
+    const rows: Array<Record<string, unknown>> = runs
+      .map((run) => ({ job: "sales", ...run }))
+      .filter((run: Record<string, unknown>) =>
+        Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
+      );
+    for (const [key, dir] of Object.entries(orderBy ?? {})) {
+      if (key !== "startedAt") throw new Error(`run fake: unmodelled orderBy ${key}`);
+      const sign = dir === "asc" ? 1 : -1;
+      rows.sort((a, b) => sign * ((a.startedAt as Date).getTime() - (b.startedAt as Date).getTime()));
+    }
+    const page = take == null ? rows : rows.slice(0, take);
+    if (!select) return page;
+    const keys = Object.keys(select).filter((k) => select[k]);
+    return page.map((row) => Object.fromEntries(keys.map((k) => [k, row[k]])));
+  };
+  p.analyticsRebuildRun.findFirst.mockImplementation(async (args?: RunQuery) => query({ ...args, take: 1 })[0] ?? null);
+  p.analyticsRebuildRun.findMany.mockImplementation(async (args?: RunQuery) => query(args));
+}
 
 const VALID_TOKEN = "invmcp_" + "A".repeat(43); // well-shaped: prefix + 43 base64url chars
 
@@ -651,7 +696,9 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     p.location.findUnique.mockResolvedValue(null);
     p.company.findMany.mockReset();
     p.company.findMany.mockResolvedValue([]);
-    // A2 M4: the sales rebuild run history, isolated per test.
+    // A2 M4: the sales rebuild run history, isolated per test (A2 C15: both reads).
+    p.analyticsRebuildRun.findFirst.mockReset();
+    p.analyticsRebuildRun.findFirst.mockResolvedValue(null);
     p.analyticsRebuildRun.findMany.mockReset();
     p.analyticsRebuildRun.findMany.mockResolvedValue([]);
     p.product.count.mockReset();
@@ -1131,7 +1178,7 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
   it("get_sales: a 30-hour-old successful rebuild puts salesFreshnessNote on the wire (A2 C7)", async () => {
     p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
     const finishedAt = new Date(Date.now() - 30 * 3_600_000);
-    p.analyticsRebuildRun.findMany.mockResolvedValue([
+    seedRuns([
       { status: "SUCCEEDED", startedAt: new Date(finishedAt.getTime() - 60_000), finishedAt, skippedReason: null },
     ]);
 
@@ -1142,9 +1189,16 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
         `ago; orders recorded after that are not counted yet.`,
     );
     expect(toolResult.data.remainingRows).toBe(0);
-    // The run history is read for the sales job only, newest first, filtered in JS.
-    const read = p.analyticsRebuildRun.findMany.mock.calls[0][0];
-    expect(read).toMatchObject({ where: { job: "sales" }, orderBy: { startedAt: "desc" }, take: 50 });
+    // A2 C15: the run history is read for the sales job only — the newest success directly,
+    // then the FAILED / ABORTED runs after it (lock-held skips filtered in JS, never in SQL).
+    expect(p.analyticsRebuildRun.findFirst.mock.calls[0][0]).toMatchObject({
+      where: { job: "sales", status: "SUCCEEDED", finishedAt: { not: null } },
+      orderBy: { startedAt: "desc" },
+    });
+    expect(p.analyticsRebuildRun.findMany.mock.calls[0][0]).toMatchObject({
+      where: { job: "sales", status: { in: ["FAILED", "ABORTED"] }, startedAt: { gt: new Date(finishedAt.getTime() - 60_000) } },
+      take: 100,
+    });
   });
 
   it("get_data_freshness: rebuild.lastSucceededAt beside lastRunAt on the wire (A2 C7)", async () => {
@@ -1153,7 +1207,7 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     p.analyticsRebuildState.findUnique.mockImplementation(async ({ where }: { where: { job: string } }) =>
       where.job === "sales" ? { lastRunAt: lastAttempt, sourceWatermark: null } : null,
     );
-    p.analyticsRebuildRun.findMany.mockResolvedValue([
+    seedRuns([
       { status: "FAILED", startedAt: new Date("2026-10-27T02:00:00.000Z"), finishedAt: lastAttempt, skippedReason: null },
       { status: "SUCCEEDED", startedAt: new Date("2026-10-26T02:00:00.000Z"), finishedAt: lastSuccess, skippedReason: null },
     ]);

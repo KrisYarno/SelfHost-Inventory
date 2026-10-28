@@ -13,6 +13,8 @@
  * read as windowed.
  */
 
+import fs from "fs";
+import path from "path";
 import { mockReset, type DeepMockProxy } from "jest-mock-extended";
 import type { PrismaClient } from "@prisma/client";
 
@@ -35,6 +37,7 @@ import {
   SALES_ATTRIBUTION_NOTE,
   SALES_COMPANY_COVERAGE_NOTE,
 } from "@/lib/assistant/sales-coverage";
+import { REBUILD_RUN_RETENTION } from "@/lib/analytics/rebuild-lock";
 
 const db = prisma as unknown as DeepMockProxy<PrismaClient>;
 
@@ -471,50 +474,117 @@ describe("A2 C8 companyCoverageDetail — the name alone, the id only as a fallb
 });
 
 // ===========================================================================
-// A2 pack C7 — the sales rebuild state and the freshness note (material staleness only)
+// A2 pack C7 / C15 — the sales rebuild state and the freshness note (material staleness only)
 // ===========================================================================
 
-describe("A2 C7 salesRebuildState — the newest 50 sales runs, lock-held skips filtered in JS", () => {
-  type Run = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+type Run = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+type RunQuery = {
+  where?: Record<string, unknown>;
+  orderBy?: Record<string, string>;
+  take?: number;
+  select?: Record<string, boolean>;
+};
+
+/**
+ * A2 C15: the sales run table, answered QUERY-FAITHFULLY — `where` (equality, `in`, `gt`, and
+ * `not` with SQL's NULL rule: a NULL column never matches `<>`), `orderBy` startedAt, `take`
+ * and `select` — so a read that asks the wrong question gets the wrong answer here too. An
+ * operator it does not model throws rather than matching silently.
+ */
+function seedRuns(runs: Run[]) {
+  const scalar = (v: unknown) => (v instanceof Date ? v.getTime() : v);
+  const holds = (field: unknown, cond: unknown): boolean =>
+    cond === null || typeof cond !== "object" || cond instanceof Date
+      ? scalar(field) === scalar(cond)
+      : Object.entries(cond).every(([op, arg]) => {
+          if (op === "in") return (arg as unknown[]).some((v) => scalar(v) === scalar(field));
+          if (op === "gt") return field != null && (scalar(field) as number) > (scalar(arg) as number);
+          if (op === "not") return arg === null ? field != null : field != null && scalar(field) !== scalar(arg);
+          throw new Error(`run fake: unmodelled operator ${op}`);
+        });
+  const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
+    const rows: Array<Record<string, unknown>> = runs
+      .map((run) => ({ job: "sales", ...run }))
+      .filter((run: Record<string, unknown>) =>
+        Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
+      );
+    for (const [key, dir] of Object.entries(orderBy ?? {})) {
+      if (key !== "startedAt") throw new Error(`run fake: unmodelled orderBy ${key}`);
+      const sign = dir === "asc" ? 1 : -1;
+      rows.sort((a, b) => sign * ((a.startedAt as Date).getTime() - (b.startedAt as Date).getTime()));
+    }
+    const page = take == null ? rows : rows.slice(0, take);
+    if (!select) return page;
+    const keys = Object.keys(select).filter((k) => select[k]);
+    return page.map((row) => Object.fromEntries(keys.map((k) => [k, row[k]])));
+  };
+  db.analyticsRebuildRun.findFirst.mockImplementation(
+    (async (args?: RunQuery) => query({ ...args, take: 1 })[0] ?? null) as never,
+  );
+  db.analyticsRebuildRun.findMany.mockImplementation((async (args?: RunQuery) => query(args)) as never);
+}
+
+describe("A2 C15 salesRebuildState — the newest success read directly, then the attempts after it", () => {
   const at = (iso: string) => new Date(iso);
-  /** Rows as the read returns them: newest startedAt first. */
-  const seedRuns = (runs: Run[]) =>
-    db.analyticsRebuildRun.findMany.mockResolvedValue(
-      [...runs].sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime()) as never,
-    );
   const success = (start: string, finish: string): Run => ({
     status: "SUCCEEDED",
     startedAt: at(start),
     finishedAt: at(finish),
     skippedReason: null,
   });
+  /** `n` lock-held skips, one a minute from `from` (beginRebuildRun self-finalizes them). */
+  const lockHeldSkips = (n: number, from: string): Run[] =>
+    Array.from({ length: n }, (_, i) => {
+      const startedAt = new Date(at(from).getTime() + i * 60_000);
+      return { status: "ABORTED", startedAt, finishedAt: startedAt, skippedReason: "lock-held" };
+    });
 
-  it("reads the newest 50 rows of the sales job by startedAt, with NO skippedReason predicate in SQL", async () => {
-    seedRuns([]);
+  it("reads the newest SUCCEEDED run directly, then only the FAILED / ABORTED runs started after it", async () => {
+    seedRuns([success("2026-10-26T02:00:00.000Z", "2026-10-26T02:06:00.000Z")]);
     await salesRebuildState();
+    expect(db.analyticsRebuildRun.findFirst).toHaveBeenCalledTimes(1);
+    expect(db.analyticsRebuildRun.findFirst.mock.calls[0][0]).toEqual({
+      where: { job: "sales", status: "SUCCEEDED", finishedAt: { not: null } },
+      orderBy: { startedAt: "desc" },
+      select: { startedAt: true, finishedAt: true },
+    });
     expect(db.analyticsRebuildRun.findMany).toHaveBeenCalledTimes(1);
-    const args = db.analyticsRebuildRun.findMany.mock.calls[0][0] as Record<string, any>;
-    expect(args.where).toEqual({ job: "sales" });
-    expect(args.orderBy).toEqual({ startedAt: "desc" });
-    expect(args.take).toBe(50);
+    expect(db.analyticsRebuildRun.findMany.mock.calls[0][0]).toEqual({
+      where: {
+        job: "sales",
+        status: { in: ["FAILED", "ABORTED"] },
+        startedAt: { gt: at("2026-10-26T02:00:00.000Z") },
+      },
+      select: { skippedReason: true },
+      take: REBUILD_RUN_RETENTION,
+    });
+    expect(REBUILD_RUN_RETENTION).toBe(100);
     // A Prisma `{ not: 'lock-held' }` compiles to SQL `<>`, which drops every FAILED run
-    // (their skippedReason is NULL) — the filter must never be in the query.
-    expect(JSON.stringify(args.where)).not.toContain("skippedReason");
+    // (their skippedReason is NULL) — the filter must never be in either query.
+    for (const read of [db.analyticsRebuildRun.findFirst, db.analyticsRebuildRun.findMany]) {
+      expect(JSON.stringify((read.mock.calls[0][0] as RunQuery).where)).not.toContain("skippedReason");
+    }
   });
 
-  it("a success behind 12 newer lock-held skips is still found (they never fill the read window)", async () => {
-    const skips: Run[] = Array.from({ length: 12 }, (_, i) => ({
-      status: "ABORTED",
-      startedAt: at(`2026-10-27T03:${String(10 + i).padStart(2, "0")}:00.000Z`),
-      finishedAt: null,
-      skippedReason: "lock-held",
-    }));
-    seedRuns([success("2026-10-27T03:00:00.000Z", "2026-10-27T03:08:00.000Z"), ...skips]);
+  it("60 lock-held skips newer than a retained success: the success is still found (A2-CR-5)", async () => {
+    seedRuns([
+      success("2026-10-26T02:00:00.000Z", "2026-10-26T02:06:00.000Z"),
+      ...lockHeldSkips(60, "2026-10-26T03:00:00.000Z"),
+    ]);
     expect(await salesRebuildState()).toEqual({
-      lastSucceededAt: "2026-10-27T03:08:00.000Z",
+      lastSucceededAt: "2026-10-26T02:06:00.000Z",
       latestAttemptFailedAfterSuccess: false,
-      lastSucceededStartedAt: "2026-10-27T03:00:00.000Z",
+      lastSucceededStartedAt: "2026-10-26T02:00:00.000Z",
     });
+  });
+
+  it("...and a FAILED run (NULL skippedReason) among those 60 skips still reads as a failed attempt", async () => {
+    seedRuns([
+      success("2026-10-26T02:00:00.000Z", "2026-10-26T02:06:00.000Z"),
+      { status: "FAILED", startedAt: at("2026-10-26T02:30:00.000Z"), finishedAt: at("2026-10-26T02:30:09.000Z"), skippedReason: null },
+      ...lockHeldSkips(60, "2026-10-26T03:00:00.000Z"),
+    ]);
+    expect((await salesRebuildState()).latestAttemptFailedAfterSuccess).toBe(true);
   });
 
   it("lastSucceededAt is the success run's finishedAt (the lastRunAt clock), never its startedAt", async () => {
@@ -575,14 +645,15 @@ describe("A2 C7 salesRebuildState — the newest 50 sales runs, lock-held skips 
     expect((await salesRebuildState()).latestAttemptFailedAfterSuccess).toBe(false);
   });
 
-  it("no success on record (only failures and skips) -> lastSucceededAt null, and no success to have failed after", async () => {
+  it("no success on record (only failures and skips) -> lastSucceededAt null, and the attempts are never read", async () => {
     seedRuns([
       { status: "FAILED", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: at("2026-10-27T02:00:09.000Z"), skippedReason: null },
       { status: "ABORTED", startedAt: at("2026-10-27T03:00:00.000Z"), finishedAt: at("2026-10-27T03:00:00.000Z"), skippedReason: "lock-held" },
     ]);
     const none = { lastSucceededAt: null, latestAttemptFailedAfterSuccess: false, lastSucceededStartedAt: null };
     expect(await salesRebuildState()).toEqual(none);
-    db.analyticsRebuildRun.findMany.mockResolvedValue(undefined as never); // a deep-mock read
+    expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+    db.analyticsRebuildRun.findFirst.mockResolvedValue(undefined as never); // a deep-mock read
     expect(await salesRebuildState()).toEqual(none);
   });
 
@@ -599,9 +670,32 @@ describe("A2 C7 salesRebuildState — the newest 50 sales runs, lock-held skips 
     expect(state.lastSucceededStartedAt).toBe("2026-10-26T02:59:59.000Z");
     expect(state.lastSucceededAt).toBe("2026-10-26T03:06:00.000Z");
   });
+
+  it("source pin: neither read filters on skippedReason — the lock-held skips are dropped in JS", () => {
+    const src = fs.readFileSync(path.resolve(__dirname, "../../../../lib/assistant/sales-coverage.ts"), "utf8");
+    const start = src.indexOf("export async function salesRebuildState");
+    const body = src.slice(start, src.indexOf("\n}\n", start));
+    expect(body).toContain(".findFirst(");
+    expect(body).toContain(".findMany(");
+    // skippedReason appears in the reads only as a SELECTED column, never as a predicate.
+    expect(body).not.toMatch(/skippedReason\s*:(?!\s*true\b)/);
+    expect(body).not.toMatch(/\bnot\s*:\s*["']lock-held/);
+    expect(body).toContain("run.skippedReason !== LOCK_HELD_SKIP");
+  });
+
+  it("the fake is faithful where it matters: a `not` on skippedReason drops the FAILED NULL row, as SQL `<>` does", async () => {
+    seedRuns([
+      { status: "FAILED", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: at("2026-10-27T02:00:09.000Z"), skippedReason: null },
+      { status: "ABORTED", startedAt: at("2026-10-27T03:00:00.000Z"), finishedAt: at("2026-10-27T03:20:00.000Z"), skippedReason: "lease-lost" },
+    ]);
+    const read = (where: Record<string, unknown>) =>
+      db.analyticsRebuildRun.findMany({ where, select: { status: true } } as never) as unknown as Promise<unknown[]>;
+    expect(await read({ job: "sales", skippedReason: { not: "lock-held" } })).toEqual([{ status: "ABORTED" }]);
+    expect(await read({ job: "sales" })).toEqual([{ status: "FAILED" }, { status: "ABORTED" }]);
+  });
 });
 
-describe("A2 C7 salesFreshnessNote — a note only on material staleness", () => {
+describe("A2 C7 / C15 salesFreshnessNote — a note only on material staleness, no 'as of' claim after a failure", () => {
   const NOW = new Date("2026-10-27T12:00:00.000Z");
   const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
   const state = (lastSucceededAt: string | null, failed = false): SalesRebuildState => ({
@@ -634,38 +728,48 @@ describe("A2 C7 salesFreshnessNote — a note only on material staleness", () =>
     expect(salesFreshnessNote(state(past), NOW)).toContain("more than a day ago");
   });
 
-  it("a recent success with a newer attempt that did not succeed -> the as-of sentence", () => {
+  // A2 C15 (A2-CR-4): the rebuild commits each day in its own transaction, so a failed or
+  // aborted attempt can leave some days rebuilt and others not — the note never says the
+  // figures are a snapshot "as of" the last success.
+  it("a recent success with a newer attempt that did not succeed -> the may-be-missing sentence", () => {
     const finished = hoursAgo(20);
     expect(salesFreshnessNote(state(finished, true), NOW)).toBe(
-      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
-        `rebuild, finished at ${finished}.`,
+      `The latest sales rebuild attempt did not succeed; the last successful rebuild finished at ` +
+        `${finished}, and orders recorded since then may be missing or only partly counted.`,
     );
   });
 
-  it("a stale success with a newer attempt that did not succeed -> the stale sentence + 'did not succeed'", () => {
+  it("a stale success with a newer attempt that did not succeed -> one stale + failed sentence", () => {
     const finished = hoursAgo(30);
     expect(salesFreshnessNote(state(finished, true), NOW)).toBe(
-      `The last successful sales rebuild finished at ${finished}, more than a day ago; orders ` +
-        `recorded after that are not counted yet. The latest rebuild attempt did not succeed.`,
+      `The last successful sales rebuild finished at ${finished}, more than a day ago, and a later ` +
+        `attempt did not succeed; orders recorded since then may be missing or only partly counted.`,
     );
   });
 
-  it("a defined no-success note gains the sentence too when the flag is set", () => {
+  it("no success on record is unchanged even with the flag set — the old appended sentence is gone", () => {
     expect(salesFreshnessNote(state(null, true), NOW)).toBe(
-      "No successful sales rebuild is on record — order figures may be missing. The latest " +
-        "rebuild attempt did not succeed.",
+      "No successful sales rebuild is on record — order figures may be missing.",
     );
+  });
+
+  it("no branch claims the figures are 'as of' the last success, or appends the old sentence", () => {
+    for (const s of [state(null), state(null, true), state(hoursAgo(30)), state(hoursAgo(30), true), state(hoursAgo(20), true)]) {
+      const note = salesFreshnessNote(s, NOW) as string;
+      expect(note).not.toContain("as of");
+      expect(note).not.toContain("The latest rebuild attempt did not succeed.");
+    }
   });
 
   it("the end to end: a FAILED run after a 20-hour-old success reads 'did not succeed' through the real state read", async () => {
-    db.analyticsRebuildRun.findMany.mockResolvedValue([
+    seedRuns([
       { status: "FAILED", startedAt: new Date(hoursAgo(2)), finishedAt: new Date(hoursAgo(2)), skippedReason: null },
       { status: "SUCCEEDED", startedAt: new Date(hoursAgo(20.1)), finishedAt: new Date(hoursAgo(20)), skippedReason: null },
-    ] as never);
+    ]);
     const note = salesFreshnessNote(await salesRebuildState(), NOW);
     expect(note).toBe(
-      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
-        `rebuild, finished at ${hoursAgo(20)}.`,
+      `The latest sales rebuild attempt did not succeed; the last successful rebuild finished at ` +
+        `${hoursAgo(20)}, and orders recorded since then may be missing or only partly counted.`,
     );
   });
 });

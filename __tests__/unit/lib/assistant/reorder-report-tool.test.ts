@@ -20,8 +20,14 @@
  * A2 FR1 (pack C14): an unlinked product is `not_linked`, never a measured 0; the window's
  * unlinked orders are counted; short reason codes explained once in the envelope; the
  * unknown-flag count — all through the REAL order-signal module, inside the worst case.
+ * A2 FR2 (pack C15): the page never takes more than the room the measured envelope leaves —
+ * pinned THROUGH THE ADAPTER across a budget sweep; the run history is answered by a
+ * query-faithful fake; the failed-attempt freshness wording.
  */
 
+// `ai` (v7) is ESM-only; createAiTools only stores def+execute, never invokes ai's
+// tool() body, so a passthrough is faithful (same stub the adapter suites use).
+jest.mock("ai", () => ({ __esModule: true, tool: (def: unknown) => def }));
 // The report is stubbed; the module's constants (definitions, notes) are the real ones.
 jest.mock("@/lib/reports/reorder", () => ({
   __esModule: true,
@@ -37,8 +43,9 @@ jest.mock("@/lib/prisma", () => ({
     product: { findMany: jest.fn() },
     productSalesFact: { aggregate: jest.fn(), groupBy: jest.fn() },
     company: { findMany: jest.fn() },
-    // A2 C7: the sales rebuild run history behind the freshness note.
-    analyticsRebuildRun: { findMany: jest.fn() },
+    // A2 C7 / C15: the sales rebuild run history behind the freshness note (the newest
+    // success, then the attempts after it).
+    analyticsRebuildRun: { findFirst: jest.fn(), findMany: jest.fn() },
     // A2 C14: the caller's stores (from its orders), the listing reads behind "linked", and
     // the window's orders with an unattributable line.
     externalOrder: { groupBy: jest.fn(), count: jest.fn() },
@@ -51,6 +58,8 @@ jest.mock("@/lib/reports/low-stock", () => ({ __esModule: true, getLowStockRepor
 
 import prisma from "@/lib/prisma";
 import { assistantTools, TOOL_SCOPES, testCtx, byteBudget } from "@/lib/assistant/tools";
+import { createAiTools } from "@/lib/assistant/tool-adapters";
+import type { ToolContext as ResolvedContext } from "@/lib/assistant/context";
 import { TOOL_PRESENTATION } from "@/lib/assistant/tool-presentation";
 import {
   getReorderReport,
@@ -65,13 +74,63 @@ import { REORDER_DEMAND_DEFINITION } from "@/lib/reports/metrics-contract";
 import { toDayKey } from "@/lib/analytics/dates";
 
 const mockReport = getReorderReport as jest.Mock;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const db = prisma as any;
 /** A2 C7: one sales rebuild run that finished `hoursAgo` hours before now. */
 function salesRun(status: string, hoursAgo: number, skippedReason: string | null = null) {
   const finishedAt = new Date(Date.now() - hoursAgo * 3_600_000);
   return { status, startedAt: new Date(finishedAt.getTime() - 60_000), finishedAt, skippedReason };
 }
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const db = prisma as any;
+type RunRow = ReturnType<typeof salesRun>;
+type RunQuery = {
+  where?: Record<string, unknown>;
+  orderBy?: Record<string, string>;
+  take?: number;
+  select?: Record<string, boolean>;
+};
+/**
+ * A2 C15: the sales run table, answered QUERY-FAITHFULLY — `where` (equality, `in`, `gt`, and
+ * `not` with SQL's NULL rule: a NULL column never matches `<>`), `orderBy` startedAt, `take`
+ * and `select` — so a read that asks the wrong question gets the wrong answer here too. An
+ * operator it does not model throws rather than matching silently.
+ */
+function seedRuns(runs: RunRow[]) {
+  const scalar = (v: unknown) => (v instanceof Date ? v.getTime() : v);
+  const holds = (field: unknown, cond: unknown): boolean =>
+    cond === null || typeof cond !== "object" || cond instanceof Date
+      ? scalar(field) === scalar(cond)
+      : Object.entries(cond).every(([op, arg]) => {
+          if (op === "in") return (arg as unknown[]).some((v) => scalar(v) === scalar(field));
+          if (op === "gt") return field != null && (scalar(field) as number) > (scalar(arg) as number);
+          if (op === "not") return arg === null ? field != null : field != null && scalar(field) !== scalar(arg);
+          throw new Error(`run fake: unmodelled operator ${op}`);
+        });
+  const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
+    const rows: Array<Record<string, unknown>> = runs
+      .map((run) => ({ job: "sales", ...run }))
+      .filter((run: Record<string, unknown>) =>
+        Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
+      );
+    for (const [key, dir] of Object.entries(orderBy ?? {})) {
+      if (key !== "startedAt") throw new Error(`run fake: unmodelled orderBy ${key}`);
+      const sign = dir === "asc" ? 1 : -1;
+      rows.sort((a, b) => sign * ((a.startedAt as Date).getTime() - (b.startedAt as Date).getTime()));
+    }
+    const page = take == null ? rows : rows.slice(0, take);
+    if (!select) return page;
+    const keys = Object.keys(select).filter((k) => select[k]);
+    return page.map((row) => Object.fromEntries(keys.map((k) => [k, row[k]])));
+  };
+  db.analyticsRebuildRun.findFirst.mockImplementation(
+    async (args?: RunQuery) => query({ ...args, take: 1 })[0] ?? null,
+  );
+  db.analyticsRebuildRun.findMany.mockImplementation(async (args?: RunQuery) => query(args));
+}
+/** A2 C15: neither run-history read was issued. */
+function expectNoRunRead() {
+  expect(db.analyticsRebuildRun.findFirst).not.toHaveBeenCalled();
+  expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+}
 const CTX = testCtx();
 const DAY_MS = 86_400_000;
 
@@ -115,8 +174,9 @@ beforeEach(() => {
     args.where.id.in.map((id) => ({ id, name: `Company ${id}` })),
   );
   // A2 C7: a 2-hour-old successful sales rebuild — fresh, so no note unless a test says so.
+  db.analyticsRebuildRun.findFirst.mockReset();
   db.analyticsRebuildRun.findMany.mockReset();
-  db.analyticsRebuildRun.findMany.mockResolvedValue([salesRun("SUCCEEDED", 2)]);
+  seedRuns([salesRun("SUCCEEDED", 2)]);
   // A2 C14: by default every product is LINKED on the caller's one store and no order has an
   // unattributable line, so a missing fact row under full coverage is a measured 0 unless a
   // test seeds otherwise (seedListings).
@@ -726,12 +786,12 @@ describe("A2 C7 — coverage.salesFreshnessNote on the reorder order signal", ()
     seedFacts(FULL);
     mockReport.mockResolvedValue(reportOf([unsized(2, 0)]));
     const stale = salesRun("SUCCEEDED", 30);
-    db.analyticsRebuildRun.findMany.mockResolvedValue([stale]);
+    seedRuns([stale]);
     expect((await run({}, ["c1"])).data.coverage.salesFreshnessNote).toBe(
       `The last successful sales rebuild finished at ${stale.finishedAt.toISOString()}, more than a ` +
         `day ago; orders recorded after that are not counted yet.`,
     );
-    db.analyticsRebuildRun.findMany.mockResolvedValue([salesRun("SUCCEEDED", 20)]);
+    seedRuns([salesRun("SUCCEEDED", 20)]);
     expect((await run({}, ["c1"])).data.coverage).not.toHaveProperty("salesFreshnessNote");
   });
 
@@ -739,35 +799,37 @@ describe("A2 C7 — coverage.salesFreshnessNote on the reorder order signal", ()
     seedFacts(FULL);
     mockReport.mockResolvedValue(reportOf([unsized(2, 0)]));
     const success = salesRun("SUCCEEDED", 20);
-    db.analyticsRebuildRun.findMany.mockResolvedValue([salesRun("FAILED", 1), success]);
+    seedRuns([salesRun("FAILED", 1), success]);
+    // A2 C15 (A2-CR-4): no "as of" claim — a failed attempt can leave some days rebuilt.
     expect((await run({}, ["c1"])).data.coverage.salesFreshnessNote).toBe(
-      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
-        `rebuild, finished at ${success.finishedAt.toISOString()}.`,
+      `The latest sales rebuild attempt did not succeed; the last successful rebuild finished at ` +
+        `${success.finishedAt.toISOString()}, and orders recorded since then may be missing or only ` +
+        `partly counted.`,
     );
-    db.analyticsRebuildRun.findMany.mockResolvedValue([salesRun("ABORTED", 1, "lock-held"), success]);
+    seedRuns([salesRun("ABORTED", 1, "lock-held"), success]);
     expect((await run({}, ["c1"])).data.coverage).not.toHaveProperty("salesFreshnessNote");
   });
 
   it("no company access: no note and NO run-history read", async () => {
     mockReport.mockResolvedValue(reportOf([unsized(2, 0)]));
-    db.analyticsRebuildRun.findMany.mockResolvedValue([salesRun("SUCCEEDED", 30)]);
+    seedRuns([salesRun("SUCCEEDED", 30)]);
     const { data } = await run({}, []);
     expect(data.coverage).not.toHaveProperty("salesFreshnessNote");
-    expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+    expectNoRunRead();
   });
 
   it("no unsized row (no order figures in the payload): no note and NO run-history read", async () => {
     mockReport.mockResolvedValue(reportOf([suggested(1, "OUT")]));
-    db.analyticsRebuildRun.findMany.mockResolvedValue([salesRun("SUCCEEDED", 30)]);
+    seedRuns([salesRun("SUCCEEDED", 30)]);
     const { data } = await run({}, ["c1"]);
     expect(data.coverage).not.toHaveProperty("salesFreshnessNote");
-    expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+    expectNoRunRead();
   });
 
   it("a throwing run-history read: no note, and the order signal is intact", async () => {
     seedFacts(FULL);
     mockReport.mockResolvedValue(reportOf([unsized(2, 0)]));
-    db.analyticsRebuildRun.findMany.mockRejectedValue(new Error("analytics_rebuild_runs unreachable"));
+    db.analyticsRebuildRun.findFirst.mockRejectedValue(new Error("analytics_rebuild_runs unreachable"));
     const { data } = await run({}, ["c1"]);
     expect(data.coverage).not.toHaveProperty("salesFreshnessNote");
     expect(data.coverage.orderSignalCoverage).toBe("full");
@@ -1018,8 +1080,9 @@ describe("A2 C4 — the worst-case envelope", () => {
     });
     db.product.findMany.mockResolvedValue([1, ...ids, ...NO_FACT_IDS].map((id) => ({ id })));
     // A2 M4 (pack C7): the LONGEST freshness note — a stale success with a newer attempt
-    // that did not succeed (the stale sentence + "The latest rebuild attempt did not succeed.").
-    db.analyticsRebuildRun.findMany.mockResolvedValue([salesRun("FAILED", 1), salesRun("SUCCEEDED", 30)]);
+    // that did not succeed (A2 C15: "..., more than a day ago, and a later attempt did not
+    // succeed; ..." — 195 characters with its instant, still the longest of the four).
+    seedRuns([salesRun("FAILED", 1), salesRun("SUCCEEDED", 30)]);
     // A2 FR1 (pack C14): BOTH reason codes a covered caller can carry — a linked no-fact
     // product (not_recorded: get_sales' company-kind sentence, naming the four silent
     // 191-character companies) and an unlinked one (not_linked) — plus the unlinked-orders
@@ -1057,7 +1120,7 @@ describe("A2 C4 — the worst-case envelope", () => {
     expect(data.coverage.orderSignalUnlinkedNote).toContain("9999999 orders in this window");
     // A2 M4: the two keys M4 adds ride in the worst case — the freshness note at its longest.
     expect(data.coverage.salesFreshnessNote).toMatch(
-      /^The last successful sales rebuild finished at .+, more than a day ago; orders recorded after that are not counted yet\. The latest rebuild attempt did not succeed\.$/,
+      /^The last successful sales rebuild finished at .+, more than a day ago, and a later attempt did not succeed; orders recorded since then may be missing or only partly counted\.$/,
     );
     expect(data).toHaveProperty("remainingRows");
   });
@@ -1075,6 +1138,12 @@ describe("A2 C4 — the worst-case envelope", () => {
   // a seven-digit count and outOfStockWithOrdersUnknown: +1,468 B at 80 characters (9,643 B).
   // The threshold moves to 7 characters: 8,043 B at 0, 8,183 B at 7, 8,203 B at 8, 9,643 B at
   // 80 (13,143 B at 255). Past it the page is fit to the MEASURED envelope, as before.
+  // Recorded (A2 FR2, pack C15): the longest freshness note is now the one stale + failed
+  // sentence (195 characters, 11 more than the old stale sentence + "did not succeed"); with
+  // the orchestrator's FR1 wording fixes the worst case measures 8,047 B at 0, 8,187 B at 7,
+  // 8,207 B at 8, 9,647 B at 80 (13,147 B at 255) — the threshold stays at 7 characters. Under
+  // C15 the side of the reserve no longer matters for safety: the row budget never exceeds the
+  // room the measured envelope leaves (the adapter sweep at the end of this file).
   it("names up to 7 characters: the WHOLE worst-case envelope stays under the fixed reserve", async () => {
     NAME = "N".repeat(7);
     const { data } = (await worstCase()) as { data: any };
@@ -1106,5 +1175,127 @@ describe("A2 C4 — the worst-case envelope", () => {
       // ...and it still answers with rows (degrade to a smaller page, never to nothing).
       expect((result.data as any).returned).toBeGreaterThan(0);
     }
+  });
+});
+
+// ===========================================================================
+// A2 pack C15 (A2-CR-3) — the page never takes more than the room the MEASURED envelope
+// leaves. Pinned THROUGH THE ADAPTER (createAiTools with a real budget.remaining), the only
+// place an over-budget result is discarded whole: an envelope just under the 8 KiB reserve
+// used to keep the 4 KiB row floor, so at a 12,000 B budget the result reached 12,058 B
+// (codex's probe) and the model got a truncation notice instead of a page.
+// ===========================================================================
+
+describe("A2 C15 — reorder's page fits the measured room, through the adapter", () => {
+  /** tools.ts's ENVELOPE_RESERVE_BYTES and MIN_RANK_PAGE_BYTES (not exported). */
+  const ENVELOPE_RESERVE_BYTES = 8_192;
+  const MIN_RANK_PAGE_BYTES = 4_096;
+  const COMPANIES = ["c0", "c1", "c2", "c3", "c4"].map((c) => `${c}${"x".repeat(23)}`);
+  const ADAPTER_CTX = { userId: 1, tokenId: null, surface: "web", companyIds: COMPANIES } as unknown as ResolvedContext;
+  const ARGS = { includeHealthy: true, limit: 50 };
+  const bytesOf = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  /** What ships around the rows (rows: []). */
+  const envelopeBytesOf = (data: any) => bytesOf({ ...data, rows: [] });
+  /** The tool's own measurement: rows: [] and the widest counters (A2 C1 / C4). */
+  const measuredEnvelopeOf = (data: any) =>
+    bytesOf({
+      ...data,
+      rows: [],
+      returned: data.totalRows,
+      nextOffset: data.totalRows >= 1000 ? data.totalRows : null,
+      remainingRows: data.totalRows,
+    });
+
+  /**
+   * Codex's probe: 25 unsized products at 0 stock with recorded orders in c0 only, over five
+   * 191-character companies of which only c0 records (a company-kind partial), and a 30-hour-
+   * old success (the stale freshness note, a string C15 leaves unchanged). With 80-character
+   * names the whole envelope sits just UNDER the reserve — measured 8,163 B at `df6c83d`,
+   * where this probe shipped 12,105 B at a 12,000 B budget and the adapter discarded it; with
+   * 255-character names it is well over the reserve.
+   */
+  function seedProbe(nameLength: number) {
+    const ids = Array.from({ length: 25 }, (_, i) => 1000 + i);
+    seedRuns([salesRun("SUCCEEDED", 30)]);
+    db.company.findMany.mockResolvedValue(COMPANIES.map((id) => ({ id, name: "C".repeat(191) })));
+    seedFacts({
+      approvedActiveIds: ids,
+      facts: [
+        { productId: 1, companyId: COMPANIES[0], dayKey: "2020-01-01", orderedQty: 1, orderCount: 1 },
+        ...ids.map((id) => ({
+          productId: id,
+          companyId: COMPANIES[0],
+          dayKey: daysBack(1),
+          orderedQty: 99_999,
+          orderCount: 9_999,
+        })),
+      ],
+    });
+    db.product.findMany.mockResolvedValue([1, ...ids].map((id) => ({ id })));
+    mockReport.mockResolvedValue(
+      reportOf(ids.map((id) => ({ ...unsized(id, 0), productName: "N".repeat(nameLength) }))),
+    );
+  }
+
+  /** One turn through the adapter with `remaining` bytes left. */
+  async function viaAdapter(remaining: number): Promise<any> {
+    const set = createAiTools(ADAPTER_CTX, { remaining }, jest.fn().mockResolvedValue(undefined) as never);
+    return (set.reorder_report as unknown as { execute: (args: unknown) => Promise<unknown> }).execute(ARGS);
+  }
+
+  it("codex's probe at a 12,000 B budget: ok, within budget, with rows — never discarded whole", async () => {
+    seedProbe(80);
+    const result = await viaAdapter(12_000);
+    expect({ status: result.status, bytes: result.meta.bytes }).toEqual({
+      status: "ok",
+      bytes: expect.any(Number),
+    });
+    expect(result.meta.bytes).toBeLessThanOrEqual(12_000);
+    expect(result.data.returned).toBeGreaterThanOrEqual(1);
+    // Non-vacuity: this IS the under-reserve case, where the old floor applied.
+    expect(measuredEnvelopeOf(result.data)).toBeLessThan(ENVELOPE_RESERVE_BYTES);
+    expect(12_000 - ENVELOPE_RESERVE_BYTES).toBeLessThan(MIN_RANK_PAGE_BYTES);
+    expect(result.data.coverage.orderSignalCompanyCoverageNote).toBe(SALES_COMPANY_COVERAGE_MEASURED_NOTE);
+    expect(result.data.coverage.salesFreshnessNote).toContain("more than a day ago");
+  });
+
+  it.each([
+    ["just under the reserve (80-character names)", 80, "under"],
+    ["over the reserve (255-character names)", 255, "over"],
+  ])("a 250 B budget sweep with the envelope %s: every result ok and within budget, and the page shrinks", async (_label, nameLength, side) => {
+    seedProbe(nameLength);
+    const full = await viaAdapter(65_536);
+    expect(full.status).toBe("ok");
+    const measured = measuredEnvelopeOf(full.data);
+    expect(side === "under" ? measured < ENVELOPE_RESERVE_BYTES : measured > ENVELOPE_RESERVE_BYTES).toBe(true);
+    // The smallest budget at which the envelope plus one row fits: the one-row page's own size.
+    const first = full.data.rows[0];
+    const start = bytesOf({
+      ...full.data,
+      rows: [first],
+      returned: 1,
+      nextOffset: 1,
+      remainingRows: full.data.totalRows - 1,
+    });
+    const points: Array<{ budget: number; status: string; bytes: number; rows: number }> = [];
+    for (let budget = start; budget <= 16_384; budget += 250) {
+      const result = await viaAdapter(budget);
+      points.push({ budget, status: result.status, bytes: result.meta.bytes, rows: result.data?.returned ?? 0 });
+      if (result.status === "ok") {
+        // The measured envelope never under-counts what ships around the rows.
+        expect(envelopeBytesOf(result.data)).toBeLessThanOrEqual(measured);
+        expect(result.meta.bytes).toBe(bytesOf(result.data));
+      }
+    }
+    // The sweep crosses the point where the reserve rule's 4 KiB floor stops binding.
+    expect(points[0].budget).toBeLessThan(ENVELOPE_RESERVE_BYTES + MIN_RANK_PAGE_BYTES);
+    expect(points[points.length - 1].budget).toBeGreaterThan(ENVELOPE_RESERVE_BYTES + MIN_RANK_PAGE_BYTES);
+    // Every result is a page that fits — never the adapter's truncation notice.
+    expect(points.filter((p) => p.status !== "ok" || p.bytes > p.budget || p.rows < 1)).toEqual([]);
+    // The page shrinks (never a vacuous all-one-row sweep), and more room never returns fewer rows.
+    const rows = points.map((p) => p.rows);
+    expect(rows[0]).toBe(1);
+    expect(Math.max(...rows)).toBeGreaterThan(1);
+    expect(rows.every((n, i) => i === 0 || n >= rows[i - 1])).toBe(true);
   });
 });

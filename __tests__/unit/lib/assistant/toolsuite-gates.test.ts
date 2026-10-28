@@ -51,7 +51,15 @@ jest.mock("@/lib/prisma", () => {
           return (...args: unknown[]) => {
             calls.push({ model, method, args: args[0] });
             const key = `${model}.${method}`;
-            if (key in overrides) return Promise.resolve(overrides[key]);
+            // A seeded value may be a FUNCTION of the query, as on the `$root.` channel below
+            // (A2 C15: the run-history reads are answered query-faithfully — a fixed value
+            // would answer a read that asks the wrong question with the right rows).
+            if (key in overrides) {
+              const seeded = overrides[key];
+              return Promise.resolve(
+                typeof seeded === "function" ? (seeded as (...a: unknown[]) => unknown)(...args) : seeded,
+              );
+            }
             return Promise.resolve(benign(method));
           };
         },
@@ -2344,15 +2352,58 @@ describe("A2 C7 — compare_periods' freshness note and the freshness tool's las
     skippedReason: null,
   });
   const runReads = () => prismaCtl.__calls.filter((c) => c.model === "analyticsRebuildRun");
+  type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+  type RunQuery = {
+    where?: Record<string, unknown>;
+    orderBy?: Record<string, string>;
+    take?: number;
+    select?: Record<string, boolean>;
+  };
+  /**
+   * A2 C15: seed the sales run table, answered QUERY-FAITHFULLY through the proxy's function
+   * overrides — `where` (equality, `in`, `gt`, and `not` with SQL's NULL rule: a NULL column
+   * never matches `<>`), `orderBy` startedAt, `take` and `select`. An operator it does not
+   * model throws rather than matching silently.
+   */
+  function seedRuns(runs: RunRow[]) {
+    const scalar = (v: unknown) => (v instanceof Date ? v.getTime() : v);
+    const holds = (field: unknown, cond: unknown): boolean =>
+      cond === null || typeof cond !== "object" || cond instanceof Date
+        ? scalar(field) === scalar(cond)
+        : Object.entries(cond).every(([op, arg]) => {
+            if (op === "in") return (arg as unknown[]).some((v) => scalar(v) === scalar(field));
+            if (op === "gt") return field != null && (scalar(field) as number) > (scalar(arg) as number);
+            if (op === "not") return arg === null ? field != null : field != null && scalar(field) !== scalar(arg);
+            throw new Error(`run fake: unmodelled operator ${op}`);
+          });
+    const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
+      const rows: Array<Record<string, unknown>> = runs
+        .map((run) => ({ job: "sales", ...run }))
+        .filter((run: Record<string, unknown>) =>
+          Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
+        );
+      for (const [key, dir] of Object.entries(orderBy ?? {})) {
+        if (key !== "startedAt") throw new Error(`run fake: unmodelled orderBy ${key}`);
+        const sign = dir === "asc" ? 1 : -1;
+        rows.sort((a, b) => sign * ((a.startedAt as Date).getTime() - (b.startedAt as Date).getTime()));
+      }
+      const page = take == null ? rows : rows.slice(0, take);
+      if (!select) return page;
+      const keys = Object.keys(select).filter((k) => select[k]);
+      return page.map((row) => Object.fromEntries(keys.map((k) => [k, row[k]])));
+    };
+    prismaCtl.__overrides["analyticsRebuildRun.findFirst"] = (args?: RunQuery) => query({ ...args, take: 1 })[0] ?? null;
+    prismaCtl.__overrides["analyticsRebuildRun.findMany"] = (args?: RunQuery) => query(args);
+  }
 
   const SALES_TOTALS = { metric: "sales_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 14 } };
   const SALES_BY_PRODUCT = { ...SALES_TOTALS, groupBy: "product" };
   const LEDGER_TOTALS = { metric: "outbound_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 } };
   const LEDGER_BY_PRODUCT = { ...LEDGER_TOTALS, groupBy: "product" };
 
-  async function compareCoverage(args: Record<string, unknown>, runs: unknown[], ctx = CTX) {
+  async function compareCoverage(args: Record<string, unknown>, runs: RunRow[], ctx = CTX) {
     prismaCtl.__reset();
-    prismaCtl.__overrides["analyticsRebuildRun.findMany"] = runs;
+    seedRuns(runs);
     const result = await assistantTools.compare_periods.run(args, ctx);
     if (result.status !== "ok") throw new Error("not ok");
     return (result.data as { coverage: Record<string, unknown> }).coverage;
@@ -2390,10 +2441,10 @@ describe("A2 C7 — compare_periods' freshness note and the freshness tool's las
   it("get_data_freshness: rebuild.lastSucceededAt is the success's finishedAt, beside lastRunAt", async () => {
     prismaCtl.__reset();
     const run = successRun(30);
-    prismaCtl.__overrides["analyticsRebuildRun.findMany"] = [
+    seedRuns([
       { status: "FAILED", startedAt: finishedHoursAgo(2), finishedAt: finishedHoursAgo(2), skippedReason: null },
       run,
-    ];
+    ]);
     // The state row's lastRunAt is the FAILED attempt's finish (finalizeRebuildRun stamps
     // every finished attempt), so the two instants differ exactly as they do in production.
     const lastAttemptFinish = new Date("2026-10-27T02:00:09.000Z");

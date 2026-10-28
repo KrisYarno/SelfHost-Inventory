@@ -554,9 +554,11 @@ describe("A2 C7 — coverage.salesFreshnessNote on the composites' sales section
     mRebuildRuns.mockResolvedValue(succeededHoursAgo(20, true));
     const s = await getBusinessSnapshot(CTX, NOW);
     expect(s.sales.status).toBe("ok");
+    // A2 C15 (A2-CR-4): no "as of" claim — a failed attempt can leave some days rebuilt.
     expect((s.sales.coverage as Record<string, unknown>).salesFreshnessNote).toBe(
-      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
-        `rebuild, finished at ${new Date(NOW.getTime() - 20 * HOUR_MS).toISOString()}.`,
+      `The latest sales rebuild attempt did not succeed; the last successful rebuild finished at ` +
+        `${new Date(NOW.getTime() - 20 * HOUR_MS).toISOString()}, and orders recorded since then may ` +
+        `be missing or only partly counted.`,
     );
     // The disclosure triple it joins is intact.
     expect((s.sales.coverage as Record<string, unknown>).archivedProductsIncluded).toBe(0);

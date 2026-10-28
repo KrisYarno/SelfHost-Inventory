@@ -363,45 +363,49 @@ export interface SalesRebuildState {
   lastSucceededStartedAt: string | null;
 }
 
-/** How many of the newest sales runs `salesRebuildState` reads (A2 pack C7). */
-// 50, not 10 (orchestrator, M4 review): lock-held skips are filtered in JS AFTER the read,
-// so a burst of contended triggers must not push the last success out of the window.
-// Retention keeps the newest 100 runs per job (rebuild-lock.ts), so 50 is always held.
-const SALES_REBUILD_RUNS_READ = 50;
-
 /** A run that never started because another held the lock — not an attempt. */
 const LOCK_HELD_SKIP = "lock-held";
 
+/** How many later FAILED/ABORTED attempts the run-history read inspects: the run table's
+ *  per-job retention (`REBUILD_RUN_RETENTION`, `lib/analytics/rebuild-lock.ts`; the read
+ *  pin in sales-coverage.test.ts holds the two equal). A local value, not an import: the
+ *  lock module carries the rebuild's writes and stays off the assistant's read path. */
+const LATER_ATTEMPTS_READ = 100;
+
 /**
- * The sales rebuild state (A2 pack C7), from the newest 10 `analyticsRebuildRun` rows of
- * the "sales" job. The lock-held skips are filtered HERE, in JS: a Prisma
- * `{ not: 'lock-held' }` compiles to SQL `<>`, which also drops every FAILED run (their
- * `skippedReason` is NULL) — the very rows this read exists to see (A2-G1R3-3).
+ * The sales rebuild state (A2 pack C7), in two reads of `analyticsRebuildRun` for the
+ * "sales" job (A2 pack C15, A2-CR-5): (1) the newest SUCCEEDED run, read DIRECTLY — a
+ * bounded newest-N read could lose a retained success behind N lock-held skips and say no
+ * success is on record; (2) only when there is one, the FAILED / ABORTED runs that started
+ * after it (at most REBUILD_RUN_RETENTION, the rows retention keeps per job). The lock-held
+ * skips (ABORTED rows) are dropped from (2) HERE, in JS: a Prisma `{ not: 'lock-held' }`
+ * compiles to SQL `<>`, which also drops every FAILED run (their `skippedReason` is NULL) —
+ * the very rows this read exists to see (A2-G1R3-3). A RUNNING row is not an outcome yet.
  *
  * `lastSucceededAt` is the success's `finishedAt`, never its `startedAt`: `lastRunAt`
  * (finalizeRebuildRun's stamp) is a finish time, so the two read on one clock
  * (A2-G1R3-2). Global, not company-sensitive (like `lastRebuildAt`).
  */
 export async function salesRebuildState(): Promise<SalesRebuildState> {
-  const runs = await prisma.analyticsRebuildRun.findMany({
-    where: { job: "sales" },
+  const success = await prisma.analyticsRebuildRun.findFirst({
+    where: { job: "sales", status: "SUCCEEDED", finishedAt: { not: null } },
     orderBy: { startedAt: "desc" },
-    take: SALES_REBUILD_RUNS_READ,
-    select: { status: true, startedAt: true, finishedAt: true, skippedReason: true },
+    select: { startedAt: true, finishedAt: true },
   });
-  // Guards a deep-mocked prisma returning undefined (as the tool layer's name helpers do).
-  const attempts = (runs ?? []).filter((run) => run.skippedReason !== LOCK_HELD_SKIP);
-  const success = attempts.find((run) => run.status === "SUCCEEDED" && run.finishedAt != null);
-  if (!success) {
+  // `?.` guards a deep-mocked prisma returning undefined (as the tool layer's name helpers do).
+  if (success?.finishedAt == null) {
     return { lastSucceededAt: null, latestAttemptFailedAfterSuccess: false, lastSucceededStartedAt: null };
   }
-  const latestAttemptFailedAfterSuccess = attempts.some(
-    (run) =>
-      (run.status === "FAILED" || run.status === "ABORTED") &&
-      run.startedAt.getTime() > success.startedAt.getTime(),
+  const laterFailures = await prisma.analyticsRebuildRun.findMany({
+    where: { job: "sales", status: { in: ["FAILED", "ABORTED"] }, startedAt: { gt: success.startedAt } },
+    select: { skippedReason: true },
+    take: LATER_ATTEMPTS_READ,
+  });
+  const latestAttemptFailedAfterSuccess = (laterFailures ?? []).some(
+    (run) => run.skippedReason !== LOCK_HELD_SKIP,
   );
   return {
-    lastSucceededAt: (success.finishedAt as Date).toISOString(),
+    lastSucceededAt: success.finishedAt.toISOString(),
     latestAttemptFailedAfterSuccess,
     lastSucceededStartedAt: success.startedAt.toISOString(),
   };
@@ -416,24 +420,39 @@ const SALES_FRESHNESS_STALE_MS = 26 * 60 * 60 * 1000;
  * on record, the last success finished more than 26 hours ago, or a newer attempt did
  * not succeed. Undefined otherwise: today's figures being partial is a standing sentence
  * in the descriptions, never a note on every answer.
+ *
+ * After a failed attempt the note never says the figures are "as of" the last success
+ * (A2 pack C15, A2-CR-4): the rebuild commits each day in its own transaction
+ * (`rebuild-sales.ts`), so a failed or aborted attempt can leave some days rebuilt and
+ * others not.
  */
 export function salesFreshnessNote(state: SalesRebuildState, now: Date): string | undefined {
+  const { lastSucceededAt } = state;
+  if (lastSucceededAt === null) {
+    return "No successful sales rebuild is on record — order figures may be missing.";
+  }
   const failed = state.latestAttemptFailedAfterSuccess;
-  let note: string | undefined;
-  if (state.lastSucceededAt === null) {
-    note = "No successful sales rebuild is on record — order figures may be missing.";
-  } else if (now.getTime() - new Date(state.lastSucceededAt).getTime() > SALES_FRESHNESS_STALE_MS) {
-    note =
-      `The last successful sales rebuild finished at ${state.lastSucceededAt}, more than a day ` +
-      `ago; orders recorded after that are not counted yet.`;
-  } else if (failed) {
+  const stale = now.getTime() - new Date(lastSucceededAt).getTime() > SALES_FRESHNESS_STALE_MS;
+  if (stale && failed) {
     return (
-      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
-      `rebuild, finished at ${state.lastSucceededAt}.`
+      `The last successful sales rebuild finished at ${lastSucceededAt}, more than a day ago, and ` +
+      `a later attempt did not succeed; orders recorded since then may be missing or only partly ` +
+      `counted.`
     );
   }
-  if (note !== undefined && failed) note += " The latest rebuild attempt did not succeed.";
-  return note;
+  if (stale) {
+    return (
+      `The last successful sales rebuild finished at ${lastSucceededAt}, more than a day ago; ` +
+      `orders recorded after that are not counted yet.`
+    );
+  }
+  if (failed) {
+    return (
+      `The latest sales rebuild attempt did not succeed; the last successful rebuild finished at ` +
+      `${lastSucceededAt}, and orders recorded since then may be missing or only partly counted.`
+    );
+  }
+  return undefined;
 }
 
 /**
