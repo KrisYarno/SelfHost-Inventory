@@ -32,11 +32,21 @@ import { InvalidToolInputError, NoSuchToolError } from "ai";
 const RECOVERED_TOOL_CALL_PREFIXES = ["AI_InvalidToolInputError: ", "AI_NoSuchToolError: "];
 
 /**
+ * True for the INSTANCE half of a rejected tool call only (A2 pack C11): the SDK hands
+ * `onError` the instance once per rejected call (the `tool-input-error` part) and its
+ * string once more (the paired `tool-output-error`), so counting instances counts each
+ * rejected call exactly once.
+ */
+export function isRecoveredToolCallInstance(error: unknown): boolean {
+  return InvalidToolInputError.isInstance(error) || NoSuchToolError.isInstance(error);
+}
+
+/**
  * True for a tool call the SDK rejected — an `InvalidToolInputError` /
  * `NoSuchToolError` instance, or the string the SDK makes of one — and false for
  * everything else.
  */
 export function isRecoveredToolCallError(error: unknown): boolean {
-  if (InvalidToolInputError.isInstance(error) || NoSuchToolError.isInstance(error)) return true;
+  if (isRecoveredToolCallInstance(error)) return true;
   return typeof error === "string" && RECOVERED_TOOL_CALL_PREFIXES.some((prefix) => error.startsWith(prefix));
 }

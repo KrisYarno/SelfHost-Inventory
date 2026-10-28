@@ -32,12 +32,24 @@ jest.mock("ai", () => ({ __esModule: true, tool: (def: unknown) => def }));
 // A2 M3: get_stock_asof resolves a locationId (and the movement filters echo reads the
 // location's name), so the stub gains location.findUnique — a 100-character name, the
 // column's width (`locations.name` VARCHAR(100)), so the echo is at its heaviest.
+// A2 M4 (pack C7): the sales tools read the sales rebuild run history for the freshness
+// note; the stub answers with the LONGEST note (a stale success, then a newer attempt that
+// did not succeed), so every sales envelope here carries it at its heaviest.
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {
     productSalesFact: { groupBy: jest.fn(async () => []) },
     product: { findMany: jest.fn(async () => []) },
     location: { findUnique: jest.fn(async () => ({ id: 2, name: "L".repeat(100) })) },
+    analyticsRebuildRun: {
+      findMany: jest.fn(async () => {
+        const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
+        return [
+          { status: "FAILED", startedAt: hoursAgo(1), finishedAt: hoursAgo(1), skippedReason: null },
+          { status: "SUCCEEDED", startedAt: hoursAgo(31), finishedAt: hoursAgo(30), skippedReason: null },
+        ];
+      }),
+    },
   },
 }));
 // A2 M3 (pack C6 / C2): the two other paged tools M3 grows — valuation product rows gain
@@ -624,5 +636,80 @@ describe("A2 M3 — the grown envelopes and rows still shrink to fit", () => {
     expect(tight.data!.counts).toEqual({ products: TOTAL, withOutbound: TOTAL / 2, withInbound: TOTAL / 3 });
     expect(typeof tight.data!.countsNote).toBe("string");
     expect(tight.meta!.bytes).toBeLessThanOrEqual(TIGHT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 M4 (pack C1) — the compare by_product fit at its EXACT boundary, with remainingRows in
+// the envelope. remainingRows depends on the page, so the envelope measurement weighs it at
+// its widest (`totalRows`); a sweep across more than one unranked row's width of budgets
+// passes through the budget at which the last unranked row only just fits, and every one of
+// them must still come back OK, inside its budget, with the right remainingRows.
+//
+// (Recorded: the joint fit leaves at least 5 bytes of slack — paginate counts a comma per
+// row and both arrays' "[]" — and the measured counters are already wider than the shipped
+// ones, so an under-weighed remainingRows (at most 2 bytes) would not overflow here on its
+// own; the placeholder keeps the measurement an upper bound by construction.)
+// ---------------------------------------------------------------------------
+
+describe("A2 C1 — compare by_product at the exact byte boundary, remainingRows included", () => {
+  const RANKED = 200;
+  const UNRANKED = 200;
+
+  beforeEach(() => {
+    identitiesMock.mockImplementation(async (ids: number[]) =>
+      new Map(ids.map((id) => [id, { name: "N".repeat(255), lifecycle: "active" }])),
+    );
+    compareByProductMock.mockReset();
+    compareByProductMock.mockResolvedValue({
+      ranked: Array.from({ length: RANKED }, (_v, i) => ({
+        productId: i + 1, a: i, b: i * 2, delta: i, pctChange: 1,
+        aPerDay: i / 7, bPerDay: (i * 2) / 7, perDayDelta: i / 7, perDayPctChange: 1, perDayDirection: "increase",
+      })),
+      unranked: Array.from({ length: UNRANKED }, (_v, i) => ({
+        productId: 1_000 + i, a: null, b: i, delta: null, pctChange: null,
+        aPerDay: null, bPerDay: i / 7, perDayDelta: null, perDayPctChange: null, perDayDirection: null,
+        reasons: { a: "period A is not fully covered by sales_units data in every company" },
+      })),
+      reasons: { a: "period A is not fully covered by sales_units data in every company" },
+      periodCoverage: { a: "partial", b: "partial" },
+      unequalLengths: false,
+      rankedBy: "total",
+      directionCounts: { increased: RANKED - 1, decreased: 0, unchanged: 1 },
+      excludedUnapprovedProducts: 0,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (prismaGroupBy as jest.Mock).mockImplementation(async (args: any) =>
+      ((args?.where?.productId?.in ?? []) as number[]).map((id) => ({ productId: id, _min: { dayKey: "2021-03-04" } })),
+    );
+  });
+
+  it("every budget across one unranked row's width fits, ships the right remainingRows, and one sits at the boundary", async () => {
+    const args = { metric: "sales_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 }, groupBy: "product" };
+    const probe = (await runOnce("compare_periods", args, 6_000)) as ExecResult & {
+      data?: { unranked?: unknown[] };
+    };
+    // One unranked row's serialized width: the sweep below spans more than it, so it passes
+    // through the budget at which the last unranked row only just fits.
+    const rowWidth = Buffer.byteLength(JSON.stringify(probe.data!.unranked![0]), "utf8") + 1;
+    let minSlack = Number.POSITIVE_INFINITY;
+    for (let budget = 6_000; budget <= 6_000 + rowWidth + 8; budget += 1) {
+      const r = (await runOnce("compare_periods", args, budget)) as ExecResult & {
+        data?: { totalRows: number; nextOffset: number | null; remainingRows: number; coverage: Record<string, unknown> };
+        meta?: { bytes: number };
+      };
+      expect({ budget, status: r.status }).toEqual({ budget, status: "ok" });
+      expect({ budget, fits: r.meta!.bytes <= budget }).toEqual({ budget, fits: true });
+      const d = r.data!;
+      expect({ budget, remainingRows: d.remainingRows }).toEqual({
+        budget,
+        remainingRows: d.nextOffset === null ? 0 : d.totalRows - d.nextOffset,
+      });
+      // The heaviest page-independent key rides on every page (weighed by the measurement).
+      expect(typeof d.coverage.salesFreshnessNote).toBe("string");
+      minSlack = Math.min(minSlack, budget - r.meta!.bytes);
+    }
+    // Non-vacuity: some budget in the sweep was filled to within a few bytes.
+    expect(minSlack).toBeLessThan(16);
   });
 });

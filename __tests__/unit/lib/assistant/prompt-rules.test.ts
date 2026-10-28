@@ -20,13 +20,15 @@
 // `ai` (v7) is ESM-only; createAiTools only stores def+execute, never invokes ai's
 // tool() body, so a passthrough is faithful (same stub the adapter suites use).
 jest.mock("ai", () => ({ __esModule: true, tool: (def: unknown) => def }));
-// The by-product compare read below reaches exactly two prisma delegates (the identity
-// lookup and the post-pagination first-sale evidence); nothing else here touches prisma.
+// The by-product compare read below reaches exactly three prisma delegates (the identity
+// lookup, the post-pagination first-sale evidence and — A2 C7, a sales metric — the sales
+// rebuild run history behind the freshness note); nothing else here touches prisma.
 jest.mock("@/lib/prisma", () => ({
   __esModule: true,
   default: {
     product: { findMany: jest.fn(async () => []) },
     productSalesFact: { groupBy: jest.fn(async () => []) },
+    analyticsRebuildRun: { findMany: jest.fn(async () => []) },
   },
 }));
 // The module result is injected so the pin reads the note the TOOL ships, not the module.
@@ -493,26 +495,45 @@ describe("A1 C8: the tool descriptions the model is handed", () => {
   });
 
   // A1 pack C8 REV 7 (FR2, A1-CRS-4): paging only when the remaining rows are needed —
-  // the prompt shows at most 40 rows and pages on the user's request.
+  // the prompt shows at most 40 rows and pages on the user's request. A2 pack C1: the
+  // posture names remainingRows — the count to use for "how many more", never computed.
   it("every paginated tool pages only when the remaining rows are needed", () => {
     const paged = descriptions.filter(([, text]) =>
       text.replace(/\s+/g, " ").includes(
-        "List results are paginated: `returned`/`totalRows`/`nextOffset` describe the page.",
+        "List results are paginated: `returned`/`totalRows`/`nextOffset`/`remainingRows` describe the page.",
       ),
     );
     expect(paged.length).toBeGreaterThan(0); // non-vacuity
     for (const [name, text] of paged) {
       const d = text.replace(/\s+/g, " ");
       expect({ name, has: d.includes(
-        "When `nextOffset` is not null, more rows exist — call again with that `offset` " +
-          "when you need the remaining rows.",
+        "`remainingRows` counts the rows after this page — use it for how many more there are, " +
+          "never compute it. When `nextOffset` is not null, more rows exist — call again with " +
+          "that `offset` when you need the remaining rows.",
       ) }).toEqual({ name, has: true });
+    }
+    // The pre-A2 posture (without remainingRows) is gone from every description.
+    for (const [name, text] of descriptions) {
+      const d = text.replace(/\s+/g, " ");
+      expect({ name, old: d.includes("`returned`/`totalRows`/`nextOffset` describe the page.") }).toEqual({
+        name,
+        old: false,
+      });
     }
     // The old unconditional instruction is gone from every description.
     for (const [name, text] of descriptions) {
       const d = text.replace(/\s+/g, " ");
       expect({ name, hit: d.includes("call again with that `offset`.") }).toEqual({ name, hit: false });
     }
+  });
+
+  // A2 pack C1: compare_periods does not embed the paging posture, so its by_product page
+  // says what remainingRows counts in its own sentence.
+  it("compare_periods says what remainingRows counts in groupBy:'product' mode", () => {
+    expect(descOf("compare_periods")).toContain(
+      "In groupBy:'product' mode, remainingRows counts the ranked rows after this page.",
+    );
+    expect(descOf("compare_periods")).not.toContain("List results are paginated");
   });
 
   it("compare_periods reports unranked rows as not comparable, in the prompt's terms", () => {

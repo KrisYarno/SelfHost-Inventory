@@ -28,6 +28,9 @@ import {
   companyCoverageDetail,
   salesDataStartsByCompany,
   salesCoverageReason,
+  salesFreshnessNote,
+  salesRebuildState,
+  type SalesRebuildState,
   BUNDLE_REVENUE_DISCLOSURE,
   SALES_ATTRIBUTION_NOTE,
   SALES_COMPANY_COVERAGE_NOTE,
@@ -464,5 +467,185 @@ describe("A2 C8 companyCoverageDetail — the name alone, the id only as a fallb
     ]);
     expect(detail).not.toContain("cmp_");
     expect(detail).toBe("no sales data recorded for Acme Peptides; latest company start 2026-07-09");
+  });
+});
+
+// ===========================================================================
+// A2 pack C7 — the sales rebuild state and the freshness note (material staleness only)
+// ===========================================================================
+
+describe("A2 C7 salesRebuildState — the newest 50 sales runs, lock-held skips filtered in JS", () => {
+  type Run = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+  const at = (iso: string) => new Date(iso);
+  /** Rows as the read returns them: newest startedAt first. */
+  const seedRuns = (runs: Run[]) =>
+    db.analyticsRebuildRun.findMany.mockResolvedValue(
+      [...runs].sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime()) as never,
+    );
+  const success = (start: string, finish: string): Run => ({
+    status: "SUCCEEDED",
+    startedAt: at(start),
+    finishedAt: at(finish),
+    skippedReason: null,
+  });
+
+  it("reads the newest 50 rows of the sales job by startedAt, with NO skippedReason predicate in SQL", async () => {
+    seedRuns([]);
+    await salesRebuildState();
+    expect(db.analyticsRebuildRun.findMany).toHaveBeenCalledTimes(1);
+    const args = db.analyticsRebuildRun.findMany.mock.calls[0][0] as Record<string, any>;
+    expect(args.where).toEqual({ job: "sales" });
+    expect(args.orderBy).toEqual({ startedAt: "desc" });
+    expect(args.take).toBe(50);
+    // A Prisma `{ not: 'lock-held' }` compiles to SQL `<>`, which drops every FAILED run
+    // (their skippedReason is NULL) — the filter must never be in the query.
+    expect(JSON.stringify(args.where)).not.toContain("skippedReason");
+  });
+
+  it("a success behind 12 newer lock-held skips is still found (they never fill the read window)", async () => {
+    const skips: Run[] = Array.from({ length: 12 }, (_, i) => ({
+      status: "ABORTED",
+      startedAt: at(`2026-10-27T03:${String(10 + i).padStart(2, "0")}:00.000Z`),
+      finishedAt: null,
+      skippedReason: "lock-held",
+    }));
+    seedRuns([success("2026-10-27T03:00:00.000Z", "2026-10-27T03:08:00.000Z"), ...skips]);
+    expect(await salesRebuildState()).toEqual({
+      lastSucceededAt: "2026-10-27T03:08:00.000Z",
+      latestAttemptFailedAfterSuccess: false,
+    });
+  });
+
+  it("lastSucceededAt is the success run's finishedAt (the lastRunAt clock), never its startedAt", async () => {
+    seedRuns([success("2026-10-27T02:00:00.000Z", "2026-10-27T02:07:31.250Z")]);
+    expect(await salesRebuildState()).toEqual({
+      lastSucceededAt: "2026-10-27T02:07:31.250Z",
+      latestAttemptFailedAfterSuccess: false,
+    });
+  });
+
+  it("the NEWEST success wins; an older one never shows", async () => {
+    seedRuns([
+      success("2026-10-25T02:00:00.000Z", "2026-10-25T02:05:00.000Z"),
+      success("2026-10-26T02:00:00.000Z", "2026-10-26T02:06:00.000Z"),
+    ]);
+    expect((await salesRebuildState()).lastSucceededAt).toBe("2026-10-26T02:06:00.000Z");
+  });
+
+  it("a FAILED run (NULL skippedReason) started after the success -> latestAttemptFailedAfterSuccess", async () => {
+    seedRuns([
+      success("2026-10-26T02:00:00.000Z", "2026-10-26T02:06:00.000Z"),
+      { status: "FAILED", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: at("2026-10-27T02:00:09.000Z"), skippedReason: null },
+    ]);
+    expect(await salesRebuildState()).toEqual({
+      lastSucceededAt: "2026-10-26T02:06:00.000Z",
+      latestAttemptFailedAfterSuccess: true,
+    });
+  });
+
+  it("an ABORTED run that was not a lock-held skip (lease lost) counts as an attempt that did not succeed", async () => {
+    seedRuns([
+      success("2026-10-26T02:00:00.000Z", "2026-10-26T02:06:00.000Z"),
+      { status: "ABORTED", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: at("2026-10-27T02:20:00.000Z"), skippedReason: "lease-lost" },
+    ]);
+    expect((await salesRebuildState()).latestAttemptFailedAfterSuccess).toBe(true);
+  });
+
+  it("a lock-held ABORTED row is IGNORED — it was never an attempt", async () => {
+    seedRuns([
+      success("2026-10-26T02:00:00.000Z", "2026-10-26T02:06:00.000Z"),
+      { status: "ABORTED", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: at("2026-10-27T02:00:00.000Z"), skippedReason: "lock-held" },
+    ]);
+    expect(await salesRebuildState()).toEqual({
+      lastSucceededAt: "2026-10-26T02:06:00.000Z",
+      latestAttemptFailedAfterSuccess: false,
+    });
+  });
+
+  it("a failure BEFORE the newest success, and a RUNNING attempt after it, do not count", async () => {
+    seedRuns([
+      { status: "FAILED", startedAt: at("2026-10-25T02:00:00.000Z"), finishedAt: at("2026-10-25T02:00:09.000Z"), skippedReason: null },
+      success("2026-10-26T02:00:00.000Z", "2026-10-26T02:06:00.000Z"),
+      { status: "RUNNING", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: null, skippedReason: null },
+    ]);
+    expect((await salesRebuildState()).latestAttemptFailedAfterSuccess).toBe(false);
+  });
+
+  it("no success on record (only failures and skips) -> lastSucceededAt null, and no success to have failed after", async () => {
+    seedRuns([
+      { status: "FAILED", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: at("2026-10-27T02:00:09.000Z"), skippedReason: null },
+      { status: "ABORTED", startedAt: at("2026-10-27T03:00:00.000Z"), finishedAt: at("2026-10-27T03:00:00.000Z"), skippedReason: "lock-held" },
+    ]);
+    expect(await salesRebuildState()).toEqual({ lastSucceededAt: null, latestAttemptFailedAfterSuccess: false });
+    db.analyticsRebuildRun.findMany.mockResolvedValue(undefined as never); // a deep-mock read
+    expect(await salesRebuildState()).toEqual({ lastSucceededAt: null, latestAttemptFailedAfterSuccess: false });
+  });
+});
+
+describe("A2 C7 salesFreshnessNote — a note only on material staleness", () => {
+  const NOW = new Date("2026-10-27T12:00:00.000Z");
+  const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
+  const state = (lastSucceededAt: string | null, failed = false): SalesRebuildState => ({
+    lastSucceededAt,
+    latestAttemptFailedAfterSuccess: failed,
+  });
+
+  it("no successful rebuild on record -> the missing-figures sentence", () => {
+    expect(salesFreshnessNote(state(null), NOW)).toBe(
+      "No successful sales rebuild is on record — order figures may be missing.",
+    );
+  });
+
+  it("a 20-hour-old success -> no note (the most recent day or two is the standing description sentence)", () => {
+    expect(salesFreshnessNote(state(hoursAgo(20)), NOW)).toBeUndefined();
+  });
+
+  it("a 30-hour-old success -> the stale sentence, naming the finish", () => {
+    const finished = hoursAgo(30);
+    expect(salesFreshnessNote(state(finished), NOW)).toBe(
+      `The last successful sales rebuild finished at ${finished}, more than a day ago; orders ` +
+        `recorded after that are not counted yet.`,
+    );
+  });
+
+  it("the boundary is MORE than 26 hours: exactly 26 is no note, one second past is", () => {
+    expect(salesFreshnessNote(state(hoursAgo(26)), NOW)).toBeUndefined();
+    const past = new Date(NOW.getTime() - 26 * 3_600_000 - 1_000).toISOString();
+    expect(salesFreshnessNote(state(past), NOW)).toContain("more than a day ago");
+  });
+
+  it("a recent success with a newer attempt that did not succeed -> the as-of sentence", () => {
+    const finished = hoursAgo(20);
+    expect(salesFreshnessNote(state(finished, true), NOW)).toBe(
+      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
+        `rebuild, finished at ${finished}.`,
+    );
+  });
+
+  it("a stale success with a newer attempt that did not succeed -> the stale sentence + 'did not succeed'", () => {
+    const finished = hoursAgo(30);
+    expect(salesFreshnessNote(state(finished, true), NOW)).toBe(
+      `The last successful sales rebuild finished at ${finished}, more than a day ago; orders ` +
+        `recorded after that are not counted yet. The latest rebuild attempt did not succeed.`,
+    );
+  });
+
+  it("a defined no-success note gains the sentence too when the flag is set", () => {
+    expect(salesFreshnessNote(state(null, true), NOW)).toBe(
+      "No successful sales rebuild is on record — order figures may be missing. The latest " +
+        "rebuild attempt did not succeed.",
+    );
+  });
+
+  it("the end to end: a FAILED run after a 20-hour-old success reads 'did not succeed' through the real state read", async () => {
+    db.analyticsRebuildRun.findMany.mockResolvedValue([
+      { status: "FAILED", startedAt: new Date(hoursAgo(2)), finishedAt: new Date(hoursAgo(2)), skippedReason: null },
+      { status: "SUCCEEDED", startedAt: new Date(hoursAgo(20.1)), finishedAt: new Date(hoursAgo(20)), skippedReason: null },
+    ] as never);
+    const note = salesFreshnessNote(await salesRebuildState(), NOW);
+    expect(note).toBe(
+      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
+        `rebuild, finished at ${hoursAgo(20)}.`,
+    );
   });
 });

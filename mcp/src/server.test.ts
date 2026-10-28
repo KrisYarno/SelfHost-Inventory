@@ -42,6 +42,8 @@ jest.mock("@/lib/prisma", () => ({
       count: jest.fn(async () => 0),
     },
     analyticsRebuildState: { findUnique: jest.fn(async () => null) },
+    // A2 M4 (pack C7): the sales rebuild run history (the freshness note + lastSucceededAt).
+    analyticsRebuildRun: { findMany: jest.fn(async () => []) },
     fulfillmentSyncState: { findMany: jest.fn(async () => []) },
     productStockSnapshot: {
       // Wave-2: get_stock_asof reads _min AND _max for dataStart + watermark.
@@ -266,6 +268,8 @@ describe("POST /mcp — tool round-trip", () => {
         returned: 0,
         totalRows: 0,
         nextOffset: null,
+        // A2 pack C1: the rows after this page (none on an empty last page).
+        remainingRows: 0,
         // G2-6: identityMisses rides on every find_product coverage block (0 is the
         // normal reading; it is a defined field, never a conditional one).
         coverage: {
@@ -641,6 +645,11 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     p.location.findUnique.mockResolvedValue(null);
     p.company.findMany.mockReset();
     p.company.findMany.mockResolvedValue([]);
+    // A2 M4: the sales rebuild run history, isolated per test.
+    p.analyticsRebuildRun.findMany.mockReset();
+    p.analyticsRebuildRun.findMany.mockResolvedValue([]);
+    p.product.count.mockReset();
+    p.product.count.mockResolvedValue(0);
   });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1051,6 +1060,73 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     // A2 C8: the company is NAMED in the prose, never shown by its id.
     expect(toolResult.data.coverage.companyCoverageNote).toContain("no sales data recorded for Beta Labs");
     expect(toolResult.data.coverage.companyCoverageNote).not.toContain("company c2");
+  });
+
+  // ---------------------------------------------------------------------------
+  // A2 M4 on the WIRE (pack C1, C7): remainingRows from the envelope's own total and
+  // cursor, the sales-freshness note on order figures, and get_data_freshness'
+  // lastSucceededAt cross the MCP boundary with real values.
+  // ---------------------------------------------------------------------------
+
+  it("find_product: 50 matches at limit 20 -> nextOffset 20, remainingRows 30 on the wire (A2 C1)", async () => {
+    const page = Array.from({ length: 20 }, (_v, i) => ({
+      id: i + 1,
+      name: `Match ${i + 1}`,
+      baseName: "Match",
+      variant: `${i + 1}`,
+      lowStockThreshold: null,
+      approvalStatus: "APPROVED",
+      deletedAt: null,
+    }));
+    p.product.count.mockResolvedValueOnce(50);
+    // One delegate, two reads: the DB page of 20 and the identity lookup over its ids.
+    p.product.findMany.mockResolvedValue(page);
+
+    const toolResult = await roundTrip("find_product", { query: "match", limit: 20 });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.returned).toBe(20);
+    expect(toolResult.data.totalRows).toBe(50);
+    expect(toolResult.data.nextOffset).toBe(20);
+    expect(toolResult.data.remainingRows).toBe(30);
+  });
+
+  it("get_sales: a 30-hour-old successful rebuild puts salesFreshnessNote on the wire (A2 C7)", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    const finishedAt = new Date(Date.now() - 30 * 3_600_000);
+    p.analyticsRebuildRun.findMany.mockResolvedValue([
+      { status: "SUCCEEDED", startedAt: new Date(finishedAt.getTime() - 60_000), finishedAt, skippedReason: null },
+    ]);
+
+    const toolResult = await roundTrip("get_sales", { groupBy: "day" });
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.coverage.salesFreshnessNote).toBe(
+      `The last successful sales rebuild finished at ${finishedAt.toISOString()}, more than a day ` +
+        `ago; orders recorded after that are not counted yet.`,
+    );
+    expect(toolResult.data.remainingRows).toBe(0);
+    // The run history is read for the sales job only, newest first, filtered in JS.
+    const read = p.analyticsRebuildRun.findMany.mock.calls[0][0];
+    expect(read).toMatchObject({ where: { job: "sales" }, orderBy: { startedAt: "desc" }, take: 50 });
+  });
+
+  it("get_data_freshness: rebuild.lastSucceededAt beside lastRunAt on the wire (A2 C7)", async () => {
+    const lastAttempt = new Date("2026-10-27T02:00:09.000Z");
+    const lastSuccess = new Date("2026-10-26T02:07:31.000Z");
+    p.analyticsRebuildState.findUnique.mockImplementation(async ({ where }: { where: { job: string } }) =>
+      where.job === "sales" ? { lastRunAt: lastAttempt, sourceWatermark: null } : null,
+    );
+    p.analyticsRebuildRun.findMany.mockResolvedValue([
+      { status: "FAILED", startedAt: new Date("2026-10-27T02:00:00.000Z"), finishedAt: lastAttempt, skippedReason: null },
+      { status: "SUCCEEDED", startedAt: new Date("2026-10-26T02:00:00.000Z"), finishedAt: lastSuccess, skippedReason: null },
+    ]);
+
+    const toolResult = await roundTrip("get_data_freshness", {});
+    expect(toolResult.status).toBe("ok");
+    expect(toolResult.data.rebuild).toEqual({
+      lastRunAt: lastAttempt.toISOString(),
+      lastSucceededAt: lastSuccess.toISOString(),
+      sourceWatermark: null,
+    });
   });
 
   // ---------------------------------------------------------------------------

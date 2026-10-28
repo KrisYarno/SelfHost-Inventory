@@ -1200,6 +1200,102 @@ describe("onError: a tool call the SDK rejected is not a failed turn (A1 C12)", 
     await expect(fenceStatus(0)).resolves.toEqual({ finalized: true, status: "error" });
     expect(mockTitles.generateThreadTitle).not.toHaveBeenCalled();
   });
+
+  // -------------------------------------------------------------------------
+  // A2 pack C11 (FD4-1): the redacted run log COUNTS the rejected tool calls — one per
+  // call (the instance; its string twin is not a second call), logged when streamText's
+  // onFinish fires (the real SDK's ordering is proven in the wire probe, cases f and
+  // f-one-step). Still "TOOL_ERROR", still nothing latched.
+  // -------------------------------------------------------------------------
+
+  describe("A2 C11 — rejectedToolCalls on the run log", () => {
+    /** The run-log rows the route wrote, in order. */
+    const runRows = (): Array<Record<string, unknown>> =>
+      info.mock.calls.filter(([tag]) => tag === "[assistant] run").map(([, row]) => row as Record<string, unknown>);
+    const finish = () => (streamTextSpy.mock.calls[0][0] as { onFinish: () => void }).onFinish();
+
+    test.each(REJECTIONS)("one rejection (%s): the instance then its string -> rejectedToolCalls 1", async (_name, rejection) => {
+      await POST(req(validBody));
+      const o = capturedStreamOptions();
+      const instance = rejection();
+      expect(o.onError(instance)).toBe("TOOL_ERROR");
+      expect(o.onError(instance.toString())).toBe("TOOL_ERROR");
+      finish();
+      expect(runRows()).toEqual([expect.objectContaining({ outcome: "ok", rejectedToolCalls: 1 })]);
+      expect(failedRunsLogged()).toBe(0);
+
+      // Nothing latched: the turn still finalizes ok.
+      o.onEnd({ responseMessage: RECOVERED, isAborted: false });
+      await settle();
+      expect(mockThreadOps.finalizeTurn).toHaveBeenCalledWith(expect.objectContaining({ errorLatched: null }));
+      await expect(fenceStatus(0)).resolves.toEqual({ finalized: true, status: "ok" });
+    });
+
+    test("two rejections (an unknown tool, then invalid input), each instance + string -> 2", async () => {
+      await POST(req(validBody));
+      const o = capturedStreamOptions();
+      for (const [, rejection] of REJECTIONS) {
+        const instance = rejection();
+        expect(o.onError(instance)).toBe("TOOL_ERROR");
+        expect(o.onError(instance.toString())).toBe("TOOL_ERROR");
+      }
+      finish();
+      expect(runRows()).toEqual([expect.objectContaining({ outcome: "ok", rejectedToolCalls: 2 })]);
+      expect(failedRunsLogged()).toBe(0);
+    });
+
+    test("the string twin alone is never counted (it is the same call's second part)", async () => {
+      await POST(req(validBody));
+      const o = capturedStreamOptions();
+      const [, rejection] = REJECTIONS[0];
+      expect(o.onError(rejection().toString())).toBe("TOOL_ERROR");
+      finish();
+      expect(runRows()).toEqual([expect.objectContaining({ outcome: "ok", rejectedToolCalls: 0 })]);
+    });
+
+    test("the run-log shape: the redacted vocabulary plus rejectedToolCalls, nothing else", async () => {
+      await POST(req(validBody));
+      const o = capturedStreamOptions();
+      const [, rejection] = REJECTIONS[1];
+      o.onError(rejection());
+      finish();
+      expect(runRows()).toEqual([
+        {
+          threadId: THREAD_ID,
+          requestId: 4242,
+          userId: 7,
+          providerKind: "ANTHROPIC",
+          model: "claude-x",
+          toolNames: [],
+          rejectedToolCalls: 1,
+          outcome: "ok",
+          durationMs: expect.any(Number),
+        },
+      ]);
+    });
+
+    test("a later provider failure logs the error row with the count so far; a control error counts nothing", async () => {
+      await POST(req(validBody));
+      const o = capturedStreamOptions();
+      const [, rejection] = REJECTIONS[0];
+      o.onError(rejection());
+      // An Error merely NAMED like a rejection is a provider failure, not a rejected call.
+      expect(o.onError(Object.assign(new Error("x"), { name: "AI_NoSuchToolError" }))).toBe("PROVIDER_ERROR");
+      await settle();
+      expect(runRows()).toEqual([expect.objectContaining({ outcome: "error", rejectedToolCalls: 1 })]);
+      expect(failedRunsLogged()).toBe(1);
+    });
+
+    // FD4-4: stream-errors.ts is complete only for the route's current streamText options —
+    // a repair hook would turn a rejection into a ToolCallRepairError the classifier (and
+    // so this counter) does not know.
+    test("FD4-4: the captured streamText options carry no experimental_repairToolCall", async () => {
+      await POST(req(validBody));
+      const opts = streamTextSpy.mock.calls[0][0] as Record<string, unknown>;
+      expect(opts).not.toHaveProperty("experimental_repairToolCall");
+      expect(Object.keys(opts).some((k) => /repair/i.test(k))).toBe(false);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1268,6 +1364,8 @@ describe("redacted run log", () => {
       providerKind: "ANTHROPIC",
       model: "claude-x",
       toolNames: [],
+      // A2 pack C11: the rejected-tool-call count (none in this turn).
+      rejectedToolCalls: 0,
       outcome: "ok",
       durationMs: expect.any(Number),
     });

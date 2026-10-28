@@ -2124,3 +2124,274 @@ describe("A2 C10 — no internal lane or design-reference names in model-facing 
     expect(payloads.some((p) => p.includes('"watermarkScope":"all locations"'))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A2 pack C1 (A2-G1R3-1) — the remainingRows VALUE gate. Every PAGED tool is re-run with a
+// seeded per-tool override (its count / findMany / groupBy returns more rows than a small
+// `limit`, so the cursor is NON-null), and EVERY object in the payload that carries a
+// `nextOffset` key must carry `remainingRows === (nextOffset === null ? 0 : totalRows -
+// nextOffset)` immediately after it — computed from THAT object's own fields, which is
+// what catches an envelope that copied its count from an inner page object (find_product's
+// envelope totals and cursor are not its page's). The benign matrix alone would check only
+// 0s (every cursor null there), so a non-vacuity check requires a non-null cursor per tool.
+// ---------------------------------------------------------------------------
+
+describe("A2 C1 — remainingRows VALUE gate (seeded, non-null cursors)", () => {
+  /** Every object (envelope or nested page) in the payload that owns a `nextOffset` key. */
+  function pagedObjects(data: unknown): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [];
+    const visit = (v: unknown) => {
+      if (Array.isArray(v)) v.forEach(visit);
+      else if (v && typeof v === "object") {
+        if (Object.prototype.hasOwnProperty.call(v, "nextOffset")) out.push(v as Record<string, unknown>);
+        Object.values(v).forEach(visit);
+      }
+    };
+    visit(data);
+    return out;
+  }
+
+  /** The gate's check for one payload: one line per object that breaks the C1 rule. */
+  function remainingRowsViolations(label: string, data: unknown): string[] {
+    return pagedObjects(data).flatMap((o) => {
+      const { totalRows, nextOffset, remainingRows } = o as {
+        totalRows: number;
+        nextOffset: number | null;
+        remainingRows: unknown;
+      };
+      const expected = nextOffset === null ? 0 : totalRows - nextOffset;
+      const keys = Object.keys(o);
+      const problems: string[] = [];
+      if (remainingRows !== expected) {
+        problems.push(`${label}: remainingRows ${String(remainingRows)} != ${expected} (totalRows ${totalRows}, nextOffset ${nextOffset})`);
+      }
+      if (keys.indexOf("remainingRows") !== keys.indexOf("nextOffset") + 1) {
+        problems.push(`${label}: remainingRows is not immediately after nextOffset`);
+      }
+      return problems;
+    });
+  }
+
+  /** Three approved products, wide enough for every product select the paged reads make. */
+  const GATE_PRODUCTS = [1, 2, 3].map((id) => ({
+    id,
+    name: `Gate Product ${id}`,
+    baseName: `Gate Product ${id}`,
+    variant: null,
+    deletedAt: null,
+    approvalStatus: "APPROVED",
+    lowStockThreshold: 5,
+    costPrice: null,
+    retailPrice: null,
+    product_locations: [{ locationId: 1, quantity: 1 }],
+  }));
+  const LEDGER_ROWS = [1, 2, 3].map((id) => ({
+    id,
+    productId: id,
+    locationId: 1,
+    locations: { name: "Gate Main" },
+    delta: 4,
+    logType: "STOCK_IN",
+    reasonCode: null,
+    unitCostCents: null,
+    batchId: null,
+    changeTime: new Date("2026-01-01T12:00:00.000Z"),
+  }));
+
+  /** [tool, args, the per-tool prisma seed] — limit 1 against a 3-row source everywhere. */
+  const PAGED: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+    // ONE DB page, as the database returns it (at most `limit` rows), of 3 matches: the
+    // envelope's total and cursor are the DB's, the byte-fit page's own are 1 and null.
+    ["find_product", { query: "gate", limit: 1 }, { "product.count": 3, "product.findMany": GATE_PRODUCTS.slice(0, 1) }],
+    ["get_sales", { groupBy: "product", includeZeroRows: true, limit: 1 }, { "product.findMany": GATE_PRODUCTS }],
+    ["get_operations", { limit: 1 }, { "product.findMany": GATE_PRODUCTS }],
+    ["get_valuation", { groupBy: "product", limit: 1 }, { "product.findMany": GATE_PRODUCTS }],
+    [
+      "get_movement_series",
+      { receipts: true, limit: 1 },
+      { "product.findMany": GATE_PRODUCTS, "inventory_logs.count": 3, "inventory_logs.findMany": LEDGER_ROWS.slice(0, 1) },
+    ],
+    [
+      "get_movement_series",
+      { breakdownBy: "product", productIds: [1, 2, 3], limit: 1 },
+      { "product.findMany": GATE_PRODUCTS },
+    ],
+    ["get_inventory_summary", { rankBy: "onHand", limit: 1 }, { "product.findMany": GATE_PRODUCTS }],
+    ["low_stock_report", { limit: 1 }, { "product.findMany": GATE_PRODUCTS }],
+    ["reorder_report", { productIds: [1, 2, 3], limit: 1 }, {}],
+    // DB-paged: the count says 3 in scope, the fetch hands back the one-row page asked for.
+    [
+      "get_stock_asof",
+      { dayKey: "2026-01-01", limit: 1 },
+      { "product.count": 3, "product.findMany": GATE_PRODUCTS.slice(0, 1) },
+    ],
+    [
+      "compare_periods",
+      { metric: "outbound_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 }, groupBy: "product", limit: 1 },
+      {
+        "inventory_logs.aggregate": { _min: { changeTime: new Date("2020-01-01T00:00:00.000Z") }, _sum: { delta: -7 } },
+        "inventory_logs.groupBy": [1, 2, 3].map((id) => ({ productId: id, _sum: { delta: -id } })),
+        "product.findMany": GATE_PRODUCTS,
+      },
+    ],
+  ];
+
+  async function runSeeded(name: string, args: Record<string, unknown>, seed: Record<string, unknown>) {
+    prismaCtl.__reset();
+    prismaCtl.__overrides["product.findFirst"] = { id: 1, name: "Gate Product 1" };
+    Object.assign(prismaCtl.__overrides, seed);
+    const result = await assistantTools[name].run(args, CTX);
+    expect({ name, args, status: result.status }).toEqual({ name, args, status: "ok" });
+    if (result.status !== "ok") throw new Error(`${name} not ok`);
+    return result.data;
+  }
+
+  it.each(PAGED)("%s %j: every nextOffset-bearing object carries the right remainingRows, and a cursor is live", async (name, args, seed) => {
+    const data = await runSeeded(name, args, seed);
+    const paged = pagedObjects(data);
+    expect(paged.length).toBeGreaterThan(0);
+    // Non-vacuity (A2-G1R3-1): this run really has rows after the page.
+    expect({ name, liveCursor: paged.some((o) => o.nextOffset !== null) }).toEqual({ name, liveCursor: true });
+    expect(remainingRowsViolations(`${name} ${JSON.stringify(args)}`, data)).toEqual([]);
+  });
+
+  it("registration: every tool whose payload carries a nextOffset is in the seeded matrix", async () => {
+    const seeded = new Set(PAGED.map(([name]) => name));
+    const carriers = new Set<string>();
+    const violations: string[] = [];
+    for (const name of TOOL_NAMES) {
+      for (const fixture of TOOL_GATE_FIXTURES[name]) {
+        prismaCtl.__reset();
+        prismaCtl.__overrides["product.findFirst"] = { id: 1, name: "Gate Product 1" };
+        const result = await assistantTools[name].run(fixture, CTX);
+        if (result.status !== "ok") continue;
+        if (pagedObjects(result.data).length > 0) carriers.add(name);
+        // The benign pass is checked too (every cursor null there, so every count 0).
+        violations.push(...remainingRowsViolations(`${name} ${JSON.stringify(fixture)} (benign)`, result.data));
+      }
+    }
+    expect(violations).toEqual([]);
+    expect(Array.from(carriers).filter((name) => !seeded.has(name))).toEqual([]);
+    // get_stock pages whole days with no nextOffset in its payload — C1 leaves it alone.
+    expect(carriers.has("get_stock")).toBe(false);
+  });
+
+  it("teeth: an envelope that copies its count from its byte-fit page object fails the gate", async () => {
+    const [name, args, seed] = PAGED[0]; // find_product: envelope total 3, page total 1
+    const data = (await runSeeded(name, args, seed)) as Record<string, unknown>;
+    expect(remainingRowsViolations("as shipped", data)).toEqual([]);
+    // What copying from the page would ship: the page is ONE fetched DB page, all of it fit,
+    // so its own cursor is null and its count 0 — while 2 matched products remain.
+    const pageCopy = { ...data, remainingRows: 0 };
+    expect(data.nextOffset).toBe(1);
+    expect(data.remainingRows).toBe(2);
+    expect(remainingRowsViolations("copied from the page", pageCopy)).toEqual([
+      "copied from the page: remainingRows 0 != 2 (totalRows 3, nextOffset 1)",
+    ]);
+    // ...and an envelope with no count at all fails it too.
+    const { remainingRows: _dropped, ...missing } = data;
+    void _dropped;
+    expect(remainingRowsViolations("missing", missing).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2 pack C7 — compare_periods' sales metrics carry the sales-freshness note (both modes),
+// the ledger metrics never do, and get_data_freshness / get_business_snapshot carry
+// lastSucceededAt with both instants defined in their descriptions.
+// ---------------------------------------------------------------------------
+
+describe("A2 C7 — compare_periods' freshness note and the freshness tool's lastSucceededAt", () => {
+  const HOUR_MS = 3_600_000;
+  const finishedHoursAgo = (h: number) => new Date(Date.now() - h * HOUR_MS);
+  const successRun = (h: number) => ({
+    status: "SUCCEEDED",
+    startedAt: finishedHoursAgo(h + 0.1),
+    finishedAt: finishedHoursAgo(h),
+    skippedReason: null,
+  });
+  const runReads = () => prismaCtl.__calls.filter((c) => c.model === "analyticsRebuildRun");
+
+  const SALES_TOTALS = { metric: "sales_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 14 } };
+  const SALES_BY_PRODUCT = { ...SALES_TOTALS, groupBy: "product" };
+  const LEDGER_TOTALS = { metric: "outbound_units", periodA: { relativeDays: 7 }, periodB: { relativeDays: 7 } };
+  const LEDGER_BY_PRODUCT = { ...LEDGER_TOTALS, groupBy: "product" };
+
+  async function compareCoverage(args: Record<string, unknown>, runs: unknown[], ctx = CTX) {
+    prismaCtl.__reset();
+    prismaCtl.__overrides["analyticsRebuildRun.findMany"] = runs;
+    const result = await assistantTools.compare_periods.run(args, ctx);
+    if (result.status !== "ok") throw new Error("not ok");
+    return (result.data as { coverage: Record<string, unknown> }).coverage;
+  }
+
+  it.each([
+    ["totals", SALES_TOTALS],
+    ["by_product", SALES_BY_PRODUCT],
+  ])("sales metric (%s): a 30-hour-old success -> the note; 20 hours -> none", async (_mode, args) => {
+    const stale = successRun(30);
+    expect((await compareCoverage(args, [stale])).salesFreshnessNote).toBe(
+      `The last successful sales rebuild finished at ${stale.finishedAt.toISOString()}, more than a ` +
+        `day ago; orders recorded after that are not counted yet.`,
+    );
+    expect(await compareCoverage(args, [successRun(20)])).not.toHaveProperty("salesFreshnessNote");
+  });
+
+  it.each([
+    ["totals", LEDGER_TOTALS],
+    ["by_product", LEDGER_BY_PRODUCT],
+  ])("ledger metric (%s): never a note, and no run-history read", async (_mode, args) => {
+    expect(await compareCoverage(args, [successRun(30)])).not.toHaveProperty("salesFreshnessNote");
+    expect(runReads()).toEqual([]);
+  });
+
+  it("a caller with no companies: no note and no run-history read (sales metric, both modes)", async () => {
+    for (const args of [SALES_TOTALS, SALES_BY_PRODUCT]) {
+      expect(await compareCoverage(args, [successRun(30)], testCtx({ companyIds: [] }))).not.toHaveProperty(
+        "salesFreshnessNote",
+      );
+      expect(runReads()).toEqual([]);
+    }
+  });
+
+  it("get_data_freshness: rebuild.lastSucceededAt is the success's finishedAt, beside lastRunAt", async () => {
+    prismaCtl.__reset();
+    const run = successRun(30);
+    prismaCtl.__overrides["analyticsRebuildRun.findMany"] = [
+      { status: "FAILED", startedAt: finishedHoursAgo(2), finishedAt: finishedHoursAgo(2), skippedReason: null },
+      run,
+    ];
+    // The state row's lastRunAt is the FAILED attempt's finish (finalizeRebuildRun stamps
+    // every finished attempt), so the two instants differ exactly as they do in production.
+    const lastAttemptFinish = new Date("2026-10-27T02:00:09.000Z");
+    prismaCtl.__overrides["analyticsRebuildState.findUnique"] = {
+      lastRunAt: lastAttemptFinish,
+      sourceWatermark: null,
+      flaggedPairs: 0,
+    };
+    const result = await assistantTools.get_data_freshness.run({}, CTX);
+    if (result.status !== "ok") throw new Error("not ok");
+    const rebuild = (result.data as { rebuild: Record<string, unknown> }).rebuild;
+    expect(rebuild).toEqual({
+      lastRunAt: lastAttemptFinish.toISOString(),
+      lastSucceededAt: run.finishedAt.toISOString(),
+      sourceWatermark: null,
+    });
+    expect(Object.keys(rebuild)).toEqual(["lastRunAt", "lastSucceededAt", "sourceWatermark"]);
+  });
+
+  it("the freshness tool and the snapshot define lastRunAt and lastSucceededAt; get_sales defines lastRebuildAt", () => {
+    const flat = (name: string) => assistantTools[name].description.replace(/\s+/g, " ");
+    expect(flat("get_data_freshness")).toContain(
+      "rebuild.lastRunAt is when the last rebuild attempt finished, whatever its outcome; " +
+        "rebuild.lastSucceededAt is when the last successful rebuild finished.",
+    );
+    expect(flat("get_business_snapshot")).toContain(
+      "freshness.lastRunAt is when the last rebuild attempt finished, whatever its outcome; " +
+        "freshness.lastSucceededAt is when the last successful rebuild finished.",
+    );
+    expect(flat("get_sales")).toContain(
+      "coverage.lastRebuildAt is when the last rebuild attempt finished, whatever its outcome.",
+    );
+  });
+});

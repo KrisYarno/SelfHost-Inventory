@@ -48,7 +48,7 @@ jest.mock("@/lib/analytics/valuation", () => ({
 }));
 
 import prisma from "@/lib/prisma";
-import { assistantTools, TURN_RESULT_BUDGET_BYTES, testCtx } from "@/lib/assistant/tools";
+import { assistantTools, remainingRowsOf, TURN_RESULT_BUDGET_BYTES, testCtx } from "@/lib/assistant/tools";
 import { getProductsWithQuantities } from "@/lib/products";
 import {
   getSales,
@@ -947,5 +947,186 @@ describe("low_stock_report: fetches the full report and paginates at the tool", 
       expect(result.meta.scope).toBe("global");
       expect((result.data as { systemDefaultThreshold: number }).systemDefaultThreshold).toBe(10);
     }
+  });
+});
+
+// ===========================================================================
+// A2 pack C1 — remainingRows, from each ENVELOPE's own totalRows and nextOffset
+// ===========================================================================
+
+describe("A2 C1 — remainingRows", () => {
+  it("remainingRowsOf: null -> 0; 50 / 20 -> 30; at or past the end -> 0 (never negative)", () => {
+    expect(remainingRowsOf(50, null)).toBe(0);
+    expect(remainingRowsOf(0, null)).toBe(0);
+    expect(remainingRowsOf(50, 20)).toBe(30);
+    expect(remainingRowsOf(50, 49)).toBe(1);
+    expect(remainingRowsOf(50, 50)).toBe(0);
+    expect(remainingRowsOf(50, 70)).toBe(0);
+  });
+
+  it("find_product: 50 matches at limit 20 -> nextOffset 20, remainingRows 30, right after nextOffset", async () => {
+    // One DB page of 20 (the tool reads exactly ONE page); the envelope's total is the DB
+    // total, so the count comes from the ENVELOPE — the byte-fit page's own totalRows is 20.
+    mockGetProducts.mockResolvedValue({
+      products: Array.from({ length: 20 }, (_, i) => product({ id: i + 1 })),
+      total: 50,
+    });
+    const result = await assistantTools.find_product.run({ query: "TIRZ", limit: 20 }, CTX);
+    if (result.status !== "ok") throw new Error("not ok");
+    const data = result.data as Record<string, unknown>;
+    expect(data).toMatchObject({ returned: 20, totalRows: 50, nextOffset: 20, remainingRows: 30 });
+    const keys = Object.keys(data);
+    expect(keys.indexOf("remainingRows")).toBe(keys.indexOf("nextOffset") + 1);
+
+    // The last page: offset 40 reads the final 10 -> no cursor, nothing remains.
+    mockGetProducts.mockResolvedValue({
+      products: Array.from({ length: 10 }, (_, i) => product({ id: 41 + i })),
+      total: 50,
+    });
+    const last = await assistantTools.find_product.run({ query: "TIRZ", limit: 20, offset: 40 }, CTX);
+    if (last.status !== "ok") throw new Error("not ok");
+    expect(last.data).toMatchObject({ totalRows: 50, nextOffset: null, remainingRows: 0 });
+  });
+
+  it("find_product under a byte fit: remainingRows follows the page-aligned cursor; the dropped rows stay in byteSkipped", async () => {
+    const CATALOG = Array.from({ length: 12 }, (_, i) =>
+      product({ id: i + 1, name: `Product ${i + 1} ` + "x".repeat(1200) }),
+    );
+    mockGetProducts.mockImplementation((filters: { page: number; pageSize: number }) => ({
+      products: CATALOG.slice((filters.page - 1) * filters.pageSize, filters.page * filters.pageSize),
+      total: CATALOG.length,
+    }));
+    const tight = testCtx({ companyIds: ["c1"], remainingBytes: 5_000 });
+    const result = await assistantTools.find_product.run({ query: "product", limit: 4 }, tight);
+    if (result.status !== "ok") throw new Error("not ok");
+    const data = result.data as {
+      returned: number;
+      totalRows: number;
+      nextOffset: number | null;
+      remainingRows: number;
+      coverage: { byteSkipped?: number };
+    };
+    expect(data.returned).toBeLessThan(4); // the fit really dropped rows
+    expect(data.nextOffset).toBe(4);
+    expect(data.remainingRows).toBe(8); // 12 - 4: from the envelope, not the page
+    expect(data.coverage.byteSkipped).toBe(4 - data.returned);
+  });
+
+  it("low_stock_report: remainingRows counts the alerts after this page", async () => {
+    mockGetLowStock.mockResolvedValue({
+      alerts: Array.from({ length: 7 }, (_, i) => ({
+        productId: i + 1,
+        name: `p${i + 1}`,
+        currentStock: 1,
+        threshold: 5,
+        rawThreshold: null,
+        averageDailyUsage: null,
+        usageKnown: false,
+        daysUntilEmpty: null,
+      })),
+      threshold: 5,
+      alertsOff: 0,
+      alertsOffAtZeroStock: 0,
+      outOfStockAllProducts: 0,
+    });
+    const page1 = await assistantTools.low_stock_report.run({ limit: 3 }, CTX);
+    if (page1.status !== "ok") throw new Error("not ok");
+    expect(page1.data).toMatchObject({ returned: 3, totalRows: 7, nextOffset: 3, remainingRows: 4 });
+    const page3 = await assistantTools.low_stock_report.run({ limit: 3, offset: 6 }, CTX);
+    if (page3.status !== "ok") throw new Error("not ok");
+    expect(page3.data).toMatchObject({ returned: 1, totalRows: 7, nextOffset: null, remainingRows: 0 });
+  });
+
+  it("get_sales with no company access: the empty envelope reads remainingRows 0", async () => {
+    const result = await assistantTools.get_sales.run({}, CTX_NO_COMPANY);
+    if (result.status !== "ok") throw new Error("not ok");
+    expect(result.data).toMatchObject({ totalRows: 0, nextOffset: null, remainingRows: 0 });
+  });
+});
+
+// ===========================================================================
+// A2 pack C7 — get_sales' coverage.salesFreshnessNote (material staleness only; never for
+// a caller with no companies; a failed run-history read is non-fatal)
+// ===========================================================================
+
+describe("A2 C7 — get_sales carries the sales-freshness note", () => {
+  const HOUR_MS = 3_600_000;
+  const hoursAgo = (h: number) => new Date(Date.now() - h * HOUR_MS);
+  const success = (finishedHoursAgo: number) => ({
+    status: "SUCCEEDED",
+    startedAt: hoursAgo(finishedHoursAgo + 0.1),
+    finishedAt: hoursAgo(finishedHoursAgo),
+    skippedReason: null,
+  });
+
+  async function salesCoverage(ctx = CTX): Promise<Record<string, unknown>> {
+    mockGetSales.mockResolvedValue([]);
+    const result = await assistantTools.get_sales.run({ groupBy: "day" }, ctx);
+    if (result.status !== "ok") throw new Error("not ok");
+    return (result.data as { coverage: Record<string, unknown> }).coverage;
+  }
+
+  it("a 20-hour-old success: no note", async () => {
+    db.analyticsRebuildRun.findMany.mockResolvedValue([success(20)] as never);
+    expect(await salesCoverage()).not.toHaveProperty("salesFreshnessNote");
+  });
+
+  it("a 30-hour-old success: the stale note, naming the success's finishedAt", async () => {
+    const run = success(30);
+    db.analyticsRebuildRun.findMany.mockResolvedValue([run] as never);
+    expect((await salesCoverage()).salesFreshnessNote).toBe(
+      `The last successful sales rebuild finished at ${run.finishedAt.toISOString()}, more than a ` +
+        `day ago; orders recorded after that are not counted yet.`,
+    );
+  });
+
+  it("a FAILED run (NULL skippedReason) after a recent success: 'did not succeed'; a lock-held skip is ignored", async () => {
+    const run = success(20);
+    db.analyticsRebuildRun.findMany.mockResolvedValue([
+      { status: "ABORTED", startedAt: hoursAgo(1), finishedAt: hoursAgo(1), skippedReason: "lock-held" },
+      { status: "FAILED", startedAt: hoursAgo(2), finishedAt: hoursAgo(2), skippedReason: null },
+      run,
+    ] as never);
+    expect((await salesCoverage()).salesFreshnessNote).toBe(
+      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
+        `rebuild, finished at ${run.finishedAt.toISOString()}.`,
+    );
+    db.analyticsRebuildRun.findMany.mockResolvedValue([
+      { status: "ABORTED", startedAt: hoursAgo(1), finishedAt: hoursAgo(1), skippedReason: "lock-held" },
+      run,
+    ] as never);
+    expect(await salesCoverage()).not.toHaveProperty("salesFreshnessNote");
+  });
+
+  it("no successful rebuild on record: the missing-figures note", async () => {
+    db.analyticsRebuildRun.findMany.mockResolvedValue([] as never);
+    expect((await salesCoverage()).salesFreshnessNote).toBe(
+      "No successful sales rebuild is on record — order figures may be missing.",
+    );
+  });
+
+  it("no company access: no note and NO run-history read", async () => {
+    db.analyticsRebuildRun.findMany.mockResolvedValue([success(30)] as never);
+    const result = await assistantTools.get_sales.run({}, CTX_NO_COMPANY);
+    if (result.status !== "ok") throw new Error("not ok");
+    expect((result.data as { coverage: object }).coverage).not.toHaveProperty("salesFreshnessNote");
+    expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+  });
+
+  it("a throwing run-history read: no note, and the result is still the full OK answer", async () => {
+    db.analyticsRebuildRun.findMany.mockRejectedValue(new Error("analytics_rebuild_runs unreachable") as never);
+    const coverage = await salesCoverage();
+    expect(coverage).not.toHaveProperty("salesFreshnessNote");
+    expect(coverage).toHaveProperty("windowCoverage");
+    expect(coverage).toHaveProperty("rowsNote");
+  });
+
+  it("the description carries the standing sentence and defines coverage.lastRebuildAt", () => {
+    const d = assistantTools.get_sales.description.replace(/\s+/g, " ");
+    expect(d).toContain(
+      "Orders recorded since the last successful nightly rebuild are not counted yet, so the most " +
+        "recent day or two may be partial.",
+    );
+    expect(d).toContain("coverage.lastRebuildAt is when the last rebuild attempt finished, whatever its outcome.");
   });
 });

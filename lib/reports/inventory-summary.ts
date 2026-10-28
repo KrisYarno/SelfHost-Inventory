@@ -43,7 +43,7 @@ import prisma from "@/lib/prisma";
 import { getValuation, type ValuationResult } from "@/lib/analytics/valuation";
 import { effectiveLowStockThreshold, getLowStockDefault, isLowStock } from "@/lib/stock-threshold";
 import { PHYSICAL_OUTBOUND_WHERE, daysCovered as daysCoveredInWindow } from "@/lib/reports/metrics-contract";
-import { paginate, type DbPage } from "@/lib/assistant/tools";
+import { paginate, remainingRowsOf, type DbPage } from "@/lib/assistant/tools";
 
 const DAY_MS = 86_400_000;
 const OUTBOUND_WINDOW_DAYS = 30;
@@ -57,7 +57,10 @@ export interface InventorySummary {
   productCount: number;
   stockStateCounts: { in_stock: number; low: number; out: number };
   valuation: ValuationResult;
-  ranked?: DbPage<{ productId: number; name: string | null; metric: number | null }>;
+  /** A2 pack C1: the page carries `remainingRows` right after its `nextOffset`. */
+  ranked?: DbPage<{ productId: number; name: string | null; metric: number | null }> & {
+    remainingRows: number;
+  };
 }
 
 type RankBy = "onHand" | "value" | "outbound30" | "daysOfSupply";
@@ -146,7 +149,9 @@ export async function getInventorySummary(
       locationId,
       nowMs,
     });
-    result.ranked = paginate(rows, offset, limit, opts.byteBudget);
+    const page = paginate(rows, offset, limit, opts.byteBudget);
+    // A2 C1: the rows after this page, from the page's own totalRows and cursor.
+    result.ranked = { ...page, remainingRows: remainingRowsOf(page.totalRows, page.nextOffset) };
   }
 
   return result;

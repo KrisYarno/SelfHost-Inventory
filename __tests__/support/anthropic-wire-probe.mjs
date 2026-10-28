@@ -48,7 +48,13 @@
  *       zod schema, step 3 plain text with `end_turn`. Every `onError` argument is
  *       recorded — its kind (instance / string / object) and lib/assistant/
  *       stream-errors.ts's verdict — and tied to its UI chunk through the error text
- *       this `onError` returns (`TOOL_ERROR#n` / `PROVIDER_ERROR#n`);
+ *       this `onError` returns (`TOOL_ERROR#n` / `PROVIDER_ERROR#n`). A2 pack C11: the
+ *       route's rejected-call counter, run the route's way (+1 per argument that
+ *       `isRecoveredToolCallInstance` accepts), is read when `streamText`'s `onFinish`
+ *       fires — where the route logs it;
+ *   f-one-step  A2 pack C11 (A2-OCR2-12, the final-step race): `stopWhen: stepCountIs(1)`
+ *       and the only step is ONE rejected call (an unknown tool), so the rejection's UI
+ *       chunks and the turn's `onFinish` come out of the same, last step;
  *   f-overloaded  control: an `overloaded_error` event mid-stream (after a text delta);
  *   f-500  control: an HTTP 500 (`maxRetries: 0`, so the one attempt is the error).
  * Plus a "bundles" line first (what each leaf bundle contains) and a "summary" line
@@ -449,6 +455,9 @@ try {
   if (typeof streamErrors.isRecoveredToolCallError !== "function") {
     throw new Error("the stream-errors bundle does not export isRecoveredToolCallError");
   }
+  if (typeof streamErrors.isRecoveredToolCallInstance !== "function") {
+    throw new Error("the stream-errors bundle does not export isRecoveredToolCallInstance");
+  }
   emit({ case: "bundles", bundles, aiBundles });
 } catch (err) {
   process.stderr.write(
@@ -766,6 +775,10 @@ function onErrorCase(model, reply, extra = {}) {
     record.errorChunks = errorChunks;
     record.chunkTypes = chunkTypes;
     record.readErrors = readErrors;
+    // A2 pack C11: the route's counter and the moment it is logged (the route's
+    // `onFinish: () => logRun("ok")`). null = onFinish never fired.
+    let rejectedToolCalls = 0;
+    record.rejectedToolCallsAtOnFinish = null;
 
     const options = modelOptions.modelCallOptions({ kind: "ANTHROPIC", model, surface: "assistant" });
     const result = streamText({
@@ -776,6 +789,9 @@ function onErrorCase(model, reply, extra = {}) {
       stopWhen: stepCountIs(10),
       ...callParams(options),
       ...extra,
+      onFinish: () => {
+        record.rejectedToolCallsAtOnFinish = rejectedToolCalls;
+      },
       onError: () => {},
     });
     const uiChunks = result
@@ -786,6 +802,8 @@ function onErrorCase(model, reply, extra = {}) {
           const n = onErrorCalls.length + 1;
           const verdict = streamErrors.isRecoveredToolCallError(error);
           onErrorCalls.push({ n, kind: errorKind(error), name: errorName(error), verdict });
+          // The route's recovered branch: counted only for the instance half.
+          if (verdict && streamErrors.isRecoveredToolCallInstance(error)) rejectedToolCalls += 1;
           return `${verdict ? "TOOL_ERROR" : "PROVIDER_ERROR"}#${n}`;
         },
       })
@@ -851,6 +869,14 @@ await runCase(
       toolUseReply(F_INVALID_CALL.id, F_INVALID_CALL.name, F_INVALID_CALL.input),
       textReply(F_TEXT),
     ]),
+  ),
+);
+await runCase(
+  "f-one-step",
+  onErrorCase(
+    "claude-opus-5-5",
+    toolUseReply(F_UNKNOWN_CALL.id, F_UNKNOWN_CALL.name, F_UNKNOWN_CALL.input),
+    { stopWhen: stepCountIs(1) },
   ),
 );
 await runCase("f-overloaded", onErrorCase("claude-opus-5-5", overloadedReply));

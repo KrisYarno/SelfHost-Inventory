@@ -43,7 +43,14 @@ jest.mock("@/lib/reports/reorder", () => ({
 }));
 jest.mock("@/lib/assistant/freshness", () => ({ __esModule: true, getFreshness: jest.fn() }));
 jest.mock("@/lib/reports/order-pipeline", () => ({ __esModule: true, getOrderPipeline: jest.fn() }));
-jest.mock("@/lib/assistant/sales-coverage", () => ({ __esModule: true, callerScopedSalesCoverage: jest.fn() }));
+// A2 C7: the sales run history is injected (salesRebuildState); the note's wording rule
+// (salesFreshnessNote) is the REAL one, so these pins read the strings the tool ships.
+jest.mock("@/lib/assistant/sales-coverage", () => ({
+  __esModule: true,
+  callerScopedSalesCoverage: jest.fn(),
+  salesRebuildState: jest.fn(),
+  salesFreshnessNote: jest.requireActual("@/lib/assistant/sales-coverage").salesFreshnessNote,
+}));
 jest.mock("@/lib/stock-threshold", () => ({
   __esModule: true,
   getLowStockDefault: jest.fn(async () => 10),
@@ -60,7 +67,7 @@ import { getInventorySummary } from "@/lib/reports/inventory-summary";
 import { getReorderReport } from "@/lib/reports/reorder";
 import { getFreshness } from "@/lib/assistant/freshness";
 import { getOrderPipeline } from "@/lib/reports/order-pipeline";
-import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
+import { callerScopedSalesCoverage, salesRebuildState } from "@/lib/assistant/sales-coverage";
 import { getProductOverview, getBusinessSnapshot } from "@/lib/assistant/composites";
 import { PHYSICAL_OUTBOUND_DEFINITION } from "@/lib/reports/metrics-contract";
 
@@ -75,10 +82,17 @@ const mReorder = getReorderReport as jest.Mock;
 const mFresh = getFreshness as jest.Mock;
 const mPipeline = getOrderPipeline as jest.Mock;
 const mCoverage = callerScopedSalesCoverage as jest.Mock;
+const mRebuildRuns = salesRebuildState as jest.Mock;
 
 const NOW = new Date("2026-07-14T00:00:00.000Z");
 const DAY_MS = 86_400_000;
 const CTX = { companyIds: ["c1"], byteBudget: 65_536 };
+const HOUR_MS = 3_600_000;
+/** A2 C7: a success `hours` before NOW (ISO UTC), as salesRebuildState reports it. */
+const succeededHoursAgo = (hours: number, failedSince = false) => ({
+  lastSucceededAt: new Date(NOW.getTime() - hours * HOUR_MS).toISOString(),
+  latestAttemptFailedAfterSuccess: failedSince,
+});
 
 /** Wire every collaborator to a benign happy-path default; individual tests override. */
 function seedHappy() {
@@ -120,6 +134,8 @@ function seedHappy() {
     coverage: { unclassifiedLegacyNote: "legacy note", reasonCodeNullRows: 2 },
   });
   mCoverage.mockResolvedValue({ unattributedOrders: 4, bundleRevenue: "excluded", lastRebuildAt: "2026-07-14T00:00:00.000Z" });
+  // A2 C7: a 2-hour-old success — fresh, so no note unless a test makes it stale.
+  mRebuildRuns.mockResolvedValue(succeededHoursAgo(2));
   // Snapshot collaborators
   mSummary.mockResolvedValue({
     unitsOnHand: 500,
@@ -134,7 +150,11 @@ function seedHappy() {
     coverage: { total: 80, suggested: 5, unavailable: 20, costed: 3 },
   });
   mFresh.mockResolvedValue({
-    rebuild: { lastRunAt: "2026-07-14T00:00:00.000Z", sourceWatermark: "2026-07-13T00:00:00.000Z" },
+    rebuild: {
+      lastRunAt: "2026-07-14T00:00:00.000Z",
+      lastSucceededAt: "2026-07-13T00:05:00.000Z",
+      sourceWatermark: "2026-07-13T00:00:00.000Z",
+    },
     sales: { unattributedOrders: 4, scope: "caller-companies" },
     fulfillmentSync: { enabled: null, reason: "not observable from this process", cursor: "2026-07-10T00:00:00.000Z", backfill: "complete" },
     dataStarts: {},
@@ -437,6 +457,15 @@ describe("getBusinessSnapshot — composition (spec §5 T-SNAP)", () => {
     // freshness one-liner (global): lastRunAt + the fulfillment note.
     expect(s.freshness.scope).toBe("global");
     expect(s.freshness.lastRunAt).toBe("2026-07-14T00:00:00.000Z");
+    // A2 C7: the last SUCCESSFUL rebuild's finish rides beside the last attempt's.
+    expect(s.freshness.lastSucceededAt).toBe("2026-07-13T00:05:00.000Z");
+    expect(Object.keys(s.freshness).slice(0, 5)).toEqual([
+      "scope",
+      "status",
+      "lastRunAt",
+      "lastSucceededAt",
+      "sourceWatermark",
+    ]);
     expect(typeof s.freshness.fulfillmentSyncNote).toBe("string");
 
     expect(s.coverage.sectionScopes.sales).toBe("company");
@@ -494,5 +523,70 @@ describe("getBusinessSnapshot — composition (spec §5 T-SNAP)", () => {
     expect(s.sales.scope).toBe("company");
     expect((s.sales.last30d as { orderedUnits: number }).orderedUnits).toBe(0);
     expect(db.productSalesFact.aggregate).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// A2 pack C7 — the sales sections carry the freshness note on MATERIAL staleness only;
+// never for a caller with no companies; and a failed run-history read is NON-FATAL (no
+// note, the section intact — never `unavailable`).
+// ===========================================================================
+
+describe("A2 C7 — coverage.salesFreshnessNote on the composites' sales sections", () => {
+  const STALE_30H = `The last successful sales rebuild finished at ${new Date(NOW.getTime() - 30 * HOUR_MS).toISOString()}, more than a day ago; orders recorded after that are not counted yet.`;
+
+  it("get_product_overview.sales30: a 30-hour-old success -> the note; 20 hours -> none", async () => {
+    mRebuildRuns.mockResolvedValue(succeededHoursAgo(30));
+    const stale = await getProductOverview(1, CTX, NOW);
+    if (!stale.found) throw new Error("not found");
+    expect(stale.sales30.status).toBe("ok");
+    expect((stale.sales30.coverage as Record<string, unknown>).salesFreshnessNote).toBe(STALE_30H);
+    // The caller-scoped coverage it joins is intact.
+    expect((stale.sales30.coverage as Record<string, unknown>).unattributedOrders).toBe(4);
+
+    mRebuildRuns.mockResolvedValue(succeededHoursAgo(20));
+    const fresh = await getProductOverview(1, CTX, NOW);
+    if (!fresh.found) throw new Error("not found");
+    expect(fresh.sales30.coverage as Record<string, unknown>).not.toHaveProperty("salesFreshnessNote");
+  });
+
+  it("get_business_snapshot.sales: a FAILED attempt after a recent success -> 'did not succeed'", async () => {
+    mRebuildRuns.mockResolvedValue(succeededHoursAgo(20, true));
+    const s = await getBusinessSnapshot(CTX, NOW);
+    expect(s.sales.status).toBe("ok");
+    expect((s.sales.coverage as Record<string, unknown>).salesFreshnessNote).toBe(
+      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
+        `rebuild, finished at ${new Date(NOW.getTime() - 20 * HOUR_MS).toISOString()}.`,
+    );
+    // The disclosure triple it joins is intact.
+    expect((s.sales.coverage as Record<string, unknown>).archivedProductsIncluded).toBe(0);
+  });
+
+  it("no companies: no note and NO run-history read, on both composites", async () => {
+    mRebuildRuns.mockResolvedValue(succeededHoursAgo(30));
+    mCoverage.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "excluded", lastRebuildAt: null });
+    const noCompanies = { companyIds: [], byteBudget: 65_536 };
+    const r = await getProductOverview(1, noCompanies, NOW);
+    if (!r.found) throw new Error("not found");
+    const s = await getBusinessSnapshot(noCompanies, NOW);
+    expect(r.sales30.coverage as Record<string, unknown>).not.toHaveProperty("salesFreshnessNote");
+    expect(s.sales.coverage as Record<string, unknown>).not.toHaveProperty("salesFreshnessNote");
+    expect(mRebuildRuns).not.toHaveBeenCalled();
+  });
+
+  it("a throwing run-history read: no note, and each sales section stays OK with its figures", async () => {
+    mRebuildRuns.mockRejectedValue(new Error("analytics_rebuild_runs unreachable at db.internal-host"));
+    const r = await getProductOverview(1, CTX, NOW);
+    if (!r.found) throw new Error("not found");
+    expect(r.sales30.status).toBe("ok");
+    expect(r.sales30.orderedUnits).toBe(40);
+    expect(r.sales30.coverage as Record<string, unknown>).not.toHaveProperty("salesFreshnessNote");
+    expect(r.coverage.degradedSections).toEqual([]);
+
+    const s = await getBusinessSnapshot(CTX, NOW);
+    expect(s.sales.status).toBe("ok");
+    expect((s.sales.last30d as { orderedUnits: number }).orderedUnits).toBe(40);
+    expect(s.sales.coverage as Record<string, unknown>).not.toHaveProperty("salesFreshnessNote");
+    expect(s.coverage.degradedSections).toEqual([]);
   });
 });

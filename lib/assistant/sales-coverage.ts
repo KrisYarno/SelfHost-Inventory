@@ -11,6 +11,9 @@
  *
  * W1-FRESH (`get_data_freshness`) consumes THIS exact function.
  *
+ * A2 pack C7: the sales rebuild's run history (`salesRebuildState`) and the note order
+ * figures carry when that history says they are materially stale (`salesFreshnessNote`).
+ *
  * MUST stay Next-free (imported by the assistant-tool layer): no `next/*`, no
  * `@/lib/api-utils`.
  */
@@ -341,6 +344,88 @@ export async function callerScopedSalesCoverage(
     salesDataStart: salesDataStart.salesDataStart,
     ...(salesDataStart.staggered ? { companyCoverage: salesDataStart.perCompany } : {}),
   };
+}
+
+/**
+ * The sales rebuild's state as order figures need it (A2 pack C7): when the last
+ * SUCCESSFUL rebuild finished, and whether a newer attempt did not succeed.
+ */
+export interface SalesRebuildState {
+  /** The newest SUCCEEDED run's `finishedAt` (ISO UTC) — the same clock as
+   *  `lastRunAt` — or null when no successful run is on record. */
+  lastSucceededAt: string | null;
+  /** A FAILED or ABORTED run (lock-held skips excluded) started after that success. */
+  latestAttemptFailedAfterSuccess: boolean;
+}
+
+/** How many of the newest sales runs `salesRebuildState` reads (A2 pack C7). */
+// 50, not 10 (orchestrator, M4 review): lock-held skips are filtered in JS AFTER the read,
+// so a burst of contended triggers must not push the last success out of the window.
+// Retention keeps the newest 100 runs per job (rebuild-lock.ts), so 50 is always held.
+const SALES_REBUILD_RUNS_READ = 50;
+
+/** A run that never started because another held the lock — not an attempt. */
+const LOCK_HELD_SKIP = "lock-held";
+
+/**
+ * The sales rebuild state (A2 pack C7), from the newest 10 `analyticsRebuildRun` rows of
+ * the "sales" job. The lock-held skips are filtered HERE, in JS: a Prisma
+ * `{ not: 'lock-held' }` compiles to SQL `<>`, which also drops every FAILED run (their
+ * `skippedReason` is NULL) — the very rows this read exists to see (A2-G1R3-3).
+ *
+ * `lastSucceededAt` is the success's `finishedAt`, never its `startedAt`: `lastRunAt`
+ * (finalizeRebuildRun's stamp) is a finish time, so the two read on one clock
+ * (A2-G1R3-2). Global, not company-sensitive (like `lastRebuildAt`).
+ */
+export async function salesRebuildState(): Promise<SalesRebuildState> {
+  const runs = await prisma.analyticsRebuildRun.findMany({
+    where: { job: "sales" },
+    orderBy: { startedAt: "desc" },
+    take: SALES_REBUILD_RUNS_READ,
+    select: { status: true, startedAt: true, finishedAt: true, skippedReason: true },
+  });
+  // Guards a deep-mocked prisma returning undefined (as the tool layer's name helpers do).
+  const attempts = (runs ?? []).filter((run) => run.skippedReason !== LOCK_HELD_SKIP);
+  const success = attempts.find((run) => run.status === "SUCCEEDED" && run.finishedAt != null);
+  if (!success) return { lastSucceededAt: null, latestAttemptFailedAfterSuccess: false };
+  const latestAttemptFailedAfterSuccess = attempts.some(
+    (run) =>
+      (run.status === "FAILED" || run.status === "ABORTED") &&
+      run.startedAt.getTime() > success.startedAt.getTime(),
+  );
+  return {
+    lastSucceededAt: (success.finishedAt as Date).toISOString(),
+    latestAttemptFailedAfterSuccess,
+  };
+}
+
+/** Past this, the last successful rebuild is materially stale (A2 pack C7): the nightly
+ *  run plus a margin, so an ordinary day never raises the note. */
+const SALES_FRESHNESS_STALE_MS = 26 * 60 * 60 * 1000;
+
+/**
+ * The sales-freshness note (A2 pack C7) — MATERIAL staleness only: no successful rebuild
+ * on record, the last success finished more than 26 hours ago, or a newer attempt did
+ * not succeed. Undefined otherwise: today's figures being partial is a standing sentence
+ * in the descriptions, never a note on every answer.
+ */
+export function salesFreshnessNote(state: SalesRebuildState, now: Date): string | undefined {
+  const failed = state.latestAttemptFailedAfterSuccess;
+  let note: string | undefined;
+  if (state.lastSucceededAt === null) {
+    note = "No successful sales rebuild is on record — order figures may be missing.";
+  } else if (now.getTime() - new Date(state.lastSucceededAt).getTime() > SALES_FRESHNESS_STALE_MS) {
+    note =
+      `The last successful sales rebuild finished at ${state.lastSucceededAt}, more than a day ` +
+      `ago; orders recorded after that are not counted yet.`;
+  } else if (failed) {
+    return (
+      `The latest sales rebuild attempt did not succeed; figures are as of the last successful ` +
+      `rebuild, finished at ${state.lastSucceededAt}.`
+    );
+  }
+  if (note !== undefined && failed) note += " The latest rebuild attempt did not succeed.";
+  return note;
 }
 
 /**

@@ -14,8 +14,8 @@
  * TRUNCATION DEGRADES GRACEFULLY (D-T7, review M3). The per-turn budget is 128 KiB
  * (~8K of a 200K-token window at 32 KiB was leaving 95% of the context unused). Each
  * list tool takes `limit`/`offset` and returns a PAGE — the rows it can fit plus
- * `{ returned, totalRows, nextOffset }` — instead of discarding the completed query
- * with an empty "too large" notice. A single oversized read therefore yields the
+ * `{ returned, totalRows, nextOffset, remainingRows }` — instead of discarding the completed
+ * query with an empty "too large" notice. A single oversized read therefore yields the
  * first N rows and a cursor, never nothing.
  *
  * NAMING (D-T8, review M1/M4). `low_stock_report` exposes `systemDefaultThreshold`
@@ -69,6 +69,8 @@ import {
   callerScopedSalesCoverage,
   callerWindowCoverage,
   salesCoverageReason,
+  salesFreshnessNote,
+  salesRebuildState,
   SALES_ROWS_NOTE,
   SALES_COMPANY_COVERAGE_NOTE,
   SALES_COMPANY_COVERAGE_MEASURED_NOTE,
@@ -665,6 +667,17 @@ export interface DbPage<T> {
   nextOffset: number | null;
 }
 
+/**
+ * How many rows remain after a page (A2 pack C1), so the model never computes "how many
+ * more". Every envelope that carries `nextOffset` puts this right after it, computed from
+ * THAT ENVELOPE's own `totalRows` and `nextOffset` — never copied from an inner page object:
+ * find_product's envelope totals and cursor are not its byte-fit page's (A2-OCR2-2).
+ * The last page (`nextOffset` null) leaves 0, and a cursor past the end never goes negative.
+ */
+export function remainingRowsOf(totalRows: number, nextOffset: number | null): number {
+  return nextOffset === null ? 0 : Math.max(0, totalRows - nextOffset);
+}
+
 /** One WHOLE day of the get_stock snapshot series (W0-STOCK): the dayKey plus every
  *  per-location point on that day. Paging on these keeps day boundaries intact. */
 type DaySnapshot = {
@@ -998,6 +1011,26 @@ async function fillFirstSaleDayKeys(rows: object[], companyIds: string[]): Promi
   for (const row of zeroRows) row.firstSaleDayKey = byId.get(row.productId) ?? null;
 }
 
+/**
+ * The sales-freshness note for a caller's order figures (A2 pack C7), or undefined. Never
+ * for a caller with no companies — no read at all, as there are no order figures to
+ * qualify — and NON-FATAL: a failed run-history read leaves the figures without a note;
+ * it never fails the tool.
+ */
+async function salesFreshnessNoteFor(companyIds: string[], now: Date = new Date()): Promise<string | undefined> {
+  if (companyIds.length === 0) return undefined;
+  try {
+    return salesFreshnessNote(await salesRebuildState(), now);
+  } catch {
+    return undefined;
+  }
+}
+
+/** `coverage.salesFreshnessNote`, present only when there is a note (A2 pack C7). */
+function salesFreshnessKey(note: string | undefined): { salesFreshnessNote?: string } {
+  return note === undefined ? {} : { salesFreshnessNote: note };
+}
+
 /** The tool-level per-product comparison row (spec C9). Identity and evidence fields
  *  are the TOOL's to fill: the module computes numbers, not names. */
 type CompareProductToolRow = ComparePeriodsProductRow & {
@@ -1141,6 +1174,9 @@ async function compareByProduct(
 
   const rankedShaped = await shapeCompareRows(result.ranked);
   const unrankedShaped = await shapeCompareRows(result.unranked);
+  // A2 C7: order figures carry the freshness note when the sales facts are materially
+  // stale. Page-independent, so the envelope measurement below weighs it.
+  const salesFreshness = isSales ? await salesFreshnessNoteFor(ctx.companyIds) : undefined;
 
   // A2 C2: counted over the WHOLE result, never the page — `ranked` is `totalRows` (post-
   // direction), the three directions are the module's pre-filter `directionCounts`, and
@@ -1163,8 +1199,13 @@ async function compareByProduct(
 
   // The envelope, MEASURED (G2-5): build the payload with both arrays empty and weigh it,
   // so the row budget is `whatever room is actually left` rather than a constant that can
-  // exceed the caller's whole budget.
-  const envelopeOf = (ranked: Page<CompareProductToolRow>, unranked: Page<CompareProductToolRow>) => {
+  // exceed the caller's whole budget. `measuredRemainingRows` is the measurement's
+  // placeholder ONLY (A2 C1); the shipped envelope always computes its own.
+  const envelopeOf = (
+    ranked: Page<CompareProductToolRow>,
+    unranked: Page<CompareProductToolRow>,
+    measuredRemainingRows?: number,
+  ) => {
     // QA-2, completing FD4-2's "only when there is a delta" at the layer that pages: the
     // module gates the shift on the post-direction RESULT, but the deltas a caller
     // receives are THIS PAGE's ranked rows. An offset past the end ships no delta at all,
@@ -1184,6 +1225,8 @@ async function compareByProduct(
       returned: ranked.returned,
       totalRows: ranked.totalRows,
       nextOffset: ranked.nextOffset,
+      // A2 C1: the ranked rows after this page (the unranked list is counted by unrankedTotal).
+      remainingRows: measuredRemainingRows ?? remainingRowsOf(ranked.totalRows, ranked.nextOffset),
       unranked: unranked.rows,
       unrankedReturned: unranked.returned,
       unrankedTotal: unranked.totalRows,
@@ -1219,14 +1262,17 @@ async function compareByProduct(
         excludedUnapprovedProducts: result.excludedUnapprovedProducts,
         archivedProductsIncluded: archivedCountOf([...rankedShaped, ...unrankedShaped]),
         approvalNote: APPROVED_UNIVERSE_NOTE,
+        ...salesFreshnessKey(salesFreshness),
       },
     };
   };
 
   // Measured with the WIDEST counters this call can emit (the real array lengths), so the
   // envelope estimate is never smaller than the envelope actually shipped. (A2's rankedBy,
-  // counts, countsNote and rateDefinition do not depend on the page, so they weigh the same
-  // here as in the shipped envelope — no placeholder needed.)
+  // counts, countsNote, rateDefinition and salesFreshnessNote do not depend on the page, so
+  // they weigh the same here as in the shipped envelope — no placeholder needed.) A2 C1:
+  // `remainingRows` DOES depend on the page, so it is measured at its widest, `totalRows`
+  // — the formula over these counters would read 0 and under-weigh a deeper cursor.
   const counterOf = (rows: CompareProductToolRow[]): Page<CompareProductToolRow> => ({
     rows: [],
     returned: rows.length,
@@ -1234,7 +1280,7 @@ async function compareByProduct(
     nextOffset: rows.length,
   });
   const envelopeBytes = byteLengthOf(
-    envelopeOf(counterOf(rankedShaped), counterOf(unrankedShaped)),
+    envelopeOf(counterOf(rankedShaped), counterOf(unrankedShaped), rankedShaped.length),
   );
   // NEVER floored above what is left: a floor bigger than the remaining budget builds a
   // page the caller cannot receive (FD-7 removed the last such floor, inside the share).
@@ -1376,6 +1422,7 @@ async function movementByProduct(
       returned: page.returned,
       totalRows: page.totalRows,
       nextOffset: page.nextOffset,
+      remainingRows: remainingRowsOf(page.totalRows, page.nextOffset),
       // A2 C2: whole-result counts (result.rows, not page.rows), beside coverage.
       counts: movementCountsOf(result.rows),
       countsNote: MOVEMENT_COUNTS_NOTE,
@@ -1580,9 +1627,10 @@ const DATA_POSTURE =
   "meaning and scope.";
 
 const PAGING_POSTURE =
-  "List results are paginated: `returned`/`totalRows`/`nextOffset` describe the page. " +
-  "When `nextOffset` is not null, more rows exist — call again with that `offset` " +
-  "when you need the remaining rows.";
+  "List results are paginated: `returned`/`totalRows`/`nextOffset`/`remainingRows` describe " +
+  "the page. `remainingRows` counts the rows after this page — use it for how many more " +
+  "there are, never compute it. When `nextOffset` is not null, more rows exist — call " +
+  "again with that `offset` when you need the remaining rows.";
 
 /** The find_product row note for a soft-deleted product (spec C13, verbatim). */
 const FIND_PRODUCT_DELETED_NOTE =
@@ -1873,12 +1921,16 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // counter, and counting it twice would tell the reader more rows are missing than
       // are. byteSkipped + identityMisses is the whole gap, with a cause for each.
       const byteSkipped = rows.length - page.returned;
+      const nextOffset = consumed < total ? consumed : null;
       return ok(
         {
           products: page.rows,
           returned: page.returned,
           totalRows: total,
-          nextOffset: consumed < total ? consumed : null,
+          nextOffset,
+          // A2 C1: from THIS envelope's DB total and cursor, never the byte-fit page's (whose
+          // own totalRows is one DB page) — the rows the fit dropped stay in byteSkipped.
+          remainingRows: remainingRowsOf(total, nextOffset),
           coverage: {
             matched: total,
             scope: "approved products; name/baseName/variant match",
@@ -2077,8 +2129,11 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `(at every other grain it is null, because a multi-product order counts once per ` +
       `product). Omitting dates uses relativeDays (default ` +
       `30) ending today; the resolved window (from/to/days/source) is returned. Figures ` +
-      `are GROSS ordered, attributed; refunds are not netted. Revenue is a string. ` +
-      `coverage.unattributedOrders is caller-scoped. Products with NO attributed sales ` +
+      `are GROSS ordered, attributed; refunds are not netted. Orders recorded since the ` +
+      `last successful nightly rebuild are not counted yet, so the most recent day or two ` +
+      `may be partial. Revenue is a string. coverage.unattributedOrders is caller-scoped. ` +
+      `coverage.lastRebuildAt is when the last rebuild attempt finished, whatever its ` +
+      `outcome. Products with NO attributed sales ` +
       `in the window are ABSENT by default — pass includeZeroRows:true (groupBy:'product', ` +
       `no productId) to get a row for every approved product instead, which is how you ` +
       `answer "which products sold nothing" — note that includeZeroRows RE-ORDERS the ` +
@@ -2140,6 +2195,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             returned: 0,
             totalRows: 0,
             nextOffset: null,
+            remainingRows: remainingRowsOf(0, null),
             groupBy,
             window,
             productScope,
@@ -2178,7 +2234,11 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // Caller-scoped coverage (spec §3 E2): live unattributed-order count for THIS
       // caller's companies (never the global rebuild count), the bundle-revenue
       // disclosure, the (global) rebuild recency, and (C6) the caller's salesDataStart.
-      const coverage = await callerScopedSalesCoverage(ctx.companyIds);
+      // A2 C7: beside it, the note these figures carry when the facts are materially stale.
+      const [coverage, salesFreshness] = await Promise.all([
+        callerScopedSalesCoverage(ctx.companyIds),
+        salesFreshnessNoteFor(ctx.companyIds),
+      ]);
       // C6: does the sales source cover this whole window? The answer decides whether
       // an absent product is a MEASURED zero or an UNKNOWN — the ONE classifier
       // compare_periods uses too, so the two tools can never disagree about a source.
@@ -2239,6 +2299,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         returned: page.returned,
         totalRows: page.totalRows,
         nextOffset: page.nextOffset,
+        remainingRows: remainingRowsOf(page.totalRows, page.nextOffset),
         coverage: {
           ...coverage,
           windowCoverage,
@@ -2249,6 +2310,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             : SALES_ROWS_NOTE,
           ...approval,
           approvalNote: APPROVED_UNIVERSE_NOTE,
+          ...salesFreshnessKey(salesFreshness),
         },
       };
       if (shaped.orderCountNote) data.orderCountNote = shaped.orderCountNote;
@@ -2313,6 +2375,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         returned: page.returned,
         totalRows: page.totalRows,
         nextOffset: page.nextOffset,
+        remainingRows: remainingRowsOf(page.totalRows, page.nextOffset),
         // Boundary-only rename (spec §3 E3): dataStarts.sale → ledgerSaleStart; the shared
         // web OperationsDataStarts type is untouched. This freshness block is also the
         // tool's coverage envelope (spec §3 E1 / §7 coverage gate).
@@ -2404,6 +2467,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             returned: result.rows.length,
             totalRows: result.rows.length,
             nextOffset: null,
+            remainingRows: remainingRowsOf(result.rows.length, null),
             coverage: result.coverage,
           },
           { scope: "global" },
@@ -2422,6 +2486,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           returned: page.returned,
           totalRows: page.totalRows,
           nextOffset: page.nextOffset,
+          remainingRows: remainingRowsOf(page.totalRows, page.nextOffset),
           coverage: result.coverage,
         },
         { scope: "global" },
@@ -2537,6 +2602,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             returned: page.returned,
             totalRows: page.totalRows,
             nextOffset: page.nextOffset,
+            remainingRows: remainingRowsOf(page.totalRows, page.nextOffset),
             // M5b seam: the producer now states the receipt-event GRAIN (one event = one
             // labeled batch, D12) — relay it so the tool's reader gets the definition the
             // analytics card carries, from the same source string.
@@ -2647,7 +2713,9 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `data-start dates (ledger/snapshot GLOBAL; order dates scoped to your companies), ` +
       `snapshot flagged-pair count, and an explicit notTracked list (fulfillment ` +
       `quantities live in WooCommerce; no PO/on-order, supplier, lot/expiry, or ` +
-      `historical cost/retail/policy). This is a MIXED-scope read: rebuild, ledger, ` +
+      `historical cost/retail/policy). rebuild.lastRunAt is when the last rebuild attempt ` +
+      `finished, whatever its outcome; rebuild.lastSucceededAt is when the last successful ` +
+      `rebuild finished. This is a MIXED-scope read: rebuild, ledger, ` +
       `snapshot, and fulfillment-sync state are GLOBAL, while the sales unattributed ` +
       `count and first-order date are scoped to YOUR companies (coverage.sectionScopes ` +
       `labels each). Answers "how fresh is this data?" / "do you track fulfillment?". ` +
@@ -2739,6 +2807,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         returned: page.returned,
         totalRows: page.totalRows,
         nextOffset: page.nextOffset,
+        remainingRows: remainingRowsOf(page.totalRows, page.nextOffset),
         counts,
         countsNote: LOW_STOCK_COUNTS_NOTE,
         coverage: {
@@ -2835,11 +2904,13 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // every key below is decorated onto the row BEFORE paging (shape-before-fit).
       const resolved = resolveWindow({ relativeDays: ORDER_SIGNAL_WINDOW_DAYS }, new Date());
       const orderSignalWindow = { from: resolved.from, to: resolved.to, days: ORDER_SIGNAL_WINDOW_DAYS };
-      const signal = await orderSignal(
-        report.rows.filter(isUnsizedReorderRow).map((row) => row.productId),
-        ctx.companyIds,
-        orderSignalWindow,
-      );
+      const unsizedIds = report.rows.filter(isUnsizedReorderRow).map((row) => row.productId);
+      // A2 C7: the order figures carry the freshness note when the sales facts are
+      // materially stale — read only when there ARE order figures (an unsized row).
+      const [signal, salesFreshness] = await Promise.all([
+        orderSignal(unsizedIds, ctx.companyIds, orderSignalWindow),
+        unsizedIds.length > 0 ? salesFreshnessNoteFor(ctx.companyIds) : Promise.resolve(undefined),
+      ]);
       const noCompanyAccess = ctx.companyIds.length === 0;
       const rows: Array<ReorderRow | OrderSignalRow> = report.rows.map((row) =>
         isUnsizedReorderRow(row) ? withOrderSignal(row, signal, noCompanyAccess) : row,
@@ -2887,11 +2958,14 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       };
 
       const partial = signal.windowCoverage === "partial";
-      const envelopeOf = (page: Page<ReorderRow | OrderSignalRow>) => ({
+      // `measuredRemainingRows` is the measurement's placeholder ONLY (A2 C1); the shipped
+      // envelope always computes its own.
+      const envelopeOf = (page: Page<ReorderRow | OrderSignalRow>, measuredRemainingRows?: number) => ({
         rows: page.rows,
         returned: page.returned,
         totalRows: page.totalRows,
         nextOffset: page.nextOffset,
+        remainingRows: measuredRemainingRows ?? remainingRowsOf(page.totalRows, page.nextOffset),
         inventoryPositionKnown: report.inventoryPositionKnown,
         assumptions: report.assumptions,
         outOfStockWithOrdersProducts: flagged.slice(0, ORDER_SIGNAL_LIST_MAX).map((row) => ({
@@ -2921,6 +2995,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             : {}),
           sectionScopes: { rows: "global", orderSignal: "company" },
           orderSignalDefinition: ORDER_SIGNAL_DEFINITION,
+          ...salesFreshnessKey(salesFreshness),
         },
         coverageNote: report.coverageNote,
         // A2 C5: the rules the rows were classified by, stated beside them.
@@ -2935,13 +3010,18 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       // completed result still fits its budget (paginate keeps at least one row). With
       // ordinary names the envelope is under the reserve and the fit is unchanged.
       // (`null` serializes wider than any cursor under 1000, so it is the widest nextOffset.)
+      // A2 C1: `remainingRows` is weighed at its widest, `totalRows` (the formula over these
+      // counters would read 0), and A2 C7's freshness note is page-independent.
       const envelopeBytes = byteLengthOf(
-        envelopeOf({
-          rows: [],
-          returned: rows.length,
-          totalRows: rows.length,
-          nextOffset: rows.length >= 1000 ? rows.length : null,
-        }),
+        envelopeOf(
+          {
+            rows: [],
+            returned: rows.length,
+            totalRows: rows.length,
+            nextOffset: rows.length >= 1000 ? rows.length : null,
+          },
+          rows.length,
+        ),
       );
       const rowBudget =
         envelopeBytes > ENVELOPE_RESERVE_BYTES
@@ -3025,6 +3105,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
           returned: page.returned,
           totalRows: page.totalRows,
           nextOffset: page.nextOffset,
+          remainingRows: remainingRowsOf(page.totalRows, page.nextOffset),
           coverage: {
             ...page.coverage,
             ...(productLifecycle === "deleted"
@@ -3058,7 +3139,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `call that answers "which products grew, declined, ` +
       `started or stopped moving"; never loop a per-product tool or rank deltas ` +
       `yourself. direction:'increase'|'decrease' filters the ranked set BEFORE paging, ` +
-      `and limit/offset page it. A ranked row with a MEASURED a of 0 and b > 0 is the ` +
+      `and limit/offset page it. In groupBy:'product' mode, remainingRows counts the ranked ` +
+      `rows after this page. A ranked row with a MEASURED a of 0 and b > 0 is the ` +
       `"started moving" case (say 'no recorded activity in period A', never 'new ` +
       `product'). The separate 'unranked' array is a COVERAGE artifact — it fills when a ` +
       `period's value is unknown: either the metric's source does not cover that period ` +
@@ -3116,14 +3198,18 @@ export const assistantTools: Record<string, AssistantToolDef> = {
         return compareByProduct(args, { periodA, periodB, ctx, isSales, metricScopeNote });
       }
       // Sales metrics are company-scoped INSIDE the module (mandatory) — pass ctx.companyIds;
-      // ledger metrics ignore it (no company dimension).
-      const result = await comparePeriods({
-        metric: args.metric,
-        periodA,
-        periodB,
-        productId: args.productId,
-        companyIds: ctx.companyIds,
-      });
+      // ledger metrics ignore it (no company dimension). A2 C7: a sales metric's figures carry
+      // the freshness note when the sales facts are materially stale.
+      const [result, salesFreshness] = await Promise.all([
+        comparePeriods({
+          metric: args.metric,
+          periodA,
+          periodB,
+          productId: args.productId,
+          companyIds: ctx.companyIds,
+        }),
+        isSales ? salesFreshnessNoteFor(ctx.companyIds) : Promise.resolve(undefined),
+      ]);
       // Mixed-scope result envelope (spec §6): meta.scope "mixed"; coverage labels the
       // metric's real scope so a consumer never reads a global ledger number as
       // company-scoped (or vice versa).
@@ -3188,6 +3274,7 @@ export const assistantTools: Record<string, AssistantToolDef> = {
             excludedUnapprovedProducts: result.excludedUnapprovedProducts,
             archivedProductsIncluded: result.archivedProductsIncluded,
             approvalNote: result.approvalNote,
+            ...salesFreshnessKey(salesFreshness),
           },
         },
         { scope: "mixed" },
@@ -3273,6 +3360,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `reorderNow (count of products on the buying worklist), sales (7-day and 30-day ` +
       `ordered units/revenue), orderPipeline (order counts + revenue by status + ` +
       `open-order aging), and freshness (rebuild recency + the fulfillment-sync note). ` +
+      `freshness.lastRunAt is when the last rebuild attempt finished, whatever its outcome; ` +
+      `freshness.lastSucceededAt is when the last successful rebuild finished. ` +
       `Each section is a SUMMARY — go deeper with get_inventory_summary, reorder_report, ` +
       `get_sales, get_order_pipeline, get_data_freshness. This is a MIXED-scope tool: ` +
       `the sales and orderPipeline sections are scoped to YOUR companies; inventory, ` +

@@ -103,6 +103,8 @@ describe("built artifact", () => {
         returned: 0,
         totalRows: 0,
         nextOffset: null,
+        // A2 pack C1: the rows after this page (none on an empty last page).
+        remainingRows: 0,
         // G2-6: identityMisses rides on every find_product coverage block (0 is the
         // normal reading; it is a defined field, never a conditional one).
         coverage: {

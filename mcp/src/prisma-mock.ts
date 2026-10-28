@@ -19,6 +19,8 @@
  *   - location.findUnique / company.findMany — assistant A2 (pack C8 / C9): the
  *     get_stock_asof location resolve + the movement filters' location name, and the
  *     company names on every per-company sales coverage entry.
+ *   - analyticsRebuildRun.findMany — assistant A2 (pack C7): the sales rebuild's run
+ *     history behind the freshness note and get_data_freshness' lastSucceededAt.
  *   - $queryRaw            — the /healthz SELECT 1 probe AND the reconciliation totals
  *     read, told apart by the statement text (see the dispatcher below).
  */
@@ -65,6 +67,10 @@ const prismaMock: any = {
   },
   analyticsRebuildState: {
     findUnique: async () => null,
+  },
+  // A2 C7: the sales rebuild run history (no runs on record in the mock build).
+  analyticsRebuildRun: {
+    findMany: async () => [],
   },
   fulfillmentSyncState: {
     findMany: async () => [],

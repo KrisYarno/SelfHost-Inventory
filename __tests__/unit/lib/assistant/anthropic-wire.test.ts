@@ -22,6 +22,12 @@
 // zod schema, then the answer. For each rejected call the SDK calls onError twice: the
 // instance, then its string. f-overloaded / f-500 are the provider-failure controls.
 //
+// A2 pack C11 (FD4-1, A2-OCR2-12): the probe also runs the route's rejected-call counter
+// (+1 per argument isRecoveredToolCallInstance accepts) and reads it when streamText's
+// onFinish fires — where the route logs it. Case f must read 2; case f-one-step
+// (`stopWhen: stepCountIs(1)`, the only step one rejected call) must read 1: the final-step
+// race, where the rejection's chunks and onFinish come out of the same, last step.
+//
 // The FIRST test is the harness self-check. Every other pin runs only after it is
 // green: a probe load error or a watchdog is never evidence.
 
@@ -32,7 +38,20 @@ const PROBE = path.resolve(__dirname, "../../../support/anthropic-wire-probe.mjs
 const PROBE_TIMEOUT_MS = 90_000;
 const CAPTURE_HOST = "anthropic-wire-probe.invalid";
 const CLIENT_HOST = "wire-probe.invalid";
-const CASES = ["a0", "a", "b", "c", "d", "e", "e-sse", "e-sse-client", "f", "f-overloaded", "f-500"] as const;
+const CASES = [
+  "a0",
+  "a",
+  "b",
+  "c",
+  "d",
+  "e",
+  "e-sse",
+  "e-sse-client",
+  "f",
+  "f-one-step",
+  "f-overloaded",
+  "f-500",
+] as const;
 type CaseName = (typeof CASES)[number];
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -303,6 +322,34 @@ describe("anthropic wire probe (A1 C4)", () => {
       expect(r.finalText).toBe("Alpha 5mg has 12 on hand.");
       expect((r.chunkTypes as string[]).includes("error")).toBe(false);
       expect(r.readErrors).toEqual([]);
+      // A2 pack C11: the route's counter reads TWO rejected calls when onFinish fires.
+      expect(r.rejectedToolCallsAtOnFinish).toBe(2);
+    });
+
+    test("f-one-step (A2 C11, the final-step race): one step, one rejected call -> the counter reads 1 when onFinish fires", () => {
+      const r = records["f-one-step"];
+      // The SDK's real two-call sequence for the lone rejection, both classified recovered.
+      const calls = callsFor("f-one-step", "toolu_f_unknown");
+      expect(calls.map((c) => [c.kind, c.name, c.verdict])).toEqual([
+        ["instance", "AI_NoSuchToolError", true],
+        ["string", "AI_NoSuchToolError", true],
+      ]);
+      expect((r.onErrorCalls as OnErrorCall[]).length).toBe(calls.length);
+      // ONE request, and the turn ended on that step (the step cap, not a text answer).
+      expect(r.requests as Captured[]).toHaveLength(1);
+      expect(r.finishReason).toBe("tool-calls");
+      const types = r.chunkTypes as string[];
+      expect(types.filter((t) => t === "finish-step")).toHaveLength(1);
+      expect(types.indexOf("tool-input-error")).toBeLessThan(types.indexOf("finish"));
+      // onFinish fired, AFTER both onError calls for the rejection: the count is 1, not 0.
+      expect(r.rejectedToolCallsAtOnFinish).toBe(1);
+      expect(r.readErrors).toEqual([]);
+    });
+
+    test("the counter's controls: a provider failure counts nothing (f-overloaded reaches onFinish with 0)", () => {
+      expect(records["f-overloaded"].rejectedToolCallsAtOnFinish).toBe(0);
+      // f-500 never reaches onFinish (no step completed): the route logs the error path.
+      expect(records["f-500"].rejectedToolCallsAtOnFinish).toBeNull();
     });
 
     test("f-overloaded / f-500 (controls): a provider failure reaches onError and classifies false", () => {

@@ -19,6 +19,9 @@
  *  - a totally empty DB (no rebuild/sync rows, no ledger/snapshot/order rows) yields
  *    nulls/zeros, never throws;
  *  - the `notTracked` list content is pinned verbatim.
+ *  - A2 pack C7: `rebuild.lastSucceededAt` beside `lastRunAt` — the last SUCCESSFUL run's
+ *    finish from the sales run history (`salesRebuildState`), which differs from the last
+ *    attempt's finish when that attempt failed.
  */
 
 jest.mock("@/lib/prisma", () => ({
@@ -37,14 +40,17 @@ jest.mock("@/lib/prisma", () => ({
   },
 }));
 
+// A2 C7: the sales run history (salesRebuildState) is read beside the coverage; its own
+// filtering is pinned in sales-coverage.test.ts — here it is the value relayed.
 jest.mock("@/lib/assistant/sales-coverage", () => ({
   __esModule: true,
   callerScopedSalesCoverage: jest.fn(),
+  salesRebuildState: jest.fn(),
 }));
 
 import prisma from "@/lib/prisma";
 import { inventory_logs_logType } from "@prisma/client";
-import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
+import { callerScopedSalesCoverage, salesRebuildState } from "@/lib/assistant/sales-coverage";
 import {
   getFreshness,
   FRESHNESS_NOT_TRACKED,
@@ -57,12 +63,15 @@ const mockLedgerAggregate = prisma.inventory_logs.aggregate as jest.Mock;
 const mockSnapshotAggregate = prisma.productStockSnapshot.aggregate as jest.Mock;
 const mockOrderFindFirst = prisma.externalOrder.findFirst as jest.Mock;
 const mockCoverage = callerScopedSalesCoverage as jest.Mock;
+const mockRebuildRuns = salesRebuildState as jest.Mock;
 
 const OUTBOUND_START = new Date("2026-01-01T00:00:00.000Z");
 const SALE_START = new Date("2026-01-05T00:00:00.000Z");
 const RECEIPT_START = new Date("2025-12-01T00:00:00.000Z");
 const REBUILD_LAST_RUN = new Date("2026-07-14T03:00:00.000Z");
 const REBUILD_WATERMARK = new Date("2026-07-14T02:00:00.000Z");
+/** A2 C7: the last SUCCESSFUL run finished a day before the last (failed) attempt. */
+const REBUILD_LAST_SUCCESS = new Date("2026-07-13T03:05:00.000Z");
 const SYNC_CURSOR = new Date("2026-07-13T12:00:00.000Z");
 
 /** Branch inventory_logs.aggregate by its `where` shape: PHYSICAL_OUTBOUND_WHERE has
@@ -100,6 +109,8 @@ function wireRebuildState(opts: {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // A2 C7: no successful run on record unless a test says otherwise.
+  mockRebuildRuns.mockResolvedValue({ lastSucceededAt: null, latestAttemptFailedAfterSuccess: false });
 });
 
 describe("getFreshness", () => {
@@ -123,6 +134,10 @@ describe("getFreshness", () => {
       bundleRevenue: "excluded — bundle components carry units only",
       lastRebuildAt: REBUILD_LAST_RUN.toISOString(),
     });
+    mockRebuildRuns.mockResolvedValue({
+      lastSucceededAt: REBUILD_LAST_SUCCESS.toISOString(),
+      latestAttemptFailedAfterSuccess: true,
+    });
     mockOrderFindFirst
       .mockResolvedValueOnce({
         externalCreatedAt: new Date("2025-11-10T00:00:00.000Z"),
@@ -138,6 +153,8 @@ describe("getFreshness", () => {
     expect(report).toEqual({
       rebuild: {
         lastRunAt: REBUILD_LAST_RUN.toISOString(),
+        // A2 C7: the last attempt failed, so the last SUCCESS finished earlier.
+        lastSucceededAt: REBUILD_LAST_SUCCESS.toISOString(),
         sourceWatermark: REBUILD_WATERMARK.toISOString(),
       },
       sales: { unattributedOrders: 7, scope: "caller-companies" },
@@ -254,7 +271,7 @@ describe("getFreshness", () => {
 
     const report = await getFreshness(["company-1"]);
 
-    expect(report.rebuild).toEqual({ lastRunAt: null, sourceWatermark: null });
+    expect(report.rebuild).toEqual({ lastRunAt: null, lastSucceededAt: null, sourceWatermark: null });
     expect(report.fulfillmentSync).toEqual({
       enabled: null,
       reason: FULFILLMENT_SYNC_NOT_OBSERVABLE_REASON,
@@ -473,5 +490,33 @@ describe("getFreshness", () => {
 
     expect(report.rebuild.lastRunAt).toBe(REBUILD_LAST_RUN.toISOString());
     expect(report.snapshots.flaggedPairs).toBe(11);
+  });
+
+  // A2 pack C7 (A2-G1R2-6 / A2-G2S-7 / A2-G1R3-2): `lastRunAt` is the last ATTEMPT's
+  // finish, whatever its outcome; `lastSucceededAt` is the last SUCCESS's finish, read from
+  // the run history once per call — global, for a caller with or without companies.
+  it("rebuild.lastSucceededAt is the run history's last success, beside the last attempt's lastRunAt", async () => {
+    wireRebuildState({
+      sales: { lastRunAt: REBUILD_LAST_RUN, sourceWatermark: null },
+      snapshots: null,
+    });
+    mockSyncFindMany.mockResolvedValue([]);
+    wireEmptyLedgerAggregate();
+    mockSnapshotAggregate.mockResolvedValue({ _min: { dayKey: null } });
+    mockOrderFindFirst.mockResolvedValue(null);
+    mockCoverage.mockResolvedValue({ unattributedOrders: 0, bundleRevenue: "x", lastRebuildAt: null });
+    mockRebuildRuns.mockResolvedValue({
+      lastSucceededAt: REBUILD_LAST_SUCCESS.toISOString(),
+      latestAttemptFailedAfterSuccess: true,
+    });
+
+    for (const companyIds of [["company-1"], []]) {
+      mockRebuildRuns.mockClear();
+      const report = await getFreshness(companyIds);
+      expect(Object.keys(report.rebuild)).toEqual(["lastRunAt", "lastSucceededAt", "sourceWatermark"]);
+      expect(report.rebuild.lastRunAt).toBe(REBUILD_LAST_RUN.toISOString());
+      expect(report.rebuild.lastSucceededAt).toBe(REBUILD_LAST_SUCCESS.toISOString());
+      expect(mockRebuildRuns).toHaveBeenCalledTimes(1);
+    }
   });
 });

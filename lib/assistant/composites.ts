@@ -37,7 +37,11 @@ import { getInventorySummary } from "@/lib/reports/inventory-summary";
 import { getReorderReport, REORDER_COSTED_NOTE } from "@/lib/reports/reorder";
 import { getFreshness } from "@/lib/assistant/freshness";
 import { getOrderPipeline } from "@/lib/reports/order-pipeline";
-import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
+import {
+  callerScopedSalesCoverage,
+  salesFreshnessNote,
+  salesRebuildState,
+} from "@/lib/assistant/sales-coverage";
 import { approvedProductIds, excludedUnapprovedProductCount } from "@/lib/reports/outbound-mix";
 import { resolveWindow } from "@/lib/assistant/window";
 import {
@@ -122,6 +126,26 @@ async function runSection(
     // an AppError from a PrismaClientKnownRequestError without exposing the message body).
     const errorKind = err instanceof Error ? err.constructor.name : typeof err;
     return { scope, status: "unavailable", reason: "section unavailable", errorKind };
+  }
+}
+
+/**
+ * `coverage.salesFreshnessNote` for a sales section (A2 pack C7): present only when the
+ * sales facts are materially stale. Never for a caller with no companies (no read at all),
+ * and NON-FATAL — a failed run-history read leaves the section without a note; it never
+ * makes the section unavailable (runSection above is for the section's own figures).
+ * (tools.ts keeps its own twin: this module cannot import tools.ts — see CompositeCtx.)
+ */
+async function salesFreshnessCoverage(
+  companyIds: string[],
+  now: Date,
+): Promise<{ salesFreshnessNote?: string }> {
+  if (companyIds.length === 0) return {};
+  try {
+    const note = salesFreshnessNote(await salesRebuildState(), now);
+    return note === undefined ? {} : { salesFreshnessNote: note };
+  } catch {
+    return {};
   }
 }
 
@@ -322,7 +346,7 @@ export async function getProductOverview(
     runSection("company", async () => {
       const window = resolveWindow({ relativeDays: SALES_WINDOW_DAYS }, now, SALES_WINDOW_DAYS);
       const scoped = ctx.companyIds.length > 0;
-      const [coverage, agg] = await Promise.all([
+      const [coverage, agg, freshness] = await Promise.all([
         // ACTIVE-ONLY (OC-4 / G2-2): this section's product is resolved approved+ACTIVE,
         // so its salesDataStart must be measured over that same universe. An
         // archived-inclusive start would date the coverage of a population these figures
@@ -338,12 +362,14 @@ export async function getProductOverview(
               _sum: { orderedQty: true, revenue: true },
             })
           : Promise.resolve(null),
+        // A2 C7: the note these order figures carry when the sales facts are stale.
+        salesFreshnessCoverage(ctx.companyIds, now),
       ]);
       const out: Record<string, unknown> = {
         window,
         orderedUnits: agg?._sum?.orderedQty ?? 0,
         revenue: agg?._sum?.revenue != null ? String(agg._sum.revenue) : null,
-        coverage,
+        coverage: { ...coverage, ...freshness },
       };
       if (!scoped) out.note = "You have no company access, so there are no sales to report.";
       return out;
@@ -463,7 +489,7 @@ export async function getBusinessSnapshot(
       // and NOT AT ALL for a caller with no company access (there is no sales population
       // to scope, and that caller's snapshot has always resolved without querying).
       const approvedActiveIds = ctx.companyIds.length > 0 ? await approvedProductIds() : [];
-      const [last7d, last30d, coverage, excludedUnapprovedProducts] = await Promise.all([
+      const [last7d, last30d, coverage, excludedUnapprovedProducts, freshness] = await Promise.all([
         salesTotals(ctx.companyIds, win7.from, win7.to, approvedActiveIds),
         salesTotals(ctx.companyIds, win30.from, win30.to, approvedActiveIds),
         // ACTIVE-ONLY start (OC-4 / G2-2): matches the universe the totals above sum.
@@ -479,6 +505,8 @@ export async function getBusinessSnapshot(
               },
             })
           : Promise.resolve(0),
+        // A2 C7: the note these order figures carry when the sales facts are stale.
+        salesFreshnessCoverage(ctx.companyIds, now),
       ]);
       return {
         last7d: { ...last7d, window: win7 },
@@ -491,6 +519,7 @@ export async function getBusinessSnapshot(
           excludedUnapprovedProducts,
           archivedProductsIncluded: 0,
           approvalNote: SNAPSHOT_SALES_APPROVAL_NOTE,
+          ...freshness,
         },
       };
     }),
@@ -508,6 +537,8 @@ export async function getBusinessSnapshot(
       const report = await getFreshness(ctx.companyIds);
       return {
         lastRunAt: report.rebuild.lastRunAt,
+        // A2 C7: the last SUCCESSFUL rebuild's finish, beside the last attempt's.
+        lastSucceededAt: report.rebuild.lastSucceededAt,
         sourceWatermark: report.rebuild.sourceWatermark,
         fulfillmentSyncNote: report.fulfillmentSync.reason,
         fulfillmentSyncCursor: report.fulfillmentSync.cursor,

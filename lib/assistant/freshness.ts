@@ -30,7 +30,7 @@
 import prisma from "@/lib/prisma";
 import { inventory_logs_logType } from "@prisma/client";
 import { PHYSICAL_OUTBOUND_WHERE } from "@/lib/reports/metrics-contract";
-import { callerScopedSalesCoverage } from "@/lib/assistant/sales-coverage";
+import { callerScopedSalesCoverage, salesRebuildState } from "@/lib/assistant/sales-coverage";
 import { approvedProductIds } from "@/lib/reports/outbound-mix";
 
 const toIso = (d: Date | null | undefined): string | null => (d ? d.toISOString() : null);
@@ -55,7 +55,9 @@ export const FRESHNESS_NOT_TRACKED: readonly string[] = [
 ];
 
 export interface FreshnessReport {
-  rebuild: { lastRunAt: string | null; sourceWatermark: string | null };
+  /** A2 pack C7: `lastRunAt` = when the last rebuild attempt finished, whatever its outcome;
+   *  `lastSucceededAt` = when the last SUCCESSFUL rebuild finished (both finish times). */
+  rebuild: { lastRunAt: string | null; lastSucceededAt: string | null; sourceWatermark: string | null };
   sales: { unattributedOrders: number; scope: "caller-companies" };
   fulfillmentSync: { enabled: null; reason: string; cursor: string | null; backfill: string | null };
   dataStarts: Record<string, string | null>;
@@ -183,7 +185,8 @@ export async function getFreshness(companyIds: string[]): Promise<FreshnessRepor
   const approvedScope = { productId: { in: await approvedProductIds({ includeArchived: true }) } };
 
   const [
-    salesRebuildState,
+    salesRebuildRow,
+    salesRunHistory,
     snapshotsRebuildState,
     syncState,
     coverage,
@@ -200,6 +203,9 @@ export async function getFreshness(companyIds: string[]): Promise<FreshnessRepor
       where: { job: "sales" },
       select: { lastRunAt: true, sourceWatermark: true },
     }),
+    // rebuild.lastSucceededAt (A2 pack C7): the same job's last SUCCESSFUL run, from its run
+    // history — `lastRunAt` above is stamped by every finished attempt, failed ones too.
+    salesRebuildState(),
     // snapshots.flaggedPairs: the "snapshots" job's counter — a DIFFERENT row from
     // the one above (flaggedPairs is populated by rebuildStockSnapshots, not the
     // sales rebuild). Labeled separately in the report on purpose (spec item 5).
@@ -270,8 +276,9 @@ export async function getFreshness(companyIds: string[]): Promise<FreshnessRepor
 
   return {
     rebuild: {
-      lastRunAt: toIso(salesRebuildState?.lastRunAt ?? null),
-      sourceWatermark: toIso(salesRebuildState?.sourceWatermark ?? null),
+      lastRunAt: toIso(salesRebuildRow?.lastRunAt ?? null),
+      lastSucceededAt: salesRunHistory.lastSucceededAt,
+      sourceWatermark: toIso(salesRebuildRow?.sourceWatermark ?? null),
     },
     sales: {
       unattributedOrders: coverage.unattributedOrders,
