@@ -1829,12 +1829,15 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       // A2 C17 (A2-QA-1): the per-day sentence follows comparableBy in BOTH modes, not
       // unequalLengths alone ("this week vs last week" has equal lengths).
       expect(d).toContain(
-        "Whenever comparableBy is 'per_day' — the periods differ in length, or one reaches past " +
+        "unequalLengths = the requested lengths differ; comparableBy decides how to compare. " +
+          "Whenever comparableBy is 'per_day' — the periods differ in length, or one reaches past " +
           "the last complete day so its total still includes days being recorded " +
           "(coverage.rateWindows) — compare the per-day figures (aPerDay, bPerDay, perDayDelta, " +
           "perDayDirection), not delta or pctChange; in groupBy 'product' mode the rows are then " +
           "ranked and filtered by the per-day change (rankedBy: 'per_day'). A period with no " +
-          "complete day yet has no per-day figure (reasons.perDay) and comparableBy is 'total'.",
+          "complete day yet has no per-day figure (reasons.perDay) and comparableBy is 'total' — " +
+          "that period's total is still partial, so the change in totals is not like-for-like " +
+          "either (relay reasons.perDay).",
       );
       expect(d).not.toContain("When periodA and periodB differ in length (unequalLengths), compare");
       // A2 FR4 (A2-FD2-2): the description's own reasons-keys list names the per-day keys too.

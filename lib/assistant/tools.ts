@@ -1806,8 +1806,8 @@ const ORDER_SIGNAL_DEFINITION =
   "orderSignal = units and orders attributed to this product in your companies' order " +
   "records over a 90-day calendar window (coverage.orderSignalWindow), shown only for " +
   "products the report cannot size. Orders since the last sales rebuild (usually today's, and " +
-  "before the nightly rebuild yesterday's too) are not counted yet, so a 0 means none recorded " +
-  "before then. These are recorded orders, fulfilled or not — not a " +
+  "before the nightly rebuild yesterday's too) are not counted yet, so a 0 covers only " +
+  "earlier orders. These are recorded orders, fulfilled or not — not a " +
   "count of currently open orders, and not the stock-outflow figures the report sizes from; " +
   "they are never added to them and never used to suggest a quantity. outOfStockWithOrders " +
   "marks a product with no stock now and recorded orders in that window: the report cannot " +
@@ -1944,8 +1944,8 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `If coverage.byteSkipped is present, this page dropped that many matched products ` +
       `to fit the response size and nextOffset skips past them — follow coverage.byteNote ` +
       `(same offset, smaller limit) to read them instead of walking on. remainingRows counts ` +
-      `only the matches after nextOffset; add coverage.byteSkipped for every match not yet ` +
-      `shown. ${PAGING_POSTURE} ${DATA_POSTURE}`,
+      `only the matches after nextOffset; the coverage.byteSkipped matches this page dropped ` +
+      `are not in it — read them with coverage.byteNote. ${PAGING_POSTURE} ${DATA_POSTURE}`,
     inputSchema: findProductSchema,
     run: async (input, ctx) => {
       const args = findProductSchema.parse(input);
@@ -3332,12 +3332,15 @@ export const assistantTools: Record<string, AssistantToolDef> = {
       `change, delta = the coverageShift qualification (BOTH modes, present only with ` +
       `coverageShift), perDayPctChange = per-day percent change, perDay = why the per-day ` +
       `figures are missing (present only when a period has no complete day yet). ` +
+      `unequalLengths = the requested lengths differ; comparableBy decides how to compare. ` +
       `Whenever comparableBy is 'per_day' — the periods differ in length, or one reaches past ` +
       `the last complete day so its total still includes days being recorded ` +
       `(coverage.rateWindows) — compare the per-day figures (aPerDay, bPerDay, perDayDelta, ` +
       `perDayDirection), not delta or pctChange; in groupBy 'product' mode the rows are then ` +
       `ranked and filtered by the per-day change (rankedBy: 'per_day'). A period with no ` +
-      `complete day yet has no per-day figure (reasons.perDay) and comparableBy is 'total'. ` +
+      `complete day yet has no per-day figure (reasons.perDay) and comparableBy is 'total' — ` +
+      `that period's total is still partial, so the change in totals is not like-for-like ` +
+      `either (relay reasons.perDay). ` +
       `outbound_units/inbound_units use a SIGN-FIRST ledger predicate over CALENDAR-DAY ` +
       `windows; a gap from get_operations is that tool's ROLLING-INSTANT window ` +
       `(ending now), and a gap from get_movement_series is that movement FOLDS a ` +

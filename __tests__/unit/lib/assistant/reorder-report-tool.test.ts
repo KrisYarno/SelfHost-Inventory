@@ -1095,8 +1095,8 @@ describe("A2 C4 — mixed scope", () => {
       "orderSignal = units and orders attributed to this product in your companies' order " +
         "records over a 90-day calendar window (coverage.orderSignalWindow), shown only for " +
         "products the report cannot size. Orders since the last sales rebuild (usually today's, " +
-        "and before the nightly rebuild yesterday's too) are not counted yet, so a 0 means none " +
-        "recorded before then. These are recorded orders, fulfilled or not — not a " +
+        "and before the nightly rebuild yesterday's too) are not counted yet, so a 0 covers only " +
+        "earlier orders. These are recorded orders, fulfilled or not — not a " +
         "count of currently open orders, and not the stock-outflow figures the report sizes " +
         "from; they are never added to them and never used to suggest a quantity. " +
         "outOfStockWithOrders marks a product with no stock now and recorded orders in that " +

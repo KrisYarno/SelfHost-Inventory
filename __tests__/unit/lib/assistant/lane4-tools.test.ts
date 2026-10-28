@@ -1457,8 +1457,8 @@ describe("A2 C17 — find_product's remaining count and the composites' newest-o
   it("find_product: remainingRows counts only the matches after nextOffset, byteSkipped the rest", () => {
     expect(descOf("find_product")).toContain(
       "follow coverage.byteNote (same offset, smaller limit) to read them instead of walking on. " +
-        "remainingRows counts only the matches after nextOffset; add coverage.byteSkipped for every " +
-        "match not yet shown.",
+        "remainingRows counts only the matches after nextOffset; the coverage.byteSkipped matches " +
+        "this page dropped are not in it — read them with coverage.byteNote.",
     );
   });
 
