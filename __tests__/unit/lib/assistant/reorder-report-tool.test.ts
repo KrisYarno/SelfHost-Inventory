@@ -23,6 +23,9 @@
  * A2 FR2 (pack C15): the page never takes more than the room the measured envelope leaves —
  * pinned THROUGH THE ADAPTER across a budget sweep; the run history is answered by a
  * query-faithful fake; the failed-attempt freshness wording.
+ * A2 FR3 (pack C16): a no-fact product linked after the last FULL sales rebuild is
+ * `not_yet_attributed`, never a measured 0 — one run-history read serving the freshness note
+ * and that cutoff; the fake models each run's `mode`; inside the worst case.
  */
 
 // `ai` (v7) is ESM-only; createAiTools only stores def+execute, never invokes ai's
@@ -76,10 +79,11 @@ import { toDayKey } from "@/lib/analytics/dates";
 const mockReport = getReorderReport as jest.Mock;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const db = prisma as any;
-/** A2 C7: one sales rebuild run that finished `hoursAgo` hours before now. */
-function salesRun(status: string, hoursAgo: number, skippedReason: string | null = null) {
+/** A2 C7: one sales rebuild run that finished `hoursAgo` hours before now. A2 C16: `mode` is
+ *  the run's own ('nightly' | 'full' | 'backfill'); the default is the nightly. */
+function salesRun(status: string, hoursAgo: number, skippedReason: string | null = null, mode = "nightly") {
   const finishedAt = new Date(Date.now() - hoursAgo * 3_600_000);
-  return { status, startedAt: new Date(finishedAt.getTime() - 60_000), finishedAt, skippedReason };
+  return { status, startedAt: new Date(finishedAt.getTime() - 60_000), finishedAt, skippedReason, mode };
 }
 type RunRow = ReturnType<typeof salesRun>;
 type RunQuery = {
@@ -107,6 +111,7 @@ function seedRuns(runs: RunRow[]) {
         });
   const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
     const rows: Array<Record<string, unknown>> = runs
+      // A2 C16: every seeded run carries its mode (salesRun defaults it to the nightly).
       .map((run) => ({ job: "sales", ...run }))
       .filter((run: Record<string, unknown>) =>
         Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
@@ -648,12 +653,18 @@ describe("A2 C4 — partial and absent coverage", () => {
 // unlinked orders are counted; short codes explained once; the unknown-flag count
 // ===========================================================================
 
+/** A2 C16: a seeded listing's creation instant when the fixture does not name one — long
+ *  before any seeded run, so the not-yet-attributed rule only fires where a test says so. */
+const LISTED_LONG_AGO = new Date("2025-01-01T00:00:00.000Z");
+
 /** The caller's stores (by company, from its orders), its listings, and the window's
- *  unlinked-order count — answered honoring the where clauses the module sends. */
+ *  unlinked-order count — answered honoring the where clauses the module sends, and (A2 C16)
+ *  with the columns each read SELECTS: a listing's createdAt directly, a component's through
+ *  its bundle listing. */
 function seedListings(opts: {
   stores: Record<string, string[]>;
-  links?: Array<{ productId: number; store: string }>;
-  components?: Array<{ productId: number; store: string }>;
+  links?: Array<{ productId: number; store: string; createdAt?: Date }>;
+  components?: Array<{ productId: number; store: string; createdAt?: Date }>;
   unlinkedOrders?: number;
 }) {
   db.externalOrder.groupBy.mockImplementation(async (args: { where: { companyId: { in: string[] } } }) =>
@@ -663,21 +674,29 @@ function seedListings(opts: {
       .map((integrationId) => ({ integrationId })),
   );
   const listingRead =
-    (rows: Array<{ productId: number; store: string }>) => async (args: { where: Record<string, any> }) =>
+    (rows: Array<{ productId: number; store: string; createdAt?: Date }>, viaBundleListing: boolean) =>
+    async (args: { where: Record<string, any>; select: Record<string, any> }) =>
       rows
         .filter(
           (row) =>
             args.where.internalProductId.in.includes(row.productId) &&
             (args.where.integrationId ?? args.where.productLink.integrationId).in.includes(row.store),
         )
-        .map((row) => ({ internalProductId: row.productId }));
-  db.productLink.findMany.mockImplementation(listingRead(opts.links ?? []));
-  db.bundleComponent.findMany.mockImplementation(listingRead(opts.components ?? []));
+        .map((row) => {
+          const createdAt = row.createdAt ?? LISTED_LONG_AGO;
+          return {
+            internalProductId: row.productId,
+            ...(!viaBundleListing && args.select.createdAt ? { createdAt } : {}),
+            ...(viaBundleListing && args.select.productLink?.select?.createdAt ? { productLink: { createdAt } } : {}),
+          };
+        });
+  db.productLink.findMany.mockImplementation(listingRead(opts.links ?? [], false));
+  db.bundleComponent.findMany.mockImplementation(listingRead(opts.components ?? [], true));
   db.externalOrder.count.mockResolvedValue(opts.unlinkedOrders ?? 0);
 }
 
 const NOT_LINKED_SENTENCE =
-  "not linked to a store listing in your companies, so its orders cannot be attributed";
+  "no listing of it is linked on a store with recorded orders in your companies, so its orders cannot be attributed";
 
 describe("A2 C14 — not_linked: an unlinked product is never a measured 0", () => {
   /** c1 has recorded since 2020 (full coverage); products 3 and 4 have no fact in the window. */
@@ -771,6 +790,179 @@ describe("A2 C14 — not_linked: an unlinked product is never a measured 0", () 
     const clean = (await run({}, ["c1"])).data;
     expect(clean.coverage).not.toHaveProperty("orderSignalUnlinkedOrders");
     expect(clean.coverage).not.toHaveProperty("orderSignalUnlinkedNote");
+  });
+});
+
+// ===========================================================================
+// A2 pack C16 (A2-FD1-1) — a product linked after the last FULL sales rebuild is not a
+// measured 0: linking back-fills the old order lines without a rebuild, the nightly re-reads
+// only its rolling days plus days whose ORDERS changed, and only the full re-reads every day
+// ===========================================================================
+
+const NOT_YET_ATTRIBUTED_SENTENCE =
+  "linked to a store listing after the last full sales rebuild, so orders on that listing may " +
+  "not be counted yet";
+
+describe("A2 C16 — not_yet_attributed: a link newer than the last full sales rebuild is never a measured 0", () => {
+  /** c1 has recorded since 2020 (full coverage); products 3 and 4 have no fact in the window. */
+  const FULL = {
+    approvedActiveIds: [3, 4],
+    facts: [{ productId: 3, companyId: "c1", dayKey: "2020-01-01", orderedQty: 1, orderCount: 1 }] as Fact[],
+  };
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
+  /** The last FULL success started ~100 hours ago; a fresh nightly finished 2 hours ago. */
+  const FULL_RUN = salesRun("SUCCEEDED", 100, null, "full");
+  const NIGHTLY_RUN = salesRun("SUCCEEDED", 2);
+
+  it("a no-fact, out-of-stock product whose only link is newer than the last full success -> null + not_yet_attributed + flag null", async () => {
+    seedFacts(FULL);
+    seedRuns([FULL_RUN, NIGHTLY_RUN]);
+    seedListings({
+      stores: { c1: ["s1"] },
+      links: [
+        { productId: 3, store: "s1", createdAt: hoursAgo(20) }, // after the full run started
+        { productId: 4, store: "s1", createdAt: hoursAgo(200) }, // before it
+      ],
+    });
+    mockReport.mockResolvedValue(reportOf([unsized(3, 0), unsized(4, 0)]));
+    const { data } = await run({}, ["c1"]);
+    expect(data.coverage.orderSignalCoverage).toBe("full");
+    expect(rowOf(data, 3)).toEqual({
+      ...unsized(3, 0),
+      orderSignal: null,
+      orderSignalReason: "not_yet_attributed",
+      outOfStockWithOrders: null,
+    });
+    // The same link OLDER than the cutoff: the full rebuild read its orders — a measured 0.
+    expect(rowOf(data, 4)).toEqual({ ...unsized(4, 0), orderSignal: { orderedUnits: 0, orders: 0 }, outOfStockWithOrders: false });
+    expect(data.coverage.orderSignalReasons).toEqual({ not_yet_attributed: NOT_YET_ATTRIBUTED_SENTENCE });
+    expect(data.counts).toMatchObject({ outOfStockWithOrders: 0, outOfStockWithOrdersUnknown: 1, orderSignalUnknown: 1 });
+  });
+
+  it("its bundle-only twin: a component of a bundle listing made after the cutoff (the listing's createdAt)", async () => {
+    seedFacts(FULL);
+    seedRuns([FULL_RUN]);
+    seedListings({ stores: { c1: ["s1"] }, components: [{ productId: 4, store: "s1", createdAt: hoursAgo(20) }] });
+    mockReport.mockResolvedValue(reportOf([unsized(4, 0)]));
+    const { data } = await run({}, ["c1"]);
+    expect(rowOf(data, 4)).toMatchObject({ orderSignal: null, orderSignalReason: "not_yet_attributed", outOfStockWithOrders: null });
+    // Non-vacuity: the same bundle listing made before the cutoff is a measured 0.
+    seedListings({ stores: { c1: ["s1"] }, components: [{ productId: 4, store: "s1", createdAt: hoursAgo(200) }] });
+    expect(rowOf((await run({}, ["c1"])).data, 4)).toMatchObject({ orderSignal: { orderedUnits: 0, orders: 0 } });
+  });
+
+  it("a nightly success NEWER than the link, but no newer full: still not_yet_attributed", async () => {
+    seedFacts(FULL);
+    // The link was made 20 hours ago; the nightly that finished 2 hours ago does not re-read
+    // the old days its back-filled lines sit on. Only the full one (100 hours ago) did.
+    seedRuns([FULL_RUN, NIGHTLY_RUN]);
+    seedListings({ stores: { c1: ["s1"] }, links: [{ productId: 3, store: "s1", createdAt: hoursAgo(20) }] });
+    mockReport.mockResolvedValue(reportOf([unsized(3, 0)]));
+    expect(rowOf((await run({}, ["c1"])).data, 3)).toMatchObject({ orderSignal: null, orderSignalReason: "not_yet_attributed" });
+    // Non-vacuity: once a FULL success starts after the link, it is a measured 0 again.
+    seedRuns([FULL_RUN, salesRun("SUCCEEDED", 2, null, "full")]);
+    expect(rowOf((await run({}, ["c1"])).data, 3)).toMatchObject({ orderSignal: { orderedUnits: 0, orders: 0 } });
+  });
+
+  it("the newest of a product's links decides: an old link beside a new one is still not_yet_attributed", async () => {
+    seedFacts(FULL);
+    seedRuns([FULL_RUN]);
+    seedListings({
+      stores: { c1: ["s1"] },
+      links: [{ productId: 3, store: "s1", createdAt: hoursAgo(500) }],
+      components: [{ productId: 3, store: "s1", createdAt: hoursAgo(20) }],
+    });
+    mockReport.mockResolvedValue(reportOf([unsized(3, 0)]));
+    expect(rowOf((await run({}, ["c1"])).data, 3)).toMatchObject({ orderSignal: null, orderSignalReason: "not_yet_attributed" });
+  });
+
+  it("no full success on record: the rule does not apply (a measured 0 under full coverage)", async () => {
+    seedFacts(FULL);
+    seedRuns([NIGHTLY_RUN]);
+    seedListings({ stores: { c1: ["s1"] }, links: [{ productId: 3, store: "s1", createdAt: hoursAgo(1) }] });
+    mockReport.mockResolvedValue(reportOf([unsized(3, 0)]));
+    const { data } = await run({}, ["c1"]);
+    expect(rowOf(data, 3)).toMatchObject({ orderSignal: { orderedUnits: 0, orders: 0 }, outOfStockWithOrders: false });
+    expect(data.coverage).not.toHaveProperty("orderSignalReasons");
+  });
+
+  it("no state (a throwing run-history read): the rule does not apply, and no note", async () => {
+    seedFacts(FULL);
+    seedListings({ stores: { c1: ["s1"] }, links: [{ productId: 3, store: "s1", createdAt: hoursAgo(1) }] });
+    db.analyticsRebuildRun.findFirst.mockRejectedValue(new Error("analytics_rebuild_runs unreachable"));
+    mockReport.mockResolvedValue(reportOf([unsized(3, 0)]));
+    const { data } = await run({}, ["c1"]);
+    expect(rowOf(data, 3)).toMatchObject({ orderSignal: { orderedUnits: 0, orders: 0 } });
+    expect(data.coverage).not.toHaveProperty("salesFreshnessNote");
+  });
+
+  it("a product WITH a fact row keeps its recorded sum, whatever its link's age", async () => {
+    seedFacts({
+      approvedActiveIds: [3],
+      facts: [
+        { productId: 3, companyId: "c1", dayKey: "2020-01-01", orderedQty: 1, orderCount: 1 },
+        { productId: 3, companyId: "c1", dayKey: daysBack(3), orderedQty: 5, orderCount: 2 },
+      ],
+    });
+    seedRuns([FULL_RUN]);
+    seedListings({ stores: { c1: ["s1"] }, links: [{ productId: 3, store: "s1", createdAt: hoursAgo(20) }] });
+    mockReport.mockResolvedValue(reportOf([unsized(3, 0)]));
+    expect(rowOf((await run({}, ["c1"])).data, 3)).toMatchObject({ orderSignal: { orderedUnits: 5, orders: 2 }, outOfStockWithOrders: true });
+  });
+
+  it("partial coverage: a linked no-fact product newer than the cutoff is not_yet_attributed; unlinked stays not_linked", async () => {
+    const start = daysBack(20);
+    seedFacts({
+      approvedActiveIds: [2, 3, 4, 5],
+      facts: [{ productId: 2, companyId: "c1", dayKey: start, orderedQty: 9, orderCount: 3 }],
+    });
+    seedRuns([FULL_RUN]);
+    seedListings({
+      stores: { c1: ["s1"] },
+      links: [
+        { productId: 3, store: "s1", createdAt: hoursAgo(20) },
+        { productId: 5, store: "s1", createdAt: hoursAgo(200) },
+      ],
+    });
+    mockReport.mockResolvedValue(reportOf([unsized(2, 0), unsized(3, 0), unsized(4, 0), unsized(5, 0)]));
+    const { data } = await run({}, ["c1"]);
+    expect(data.coverage.orderSignalCoverage).toBe("partial");
+    expect(rowOf(data, 3)).toMatchObject({ orderSignal: null, orderSignalReason: "not_yet_attributed", outOfStockWithOrders: null });
+    expect(rowOf(data, 4)).toMatchObject({ orderSignal: null, orderSignalReason: "not_linked" });
+    expect(rowOf(data, 5)).toMatchObject({ orderSignal: null, orderSignalReason: "not_recorded" });
+    expect(data.coverage.orderSignalReasons).toEqual({
+      not_yet_attributed: NOT_YET_ATTRIBUTED_SENTENCE,
+      not_linked: NOT_LINKED_SENTENCE,
+      not_recorded: salesCoverageReason(start, signalWindow().from),
+    });
+  });
+
+  it("ONE state read per call serves both the freshness note and the cutoff", async () => {
+    seedFacts(FULL);
+    const stale = salesRun("SUCCEEDED", 30, null, "full");
+    seedRuns([stale]);
+    seedListings({ stores: { c1: ["s1"] }, links: [{ productId: 3, store: "s1", createdAt: hoursAgo(20) }] });
+    mockReport.mockResolvedValue(reportOf([unsized(3, 0)]));
+    const { data } = await run({}, ["c1"]);
+    // Both consumers of the one read: the stale note AND the cutoff.
+    expect(data.coverage.salesFreshnessNote).toContain("more than a day ago");
+    expect(rowOf(data, 3)).toMatchObject({ orderSignalReason: "not_yet_attributed" });
+    // One salesRebuildState: its newest-success read, its full-success read, its attempts read.
+    expect(db.analyticsRebuildRun.findFirst).toHaveBeenCalledTimes(2);
+    expect(db.analyticsRebuildRun.findMany).toHaveBeenCalledTimes(1);
+    const reads = db.analyticsRebuildRun.findFirst.mock.calls.map((c: any[]) => c[0].where);
+    expect(reads).toEqual([
+      { job: "sales", status: "SUCCEEDED", finishedAt: { not: null } },
+      { job: "sales", status: "SUCCEEDED", mode: "full", finishedAt: { not: null } },
+    ]);
+  });
+
+  it("no company access: the rule never reads the run history (no state, no rule)", async () => {
+    mockReport.mockResolvedValue(reportOf([unsized(3, 0)]));
+    seedRuns([FULL_RUN]);
+    const { data } = await run({}, []);
+    expect(rowOf(data, 3)).toMatchObject({ orderSignal: null, orderSignalReason: "no_company_access" });
+    expectNoRunRead();
   });
 });
 
@@ -964,8 +1156,9 @@ describe("A2 C2 — reorder counts", () => {
       "counts cover every row of this result, not only this page; approaching and healthy " +
         "products that are not listed are counted in coverage.approachingOmitted and " +
         "coverage.healthy. outOfStockWithOrders is a lower bound whenever " +
-        "outOfStockWithOrdersUnknown is above 0 — it counts the out-of-stock products the order " +
-        "records cannot tell about. Use these for how many; never count rows yourself.",
+        "outOfStockWithOrdersUnknown is above 0 — outOfStockWithOrdersUnknown counts the " +
+        "out-of-stock products the order records cannot tell about. Use these for how many; " +
+        "never count rows yourself.",
     );
     const keys = Object.keys(data);
     expect(keys.indexOf("counts")).toBeLessThan(keys.indexOf("coverage"));
@@ -1054,8 +1247,9 @@ describe("A2 C4 — the worst-case envelope", () => {
   const ENVELOPE_RESERVE_BYTES = 8_192;
   let NAME = "N".repeat(255);
   const ids = Array.from({ length: 25 }, (_, i) => 1000 + i);
-  /** A2 C14: two unsized products with no fact row — one linked, one not. */
-  const NO_FACT_IDS = [2000, 2001];
+  /** A2 C14: unsized products with no fact row — one linked, one not; A2 C16: and one linked
+   *  after the last full sales rebuild started. */
+  const NO_FACT_IDS = [2000, 2001, 2002];
   const envelopeBytesOf = (data: any) => Buffer.byteLength(JSON.stringify({ ...data, rows: [] }), "utf8");
   afterEach(() => {
     NAME = "N".repeat(255);
@@ -1082,14 +1276,20 @@ describe("A2 C4 — the worst-case envelope", () => {
     // A2 M4 (pack C7): the LONGEST freshness note — a stale success with a newer attempt
     // that did not succeed (A2 C15: "..., more than a day ago, and a later attempt did not
     // succeed; ..." — 195 characters with its instant, still the longest of the four).
-    seedRuns([salesRun("FAILED", 1), salesRun("SUCCEEDED", 30)]);
+    // A2 C16: plus an older FULL success, the cutoff the not_yet_attributed rule reads.
+    seedRuns([salesRun("FAILED", 1), salesRun("SUCCEEDED", 30), salesRun("SUCCEEDED", 200, null, "full")]);
     // A2 FR1 (pack C14): BOTH reason codes a covered caller can carry — a linked no-fact
     // product (not_recorded: get_sales' company-kind sentence, naming the four silent
     // 191-character companies) and an unlinked one (not_linked) — plus the unlinked-orders
     // note at a seven-digit count.
+    // A2 FR3 (pack C16): and the third code — a no-fact product linked an hour ago, after the
+    // last full success started (not_yet_attributed).
     seedListings({
       stores: { [companies[0]]: ["s0"] },
-      links: [{ productId: NO_FACT_IDS[0], store: "s0" }],
+      links: [
+        { productId: NO_FACT_IDS[0], store: "s0" },
+        { productId: NO_FACT_IDS[2], store: "s0", createdAt: new Date(Date.now() - 3_600_000) },
+      ],
       unlinkedOrders: 9_999_999,
     });
     const rows = [...ids, ...NO_FACT_IDS].map((id) => ({ ...unsized(id, 0), productName: NAME }));
@@ -1114,7 +1314,12 @@ describe("A2 C4 — the worst-case envelope", () => {
     expect(data.coverage.orderSignalCompanyCoverageNote).toBe(SALES_COMPANY_COVERAGE_MEASURED_NOTE);
     expect(data.coverage.requested).toBeDefined();
     // A2 FR1: both codes' sentences (the long one names the companies) and the unlinked note.
-    expect(Object.keys(data.coverage.orderSignalReasons).sort()).toEqual(["not_linked", "not_recorded"]);
+    // A2 FR3: and the third code a covered caller can carry, not_yet_attributed.
+    expect(Object.keys(data.coverage.orderSignalReasons).sort()).toEqual([
+      "not_linked",
+      "not_recorded",
+      "not_yet_attributed",
+    ]);
     expect(data.coverage.orderSignalReasons.not_recorded).toContain("C".repeat(191));
     expect(data.coverage.orderSignalUnlinkedOrders).toBe(9_999_999);
     expect(data.coverage.orderSignalUnlinkedNote).toContain("9999999 orders in this window");
@@ -1144,11 +1349,24 @@ describe("A2 C4 — the worst-case envelope", () => {
   // 8,207 B at 8, 9,647 B at 80 (13,147 B at 255) — the threshold stays at 7 characters. Under
   // C15 the side of the reserve no longer matters for safety: the row budget never exceeds the
   // room the measured envelope leaves (the adapter sweep at the end of this file).
-  it("names up to 7 characters: the WHOLE worst-case envelope stays under the fixed reserve", async () => {
-    NAME = "N".repeat(7);
+  // Recorded (A2 FR3, pack C16): the worst case now also carries the third reason code a
+  // covered caller can carry — not_yet_attributed's sentence, once (+158 B). It measures
+  // 8,205 B at 0 characters, 8,345 B at 7, 9,805 B at 80 (13,305 B at 255): over the fixed
+  // reserve at EVERY name length, so the worst case always takes the measured-room fit (C15).
+  // The pin below holds that fact and the budget safety at the shortest names.
+  it("the worst case outweighs the fixed reserve at every name length now, and still fits its budget", async () => {
+    NAME = "";
     const { data } = (await worstCase()) as { data: any };
     expect(data.outOfStockWithOrdersProducts).toHaveLength(20);
-    expect(envelopeBytesOf(data)).toBeLessThan(ENVELOPE_RESERVE_BYTES);
+    expect(envelopeBytesOf(data)).toBeGreaterThan(ENVELOPE_RESERVE_BYTES);
+    for (const remaining of [65_536, 16_384, 12_000, 9_000]) {
+      const result = await worstCase(remaining);
+      expect({ remaining, fits: result.meta.bytes <= byteBudget(testCtx({ remainingBytes: remaining })) }).toEqual({
+        remaining,
+        fits: true,
+      });
+      expect((result.data as any).returned).toBeGreaterThan(0);
+    }
   });
 
   it("255-character names outweigh the reserve, so the page is fit to the MEASURED envelope", async () => {
@@ -1156,13 +1374,15 @@ describe("A2 C4 — the worst-case envelope", () => {
     // so no envelope carrying it can sit under the 8 KiB reserve. The page gives way.
     // (A2 M3: ~11.4 KB once the five company names ride in orderSignalCompanyCoverage;
     // A2 M4: 11,675 B with remainingRows and the longest freshness note; A2 FR1: 13,143 B
-    // with both reason sentences and the unlinked-orders note.)
+    // with both reason sentences and the unlinked-orders note; A2 FR3: 13,305 B with the
+    // not_yet_attributed sentence.)
     const { data, meta } = (await worstCase()) as { data: any; meta: { bytes: number } };
     const envelope = envelopeBytesOf(data);
     expect(envelope).toBeGreaterThan(ENVELOPE_RESERVE_BYTES);
     expect(meta.bytes).toBeLessThanOrEqual(65_536);
-    // All 27 rows fit the full budget beside it here; the tight budgets below shrink them.
-    expect(data.returned).toBe(27);
+    // All 28 rows (A2 FR3: a third no-fact product) fit the full budget beside it here; the
+    // tight budgets below shrink them.
+    expect(data.returned).toBe(28);
   });
 
   it("the result never exceeds the byte budget it was given, at full and at tight budgets", async () => {
@@ -1213,10 +1433,25 @@ describe("A2 C15 — reorder's page fits the measured room, through the adapter"
    * names the whole envelope sits just UNDER the reserve — measured 8,163 B at `df6c83d`,
    * where this probe shipped 12,105 B at a 12,000 B budget and the adapter discarded it; with
    * 255-character names it is well over the reserve.
+   *
+   * A2 FR3 (pack C16): `notYetAttributed` adds one no-fact product at 0 stock whose listing was
+   * made after the last FULL sales success started — so the sweep also weighs C16's code and
+   * sentence (the plain probe has a fact row for every product and never reaches them).
    */
-  function seedProbe(nameLength: number) {
+  function seedProbe(nameLength: number, notYetAttributed = false) {
     const ids = Array.from({ length: 25 }, (_, i) => 1000 + i);
-    seedRuns([salesRun("SUCCEEDED", 30)]);
+    const extra = notYetAttributed ? [2002] : [];
+    seedRuns(
+      notYetAttributed
+        ? [salesRun("SUCCEEDED", 30), salesRun("SUCCEEDED", 200, null, "full")]
+        : [salesRun("SUCCEEDED", 30)],
+    );
+    if (notYetAttributed) {
+      seedListings({
+        stores: { [COMPANIES[0]]: ["s0"] },
+        links: [{ productId: 2002, store: "s0", createdAt: new Date(Date.now() - 3_600_000) }],
+      });
+    }
     db.company.findMany.mockResolvedValue(COMPANIES.map((id) => ({ id, name: "C".repeat(191) })));
     seedFacts({
       approvedActiveIds: ids,
@@ -1231,9 +1466,9 @@ describe("A2 C15 — reorder's page fits the measured room, through the adapter"
         })),
       ],
     });
-    db.product.findMany.mockResolvedValue([1, ...ids].map((id) => ({ id })));
+    db.product.findMany.mockResolvedValue([1, ...ids, ...extra].map((id) => ({ id })));
     mockReport.mockResolvedValue(
-      reportOf(ids.map((id) => ({ ...unsized(id, 0), productName: "N".repeat(nameLength) }))),
+      reportOf([...ids, ...extra].map((id) => ({ ...unsized(id, 0), productName: "N".repeat(nameLength) }))),
     );
   }
 
@@ -1260,12 +1495,20 @@ describe("A2 C15 — reorder's page fits the measured room, through the adapter"
   });
 
   it.each([
-    ["just under the reserve (80-character names)", 80, "under"],
-    ["over the reserve (255-character names)", 255, "over"],
-  ])("a 250 B budget sweep with the envelope %s: every result ok and within budget, and the page shrinks", async (_label, nameLength, side) => {
-    seedProbe(nameLength);
+    ["just under the reserve (80-character names)", 80, "under", false],
+    ["over the reserve (255-character names)", 255, "over", false],
+    // A2 FR3 (pack C16): the 80-character probe plus a not-yet-attributed product — its code's
+    // sentence takes the envelope over the reserve.
+    ["over the reserve with a not-yet-attributed product (80-character names)", 80, "over", true],
+  ])("a 250 B budget sweep with the envelope %s: every result ok and within budget, and the page shrinks", async (_label, nameLength, side, notYetAttributed) => {
+    seedProbe(nameLength, notYetAttributed);
     const full = await viaAdapter(65_536);
     expect(full.status).toBe("ok");
+    if (notYetAttributed) {
+      // Non-vacuity: the C16 code and its sentence really ride in this sweep's envelope.
+      expect(full.data.rows.find((r: any) => r.productId === 2002)).toMatchObject({ orderSignalReason: "not_yet_attributed" });
+      expect(full.data.coverage.orderSignalReasons).toHaveProperty("not_yet_attributed");
+    }
     const measured = measuredEnvelopeOf(full.data);
     expect(side === "under" ? measured < ENVELOPE_RESERVE_BYTES : measured > ENVELOPE_RESERVE_BYTES).toBe(true);
     // The smallest budget at which the envelope plus one row fits: the one-row page's own size.

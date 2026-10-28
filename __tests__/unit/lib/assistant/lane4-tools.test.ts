@@ -69,7 +69,8 @@ const mockGetValuation = getValuation as jest.Mock;
 const CTX = testCtx({ companyIds: ["c1"] });
 const CTX_NO_COMPANY = testCtx({ companyIds: [] });
 
-type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+/** A2 C16: `mode` is the run's own ('nightly' | 'full' | 'backfill'); unnamed = a nightly. */
+type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null; mode?: string };
 type RunQuery = {
   where?: Record<string, unknown>;
   orderBy?: Record<string, string>;
@@ -95,7 +96,7 @@ function seedRuns(runs: RunRow[]) {
         });
   const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
     const rows: Array<Record<string, unknown>> = runs
-      .map((run) => ({ job: "sales", ...run }))
+      .map((run) => ({ job: "sales", mode: "nightly", ...run }))
       .filter((run: Record<string, unknown>) =>
         Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
       );
@@ -1202,11 +1203,12 @@ describe("A2 C14 — compare_periods' rate windows (the tool's last complete day
     finishedAt: new Date(startedAt.getTime() + 5 * 60_000),
     skippedReason: null,
   });
+  // A2 C16 (A2-FD1-4): "past the last complete day" — the sales frontier is a cut-off too.
   const RATE_DEFINITION =
     "per day = a period's total over its COMPLETE days divided by those days " +
-    "(coverage.rateWindows): a period that reaches today or later is measured for its per-day " +
-    "figure only through the last complete day, because today's figures — and, before the " +
-    "nightly rebuild, yesterday's sales — are still arriving. Values of 1 or more are rounded " +
+    "(coverage.rateWindows): a period that reaches past the last complete day is measured for " +
+    "its per-day figure only through it, because today's figures — and, until the nightly sales " +
+    "rebuild succeeds, recent days' sales — are still arriving. Values of 1 or more are rounded " +
     "to 2 decimals, smaller values to 3 significant figures, so a small non-zero rate never " +
     "shows as 0; perDayDirection is the sign of the unrounded change. When the rate periods " +
     "differ in length, rows are ranked and filtered by the per-day change, because totals of " +
@@ -1259,9 +1261,9 @@ describe("A2 C14 — compare_periods' rate windows (the tool's last complete day
     const data = await compare({ metric: "sales_units", periodA: LAST_WEEK, periodB: WEEK_TO_TODAY });
     expect(data.coverage.rateWindows.b).toEqual({ from: WEEK_TO_TODAY.from, to: day(-2), days: 5 });
     expect(data.bPerDay).toBe(7);
-    // ONE run-history read (A2 C15: the success, then the attempts after it) serves both the
-    // rate day and the freshness note.
-    expect(db.analyticsRebuildRun.findFirst).toHaveBeenCalledTimes(1);
+    // ONE run-history read (A2 C15: the success, then the attempts after it; A2 C16: and the
+    // newest full success, a second findFirst) serves both the rate day and the freshness note.
+    expect(db.analyticsRebuildRun.findFirst).toHaveBeenCalledTimes(2);
     expect(db.analyticsRebuildRun.findMany).toHaveBeenCalledTimes(1);
   });
 
@@ -1317,6 +1319,8 @@ describe("A2 C14 — compare_periods' rate windows (the tool's last complete day
         "decreased and unchanged count every product with activity in either period that both " +
         "periods can measure, before that filter; unranked counts the products not comparable. " +
         "Under rankedBy 'per_day', increased and decreased follow the per-day change, not delta. " +
+        "When the periods differ in length and one has no complete day yet (reasons.perDay), " +
+        "rows rank by the change in totals, which is not like-for-like. " +
         "Use these for how many; never count rows yourself.",
     );
   });
@@ -1329,12 +1333,25 @@ describe("A2 C14 — compare_periods' rate windows (the tool's last complete day
   });
 });
 
-describe("A2 C14 (A2-OCC-12) — get_valuation says whose retail price unitRetailCents is", () => {
+describe("A2 C14 (A2-OCC-12) / C16 (A2-FD1-6) — get_valuation says whose retail price unitRetailCents is", () => {
   it("the description appends the stored-retail sentence after the money-totals rule", () => {
     const d = assistantTools.get_valuation.description.replace(/\s+/g, " ");
     expect(d).toContain(
       "nothing is on hand — never a free or unpriced product. unitRetailCents is the one stored " +
-        "retail price (synced from one store listing), not necessarily each store's live price.",
+        "retail price (set by hand, or copied from one store listing when its price is synced), " +
+        "not necessarily each store's live price.",
     );
+    // A2 C16: pricing can be manual and the sync is manual — "synced from" over-claimed.
+    expect(d).not.toContain("(synced from one store listing)");
+  });
+
+  it("get_product_overview's description says the same of its valuation row's retail", () => {
+    const d = assistantTools.get_product_overview.description.replace(/\s+/g, " ");
+    expect(d).toContain(
+      "(currentUnitCostCents / unitRetailCents: 0 = recorded as free, null = not set; the retail " +
+        "is the one stored price, set by hand or copied from one store listing, not necessarily " +
+        "each store's live price)",
+    );
+    expect(d).not.toContain("synced from one store listing");
   });
 });

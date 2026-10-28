@@ -477,7 +477,9 @@ describe("A2 C8 companyCoverageDetail — the name alone, the id only as a fallb
 // A2 pack C7 / C15 — the sales rebuild state and the freshness note (material staleness only)
 // ===========================================================================
 
-type Run = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+/** A2 C16: `mode` is the run's own ('nightly' | 'full' | 'backfill', rebuild-lock.ts); a seeded
+ *  run that does not name one is a nightly. */
+type Run = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null; mode?: string };
 type RunQuery = {
   where?: Record<string, unknown>;
   orderBy?: Record<string, string>;
@@ -504,7 +506,7 @@ function seedRuns(runs: Run[]) {
         });
   const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
     const rows: Array<Record<string, unknown>> = runs
-      .map((run) => ({ job: "sales", ...run }))
+      .map((run) => ({ job: "sales", mode: "nightly", ...run }))
       .filter((run: Record<string, unknown>) =>
         Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
       );
@@ -542,7 +544,9 @@ describe("A2 C15 salesRebuildState — the newest success read directly, then th
   it("reads the newest SUCCEEDED run directly, then only the FAILED / ABORTED runs started after it", async () => {
     seedRuns([success("2026-10-26T02:00:00.000Z", "2026-10-26T02:06:00.000Z")]);
     await salesRebuildState();
-    expect(db.analyticsRebuildRun.findFirst).toHaveBeenCalledTimes(1);
+    // A2 C16: two findFirst reads now — the newest success (first, unchanged) and the newest
+    // FULL success (pinned below).
+    expect(db.analyticsRebuildRun.findFirst).toHaveBeenCalledTimes(2);
     expect(db.analyticsRebuildRun.findFirst.mock.calls[0][0]).toEqual({
       where: { job: "sales", status: "SUCCEEDED", finishedAt: { not: null } },
       orderBy: { startedAt: "desc" },
@@ -562,7 +566,9 @@ describe("A2 C15 salesRebuildState — the newest success read directly, then th
     // A Prisma `{ not: 'lock-held' }` compiles to SQL `<>`, which drops every FAILED run
     // (their skippedReason is NULL) — the filter must never be in either query.
     for (const read of [db.analyticsRebuildRun.findFirst, db.analyticsRebuildRun.findMany]) {
-      expect(JSON.stringify((read.mock.calls[0][0] as RunQuery).where)).not.toContain("skippedReason");
+      for (const call of read.mock.calls) {
+        expect(JSON.stringify((call[0] as RunQuery).where)).not.toContain("skippedReason");
+      }
     }
   });
 
@@ -575,6 +581,7 @@ describe("A2 C15 salesRebuildState — the newest success read directly, then th
       lastSucceededAt: "2026-10-26T02:06:00.000Z",
       latestAttemptFailedAfterSuccess: false,
       lastSucceededStartedAt: "2026-10-26T02:00:00.000Z",
+      lastFullSucceededStartedAt: null,
     });
   });
 
@@ -593,6 +600,7 @@ describe("A2 C15 salesRebuildState — the newest success read directly, then th
       lastSucceededAt: "2026-10-27T02:07:31.250Z",
       latestAttemptFailedAfterSuccess: false,
       lastSucceededStartedAt: "2026-10-27T02:00:00.000Z",
+      lastFullSucceededStartedAt: null,
     });
   });
 
@@ -613,6 +621,7 @@ describe("A2 C15 salesRebuildState — the newest success read directly, then th
       lastSucceededAt: "2026-10-26T02:06:00.000Z",
       latestAttemptFailedAfterSuccess: true,
       lastSucceededStartedAt: "2026-10-26T02:00:00.000Z",
+      lastFullSucceededStartedAt: null,
     });
   });
 
@@ -633,6 +642,7 @@ describe("A2 C15 salesRebuildState — the newest success read directly, then th
       lastSucceededAt: "2026-10-26T02:06:00.000Z",
       latestAttemptFailedAfterSuccess: false,
       lastSucceededStartedAt: "2026-10-26T02:00:00.000Z",
+      lastFullSucceededStartedAt: null,
     });
   });
 
@@ -650,9 +660,16 @@ describe("A2 C15 salesRebuildState — the newest success read directly, then th
       { status: "FAILED", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: at("2026-10-27T02:00:09.000Z"), skippedReason: null },
       { status: "ABORTED", startedAt: at("2026-10-27T03:00:00.000Z"), finishedAt: at("2026-10-27T03:00:00.000Z"), skippedReason: "lock-held" },
     ]);
-    const none = { lastSucceededAt: null, latestAttemptFailedAfterSuccess: false, lastSucceededStartedAt: null };
+    const none = {
+      lastSucceededAt: null,
+      latestAttemptFailedAfterSuccess: false,
+      lastSucceededStartedAt: null,
+      lastFullSucceededStartedAt: null,
+    };
     expect(await salesRebuildState()).toEqual(none);
     expect(db.analyticsRebuildRun.findMany).not.toHaveBeenCalled();
+    // A2 C16: no success at all means no full success either — the third read is not issued.
+    expect(db.analyticsRebuildRun.findFirst).toHaveBeenCalledTimes(1);
     db.analyticsRebuildRun.findFirst.mockResolvedValue(undefined as never); // a deep-mock read
     expect(await salesRebuildState()).toEqual(none);
   });
@@ -671,12 +688,75 @@ describe("A2 C15 salesRebuildState — the newest success read directly, then th
     expect(state.lastSucceededAt).toBe("2026-10-26T03:06:00.000Z");
   });
 
+  // A2 C16 (A2-FD1-1): the newest FULL success's start — only a full rebuild re-reads every
+  // day, so a listing linked after it may have orders the facts do not carry yet. Internal.
+  it("lastFullSucceededStartedAt: a third read, exactly — the newest SUCCEEDED run in mode 'full'", async () => {
+    seedRuns([
+      success("2026-10-25T02:00:00.000Z", "2026-10-25T02:05:00.000Z"),
+      { ...success("2026-10-26T02:00:00.000Z", "2026-10-26T02:40:00.000Z"), mode: "full" },
+    ]);
+    const state = await salesRebuildState();
+    expect(db.analyticsRebuildRun.findFirst.mock.calls[1][0]).toEqual({
+      where: { job: "sales", status: "SUCCEEDED", mode: "full", finishedAt: { not: null } },
+      orderBy: { startedAt: "desc" },
+      select: { startedAt: true },
+    });
+    expect(state).toEqual({
+      lastSucceededAt: "2026-10-26T02:40:00.000Z",
+      latestAttemptFailedAfterSuccess: false,
+      lastSucceededStartedAt: "2026-10-26T02:00:00.000Z",
+      lastFullSucceededStartedAt: "2026-10-26T02:00:00.000Z",
+    });
+  });
+
+  it("a nightly success NEWER than the last full one never moves it; an older full is still found", async () => {
+    seedRuns([
+      { ...success("2026-10-18T02:00:00.000Z", "2026-10-18T02:41:00.000Z"), mode: "full" },
+      { ...success("2026-10-25T02:00:00.000Z", "2026-10-25T02:42:00.000Z"), mode: "full" },
+      success("2026-10-26T02:00:00.000Z", "2026-10-26T02:05:00.000Z"),
+      success("2026-10-27T02:00:00.000Z", "2026-10-27T02:05:00.000Z"),
+    ]);
+    const state = await salesRebuildState();
+    expect(state.lastSucceededStartedAt).toBe("2026-10-27T02:00:00.000Z");
+    expect(state.lastFullSucceededStartedAt).toBe("2026-10-25T02:00:00.000Z");
+  });
+
+  it("a FAILED or ABORTED full run, or one still RUNNING, is not a full success", async () => {
+    seedRuns([
+      success("2026-10-26T02:00:00.000Z", "2026-10-26T02:05:00.000Z"),
+      { status: "FAILED", startedAt: at("2026-10-25T02:00:00.000Z"), finishedAt: at("2026-10-25T02:09:00.000Z"), skippedReason: null, mode: "full" },
+      { status: "ABORTED", startedAt: at("2026-10-24T02:00:00.000Z"), finishedAt: at("2026-10-24T02:00:00.000Z"), skippedReason: "lock-held", mode: "full" },
+      { status: "RUNNING", startedAt: at("2026-10-27T02:00:00.000Z"), finishedAt: null, skippedReason: null, mode: "full" },
+    ]);
+    expect((await salesRebuildState()).lastFullSucceededStartedAt).toBeNull();
+  });
+
+  it("no full success on record (nightlies only) -> lastFullSucceededStartedAt null, the rest unchanged", async () => {
+    seedRuns([success("2026-10-26T02:00:00.000Z", "2026-10-26T02:05:00.000Z")]);
+    expect(await salesRebuildState()).toEqual({
+      lastSucceededAt: "2026-10-26T02:05:00.000Z",
+      latestAttemptFailedAfterSuccess: false,
+      lastSucceededStartedAt: "2026-10-26T02:00:00.000Z",
+      lastFullSucceededStartedAt: null,
+    });
+  });
+
+  it("the fake models mode: a run that names none is a nightly, so a 'full' predicate skips it", async () => {
+    seedRuns([success("2026-10-26T02:00:00.000Z", "2026-10-26T02:05:00.000Z")]);
+    const read = (where: Record<string, unknown>) =>
+      db.analyticsRebuildRun.findMany({ where, select: { mode: true } } as never) as unknown as Promise<unknown[]>;
+    expect(await read({ job: "sales", mode: "full" })).toEqual([]);
+    expect(await read({ job: "sales", mode: "nightly" })).toEqual([{ mode: "nightly" }]);
+  });
+
   it("source pin: neither read filters on skippedReason — the lock-held skips are dropped in JS", () => {
     const src = fs.readFileSync(path.resolve(__dirname, "../../../../lib/assistant/sales-coverage.ts"), "utf8");
     const start = src.indexOf("export async function salesRebuildState");
     const body = src.slice(start, src.indexOf("\n}\n", start));
     expect(body).toContain(".findFirst(");
     expect(body).toContain(".findMany(");
+    // A2 C16: the third read names the mode, as an equality.
+    expect(body).toContain('mode: "full"');
     // skippedReason appears in the reads only as a SELECTED column, never as a predicate.
     expect(body).not.toMatch(/skippedReason\s*:(?!\s*true\b)/);
     expect(body).not.toMatch(/\bnot\s*:\s*["']lock-held/);
@@ -702,6 +782,7 @@ describe("A2 C7 / C15 salesFreshnessNote — a note only on material staleness, 
     lastSucceededAt,
     latestAttemptFailedAfterSuccess: failed,
     lastSucceededStartedAt: null, // A2 C14: internal — the note never reads it
+    lastFullSucceededStartedAt: null, // A2 C16: internal — the note never reads it
   });
 
   it("no successful rebuild on record -> the missing-figures sentence", () => {

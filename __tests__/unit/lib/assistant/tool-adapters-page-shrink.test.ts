@@ -37,13 +37,14 @@ jest.mock("ai", () => ({ __esModule: true, tool: (def: unknown) => def }));
 // did not succeed), so every sales envelope here carries it at its heaviest. A2 C15: the
 // history is two reads (the newest success, then the attempts after it), answered
 // query-faithfully over that two-run table (`where` equality / `in` / `gt` / `not`, `orderBy`
-// startedAt, `take`, `select`; an unmodelled operator throws).
+// startedAt, `take`, `select`; an unmodelled operator throws). A2 C16: a third read, the newest
+// FULL success — each run carries its `mode` (both nightlies here, so there is none).
 jest.mock("@/lib/prisma", () => {
   const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
   type Q = { where?: Record<string, unknown>; orderBy?: Record<string, string>; take?: number; select?: Record<string, boolean> };
   const runs = (): Array<Record<string, unknown>> => [
-    { job: "sales", status: "FAILED", startedAt: hoursAgo(1), finishedAt: hoursAgo(1), skippedReason: null },
-    { job: "sales", status: "SUCCEEDED", startedAt: hoursAgo(31), finishedAt: hoursAgo(30), skippedReason: null },
+    { job: "sales", mode: "nightly", status: "FAILED", startedAt: hoursAgo(1), finishedAt: hoursAgo(1), skippedReason: null },
+    { job: "sales", mode: "nightly", status: "SUCCEEDED", startedAt: hoursAgo(31), finishedAt: hoursAgo(30), skippedReason: null },
   ];
   const scalar = (v: unknown) => (v instanceof Date ? v.getTime() : v);
   const holds = (field: unknown, cond: unknown): boolean =>
@@ -489,11 +490,14 @@ describe("G2-5 — compare_periods by_product fits the EXACT remaining budget", 
     // per-day countsNote sentence (~470 B). At 5,000 B this floor case therefore downgrades
     // to truncated (still never over budget); it holds from 5,300 B. With realistic product
     // names (~40 characters) the same case is ~4.9 KB and fits 5 KB.
+    // A2 FR3 (pack C16) — RECORDED: the counts note's totals-fallback sentence and the perDay
+    // key in the reasonsKeys legend add ~265 B: the one-row floors now weigh 5,551 B, ok from
+    // 5,560 B (still never over budget below it — the adapter's truncated downgrade).
     const floor = (await runOnce("compare_periods", compareArgs, CRAMPED)) as ExecResult & {
       meta?: { bytes: number };
     };
     expect(floor.status).toBe("truncated");
-    const BOTH_FLOOR = 5_400;
+    const BOTH_FLOOR = 5_600;
     const tight = (await runOnce("compare_periods", compareArgs, BOTH_FLOOR)) as ExecResult & {
       data?: { rows?: unknown[]; unranked?: unknown[]; unrankedTotal?: number };
       meta?: { bytes: number };

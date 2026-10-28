@@ -25,6 +25,10 @@
  *  - NO read touches the `Integration` table (it holds the encrypted store keys and the
  *    webhook secret) — not even a relation filter. The caller's stores are the
  *    `integrationId`s of the caller's own order records.
+ *  - WHEN each linked no-fact product was last linked (A2 pack C16, A2-FD1-1): linking a
+ *    listing back-fills its old order lines without a rebuild, so the same link reads return
+ *    the newest link instant (`newestLinkAt`). This module knows nothing of rebuilds — the
+ *    tool compares the instant with the last full sales rebuild.
  *
  * MUST stay Next-free and read-only (imported by the assistant-tool layer; registered in
  * the toolsuite gates' read-only scan): no `next/*`, no `@/lib/api-utils`, no writes.
@@ -66,6 +70,11 @@ export interface OrderSignalResult {
   /** A2 C14: the window's orders in the caller's companies with at least one line the fact
    *  rebuild cannot attribute to a product. 0 when the read does not run (same condition). */
   unlinkedOrders: number;
+  /** A2 C16: for each no-fact LINKED product, the newest `createdAt` among its links on the
+   *  caller's stores — a direct listing's own, a bundle component's bundle listing's (a
+   *  component carries no `createdAt`). The same reads as `unlinked`, so empty whenever the
+   *  link check does not run. */
+  newestLinkAt: Map<number, Date>;
 }
 
 /**
@@ -86,6 +95,7 @@ export async function orderSignal(
       reason: salesCoverageReason(null, window.from),
       unlinked: new Set(),
       unlinkedOrders: 0,
+      newestLinkAt: new Map(),
     };
   }
 
@@ -123,17 +133,18 @@ export async function orderSignal(
   // at all, and only the products WITHOUT a fact row need the link check.
   const noFact = productIds.filter((productId) => !byProduct.has(productId));
   const linkCheckNeeded = windowCoverage !== "none" && noFact.length > 0;
-  const [unlinked, unlinkedOrders] = linkCheckNeeded
-    ? await Promise.all([unlinkedProducts(noFact, companyIds), unlinkedOrderCount(companyIds, window)])
-    : [new Set<number>(), 0];
+  const [links, unlinkedOrders] = linkCheckNeeded
+    ? await Promise.all([linkCheck(noFact, companyIds), unlinkedOrderCount(companyIds, window)])
+    : [{ unlinked: new Set<number>(), newestLinkAt: new Map<number, Date>() }, 0];
 
   const result: OrderSignalResult = {
     byProduct,
     windowCoverage,
     salesDataStart: starts.salesDataStart,
     ...(companyCoverage ? { companyCoverage } : {}),
-    unlinked,
+    unlinked: links.unlinked,
     unlinkedOrders,
+    newestLinkAt: links.newestLinkAt,
   };
   if (windowCoverage === "partial") {
     // The source itself starting inside the window is the WINDOW kind, whatever the
@@ -153,31 +164,46 @@ export async function orderSignal(
  * product whose bundle listing is on one of them (attribution credits a bundle's frozen
  * components). The stores are the `integrationId`s of the caller's own orders — never an
  * `Integration` read — so a listing on a store with no recorded order counts as not linked:
- * the conservative direction (unknown, never a false 0). Each read selects ids only.
+ * the conservative direction (unknown, never a false 0).
+ *
+ * A2 C16: the same two reads also select when each listing was made — a component through
+ * its bundle listing (`productLink.createdAt`; a component added to an existing bundle later
+ * is not seen) — and return each linked product's newest instant. No other column is read.
  */
-async function unlinkedProducts(noFact: number[], companyIds: string[]): Promise<Set<number>> {
+async function linkCheck(
+  noFact: number[],
+  companyIds: string[],
+): Promise<{ unlinked: Set<number>; newestLinkAt: Map<number, Date> }> {
+  const newestLinkAt = new Map<number, Date>();
   const stores = (await prisma.externalOrder.groupBy({
     by: ["integrationId"],
     where: { companyId: { in: companyIds } },
   })) as unknown as Array<{ integrationId: string }>;
   const storeIds = (stores ?? []).map((store) => store.integrationId);
   // No order on any store: nothing can be linked on one.
-  if (storeIds.length === 0) return new Set(noFact);
+  if (storeIds.length === 0) return { unlinked: new Set(noFact), newestLinkAt };
   const [direct, components] = await Promise.all([
     prisma.productLink.findMany({
       where: { internalProductId: { in: noFact }, integrationId: { in: storeIds }, isBundle: false },
-      select: { internalProductId: true },
+      select: { internalProductId: true, createdAt: true },
     }),
     prisma.bundleComponent.findMany({
       where: { internalProductId: { in: noFact }, productLink: { integrationId: { in: storeIds } } },
-      select: { internalProductId: true },
+      select: { internalProductId: true, productLink: { select: { createdAt: true } } },
     }),
   ]);
   const linked = new Set<number>();
-  for (const row of [...(direct ?? []), ...(components ?? [])]) {
-    if (row.internalProductId != null) linked.add(row.internalProductId);
-  }
-  return new Set(noFact.filter((productId) => !linked.has(productId)));
+  const noteLink = (productId: number | null, createdAt: Date | null | undefined) => {
+    if (productId == null) return;
+    linked.add(productId);
+    // `instanceof` guards a mocked read that leaves the column out (the product stays linked).
+    if (!(createdAt instanceof Date)) return;
+    const newest = newestLinkAt.get(productId);
+    if (newest == null || createdAt > newest) newestLinkAt.set(productId, createdAt);
+  };
+  for (const row of direct ?? []) noteLink(row.internalProductId, row.createdAt);
+  for (const row of components ?? []) noteLink(row.internalProductId, row.productLink?.createdAt);
+  return { unlinked: new Set(noFact.filter((productId) => !linked.has(productId))), newestLinkAt };
 }
 
 /**

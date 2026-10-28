@@ -838,15 +838,28 @@ describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)
   // A2 FR1 (pack C14): and the LINK check runs too, over a REAL mix — product 1 is linked on
   // the caller's one store (a measured 0), product 2 is not (null + not_linked) — plus the
   // window's unlinked-order count; none of it writes, and none of it reads `integration`.
-  it("reorder_report's ORDER-SIGNAL read path runs and issues zero write calls (A2 C4 + C14)", async () => {
+  // A2 FR3 (pack C16): and product 3 was linked after the last FULL sales rebuild started
+  // (null + not_yet_attributed) — the run-history reads join the path, and still write nothing.
+  it("reorder_report's ORDER-SIGNAL read path runs and issues zero write calls (A2 C4 + C14 + C16)", async () => {
     prismaCtl.__reset();
     prismaCtl.__overrides["product.findMany"] = [
       { id: 1, name: "Gate Unsized", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
       { id: 2, name: "Gate Unlinked", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
+      { id: 3, name: "Gate Newly Linked", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
     ];
     prismaCtl.__overrides["productSalesFact.aggregate"] = { _min: { dayKey: "2020-01-01" } };
     prismaCtl.__overrides["externalOrder.groupBy"] = [{ integrationId: "gate-store" }];
-    prismaCtl.__overrides["productLink.findMany"] = [{ internalProductId: 1 }];
+    // A2 C16: the newest success is a nightly two hours ago; the newest FULL one started 100
+    // hours ago — product 1's listing predates it, product 3's was made after it.
+    const fullStart = new Date(Date.now() - 100 * 3_600_000);
+    prismaCtl.__overrides["analyticsRebuildRun.findFirst"] = (args: { where: { mode?: string } }) =>
+      args.where.mode === "full"
+        ? { startedAt: fullStart }
+        : { startedAt: new Date(Date.now() - 2.1 * 3_600_000), finishedAt: new Date(Date.now() - 2 * 3_600_000) };
+    prismaCtl.__overrides["productLink.findMany"] = [
+      { internalProductId: 1, createdAt: new Date(fullStart.getTime() - 3_600_000) },
+      { internalProductId: 3, createdAt: new Date(fullStart.getTime() + 3_600_000) },
+    ];
     prismaCtl.__overrides["externalOrder.count"] = 2;
     const result = await assistantTools.reorder_report.run({}, CTX);
     expect(result.status).toBe("ok");
@@ -871,6 +884,12 @@ describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)
       orderSignalReason: "not_linked",
       outOfStockWithOrders: null,
     });
+    // ...and a product linked after the last full sales rebuild: unknown, never a measured 0.
+    expect(rows.find((row) => row.productId === 3)).toMatchObject({
+      orderSignal: null,
+      orderSignalReason: "not_yet_attributed",
+      outOfStockWithOrders: null,
+    });
     const coverage = (result.data as { coverage: Record<string, unknown> }).coverage;
     expect(coverage.orderSignalUnlinkedOrders).toBe(2);
     // The link reads ran (stores from the caller's ORDERS, the listing reads ids only)...
@@ -886,9 +905,15 @@ describe("READ-ONLY gate — no business writes from def.run (fail-closed proxy)
       "externalOrder.groupBy",
       "productLink.findMany",
     ]);
-    for (const c of linkReads.filter((call) => call.method === "findMany")) {
-      expect((c.args as { select: unknown }).select).toEqual({ internalProductId: true });
-    }
+    // A2 C16: the listing reads select the product id and when the listing was made — a
+    // component through its bundle listing — and nothing else.
+    const selectOf = (model: string) =>
+      (linkReads.find((c) => c.model === model)!.args as { select: unknown }).select;
+    expect(selectOf("productLink")).toEqual({ internalProductId: true, createdAt: true });
+    expect(selectOf("bundleComponent")).toEqual({
+      internalProductId: true,
+      productLink: { select: { createdAt: true } },
+    });
     // ...and NO read touched the Integration table (the encrypted store keys live there).
     expect(prismaCtl.__calls.some((c) => c.model === "integration")).toBe(false);
     expect(writeCalls()).toEqual([]);
@@ -2352,7 +2377,8 @@ describe("A2 C7 — compare_periods' freshness note and the freshness tool's las
     skippedReason: null,
   });
   const runReads = () => prismaCtl.__calls.filter((c) => c.model === "analyticsRebuildRun");
-  type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+  /** A2 C16: `mode` is the run's own ('nightly' | 'full' | 'backfill'); unnamed = a nightly. */
+  type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null; mode?: string };
   type RunQuery = {
     where?: Record<string, unknown>;
     orderBy?: Record<string, string>;
@@ -2378,7 +2404,7 @@ describe("A2 C7 — compare_periods' freshness note and the freshness tool's las
           });
     const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
       const rows: Array<Record<string, unknown>> = runs
-        .map((run) => ({ job: "sales", ...run }))
+        .map((run) => ({ job: "sales", mode: "nightly", ...run }))
         .filter((run: Record<string, unknown>) =>
           Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
         );

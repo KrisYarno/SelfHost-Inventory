@@ -21,7 +21,8 @@
  *     company names on every per-company sales coverage entry.
  *   - analyticsRebuildRun.findFirst / findMany — assistant A2 (pack C7, C15): the sales
  *     rebuild's run history behind the freshness note and get_data_freshness'
- *     lastSucceededAt — the newest success read directly, then the attempts after it.
+ *     lastSucceededAt — the newest success read directly, then the attempts after it; A2
+ *     C16: and the newest success in mode "full" (a second findFirst, filtered on `mode`).
  *   - externalOrder.groupBy / productLink.findMany / bundleComponent.findMany — assistant
  *     A2 FR1 (pack C14): the reorder order signal's link check (the caller's stores from its
  *     orders, then the listings on them) and its unlinked-order count (externalOrder.count).
@@ -73,7 +74,9 @@ const prismaMock: any = {
     findUnique: async () => null,
   },
   // A2 C7: the sales rebuild run history (no runs on record in the mock build). A2 C15: the
-  // two reads answer that empty table faithfully — no success (null), no attempts ([]).
+  // two reads answer that empty table faithfully — no success (null), no attempts ([]). A2
+  // C16: whatever mode a read asks for, an empty table has no run in it — the newest full
+  // success is null too (and is never asked for without a success).
   analyticsRebuildRun: {
     findFirst: async () => null,
     findMany: async () => [],
@@ -123,7 +126,8 @@ const prismaMock: any = {
   company: {
     findMany: async () => [],
   },
-  // A2 C14: the listings that make a no-fact product LINKED (internalProductId only).
+  // A2 C14: the listings that make a no-fact product LINKED (internalProductId; A2 C16: and
+  // when each listing was made — a component's through its bundle listing).
   productLink: {
     findMany: async () => [],
   },

@@ -20,6 +20,11 @@
  * the caller's own order records (never the Integration table); the window's orders with an
  * unattributable line are counted. Both only when coverage is not `none` and some product
  * has no fact row.
+ *
+ * A2 pack C16 (A2-FD1-1): the same link reads also return when each no-fact LINKED product's
+ * newest link on the caller's stores was made (`newestLinkAt`) — the listing's own
+ * `createdAt`, for a bundle component its bundle listing's — so the tool can tell a link the
+ * last full sales rebuild has not seen yet. No rebuild knowledge here.
  */
 
 import { mockReset, type DeepMockProxy } from "jest-mock-extended";
@@ -260,7 +265,10 @@ type Order = {
   createdAt: Date;
   items: Array<{ productLinkId: string | null; productLink: { isBundle: boolean; internalProductId: number | null } | null }>;
 };
-type Link = { internalProductId: number | null; integrationId: string; isBundle?: boolean };
+type Link = { internalProductId: number | null; integrationId: string; isBundle?: boolean; createdAt?: Date };
+
+/** A2 C16: a seeded listing's creation instant when the fixture does not name one. */
+const LISTED_LONG_AGO = new Date("2025-01-01T00:00:00.000Z");
 
 /** An item predicate, evaluated over a seeded order line (the shapes C14 names only). */
 function itemMatches(item: Order["items"][number], where: Record<string, any>): boolean {
@@ -291,8 +299,10 @@ function seedOrders(opts: { orders: Order[]; links?: Link[]; components?: Link[]
     );
     return Array.from(ids, (integrationId) => ({ integrationId }));
   }) as never);
-  const listingRead = (rows: Link[]) =>
-    (async (args: { where: Record<string, any> }) =>
+  // A2 C16: each read answers with the columns it SELECTS — the listing's createdAt directly,
+  // a component's through its bundle listing (`productLink.createdAt`).
+  const listingRead = (rows: Link[], viaBundleListing: boolean) =>
+    (async (args: { where: Record<string, any>; select: Record<string, any> }) =>
       rows
         .filter(
           (row) =>
@@ -300,9 +310,16 @@ function seedOrders(opts: { orders: Order[]; links?: Link[]; components?: Link[]
             (args.where.integrationId ?? args.where.productLink.integrationId).in.includes(row.integrationId) &&
             (args.where.isBundle === undefined || (row.isBundle ?? false) === args.where.isBundle),
         )
-        .map((row) => ({ internalProductId: row.internalProductId }))) as never;
-  db.productLink.findMany.mockImplementation(listingRead(opts.links ?? []));
-  db.bundleComponent.findMany.mockImplementation(listingRead(opts.components ?? []));
+        .map((row) => {
+          const createdAt = row.createdAt ?? LISTED_LONG_AGO;
+          return {
+            internalProductId: row.internalProductId,
+            ...(!viaBundleListing && args.select.createdAt ? { createdAt } : {}),
+            ...(viaBundleListing && args.select.productLink?.select?.createdAt ? { productLink: { createdAt } } : {}),
+          };
+        })) as never;
+  db.productLink.findMany.mockImplementation(listingRead(opts.links ?? [], false));
+  db.bundleComponent.findMany.mockImplementation(listingRead(opts.components ?? [], true));
   db.externalOrder.count.mockImplementation((async (args: { where: Record<string, any> }) => {
     const w = args.where;
     return opts.orders.filter(
@@ -387,23 +404,25 @@ describe("A2 C14 orderSignal — the link check", () => {
     expect(both.unlinked.size).toBe(0);
   });
 
-  it("the reads: stores by integrationId over the caller's orders; each listing read selects internalProductId only", async () => {
+  it("the reads: stores by integrationId over the caller's orders; each listing read selects the product id and when the listing was made", async () => {
     seed({ approvedActiveIds: [1, 2, 3, 9], facts: COVERED });
     seedOrders({ orders: [order({})] });
     await orderSignal([1, 2, 3], ["c1"], WINDOW);
     expect(db.externalOrder.groupBy.mock.calls.map((c) => c[0])).toEqual([
       { by: ["integrationId"], where: { companyId: { in: ["c1"] } } },
     ]);
+    // A2 C16: the selects exactly — the direct listing's createdAt, and for a component its
+    // bundle listing's (a component has no createdAt of its own). No other read changes.
     expect(db.productLink.findMany.mock.calls.map((c) => c[0])).toEqual([
       {
         where: { internalProductId: { in: [2, 3] }, integrationId: { in: ["store-c1"] }, isBundle: false },
-        select: { internalProductId: true },
+        select: { internalProductId: true, createdAt: true },
       },
     ]);
     expect(db.bundleComponent.findMany.mock.calls.map((c) => c[0])).toEqual([
       {
         where: { internalProductId: { in: [2, 3] }, productLink: { integrationId: { in: ["store-c1"] } } },
-        select: { internalProductId: true },
+        select: { internalProductId: true, productLink: { select: { createdAt: true } } },
       },
     ]);
   });
@@ -450,6 +469,70 @@ describe("A2 C14 orderSignal — the link check", () => {
     const out = await orderSignal([1, 2], ["c1"], WINDOW);
     expect(out.windowCoverage).toBe("partial");
     expect(Array.from(out.unlinked)).toEqual([2]);
+  });
+});
+
+describe("A2 C16 orderSignal — newestLinkAt: when each no-fact linked product was last linked", () => {
+  const OLD = at("2026-03-01T00:00:00.000Z");
+  const NEWER = at("2026-10-20T09:30:00.000Z");
+  const NEWEST = at("2026-10-26T18:00:00.000Z");
+
+  it("the newest createdAt among a product's links on the caller's stores, direct and through a bundle listing", async () => {
+    seed({ approvedActiveIds: [1, 2, 3, 4, 9], facts: COVERED });
+    seedOrders({
+      orders: [order({}), order({ companyId: "c2", integrationId: "store-c2" })],
+      links: [
+        { internalProductId: 2, integrationId: "store-c1", createdAt: OLD },
+        { internalProductId: 2, integrationId: "store-c1", createdAt: NEWER },
+        // Another company's store is not one of the caller's: its later link never counts.
+        { internalProductId: 2, integrationId: "store-c2", createdAt: NEWEST },
+      ],
+      components: [
+        // 3 is linked only as a bundle component: its bundle listing's createdAt is used.
+        { internalProductId: 3, integrationId: "store-c1", createdAt: NEWER },
+        // 2 is also a component of a newer bundle listing on the caller's store.
+        { internalProductId: 2, integrationId: "store-c1", createdAt: NEWEST },
+      ],
+    });
+    const out = await orderSignal([1, 2, 3, 4], ["c1"], WINDOW);
+    // 1 has a fact row (never checked); 4 has no link at all (unlinked, no instant).
+    expect(Array.from(out.unlinked)).toEqual([4]);
+    expect(Array.from(out.newestLinkAt.entries()).sort((a, b) => a[0] - b[0])).toEqual([
+      [2, NEWEST],
+      [3, NEWER],
+    ]);
+  });
+
+  it("a direct link newer than the bundle listing wins (the newest of either kind)", async () => {
+    seed({ approvedActiveIds: [1, 2, 9], facts: COVERED });
+    seedOrders({
+      orders: [order({})],
+      links: [{ internalProductId: 2, integrationId: "store-c1", createdAt: NEWEST }],
+      components: [{ internalProductId: 2, integrationId: "store-c1", createdAt: OLD }],
+    });
+    const out = await orderSignal([2], ["c1"], WINDOW);
+    expect(out.newestLinkAt.get(2)).toEqual(NEWEST);
+  });
+
+  it("empty whenever the link check does not run, and for unlinked products", async () => {
+    // Every requested product has a fact row.
+    seed({ approvedActiveIds: [1, 9], facts: COVERED });
+    seedOrders({ orders: [order({})], links: [{ internalProductId: 1, integrationId: "store-c1", createdAt: NEWEST }] });
+    expect((await orderSignal([1], ["c1"], WINDOW)).newestLinkAt.size).toBe(0);
+    // Coverage none.
+    mockReset(db);
+    seed({ approvedActiveIds: [2], facts: [] });
+    seedOrders({ orders: [order({})], links: [{ internalProductId: 2, integrationId: "store-c1", createdAt: NEWEST }] });
+    expect((await orderSignal([2], ["c1"], WINDOW)).newestLinkAt.size).toBe(0);
+    // No order on any of the caller's stores: everything is unlinked, nothing has an instant.
+    mockReset(db);
+    seed({ approvedActiveIds: [1, 2, 9], facts: COVERED });
+    seedOrders({ orders: [], links: [{ internalProductId: 2, integrationId: "store-c1", createdAt: NEWEST }] });
+    const noStores = await orderSignal([2], ["c1"], WINDOW);
+    expect(Array.from(noStores.unlinked)).toEqual([2]);
+    expect(noStores.newestLinkAt.size).toBe(0);
+    // Empty inputs: the short-circuit carries the map too.
+    expect((await orderSignal([], ["c1"], WINDOW)).newestLinkAt.size).toBe(0);
   });
 });
 

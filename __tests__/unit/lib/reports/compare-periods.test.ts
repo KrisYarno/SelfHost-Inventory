@@ -2139,4 +2139,71 @@ describe("A2 C14 — per-day over complete days (rate windows)", () => {
       expect(productReads()).toHaveLength(2);
     });
   });
+
+  // A2 C16 (A2-FD1C-1): a ranked row's per-day zero reason follows the RATE numerator — the
+  // one the per-day figures divide — exactly as totals mode's `aIsZero` does, independently of
+  // the pctChange reason (still the period total, `a === 0`).
+  describe("A2 C16 — by_product row reasons: the per-day zero reason follows the rate numerator", () => {
+    const ZERO = "period A is zero — percent change undefined";
+
+    it("A's total > 0 only from the incomplete day (rate numerator 0), B measured -> the per-day reason, NO pctChange reason", async () => {
+      seedSalesTable([
+        START,
+        { productId: 2, companyId: "c1", dayKey: today, orderedQty: 5 }, // A's only units: today
+        { productId: 2, companyId: "c1", dayKey: day(-10), orderedQty: 7 },
+      ]);
+      const res = await comparePeriodsByProduct({
+        metric: "sales_units",
+        periodA: THIS_WEEK, // ends today: its rate window runs through yesterday
+        periodB: LAST_WEEK,
+        companyIds: ["c1"],
+      });
+      const p2 = res.ranked.find((r) => r.productId === 2)!;
+      expect(p2).toMatchObject({ a: 5, b: 7, pctChange: 0.4, aPerDay: 0, bPerDay: 1, perDayPctChange: null });
+      expect(p2.reasons).toEqual({ perDayPctChange: ZERO });
+    });
+
+    it("a period with no complete day: no row-level perDayPctChange reason (the envelope's reasons.perDay explains)", async () => {
+      seedSalesTable([START, { productId: 2, companyId: "c1", dayKey: day(-2), orderedQty: 9 }]);
+      const res = await comparePeriodsByProduct({
+        metric: "sales_units",
+        periodA: win(today, today), // no complete day; product 2 measured 0 in it
+        periodB: win(day(-3), day(-1)),
+        companyIds: ["c1"],
+      });
+      expect(res.reasons.perDay).toBe("this period has no complete day yet");
+      const p2 = res.ranked.find((r) => r.productId === 2)!;
+      expect(p2).toMatchObject({ a: 0, b: 9, pctChange: null, aPerDay: null, perDayPctChange: null });
+      // The TOTAL is zero, so the pctChange reason stands; the per-day one is the envelope's.
+      expect(p2.reasons).toEqual({ pctChange: ZERO });
+    });
+
+    it("A's total 0 over complete days: both reasons, as before", async () => {
+      seedSalesTable([START, { productId: 2, companyId: "c1", dayKey: day(-3), orderedQty: 6 }]);
+      const res = await comparePeriodsByProduct({
+        metric: "sales_units",
+        periodA: LAST_WEEK,
+        periodB: win(day(-6), day(-1)),
+        companyIds: ["c1"],
+      });
+      const p2 = res.ranked.find((r) => r.productId === 2)!;
+      expect(p2).toMatchObject({ a: 0, b: 6, pctChange: null, aPerDay: 0, bPerDay: 1, perDayPctChange: null });
+      expect(p2.reasons).toEqual({ pctChange: ZERO, perDayPctChange: ZERO });
+    });
+
+    it("a row whose rate numerator is not zero carries no reason (unranked rows keep their period reasons)", async () => {
+      seedSalesTable([
+        START,
+        { productId: 2, companyId: "c1", dayKey: day(-3), orderedQty: 6 },
+        { productId: 2, companyId: "c1", dayKey: day(-10), orderedQty: 7 },
+      ]);
+      const res = await comparePeriodsByProduct({
+        metric: "sales_units",
+        periodA: LAST_WEEK,
+        periodB: THIS_WEEK,
+        companyIds: ["c1"],
+      });
+      expect(res.ranked.find((r) => r.productId === 2)!.reasons).toBeUndefined();
+    });
+  });
 });

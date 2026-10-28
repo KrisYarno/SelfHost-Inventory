@@ -43,7 +43,8 @@ jest.mock("@/lib/prisma", () => ({
     },
     analyticsRebuildState: { findUnique: jest.fn(async () => null) },
     // A2 M4 (pack C7): the sales rebuild run history (the freshness note + lastSucceededAt).
-    // A2 C15: two reads — the newest success (findFirst), then the attempts after it.
+    // A2 C15: two reads — the newest success (findFirst), then the attempts after it. A2 C16:
+    // and the newest FULL success (a second findFirst).
     analyticsRebuildRun: { findFirst: jest.fn(async () => null), findMany: jest.fn(async () => []) },
     fulfillmentSyncState: { findMany: jest.fn(async () => []) },
     productStockSnapshot: {
@@ -105,7 +106,8 @@ import prismaMock from "./prisma-mock";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const p: any = prisma;
 
-type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+/** A2 C16: `mode` is the run's own ('nightly' | 'full' | 'backfill'); unnamed = a nightly. */
+type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null; mode?: string };
 type RunQuery = {
   where?: Record<string, unknown>;
   orderBy?: Record<string, string>;
@@ -131,7 +133,7 @@ function seedRuns(runs: RunRow[]) {
         });
   const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
     const rows: Array<Record<string, unknown>> = runs
-      .map((run) => ({ job: "sales", ...run }))
+      .map((run) => ({ job: "sales", mode: "nightly", ...run }))
       .filter((run: Record<string, unknown>) =>
         Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
       );
@@ -951,7 +953,7 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     // A2 C14: unlinked -> unknown, never a measured 0; the code is explained once.
     expect(byId[7]).toMatchObject({ orderSignal: null, orderSignalReason: "not_linked", outOfStockWithOrders: null });
     expect(data.coverage.orderSignalReasons).toEqual({
-      not_linked: "not linked to a store listing in your companies, so its orders cannot be attributed",
+      not_linked: "no listing of it is linked on a store with recorded orders in your companies, so its orders cannot be attributed",
     });
     expect(data.coverage.orderSignalUnlinkedOrders).toBe(4);
     expect(data.coverage.orderSignalUnlinkedNote).toContain("4 orders in this window");
@@ -976,6 +978,52 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
     const signalRead = (p.productSalesFact.groupBy.mock.calls as any[]).map((c) => c[0]).find((a) => a.by[0] === "productId");
     expect(signalRead.where.companyId).toEqual({ in: ["c1"] });
     expect(signalRead.where.productId).toEqual({ in: [5, 6, 7] });
+  });
+
+  // Assistant A2 FR3 (pack C16, A2-FD1-1): a no-fact product linked after the last FULL sales
+  // rebuild started is unknown on the wire — its back-filled order lines are not facts yet.
+  it("reorder_report: a listing linked after the last full sales rebuild reads not_yet_attributed on the wire (A2 C16)", async () => {
+    p.userCompany.findMany.mockResolvedValueOnce([{ companyId: "c1" }]);
+    p.product.findMany.mockImplementation(async (args: Record<string, unknown>) => {
+      const select = (args.select ?? {}) as { product_locations?: unknown };
+      return select.product_locations
+        ? [
+            { id: 8, name: "Newly Linked", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
+            { id: 9, name: "Long Linked", costPrice: null, product_locations: [{ quantity: 0 }], reorderConfig: null },
+          ]
+        : [{ id: 8 }, { id: 9 }];
+    });
+    const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000);
+    // The newest success is a nightly 2 hours ago; the newest FULL one started 100 hours ago.
+    const fullStart = hoursAgo(100);
+    seedRuns([
+      { status: "SUCCEEDED", startedAt: hoursAgo(2.1), finishedAt: hoursAgo(2), skippedReason: null },
+      { status: "SUCCEEDED", startedAt: fullStart, finishedAt: hoursAgo(99), skippedReason: null, mode: "full" },
+    ]);
+    p.externalOrder.groupBy.mockResolvedValueOnce([{ integrationId: "store-c1" }]);
+    p.productLink.findMany.mockResolvedValueOnce([
+      { internalProductId: 8, createdAt: hoursAgo(20) }, // after the full run started
+      { internalProductId: 9, createdAt: hoursAgo(500) }, // before it
+    ]);
+    p.productSalesFact.aggregate.mockResolvedValue({ _min: { dayKey: "2019-01-01" } });
+    p.productSalesFact.groupBy.mockImplementation(async (args: Record<string, unknown>) =>
+      (args.by as string[])[0] === "companyId" ? [{ companyId: "c1", _min: { dayKey: "2019-01-01" } }] : [],
+    );
+
+    const toolResult = await roundTrip("reorder_report", {});
+    expect(toolResult.status).toBe("ok");
+    const data = toolResult.data;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const byId = Object.fromEntries((data.rows as any[]).map((r) => [r.productId, r]));
+    expect(byId[8]).toMatchObject({ orderSignal: null, orderSignalReason: "not_yet_attributed", outOfStockWithOrders: null });
+    expect(byId[9]).toMatchObject({ orderSignal: { orderedUnits: 0, orders: 0 }, outOfStockWithOrders: false });
+    expect(data.coverage.orderSignalReasons).toEqual({
+      not_yet_attributed:
+        "linked to a store listing after the last full sales rebuild, so orders on that listing may not be counted yet",
+    });
+    expect(data.counts).toMatchObject({ outOfStockWithOrders: 0, outOfStockWithOrdersUnknown: 1, orderSignalUnknown: 1 });
+    // The cutoff is internal: no tool output relays the full run's start.
+    expect(JSON.stringify(data)).not.toContain(fullStart.toISOString());
   });
 
   it("get_sales: coverage carries salesDataStart + windowCoverage + rowsNote (C6)", async () => {
@@ -1454,6 +1502,10 @@ describe("POST /mcp — quality+reach W1 round-trips (scope echoes / coverage ad
       "rows are ranked and filtered by the per-day change",
     );
     expect(toolResult.data.coverage.reasonsKeys).toContain("perDayPctChange = per-day percent change");
+    // A2 C16 (A2-FD1-4): the legend names the envelope's per-day reason too.
+    expect(toolResult.data.coverage.reasonsKeys).toContain(
+      "perDay = why the per-day figures are missing (present only when a period has no complete day yet)",
+    );
   });
 
   it("get_movement_series breakdownBy:'product': per-product rows + a rejected-id echo (C10)", async () => {

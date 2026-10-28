@@ -361,6 +361,12 @@ export interface SalesRebuildState {
    *  sales are complete — compare_periods measures its per-day figures through it. Never
    *  shown to the model (`get_data_freshness` relays `lastSucceededAt` only). */
   lastSucceededStartedAt: string | null;
+  /** A2 pack C16 (internal): the newest SUCCEEDED run in mode "full"'s `startedAt` (ISO UTC),
+   *  or null. Only a full rebuild re-reads every day; the nightly re-reads its rolling days
+   *  plus the days whose ORDERS changed, and linking a listing back-fills its old order lines
+   *  without changing any order — so a listing linked after this instant may have orders the
+   *  facts do not carry yet. Never shown to the model. */
+  lastFullSucceededStartedAt: string | null;
 }
 
 /** A run that never started because another held the lock — not an attempt. */
@@ -373,14 +379,16 @@ const LOCK_HELD_SKIP = "lock-held";
 const LATER_ATTEMPTS_READ = 100;
 
 /**
- * The sales rebuild state (A2 pack C7), in two reads of `analyticsRebuildRun` for the
- * "sales" job (A2 pack C15, A2-CR-5): (1) the newest SUCCEEDED run, read DIRECTLY — a
- * bounded newest-N read could lose a retained success behind N lock-held skips and say no
- * success is on record; (2) only when there is one, the FAILED / ABORTED runs that started
- * after it (at most REBUILD_RUN_RETENTION, the rows retention keeps per job). The lock-held
- * skips (ABORTED rows) are dropped from (2) HERE, in JS: a Prisma `{ not: 'lock-held' }`
- * compiles to SQL `<>`, which also drops every FAILED run (their `skippedReason` is NULL) —
- * the very rows this read exists to see (A2-G1R3-3). A RUNNING row is not an outcome yet.
+ * The sales rebuild state (A2 pack C7), in reads of `analyticsRebuildRun` for the "sales"
+ * job (A2 pack C15, A2-CR-5): (1) the newest SUCCEEDED run, read DIRECTLY — a bounded
+ * newest-N read could lose a retained success behind N lock-held skips and say no success is
+ * on record; (2) only when there is one, the FAILED / ABORTED runs that started after it (at
+ * most REBUILD_RUN_RETENTION, the rows retention keeps per job), beside (3) the newest
+ * SUCCEEDED run in mode "full" (A2 pack C16), read directly the same way — no success at all
+ * means no full one, so (3) waits on (1) as (2) does. The lock-held skips (ABORTED rows) are
+ * dropped from (2) HERE, in JS: a Prisma `{ not: 'lock-held' }` compiles to SQL `<>`, which
+ * also drops every FAILED run (their `skippedReason` is NULL) — the very rows this read
+ * exists to see (A2-G1R3-3). A RUNNING row is not an outcome yet.
  *
  * `lastSucceededAt` is the success's `finishedAt`, never its `startedAt`: `lastRunAt`
  * (finalizeRebuildRun's stamp) is a finish time, so the two read on one clock
@@ -394,13 +402,25 @@ export async function salesRebuildState(): Promise<SalesRebuildState> {
   });
   // `?.` guards a deep-mocked prisma returning undefined (as the tool layer's name helpers do).
   if (success?.finishedAt == null) {
-    return { lastSucceededAt: null, latestAttemptFailedAfterSuccess: false, lastSucceededStartedAt: null };
+    return {
+      lastSucceededAt: null,
+      latestAttemptFailedAfterSuccess: false,
+      lastSucceededStartedAt: null,
+      lastFullSucceededStartedAt: null,
+    };
   }
-  const laterFailures = await prisma.analyticsRebuildRun.findMany({
-    where: { job: "sales", status: { in: ["FAILED", "ABORTED"] }, startedAt: { gt: success.startedAt } },
-    select: { skippedReason: true },
-    take: LATER_ATTEMPTS_READ,
-  });
+  const [laterFailures, lastFull] = await Promise.all([
+    prisma.analyticsRebuildRun.findMany({
+      where: { job: "sales", status: { in: ["FAILED", "ABORTED"] }, startedAt: { gt: success.startedAt } },
+      select: { skippedReason: true },
+      take: LATER_ATTEMPTS_READ,
+    }),
+    prisma.analyticsRebuildRun.findFirst({
+      where: { job: "sales", status: "SUCCEEDED", mode: "full", finishedAt: { not: null } },
+      orderBy: { startedAt: "desc" },
+      select: { startedAt: true },
+    }),
+  ]);
   const latestAttemptFailedAfterSuccess = (laterFailures ?? []).some(
     (run) => run.skippedReason !== LOCK_HELD_SKIP,
   );
@@ -408,6 +428,7 @@ export async function salesRebuildState(): Promise<SalesRebuildState> {
     lastSucceededAt: success.finishedAt.toISOString(),
     latestAttemptFailedAfterSuccess,
     lastSucceededStartedAt: success.startedAt.toISOString(),
+    lastFullSucceededStartedAt: lastFull?.startedAt ? lastFull.startedAt.toISOString() : null,
   };
 }
 

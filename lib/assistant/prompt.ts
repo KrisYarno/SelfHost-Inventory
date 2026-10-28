@@ -114,7 +114,7 @@ export function buildSystemPrompt(now: Date): string {
     "- \"What does X cost or sell for, per unit?\" -> get_valuation with groupBy 'product'.",
     "- \"How many products are out of stock (all products)?\" -> get_inventory_summary",
     "  (stockStateCounts.out). In low_stock_report, counts.outOfStockAlerts covers only",
-    "  products with alerts on, and counts.outOfStockAllProducts counts every product.",
+    "  products with alerts on, and counts.outOfStockAllProducts counts every out-of-stock product.",
     "- \"What was the stock at one location on a past day?\" -> get_stock_asof with",
     "  locationId.",
     "- \"What is at or below its alert threshold?\" -> low_stock_report.",

@@ -1101,13 +1101,14 @@ export async function comparePeriodsByProduct(opts: {
       pctChange: a === 0 ? null : delta / a,
       ...perDay.figures,
     };
-    if (a === 0) {
-      row.reasons = {
-        pctChange: "period A is zero — percent change undefined",
-        // b is measured on every ranked row, so a measured-zero A is the per-day case too.
-        perDayPctChange: PER_DAY_PCT_ZERO_REASON,
-      };
-    }
+    // A2 C16 (A2-FD1C-1): each reason follows its OWN numerator — pctChange the period total,
+    // perDayPctChange the rate window's (`aIsZero`, as totals mode reads it). A's units only on
+    // its incomplete day leave a rate numerator of 0 under a non-zero total; a period with no
+    // complete day has no per-day figure at all (the envelope's reasons.perDay says why).
+    const reasons: Record<string, string> = {};
+    if (a === 0) reasons.pctChange = "period A is zero — percent change undefined";
+    if (perDay.aIsZero) reasons.perDayPctChange = PER_DAY_PCT_ZERO_REASON;
+    if (Object.keys(reasons).length > 0) row.reasons = reasons;
     rawPerDayChange.set(productId, perDay.rawChange as number);
     ranked.push(row);
   }

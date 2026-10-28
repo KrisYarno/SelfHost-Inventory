@@ -1540,12 +1540,13 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
     const NINE_MONTHS = { from: "2025-09-01", to: "2026-06-01" }; // 274 day-keys
     const LAST_MONTH = { from: "2026-06-02", to: "2026-07-01" }; // 30 day-keys
     // A2 C14 (A2-OCC-2 / OCC-8 / OCC-9): complete days only, a calendar rate, and the
-    // direction counts follow the per-day change under per-day ranking.
+    // direction counts follow the per-day change under per-day ranking. A2 C16 (A2-FD1-3 /
+    // -4): the sales frontier's other cut-off, and the totals-ranking fallback's warning.
     const RATE_DEFINITION =
       "per day = a period's total over its COMPLETE days divided by those days " +
-      "(coverage.rateWindows): a period that reaches today or later is measured for its " +
-      "per-day figure only through the last complete day, because today's figures — and, " +
-      "before the nightly rebuild, yesterday's sales — are still arriving. Values of 1 or more " +
+      "(coverage.rateWindows): a period that reaches past the last complete day is measured for " +
+      "its per-day figure only through it, because today's figures — and, until the nightly " +
+      "sales rebuild succeeds, recent days' sales — are still arriving. Values of 1 or more " +
       "are rounded to 2 decimals, smaller values to 3 significant figures, so a small non-zero " +
       "rate never shows as 0; perDayDirection is the sign of the unrounded change. When the " +
       "rate periods differ in length, rows are ranked and filtered by the per-day change, " +
@@ -1559,6 +1560,8 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       "decreased and unchanged count every product with activity in either period that both " +
       "periods can measure, before that filter; unranked counts the products not comparable. " +
       "Under rankedBy 'per_day', increased and decreased follow the per-day change, not delta. " +
+      "When the periods differ in length and one has no complete day yet (reasons.perDay), rows " +
+      "rank by the change in totals, which is not like-for-like. " +
       "Use these for how many; never count rows yourself.";
 
     /** Nine months vs last month, fully covered:
@@ -1731,13 +1734,14 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       expect(data.counts).toEqual({ ranked: 3, increased: 2, decreased: 1, unchanged: 0, unranked: 0 });
     });
 
-    it("by_product: rateDefinition exact, and both legends append the perDayPctChange key", async () => {
+    it("by_product: rateDefinition exact, and both legends append the perDayPctChange and perDay keys", async () => {
       seedUnequal();
       const plain = await okData(unequalArgs());
       const coverage = plain.coverage as Record<string, unknown>;
       expect(coverage.rateDefinition).toBe(RATE_DEFINITION);
       expect(coverage.reasonsKeys).toBe(
-        "a = periodA, b = periodB, pctChange = percent change, perDayPctChange = per-day percent change",
+        "a = periodA, b = periodB, pctChange = percent change, perDayPctChange = per-day percent change" +
+          ", perDay = why the per-day figures are missing (present only when a period has no complete day yet)",
       );
 
       // The shift legend (a company joining at period B's first day).
@@ -1766,7 +1770,8 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       expect(shifted.coverageShift).toContain("delta and the per-day figures are not like-for-like growth");
       expect(shifted.reasonsKeys).toBe(
         "a = periodA, b = periodB, pctChange = percent change, delta = the coverageShift " +
-          "qualification, perDayPctChange = per-day percent change",
+          "qualification, perDayPctChange = per-day percent change" +
+          ", perDay = why the per-day figures are missing (present only when a period has no complete day yet)",
       );
       expect(shifted.rateDefinition).toBe(RATE_DEFINITION);
     });
@@ -1801,7 +1806,8 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
       expect(coverage.rateDefinition).toBe(RATE_DEFINITION);
       expect(coverage.reasonsKeys).toBe(
         "a = periodA, b = periodB, pctChange = percent change, delta = why this delta is not " +
-          "like-for-like (present only with coverageShift), perDayPctChange = per-day percent change",
+          "like-for-like (present only with coverageShift), perDayPctChange = per-day percent change" +
+          ", perDay = why the per-day figures are missing (present only when a period has no complete day yet)",
       );
     });
 
@@ -1815,8 +1821,10 @@ describe("C9 compare_periods by_product — ranked deltas + unranked coverage ro
         "When periodA and periodB differ in length (unequalLengths), compare the per-day figures " +
           "(aPerDay, bPerDay, perDayDelta, perDayDirection). Rows are ranked and filtered by the " +
           "per-day change (rankedBy: 'per_day') when the lengths differ, or when one period " +
-          "reaches today or later and so has fewer complete days (coverage.rateWindows).",
+          "reaches past the last complete day and so has fewer complete days (coverage.rateWindows).",
       );
+      // A2 C16 (A2-FD1-4): the old "today or later" missed the sales frontier's other cut-off.
+      expect(d).not.toContain("reaches today or later");
       expect(d).not.toContain("unequalLengths flags mismatched window lengths (comparison still runs).");
     });
   });

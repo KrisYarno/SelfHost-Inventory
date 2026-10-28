@@ -692,10 +692,11 @@ const C12_TRUTHFULNESS = [
 /** The three ROUTING lines (pack C12), joined, in their placement order. */
 const C12_ROUTING = [
   "- \"What does X cost or sell for, per unit?\" -> get_valuation with groupBy 'product'.",
-  // A2 C15 (A2-CR-7): the clause names both low-stock out-of-stock counts.
+  // A2 C15 (A2-CR-7): the clause names both low-stock out-of-stock counts. A2 C16 (A2-FD1-5):
+  // "every product" read as the catalog size — it counts every OUT-OF-STOCK product.
   "- \"How many products are out of stock (all products)?\" -> get_inventory_summary " +
     "(stockStateCounts.out). In low_stock_report, counts.outOfStockAlerts covers only " +
-    "products with alerts on, and counts.outOfStockAllProducts counts every product.",
+    "products with alerts on, and counts.outOfStockAllProducts counts every out-of-stock product.",
   "- \"What was the stock at one location on a past day?\" -> get_stock_asof with locationId.",
 ];
 
@@ -785,7 +786,8 @@ describe("A2 C12: 'at or below' everywhere — find_product, and a strict-'below
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
-type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null };
+/** A2 C16: `mode` is the run's own ('nightly' | 'full' | 'backfill'); unnamed = a nightly. */
+type RunRow = { status: string; startedAt: Date; finishedAt: Date | null; skippedReason: string | null; mode?: string };
 type RunQuery = {
   where?: Record<string, unknown>;
   orderBy?: Record<string, string>;
@@ -811,7 +813,7 @@ function seedRuns(runs: RunRow[]) {
         });
   const query = ({ where = {}, orderBy, take, select }: RunQuery = {}) => {
     const rows: Array<Record<string, unknown>> = runs
-      .map((run) => ({ job: "sales", ...run }))
+      .map((run) => ({ job: "sales", mode: "nightly", ...run }))
       .filter((run: Record<string, unknown>) =>
         Object.entries(where).every(([key, cond]) => holds(run[key], cond)),
       );
@@ -954,7 +956,8 @@ const S8_FIELDS: Array<{ cites: string; tool: string; path: string; value: unkno
   { cites: "a total of 0 on a row with no units", tool: "get_valuation", path: "rows.0.atCurrentCostCents", value: 0 },
   // "-> get_inventory_summary (stockStateCounts.out). In low_stock_report,
   // counts.outOfStockAlerts covers only products with alerts on, and
-  // counts.outOfStockAllProducts counts every product." (A2 C15: Spare's alerts are off.)
+  // counts.outOfStockAllProducts counts every out-of-stock product." (A2 C15: Spare's alerts
+  // are off.)
   { cites: "stockStateCounts.out", tool: "get_inventory_summary", path: "stockStateCounts.out", value: 3 },
   { cites: "outOfStockAlerts", tool: "low_stock_report", path: "counts.outOfStockAlerts", value: 2 },
   { cites: "outOfStockAllProducts", tool: "low_stock_report", path: "counts.outOfStockAllProducts", value: 3 },

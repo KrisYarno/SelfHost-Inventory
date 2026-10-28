@@ -1818,7 +1818,7 @@ describe("MATRIX ROW 2 — post-lane tool contracts through the REAL route", () 
         const starts = (await startsOf(caller.companyIds)).map((row) => row.start).filter((d): d is string => d != null);
         const start = starts.reduce((a, b) => (a <= b ? a : b));
         expect(coverage.orderSignalReasons).toEqual({
-          not_linked: "not linked to a store listing in your companies, so its orders cannot be attributed",
+          not_linked: "no listing of it is linked on a store with recorded orders in your companies, so its orders cannot be attributed",
           not_recorded: `window predates/straddles sales data (starts ${start})`,
         });
       }
