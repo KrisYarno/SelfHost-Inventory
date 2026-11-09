@@ -22,7 +22,9 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 jest.mock("next-auth/react", () => ({
-  useSession: () => ({ data: { user: { isAdmin: false } }, status: "authenticated" }),
+  // A jest.fn so the hand-typed-lines cases can render as an admin; every other
+  // case keeps the non-admin default.
+  useSession: jest.fn(() => ({ data: { user: { isAdmin: false } }, status: "authenticated" })),
 }));
 jest.mock("sonner", () => ({
   toast: { error: jest.fn(), warning: jest.fn(), success: jest.fn(), message: jest.fn() },
@@ -36,7 +38,9 @@ jest.mock("@/components/products/product-map-dialog", () => ({
 }));
 
 import { toast } from "sonner";
+import { useSession } from "next-auth/react";
 import { useFulfillmentValidation, useFulfillOrder } from "@/hooks/use-orders";
+import { NO_STORE_PRODUCT_LINE_HINT } from "@/lib/orders/catalog-product-id";
 import { FulfillOrderDialog, openLines } from "@/components/orders/fulfill-order-dialog";
 import { MAX_FULFILLMENT_ITEMS, CAP_COUNTER_FROM } from "@/lib/inventory/request-limits";
 import type { ExternalOrder } from "@/types/external-orders";
@@ -475,5 +479,58 @@ describe("fulfill dialog — the request cap, counted before it bites", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/fulfilment handles at most/)).toBeNull();
     expect(confirmButton()).toBeEnabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A LINE WITH NO STORE PRODUCT (hand-typed lines plan, C7)
+// ---------------------------------------------------------------------------
+
+describe("fulfill dialog — a line with no store product is never offered Map now", () => {
+  const NON_ADMIN = { data: { user: { isAdmin: false } }, status: "authenticated" };
+  const ADMIN = { data: { user: { isAdmin: true } }, status: "authenticated" };
+
+  afterEach(() => {
+    (useSession as jest.Mock).mockReturnValue(NON_ADMIN);
+  });
+
+  /** One mapped line plus one unmapped line carrying `externalProductId`. */
+  const orderWithUnmapped = (externalProductId: string) =>
+    makeOrder([
+      orderItem({ id: "it-0", name: "Mapped", isMapped: true }),
+      orderItem({
+        id: "it-1",
+        name: "BAC 5",
+        externalProductId,
+        isMapped: false,
+        productLinkId: null,
+      }),
+    ]);
+
+  it('a "0" line (admin): the hint, and no "Map now"', async () => {
+    (useSession as jest.Mock).mockReturnValue(ADMIN);
+    await renderDialog(orderWithUnmapped("0"));
+
+    expect(screen.getByText(NO_STORE_PRODUCT_LINE_HINT)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /map now/i })).toBeNull();
+    // The sentence above the list is unchanged.
+    expect(
+      screen.getByText(/These items will be skipped during fulfillment\. Map them to internal/),
+    ).toBeInTheDocument();
+  });
+
+  it('a "0" line (non-admin): the hint has no admin gate', async () => {
+    await renderDialog(orderWithUnmapped("0"));
+
+    expect(screen.getByText(NO_STORE_PRODUCT_LINE_HINT)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /map now/i })).toBeNull();
+  });
+
+  it('a catalog unmapped line (admin): "Map now", and no hint', async () => {
+    (useSession as jest.Mock).mockReturnValue(ADMIN);
+    await renderDialog(orderWithUnmapped("wc-p-123"));
+
+    expect(screen.getByRole("button", { name: /map now/i })).toBeInTheDocument();
+    expect(screen.queryByText(NO_STORE_PRODUCT_LINE_HINT)).toBeNull();
   });
 });

@@ -35,7 +35,7 @@ import { ReconciliationErrorCard } from "./error-card";
  * is unmapped" and "nothing older than 30 days is unmapped" are different
  * claims, and only one of them is true on a filtered list.
  */
-export const UNMAPPED_EMPTY_STATE = "No unmapped external order lines match this filter.";
+export const UNMAPPED_EMPTY_STATE = "No mappable external order lines match this filter.";
 
 const PAGE_SIZE = 50;
 
@@ -199,10 +199,13 @@ export function UnmappedTab() {
               <span className="tabular-nums">{page.buckets[chip.key]}</span>
             </span>
           ))}
-          {/* BESIDE THE UNKNOWN CHIP, because it is that chip the note is about
-              (QA-4): an age filter cannot assert anything about a group whose age
-              nobody can compute, so it drops them and the chip reads 0. The
-              producer counted what it excluded and wrote the sentence. */}
+          {/* BESIDE THE CHIPS, because they are what the notes qualify. The
+              unknown-excluded note (QA-4): an age filter cannot assert anything
+              about a group whose age nobody can compute, so it drops them and
+              the unknown chip reads 0. The no-store-product note: lines with no
+              store product can never be mapped, so they are not groups at all,
+              only a count across all ages. The producer counted both and wrote
+              the sentences, in that order. */}
           {page.notes.map((note) => (
             <span
               key={note}

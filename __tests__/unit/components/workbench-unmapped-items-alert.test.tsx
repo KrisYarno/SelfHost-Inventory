@@ -32,6 +32,7 @@ import {
   SKIPPED_LINE_COPY,
   SKIPPED_LINE_LABEL,
 } from "@/lib/workbench/skipped-lines";
+import { NO_STORE_PRODUCT_LINE_HINT } from "@/lib/orders/catalog-product-id";
 
 // ---------------------------------------------------------------------------
 // Fixtures — one line per class, built the way the hook builds them
@@ -59,6 +60,45 @@ const BUNDLE = {
   quantity: 2,
   externalProductId: "wc-909",
   isBundle: true,
+};
+
+/**
+ * Hand-typed lines plan, C7: lines with NO store product. WooCommerce sends
+ * product_id 0 for a line typed by hand in the store; a missing id is "". Both
+ * carry `class: "unmapped"` exactly as the hook stamps it
+ * (hooks/use-workbench.ts) — a class-less "" line would fall back to the
+ * heuristic and classify as unavailable, which is not what the hook sends.
+ * Declared as consts so the extra `class` field is accepted.
+ */
+const HAND_TYPED_ZERO = {
+  name: "BAC 5",
+  quantity: 2,
+  externalProductId: "0",
+  class: "unmapped" as const,
+};
+
+const HAND_TYPED_EMPTY = {
+  name: "Custom line",
+  quantity: 1,
+  externalProductId: "",
+  class: "unmapped" as const,
+};
+
+/** A catalog line, stamped the way the hook stamps it. */
+const CATALOG_UNMAPPED = {
+  name: "Mystery Peptide 10mg",
+  sku: "MP-10",
+  quantity: 1,
+  externalProductId: "wc-102",
+  class: "unmapped" as const,
+};
+
+/** Mapped but not in the loaded products, stamped the way the hook stamps it. */
+const UNAVAILABLE_STAMPED = {
+  name: "Vial Rack",
+  sku: "VR-1",
+  quantity: 1,
+  class: "unavailable" as const,
 };
 
 const renderAlert = (
@@ -179,6 +219,56 @@ describe("the Map button", () => {
 
   it("never offers Map without an integration", () => {
     renderAlert([UNMAPPED], { integrationId: undefined });
+    expect(screen.queryByRole("button", { name: /^map$/i })).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lines with no store product (hand-typed lines plan, C7)
+// ---------------------------------------------------------------------------
+
+describe("a line with no store product", () => {
+  it.each([
+    ['"0"', HAND_TYPED_ZERO],
+    ['""', HAND_TYPED_EMPTY],
+  ])("%s (admin): no Map button, the hint instead", (_label, line) => {
+    renderAlert([line]);
+
+    const group = screen.getByTestId("skipped-group-unmapped");
+    expect(within(group).queryByRole("button", { name: /^map$/i })).not.toBeInTheDocument();
+    expect(within(group).getByText(NO_STORE_PRODUCT_LINE_HINT)).toBeInTheDocument();
+  });
+
+  it("the hint is information, not an admin action: a non-admin sees it too", () => {
+    (useSession as jest.Mock).mockReturnValue({ data: { user: { isAdmin: false } } });
+    renderAlert([HAND_TYPED_ZERO]);
+
+    expect(screen.getByText(NO_STORE_PRODUCT_LINE_HINT)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^map$/i })).not.toBeInTheDocument();
+  });
+
+  it("a catalog unmapped line (admin) keeps its Map button and gets no hint", () => {
+    renderAlert([CATALOG_UNMAPPED]);
+
+    expect(screen.getByRole("button", { name: /^map$/i })).toBeInTheDocument();
+    expect(screen.queryByText(NO_STORE_PRODUCT_LINE_HINT)).not.toBeInTheDocument();
+  });
+
+  it("beside a catalog line, only the catalog line is offered Map", () => {
+    renderAlert([CATALOG_UNMAPPED, HAND_TYPED_ZERO]);
+
+    expect(screen.getAllByRole("button", { name: /^map$/i })).toHaveLength(1);
+    expect(screen.getAllByText(NO_STORE_PRODUCT_LINE_HINT)).toHaveLength(1);
+  });
+
+  it.each([
+    ["class-less (the heuristic)", UNAVAILABLE],
+    ["stamped by the hook", UNAVAILABLE_STAMPED],
+  ])("a mapped-but-unavailable line, %s, shows no hint", (_label, line) => {
+    renderAlert([line]);
+
+    expect(screen.getByTestId("skipped-group-unavailable")).toBeInTheDocument();
+    expect(screen.queryByText(NO_STORE_PRODUCT_LINE_HINT)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^map$/i })).not.toBeInTheDocument();
   });
 });

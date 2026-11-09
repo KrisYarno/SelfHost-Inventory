@@ -41,6 +41,7 @@ jest.mock('@/lib/rateLimit', () => ({
 import { POST } from '@/app/api/products/bundle-links/route';
 import { requireAdmin, requireCompanyMembership } from '@/lib/api-utils';
 import prisma from '@/lib/prisma';
+import { NO_STORE_PRODUCT_MAPPING_REFUSAL } from '@/lib/orders/catalog-product-id';
 
 const tx: any = (prisma as any);
 
@@ -290,6 +291,58 @@ describe('POST /api/products/bundle-links', () => {
     // No transaction or DB writes should have happened
     expect((prisma as any).$transaction).not.toHaveBeenCalled();
     expect(tx.productLink.create).not.toHaveBeenCalled();
+  });
+
+  // Hand-typed lines plan, C3: a store line with no store product (Woo sends
+  // product_id 0 for a line typed by hand) is refused IN THE ROUTE, right after
+  // the parse — the schema module is on the assistant's read path and stays
+  // untouched. Everything downstream is primed to succeed, so only the refusal
+  // can stop the create and its backfill. PAD SPACE makes "0 " equal "0" in the
+  // backfill, so every space-padded spelling is refused too.
+  function primeAWouldBeCreate() {
+    setupAdminCompany();
+    (tx.productLink.findFirst as jest.Mock).mockResolvedValue(null);
+    (tx.productLink.create as jest.Mock).mockResolvedValue({
+      id: 'bl-zero', isBundle: true, integrationId: 'int1',
+      externalProductId: '0', externalVariantId: null,
+      internalProductId: null, externalSku: null, externalTitle: null, createdAt: new Date(),
+    });
+    (tx.bundleComponent.createMany as jest.Mock).mockResolvedValue({ count: 1 });
+    (tx.externalOrderItem.updateMany as jest.Mock).mockResolvedValue({ count: 569 });
+  }
+
+  it.each(['0', ' ', '0 ', ' 0'])(
+    'refuses externalProductId %j with 400 before any read, create or backfill',
+    async (externalProductId) => {
+      primeAWouldBeCreate();
+      const resp = await POST(mkReq({
+        integrationId: 'int1',
+        externalProductId,
+        components: [{ internalProductId: 1, quantity: 1 }],
+      }));
+
+      expect(resp.status).toBe(400);
+      expect(await resp.json()).toEqual({ error: NO_STORE_PRODUCT_MAPPING_REFUSAL });
+      expect(tx.integration.findUnique).not.toHaveBeenCalled();
+      expect(tx.product.findMany).not.toHaveBeenCalled();
+      expect((prisma as any).$transaction).not.toHaveBeenCalled();
+      expect(tx.productLink.create).not.toHaveBeenCalled();
+      expect(tx.externalOrderItem.updateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it('an empty externalProductId keeps the schema\'s own first message', async () => {
+    primeAWouldBeCreate();
+    const resp = await POST(mkReq({
+      integrationId: 'int1',
+      externalProductId: '',
+      components: [{ internalProductId: 1, quantity: 1 }],
+    }));
+
+    expect(resp.status).toBe(400);
+    expect((await resp.json()).error).toBe('String must contain at least 1 character(s)');
+    expect(tx.productLink.create).not.toHaveBeenCalled();
+    expect(tx.externalOrderItem.updateMany).not.toHaveBeenCalled();
   });
 });
 

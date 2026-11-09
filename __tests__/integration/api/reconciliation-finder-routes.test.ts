@@ -210,7 +210,9 @@ describe('GET /api/reconciliation/unmapped', () => {
 
   // SEVEN keys since QA-4: `unknownExcluded` counts the unknown-age groups an
   // active age filter dropped, and `notes` carries the sentence that says so.
-  it('serves the seven-key envelope with the buckets alongside the groups', async () => {
+  // EIGHT since the hand-typed lines plan (C4): `noStoreProductItems` counts the
+  // unmapped lines with no store product, which are never groups.
+  it('serves the eight-key envelope with the buckets alongside the groups', async () => {
     const res = await unmappedGET(req('http://localhost/api/reconciliation/unmapped'));
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -220,9 +222,12 @@ describe('GET /api/reconciliation/unmapped', () => {
       'groups',
       'moreCount',
       'nextCursor',
+      'noStoreProductItems',
       'notes',
       'unknownExcluded',
     ]);
+    // The totals row here carries no such count, so it reads 0 (never absent).
+    expect(body.noStoreProductItems).toBe(0);
     expect(body.buckets).toEqual({ '0-7': 0, '8-30': 1, '31-90': 0, '90+': 0, unknown: 0 });
     expect(body.count).toBe(1);
     expect(body.groups[0]).toMatchObject({

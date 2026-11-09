@@ -1039,4 +1039,121 @@ describe('upsertOrderWithItems', () => {
       data: { externalTitle: 'Coffee Beans — 1 lb' },
     })
   })
+
+  // -----------------------------------------------------------------------
+  // A line with no store product (hand-typed lines plan, C2). WooCommerce
+  // sends product_id 0 for a line typed by hand in its order screen. Every
+  // lookup below WOULD find a link (the mock answers any query), so a "0" line
+  // that was still looked up would come back mapped and retitled — which is
+  // exactly how one (Awake, "0") mapping claimed every hand-typed Awake line.
+  // -----------------------------------------------------------------------
+  describe('a line with no store product ("0" / "")', () => {
+    const CATALOG_LINE = {
+      externalId: 'item-cat',
+      externalProductId: 'prod-1',
+      externalVariantId: null,
+      name: 'Widget',
+      variantName: null,
+      sku: 'WDG-001',
+      quantity: 1,
+      unitPrice: 10,
+    }
+    const HAND_TYPED_LINE = {
+      externalId: 'item-zero',
+      externalProductId: '0',
+      externalVariantId: null,
+      name: 'BAC 5',
+      variantName: null,
+      sku: '',
+      quantity: 2,
+      unitPrice: 4,
+    }
+
+    function anyLookupFindsALink(tx: ReturnType<typeof setupTransaction>) {
+      tx.productLink.findFirst.mockResolvedValue({
+        id: 'plink-any',
+        isBundle: false,
+        externalTitle: 'BAC 2ML',
+      } as any)
+    }
+
+    function itemUpsertFor(tx: ReturnType<typeof setupTransaction>, externalItemId: string) {
+      return tx.externalOrderItem.upsert.mock.calls
+        .map((c) => c[0] as any)
+        .find((call) => call.where.orderId_externalItemId.externalItemId === externalItemId)
+    }
+
+    it('beside a catalog line: never looked up, never retitled, stored unmapped (create AND update payloads)', async () => {
+      const tx = setupTransaction()
+      tx.externalOrder.upsert.mockResolvedValue({ id: 'order-1' } as any)
+      anyLookupFindsALink(tx)
+      tx.externalOrderItem.upsert.mockResolvedValue({} as any)
+
+      const result = await upsertOrderWithItems(mockPrisma, {
+        ...baseParams,
+        normalized: buildNormalizedOrder({ lineItems: [CATALOG_LINE, HAND_TYPED_LINE] }),
+        status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+      })
+
+      // ONE lookup, for the catalog line only.
+      expect(tx.productLink.findFirst).toHaveBeenCalledTimes(1)
+      expect((tx.productLink.findFirst.mock.calls[0][0] as any).where.externalProductId).toBe('prod-1')
+      // The link is never renamed after the hand-typed line.
+      for (const [arg] of tx.productLink.update.mock.calls as any[]) {
+        expect(arg.data.externalTitle).not.toBe('BAC 5')
+      }
+      expect(result.itemsProcessed).toBe(2)
+      expect(result.itemsMapped).toBe(1)
+
+      const catalog = itemUpsertFor(tx, 'item-cat')
+      expect(catalog.create).toMatchObject({ productLinkId: 'plink-any', isMapped: true })
+
+      // The "0" line: unmapped on CREATE, and the UPDATE payload a re-upsert of an
+      // existing order writes un-maps it too. The stored id stays what the store sent.
+      const zero = itemUpsertFor(tx, 'item-zero')
+      expect(zero.create).toMatchObject({ externalProductId: '0', productLinkId: null, isMapped: false })
+      expect(zero.update).toMatchObject({ productLinkId: null, isMapped: false })
+    })
+
+    it('a re-upserted order with no external item id: the existing "0" row is updated to unmapped', async () => {
+      const tx = setupTransaction()
+      tx.externalOrder.upsert.mockResolvedValue({ id: 'order-1' } as any)
+      anyLookupFindsALink(tx)
+      tx.externalOrderItem.findFirst.mockResolvedValue({ id: 'existing-zero' } as any)
+      tx.externalOrderItem.update.mockResolvedValue({} as any)
+
+      await upsertOrderWithItems(mockPrisma, {
+        ...baseParams,
+        normalized: buildNormalizedOrder({ lineItems: [{ ...HAND_TYPED_LINE, externalId: '' }] }),
+        status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+      })
+
+      expect(tx.productLink.findFirst).not.toHaveBeenCalled()
+      expect(tx.productLink.update).not.toHaveBeenCalled()
+      expect(tx.externalOrderItem.update).toHaveBeenCalledWith({
+        where: { id: 'existing-zero' },
+        data: expect.objectContaining({ productLinkId: null, isMapped: false }),
+      })
+    })
+
+    it.each(['', ' ', ' 0', '0 '])('the id %j is never looked up either', async (externalProductId) => {
+      const tx = setupTransaction()
+      tx.externalOrder.upsert.mockResolvedValue({ id: 'order-1' } as any)
+      anyLookupFindsALink(tx)
+      tx.externalOrderItem.upsert.mockResolvedValue({} as any)
+
+      const result = await upsertOrderWithItems(mockPrisma, {
+        ...baseParams,
+        normalized: buildNormalizedOrder({ lineItems: [{ ...HAND_TYPED_LINE, externalProductId }] }),
+        status: { statusMode: 'compute', platform: 'WOOCOMMERCE' },
+      })
+
+      expect(tx.productLink.findFirst).not.toHaveBeenCalled()
+      expect(tx.productLink.update).not.toHaveBeenCalled()
+      expect(result.itemsMapped).toBe(0)
+      const zero = itemUpsertFor(tx, 'item-zero')
+      expect(zero.create).toMatchObject({ productLinkId: null, isMapped: false })
+      expect(zero.update).toMatchObject({ productLinkId: null, isMapped: false })
+    })
+  })
 })

@@ -527,6 +527,15 @@ describe("the This order panel (pack CA3)", () => {
       "href",
       "/admin/reconciliation?tab=unmapped",
     );
+    // Hand-typed lines plan, C9: the matcher counts a line with no store product
+    // as unmapped, but the Unmapped tab lists only the MAPPABLE ones — so the
+    // link says where it leads, and the sentence after it says what is not there.
+    expect(screen.getByTestId("order-match-unmapped-link")).toHaveTextContent(
+      /^See the mappable ones on the Unmapped tab$/,
+    );
+    expect(unmapped).toHaveTextContent(
+      "See the mappable ones on the Unmapped tab. A line with no store product can't be mapped and is only counted there.",
+    );
   });
 
   it("says nothing about unmapped lines when there are none", () => {

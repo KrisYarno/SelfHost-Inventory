@@ -64,6 +64,7 @@ import { POST as bundlePOST } from "@/app/api/products/bundle-links/route";
 import { PATCH as bundlePATCH } from "@/app/api/products/bundle-links/[linkId]/route";
 import { requireAdmin } from "@/lib/api-utils";
 import prisma from "@/lib/prisma";
+import { NO_STORE_PRODUCT_MAPPING_REFUSAL } from "@/lib/orders/catalog-product-id";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const db = prisma as any;
@@ -336,6 +337,120 @@ describe("bundle-links POST — MAPPING_CREATE (isBundle + components)", () => {
       { internalProductId: 9, quantity: 2 },
       { internalProductId: 10, quantity: 1 },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Both create routes REFUSE a store line with no store product (hand-typed
+// lines plan, C3 / seam S3). WooCommerce sends product_id 0 for a line typed by
+// hand in the store; the id columns are PAD SPACE, so "0 " equals "0" in the
+// 409 check AND in the backfill — every padded spelling must be refused too, or
+// one POST re-attaches every stored "0" line. Everything downstream is primed
+// to SUCCEED, so only the refusal itself can stop the create and the backfill.
+// ---------------------------------------------------------------------------
+describe("both mapping-create routes refuse a line with no store product", () => {
+  function primeAWouldBeCreate() {
+    db.product.findFirst.mockResolvedValue({ id: 5, deletedAt: null });
+    db.product.findMany.mockResolvedValue([{ id: 9, name: "A", deletedAt: null }]);
+    db.integration.findUnique.mockResolvedValue({ id: "int1", companyId: "C1", isActive: true });
+    db.productLink.findFirst.mockResolvedValue(null);
+    tx.productLink.create.mockResolvedValue({
+      id: "L-zero",
+      integrationId: "int1",
+      externalProductId: "0",
+      externalVariantId: null,
+      externalSku: null,
+      externalTitle: null,
+      isBundle: true,
+      internalProductId: null,
+      createdAt: new Date("2026-11-09T00:00:00Z"),
+      integration: { id: "int1", name: "n", platform: "p" },
+    });
+    tx.bundleComponent.createMany.mockResolvedValue({ count: 1 });
+    tx.externalOrderItem.updateMany.mockResolvedValue({ count: 569 });
+  }
+
+  function linksPost(externalProductId: string) {
+    return linksPOST(
+      mkReq("http://t/api/products/5/links", "POST", {
+        integrationId: "int1",
+        externalProductId,
+        externalTitle: "BAC 5",
+      }),
+      { params: { id: "5" } } as any,
+    );
+  }
+
+  function bundlePost(externalProductId: string) {
+    return bundlePOST(
+      mkReq("http://t/api/products/bundle-links", "POST", {
+        integrationId: "int1",
+        externalProductId,
+        components: [{ internalProductId: 9, quantity: 1 }],
+      }),
+    );
+  }
+
+  function expectNothingRead() {
+    // Refused before any product or integration read, so before the create and
+    // its backfill too.
+    expect(db.product.findFirst).not.toHaveBeenCalled();
+    expect(db.product.findMany).not.toHaveBeenCalled();
+    expect(db.integration.findUnique).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(tx.productLink.create).not.toHaveBeenCalled();
+    expect(tx.externalOrderItem.updateMany).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+  }
+
+  it.each(["0", " ", "0 ", " 0"])(
+    "products/[id]/links POST %j: 400 with the refusal, no create, no backfill",
+    async (externalProductId) => {
+      primeAWouldBeCreate();
+      const resp = await linksPost(externalProductId);
+
+      expect(resp.status).toBe(400);
+      expect(await resp.json()).toEqual({
+        error: NO_STORE_PRODUCT_MAPPING_REFUSAL,
+        code: "VALIDATION_ERROR",
+      });
+      expectNothingRead();
+    },
+  );
+
+  it.each(["0", " ", "0 ", " 0"])(
+    "bundle-links POST %j: 400 with the refusal, no create, no backfill",
+    async (externalProductId) => {
+      primeAWouldBeCreate();
+      const resp = await bundlePost(externalProductId);
+
+      expect(resp.status).toBe(400);
+      expect(await resp.json()).toEqual({ error: NO_STORE_PRODUCT_MAPPING_REFUSAL });
+      expectNothingRead();
+    },
+  );
+
+  it('"" keeps each route\'s existing first message', async () => {
+    primeAWouldBeCreate();
+    const links = await linksPost("");
+    expect(links.status).toBe(400);
+    expect((await links.json()).error).toBe("External product ID is required");
+
+    const bundle = await bundlePost("");
+    expect(bundle.status).toBe(400);
+    expect((await bundle.json()).error).toBe("String must contain at least 1 character(s)");
+
+    expectNothingRead();
+  });
+
+  it("the near miss: a real store product id still creates on both routes", async () => {
+    primeAWouldBeCreate();
+    const links = await linksPost("10");
+    expect(links.status).toBe(201);
+
+    const bundle = await bundlePost("10");
+    expect(bundle.status).toBe(201);
+    expect(tx.productLink.create).toHaveBeenCalledTimes(2);
   });
 });
 

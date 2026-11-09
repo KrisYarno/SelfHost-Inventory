@@ -10,6 +10,10 @@ import { Prisma } from '@prisma/client';
 import { recordChange } from '@/lib/change-tracking';
 import { enforceRateLimit, applyRateLimitHeaders } from '@/lib/rateLimit';
 import { CreateBundleLinkSchema } from '@/lib/validation/bundle-links';
+import {
+  isCatalogProductId,
+  NO_STORE_PRODUCT_MAPPING_REFUSAL,
+} from '@/lib/orders/catalog-product-id';
 import type { BundleComponentSnapshot } from '@/types/bulk-map';
 import { ZodError } from 'zod';
 
@@ -32,6 +36,13 @@ export const POST = apiHandler(async (request: NextRequest) => {
       return NextResponse.json({ error: err.errors[0]?.message ?? 'Invalid input' }, { status: 400 });
     }
     throw err;
+  }
+
+  // A line with no store product ("" / "0", e.g. typed by hand in the store) has
+  // nothing to map. Checked HERE, not in the schema: `lib/validation/bundle-links.ts`
+  // is on the assistant's scanned read path and must not import the owner.
+  if (!isCatalogProductId(body.externalProductId)) {
+    return NextResponse.json({ error: NO_STORE_PRODUCT_MAPPING_REFUSAL }, { status: 400 });
   }
 
   const integration = await prisma.integration.findUnique({

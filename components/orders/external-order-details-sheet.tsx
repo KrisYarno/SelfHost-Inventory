@@ -22,6 +22,7 @@ import { FulfillOrderDialog } from "@/components/orders/fulfill-order-dialog";
 import { BundleLineItemRow } from "@/components/orders/bundle-line-item-row";
 import { ProductMapDialog } from "@/components/products/product-map-dialog";
 import { cn } from "@/lib/utils";
+import { isCatalogProductId, NO_STORE_PRODUCT_LINE_HINT } from "@/lib/orders/catalog-product-id";
 import type { ExternalOrder } from "@/types/external-orders";
 import { STATUS_COLORS } from "@/types/external-orders";
 import { formatDistanceToNow, format } from "date-fns";
@@ -314,7 +315,13 @@ export function ExternalOrderDetailsSheet({
                                 <AlertTriangle className="h-3 w-3" />
                                 <span>Not mapped to internal product</span>
                               </div>
-                              {isAdmin && (
+                              {/* A line with no store product ("" / "0", e.g. typed
+                                  by hand in the store) has nothing to map: the hint,
+                                  for everyone, in place of the admin's Map button. */}
+                              {!isCatalogProductId(item.externalProductId) && (
+                                <span className="text-xs text-muted-foreground">{NO_STORE_PRODUCT_LINE_HINT}</span>
+                              )}
+                              {isAdmin && isCatalogProductId(item.externalProductId) && (
                                 <Button
                                   size="sm"
                                   variant="outline"

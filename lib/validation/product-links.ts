@@ -1,11 +1,21 @@
 import { z } from 'zod';
+import {
+  isCatalogProductId,
+  NO_STORE_PRODUCT_MAPPING_REFUSAL,
+} from '@/lib/orders/catalog-product-id';
 
 /**
  * Validation schema for creating a product link
  */
 export const CreateProductLinkSchema = z.object({
   integrationId: z.string().min(1, 'Integration ID is required'),
-  externalProductId: z.string().min(1, 'External product ID is required'),
+  // A line with no store product ("" / "0", e.g. typed by hand in the store) has
+  // nothing to map: refused here so the create's backfill can never attach those
+  // lines. `""` still reports the `min` message first.
+  externalProductId: z
+    .string()
+    .min(1, 'External product ID is required')
+    .refine(isCatalogProductId, { message: NO_STORE_PRODUCT_MAPPING_REFUSAL }),
   externalVariantId: z.string().optional(),
   externalSku: z.string().optional(),
   externalTitle: z.string().optional(),

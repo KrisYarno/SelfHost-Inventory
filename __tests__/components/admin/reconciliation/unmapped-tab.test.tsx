@@ -46,6 +46,7 @@ type Page = {
   moreCount: number;
   nextCursor: string | null;
   unknownExcluded: number;
+  noStoreProductItems: number;
   notes: string[];
 };
 
@@ -79,6 +80,7 @@ function makePage(over: Partial<Page> = {}): Page {
     moreCount: 0,
     nextCursor: null,
     unknownExcluded: 0,
+    noStoreProductItems: 0,
     notes: [],
     ...over,
   };
@@ -147,6 +149,32 @@ describe("the bucket chips", () => {
   it("says nothing when the filter is hiding nothing", () => {
     render(<UnmappedTab />);
     expect(screen.queryByTestId("unmapped-note")).not.toBeInTheDocument();
+  });
+
+  // Hand-typed lines plan, C4: lines with no store product are never groups,
+  // only a count — and the producer's sentence about them renders beside the
+  // QA-4 note, in the producer's order.
+  it("renders the no-store-product note, after the unknown-excluded note", () => {
+    const noStoreNote =
+      "569 order lines have no store product id (for example, they were typed by hand in the store's order screen). They can't be mapped and stay unattributed. Counted across all ages.";
+    setPage(
+      makePage({
+        unknownExcluded: 4,
+        noStoreProductItems: 569,
+        notes: [
+          "4 unknown-age groups are outside this age filter — clear the filter to see them",
+          noStoreNote,
+        ],
+      }),
+    );
+    render(<UnmappedTab />);
+
+    const notes = screen.getAllByTestId("unmapped-note");
+    expect(notes).toHaveLength(2);
+    expect(notes[0]).toHaveTextContent(
+      "4 unknown-age groups are outside this age filter — clear the filter to see them",
+    );
+    expect(notes[1]).toHaveTextContent(noStoreNote);
   });
 });
 
@@ -248,6 +276,10 @@ describe("bounds, filter and the empty state", () => {
     render(<UnmappedTab />);
 
     expect(screen.getByTestId("unmapped-empty")).toHaveTextContent(UNMAPPED_EMPTY_STATE);
+  });
+
+  it("the empty state speaks of MAPPABLE lines (no-store-product lines are only counted)", () => {
+    expect(UNMAPPED_EMPTY_STATE).toBe("No mappable external order lines match this filter.");
   });
 });
 

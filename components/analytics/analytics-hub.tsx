@@ -414,7 +414,7 @@ export function AnalyticsHub() {
       {/* Global unattributed-orders note (single, hub-level; only when > 0). */}
       {unattributed > 0 && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-700 dark:text-amber-300">
-          {fmt(unattributed)} {unattributed === 1 ? "order" : "orders"} unattributed in the last
+          {fmt(unattributed)} {unattributed === 1 ? "order line" : "order lines"} unattributed in the last
           rebuild (could not be matched to a product, so they are not counted in the totals below).
         </div>
       )}

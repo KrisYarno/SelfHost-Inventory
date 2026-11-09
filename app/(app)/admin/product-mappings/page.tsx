@@ -33,6 +33,7 @@ import { toast } from "sonner";
 import { useCSRF, withCSRFHeaders } from "@/hooks/use-csrf";
 import { useIntegrations, type FetchError } from "@/hooks/use-integrations";
 import type { PlatformType } from "@/types/external-orders";
+import { mappingExternalLabel } from "@/lib/orders/catalog-product-id";
 
 interface MappingEntry {
   id: string;
@@ -72,6 +73,24 @@ interface MappingsResponse {
     total: number;
     totalPages: number;
   };
+}
+
+/**
+ * The external side of a mapping row. A mapping whose store product id is not a
+ * catalog product ("" / "0", e.g. lines typed by hand in the store) is labelled
+ * as one; the last line name it saw rides underneath as secondary text.
+ */
+function ExternalProductLabel({ mapping }: { mapping: MappingEntry }) {
+  const { primary, secondary } = mappingExternalLabel(
+    mapping.externalProductId,
+    mapping.externalTitle,
+  );
+  return (
+    <>
+      <p className="text-sm truncate">{primary}</p>
+      {secondary && <p className="text-xs text-muted-foreground">{secondary}</p>}
+    </>
+  );
 }
 
 export default function AdminProductMappingsPage() {
@@ -446,9 +465,7 @@ export default function AdminProductMappingsPage() {
 
                           {/* External product */}
                           <div className="min-w-0">
-                            <p className="text-sm truncate">
-                              {mapping.externalTitle || mapping.externalProductId}
-                            </p>
+                            <ExternalProductLabel mapping={mapping} />
                             {mapping.externalSku && (
                               <p className="text-xs text-muted-foreground">
                                 SKU: {mapping.externalSku}
@@ -566,8 +583,12 @@ export default function AdminProductMappingsPage() {
                   <>
                     Are you sure you want to delete the bundle mapping for{" "}
                     <span className="font-medium">
-                      {deletingMapping.externalTitle ||
-                        deletingMapping.externalProductId}
+                      {
+                        mappingExternalLabel(
+                          deletingMapping.externalProductId,
+                          deletingMapping.externalTitle,
+                        ).primary
+                      }
                     </span>
                     ? Order items using this mapping will become unmapped.
                   </>
@@ -579,8 +600,12 @@ export default function AdminProductMappingsPage() {
                     </span>{" "}
                     and{" "}
                     <span className="font-medium">
-                      {deletingMapping.externalTitle ||
-                        deletingMapping.externalProductId}
+                      {
+                        mappingExternalLabel(
+                          deletingMapping.externalProductId,
+                          deletingMapping.externalTitle,
+                        ).primary
+                      }
                     </span>
                     ? Order items using this mapping will become unmapped.
                   </>

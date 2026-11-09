@@ -279,8 +279,9 @@ function OrderMatchPanel({ match }: { match: WireOrderMatch }) {
             className="underline"
             data-testid="order-match-unmapped-link"
           >
-            Find these unmapped lines
+            See the mappable ones on the Unmapped tab
           </Link>
+          . A line with no store product can&apos;t be mapped and is only counted there.
         </p>
       )}
 

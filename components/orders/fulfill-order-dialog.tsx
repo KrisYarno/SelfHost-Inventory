@@ -25,6 +25,7 @@ import { cn } from "@/lib/utils";
 import { useFulfillmentValidation, useFulfillOrder } from "@/hooks/use-orders";
 import { CAP_COUNTER_FROM, MAX_FULFILLMENT_ITEMS } from "@/lib/inventory/request-limits";
 import { primaryRefusal } from "@/lib/orders/refusal";
+import { isCatalogProductId, NO_STORE_PRODUCT_LINE_HINT } from "@/lib/orders/catalog-product-id";
 import type { ExternalOrder } from "@/types/external-orders";
 
 type OrderLine = NonNullable<ExternalOrder["items"]>[number];
@@ -350,7 +351,13 @@ export function FulfillOrderDialog({
                           <span className="text-xs text-muted-foreground truncate max-w-[200px]">
                             {item.name}{item.variantName ? ` — ${item.variantName}` : ''}
                           </span>
-                          {isAdmin && (
+                          {/* A line with no store product ("" / "0", e.g. typed by
+                              hand in the store) has nothing to map: the hint, for
+                              everyone, in place of the admin's Map button. */}
+                          {!isCatalogProductId(item.externalProductId) && (
+                            <span className="text-xs text-muted-foreground">{NO_STORE_PRODUCT_LINE_HINT}</span>
+                          )}
+                          {isAdmin && isCatalogProductId(item.externalProductId) && (
                             <Button
                               size="sm"
                               variant="link"

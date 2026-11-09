@@ -166,7 +166,7 @@ test("renders the single global unattributed note when unattributed > 0", async 
     renderHub();
   });
   await waitFor(() =>
-    expect(screen.getByText(/9 orders unattributed/i)).toBeInTheDocument()
+    expect(screen.getByText(/9 order lines unattributed/i)).toBeInTheDocument()
   );
 });
 
@@ -177,7 +177,7 @@ test("does NOT render the unattributed note when unattributed === 0", async () =
   });
   // Give the rebuild-state fetch a tick to resolve.
   await waitFor(() => expect(global.fetch).toHaveBeenCalled());
-  expect(screen.queryByText(/orders unattributed/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/order lines unattributed/i)).not.toBeInTheDocument();
 });
 
 // --- T4: mobile card list (md-breakpoint swap) -------------------------------

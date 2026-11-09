@@ -5,6 +5,7 @@ import { getPlatformAdapter } from "@/lib/platforms/core/registry";
 import { pushOrderStatus } from "@/lib/platforms/egress";
 import prisma from "@/lib/prisma";
 import { diff } from "@/lib/change-tracking";
+import { isCatalogProductId } from "@/lib/orders/catalog-product-id";
 import type { ChangeDiff } from "@/lib/change-tracking";
 import type { PlatformType, PlatformAdapter, NormalizedOrder } from "@/lib/platforms/core/types";
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -328,9 +329,10 @@ export async function upsertOrderWithItems(
       for (const lineItem of normalized.lineItems) {
         if (lineItem.externalId) seenExternalItemIds.add(lineItem.externalId);
 
-        // Auto-map via ProductLink
+        // Auto-map via ProductLink. A line with no store product ("" / "0", e.g.
+        // typed by hand in the store) is never looked up, mapped or retitled.
         let productLink = null;
-        if (lineItem.externalProductId) {
+        if (isCatalogProductId(lineItem.externalProductId)) {
           productLink = await tx.productLink.findFirst({
             where: {
               integrationId,

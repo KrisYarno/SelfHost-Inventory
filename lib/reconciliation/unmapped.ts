@@ -33,6 +33,7 @@
 import { Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import { AppError } from '@/lib/error-handling';
+import { NO_STORE_PRODUCT_IDS, noStoreProductNote } from '@/lib/orders/catalog-product-id';
 
 // ---------------------------------------------------------------------------
 // The wire shapes
@@ -90,6 +91,13 @@ export type UnmappedPage = {
    * than "this filter cannot see them". 0 when no filter is active.
    */
   unknownExcluded: number;
+  /**
+   * Unmapped lines with no store product (`""` / `"0"`, e.g. typed by hand in
+   * the store). They can never be mapped, so they are not GROUPS here — only
+   * this count, across ALL ages (neither the age filter nor the cursor touches
+   * it). 0 when there are none.
+   */
+  noStoreProductItems: number;
   /** What the figures cannot say for themselves (R-2). Empty when there is nothing. */
   notes: string[];
 };
@@ -118,6 +126,10 @@ function unknownExcludedNote(count: number): string {
  * `ONLY_FULL_GROUP_BY`. `external_order_items` carries no `integrationId` and
  * no order date, so the two joins are not decoration: they are where the group
  * key and the age come from.
+ *
+ * A line with no store product (`""` / `"0"` after `TRIM()`, the same rule as
+ * `isCatalogProductId`) is not a group: nobody can map it. The totals statement
+ * counts those lines instead (`noStoreProductItems`).
  */
 const GROUPED_CTE = Prisma.sql`WITH grouped AS (
   SELECT
@@ -134,6 +146,7 @@ const GROUPED_CTE = Prisma.sql`WITH grouped AS (
   JOIN external_orders o ON o.id = i.orderId
   JOIN integrations g ON g.id = o.integrationId
   WHERE i.isMapped = 0
+    AND TRIM(i.externalProductId) NOT IN (${Prisma.join(NO_STORE_PRODUCT_IDS)})
   GROUP BY o.integrationId, i.externalProductId, i.externalVariantId
 )`;
 
@@ -291,6 +304,8 @@ type TotalsSqlRow = {
   unknownGroups: unknown;
   /** Absent (and read as 0) when no age filter is active — see `listUnmapped`. */
   unknownExcluded?: unknown;
+  /** The all-age count of unmapped lines with no store product (absent reads as 0). */
+  noStoreProductItems?: unknown;
   bucket0: unknown;
   bucket1: unknown;
   bucket2: unknown;
@@ -341,10 +356,16 @@ LIMIT ${input.limit + 1}`);
       : Prisma.sql`,
   (SELECT COUNT(*) FROM grouped u WHERE u.oldest IS NULL) AS unknownExcluded`;
 
+  // THE LINES THAT ARE NOT GROUPS. A line with no store product never enters the
+  // CTE (nobody can map it), so it is counted here instead: one scalar subquery
+  // over the raw items, in this same statement (still two statements), ignoring
+  // the age filter and the cursor by construction — the note says "all ages".
   const totalsRows = await prisma.$queryRaw<TotalsSqlRow[]>(Prisma.sql`${GROUPED_CTE}
 SELECT
   COUNT(*) AS total,
   SUM(CASE WHEN oldest IS NULL THEN 1 ELSE 0 END) AS unknownGroups${excludedCount},
+  (SELECT COUNT(*) FROM external_order_items h
+    WHERE h.isMapped = 0 AND TRIM(h.externalProductId) IN (${Prisma.join(NO_STORE_PRODUCT_IDS)})) AS noStoreProductItems,
   ${bucketSumsSql(now)}
 FROM grouped${whereSql(olderThan)}`);
 
@@ -359,6 +380,7 @@ FROM grouped${whereSql(olderThan)}`);
   const consumed = cursor?.c ?? 0;
   const last = rows[rows.length - 1];
   const unknownExcluded = toNumber(totals?.unknownExcluded);
+  const noStoreProductItems = toNumber(totals?.noStoreProductItems);
 
   return {
     groups: rows.map((row) => buildGroup(row, now)),
@@ -374,7 +396,13 @@ FROM grouped${whereSql(olderThan)}`);
     nextCursor:
       hasMore && last !== undefined ? encodeCursor(cursorOf(last, consumed + rows.length)) : null,
     unknownExcluded,
-    notes: unknownExcluded > 0 ? [unknownExcludedNote(unknownExcluded)] : [],
+    noStoreProductItems,
+    // The unknown-excluded note first (it is about the chips beside it), then
+    // the no-store-product note.
+    notes: [
+      ...(unknownExcluded > 0 ? [unknownExcludedNote(unknownExcluded)] : []),
+      ...(noStoreProductItems > 0 ? [noStoreProductNote(noStoreProductItems)] : []),
+    ],
   };
 }
 

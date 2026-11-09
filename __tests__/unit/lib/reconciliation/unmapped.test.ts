@@ -132,8 +132,11 @@ function boundLimit(query: Prisma.Sql): number {
 
 const AGE_BUCKET_KEYS: UnmappedGroup['bucket'][] = ['0-7', '8-30', '31-90', '90+'];
 
-/** Serve the fixture: the page statement pages it, the other one counts it. */
-function serve(rows: GroupRow[] = FIXTURE) {
+/**
+ * Serve the fixture: the page statement pages it, the other one counts it.
+ * `extraTotals` rides on the totals row as-is (the note-order tests only).
+ */
+function serve(rows: GroupRow[] = FIXTURE, extraTotals: Record<string, unknown> = {}) {
   (db.$queryRaw as unknown as jest.Mock).mockImplementation(async (query: Prisma.Sql) => {
     if (query.sql.includes('AS total')) {
       const buckets = [0, 0, 0, 0];
@@ -154,6 +157,7 @@ function serve(rows: GroupRow[] = FIXTURE) {
           bucket1: buckets[1],
           bucket2: buckets[2],
           bucket3: buckets[3],
+          ...extraTotals,
         },
       ];
     }
@@ -253,8 +257,11 @@ describe('the grouped CTE (TEXT pins)', () => {
     await listUnmapped({ limit: 10, olderThanDays: 30 });
     const calls = (db.$queryRaw as unknown as jest.Mock).mock.calls.map((c) => c[0] as Prisma.Sql);
     for (const query of calls) {
-      // The CTE's own WHERE stays the driving filter alone...
-      expect(query.sql).toContain('WHERE i.isMapped = 0\n  GROUP BY');
+      // The CTE's own WHERE stays the driving filter (plus the no-store-product
+      // exclusion, hand-typed lines plan D4)...
+      expect(query.sql).toContain(
+        'WHERE i.isMapped = 0\n    AND TRIM(i.externalProductId) NOT IN (?,?)\n  GROUP BY',
+      );
       // ...and the age cut sits on the aggregate, outside the CTE.
       expect(query.sql).toContain('oldest <= ?');
       expect(query.values).toContainEqual(new Date(NOW.getTime() - 30 * DAY));
@@ -354,6 +361,114 @@ describe('the age filter and the groups it excludes (QA-4)', () => {
 
     const page = await listUnmapped({ limit: 10, olderThanDays: 30 });
     expect(page.notes).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lines with no store product (hand-typed lines plan, C4)
+// ---------------------------------------------------------------------------
+
+/**
+ * WooCommerce sends product_id 0 for a line typed by hand in the store; a
+ * missing id is stored as "". Nobody can map either, so they are not GROUPS:
+ * the CTE excludes them (after `TRIM()`, the same rule as `isCatalogProductId`)
+ * and the TOTALS statement counts them in one scalar subquery — still two
+ * statements, and across all ages by construction. MySQL's own `TRIM()`
+ * semantics are the dev drive's to prove; these are text and wiring pins.
+ */
+describe('lines with no store product: excluded from the groups, counted in the totals', () => {
+  function totalsQuery(): Prisma.Sql {
+    return (db.$queryRaw as unknown as jest.Mock).mock.calls
+      .map((c) => c[0] as Prisma.Sql)
+      .find((q) => q.sql.includes('AS total')) as Prisma.Sql;
+  }
+
+  it('the TOTALS statement carries the count, binding "" and "0", after the unknown counts and before the bands', async () => {
+    await listUnmapped({ limit: 10 });
+    const totals = totalsQuery();
+    expect(totals.sql).toContain(
+      '(SELECT COUNT(*) FROM external_order_items h\n' +
+        '    WHERE h.isMapped = 0 AND TRIM(h.externalProductId) IN (?,?)) AS noStoreProductItems,',
+    );
+    // The CTE binds the pair first, then the subquery binds it again.
+    expect((totals.values as unknown[]).slice(0, 4)).toEqual(['', '0', '', '0']);
+    expect(totals.sql.indexOf('AS unknownGroups')).toBeLessThan(
+      totals.sql.indexOf('AS noStoreProductItems'),
+    );
+    expect(totals.sql.indexOf('AS noStoreProductItems')).toBeLessThan(
+      totals.sql.indexOf('AS bucket0'),
+    );
+    // Still the same two statements.
+    expect(db.$queryRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it('with an age filter the subquery still reads ALL ages, and sits after unknownExcluded', async () => {
+    await listUnmapped({ limit: 10, olderThanDays: 30 });
+    const totals = totalsQuery();
+    const subquery = totals.sql.slice(
+      totals.sql.indexOf('(SELECT COUNT(*) FROM external_order_items h'),
+      totals.sql.indexOf('AS noStoreProductItems'),
+    );
+    expect(subquery).not.toContain('oldest');
+    expect(totals.sql.indexOf('AS unknownExcluded')).toBeLessThan(
+      totals.sql.indexOf('AS noStoreProductItems'),
+    );
+  });
+
+  it('the notes: the unknown-excluded note FIRST, then the no-store-product note', async () => {
+    serve(FIXTURE, { unknownExcluded: 4, noStoreProductItems: 569 });
+    const page = await listUnmapped({ limit: 10, olderThanDays: 30 });
+
+    expect(page.noStoreProductItems).toBe(569);
+    expect(page.notes).toEqual([
+      '4 unknown-age groups are outside this age filter — clear the filter to see them',
+      "569 order lines have no store product id (for example, they were typed by hand in the store's order screen). They can't be mapped and stay unattributed. Counted across all ages.",
+    ]);
+  });
+
+  it('with no age filter the no-store-product note stands alone', async () => {
+    serve(FIXTURE, { noStoreProductItems: 1 });
+    const page = await listUnmapped({ limit: 10 });
+
+    expect(page.noStoreProductItems).toBe(1);
+    expect(page.notes).toEqual([
+      "1 order line has no store product id (for example, it was typed by hand in the store's order screen). It can't be mapped and stays unattributed. Counted across all ages.",
+    ]);
+  });
+
+  it('none of them: a 0, and no note', async () => {
+    const page = await listUnmapped({ limit: 10 });
+    expect(page.noStoreProductItems).toBe(0);
+    expect(page.notes).toEqual([]);
+  });
+
+  // A cursor minted BEFORE the deploy may rest on a "0" group that no longer
+  // exists. It is still a cursor this producer minted: it decodes, binds the
+  // same six-part tuple, and the page resumes strictly after it.
+  it('a pre-deploy cursor carrying p: "0" decodes, binds and pages the rest', async () => {
+    const preDeploy = Buffer.from(
+      JSON.stringify({ n: 0, o: '2026-08-01T00:00:00.000Z', g: 'int-1', p: '0', v: 1, x: '', c: 2 }),
+      'utf8',
+    ).toString('base64url');
+
+    const page = await listUnmapped({ limit: 10, cursor: preDeploy });
+
+    const statement = (db.$queryRaw as unknown as jest.Mock).mock.calls
+      .map((c) => c[0] as Prisma.Sql)
+      .filter((q) => !q.sql.includes('AS total'))
+      .pop() as Prisma.Sql;
+    expect(boundTuple(statement)).toEqual([
+      0,
+      new Date('2026-08-01T00:00:00.000Z').getTime(),
+      'int-1',
+      '0',
+      1,
+      '',
+    ]);
+    expect(
+      page.groups.map((g) => `${g.integrationId}/${g.externalProductId}/${g.externalVariantId ?? '-'}`),
+    ).toEqual(['int-1/P2/V9', 'int-1/P2/-', 'int-1/P3/V3', 'int-2/P4/-']);
+    expect(page.nextCursor).toBeNull();
   });
 });
 

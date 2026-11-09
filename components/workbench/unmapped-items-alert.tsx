@@ -11,6 +11,10 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
+  isCatalogProductId,
+  NO_STORE_PRODUCT_LINE_HINT,
+} from "@/lib/orders/catalog-product-id";
+import {
   SKIPPED_LINE_CLASSES,
   SKIPPED_LINE_COPY,
   SKIPPED_LINE_LABEL,
@@ -191,15 +195,22 @@ export function UnmappedItemsAlert({
                         </div>
                       </div>
 
-                      {/* Admin-only Map button. UNCHANGED semantics — it opens
-                          the same dialog for the same lines it always worked
-                          for. It is simply no longer rendered on lines where
-                          handleMapClick already refused to act (no external
-                          reference), because offering an inert button next to
-                          copy that says the line IS mapped is the divergence
-                          this pass exists to close. */}
+                      {/* Admin-only Map button. It opens the same dialog for
+                          the same lines it always worked for, and is not
+                          rendered where handleMapClick would refuse to act (no
+                          external reference), because offering an inert button
+                          next to copy that says the line IS mapped is the
+                          divergence this pass exists to close. A line with no
+                          store product ("" / "0", e.g. typed by hand in the
+                          store) has nothing to map either: it gets the hint
+                          instead, for everyone (the hint is information, not an
+                          admin action). */}
                       {lineClass === "unmapped" &&
-                        item.externalProductId &&
+                        !isCatalogProductId(item.externalProductId) && (
+                          <span className="text-xs text-muted-foreground">{NO_STORE_PRODUCT_LINE_HINT}</span>
+                        )}
+                      {lineClass === "unmapped" &&
+                        isCatalogProductId(item.externalProductId) &&
                         isAdmin &&
                         integrationId && (
                           <Button
