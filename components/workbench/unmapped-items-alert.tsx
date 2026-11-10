@@ -193,6 +193,21 @@ export function UnmappedItemsAlert({
                             {SKIPPED_LINE_COPY[lineClass]}
                           </span>
                         </div>
+                        {/* A line with no store product ("" / "0", e.g. typed by
+                            hand in the store) has nothing to map: the hint, for
+                            everyone (information, not an admin action). It sits
+                            INSIDE the name column, under the meta row, so it
+                            wraps there instead of squeezing the name column to
+                            nothing in the narrow workbench panel (HTL-QA-1). */}
+                        {lineClass === "unmapped" &&
+                          !isCatalogProductId(item.externalProductId) && (
+                            <p
+                              className="text-xs text-muted-foreground"
+                              data-testid="no-store-product-hint"
+                            >
+                              {NO_STORE_PRODUCT_LINE_HINT}
+                            </p>
+                          )}
                       </div>
 
                       {/* Admin-only Map button. It opens the same dialog for
@@ -201,14 +216,7 @@ export function UnmappedItemsAlert({
                           external reference), because offering an inert button
                           next to copy that says the line IS mapped is the
                           divergence this pass exists to close. A line with no
-                          store product ("" / "0", e.g. typed by hand in the
-                          store) has nothing to map either: it gets the hint
-                          instead, for everyone (the hint is information, not an
-                          admin action). */}
-                      {lineClass === "unmapped" &&
-                        !isCatalogProductId(item.externalProductId) && (
-                          <span className="text-xs text-muted-foreground">{NO_STORE_PRODUCT_LINE_HINT}</span>
-                        )}
+                          store product gets the hint above instead. */}
                       {lineClass === "unmapped" &&
                         isCatalogProductId(item.externalProductId) &&
                         isAdmin &&

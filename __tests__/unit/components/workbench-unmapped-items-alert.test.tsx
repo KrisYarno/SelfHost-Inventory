@@ -261,6 +261,18 @@ describe("a line with no store product", () => {
     expect(screen.getAllByText(NO_STORE_PRODUCT_LINE_HINT)).toHaveLength(1);
   });
 
+  it("the hint sits INSIDE the name column, under the meta row (HTL-QA-1: never squeezes the name)", () => {
+    renderAlert([HAND_TYPED_ZERO]);
+
+    const hint = screen.getByTestId("no-store-product-hint");
+    expect(hint.tagName).toBe("P");
+    const nameColumn = hint.parentElement as HTMLElement;
+    expect(nameColumn).toHaveClass("min-w-0", "flex-1");
+    expect(nameColumn).toHaveTextContent(HAND_TYPED_ZERO.name);
+    // Not a sibling competing with the name column for the row's width.
+    expect(hint.parentElement?.tagName).not.toBe("LI");
+  });
+
   it.each([
     ["class-less (the heuristic)", UNAVAILABLE],
     ["stamped by the hook", UNAVAILABLE_STAMPED],

@@ -513,10 +513,26 @@ describe("fulfill dialog — a line with no store product is never offered Map n
 
     expect(screen.getByText(NO_STORE_PRODUCT_LINE_HINT)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /map now/i })).toBeNull();
-    // The sentence above the list is unchanged.
-    expect(
-      screen.getByText(/These items will be skipped during fulfillment\. Map them to internal/),
-    ).toBeInTheDocument();
+    // HTL-QA-4: with no mappable unmapped line, the "Map them" advice is left out.
+    const sentence = screen.getByText(/These items will be skipped during fulfillment\./);
+    expect(sentence.textContent).toBe("These items will be skipped during fulfillment.");
+  });
+
+  it("a catalog unmapped line beside a \"0\" line: the full sentence, unchanged", async () => {
+    (useSession as jest.Mock).mockReturnValue(ADMIN);
+    await renderDialog(
+      makeOrder([
+        orderItem({ id: "it-0", name: "Catalog", externalProductId: "wc-p-123", isMapped: false, productLinkId: null }),
+        orderItem({ id: "it-1", name: "BAC 5", externalProductId: "0", isMapped: false, productLinkId: null }),
+      ]),
+    );
+
+    const sentence = screen.getByText(/These items will be skipped during fulfillment\./);
+    expect(sentence.textContent).toBe(
+      "These items will be skipped during fulfillment. Map them to internal products to include them.",
+    );
+    expect(screen.getAllByRole("button", { name: /map now/i })).toHaveLength(1);
+    expect(screen.getAllByText(NO_STORE_PRODUCT_LINE_HINT)).toHaveLength(1);
   });
 
   it('a "0" line (non-admin): the hint has no admin gate', async () => {

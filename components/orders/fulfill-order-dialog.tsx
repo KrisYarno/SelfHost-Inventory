@@ -339,9 +339,15 @@ export function FulfillOrderDialog({
                   <p className="text-sm font-medium text-warning-foreground">
                     {unmappedItems} unmapped {unmappedItems === 1 ? "item" : "items"}
                   </p>
+                  {/* "Map them …" only when at least one unmapped line CAN be
+                      mapped: a line with no store product ("" / "0", e.g. typed
+                      by hand in the store) says so itself, and the advice would
+                      contradict it (HTL-QA-4). */}
                   <p className="text-sm text-muted-foreground">
-                    These items will be skipped during fulfillment. Map them to internal
-                    products to include them.
+                    These items will be skipped during fulfillment.
+                    {order.items?.some(
+                      (item) => !item.isMapped && isCatalogProductId(item.externalProductId),
+                    ) && " Map them to internal products to include them."}
                   </p>
                   <div className="mt-2 space-y-1">
                     {order.items
