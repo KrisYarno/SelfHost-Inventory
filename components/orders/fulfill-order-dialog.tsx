@@ -353,15 +353,22 @@ export function FulfillOrderDialog({
                     {order.items
                       ?.filter((item) => !item.isMapped)
                       .map((item) => (
-                        <div key={item.id} className="flex items-center gap-2">
+                        <div key={item.id} className="flex flex-wrap items-center gap-x-2">
                           <span className="text-xs text-muted-foreground truncate max-w-[200px]">
                             {item.name}{item.variantName ? ` — ${item.variantName}` : ''}
                           </span>
                           {/* A line with no store product ("" / "0", e.g. typed by
                               hand in the store) has nothing to map: the hint, for
-                              everyone, in place of the admin's Map button. */}
+                              everyone, in place of the admin's Map button. It takes
+                              its own line (basis-full in a wrapping row) so it never
+                              squeezes the name on a narrow screen (HTL-FD1-1). */}
                           {!isCatalogProductId(item.externalProductId) && (
-                            <span className="text-xs text-muted-foreground">{NO_STORE_PRODUCT_LINE_HINT}</span>
+                            <span
+                              className="basis-full text-xs text-muted-foreground"
+                              data-testid="no-store-product-hint"
+                            >
+                              {NO_STORE_PRODUCT_LINE_HINT}
+                            </span>
                           )}
                           {isAdmin && isCatalogProductId(item.externalProductId) && (
                             <Button

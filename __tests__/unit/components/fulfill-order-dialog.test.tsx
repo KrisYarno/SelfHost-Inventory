@@ -535,6 +535,14 @@ describe("fulfill dialog — a line with no store product is never offered Map n
     expect(screen.getAllByText(NO_STORE_PRODUCT_LINE_HINT)).toHaveLength(1);
   });
 
+  it("the hint takes its own line, so it never squeezes the name (HTL-FD1-1)", async () => {
+    await renderDialog(orderWithUnmapped("0"));
+
+    const hint = screen.getByTestId("no-store-product-hint");
+    expect(hint).toHaveClass("basis-full");
+    expect(hint.parentElement).toHaveClass("flex-wrap");
+  });
+
   it('a "0" line (non-admin): the hint has no admin gate', async () => {
     await renderDialog(orderWithUnmapped("0"));
 
