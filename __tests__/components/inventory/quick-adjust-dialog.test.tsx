@@ -1,5 +1,5 @@
 /** @jest-environment jsdom */
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import * as React from "react";
@@ -377,6 +377,77 @@ describe("the capture", () => {
       const body = await submit(user);
       expect(body).toMatchObject({ productId: 42, delta: -3, intent: "order" });
       expect(body.orderReference).toBe("1009");
+    });
+
+    // B3-1 FD1-1: clearing the capture in an EFFECT leaves one COMMITTED render
+    // of product B still holding A's capture — Confirm enabled, its handler
+    // pairing B's id with A's order — until the effect's own render lands. The
+    // reset happens DURING render instead, so no commit ever pairs them. The
+    // probe reads the screen in a layout effect, which runs after every commit
+    // and BEFORE any passive effect: the instant the old code was exposed.
+    //
+    // The product is swapped while the dialog stays MOUNTED (no Cancel, and no
+    // click outside it): after a close, Radix remounts the portal one commit
+    // late, by which time React has flushed the effect, so jsdom would hide the
+    // window. A real browser does not reliably — a reopen during the close
+    // animation keeps the portal mounted — so the swap-while-mounted shape is
+    // the one that can tell the two implementations apart.
+    it.each([
+      ["a pick", async (user: User) => pickOrder(user)],
+      ["a typed reference", async (user: User) => user.type(referenceField(), "1009")],
+    ])("no COMMITTED render ever shows product B with A's capture (%s)", async (_label, enter) => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      const mismatches: string[] = [];
+      function CommitProbe() {
+        React.useLayoutEffect(() => {
+          const showsB = document.body.textContent?.includes(PRODUCT_B.name) ?? false;
+          const picked = document.querySelector('[data-testid="order-lookup-picked"]');
+          const ref = document.getElementById("order-reference") as HTMLInputElement | null;
+          if (showsB && (picked !== null || (ref !== null && ref.value !== ""))) {
+            mismatches.push(`picked=${picked?.textContent ?? "-"}; reference=${ref?.value ?? "-"}`);
+          }
+        });
+        return null;
+      }
+      // The swap is driven from OUTSIDE React's event system: a click on a
+      // button beside a Radix modal is an "interact outside", which closes the
+      // dialog first and remounts its portal — exactly the timing that hides
+      // the window. A programmatic swap keeps the dialog mounted throughout.
+      let swapToB: () => void = () => {};
+      function ProbedHost() {
+        const [open, setOpen] = React.useState(true);
+        const [product, setProduct] = React.useState({ ...PRODUCT_A });
+        swapToB = () => setProduct({ ...PRODUCT_B });
+        return (
+          <>
+            <QuickAdjustDialog open={open} onOpenChange={setOpen} product={product} onSuccess={() => {}} />
+            <CommitProbe />
+          </>
+        );
+      }
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+      });
+      render(
+        <QueryClientProvider client={client}>
+          <ProbedHost />
+        </QueryClientProvider>,
+      );
+      await waitFor(() => expect(screen.getByText(/40 units/)).toBeInTheDocument());
+      await user.type(screen.getByLabelText("Quantity"), "3");
+      await user.type(screen.getByLabelText("Reason (required)"), "packed");
+      await intoCapture(user);
+      await enter(user);
+
+      // Swap the product under the MOUNTED dialog.
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      act(() => swapToB());
+      expect(screen.getByText(PRODUCT_B.name)).toBeInTheDocument();
+
+      expect(mismatches).toEqual([]);
+      // And the capture B shows is empty.
+      expect(screen.queryByTestId("order-lookup-picked")).toBeNull();
+      expect(referenceField()).toHaveValue("");
     });
   });
 

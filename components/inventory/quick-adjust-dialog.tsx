@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { Plus, Minus, Package, MapPin } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
@@ -82,10 +82,18 @@ export function QuickAdjustDialog({
   // product's removal (B3-1 FR1, CR-1). Keyed on the id, never the object: the
   // page builds a fresh object on every open, and reopening the SAME product
   // keeps the capture. The other remembered fields are out of scope here.
-  useEffect(() => {
+  //
+  // Reset DURING RENDER (React's "adjusting state when a prop changes"), never
+  // in an effect: an effect lets one render of the new product COMMIT with the
+  // old capture — Confirm enabled, its handler pairing the new product with the
+  // old order — before the clearing render lands (B3-1 FD1-1). Setting state
+  // here makes React discard this render and re-run it before anything commits.
+  const [captureProductId, setCaptureProductId] = useState(product.id);
+  if (captureProductId !== product.id) {
+    setCaptureProductId(product.id);
     setPickedOrder(null);
     setOrderReference("");
-  }, [product.id]);
+  }
 
   const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
     enabled: open,
