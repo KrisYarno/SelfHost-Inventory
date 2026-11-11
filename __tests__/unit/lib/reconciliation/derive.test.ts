@@ -102,6 +102,51 @@ describe('R1b — a stamped ADJUSTMENT the operator marked as an order', () => {
   });
 });
 
+// B3-1 FR1 (CR-2): the adjust capture's event now records WHICH evidence
+// stamped it. When the attempt insert is swallowed the report derives the class,
+// and a typed number that resolved must read as R1's `reference-resolved` — not
+// as R1b's blanket `selected`, which is still the reading for older rows.
+describe('the adjust capture recorded its source (B3-1 FR1)', () => {
+  const adjustEvent = (details: Record<string, unknown>) =>
+    ev({ actionType: 'INVENTORY_ADJUSTMENT', entityId: '5', details });
+
+  it('stamped + an order-intent adjust that recorded reference-resolved -> R1, not R1b', () => {
+    expect(
+      deriveHistoricalAttempt(
+        batch({ stamps: ['ord_2'] }),
+        [
+          adjustEvent({
+            intent: 'order',
+            orderReference: '12345',
+            orderAttributionSource: 'reference-resolved',
+          }),
+        ],
+        NO_RECORDING
+      )
+    ).toEqual({
+      outcome: 'attributed',
+      evidence: 'reference-resolved',
+      ruleId: 'R1',
+      sentence: DERIVED_SENTENCES.R1,
+    });
+  });
+
+  it('the SAME event without the source key still derives R1b `selected` (older rows)', () => {
+    expect(
+      deriveHistoricalAttempt(
+        batch({ stamps: ['ord_2'] }),
+        [adjustEvent({ intent: 'order', orderReference: '12345' })],
+        NO_RECORDING
+      )
+    ).toEqual({
+      outcome: 'attributed',
+      evidence: 'selected',
+      ruleId: 'R1b',
+      sentence: DERIVED_SENTENCES.R1b,
+    });
+  });
+});
+
 describe('R2 / R2b — fulfillment, keyed on the STAMP', () => {
   const fulfillment = ev({
     actionType: 'EXTERNAL_ORDER_FULFILLMENT',

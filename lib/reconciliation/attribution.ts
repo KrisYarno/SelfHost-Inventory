@@ -377,6 +377,10 @@ const R0_INVISIBLE_NOTE =
 
 export const NO_MEMBER_ORDER_NOTE = 'no order matching that number in your companies';
 
+/** A member with NO company: the empty answer's named reason (B3-1 FR1), not "no match". */
+export const NO_COMPANY_MEMBERSHIP_NOTE =
+  'you are not a member of any company yet, so there are no orders to search — ask an admin to add you';
+
 const NO_DENOMINATOR_NOTE =
   'no attributable batch in this window, so the derived share has no denominator';
 

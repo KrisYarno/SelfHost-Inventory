@@ -44,7 +44,11 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import { requireAdmin, requireApproved } from '@/lib/api-utils';
 import { enforceRateLimit } from '@/lib/rateLimit';
-import { NO_MEMBER_ORDER_NOTE, __resetForTests } from '@/lib/reconciliation/attribution';
+import {
+  NO_COMPANY_MEMBERSHIP_NOTE,
+  NO_MEMBER_ORDER_NOTE,
+  __resetForTests,
+} from '@/lib/reconciliation/attribution';
 import { MAX_MATCH_ORDERS } from '@/lib/reconciliation/match-producer';
 import { GET as reportGET, dynamic as reportDynamic } from '@/app/api/reconciliation/attribution/route';
 import {
@@ -494,7 +498,7 @@ describe('GET /api/reconciliation/orders/search', () => {
     expect(body.orders).toHaveLength(1);
   });
 
-  it('an approved user with NO memberships gets an empty answer, never a 403', async () => {
+  it('an approved user with NO memberships gets an empty answer that NAMES why, never a 403 (B3-1 FR1)', async () => {
     asMember([]);
     db.externalOrder.count.mockResolvedValue(0 as never);
     db.externalOrder.findMany.mockResolvedValue([] as never);
@@ -502,7 +506,14 @@ describe('GET /api/reconciliation/orders/search', () => {
     const res = await searchGET(searchRequest());
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ orders: [], moreCount: 0, note: NO_MEMBER_ORDER_NOTE });
+    expect(NO_COMPANY_MEMBERSHIP_NOTE).toBe(
+      'you are not a member of any company yet, so there are no orders to search — ask an admin to add you',
+    );
+    expect(await res.json()).toEqual({
+      orders: [],
+      moreCount: 0,
+      note: 'you are not a member of any company yet, so there are no orders to search — ask an admin to add you',
+    });
     // Scoped to nothing — not unscoped.
     const { count, rows } = searchWheres();
     expect(count).toEqual({ orderNumber: { startsWith: '100' }, companyId: { in: [] } });
@@ -524,6 +535,28 @@ describe('GET /api/reconciliation/orders/search', () => {
       moreCount: 0,
       note: 'no order matching that number in your companies',
     });
+  });
+
+  it('one or more companies and no match keep the house sentence — never the no-company reason (B3-1 FR1)', async () => {
+    db.externalOrder.count.mockResolvedValue(0 as never);
+    db.externalOrder.findMany.mockResolvedValue([] as never);
+
+    for (const companies of [['co-1'], ['co-1', 'co-2']]) {
+      asMember(companies);
+      const body = await (await searchGET(searchRequest())).json();
+      expect(body).toEqual({ orders: [], moreCount: 0, note: NO_MEMBER_ORDER_NOTE });
+      expect(body.note).not.toBe(NO_COMPANY_MEMBERSHIP_NOTE);
+    }
+  });
+
+  it("a zero-company member's blank q still answers BEFORE the membership read, with no note", async () => {
+    asMember([]);
+
+    const blank = await searchGET(searchRequest('q=%20%20'));
+
+    expect(await blank.json()).toEqual({ orders: [], moreCount: 0 });
+    expect(db.userCompany.findMany).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it('the projection carries no customer field — for a member as for an admin', async () => {

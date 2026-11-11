@@ -517,6 +517,41 @@ describe('classification', () => {
     expect(report.rows[0].actor).toBeNull();
   });
 
+  // B3-1 FR1 (CR-2), through the report: a stamped adjust whose attempt insert
+  // was swallowed has NO attempt row, so its class is derived — off the event's
+  // recorded source first (R1), and off the chip alone only for older rows.
+  it.each([
+    ['reference-resolved', 'attributed·reference-resolved', 'R1'],
+    [null, 'attributed·selected', 'R1b'],
+  ])(
+    'a stamped adjust with NO attempt row and source %s derives %s by %s',
+    async (source, classKey, ruleId) => {
+      mockSummary([
+        summaryRow({
+          distinctStamps: 1,
+          firstStamp: 'ord-1',
+          lastStamp: 'ord-1',
+          unstampedRows: 0,
+          logTypes: 'ADJUSTMENT',
+          auditId: 3,
+          auditActionType: 'INVENTORY_ADJUSTMENT',
+          auditEntityId: '9',
+          auditIntent: 'order',
+          auditHasOrderReference: 1,
+          auditOrderAttributionSource: source,
+        }),
+      ]);
+      db.externalOrder.findMany.mockResolvedValue([orderRow()] as never);
+
+      const report = await getAttributionReport(INPUT, ADMIN);
+
+      expect(report.rows).toHaveLength(1);
+      expect(report.rows[0].source).toBe('derived');
+      expect(report.rows[0].how.classKey).toBe(classKey);
+      expect(report.rows[0].how.ruleId).toBe(ruleId);
+    },
+  );
+
   it('annotates a post-lane gap (recording was live and nothing recorded)', async () => {
     db.orderAttributionAttempt.findFirst.mockResolvedValue({
       attemptedAt: new Date('2026-08-01T00:00:00.000Z'),

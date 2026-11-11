@@ -434,3 +434,74 @@ describe("the moved order search — re-exported, unchanged", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// B3-1 FR1 (OC-4 / OC-5): the search's two options. A 429 is NOT retried — a
+// retry spends the same limiter bucket that just refused it — while every
+// other failure keeps the app's one retry (`lib/query-client.ts`). And an
+// answer goes stale after 30 s, not the app's 5 min.
+//
+// The client here says `retry: false`, so a retry seen below is the HOOK's
+// own; `retryDelay: 0` only spares the run the default one-second back-off.
+// ---------------------------------------------------------------------------
+
+describe("the order search's retry and freshness (B3-1 FR1)", () => {
+  function retryHarness() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    function Wrapper({ children }: { children: ReactNode }) {
+      return React.createElement(QueryClientProvider, { client }, children);
+    }
+    return { client, Wrapper };
+  }
+
+  it("a 429 is NOT retried: one request, then the error", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({ error: "Too many requests", code: "RATE_LIMITED" }),
+    });
+    const { Wrapper } = retryHarness();
+
+    const { result } = renderHook(() => leafUseOrderSearch("1"), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(result.current.error?.status).toBe(429);
+  });
+
+  it("a 500 is retried exactly ONCE, then the error", async () => {
+    mockFetch.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    const { Wrapper } = retryHarness();
+
+    const { result } = renderHook(() => leafUseOrderSearch("1"), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(result.current.error?.status).toBe(500);
+  });
+
+  it("the one retry recovers a transient failure", async () => {
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ orders: [], moreCount: 0 }) });
+    const { Wrapper } = retryHarness();
+
+    const { result } = renderHook(() => leafUseOrderSearch("1"), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("an answer is fresh for 30 s — the query carries staleTime 30_000", async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ orders: [], moreCount: 0 }) });
+    const { client, Wrapper } = retryHarness();
+
+    const { result } = renderHook(() => leafUseOrderSearch("1"), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const query = client
+      .getQueryCache()
+      .find({ queryKey: ["admin", "reconciliation", "orders", "1"], exact: true });
+    expect((query?.options as { staleTime?: unknown } | undefined)?.staleTime).toBe(30_000);
+  });
+});

@@ -21,7 +21,9 @@
  * lives in ONE import-free leaf, `lib/orders/order-reference-shape.ts`, and the
  * resolver, the picker and the adjust dialog each IMPORT it from there. What
  * used to be an equal-copies pin on the literal is now an IMPORT pin: every
- * reader imports the leaf, and none of them declares its own.
+ * reader imports the leaf, and none of them declares its own. Since B3-1 FR1
+ * the order lookup reads the bar too, and the leaf also holds the ONE spelling
+ * of the hint the dialog and the lookup show when a typed number fails it.
  *
  * When the bar legitimately changes, it changes in the leaf; when the
  * normalisation changes, both copies of the function change in the same commit
@@ -37,6 +39,7 @@ const SOURCE = 'lib/orders/resolve-order-reference.ts';
 const MIRROR = 'components/admin/reconciliation/attribute-picker.tsx';
 const LEAF = 'lib/orders/order-reference-shape.ts';
 const DIALOG = 'components/inventory/quick-adjust-dialog.tsx';
+const LOOKUP = 'components/inventory/order-lookup.tsx';
 
 function read(rel: string): string {
   return fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8');
@@ -56,6 +59,13 @@ function declaresShape(source: string): boolean {
 /** `import { …ORDER_REFERENCE_SHAPE… } from "@/lib/orders/order-reference-shape"`. */
 function importsShapeFromLeaf(source: string): boolean {
   return /import\s*\{[^}]*\bORDER_REFERENCE_SHAPE\b[^}]*\}\s*from\s*["']@\/lib\/orders\/order-reference-shape["']/.test(
+    source,
+  );
+}
+
+/** `import { …ORDER_REFERENCE_HINT… } from "@/lib/orders/order-reference-shape"`. */
+function importsHintFromLeaf(source: string): boolean {
+  return /import\s*\{[^}]*\bORDER_REFERENCE_HINT\b[^}]*\}\s*from\s*["']@\/lib\/orders\/order-reference-shape["']/.test(
     source,
   );
 }
@@ -87,12 +97,14 @@ const sourceText = read(SOURCE);
 const mirrorText = read(MIRROR);
 const leafText = read(LEAF);
 const dialogText = read(DIALOG);
+const lookupText = read(LOOKUP);
 
 /** Every reader of the bar, by path. */
 const IMPORTERS: Array<[string, string]> = [
   [SOURCE, sourceText],
   [MIRROR, mirrorText],
   [DIALOG, dialogText],
+  [LOOKUP, lookupText],
 ];
 
 describe('the picker mirrors the server normalisation', () => {
@@ -112,6 +124,14 @@ describe('the picker mirrors the server normalisation', () => {
     expect(importsShapeFromLeaf(text)).toBe(true);
     expect(declaresShape(text)).toBe(false);
     expect(shapeLiteral(text)).toBeNull();
+  });
+
+  it('the hint has ONE spelling: the leaf declares it; the dialog and the lookup import it and copy no text (B3-1 FR1)', () => {
+    expect(leafText).toContain('export const ORDER_REFERENCE_HINT = "digits only, without #";');
+    for (const text of [dialogText, lookupText]) {
+      expect(importsHintFromLeaf(text)).toBe(true);
+      expect(text).not.toContain('digits only, without #');
+    }
   });
 
   it('the normalisation lines are IDENTICAL text — signature and body', () => {

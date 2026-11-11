@@ -27,7 +27,8 @@ export interface OrderSearchResponse {
   /**
    * A MEMBER's empty answer to a non-blank search carries the house sentence
    * (pack row 94): their companies hold no order with that number, which is
-   * not the same fact as "no order anywhere". An admin's answer never has it.
+   * not the same fact as "no order anywhere" — or, when they belong to no
+   * company at all, that reason instead (B3-1 FR1). An admin's answer never has it.
    */
   note?: string;
 }
@@ -36,6 +37,12 @@ export interface OrderSearchResponse {
  * The Attribute… picker's search. DISABLED on an empty query: an empty search
  * is not a request for every order (the route answers the same way). The 250ms
  * debounce lives in the component, which owns the keystrokes.
+ *
+ * B3-1 FR1: a 429 is NOT retried — a retry spends the same limiter bucket that
+ * just refused it — and every other failure keeps the app's one retry. An
+ * answer goes stale after 30 s rather than the app's 5 min: orders arrive while
+ * someone packs. Inside those 30 s a revisited query is still served from the
+ * cache, so typing back and forth does not double what the limiter counts.
  */
 export function useOrderSearch(q: string) {
   return useQuery<OrderSearchResponse, ApiError>({
@@ -46,5 +53,7 @@ export function useOrderSearch(q: string) {
         { signal },
       ),
     enabled: q.length >= 1,
+    retry: (failureCount, error) => error?.status !== 429 && failureCount < 1,
+    staleTime: 30_000,
   });
 }

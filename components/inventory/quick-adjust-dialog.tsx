@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Plus, Minus, Package, MapPin } from "lucide-react";
 import { useLocation } from "@/contexts/location-context";
@@ -26,7 +26,7 @@ import { ReceivingRedirectPrompt } from "@/components/inventory/receiving-redire
 import { IntentChip } from "@/components/inventory/intent-chip";
 import { OrderLookup, type PickedOrder } from "@/components/inventory/order-lookup";
 import type { DeductionIntent } from "@/lib/inventory/intent";
-import { ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
+import { ORDER_REFERENCE_HINT, ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
 import type { DialogProduct } from "@/types/inventory";
 
 interface QuickAdjustDialogProps {
@@ -48,7 +48,6 @@ interface QuickAdjustDialogProps {
 // server stamps the ledger row when it can stand behind the identity. The
 // sentences below are frozen by the pack, byte for byte.
 const CAPTURE_BOTH_SENTENCE = "Pick the order or type the reference, not both";
-const REFERENCE_SHAPE_HINT = "digits only, without #";
 
 /** The stored order id the server stamped the ledger row with (`log.orderRecordId` on the 200). */
 function stampedOrderId(result: unknown): string | null {
@@ -76,6 +75,17 @@ export function QuickAdjustDialog({
   // removal can never ride along on an add or on another intent.
   const [pickedOrder, setPickedOrder] = useState<PickedOrder | null>(null);
   const [orderReference, setOrderReference] = useState("");
+
+  // ...and an identity belongs to ONE product's removal. The inventory page
+  // keeps this dialog mounted and swaps `product` under it, so an order picked
+  // or typed for one product, then Cancelled, must not ride along on the next
+  // product's removal (B3-1 FR1, CR-1). Keyed on the id, never the object: the
+  // page builds a fresh object on every open, and reopening the SAME product
+  // keeps the capture. The other remembered fields are out of scope here.
+  useEffect(() => {
+    setPickedOrder(null);
+    setOrderReference("");
+  }, [product.id]);
 
   const quantityQuery = useProductLocationQuantity(product.id, selectedLocationId, {
     enabled: open,
@@ -188,9 +198,12 @@ export function QuickAdjustDialog({
       } else {
         // ONE sentence for every way the identity did not land — unmatched,
         // ambiguous, not yours, unusable, or the lookup failing. The removal
-        // itself succeeded; only the stamp was withheld.
+        // itself succeeded; only the stamp was withheld. Held for 10 s (the
+        // house idiom for a toast that must be read): the dialog closes as it
+        // appears, and sonner's 4 s default is gone before it can be read.
         toast.warning(
-          `Removed ${quantityNum} units — the reference was not matched to an order you can see; the deduction is recorded unattributed`
+          `Removed ${quantityNum} units — the reference was not matched to an order you can see; the deduction is recorded unattributed`,
+          { duration: 10000 }
         );
       }
 
@@ -385,7 +398,7 @@ export function QuickAdjustDialog({
                 />
                 {referenceShapeInvalid && (
                   <p id="order-reference-hint" className="text-[11px] text-destructive">
-                    {REFERENCE_SHAPE_HINT}
+                    {ORDER_REFERENCE_HINT}
                   </p>
                 )}
               </div>

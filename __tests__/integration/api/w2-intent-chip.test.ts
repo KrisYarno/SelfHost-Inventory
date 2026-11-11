@@ -858,6 +858,8 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
     stamp: string | null;
     /** The `details.orderReference` the event must carry — absent when undefined. */
     typed: string | undefined;
+    /** The `details.orderAttributionSource` (B3-1 FR1) — absent when undefined. */
+    source: "selected" | "reference-resolved" | undefined;
     /** Whether the reference lookup may run at all. */
     looksUp: boolean;
   };
@@ -872,6 +874,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       reason: "order-intent-no-id",
       stamp: null,
       typed: undefined,
+      source: undefined,
       looksUp: false,
     },
     {
@@ -885,6 +888,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       reason: "resolver-error",
       stamp: null,
       typed: REF,
+      source: undefined,
       looksUp: true,
     },
     {
@@ -900,6 +904,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       reason: null,
       stamp: ORDER_CUID,
       typed: REF,
+      source: "reference-resolved",
       looksUp: true,
     },
     {
@@ -911,6 +916,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       reason: "unusable",
       stamp: null,
       typed: "walk-in 88",
+      source: undefined,
       looksUp: false,
     },
     {
@@ -924,6 +930,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       reason: "unmatched",
       stamp: null,
       typed: "99999",
+      source: undefined,
       looksUp: true,
     },
     {
@@ -940,6 +947,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       reason: "ambiguous",
       stamp: null,
       typed: REF,
+      source: undefined,
       looksUp: true,
     },
     {
@@ -958,6 +966,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       reason: "not-a-member",
       stamp: null,
       typed: REF,
+      source: undefined,
       looksUp: true,
     },
     {
@@ -971,6 +980,7 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       reason: null,
       stamp: ORDER_CUID,
       typed: undefined,
+      source: "selected",
       looksUp: false,
     },
   ];
@@ -998,6 +1008,16 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
     expect(res.status).toBe(200);
     expect(tx.inventory_logs.create).toHaveBeenCalledTimes(1);
 
+    // B3-1 FR1 (codex test gap): the 200 is today's envelope and NOTHING more —
+    // no resolver key rides the wire, and no value names what the resolver
+    // made of the number (the dialog reads only `log.orderRecordId`).
+    const body = await res.json();
+    expect(Object.keys(body).sort()).toEqual(["batchId", "log", "newVersion", "success"]);
+    const wire = JSON.stringify(body);
+    for (const word of [c.outcome, c.evidence, c.reason, "resolver"]) {
+      if (word !== null) expect(wire).not.toContain(word);
+    }
+
     // The ledger write carries the stamp: the picked or the resolved STORED id.
     const row = tx.inventory_logs.create.mock.calls[0][0].data as unknown as LedgerRowData;
     expect(row.orderRecordId ?? null).toBe(c.stamp);
@@ -1012,6 +1032,17 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
       expect(event.details.orderReference).toBe(c.typed);
     }
     expect(event.details.intent).toBe("order");
+
+    // B3-1 FR1 (CR-2): WHICH evidence stamped the row, on the event — so a
+    // swallowed attempt insert still derives by R1, never R1b's blanket
+    // `selected`. ABSENT on every decline, the throw and the skip.
+    if (c.source === undefined) {
+      expect("orderAttributionSource" in event.details).toBe(false);
+    } else {
+      expect(event.details.orderAttributionSource).toBe(c.source);
+    }
+    // Never the picked id: derive's R3a would read it as "the packer picked it".
+    expect("selectedExternalOrderId" in event.details).toBe(false);
 
     // The attempt row: its class, its stamp — and never the typed text.
     expect(tx.orderAttributionAttempt.create).toHaveBeenCalledTimes(1);
@@ -1058,6 +1089,52 @@ describe("adjust route — the typed reference, every resolver outcome", () => {
     const logged = consoleError.mock.calls.map((call) => call.join(" ")).join("\n");
     expect(logged).toContain("reference resolution");
     expect(logged).not.toContain(REF);
+  });
+
+  it("an UNSTAMPED removal carries no source and no picked id on its event (B3-1 FR1, CR-2)", async () => {
+    db.externalOrder.findUnique.mockResolvedValue({ companyId: COMPANY_ID } as any);
+
+    // A validated id under `other` (resolved, never stamped), damage-loss, and
+    // no chip at all: nothing stamped, so nothing to say which evidence did.
+    for (const extra of [
+      { intent: "other", selectedExternalOrderId: ORDER_CUID },
+      { intent: "damage-loss" },
+      {},
+    ]) {
+      const { row, details } = await adjustRow(extra);
+      expect(row.orderRecordId ?? null).toBeNull();
+      expect("orderAttributionSource" in details).toBe(false);
+      expect("selectedExternalOrderId" in details).toBe(false);
+      expect(JSON.stringify(details)).not.toContain(ORDER_CUID);
+    }
+  });
+
+  it("a resolver THROW with SHORT STOCK -> today's 400 with its message, and nothing written (codex test gap)", async () => {
+    db.externalOrder.findMany.mockRejectedValue(new Error("connection lost"));
+    // Two on hand, three asked for: the pre-transaction availability check.
+    db.product_locations.findUnique.mockResolvedValue({ quantity: 2, version: 1 } as any);
+    const tx = makeTx();
+    driveTxWith(tx);
+
+    const res = await ADJUST(
+      post("http://x/api/inventory/adjust", {
+        productId: 5,
+        locationId: 2,
+        delta: -3,
+        intent: "order",
+        orderReference: REF,
+      })
+    );
+
+    // The swallowed throw changes nothing about the stock refusal.
+    expect(db.externalOrder.findMany).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Insufficient stock. Available: 2, Requested: 3" });
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(tx.inventory_logs.create).not.toHaveBeenCalled();
+    expect(tx.product_locations.upsert).not.toHaveBeenCalled();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
+    expect(tx.orderAttributionAttempt.create).not.toHaveBeenCalled();
   });
 
   it("not-a-member: the membership probe is asked of the RESOLVED order's company", async () => {

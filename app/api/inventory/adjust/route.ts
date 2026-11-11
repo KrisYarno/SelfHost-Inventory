@@ -13,6 +13,7 @@ import { refuse } from "@/lib/validation/refuse";
 import { mapDeductionIntent } from "@/lib/inventory/intent";
 import { resolveSelectedExternalOrderId } from "@/lib/orders/resolve-selected-order";
 import {
+  ORDER_ATTRIBUTION_SOURCE,
   resolveOrderReference,
   type OrderReferenceResolution,
 } from "@/lib/orders/resolve-order-reference";
@@ -158,6 +159,18 @@ export const POST = apiHandler(async (request: NextRequest) => {
     selectedStamp ??
     (referenceResolution?.outcome === "resolved" ? referenceResolution.orderRecordId : null);
 
+  // WHICH EVIDENCE stamped the row (B3-1 FR1, CR-2), spelled as deduct-simple
+  // spells it. If the attempt insert is swallowed, the report derives this
+  // batch's class instead — and the derivation reads this key FIRST (its R1),
+  // so a resolved number is never re-read as a pick. Absent when nothing was
+  // stamped, never null-filled.
+  const orderAttributionSource =
+    orderRecordId === null
+      ? null
+      : selectedStamp !== null
+        ? ORDER_ATTRIBUTION_SOURCE.SELECTED
+        : ORDER_ATTRIBUTION_SOURCE.REFERENCE_RESOLVED;
+
   // If removing stock, validate availability
   if (shape.delta < 0) {
     const validation = await validateStockAvailability(
@@ -256,6 +269,8 @@ export const POST = apiHandler(async (request: NextRequest) => {
             // own. ABSENT when nothing was typed. It goes on this EVENT only:
             // the attempt row's details are a closed set and never carry it.
             ...(shape.orderReference ? { orderReference: shape.orderReference } : {}),
+            ...(orderAttributionSource ? { orderAttributionSource } : {}),
+            // NOT `selectedExternalOrderId`, unlike deduct-simple: derive's R3a reads it as "the packer picked this order", and here an `other`-chip id is validated but never stamped.
           },
           batchId,
         });

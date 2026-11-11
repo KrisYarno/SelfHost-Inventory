@@ -3954,12 +3954,15 @@ async function runCaptureLeg(
 
   // THE CLAIM, off the engine: the loser waited on the ORDER ROW and on nothing
   // else — never on `product_locations`, where both of them write (the control
-  // above is the run in which it does).
+  // above is the run in which it does). And it asked for an EXCLUSIVE record
+  // lock (B3-1 FR1, codex test gap): a shared lock would serialise these
+  // pairings just as quietly, so the table and the row alone cannot tell.
   expect(Array.from(new Set(race.waits.map((wait) => wait.objectName)))).toEqual([
     "external_orders",
   ]);
   for (const wait of race.waits) {
     expect(wait.indexName).toBe("PRIMARY");
+    expect(wait.lockMode).toBe("X,REC_NOT_GAP");
     expect(wait.lockData ?? "").toContain(S18_ORDER_ID);
   }
 
@@ -4039,6 +4042,10 @@ async function runCaptureLeg(
   } else {
     expect(details).not.toHaveProperty("orderReference");
   }
+  // B3-1 FR1 (CR-2): WHICH evidence stamped the row, on the event as written.
+  expect(details.orderAttributionSource).toBe(
+    variant === "reference" ? "reference-resolved" : "selected",
+  );
   expect(await auditRowsForBatch(otherBatch)).toEqual([leg.otherEvent]);
 
   // THE CLEANUP, proven: the reset takes back every row this run wrote — the
@@ -4229,7 +4236,10 @@ describe("scenario 18 — the adjust capture's stamp takes the ORDER LOCK on a r
         ledgerRowId: await firstLedgerIdOf(adjustBatch),
       },
     ]);
-    expect((await eventDetailsForBatch(adjustBatch)).orderReference).toBe(S18_UNMATCHED_NUMBER);
+    const controlDetails = await eventDetailsForBatch(adjustBatch);
+    expect(controlDetails.orderReference).toBe(S18_UNMATCHED_NUMBER);
+    // Nothing stamped, so nothing to say which evidence did (B3-1 FR1).
+    expect(controlDetails).not.toHaveProperty("orderAttributionSource");
 
     // Only the deduct-simple's row is stamped, and the stock is exact.
     expect(await stampedTotalsFor(S18_ORDER_ID)).toEqual({

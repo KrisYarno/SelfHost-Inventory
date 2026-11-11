@@ -18,7 +18,13 @@
  *                           "none in your companies" is not "none anywhere"),
  *                           else the picker's sentence;
  *   - a FAILED search     → said as a failure, never rendered as an empty list
- *                           that reads like "no such order".
+ *                           that reads like "no such order" — and a 429 says
+ *                           it was too many searches, with the way round it.
+ *
+ * Before any of that (B3-1 FR1): a query that is not an order number at all
+ * (`#4521`) gets the reference field's hint and is NEVER searched — "no order
+ * matching that number" would be a false answer to a malformed question. While
+ * the first answer for a query is in flight, the lookup says it is searching.
  *
  * Order numbers render as stored, WITHOUT a `#` — the reference field beside
  * this lookup refuses `#`, and the two must not teach the operator opposite
@@ -31,15 +37,29 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useDebounce } from "@/hooks/use-debounce";
 import { useOrderSearch } from "@/hooks/use-order-search";
+import { ORDER_REFERENCE_HINT, ORDER_REFERENCE_SHAPE } from "@/lib/orders/order-reference-shape";
 
 /** The picker's debounce; the hook owns the `enabled` rule. */
 const SEARCH_DEBOUNCE_MS = 250;
+
+/** Typed, and not an order number: the bar the resolver applies, applied here first. */
+function failsShape(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed !== "" && !ORDER_REFERENCE_SHAPE.test(trimmed);
+}
 
 /** The empty answer when the route sent no `note` — the picker's own sentence. */
 export const ORDER_LOOKUP_EMPTY_SENTENCE = "No order number starts with what you typed.";
 
 /** The failure, stated as one — never an empty list. */
 export const ORDER_LOOKUP_ERROR_SENTENCE = "Could not search orders — try again.";
+
+/** The rate limit, said as one — the search is not retried, and the field beside it still works. */
+export const ORDER_LOOKUP_RATE_LIMITED_SENTENCE =
+  "Too many searches just now — wait a minute, or type the order number instead.";
+
+/** The first answer for this query is still on its way. */
+export const ORDER_LOOKUP_SEARCHING_SENTENCE = "Searching…";
 
 /** What a pick carries back to the host: the id it sends, the number it shows. */
 export interface PickedOrder {
@@ -55,10 +75,16 @@ interface OrderLookupProps {
 
 export function OrderLookup({ value, onChange, disabled }: OrderLookupProps) {
   const inputId = React.useId();
+  const hintId = `${inputId}-hint`;
   const [query, setQuery] = React.useState("");
   const debounced = useDebounce(query, SEARCH_DEBOUNCE_MS);
+  // The hint follows the keystrokes; the search never asks with a malformed
+  // query — neither the one on screen nor a debounced one not yet caught up.
+  const shapeInvalid = failsShape(query);
   // A chosen order is not searched for: "" is the hook's disabled state.
-  const search = useOrderSearch(value === null ? debounced : "");
+  const search = useOrderSearch(
+    value === null && !shapeInvalid && !failsShape(debounced) ? debounced : "",
+  );
 
   if (value !== null) {
     return (
@@ -98,12 +124,26 @@ export function OrderLookup({ value, onChange, disabled }: OrderLookupProps) {
         placeholder="Type the start of the order number"
         inputMode="numeric"
         autoComplete="off"
+        aria-invalid={shapeInvalid}
+        aria-describedby={shapeInvalid ? hintId : undefined}
         disabled={disabled}
       />
 
-      {search.isError ? (
+      {shapeInvalid ? (
+        <p id={hintId} className="text-[11px] text-destructive">
+          {ORDER_REFERENCE_HINT}
+        </p>
+      ) : search.isError ? (
         <p role="alert" data-testid="order-lookup-error" className="text-body-sm text-destructive">
-          {ORDER_LOOKUP_ERROR_SENTENCE}
+          {search.error?.status === 429
+            ? ORDER_LOOKUP_RATE_LIMITED_SENTENCE
+            : ORDER_LOOKUP_ERROR_SENTENCE}
+        </p>
+      ) : search.isLoading ? (
+        // `isLoading` = the FIRST fetch for this query, with no data yet — a
+        // background refetch of an answer already on screen never flashes it.
+        <p data-testid="order-lookup-searching" className="text-body-sm text-muted-foreground">
+          {ORDER_LOOKUP_SEARCHING_SENTENCE}
         </p>
       ) : data ? (
         <div className="space-y-2">

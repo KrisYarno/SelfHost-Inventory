@@ -266,6 +266,120 @@ describe("the capture", () => {
     });
   });
 
+  // B3-1 FR1 (CR-1 / OC-6): the inventory page keeps ONE dialog mounted and
+  // swaps `product` under it, building a fresh object on every open
+  // (`app/(app)/inventory/page.tsx`). A capture entered for A and Cancelled
+  // must not ride along on B's removal; reopening A itself keeps it.
+  describe("the capture belongs to ONE product", () => {
+    const PRODUCT_A = { id: 42, name: "AOD 2mg" };
+    const PRODUCT_B = { id: 43, name: "BPC 5mg" };
+
+    /** The page's shape: one mounted dialog, a fresh product object per open. */
+    function PageHost() {
+      const [open, setOpen] = React.useState(true);
+      const [product, setProduct] = React.useState({ ...PRODUCT_A });
+      const openFor = (next: typeof PRODUCT_A) => {
+        setProduct({ ...next });
+        setOpen(true);
+      };
+      return (
+        <>
+          <button type="button" onClick={() => openFor(PRODUCT_A)}>Adjust A</button>
+          <button type="button" onClick={() => openFor(PRODUCT_B)}>Adjust B</button>
+          <QuickAdjustDialog open={open} onOpenChange={setOpen} product={product} onSuccess={() => {}} />
+        </>
+      );
+    }
+
+    async function readyOnPage(user: User) {
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+      });
+      render(
+        <QueryClientProvider client={client}>
+          <PageHost />
+        </QueryClientProvider>,
+      );
+      await waitFor(() => expect(screen.getByText(/40 units/)).toBeInTheDocument());
+      await user.type(screen.getByLabelText("Quantity"), "3");
+      await user.type(screen.getByLabelText("Reason (required)"), "packed");
+    }
+
+    /** Cancel, then open the dialog again for `which`. */
+    async function cancelAndOpen(user: User, which: "Adjust A" | "Adjust B") {
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByTestId("order-capture")).toBeNull());
+      await user.click(screen.getByRole("button", { name: which }));
+      await waitFor(() => expect(screen.getByTestId("order-capture")).toBeInTheDocument());
+    }
+
+    it("A → pick → Cancel → B: the capture is EMPTY and the body sends no identity", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      await readyOnPage(user);
+      await intoCapture(user);
+      await pickOrder(user);
+
+      await cancelAndOpen(user, "Adjust B");
+
+      // Sign and chip are remembered (registered), so the capture shows — empty.
+      expect(screen.getByText("BPC 5mg")).toBeInTheDocument();
+      expect(screen.queryByTestId("order-lookup-picked")).toBeNull();
+      expect(screen.getByLabelText("Find the order")).toHaveValue("");
+      expect(referenceField()).toHaveValue("");
+
+      const body = await submit(user);
+      expect(body).toMatchObject({ productId: 43, delta: -3, intent: "order" });
+      expect("selectedExternalOrderId" in body).toBe(false);
+      expect("orderReference" in body).toBe(false);
+    });
+
+    it("A → type a reference → Cancel → B: the reference is gone and the body sends none", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      await readyOnPage(user);
+      await intoCapture(user);
+      await user.type(referenceField(), "1009");
+
+      await cancelAndOpen(user, "Adjust B");
+
+      expect(screen.getByText("BPC 5mg")).toBeInTheDocument();
+      expect(referenceField()).toHaveValue("");
+      expect(screen.queryByTestId("order-lookup-picked")).toBeNull();
+
+      const body = await submit(user);
+      expect(body).toMatchObject({ productId: 43, delta: -3, intent: "order" });
+      expect("orderReference" in body).toBe(false);
+      expect("selectedExternalOrderId" in body).toBe(false);
+    });
+
+    it("A → pick → Cancel → A again (a fresh object, the same id): the pick is KEPT", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      await readyOnPage(user);
+      await intoCapture(user);
+      await pickOrder(user);
+
+      await cancelAndOpen(user, "Adjust A");
+
+      expect(screen.getByTestId("order-lookup-picked")).toHaveTextContent("Order 2044");
+      const body = await submit(user);
+      expect(body).toMatchObject({ productId: 42, delta: -3, intent: "order" });
+      expect(body.selectedExternalOrderId).toBe("ord-2");
+    });
+
+    it("A → type a reference → Cancel → A again: the reference is KEPT", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      await readyOnPage(user);
+      await intoCapture(user);
+      await user.type(referenceField(), "1009");
+
+      await cancelAndOpen(user, "Adjust A");
+
+      expect(referenceField()).toHaveValue("1009");
+      const body = await submit(user);
+      expect(body).toMatchObject({ productId: 42, delta: -3, intent: "order" });
+      expect(body.orderReference).toBe("1009");
+    });
+  });
+
   describe("the body, per path", () => {
     it("picked → selectedExternalOrderId only", async () => {
       const user = userEvent.setup({ pointerEventsCheck: 0 });
@@ -405,6 +519,34 @@ describe("the capture", () => {
         "Removed 3 units — the reference was not matched to an order you can see; the deduction is recorded unattributed",
       );
       expect(toastSuccess).not.toHaveBeenCalled();
+    });
+
+    it("the unmatched warning is held for 10 s (B3-1 FR1, OC-3) — the success toasts are not", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      adjustAnswer.body = { success: true, log: { id: 1, orderRecordId: null }, batchId: "b-1" };
+      await ready(user);
+      await intoCapture(user);
+      await user.type(referenceField(), "1009");
+
+      await submit(user);
+      await waitFor(() => expect(toastWarning).toHaveBeenCalledTimes(1));
+      expect(toastWarning.mock.calls[0]).toEqual([UNMATCHED(3), { duration: 10000 }]);
+
+      // The success toasts keep sonner's default: no options at all.
+      adjustAnswer.body = { success: true, log: { id: 2, orderRecordId: "ord-9" }, batchId: "b-2" };
+      await user.type(screen.getByLabelText("Quantity"), "3");
+      await user.type(screen.getByLabelText("Reason (required)"), "packed");
+      await intoCapture(user);
+      await user.type(referenceField(), "1009");
+      await submit(user);
+      await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+      expect(toastSuccess.mock.calls[0]).toEqual(["Removed 3 units — attributed to order 1009"]);
+
+      await user.type(screen.getByLabelText("Quantity"), "3");
+      await user.type(screen.getByLabelText("Reason (required)"), "packed");
+      await submit(user);
+      await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(2));
+      expect(toastSuccess.mock.calls[1]).toEqual(["Added 3 units to AOD 2mg"]);
     });
 
     it("a 200 with no log stamp at all reads as not stamped, never as attributed", async () => {

@@ -11,3 +11,10 @@
  * cannot import TypeScript and stays a pinned copy.
  */
 export const ORDER_REFERENCE_SHAPE = /^[0-9]{1,20}$/;
+
+/**
+ * What the operator is told when a typed number fails the bar — ONE spelling,
+ * shared by the adjust dialog's reference field and the order lookup beside it
+ * (B3-1 FR1), so the two never word the same rule two ways.
+ */
+export const ORDER_REFERENCE_HINT = "digits only, without #";
