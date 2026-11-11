@@ -689,6 +689,30 @@ describe("the capture", () => {
       },
     );
 
+    // B3-1 FD4-1: the latch is released on a FAILED submit too — otherwise one
+    // 4xx/5xx would leave the dialog ignoring Confirm, Cancel, Escape and X.
+    it("after a failed submit the latch is released: Confirm sends again, Cancel closes (FD4-1)", async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      const onOpenChange = jest.fn();
+      adjustAnswer = { status: 400, body: { error: "Insufficient stock. Available: 2, Requested: 3" } };
+      await readyInGuardHost(user, onOpenChange);
+
+      await user.click(confirmButton());
+      await waitFor(() => expect(toastError).toHaveBeenCalledWith("Insufficient stock. Available: 2, Requested: 3"));
+      expect(adjustCalls()).toHaveLength(1);
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+      await waitFor(() => expect(confirmButton()).toBeEnabled());
+      await user.click(confirmButton());
+      await waitFor(() => expect(adjustCalls()).toHaveLength(2));
+      await waitFor(() => expect(toastError).toHaveBeenCalledTimes(2));
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled());
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(onOpenChange.mock.calls).toEqual([[false]]);
+    });
+
     it("a second Confirm in that instant sends ONE request, never two (FD3-1)", async () => {
       const user = userEvent.setup({ pointerEventsCheck: 0 });
       const onOpenChange = jest.fn();
